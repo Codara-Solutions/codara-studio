@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { NotificationCenterEntry, ResolvedRunQuestion, RunQuestionOption } from "@shared/types";
+import type { NotificationCenterEntry, ResolvedRunQuestion } from "@shared/types";
 import { NotifyGlyphSvg } from "../components/Toast";
-import { answerRunQuestion } from "./answers";
 import { accentVar, isCompletionKind, kindMeta } from "./kinds";
 import type { NavigateTo } from "./routing";
 import { useNotificationCenter } from "./useNotificationCenter";
@@ -9,8 +8,8 @@ import { useNotificationCenter } from "./useNotificationCenter";
 // Notification center: a bell in the window chrome with an unread badge and
 // a .spark-menu popover over the persisted history (main-side ring buffer).
 // Entries group by day; clicking one routes its NavigationTarget and marks
-// it read; run.blocked entries with a still-open question offer the same
-// one-click answers as the toast cards.
+// it read. A blocked run says only that an answer is wanted; the options
+// themselves stay in the run, where the reasoning behind them lives.
 
 type AppRegionStyle = React.CSSProperties & {
   WebkitAppRegion?: "drag" | "no-drag";
@@ -382,7 +381,6 @@ function CenterEntry({
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
 }) {
   const [hover, setHover] = useState(false);
-  const answering = useRef(false);
   const meta = kindMeta(entry.kind);
   const toneVar = toneVarOf(entry);
 
@@ -397,25 +395,10 @@ function CenterEntry({
         : null;
   const resolvedQuestion =
     questionRunId && resolveQuestion ? resolveQuestion(questionRunId) : null;
-  const answerOptions: RunQuestionOption[] = resolvedQuestion
-    ? resolvedQuestion.options.slice(0, 3)
-    : [];
-
-  const answerWith = async (option: RunQuestionOption) => {
-    if (!questionRunId || answering.current) return;
-    answering.current = true;
-    try {
-      if (!resolvedQuestion) throw new Error("This question is no longer open.");
-      await answerRunQuestion(
-        questionRunId,
-        option,
-        resolvedQuestion.questionMessageId,
-      );
-      onActed();
-    } catch {
-      answering.current = false;
-    }
-  };
+  // Resolving still matters — it distinguishes a question that is genuinely
+  // still open from an entry left behind by one already answered or expired —
+  // but the options themselves are deliberately not surfaced here.
+  const waitingOnAnswer = resolvedQuestion !== null;
 
   return (
     <div
@@ -504,37 +487,23 @@ function CenterEntry({
         >
           {entry.body}
         </div>
-        {answerOptions.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 5 }}>
-            {answerOptions.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void answerWith(option);
-                }}
-                style={{
-                  appearance: "none",
-                  cursor: "pointer",
-                  fontFamily: "var(--font-sans)",
-                  fontSize: 10,
-                  fontWeight: 600,
-                  color: "var(--ink)",
-                  background: "var(--hover)",
-                  border:
-                    "1px solid color-mix(in oklch, var(--accent) 40%, var(--rule-strong))",
-                  borderRadius: "var(--radius-control, 6px)",
-                  padding: "2px 7px",
-                  maxWidth: "100%",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                }}
-              >
-                {option.label}
-              </button>
-            ))}
+        {/* A pending question announces ITSELF here and nothing more. The
+            options used to render as one-click answer buttons, which turned a
+            notification into a decision surface: the choices were shown
+            stripped of the reasoning that makes them meaningful, truncated to
+            three of four, and answerable without ever reading the question in
+            context. Deciding belongs in the run, so this only says an answer is
+            wanted and takes you there. */}
+        {waitingOnAnswer && (
+          <div
+            style={{
+              marginTop: 5,
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
+            }}
+          >
+            Open the run to answer
           </div>
         )}
       </div>
