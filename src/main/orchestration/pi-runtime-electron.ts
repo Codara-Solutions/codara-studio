@@ -2,7 +2,7 @@ import { app } from "electron";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, readdir } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
 
 import { resolveBundledResourcePath } from "../bundled-resources";
@@ -220,6 +220,15 @@ export interface CreateCodaraPiWorkerLaunchOptions {
   model?: string;
   thinking?: PiThinkingLevel;
   sessionName?: string;
+  /** The run's actual orchestration policy. Undefined falls back to fast so
+   * legacy callers keep the historical behavior. */
+  executionPolicy?: CoraExecutionPolicy;
+  /** Absolute path of the run's peer-comms mailbox dir. Set only for workers
+   * in a parallel batch; stamped into the worker env as CODARA_PI_PEER_DIR. */
+  peerCommsDir?: string;
+  /** The worker task id, stamped as CODARA_PI_SELF_ID alongside peerCommsDir
+   * so the worker extension knows its own mailbox identity. */
+  peerSelfId?: string;
 }
 
 /**
@@ -249,7 +258,7 @@ export async function createCodaraPiWorkerLaunchPlan(
     .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "")
     .slice(0, 200)
     .replace(/[^A-Za-z0-9]+$/g, "");
-  return buildPiManagerLaunchPlan({
+  const plan = buildPiManagerLaunchPlan({
     runtime,
     provider: options.provider,
     configDir: paths.configDir,
@@ -257,7 +266,7 @@ export async function createCodaraPiWorkerLaunchPlan(
     sessionId,
     runId: options.runId,
     mode: "talk",
-    executionPolicy: "fast",
+    executionPolicy: options.executionPolicy ?? "fast",
     cwd: options.cwd,
     bridgePath: paths.bridgePath,
     extensionPaths: [paths.workerExtensionPath],
@@ -266,6 +275,14 @@ export async function createCodaraPiWorkerLaunchPlan(
     sessionName: options.sessionName,
     codaraHomeDir: sparkHome(),
   });
+  // Frozen contract with resources/pi-cora/worker.ts: parallel-batch workers
+  // read exactly these two env names to reach the run's peer-comms mailbox
+  // without shelling out to the CLI helper. Both or neither.
+  if (options.peerCommsDir && options.peerSelfId) {
+    plan.env.CODARA_PI_PEER_DIR = resolve(options.peerCommsDir);
+    plan.env.CODARA_PI_SELF_ID = options.peerSelfId;
+  }
+  return plan;
 }
 
 export interface PiFrontierCachePromotionResult {

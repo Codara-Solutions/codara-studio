@@ -15,6 +15,7 @@ import { loadSettings, loadState, saveState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
 import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
+import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
   CODEX_MODEL_CATALOG,
@@ -38,6 +39,7 @@ import type {
   LoomWorkerConfig,
   RunQuestionCategory,
   RunState,
+  SparkEvent,
   ScheduledJob,
   UpdateScheduledJobInput,
   UpdateCoraWhiteboardInput,
@@ -366,6 +368,8 @@ async function dispatch(
         return await handleChatSend(params, id);
       case "chat.wait":
         return await handleChatWait(params, id, res);
+      case "chat.events":
+        return await handleChatEvents(params, id, res);
       case "chat.cancel":
         return await handleChatCancel(params, id);
       case "app.info":
@@ -983,6 +987,93 @@ async function handleChatWait(
   });
 }
 
+// Cap on events per chat.events response. A large backlog pages: the response
+// carries hasMore=true so the client re-polls with the advanced cursor and
+// drains the remainder before honoring a terminal status.
+const CHAT_EVENTS_MAX_BATCH = 500;
+const CHAT_EVENTS_DEFAULT_WAIT_MS = 25_000;
+// Kept under a minute so the long poll returns well before any socket idle
+// policy could sever it mid-response; the client simply re-polls.
+const CHAT_EVENTS_MAX_WAIT_MS = 55_000;
+
+// Cursor-based long-poll over a run's event journal — the CLI's substitute for
+// the renderer's live push channel (mirrors daemon-host's subscribeDaemonEvents
+// seam, but over the wire). Without afterSequence it answers immediately with
+// the current cursor ("follow from now" bootstrap); with one it returns journal
+// events past the cursor, long-polling up to waitMs when already caught up.
+// Streams everything the journal carries: chat.assistant_block deltas,
+// chat.tool_use/tool_result, step.* transitions, worker_attempt.* status.
+async function handleChatEvents(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const run = await resolveCliRun(runIdOrPrefix);
+  if (!run) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Run not found or prefix is ambiguous: ${runIdOrPrefix}`,
+    );
+  }
+  const afterSequence = optionalNumberParam(params, "afterSequence");
+  const waitMs = Math.max(
+    0,
+    Math.min(
+      optionalNumberParam(params, "waitMs") ?? CHAT_EVENTS_DEFAULT_WAIT_MS,
+      CHAT_EVENTS_MAX_WAIT_MS,
+    ),
+  );
+
+  const { listEvents, subscribeToEvents } = await import("./orchestration/event-log");
+  // Subscribe before reading the journal so an event landing between the read
+  // and the wait loop arrives via the live feed instead of being lost until
+  // the client's next poll.
+  const live: SparkEvent[] = [];
+  const unsubscribe = subscribeToEvents((event) => {
+    if (event.runId === run.id) live.push(event);
+  });
+  try {
+    const journal = await listEvents(run.id);
+    const highWater = journal.reduce((max, event) => Math.max(max, event.sequence ?? 0), 0);
+    if (afterSequence === null) {
+      return successResponse(id, { runId: run.id, cursor: highWater, events: [], status: run.status });
+    }
+
+    const events = journal.filter((event) => (event.sequence ?? 0) > afterSequence);
+    if (events.length === 0 && waitMs > 0) {
+      const deadline = Date.now() + waitMs;
+      while (live.length === 0 && Date.now() < deadline && !res.destroyed) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+      }
+      const seen = new Set(events.map((event) => event.id));
+      for (const event of live) {
+        if ((event.sequence ?? 0) > afterSequence && !seen.has(event.id)) events.push(event);
+      }
+      events.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+    }
+
+    const batch = events.slice(0, CHAT_EVENTS_MAX_BATCH);
+    const cursor = batch.length > 0 ? (batch[batch.length - 1].sequence ?? afterSequence) : afterSequence;
+    const fresh = await (await getRunStore()).getRun(run.id);
+    return successResponse(id, {
+      runId: run.id,
+      cursor,
+      events: batch,
+      // Truncation signal: the journal held more events past the cursor than
+      // this batch carries. Clients must keep draining before treating a
+      // terminal status as the end of the stream, or the transcript tail is
+      // silently dropped.
+      hasMore: events.length > batch.length,
+      status: (fresh ?? run).status,
+    });
+  } finally {
+    unsubscribe();
+  }
+}
+
 async function handleChatCancel(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1330,6 +1421,85 @@ function handleOrchestratorSpawnTerminals(
   });
 }
 
+// ── Verification-round hard cap ─────────────────────────────────────────────
+// The manager LLM is the only thing that mints verification steps for
+// execute-mode runs, and prose policy alone does not stop a hedging verifier
+// from being re-requested forever (run-mrz25z39-9ffs4w chained Build → Verify
+// → Reverify → Final verification → DOM regression verifier on a one-file
+// task). The cap is enforced here — the spawn chokepoint shared by
+// Claude/Codex/Pi managers — as an actual limit, extending the reuse guards
+// below which only dedupe.
+
+function normalizeScopePath(path: string): string {
+  return path.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+
+// How many verifier tasks already ran (or are live) against the requested
+// scope. Overlap is deliberately permissive: an unscoped verifier counts
+// against every scope, because manager-spawned verifiers usually target "the
+// implementation so far" rather than named files. Only FRESH rounds count:
+// a verifier that began before the most recent finished implementation
+// attempt examined code that has since changed (same finishedAt >
+// verifierBeganAt idiom as the live-verifier reuse guard below), so it must
+// not consume the budget for verifying the new work — otherwise turn 1's
+// verifier would starve turn 2's first-ever verification in a long-lived
+// chat run.
+function countVerifierRoundsForScope(
+  run: RunState,
+  requested: Array<Record<string, unknown>>,
+): number {
+  const requestedPaths = new Set<string>();
+  for (const worker of requested) {
+    const raw = [
+      ...(Array.isArray(worker.allowedPaths) ? worker.allowedPaths : []),
+      ...(Array.isArray(worker.expectedOutputs) ? worker.expectedOutputs : []),
+    ];
+    for (const path of raw) {
+      if (typeof path === "string" && path.trim()) requestedPaths.add(normalizeScopePath(path));
+    }
+  }
+  let rounds = 0;
+  for (const task of run.workerTasks) {
+    if (task.taskClass !== "verifier" || task.status === "cancelled") continue;
+    const verifierBeganAt = Date.parse(task.createdAt);
+    const supersededByNewerWork = run.workerAttempts.some((attempt) => {
+      const implementation = run.workerTasks.find(
+        (candidate) => candidate.id === attempt.workerTaskId && candidate.taskClass !== "verifier",
+      );
+      const finishedAt = attempt.finishedAt ? Date.parse(attempt.finishedAt) : Number.NaN;
+      return Boolean(implementation) && Number.isFinite(finishedAt) && finishedAt > verifierBeganAt;
+    });
+    if (supersededByNewerWork) continue;
+    const taskPaths = [...task.allowedPaths, ...task.expectedOutputs]
+      .map(normalizeScopePath)
+      .filter((path) => path.length > 0);
+    const overlaps =
+      requestedPaths.size === 0 ||
+      taskPaths.length === 0 ||
+      taskPaths.some((path) => requestedPaths.has(path));
+    if (overlaps) rounds += 1;
+  }
+  return rounds;
+}
+
+// Verifier rounds allowed per implementation scope, derived from the run's
+// execution policy (and complexity classification when present): fast gets a
+// single independent verification, deep two, frontier three.
+function verifierRoundCapForRun(run: RunState): number {
+  const policy = normalizeCoraExecutionPolicy(run.coraExecutionPolicy);
+  const base = policy === "frontier" ? 3 : policy === "deep" ? 2 : 1;
+  return run.taskComplexity === "complex" ? Math.max(base, 2) : base;
+}
+
+// Backstop on manager-minted steps: every spawn RPC creates one synthetic
+// worker_batch step, and a runaway manager can chain them without limit —
+// chat autopilot has no automation-loop hardCap. Generous on purpose: it
+// bounds pathological loops, not normal runs. Scoped to the current user
+// turn (batches minted since the latest user-authored message) because chat
+// runs are long-lived — legitimate batches spread across many turns must
+// never accumulate into a force-land.
+const SYNTHETIC_STEP_CEILING = 20;
+
 async function handleOrchestratorSpawnWorkers(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1397,6 +1567,42 @@ async function handleOrchestratorSpawnWorkers(
     }
   }
 
+  // Hard verification-round cap: past the policy's budget, refuse to mint
+  // another verification step. The manager must either accept the work (it
+  // lands via the completed_unverified path with the existing caveats) or ask
+  // the user — more verifier rounds cannot produce new evidence.
+  const workerEntries = rawWorkers.filter(
+    (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
+      Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
+  );
+  let workersToCreate = workerEntries;
+  const guardrailNotes: string[] = [];
+  const requestedVerifiers = workerEntries.filter((worker) => worker.taskClass === "verifier");
+  if (requestedVerifiers.length > 0) {
+    const verifierRoundCap = verifierRoundCapForRun(run);
+    const verifierRoundsUsed = countVerifierRoundsForScope(run, requestedVerifiers);
+    if (verifierRoundsUsed >= verifierRoundCap) {
+      const policy = normalizeCoraExecutionPolicy(run.coraExecutionPolicy);
+      const capNote =
+        `Verification cap reached: ${verifierRoundsUsed} verifier round(s) already ran against this scope ` +
+        `(cap ${verifierRoundCap} for the ${policy} policy). Do not spawn another verifier. Either accept ` +
+        "the implementation now — it lands as completed_unverified carrying the existing verifier caveats — " +
+        "or ask the user one concrete question. If a verifier could not run because tooling was unavailable, " +
+        "treat that as an environmental caveat, not a code failure.";
+      if (requestedVerifiers.length === workerEntries.length) {
+        return successResponse(id, {
+          worker_task_ids: [],
+          verification_cap_reached: true,
+          verifier_rounds_used: verifierRoundsUsed,
+          verifier_round_cap: verifierRoundCap,
+          note: capNote,
+        });
+      }
+      workersToCreate = workerEntries.filter((worker) => worker.taskClass !== "verifier");
+      guardrailNotes.push(capNote);
+    }
+  }
+
   // Cross-provider verification is a control-plane invariant, not merely a
   // prompt suggestion. For the common single-verifier follow-up, reroute a
   // same-provider request to the installed/enabled peer and translate the
@@ -1454,8 +1660,39 @@ async function handleOrchestratorSpawnWorkers(
   // even though the worker actually ran and edited files. Create one
   // synthetic worker_batch step per spawn_workers RPC call so the graph
   // can render the worker rows via the existing agentRowsForStep path.
-  const workerTitles = rawWorkers
-    .filter((r): r is Record<string, unknown> => Boolean(r) && typeof r === "object")
+  // Only batches minted during the current user turn count toward the
+  // ceiling: a fresh user message resets the budget, so the brake catches a
+  // runaway single-turn spawn loop without ever tripping on a multi-turn
+  // chat run's accumulated history.
+  const latestUserTurnAt = run.humanMessages.reduce((max, message) => {
+    if (message.author !== "user") return max;
+    const at = Date.parse(message.createdAt);
+    return Number.isFinite(at) && at > max ? at : max;
+  }, Number.NEGATIVE_INFINITY);
+  const syntheticStepCount = run.steps.filter(
+    (step) =>
+      (step.kind ?? "worker_batch") === "worker_batch" &&
+      Date.parse(step.createdAt) >= latestUserTurnAt,
+  ).length;
+  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING) {
+    await runStore
+      .forceLandRunUnverified(runId, {
+        trigger: "synthetic_step_ceiling",
+        note:
+          `This run reached the ceiling of ${SYNTHETIC_STEP_CEILING} manager-spawned worker batches in one turn. ` +
+          "Codara accepted the remaining reviewed work and landed the run as unverified rather than keep spawning.",
+      })
+      .catch(() => undefined);
+    return successResponse(id, {
+      worker_task_ids: [],
+      step_ceiling_reached: true,
+      note:
+        `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
+        `(cap ${SYNTHETIC_STEP_CEILING}). Codara has landed the run with the work completed so far. ` +
+        "Summarize the outcome for the user and end the turn — do not spawn more workers.",
+    });
+  }
+  const workerTitles = workersToCreate
     .map((r) => (typeof r.title === "string" ? r.title.trim() : ""))
     .filter((t) => t.length > 0);
   const stepTitle = workerTitles.length === 1
@@ -1501,9 +1738,7 @@ async function handleOrchestratorSpawnWorkers(
   // would be rendered before its peers exist on the step, so it would miss the
   // mailbox + peer-comms guidance (the synthetic step has no plannedAgents to
   // compensate). Two passes guarantee each worker's prompt sees the full batch.
-  for (const raw of rawWorkers) {
-    if (!raw || typeof raw !== "object") continue;
-    const w = raw as Record<string, unknown> & OrchestratorWorkerInput;
+  for (const w of workersToCreate) {
     const title = typeof w.title === "string" ? w.title.trim() : "";
     if (!title) continue;
     const description = typeof w.description === "string" ? w.description : "";
@@ -1587,7 +1822,7 @@ async function handleOrchestratorSpawnWorkers(
   // sees run system notes, and its system prompt is frozen at run start, so
   // this response is the ONLY channel that reaches managers of long-lived
   // runs when fleet/model policy evolves underneath them.
-  const notes: string[] = [];
+  const notes: string[] = [...guardrailNotes];
   if (verifierPeerOverride) notes.push(verifierPeerOverride.note);
   if (downgradedFableTitles.length > 0) {
     notes.push(

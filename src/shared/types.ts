@@ -1473,6 +1473,17 @@ export interface RunState {
    */
   greenClaims?: Record<string, string>;
   /**
+   * Guardrail counter: how many CORRECTIVE verifier verdicts (FEEDBACK/FAILED
+   * — the ones that trigger rework) have been reviewed on this run since the
+   * last user turn. Clean terminal-OK passes (PERFECT/VERIFIED/PARTIAL) do
+   * not count, and every new user message (and user-driven resume) resets it,
+   * so the execute-mode ceiling only trips on a genuine runaway corrective
+   * loop. Persisted so the ceiling survives restarts regardless of which
+   * manager backend keeps requesting rounds. Undefined on legacy runs reads
+   * as 0.
+   */
+  verificationRounds?: number;
+  /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
    * treated as "openrouter" by the dispatch layer — keeps pre-feature chats
    * working unchanged.
@@ -2118,8 +2129,24 @@ export interface WorkerTask {
    *     verifier could judge, so acceptance was forced to avoid stalling.
    *   - corrective_rounds_capped: corrective re-attempts hit their cap without
    *     a passing verdict, so the latest attempt was accepted as-is.
+   *   - verification_rounds_capped: the run-level verification-round ceiling
+   *     fired, so pending work was landed instead of verifying again.
+   *   - synthetic_step_ceiling: an execute-mode manager hit the hard cap on
+   *     spawned worker-batch steps, so the run was landed with work so far.
    */
-  forceAcceptReason?: "completion_refused" | "corrective_rounds_capped";
+  forceAcceptReason?:
+    | "completion_refused"
+    | "corrective_rounds_capped"
+    | "verification_rounds_capped"
+    | "synthetic_step_ceiling";
+  /**
+   * How many verifier-FEEDBACK corrective requeues this task has consumed.
+   * Tracked separately from raw attempt counts, which also include watchdog
+   * and environmental-fallback retries — the fast execution policy caps
+   * FEEDBACK rework at one round and must not miscount stuck retries as
+   * verification rework.
+   */
+  verifierFeedbackRounds?: number;
   /**
    * Looms v2.5: which graph node (LoomNodeDef.id) this task executes within a
    * loom pass. Stamped by run-store's node launcher; undefined on managed runs

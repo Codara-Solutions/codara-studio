@@ -1,4 +1,4 @@
-import { promises as fs, createWriteStream } from "node:fs";
+import { promises as fs, createWriteStream, watch, type FSWatcher } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
@@ -868,6 +868,28 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     tasks = pickAutopilotTasks(run);
   }
   if (tasks.length === 0) {
+    // A force-pause or a still-active worker can race this launch loop: the
+    // pause requeues the manager input, startAutopilot re-enters, and the sole
+    // non-terminal task is unqueueable because its attempt was just killed
+    // (observed in run-mrz25z39-9ffs4w). Asking "I could not find a ready
+    // task" then reads as model confusion — stay quiet and let the real
+    // driver (resume, worker finish, or review) pick the run back up.
+    run = await requireRun(run.id);
+    const attemptInFlight = run.workerAttempts.some(
+      (item) => !["succeeded", "failed", "timed_out", "cancelled"].includes(item.status),
+    );
+    const forcePausedJustNow =
+      run.autopilot?.lastAction === "force_paused" &&
+      typeof run.autopilot.pausedAt === "string" &&
+      Date.now() - Date.parse(run.autopilot.pausedAt) < 30_000;
+    if (
+      ["paused", "blocked", "cancelled", "complete"].includes(run.status) ||
+      forcePausedJustNow ||
+      attemptInFlight ||
+      activeWorkersForRun(run.id).length > 0
+    ) {
+      return run;
+    }
     return askHumanQuestion(
       run.id,
       "I could not find a ready task to run. Please clarify the next goal.",
@@ -8077,6 +8099,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     },
     mutate: (draft, timestamp) => {
       draft.status = "running";
+      // A user-driven resume is a fresh engagement: reset the verification
+      // budget so the run doesn't re-trip a saturated round ceiling on its
+      // first corrective verdict (mirrors the user-turn reset in addRunMessage).
+      draft.verificationRounds = 0;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -8387,6 +8413,11 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
         targetTurnId: authoritativeTargetTurnId,
         createdAt: timestamp,
       });
+      // A user turn opens a fresh verification budget. The round ceiling
+      // guards a single runaway corrective loop, not the whole conversation —
+      // without this reset a follow-up inherits a saturated counter and the
+      // first corrective verdict of the new turn instantly force-lands the run.
+      if (input.author === "user") draft.verificationRounds = 0;
       const draftWasTerminal =
         draft.status === "complete" || draft.status === "failed" || draft.status === "cancelled";
       // When the user chats into a finished run, transition it back into a
@@ -9949,38 +9980,52 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     }
   }
 
-  const result = usePiWorkerHarness
-    ? await runPiWorkerSession({
-        run,
-        task,
-        attemptId: attempt.id,
-        paths,
-        cwd: attempt.cwd,
-        promptText,
-        command,
-      })
-    : isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
-    ? await runStructuredAutomationWorkerSession({
-        run,
-        task,
-        attemptId: attempt.id,
-        paths,
-        cwd: attempt.cwd,
-        promptText,
-        command,
-        sandboxed: Boolean(attempt.sandboxWorktreePath),
-        extraWritableDirs,
-      })
-    : await runWorkerSession({
-        run,
-        task,
-        attemptId: attempt.id,
-        paths,
-        cwd: attempt.cwd,
-        launchCommand,
-        promptText,
-        command,
-      });
+  // Peer-traffic observability rides the batch lifecycle: the first
+  // peer-comms worker to launch opens the run's mailbox watcher, the last one
+  // to finish closes it. Best-effort — traffic events must never block a run.
+  // Release is paired strictly with a successful acquire so a failed acquire
+  // can never decrement a sibling worker's refcount.
+  const watchPeerComms = shouldUsePeerComms(run, launchStep, task);
+  const peerCommsAcquired = watchPeerComms
+    ? await acquirePeerCommsWatcher(run).catch(() => false)
+    : false;
+  let result: { exitCode: number; error?: string };
+  try {
+    result = usePiWorkerHarness
+      ? await runPiWorkerSession({
+          run,
+          task,
+          attemptId: attempt.id,
+          paths,
+          cwd: attempt.cwd,
+          promptText,
+          command,
+        })
+      : isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+      ? await runStructuredAutomationWorkerSession({
+          run,
+          task,
+          attemptId: attempt.id,
+          paths,
+          cwd: attempt.cwd,
+          promptText,
+          command,
+          sandboxed: Boolean(attempt.sandboxWorktreePath),
+          extraWritableDirs,
+        })
+      : await runWorkerSession({
+          run,
+          task,
+          attemptId: attempt.id,
+          paths,
+          cwd: attempt.cwd,
+          launchCommand,
+          promptText,
+          command,
+        });
+  } finally {
+    if (peerCommsAcquired) releasePeerCommsWatcher(run.id);
+  }
 
   run = await requireRun(input.runId);
   const finishedAttempt = run.workerAttempts.find((item) => item.id === input.attemptId);
@@ -10895,7 +10940,12 @@ async function reviewWorkerReportArtifact({
   //   2. Record this report's newly-verified claims as green — done BEFORE the
   //      FEEDBACK short-circuit so a partial pass isn't lost when the same report
   //      also re-enqueues the impl with corrective feedback.
-  //   3. FEEDBACK re-enqueue — deterministically re-run the impl worker with the
+  //   3. Round accounting + guardrails — bump the persisted verification-round
+  //      counter for CORRECTIVE verdicts only, short-circuit oracle-blocked
+  //      verdicts (re-running the impl cannot conjure missing tooling), and
+  //      force-land past the run-level verification ceiling instead of feeding
+  //      another corrective loop.
+  //   4. FEEDBACK re-enqueue — deterministically re-run the impl worker with the
   //      verifier's corrective prompt, skipping a full manager round-trip.
   if (report.verifier) {
     const regressionRestore = await maybeRestoreGreenClaimRegression({ run, task, attempt, report });
@@ -10904,6 +10954,20 @@ async function reviewWorkerReportArtifact({
       if (regressionRestore.restoreFailed) return run;
     }
     run = await recordGreenClaims({ run, attempt, report });
+    // Only corrective verdicts (FEEDBACK/FAILED — the ones that trigger rework)
+    // consume verification budget. Clean terminal-OK passes on distinct scopes
+    // are the healthy shape of a multi-feature run; counting them would let
+    // the runaway-loop ceiling guillotine a run that never looped.
+    const correctiveVerdict = !TERMINAL_OK_VERIFIER_CONFIDENCE.has(report.verifier.confidence);
+    if (correctiveVerdict) {
+      run = await recordVerificationRound({ run, task, attempt });
+    }
+    const oracleAccept = await maybeAcceptOracleBlockedVerifierVerdict({ run, task, attempt, report });
+    if (oracleAccept) return oracleAccept;
+    if (correctiveVerdict) {
+      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run);
+      if (ceilingLanded) return ceilingLanded;
+    }
     const feedbackRetry = await maybeQueueVerifierFeedbackRetry({
       run,
       task,
@@ -11010,6 +11074,10 @@ const LIVE_VERIFIER_TASK_STATUSES = new Set<WorkerTaskStatus>([
 // by ensureVerifierCoverage (to decide whether to synthesize a verifier) and by
 // stepHasTerminalVerifierVerdict (to gate step->complete transitions).
 interface StepVerifierFacts {
+  // At least one of the step's attempts produced a parseable worker report.
+  // False means the step never executed (or nothing it ran reported back) —
+  // callers must not read changedFiles=false as "verified no-op" in that case.
+  hasAnyReport: boolean;
   // The step's non-verifier workers collectively reported >=1 filesChanged.
   changedFiles: boolean;
   // A verifier task is in flight / awaiting review on the step.
@@ -11039,6 +11107,7 @@ async function computeStepVerifierFacts(
     (task) => task.taskClass === "verifier" && LIVE_VERIFIER_TASK_STATUSES.has(task.status),
   );
 
+  let hasAnyReport = false;
   let changedFiles = false;
   let hasTerminalVerifierVerdict = false;
   let implementerRuntime: WorkerRuntime | undefined;
@@ -11049,6 +11118,7 @@ async function computeStepVerifierFacts(
     if (!attempt.finalReportPath) continue;
     const report = await readWorkerReport(attempt.finalReportPath);
     if (!report) continue;
+    hasAnyReport = true;
     if (verifierTaskIds.has(task.id)) {
       const confidence = report.verifier?.confidence;
       if (confidence && TERMINAL_OK_VERIFIER_CONFIDENCE.has(confidence)) {
@@ -11065,7 +11135,7 @@ async function computeStepVerifierFacts(
     }
   }
 
-  return { changedFiles, hasLiveVerifier, hasTerminalVerifierVerdict, implementerRuntime };
+  return { hasAnyReport, changedFiles, hasLiveVerifier, hasTerminalVerifierVerdict, implementerRuntime };
 }
 
 // Cross-provider verification as a code-level invariant. For each non-terminal
@@ -11405,6 +11475,328 @@ function normalizeClaimKey(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// One verification round = one reviewed worker report carrying a CORRECTIVE
+// verifier verdict (FEEDBACK/FAILED — the caller skips clean terminal-OK
+// passes). Persisted on the run so the ceiling survives restarts and can be
+// read from the spawn chokepoint as well as here; reset on every new user
+// turn so a follow-up never inherits a saturated counter.
+async function recordVerificationRound({
+  run,
+  task,
+  attempt,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+}): Promise<RunState> {
+  const nextRounds = (run.verificationRounds ?? 0) + 1;
+  return commitRunChange(run, {
+    type: "autopilot.verification_round_recorded",
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    message: `Verification round ${nextRounds} reviewed`,
+    payload: { attemptId: attempt.id, verificationRounds: nextRounds },
+    mutate: (draft, timestamp) => {
+      draft.verificationRounds = (draft.verificationRounds ?? 0) + 1;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Run-level verification-round ceiling for execute-mode CLI/Pi managers. The
+// per-spawn cap in agent-socket stops new verifier steps at the source; this
+// backstop bounds shapes it cannot see (multi-verifier batches, verifiers
+// minted before the cap existed). Deliberately generous — it exists to stop
+// runaway loops, not to police normal runs.
+const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6, frontier: 9 } as const;
+
+async function maybeForceLandAtVerificationCeiling(run: RunState): Promise<RunState | null> {
+  if (!runHasMcpManager(run)) return null;
+  const rounds = run.verificationRounds ?? 0;
+  const ceiling = VERIFICATION_ROUND_CEILING[normalizeCoraExecutionPolicy(run.coraExecutionPolicy)];
+  if (rounds < ceiling) return null;
+  return forceLandRunUnverified(run.id, {
+    trigger: "verification_rounds_capped",
+    note:
+      `Verification hit its hard ceiling: ${rounds} rounds against a limit of ${ceiling} for this policy. ` +
+      "Codara accepted the remaining reviewed work and landed it as unverified — further rounds were repeating the same evidence.",
+  });
+}
+
+// Guardrail landing: accept everything still pending (except tasks with a
+// live worker process), cancel pending work that never even produced an
+// attempt, label steps that never earned a terminal verifier verdict as
+// completed_unverified, and land the run when that leaves every step
+// terminal. Mirrors the deadlock-break in applySparkManagerDecision —
+// this variant is callable from code-level caps (verification-round ceiling,
+// synthetic-step ceiling) where no manager decision object exists.
+export async function forceLandRunUnverified(
+  runId: string,
+  input: { trigger: "verification_rounds_capped" | "synthetic_step_ceiling"; note: string },
+): Promise<RunState> {
+  let run = await requireRun(runId);
+  const liveWorkerTaskIds = new Set(
+    activeWorkersForRun(run.id)
+      .map((worker) => worker.workerTaskId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const landableStatuses = new Set<WorkerTaskStatus>([
+    "created",
+    "queued",
+    "claimed",
+    "running",
+    "needs_review",
+    "retry_queued",
+  ]);
+  const pendingTasks = run.workerTasks.filter(
+    (task) => landableStatuses.has(task.status) && !liveWorkerTaskIds.has(task.id),
+  );
+  // Work that never produced an attempt cannot honestly be "accepted" —
+  // force-accepting it would report never-executed work as done. Cancel it
+  // instead so the landing is explicit about what was skipped.
+  const attemptedTaskIds = new Set(run.workerAttempts.map((attempt) => attempt.workerTaskId));
+  const cancelTaskIds = new Set(
+    pendingTasks
+      .filter(
+        (task) =>
+          (task.status === "created" || task.status === "queued") &&
+          !attemptedTaskIds.has(task.id),
+      )
+      .map((task) => task.id),
+  );
+  const landableTasks = pendingTasks.filter((task) => !cancelTaskIds.has(task.id));
+  // Precompute which affected steps may land as a clean `complete` (reads
+  // reports from disk) before the synchronous mutate. A step qualifies only
+  // when it actually reported back AND either changed no files or earned a
+  // terminal verifier verdict — a step with NO reports at all never executed,
+  // so the changedFiles=false shortcut must not mark it clean.
+  const openStepIds = run.steps
+    .filter((step) => !isTerminalStepStatus(step.status))
+    .map((step) => step.id);
+  const cleanCompleteStepIds = new Set<string>();
+  for (const stepId of openStepIds) {
+    const facts = await computeStepVerifierFacts(run, stepId);
+    if (facts.hasAnyReport && (!facts.changedFiles || facts.hasTerminalVerifierVerdict)) {
+      cleanCompleteStepIds.add(stepId);
+    }
+  }
+  run = await commitRunChange(run, {
+    type: "autopilot.guardrail_force_landed",
+    message: input.note,
+    payload: {
+      trigger: input.trigger,
+      acceptedTaskIds: landableTasks.map((task) => task.id),
+      cancelledTaskIds: [...cancelTaskIds],
+      verificationRounds: run.verificationRounds,
+    },
+    mutate: (draft, timestamp) => {
+      const acceptIds = new Set(landableTasks.map((task) => task.id));
+      for (const task of draft.workerTasks) {
+        if (cancelTaskIds.has(task.id)) {
+          task.status = "cancelled";
+          task.updatedAt = timestamp;
+          continue;
+        }
+        if (!acceptIds.has(task.id)) continue;
+        task.status = "accepted";
+        task.forceAccepted = true;
+        task.forceAcceptReason = input.trigger;
+        task.updatedAt = timestamp;
+      }
+      for (const step of draft.steps) {
+        if (isTerminalStepStatus(step.status)) continue;
+        const stepTasks = draft.workerTasks.filter((task) => task.stepId === step.id);
+        const allDone =
+          stepTasks.length > 0 &&
+          stepTasks.every((task) =>
+            ["accepted", "failed", "cancelled", "blocked"].includes(task.status),
+          );
+        if (!allDone) continue;
+        step.status = cleanCompleteStepIds.has(step.id) ? "complete" : "completed_unverified";
+        step.updatedAt = timestamp;
+        if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+      }
+      const allStepsTerminal =
+        draft.steps.length > 0 &&
+        draft.steps.every((step) => isTerminalStepStatus(step.status));
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        lastAction: "guardrail_force_landed",
+        stopReason: input.trigger,
+        updatedAt: timestamp,
+      };
+      if (allStepsTerminal) {
+        draft.status = "complete";
+        draft.autopilot.status = "complete";
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  await addRunMessage({
+    runId: run.id,
+    author: "system",
+    kind: "note",
+    message: input.note,
+  }).catch(() => undefined);
+  return requireRun(run.id);
+}
+
+// True when a FEEDBACK verdict is environmental rather than behavioral: the
+// verifier flagged an unavailable oracle (missing_oracle in its final report)
+// and none of its failed claims stand on independent evidence. Re-running the
+// implementation cannot conjure the missing tooling, so requeueing it just
+// burns attempts — the exact loop from run-mrz25z39-9ffs4w, where every
+// verifier hedged on absent codara-studio MCP tools and each hedge re-ran the
+// build. A failed claim with real evidence keeps the corrective path.
+//
+// Oracle-taint is an AVAILABILITY statement, never a topic match. The schema's
+// `unsure` claim verdict is the natural encoding for "couldn't verify", so a
+// verdict whose only non-verified claims are unsure ones is oracle-blocked. A
+// hard-`failed` claim is discounted only when its own evidence explicitly says
+// the tool/oracle could not be exercised — substring-matching topic words
+// ("mcp", "codara-studio") over claim text would swallow genuine failures in
+// any task whose subject matter IS the MCP/preview stack.
+function verifierVerdictIsOracleBlocked(verdict: VerifierVerdict): boolean {
+  const oracle = verdict.missingOracle?.trim().toLowerCase();
+  if (!oracle) return false;
+  const failed = (verdict.atomicClaims ?? []).filter((claim) => claim.verdict === "failed");
+  if (failed.length === 0) return true;
+  return failed.every((claim) => evidenceStatesOracleUnavailable(claim.evidence ?? "", oracle));
+}
+
+// Tight availability phrasings a verifier writes when it could not exercise a
+// tool. Deliberately narrow: these describe the oracle being ABSENT, not the
+// implementation failing. No /g flags — exec() must stay stateless.
+const ORACLE_UNAVAILABLE_PHRASES: RegExp[] = [
+  /\bnot\s+available\b/,
+  /\bunavailable\b/,
+  /\b(?:was|were|is|are)\s+not\s+(?:present|exposed|installed|loaded|accessible|reachable)\b/,
+  /\bcould\s+not\s+(?:be\s+)?(?:run|invoked?|reached|accessed|used|found)\b/,
+  /\bmissing\s+oracle\b/,
+  /\bno\s+such\s+tool\b/,
+  /\btools?\s+(?:was\s+|were\s+|is\s+|are\s+)?missing\b/,
+];
+
+// True when the evidence explicitly states the oracle/tool was unavailable:
+// an availability phrase must appear ADJACENT to a tool/oracle reference, so a
+// stray "not available" elsewhere in a long evidence blob — or a mere topic
+// mention of a tool name alongside real failure evidence (a stack trace, a
+// failing command) — never discounts the claim.
+function evidenceStatesOracleUnavailable(evidence: string, oracle: string): boolean {
+  const text = evidence.toLowerCase();
+  for (const phrase of ORACLE_UNAVAILABLE_PHRASES) {
+    const match = phrase.exec(text);
+    if (!match) continue;
+    const windowStart = Math.max(0, match.index - 100);
+    const window = text.slice(windowStart, match.index + match[0].length + 100);
+    if (window.includes(oracle) || /\b(?:tool|oracle|mcp)s?\b/.test(window)) return true;
+  }
+  return false;
+}
+
+// Accept a FEEDBACK verdict without re-running the implementation. Used when
+// the feedback cannot be acted on (missing oracle) or when the policy's
+// rework budget is spent. Terminalizes the verifier, leaves the
+// implementation as-is, and lands the settled steps this verdict covered as
+// completed_unverified — FEEDBACK is not a terminal-OK confidence, so a clean
+// `complete` would misrepresent the evidence.
+async function acceptVerifierFeedbackWithoutRetry({
+  run,
+  task,
+  attempt,
+  report,
+  targetStepId,
+  reason,
+  note,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+  targetStepId?: string;
+  reason: "missing_oracle" | "fast_policy_rework_cap";
+  note: string;
+}): Promise<RunState> {
+  const settleStepIds = new Set(
+    [task.stepId, targetStepId].filter((id): id is string => Boolean(id)),
+  );
+  const updated = await commitRunChange(run, {
+    type: "autopilot.verifier_feedback_accepted_with_caveat",
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    message: note,
+    payload: {
+      reason,
+      attemptId: attempt.id,
+      confidence: report.verifier?.confidence,
+      missingOracle: report.verifier?.missingOracle,
+    },
+    mutate: (draft, timestamp) => {
+      const verifierTask = draft.workerTasks.find((candidate) => candidate.id === task.id);
+      if (verifierTask) {
+        verifierTask.status = "accepted";
+        verifierTask.updatedAt = timestamp;
+      }
+      reconcileAcceptedVerifierOnlySteps(draft, timestamp);
+      // Land only the steps this verdict actually settles; any step whose
+      // tasks are all terminal but that lacks a terminal-OK confidence gets
+      // the honest completed_unverified label.
+      for (const step of draft.steps) {
+        if (!settleStepIds.has(step.id) || isTerminalStepStatus(step.status)) continue;
+        const stepTasks = draft.workerTasks.filter((candidate) => candidate.stepId === step.id);
+        const allDone =
+          stepTasks.length > 0 &&
+          stepTasks.every((candidate) =>
+            ["accepted", "failed", "cancelled", "blocked"].includes(candidate.status),
+          );
+        if (!allDone) continue;
+        step.status = "completed_unverified";
+        step.reviewSummary = note;
+        step.updatedAt = timestamp;
+        if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  await addRunMessage({
+    runId: updated.id,
+    author: "system",
+    kind: "note",
+    message: note,
+  }).catch(() => undefined);
+  return requireRun(updated.id);
+}
+
+// Short-circuits the corrective loop for verdicts that only hedge on missing
+// tooling. Runs before maybeQueueVerifierFeedbackRetry so an oracle-blocked
+// FEEDBACK never re-enqueues the implementation.
+async function maybeAcceptOracleBlockedVerifierVerdict({
+  run,
+  task,
+  attempt,
+  report,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+}): Promise<RunState | null> {
+  const verdict = report.verifier;
+  if (!verdict || verdict.confidence !== "FEEDBACK") return null;
+  if (!verifierVerdictIsOracleBlocked(verdict)) return null;
+  const oracle = verdict.missingOracle?.trim() || "required verification tooling";
+  return acceptVerifierFeedbackWithoutRetry({
+    run,
+    task,
+    attempt,
+    report,
+    reason: "missing_oracle",
+    note:
+      `The verifier could not run its required tooling (${oracle}) and had no independent failing evidence. ` +
+      "Accepted the implementation with that caveat — re-running the build cannot restore missing tools.",
+  });
+}
+
 const VERIFIER_FEEDBACK_HEADER = "## VERIFIER FEEDBACK";
 
 // Detects a verifier FEEDBACK verdict and deterministically re-enqueues the
@@ -11484,6 +11876,30 @@ async function maybeQueueVerifierFeedbackRetry({
   if (!target) return null;
   const retriesUsed = countWorkerAttempts(run, target.id);
   if (retriesUsed >= MAX_WORKER_ATTEMPTS) return null;
+  // "Fast" means at most one corrective rework in code, not just in prose.
+  // Count FEEDBACK-driven requeues specifically — countWorkerAttempts also
+  // includes watchdog/stuck retries, which are not verification rework. The
+  // policy is only honored by the Pi backend (other backends persist but
+  // ignore it), so the cap keys off chatBackend to avoid changing OpenRouter
+  // and CC/Codex behavior via the fast default.
+  const feedbackRoundsUsed = target.verifierFeedbackRounds ?? 0;
+  if (
+    run.chatBackend === "pi" &&
+    normalizeCoraExecutionPolicy(run.coraExecutionPolicy) === "fast" &&
+    feedbackRoundsUsed >= 1
+  ) {
+    return acceptVerifierFeedbackWithoutRetry({
+      run,
+      task,
+      attempt,
+      report,
+      targetStepId: target.stepId,
+      reason: "fast_policy_rework_cap",
+      note:
+        `The fast execution policy allows one verifier-feedback rework and "${target.title}" already used it. ` +
+        "Accepted the current implementation with the verifier's remaining caveats instead of another rework round.",
+    });
+  }
 
   const failedClaims = (verdict.atomicClaims ?? []).filter(
     (claim) => claim.verdict === "failed",
@@ -11532,6 +11948,7 @@ async function maybeQueueVerifierFeedbackRetry({
         targetTask.description = `${trimmed}\n\n${feedbackBlock}`;
       }
       targetTask.status = "retry_queued";
+      targetTask.verifierFeedbackRounds = (targetTask.verifierFeedbackRounds ?? 0) + 1;
       targetTask.updatedAt = timestamp;
       // The verifier successfully completed its job even though the code did
       // not pass. Terminalize that verifier so a live CLI manager waiting on
@@ -13606,6 +14023,165 @@ export async function readManagerInbox(
   return inbox;
 }
 
+// ── Peer-traffic observability ──────────────────────────────────────────────
+// While a parallel batch is live, watch the run's peer-comms messages dir and
+// surface each new message file as a lightweight `peer_message.sent` event
+// (from/to/subject only) so Cora and the event log can see worker-to-worker
+// traffic that never crosses the manager inbox. Ref-counted per run: the
+// first peer-comms worker launch opens the watcher, the last active one
+// closes it. Everything here is best-effort — observability must never block
+// or fail a run.
+
+interface PeerCommsWatchState {
+  watcher: FSWatcher;
+  refs: number;
+  seen: Set<string>;
+  timer: NodeJS.Timeout | null;
+  scanning: boolean;
+  workspaceId: string;
+}
+
+const peerCommsWatchers = new Map<string, PeerCommsWatchState>();
+
+// In-flight watcher creations keyed by run id. Reserved SYNCHRONOUSLY before
+// the first await in acquirePeerCommsWatcher so concurrent worker launches of
+// the same batch share one creation instead of racing through the mkdir/readdir
+// window — the losing racer would leak an unclosed FSWatcher and leave refs=1
+// for two holders, closing the survivor when the first worker finished.
+const peerCommsWatcherCreations = new Map<string, Promise<boolean>>();
+
+// Returns true when a reference was actually taken. Callers must pair
+// releasePeerCommsWatcher ONLY with a `true` result — releasing after a failed
+// acquire would decrement a sibling's refcount and close the shared watcher
+// mid-batch. Deliberately not `async`: the refs fast path and the creation
+// reservation must both happen in the same synchronous tick.
+function acquirePeerCommsWatcher(run: RunState): Promise<boolean> {
+  const existing = peerCommsWatchers.get(run.id);
+  if (existing && existing.refs > 0) {
+    existing.refs += 1;
+    return Promise.resolve(true);
+  }
+  const inFlight = peerCommsWatcherCreations.get(run.id);
+  if (inFlight) {
+    return inFlight.then((created) => {
+      const state = peerCommsWatchers.get(run.id);
+      if (created && state && state.refs > 0) {
+        state.refs += 1;
+        return true;
+      }
+      // The shared creation failed or was fully released before we got our
+      // reference — retry from the top and create our own watcher.
+      return acquirePeerCommsWatcher(run);
+    });
+  }
+  const creation = createPeerCommsWatcher(run)
+    .then(() => true)
+    .catch(() => false);
+  peerCommsWatcherCreations.set(run.id, creation);
+  void creation.finally(() => {
+    peerCommsWatcherCreations.delete(run.id);
+  });
+  return creation;
+}
+
+// Builds and registers the watcher state with refs=1 for the reserving caller.
+// Only ever one in flight per run id (guarded by peerCommsWatcherCreations).
+async function createPeerCommsWatcher(run: RunState): Promise<void> {
+  const stale = peerCommsWatchers.get(run.id);
+  if (stale) {
+    // Stale entry from a release whose final sweep has not finished; its
+    // watcher is already closed, so replace it rather than reuse it.
+    try { stale.watcher.close(); } catch { /* already closed */ }
+    peerCommsWatchers.delete(run.id);
+  }
+  const { messagesDir } = peerCommsRunPaths(run.id);
+  await fs.mkdir(messagesDir, { recursive: true });
+  // The mailbox dir is per-run, so earlier batches' traffic is already on
+  // disk — prime `seen` so only new messages are announced.
+  const seen = new Set<string>(await fs.readdir(messagesDir).catch(() => [] as string[]));
+  const state: PeerCommsWatchState = {
+    watcher: watch(messagesDir, () => schedulePeerCommsScan(run.id)),
+    refs: 1,
+    seen,
+    timer: null,
+    scanning: false,
+    workspaceId: run.workspaceId,
+  };
+  state.watcher.on("error", () => {
+    try { state.watcher.close(); } catch { /* already closed */ }
+    peerCommsWatchers.delete(run.id);
+  });
+  peerCommsWatchers.set(run.id, state);
+}
+
+function releasePeerCommsWatcher(runId: string): void {
+  const state = peerCommsWatchers.get(runId);
+  if (!state) return;
+  state.refs -= 1;
+  if (state.refs > 0) return;
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = null;
+  try { state.watcher.close(); } catch { /* already closed */ }
+  // One last sweep so messages written inside the final debounce window still
+  // reach the event log, then drop the entry.
+  void scanPeerCommsMessages(runId)
+    .catch(() => undefined)
+    .finally(() => {
+      const current = peerCommsWatchers.get(runId);
+      if (current === state) peerCommsWatchers.delete(runId);
+    });
+}
+
+function schedulePeerCommsScan(runId: string): void {
+  const state = peerCommsWatchers.get(runId);
+  if (!state || state.timer) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    void scanPeerCommsMessages(runId).catch(() => undefined);
+  }, 300);
+  state.timer.unref();
+}
+
+async function scanPeerCommsMessages(runId: string): Promise<void> {
+  const state = peerCommsWatchers.get(runId);
+  if (!state || state.scanning) return;
+  state.scanning = true;
+  try {
+    const { messagesDir } = peerCommsRunPaths(runId);
+    const names = (await fs.readdir(messagesDir).catch(() => [] as string[])).filter((name) =>
+      name.endsWith(".json"),
+    );
+    for (const name of names) {
+      if (state.seen.has(name)) continue;
+      state.seen.add(name);
+      let message: PeerCommsMessage | null = null;
+      try {
+        message = JSON.parse(await fs.readFile(join(messagesDir, name), "utf8")) as PeerCommsMessage;
+      } catch {
+        // Partially-written file — retry on the next watch event.
+        state.seen.delete(name);
+        continue;
+      }
+      if (!message || typeof message.id !== "string" || typeof message.from !== "string") continue;
+      const to = Array.isArray(message.to) ? message.to.join(", ") : String(message.to ?? "");
+      await appendEvent({
+        workspaceId: state.workspaceId,
+        runId,
+        type: "peer_message.sent",
+        message: `Peer message: ${message.from} -> ${to}`,
+        payload: {
+          from: message.from,
+          to: message.to,
+          subject: piWorkerSafeText(message.subject, 160),
+          messageId: message.id,
+        },
+      }).catch(() => undefined);
+    }
+  } finally {
+    state.scanning = false;
+  }
+}
+
 // Loom iterations are unattended jobs, so they use the same structured
 // transports as Cora itself: Claude Agent SDK or Codex App Server. Ordinary
 // Cora implementation workers deliberately stay on the visible PTY path below
@@ -13807,15 +14383,19 @@ function piWorkerToolDetail(event: PiRpcEvent): string {
     : "";
   const keys = name === "bash"
     ? ["command"]
-    : name === "grep"
+    : name === "grep" || name === "find" || name === "glob"
       ? ["pattern", "path"]
-      : name === "find"
-        ? ["pattern", "path"]
-        : name === "read" || name === "write" || name === "edit"
-          ? ["path", "file_path", "filePath"]
-          : name === "ls"
-            ? ["path"]
-            : ["path", "command", "query", "pattern", "url"];
+      : name === "read" || name === "write" || name === "edit" || name === "multi_edit"
+        ? ["path", "file_path", "filePath"]
+        : name === "ls"
+          ? ["path"]
+          : name === "fetch" || name === "web_fetch" || name === "webfetch"
+            ? ["url"]
+            : name.startsWith("codara_preview")
+              ? ["url", "selector", "key", "text", "code"]
+              : name.startsWith("codara_terminal")
+                ? ["command", "text"]
+                : ["path", "command", "query", "pattern", "url", "prompt", "description"];
   const pieces = keys
     .map((key) => piWorkerSafeText(args[key], name === "bash" ? 320 : 160))
     .filter(Boolean);
@@ -13839,6 +14419,56 @@ function piWorkerResultText(result: unknown): string {
     if (text) return piWorkerSafeText(text, 700);
   }
   return piWorkerSafeText(result, 700);
+}
+
+// Terminal frame painted after final-report.json lands: the report facts plus
+// the deterministic review outcome, so the worker pane does not dead-end at
+// "Cora is reviewing the evidence" with the verdict visible only in the run
+// log. Facts first, one quiet line per item.
+function paintPiWorkerReportOutcome(
+  paint: (text: string) => void,
+  report: WorkerReport,
+): void {
+  const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
+  const lines: string[] = [`\r\n\x1b[32m  ✓  Report ready — ${report.status}\x1b[0m`];
+  const summary = piWorkerSafeText(report.summary, 220);
+  if (summary) lines.push(`     ${dim(summary)}`);
+  const counts: string[] = [];
+  if (report.filesChanged.length > 0) counts.push(`${report.filesChanged.length} file(s) changed`);
+  if (report.commandsRun.length > 0) counts.push(`${report.commandsRun.length} command(s) run`);
+  if (report.tests.length > 0) {
+    const passed = report.tests.filter((test) => test.result === "passed").length;
+    counts.push(`${passed}/${report.tests.length} test(s) passed`);
+  }
+  if (counts.length > 0) lines.push(`     ${dim(counts.join(" · "))}`);
+  const verdict = report.verifier;
+  if (verdict) {
+    lines.push(`     Verifier verdict: ${verdict.confidence} (${verdict.status})`);
+    if (verdict.missingOracle) {
+      lines.push(`     ${dim(`Missing oracle: ${piWorkerSafeText(verdict.missingOracle, 180)}`)}`);
+    }
+    if (verdict.atomicClaims.length > 0) {
+      const failed = verdict.atomicClaims.filter((claim) => claim.verdict === "failed").length;
+      const unsure = verdict.atomicClaims.filter((claim) => claim.verdict === "unsure").length;
+      const verified = verdict.atomicClaims.length - failed - unsure;
+      lines.push(`     ${dim(`Claims: ${verified} verified · ${failed} failed · ${unsure} unsure`)}`);
+    }
+  }
+  let review: string;
+  if (verdict && verdict.confidence === "FEEDBACK") {
+    review = verifierVerdictIsOracleBlocked(verdict)
+      ? "Verifier tooling was unavailable; Cora accepts with this caveat."
+      : "Cora is sending the corrective feedback back to the implementation.";
+  } else {
+    const decision = decideWorkerReport(report);
+    review = decision.decision === "accept"
+      ? "Cora accepted the report."
+      : decision.decision === "retry_same_worker"
+        ? "Cora is queuing a retry."
+        : "Cora is flagging this for your review.";
+  }
+  lines.push(`     ${review}`);
+  paint(lines.join("\r\n") + "\r\n");
 }
 
 function piWorkerEventFailure(event: PiRpcEvent): string | null {
@@ -13997,6 +14627,8 @@ async function runPiWorkerSession({
   };
 
   try {
+    const step = run.steps.find((item) => item.id === task.stepId);
+    const peerCommsEnabled = shouldUsePeerComms(run, step, task);
     const plan = await createCodaraPiWorkerLaunchPlan({
       provider,
       runId: run.id,
@@ -14005,6 +14637,12 @@ async function runPiWorkerSession({
       model,
       thinking,
       sessionName: task.title,
+      executionPolicy: normalizeCoraExecutionPolicy(run.coraExecutionPolicy),
+      // Frozen contract with resources/pi-cora/worker.ts: parallel-batch
+      // workers get CODARA_PI_PEER_DIR + CODARA_PI_SELF_ID to reach the
+      // run's mailbox natively. Same gate as the prompt-side guidance.
+      peerCommsDir: peerCommsEnabled ? paths.peerCommsDir : undefined,
+      peerSelfId: peerCommsEnabled ? task.id : undefined,
     });
     client = new PiRpcClient(plan, {
       requestTimeoutMs: 120_000,
@@ -14033,8 +14671,7 @@ async function runPiWorkerSession({
         session: "pi-rpc",
       },
     });
-    const step = run.steps.find((item) => item.id === task.stepId);
-    if (shouldUsePeerComms(run, step, task)) {
+    if (peerCommsEnabled) {
       await updatePeerCommsRegistry(run, step, task, attemptId, paths, "running").catch(() => undefined);
     }
 
@@ -14119,7 +14756,7 @@ async function runPiWorkerSession({
     if (!report) throw new Error("Pi worker completed without a parseable final-report.json.");
 
     applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
-    paint("\r\n\x1b[32m  ✓  REPORT READY\x1b[0m\r\n\x1b[2m     Cora is reviewing the evidence.\x1b[0m\r\n");
+    paintPiWorkerReportOutcome(paint, report);
     await logQueue.catch(() => undefined);
     return { exitCode: 0 };
   } catch (error) {
