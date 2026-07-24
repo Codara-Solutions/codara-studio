@@ -53,7 +53,33 @@ const READ_RETRY_BASE_MS = 60;
 // Cap on the bytes we'll read from a single hook file. Real hook payloads
 // (PreToolUse for a large tool input) can be a few KB; 256 KiB is the cap
 // from above which we treat the file as hostile/corrupt and drop it.
+// spark-hook.py trims payloads at the source (96KB budget), so anything this
+// large predates the trim or bypassed the writer.
 const MAX_HOOK_FILE_BYTES = 256 * 1024;
+
+// A cold-start backlog can hold dozens of oversized files (each Claude
+// session on the machine drops hooks here while Codara is closed); one
+// summary line beats a page of per-file warnings.
+let oversizedDropCount = 0;
+let oversizedDropBytes = 0;
+let oversizedFlushTimer: NodeJS.Timeout | null = null;
+
+function noteOversizedDrop(size: number): void {
+  oversizedDropCount++;
+  oversizedDropBytes += size;
+  if (oversizedFlushTimer === null) {
+    oversizedFlushTimer = setTimeout(() => {
+      oversizedFlushTimer = null;
+      const mb = (oversizedDropBytes / (1024 * 1024)).toFixed(1);
+      console.warn(
+        `[hook-watcher] dropped ${oversizedDropCount} oversized hook file(s) (${mb} MB total; per-file cap ${MAX_HOOK_FILE_BYTES} bytes)`,
+      );
+      oversizedDropCount = 0;
+      oversizedDropBytes = 0;
+    }, 1000);
+    oversizedFlushTimer.unref?.();
+  }
+}
 
 // Debounce window when fs.watch sees a "rename" event but the file name is
 // missing (Windows on some volumes). We rescan the directory and process
@@ -292,12 +318,7 @@ async function handleFile(state: WatcherState, filename: string): Promise<void> 
           continue;
         }
         if (stat.size > MAX_HOOK_FILE_BYTES) {
-          console.warn(
-            "[hook-watcher] dropping oversized hook file",
-            filename,
-            "size:",
-            stat.size,
-          );
+          noteOversizedDrop(stat.size);
           await dropFile(filePath);
           return;
         }

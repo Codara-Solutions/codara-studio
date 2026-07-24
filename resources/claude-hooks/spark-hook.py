@@ -107,14 +107,83 @@ def _atomic_write(target: str, data: str) -> None:
         raise
 
 
+# Payload size discipline. Claude embeds entire tool results in PostToolUse
+# (`tool_response`) and entire prompts in UserPromptSubmit — a single big file
+# read produces a 600KB+ hook file that the watcher must read only to discard
+# (its hard cap is 256 KiB), and even sub-cap blobs bloat every run's event
+# log. Spark only ever consumes small fields (session ids, tool names, short
+# previews), so we clamp at the source: long strings get truncated in place,
+# and if the payload is still over budget the bulkiest top-level fields are
+# replaced with a preview stub. `payloadTrimmed` tells the inspector.
+_STRING_CAP = 16_000
+_PAYLOAD_BUDGET = 96_000
+_FIELD_PREVIEW = 2_000
+
+
+def _clamp_strings(value, cap):
+    if isinstance(value, str):
+        if len(value) <= cap:
+            return value, False
+        return value[:cap] + f"…[trimmed {len(value) - cap} chars]", True
+    if isinstance(value, dict):
+        trimmed = False
+        out = {}
+        for key, item in value.items():
+            out[key], t = _clamp_strings(item, cap)
+            trimmed = trimmed or t
+        return out, trimmed
+    if isinstance(value, list):
+        trimmed = False
+        out = []
+        for item in value:
+            clamped, t = _clamp_strings(item, cap)
+            out.append(clamped)
+            trimmed = trimmed or t
+        return out, trimmed
+    return value, False
+
+
+def _trim_payload(payload):
+    """Bound the payload so the wrapper always stays far below the watcher cap."""
+    if payload is None:
+        return None, False
+    clamped, trimmed = _clamp_strings(payload, _STRING_CAP)
+    try:
+        if len(json.dumps(clamped, ensure_ascii=False)) <= _PAYLOAD_BUDGET:
+            return clamped, trimmed
+    except Exception:
+        return None, True
+    if not isinstance(clamped, dict):
+        preview = json.dumps(clamped, ensure_ascii=False)[:_FIELD_PREVIEW]
+        return {"trimmed": True, "preview": preview}, True
+    # Replace the bulkiest fields with preview stubs until we fit.
+    sized = []
+    for key, item in clamped.items():
+        try:
+            sized.append((len(json.dumps(item, ensure_ascii=False)), key))
+        except Exception:
+            sized.append((0, key))
+    sized.sort(reverse=True)
+    out = dict(clamped)
+    for size, key in sized:
+        if len(json.dumps(out, ensure_ascii=False)) <= _PAYLOAD_BUDGET:
+            break
+        preview = json.dumps(out[key], ensure_ascii=False)[:_FIELD_PREVIEW]
+        out[key] = {"trimmed": True, "originalBytes": size, "preview": preview}
+    return out, True
+
+
 def main() -> int:
     payload, parse_error = _read_stdin_payload()
+    payload, payload_trimmed = _trim_payload(payload)
     wrapper = {
         "hookName": _hook_name(),
         "timestamp": _iso_now(),
         "paneId": os.environ.get("SPARK_PANE_ID") or "",
         "payload": payload,
     }
+    if payload_trimmed:
+        wrapper["payloadTrimmed"] = True
     if parse_error is not None:
         wrapper["parseError"] = parse_error
 
