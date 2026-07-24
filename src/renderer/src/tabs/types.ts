@@ -106,6 +106,21 @@ export interface TerminalLeafWorker {
   workerTaskId: string;
   attemptId: string;
   source: "spark" | "manual";
+  // Human task title (WorkerTask.title) shown in the worker pane header so the
+  // user can tell panes apart. Best-effort: filled from a getRun lookup, so it
+  // can lag the pane by a beat or stay unset if the lookup fails.
+  title?: string;
+  // 1-based WorkerAttempt.attemptNumber. The pane header shows "attempt N"
+  // when > 1, and open-from-graph prefers the leaf with the highest ordinal.
+  attemptOrdinal?: number;
+  // Which harness executes the attempt: "cli" panes host a real provider TUI,
+  // "pi" panes mirror the main-process Pi event stream. Derived from
+  // WorkerAttempt.command, which is only stamped at launch — undefined before
+  // then.
+  harness?: "pi" | "cli";
+  // WorkerAttempt.startedAt (ISO). Drives the header's live elapsed readout;
+  // absent until the attempt has actually launched.
+  startedAt?: string;
   // Lifecycle of the worker attempt. While "running" the chip pulses; on
   // "done" the pane may show a static completion chip until the foreground
   // agent exits and the shell prompt is back.

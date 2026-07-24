@@ -228,15 +228,26 @@ function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
 }
 
 function findWorkerLeafByTaskId(node: PaneNode, workerTaskId: string): TerminalLeaf | null {
-  if (node.kind === "leaf") {
-    return node.worker?.workerTaskId === workerTaskId ? node : null;
-  }
-  // Prefer the later/right-most pane because retries are appended to the
-  // worker grid and should open the newest attempt for a task.
-  return (
-    findWorkerLeafByTaskId(node.b, workerTaskId) ??
-    findWorkerLeafByTaskId(node.a, workerTaskId)
-  );
+  // Prefer the pane hosting the task's LATEST attempt so open-from-graph lands
+  // on the live retry, not a finished predecessor. attemptOrdinal is
+  // best-effort metadata; `>=` keeps the later-in-tree pane on ties/absence
+  // (retries historically appended to the right of the grid).
+  let best: TerminalLeaf | null = null;
+  forEachTerminalLeaf(node, (leaf) => {
+    if (leaf.worker?.workerTaskId !== workerTaskId) return;
+    if (!best || (leaf.worker.attemptOrdinal ?? 0) >= (best.worker?.attemptOrdinal ?? 0)) {
+      best = leaf;
+    }
+  });
+  return best;
+}
+
+// WorkerAttempt.command is stamped at launch: the Pi worker harness records a
+// "Pi harness (...)" descriptor there instead of a CLI command line. Undefined
+// before launch — the header simply omits the harness until then.
+function workerHarnessFromCommand(command: string | undefined): "pi" | "cli" | undefined {
+  if (!command) return undefined;
+  return command.startsWith("Pi harness") ? "pi" : "cli";
 }
 
 function forEachTerminalLeaf(node: PaneNode, fn: (leaf: TerminalLeaf) => void): void {
@@ -1643,9 +1654,14 @@ export default function App() {
       if (!ws) return;
       const workspaceCwd = ws.cwd;
 
-      // Pull the runtime so the worker chip shows CLAUDE/CODEX. Best-effort —
-      // the chip is decoration; the PTY claim itself doesn't depend on it.
+      // Pull the task/attempt metadata that names the pane header (title,
+      // runtime, attempt ordinal). Best-effort — the header is decoration; the
+      // PTY claim itself doesn't depend on it.
       let runtime: "claude" | "codex" | undefined;
+      let title: string | undefined;
+      let attemptOrdinal: number | undefined;
+      let harness: "pi" | "cli" | undefined;
+      let startedAt: string | undefined;
       try {
         const run = await window.spark.orchestration.getRun(event.runId);
         const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
@@ -1655,8 +1671,13 @@ export default function App() {
         ) {
           runtime = task.runtimePreference;
         }
+        title = task?.title;
+        const attempt = run?.workerAttempts.find((item) => item.id === event.attemptId);
+        attemptOrdinal = attempt?.attemptNumber;
+        harness = workerHarnessFromCommand(attempt?.command);
+        startedAt = attempt?.startedAt;
       } catch {
-        /* runtime is decorative */
+        /* header metadata is decorative */
       }
 
       // getRun is asynchronous. The user may have switched workspaces while
@@ -1671,15 +1692,20 @@ export default function App() {
         attemptId: event.attemptId,
         source: "spark" as const,
         state: "running" as const,
+        title,
+        attemptOrdinal,
+        harness,
+        startedAt,
       };
 
       const t = tabsRef.current;
       if (!t) return;
+      // ensureWorkerTerminalTab activates a newly materialized pane itself; a
+      // repeat event for an existing pane must not steal the user's selection.
       const tabId = t.ensureWorkerTerminalTab(event.runId, workspaceCwd, event.attemptId, workerMeta, {
         focus: false,
       });
       t.setLeafCwd(tabId, event.attemptId, workspaceCwd);
-      t.setActiveTerminalPane(tabId, event.attemptId);
     };
 
     // Keep successful worker evidence inspectable, but close failed worker
@@ -1724,6 +1750,10 @@ export default function App() {
             source: "spark",
             state: "done",
             agentRunning: prior?.agentRunning,
+            title: prior?.title,
+            attemptOrdinal: prior?.attemptOrdinal,
+            harness: prior?.harness,
+            startedAt: prior?.startedAt,
           });
           return;
         }
@@ -1747,6 +1777,10 @@ export default function App() {
         source: "spark",
         state: "done",
         agentRunning: prior?.agentRunning,
+        title: prior?.title,
+        attemptOrdinal: prior?.attemptOrdinal,
+        harness: prior?.harness,
+        startedAt: prior?.startedAt,
       }));
     };
 
@@ -1820,8 +1854,16 @@ export default function App() {
                 source: "spark",
                 state: "running",
                 runtimeState: attempt.runtimeState,
+                title: task?.title,
+                attemptOrdinal: attempt.attemptNumber,
+                harness: workerHarnessFromCommand(attempt.command),
+                startedAt: attempt.startedAt,
               },
-              { focus: false },
+              // Level-triggered re-ensures run every second; they must never
+              // move the user's pane selection. (A pane the loop MATERIALIZES
+              // still activates — creation, not re-ensure, drives focus, and
+              // pane creation is also what drives pty:spawn.)
+              { focus: false, activate: false },
             );
             if (cwd) tabsRef.current.setLeafCwd(tabId, attempt.id, cwd);
           }),

@@ -479,11 +479,53 @@ function trimPersistedTerminalScrollback(scrollback: string, scrollbackLineLimit
   return trimTerminalScrollbackLines(charTrimmed, scrollbackLineLimit);
 }
 
+// View teardown for a pane's pty. Cora (the main-process orchestrator) is the
+// only authority allowed to kill its own workers — closing UI around a live
+// spark attempt must leave the session running so Cora can reuse it for
+// follow-ups. So a running spark worker's pty is only detached (renderer sink
+// dropped, process untouched; the reconcile loop can re-attach later), while
+// every other pane is disposed as before. Main's pty:dispose handler enforces
+// the same rule for callers that bypass this helper.
+function releaseTerminalPanePty(leaf: TerminalLeaf | null | undefined, paneId: string): void {
+  const worker = leaf?.worker;
+  if (worker?.source === "spark" && worker.state === "running") {
+    void window.spark.pty.detach(paneId).catch(() => undefined);
+    return;
+  }
+  void window.spark.pty.dispose(paneId).catch(() => undefined);
+}
+
 function disposeTerminalTabPanes(tab: Tab): void {
   if (tab.kind !== "terminal") return;
   for (const pane of collectLeaves(tab.root)) {
-    void window.spark.pty.dispose(pane.paneId).catch(() => undefined);
+    releaseTerminalPanePty(pane, pane.paneId);
   }
+}
+
+// The finished pane of an earlier attempt for the same task — the grid slot a
+// retry should take over instead of tiling a sibling. Running predecessors are
+// never matched (each live attempt keeps its own pane).
+function findRetiredPredecessorLeaf(
+  root: PaneNode,
+  worker: TerminalLeafWorker,
+): TerminalLeaf | null {
+  return (
+    collectLeaves(root).find(
+      (item) =>
+        item.worker?.workerTaskId === worker.workerTaskId &&
+        item.worker.attemptId !== worker.attemptId &&
+        item.worker.state === "done",
+    ) ?? null
+  );
+}
+
+// Swap the leaf `paneId` for `next`, preserving the surrounding split
+// structure so the replacement inherits the exact grid slot.
+function replaceLeafNode(node: PaneNode, paneId: string, next: TerminalLeaf): PaneNode {
+  if (node.kind === "leaf") return node.paneId === paneId ? next : node;
+  const a = replaceLeafNode(node.a, paneId, next);
+  const b = replaceLeafNode(node.b, paneId, next);
+  return a === node.a && b === node.b ? node : { ...node, a, b };
 }
 
 // Resolve the initial tabs + activeId for a workspace in a SINGLE
@@ -632,12 +674,15 @@ export interface UseTabsApi {
       worker?: TerminalLeafWorker | null;
     },
   ) => boolean;
+  // Idempotently host a worker attempt in the run's workers-scoped terminal
+  // tab. A newly materialized pane becomes the tab's active pane; re-ensures
+  // never move the user's selection unless `activate` is passed explicitly.
   ensureWorkerTerminalTab: (
     runId: string,
     cwd: string | undefined,
     paneId: string,
     worker: TerminalLeafWorker,
-    options?: { focus?: boolean },
+    options?: { focus?: boolean; activate?: boolean },
   ) => TabId;
   detachTerminalPaneToNewTab: (tabId: TabId, paneId: string) => TabId | null;
   moveTerminalPane: (
@@ -1463,13 +1508,22 @@ export function useTabs(
       cwd: string | undefined,
       paneId: string,
       worker: TerminalLeafWorker,
-      options?: { focus?: boolean },
+      options?: { focus?: boolean; activate?: boolean },
     ): TabId => {
-      const existingId = tabsRef.current.find(
+      const snapshotTab = tabsRef.current.find(
         (t): t is TerminalTab =>
           t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId,
-      )?.id;
-      const resultId = existingId ?? makeId("term");
+      );
+      const resultId = snapshotTab?.id ?? makeId("term");
+      // A retry attempt (same task, new attemptId) whose predecessor pane
+      // finished cleanly takes over that pane's grid slot instead of tiling a
+      // sibling, so pane count keeps matching logical workers. Resolve the
+      // predecessor from the ref snapshot — the setTabs updater runs during
+      // render, so an assignment inside it would not be visible below.
+      const replacedPaneId =
+        snapshotTab && !findLeaf(snapshotTab.root, paneId)
+          ? (findRetiredPredecessorLeaf(snapshotTab.root, worker)?.paneId ?? null)
+          : null;
       setTabs((curr) => {
         const existing = curr.find(
           (t): t is TerminalTab =>
@@ -1477,21 +1531,28 @@ export function useTabs(
         );
         if (existing) {
           const hasPane = Boolean(findLeaf(existing.root, paneId));
-          const newLeaf = leaf(paneId, cwd);
-          newLeaf.worker = worker;
-          const root = hasPane
-            ? setLeafField(
-                cwd
-                  ? setLeafField(existing.root, paneId, "cwd", cwd)
-                  : existing.root,
-                paneId,
-                "worker",
-                worker,
-              )
-            : buildPaneGrid([
-                ...collectLeaves(existing.root),
-                newLeaf,
-              ]);
+          let root: PaneNode;
+          if (hasPane) {
+            root = setLeafField(
+              cwd
+                ? setLeafField(existing.root, paneId, "cwd", cwd)
+                : existing.root,
+              paneId,
+              "worker",
+              worker,
+            );
+          } else {
+            const newLeaf = leaf(paneId, cwd);
+            newLeaf.worker = worker;
+            const predecessor = findRetiredPredecessorLeaf(existing.root, worker);
+            root = predecessor
+              ? replaceLeafNode(existing.root, predecessor.paneId, newLeaf)
+              : buildPaneGrid([...collectLeaves(existing.root), newLeaf]);
+          }
+          // Only a NEWLY materialized pane (or an explicit request) may steal
+          // the tab's pane selection — re-ensures from the 1s reconcile loop
+          // and repeat envelope events must leave the user's click alone.
+          const activate = options?.activate === true || !hasPane;
           return curr.map((tab) =>
             tab.id === existing.id && tab.kind === "terminal"
               ? {
@@ -1499,7 +1560,11 @@ export function useTabs(
                   title: "workers",
                   scope: { kind: "workers", runId },
                   root,
-                  activePaneId: paneId,
+                  activePaneId: activate
+                    ? paneId
+                    : findLeaf(root, tab.activePaneId)
+                      ? tab.activePaneId
+                      : paneId,
                 }
               : tab,
           );
@@ -1516,6 +1581,12 @@ export function useTabs(
         };
         return [...curr, tab];
       });
+      if (replacedPaneId) {
+        // The predecessor attempt is done and its leaf just left the tree, so
+        // this is evidence cleanup, not a kill (main refuses disposes of live
+        // attempts anyway).
+        void window.spark.pty.dispose(replacedPaneId).catch(() => undefined);
+      }
       if (options?.focus === true) setActiveId(resultId);
       return resultId;
     },
@@ -1699,11 +1770,14 @@ export function useTabs(
 
   const closeTerminalPane = useCallback(
     (tabId: TabId, paneId: string) => {
-      // Best-effort PTY teardown — the renderer-side TerminalPane already
-      // calls dispose on unmount, but we call it here too so a programmatic
-      // close (split with one child) reaps the conpty even if the React tree
-      // is still in the middle of unmounting.
-      void window.spark.pty.dispose(paneId).catch(() => undefined);
+      // Best-effort PTY teardown so a programmatic close (split with one
+      // child) reaps the conpty even if the React tree is still in the middle
+      // of unmounting. Live spark workers are only detached — see
+      // releaseTerminalPanePty.
+      const owner = tabsRef.current.find(
+        (t): t is TerminalTab => t.id === tabId && t.kind === "terminal",
+      );
+      releaseTerminalPanePty(owner ? findLeaf(owner.root, paneId) : null, paneId);
       setTabs((curr) => {
         const next: Tab[] = [];
         let dropped = false;
@@ -1772,10 +1846,13 @@ export function useTabs(
         closeTerminalPane(tabId, paneId);
         return;
       }
-      // Same best-effort PTY teardown as closeTerminalPane (dispose is
+      // Same best-effort PTY teardown as closeTerminalPane (dispose/detach is
       // idempotent for already-dead sessions).
-      void window.spark.pty.dispose(paneId).catch(() => undefined);
       const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      const frozenTab = live?.tabs.find(
+        (t): t is TerminalTab => t.id === tabId && t.kind === "terminal",
+      );
+      releaseTerminalPanePty(frozenTab ? findLeaf(frozenTab.root, paneId) : null, paneId);
       if (!live) return;
       let changed = false;
       let droppedTabId: TabId | null = null;

@@ -939,6 +939,11 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             className="spark-terminal-pane"
             style={{
               position: "absolute",
+              // Worker panes stack a header row above the terminal; the
+              // header is flex-static and TerminalPane (flex:1, minHeight:0)
+              // absorbs the rest, so xterm reflows normally on resize. The
+              // display value itself is set below (zoom hiding wins).
+              flexDirection: workerTerminal ? "column" : undefined,
               // Parked dragged pane: pull the wrapper off-screen (kept mounted
               // so the live xterm survives) and suppress pointer/animation. A
               // normal pane positions to its flow rect.
@@ -954,9 +959,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               pointerEvents: placeOffScreen ? "none" : undefined,
               // display:none keeps the React subtree (and the xterm canvas /
               // PTY behind it) mounted while removing it from layout. When
-              // the wrapper toggles back to "block", the parent
+              // the wrapper toggles back to "block"/"flex", the parent
               // ResizeObserver fires and xterm reflows to the new size.
-              display: isHiddenByZoom ? "none" : undefined,
+              display: isHiddenByZoom ? "none" : workerTerminal ? "flex" : undefined,
               // Resting card depth: a hairline well-edge plus a 1px top
               // highlight so each pane reads as a deliberate macOS-like card
               // with clear seams against its neighbours. The accent focus /
@@ -976,6 +981,17 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           >
             {!placeOffScreen && isActive ? <PaneFocusRing /> : null}
             {!placeOffScreen && isZoomed ? <PaneZoomedRing /> : null}
+            {workerTerminal && leaf.worker ? (
+              <WorkerPaneHeader
+                worker={leaf.worker}
+                // The tab-level guard controls (Back to Runs / input lock)
+                // float over the tab's top-right corner; the pane rendered
+                // there keeps its header meta clear of them.
+                reserveControlsSpace={
+                  renderRect.top < 0.001 && renderRect.left + renderRect.width > 0.999
+                }
+              />
+            ) : null}
             <TerminalPane
               ref={(h) => setHandle(leaf.paneId, h)}
               sessionId={leaf.paneId}
@@ -1010,7 +1026,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               onBootResumeConsumed={bundle.onBootResumeConsumed}
               inputBlocked={workerTerminal && workerInputProtected}
             />
-            {!placeOffScreen && workerChip ? <WorkerChip worker={workerChip} /> : null}
+            {!placeOffScreen && !workerTerminal && workerChip ? (
+              <WorkerChip worker={workerChip} />
+            ) : null}
             {!placeOffScreen && !workerTerminal ? (
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
@@ -2606,6 +2624,134 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
         pulse: false,
         frame: "calm",
       };
+}
+
+// Live "3m 12s" readout for a running worker. Ticks once a second while a
+// start timestamp is provided; callers pass undefined once the attempt is done
+// (no finish timestamp is carried on the leaf, so a frozen value would drift).
+function useWorkerElapsed(startedAt: string | undefined): string | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  if (!startedAt) return null;
+  const startMs = Date.parse(startedAt);
+  if (!Number.isFinite(startMs)) return null;
+  const totalSeconds = Math.max(0, Math.floor((now - startMs) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+// Per-pane header row for Cora worker terminals: names the worker (task
+// title), shows attempt ordinal / runtime / live elapsed, and carries the
+// status word that used to float on the WorkerChip overlay. Restrained on
+// purpose — hairline bottom rule, muted metadata, tone color reserved for the
+// status word — and it sits in normal flow above the terminal so it never
+// covers output. Clicks bubble to the pane wrapper, so the header also
+// selects its pane; the aria-label keeps the "… Cora <status>" phrasing the
+// chip announced.
+function WorkerPaneHeader({
+  worker,
+  reserveControlsSpace,
+}: {
+  worker: TerminalLeafWorker;
+  reserveControlsSpace?: boolean;
+}) {
+  const tone = deriveChipTone(worker);
+  const title = worker.title?.trim() || "Cora worker";
+  const elapsed = useWorkerElapsed(worker.state === "running" ? worker.startedAt : undefined);
+  const runtimeLabel =
+    worker.runtime === "claude"
+      ? "Claude"
+      : worker.runtime === "codex"
+        ? "Codex"
+        : worker.runtime === "opencode"
+          ? "OpenCode"
+          : null;
+  const engine =
+    worker.harness === "pi" ? (runtimeLabel ? `Pi · ${runtimeLabel}` : "Pi") : runtimeLabel;
+  const statusColor =
+    tone.frame === "accent"
+      ? "var(--accent)"
+      : tone.frame === "warn"
+        ? "var(--warn)"
+        : tone.frame === "success"
+          ? "var(--ok)"
+          : tone.frame === "danger"
+            ? "var(--danger)"
+            : "var(--muted)";
+  return (
+    <div
+      className="cora-worker-pane-header"
+      style={{
+        flex: "0 0 auto",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        minWidth: 0,
+        height: 28,
+        padding: "0 10px",
+        paddingRight: reserveControlsSpace ? 236 : 10,
+        borderBottom: "1px solid var(--rule-soft)",
+        background: "var(--panel)",
+        fontSize: 11,
+        lineHeight: "16px",
+        color: "var(--muted)",
+        whiteSpace: "nowrap",
+        userSelect: "none",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          flex: "0 0 auto",
+          background: tone.dot,
+          animation: tone.pulse ? "spark-pulse 1.8s var(--ease-out) infinite" : undefined,
+        }}
+      />
+      <span
+        title={title}
+        style={{
+          color: "var(--ink-dim)",
+          fontWeight: 500,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {title}
+      </span>
+      {typeof worker.attemptOrdinal === "number" && worker.attemptOrdinal > 1 ? (
+        <span style={{ flex: "0 0 auto" }}>attempt {worker.attemptOrdinal}</span>
+      ) : null}
+      <span style={{ flex: 1 }} aria-hidden />
+      {engine ? <span style={{ flex: "0 0 auto" }}>{engine}</span> : null}
+      {elapsed ? (
+        <span style={{ flex: "0 0 auto", fontVariantNumeric: "tabular-nums" }}>{elapsed}</span>
+      ) : null}
+      {/* Only the status word is a live region — the ticking elapsed readout
+          above must stay outside it, or it would be announced every second. */}
+      <span
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        aria-label={`${title} — Cora ${tone.status}`}
+        style={{ flex: "0 0 auto", color: statusColor }}
+      >
+        {tone.status}
+      </span>
+    </div>
+  );
 }
 
 // Small overlay chip rendered on a pane that's hosting a live manual agent or

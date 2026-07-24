@@ -51,7 +51,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { remoteStreamGrep } from "./remote/remote-search";
-import { listEvents } from "./orchestration/event-log";
+import { listEvents, subscribeToEvents } from "./orchestration/event-log";
 import {
   claudeSessionTranscriptPath,
   discoverClaudeSessionForCwd,
@@ -169,6 +169,46 @@ let schedulerMod: typeof import("./orchestration/scheduler") | undefined;
 async function getScheduler(): Promise<typeof import("./orchestration/scheduler")> {
   schedulerMod ??= await import("./orchestration/scheduler");
   return schedulerMod;
+}
+
+// ── Cora-only kill authority for worker ptys ────────────────────────────────
+// Worker panes use their attemptId as the pty session id, and every renderer
+// pane-close path funnels into "pty:dispose". Killing a live worker is the
+// orchestrator's decision alone (run-store's activeWorkerProcesses and its
+// cancel/fail paths call pty-manager directly and never cross this IPC
+// boundary), so the handler downgrades a renderer dispose of a still-live
+// attempt to a detach: the view lets go, the session survives for follow-ups.
+// The attempt→run map is fed from the durable event journal; attempts that
+// never launched (preparing/prompt_ready) are deliberately not protected —
+// their pty is an idle shell no worker owns yet.
+const workerAttemptRunIds = new Map<string, string>();
+subscribeToEvents((event) => {
+  if (!event.attemptId) return;
+  if (event.type === "worker_task.envelope_prepared" && event.runId) {
+    workerAttemptRunIds.set(event.attemptId, event.runId);
+  } else if (event.type === "worker_attempt.finished") {
+    workerAttemptRunIds.delete(event.attemptId);
+  }
+});
+
+const KILL_PROTECTED_ATTEMPT_STATUSES = new Set(["launching", "running", "finishing"]);
+
+async function isLiveWorkerAttemptPty(id: string): Promise<boolean> {
+  const runId = workerAttemptRunIds.get(id);
+  if (!runId) return false;
+  try {
+    const { getRun } = await getRunStore();
+    const run = await getRun(runId);
+    const attempt = run?.workerAttempts.find((item) => item.id === id);
+    if (attempt && KILL_PROTECTED_ATTEMPT_STATUSES.has(attempt.status)) return true;
+    // Terminal (or unknown) attempt: forget it so the map stays bounded and
+    // later disposes take the fast path.
+    workerAttemptRunIds.delete(id);
+    return false;
+  } catch {
+    // Fail closed: an unreadable run must not let the UI kill a worker.
+    return true;
+  }
 }
 import type {
   AddRunMessageInput,
@@ -1490,6 +1530,13 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
+    // Only Cora may kill a live worker attempt — downgrade to detach so the
+    // session keeps running headless (the workers-tab reconcile loop can
+    // re-attach it later). See workerAttemptRunIds above.
+    if (await isLiveWorkerAttemptPty(args.id)) {
+      pty.detach(args.id);
+      return;
+    }
     noteTerminalWillDispose(args.id);
     pty.dispose(args.id);
   });
