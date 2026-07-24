@@ -7,11 +7,15 @@
 // calls to the running Codara app via its agent socket (loopback HTTP +
 // bearer token). Codara's renderer/main make the calls real.
 //
-// One server, three rosters, selected ONCE at startup by SPARK_MCP_MODE:
+// One server, four rosters, selected ONCE at startup by SPARK_MCP_MODE:
 //   - unset / "studio" (the GLOBAL user-scope entry): the preview tool set
 //     (drive the live <preview> tab) + the terminal tool set (open and drive
 //     agent-owned terminal tabs). This is what any claude/codex sub-agent,
 //     worker, or verifier sees.
+//   - "worker": the studio roster minus whiteboard writes, plus the two
+//     run-lifecycle tools a headless automation pass needs (codara_ask_user,
+//     codara_request_next_iteration). Spawned by structured-worker.ts for
+//     automation workers — never the manager orchestration tools.
 //   - "execute": the studio roster + the Execute worker-orchestration tools
 //     (spawn/steer Cora workers, ask the user, complete the run). Written by
 //     the Claude/Codex backends into a per-run config for the manager CLI.
@@ -41,11 +45,12 @@ const HANDSHAKE_FILE = "agent-socket.json";
 const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Codara");
 
 // Roster gating. Chosen once, at startup. Anything other than "execute" /
-// "automation" (unset, "studio", empty) means the global studio roster —
-// preview + terminal only.
+// "automation" / "worker" (unset, "studio", empty) means the global studio
+// roster — preview + terminal only.
 const SPARK_MCP_MODE = (process.env.SPARK_MCP_MODE || "").trim().toLowerCase();
 const IS_EXECUTE_MODE = SPARK_MCP_MODE === "execute";
 const IS_AUTOMATION_MODE = SPARK_MCP_MODE === "automation";
+const IS_WORKER_MODE = SPARK_MCP_MODE === "worker";
 
 // Orchestration RPCs can block up to ~15 min (codara_ask_user waits on a human;
 // codara_wait_for_workers / codara_wait_for_automation long-poll), so they get a
@@ -1349,6 +1354,23 @@ const AUTOMATION_TOOL_TO_RPC = {
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS];
 const STUDIO_TOOL_TO_RPC = { ...PREVIEW_TOOL_TO_RPC, ...TERMINAL_TOOL_TO_RPC, ...WHITEBOARD_TOOL_TO_RPC };
 
+// Worker mode: the studio surface a headless automation worker may drive
+// (whiteboard stays read-only — edits are the manager's call) plus the two
+// run-lifecycle tools its loop prompt references: codara_ask_user (blocked on
+// a genuinely human decision) and codara_request_next_iteration (agent-loop
+// continuation). Deliberately NO manager orchestration tools — a worker never
+// spawns, steers, messages, or completes.
+const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
+const WORKER_TOOLS = [
+  ...STUDIO_TOOLS.filter((tool) => tool.name !== "codara_whiteboard_update"),
+  ...EXECUTE_TOOLS.filter((tool) => WORKER_LIFECYCLE_TOOL_NAMES.includes(tool.name)),
+];
+const WORKER_TOOL_TO_RPC = Object.fromEntries(
+  WORKER_TOOLS
+    .filter((tool) => tool.name !== "codara_preview_run")
+    .map((tool) => [tool.name, STUDIO_TOOL_TO_RPC[tool.name] ?? EXECUTE_TOOL_TO_RPC[tool.name]]),
+);
+
 let TOOLS;
 let TOOL_TO_RPC;
 if (IS_AUTOMATION_MODE) {
@@ -1358,6 +1380,9 @@ if (IS_AUTOMATION_MODE) {
   // EXECUTE_TOOLS already contains codara_ask_user.
   TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS];
   TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, ...EXECUTE_TOOL_TO_RPC };
+} else if (IS_WORKER_MODE) {
+  TOOLS = WORKER_TOOLS;
+  TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
 } else {
   TOOLS = STUDIO_TOOLS;
   TOOL_TO_RPC = STUDIO_TOOL_TO_RPC;

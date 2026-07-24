@@ -11,7 +11,9 @@
 // architect) are layered on TOP of that roster only when a backend spawns the
 // server with SPARK_MCP_MODE=execute|automation — Claude via a per-run
 // --mcp-config, Codex via a `-c mcp_servers."codara-studio".env.SPARK_MCP_MODE`
-// override. The single server, three rosters, live in the server.js itself.
+// override — and structured automation workers get SPARK_MCP_MODE=worker (the
+// studio surface plus the loop-lifecycle pair, structured-worker.ts). The
+// single server and all its rosters live in server.js itself.
 //
 // Design mirrors hook-installer.ts:
 // 1. Idempotent. JSON entries are tagged `_sparkManaged: true` + version;

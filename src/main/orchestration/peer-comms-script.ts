@@ -193,7 +193,9 @@ async function commandSend(dir, args, replyTo) {
     subject,
     body,
     replyTo: replyTo || null,
-    readBy: [],
+    // Seed with the sender so a worker's own "all" broadcast never shows up
+    // unread in its own inbox/await loop.
+    readBy: [from],
   };
   writeJsonAtomic(path.join(dir, "messages", message.id + ".json"), message);
   console.log(message.id);
