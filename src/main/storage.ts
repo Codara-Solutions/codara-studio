@@ -4,8 +4,6 @@ import { join } from "node:path";
 import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   normalizeTerminalScrollbackLineLimit,
-  type AgentRuntimeKind,
-  type AgentRuntimeSelection,
   type AppSettings,
   type AppState,
   type Workspace,
@@ -29,15 +27,11 @@ const EMPTY_SETTINGS: AppSettings = {
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
-  agentRuntimeSelection: "auto",
   agentMcpSyncEnabled: true,
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
   agentDisabledSkillIds: [],
   playwrightMcpAutoInstall: true,
-  workerStuckDetectEnabled: true,
-  workerStuckIdleSeconds: 180,
-  workerStuckMaxAutoRetries: 2,
   autopilotSandbox: false,
 };
 
@@ -200,38 +194,13 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.openRouterModel === "string" && settings.openRouterModel.trim()
         ? settings.openRouterModel.trim()
         : DEFAULT_OPENROUTER_MODEL,
-    agentRuntimeSelection: normalizeAgentRuntimeSelection(settings.agentRuntimeSelection),
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled !== false,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled !== false,
     agentDisabledMcpIds: normalizeStringArray(settings.agentDisabledMcpIds),
     agentDisabledSkillIds: normalizeStringArray(settings.agentDisabledSkillIds),
     playwrightMcpAutoInstall: settings.playwrightMcpAutoInstall !== false,
-    workerStuckDetectEnabled: settings.workerStuckDetectEnabled !== false,
-    workerStuckIdleSeconds: clampInt(settings.workerStuckIdleSeconds, 60, 3600, 180),
-    workerStuckMaxAutoRetries: clampInt(settings.workerStuckMaxAutoRetries, 0, 5, 2),
     autopilotSandbox: settings.autopilotSandbox === true,
   };
-}
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, Math.trunc(n)));
-}
-
-function normalizeAgentRuntimeSelection(value: unknown): AgentRuntimeSelection {
-  const allKinds: AgentRuntimeKind[] = ["claude", "codex"];
-  // Legacy single-string formats migrate to the array form so the rest of
-  // the app only has to handle one shape.
-  if (value === "claude") return ["claude"];
-  if (value === "codex") return ["codex"];
-  if (value === "both") return ["claude", "codex"];
-  if (value === "auto") return [...allKinds];
-  if (Array.isArray(value)) {
-    const kinds = value.filter((kind): kind is AgentRuntimeKind => allKinds.includes(kind as AgentRuntimeKind));
-    return Array.from(new Set(kinds));
-  }
-  return [...allKinds];
 }
 
 function normalizeStringArray(value: unknown): string[] {

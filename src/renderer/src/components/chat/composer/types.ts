@@ -3,6 +3,7 @@ import type {
   AgentRuntimeDiagnostic,
   ChatBackendKind,
   ChatMode,
+  PiCatalogModel,
 } from "@shared/types";
 import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
 
@@ -64,9 +65,8 @@ const CLAUDE_MODELS: ChatModelOption[] = [
     badge: "Balanced",
   },
   {
-    // Fable stays available when the preference is enabled, but it comes last:
-    // merely opting into a premium model must never make every fresh chat use
-    // it by accident.
+    // Fable is always available, but it comes last: a fresh chat must default
+    // to Opus (the first row), never drift onto the premium tier by accident.
     id: "claude-fable-5",
     label: "Fable 5",
     backend: "claude",
@@ -186,39 +186,58 @@ export function clampEffort(
 export function buildVisibleGroups({
   diagnostics,
   openRouterModel,
-  fableEnabled = false,
+  piCatalog = [],
 }: {
   diagnostics: AgentRuntimeDiagnostic[];
   openRouterModel: string;
-  // Default OFF: Fable 5 is filtered out of the Claude group unless the user
-  // opted in via Settings. The static CLAUDE_MODELS list is left intact, so
-  // toggling the preference back on re-exposes the row with no reload.
-  fableEnabled?: boolean;
+  /** Models Pi reports as usable by the connected subscriptions right now.
+   * Merged under the curated rows so a model released after this build is
+   * selectable without a code change. */
+  piCatalog?: PiCatalogModel[];
 }): ChatBackendGroup[] {
   const groups: ChatBackendGroup[] = [];
   // Pi is bundled and version-pinned with Studio. OAuth readiness is checked
   // at launch so the picker can expose the experimental backend without
   // pretending it is one of the native worker CLIs.
+  // Pi spans both providers, so each side is trimmed against its own rule and
+  // the survivors are then re-read in the ORIGINAL row order. Concatenating the
+  // two filtered lists instead would reorder the group, and the first row of
+  // this group is the default chat model — that alone would silently move the
+  // default off Sol.
+  const piMerged = mergePiModels(PI_MODELS, piCatalog);
+  const isCodexModel = (model: ChatModelOption): boolean =>
+    /^gpt-/i.test(decomposeModelId(model.id).baseId);
+  const piKept = new Set([
+    ...keepCurrentGeneration(piMerged.filter((m) => !isCodexModel(m)), "anthropic").map((m) => m.id),
+    ...keepCurrentGeneration(piMerged.filter(isCodexModel), "openai").map((m) => m.id),
+  ]);
   groups.push({
     backend: "pi",
     label: "Cora · Pi",
-    models: fableEnabled ? PI_MODELS : PI_MODELS.filter((model) => !/fable/i.test(model.id)),
+    models: piMerged.filter((model) => piKept.has(model.id)),
   });
+  // The CLI groups get the same live catalog, scoped to the provider each one
+  // actually talks to. Claude Code runs Anthropic models and Codex runs OpenAI
+  // models, so a newly released model belongs in these lists too — merging only
+  // into the Pi group above was why a just-shipped Opus did not appear here.
   if (isAvailable(diagnostics, "claude")) {
-    const claudeModels = fableEnabled
-      ? CLAUDE_MODELS
-      : CLAUDE_MODELS.filter((m) => !/fable/i.test(m.id));
     groups.push({
       backend: "claude",
       label: labelFor(diagnostics, "claude", "Claude Code"),
-      models: claudeModels,
+      models: keepCurrentGeneration(
+        mergeCatalogModels(CLAUDE_MODELS, piCatalog, "anthropic", "claude"),
+        "anthropic",
+      ),
     });
   }
   if (isAvailable(diagnostics, "codex")) {
     groups.push({
       backend: "codex",
       label: labelFor(diagnostics, "codex", "Codex"),
-      models: CODEX_MODELS,
+      models: keepCurrentGeneration(
+        mergeCatalogModels(CODEX_MODELS, piCatalog, "openai-codex", "codex"),
+        "openai",
+      ),
     });
   }
   const apiModel = openRouterModel.trim();
@@ -232,11 +251,183 @@ export function buildVisibleGroups({
   return groups;
 }
 
+/**
+ * Union Pi's live catalog under the curated Pi rows.
+ *
+ * Curated rows win on presentation and ordering — they carry the labels,
+ * badges, descriptions and hand-tuned effort ladders — so they stay exactly
+ * where they are. Anything Pi reports that isn't already covered is appended
+ * as a plain row using the vendor's own name. That is the whole point: the day
+ * a new model ships, it is selectable, and a nicer curated entry can follow
+ * later without blocking the user in the meantime.
+ *
+ * Dynamic rows deliberately do NOT pin effortLevels: they fall through to
+ * effortsFor()'s ALL_EFFORTS, matching findOptionInCatalog (which only knows
+ * the static rows and so also yields ALL_EFFORTS for a selected dynamic model).
+ * Pi passes an unmapped level through to the provider rather than rejecting
+ * it, so over-offering a level is harmless — whereas deriving a narrowed
+ * ladder here silently escalated a picked effort (e.g. "high" → "xhigh" on
+ * claude-opus-4-8, whose thinking map only lists xhigh/max).
+ */
+function mergeCatalogModels(
+  curated: ChatModelOption[],
+  catalog: PiCatalogModel[],
+  provider: PiCatalogModel["provider"] | null,
+  backend: ChatBackendKind,
+): ChatModelOption[] {
+  const scoped = provider === null ? catalog : catalog.filter((m) => m.provider === provider);
+  if (scoped.length === 0) return curated;
+  // Compare on the base id so a curated `:1m` row still suppresses the plain
+  // dynamic row for the same underlying model.
+  const covered = new Set(curated.map((option) => decomposeModelId(option.id).baseId));
+  const extras: ChatModelOption[] = [];
+  for (const model of scoped) {
+    if (covered.has(model.id)) continue;
+    covered.add(model.id);
+    extras.push({ id: model.id, label: model.label, backend });
+  }
+  return extras.length > 0 ? [...curated, ...extras] : curated;
+}
+
+/** The Pi group spans both providers, so it takes the catalog unscoped. */
+function mergePiModels(
+  curated: ChatModelOption[],
+  catalog: PiCatalogModel[],
+): ChatModelOption[] {
+  return mergeCatalogModels(curated, catalog, null, "pi");
+}
+
+// ---------------------------------------------------------------------------
+// Current-generation filter
+//
+// The live catalog carries every model a provider still serves, including long
+// superseded ones (gpt-5.3-codex-spark, claude-opus-4-1). The picker should
+// offer the current lineup only. This is expressed as a RULE rather than a list
+// of ids, so the day Opus 6 or GPT-5.7 ships it takes over automatically —
+// which is the entire reason the catalog is dynamic in the first place.
+//
+// The two providers need different rules because they version differently:
+//   * OpenAI ships a generation at a time (5.6 sol/terra/luna), so keep every
+//     model at the highest generation and drop earlier ones wholesale.
+//   * Anthropic ships tiers on independent cadences (Sonnet 5 alongside Opus
+//     4.8), so keep the newest release of each tier instead. Anchoring to a
+//     single highest version would delete a whole tier the moment one tier
+//     moved ahead — including offline, where the curated rows are all we have.
+// ---------------------------------------------------------------------------
+
+/** Small/cheap tiers Cora does not offer as a chat model. */
+const MINOR_TIER_PATTERN = /haiku|mini|spark/i;
+
+/** Numeric version embedded in a model id, most significant first. */
+function versionOf(id: string): number[] {
+  const numbers = id.match(/\d+/g);
+  return numbers ? numbers.map(Number) : [];
+}
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const diff = (a[i] ?? -1) - (b[i] ?? -1);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/** Anthropic tier: the word between "claude-" and the version ("opus", "sonnet"). */
+function claudeTier(baseId: string): string | null {
+  const match = /^claude-([a-z]+)/i.exec(baseId);
+  return match ? match[1].toLowerCase() : null;
+}
+
+/** OpenAI generation: the leading major.minor ("gpt-5.6-sol" -> [5, 6]). */
+function codexGeneration(baseId: string): number[] | null {
+  const match = /^gpt-(\d+)(?:\.(\d+))?/i.exec(baseId);
+  if (!match) return null;
+  return match[2] === undefined ? [Number(match[1])] : [Number(match[1]), Number(match[2])];
+}
+
+/**
+ * Reduce a group to the current lineup. Anything whose id does not parse is
+ * KEPT — an unrecognized id is far more likely to be a brand-new naming scheme
+ * than something stale, and silently hiding a just-released model is exactly
+ * the failure this whole mechanism exists to prevent.
+ */
+function keepCurrentGeneration(
+  models: ChatModelOption[],
+  provider: "anthropic" | "openai",
+): ChatModelOption[] {
+  if (models.length === 0) return models;
+
+  if (provider === "openai") {
+    let newest: number[] | null = null;
+    for (const model of models) {
+      const generation = codexGeneration(decomposeModelId(model.id).baseId);
+      if (generation && (newest === null || compareVersions(generation, newest) > 0)) {
+        newest = generation;
+      }
+    }
+    if (newest === null) return models;
+    return models.filter((model) => {
+      const baseId = decomposeModelId(model.id).baseId;
+      if (MINOR_TIER_PATTERN.test(baseId)) return false;
+      const generation = codexGeneration(baseId);
+      return generation === null || compareVersions(generation, newest) === 0;
+    });
+  }
+
+  // Anthropic: newest release per tier.
+  const newestByTier = new Map<string, number[]>();
+  for (const model of models) {
+    const baseId = decomposeModelId(model.id).baseId;
+    const tier = claudeTier(baseId);
+    if (!tier || MINOR_TIER_PATTERN.test(baseId)) continue;
+    const version = versionOf(baseId);
+    const best = newestByTier.get(tier);
+    if (!best || compareVersions(version, best) > 0) newestByTier.set(tier, version);
+  }
+  const survives = (model: ChatModelOption): boolean => {
+    const baseId = decomposeModelId(model.id).baseId;
+    if (MINOR_TIER_PATTERN.test(baseId)) return false;
+    const tier = claudeTier(baseId);
+    if (!tier) return true;
+    const best = newestByTier.get(tier);
+    return !best || compareVersions(versionOf(baseId), best) === 0;
+  };
+
+  // Order matters beyond tidiness: the first row of the Claude group is the
+  // default chat model. A superseded row is therefore REPLACED IN PLACE by its
+  // successor rather than dropped — otherwise retiring Opus 4.8 would silently
+  // promote whatever sat below it (Sonnet) to the default, and strand the new
+  // Opus at the bottom of the list.
+  const ordered: ChatModelOption[] = [];
+  const placed = new Set<string>();
+  for (const model of models) {
+    if (survives(model)) {
+      if (!placed.has(model.id)) {
+        placed.add(model.id);
+        ordered.push(model);
+      }
+      continue;
+    }
+    const tier = claudeTier(decomposeModelId(model.id).baseId);
+    if (!tier) continue;
+    const successor = models.find(
+      (candidate) =>
+        !placed.has(candidate.id) &&
+        survives(candidate) &&
+        claudeTier(decomposeModelId(candidate.id).baseId) === tier,
+    );
+    if (successor) {
+      placed.add(successor.id);
+      ordered.push(successor);
+    }
+  }
+  return ordered;
+}
+
 // Authoritative override: hide a runtime when diagnostics report it as
-// uninstalled or disabled by settings. If diagnostics are empty (haven't
-// loaded yet) or there's no entry for the kind, default to showing — let
-// the user pick; a launch failure will surface a clear error if it's
-// genuinely missing.
+// uninstalled. If diagnostics are empty (haven't loaded yet) or there's no
+// entry for the kind, default to showing — let the user pick; a launch
+// failure will surface a clear error if it's genuinely missing.
 function isAvailable(
   diagnostics: AgentRuntimeDiagnostic[],
   kind: "claude" | "codex",
@@ -244,7 +435,7 @@ function isAvailable(
   if (diagnostics.length === 0) return false;
   const entry = diagnostics.find((d) => d.kind === kind);
   if (!entry) return false;
-  return entry.installed === true && entry.disabledBySettings !== true;
+  return entry.installed === true;
 }
 
 function labelFor(

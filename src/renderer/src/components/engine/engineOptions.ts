@@ -26,7 +26,7 @@ function isAvailable(
   if (diagnostics.length === 0) return false;
   const entry = diagnostics.find((d) => d.kind === kind);
   if (!entry) return false;
-  return entry.installed === true && entry.disabledBySettings !== true;
+  return entry.installed === true;
 }
 
 function labelFor(

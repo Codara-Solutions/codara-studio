@@ -1545,10 +1545,6 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   const lines: string[] = [];
   for (const r of runtimes) {
     if (!r.installed) {
-      if (r.disabledBySettings) {
-        lines.push(`- ${r.kind} (${r.label}): DISABLED BY SETTINGS — do not assign work to this runtime.`);
-        continue;
-      }
       lines.push(`- ${r.kind} (${r.label}): NOT INSTALLED — do not assign work to this runtime.`);
       continue;
     }
@@ -1559,13 +1555,20 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
       const def = m.isDefault ? " default" : "";
       return `${m.id} [${efforts}${tier}${def}]`;
     }).join(", ");
-    lines.push(`- ${r.kind} (${r.label})${versionPart} INSTALLED. Models: ${modelList}`);
+    // The sign-in probe is advisory: it cannot see shell-exported credentials
+    // from a Finder-launched app, so "no credential detected" must not forbid
+    // assigning work — only bias the choice when an equivalent peer exists.
+    const authCaveat =
+      r.authenticated === false
+        ? " (WARNING: no credential detected on this machine — it may not be signed in; prefer an equivalent runtime without this warning, but assigning work here is allowed)"
+        : "";
+    lines.push(`- ${r.kind} (${r.label})${versionPart} INSTALLED${authCaveat}. Models: ${modelList}`);
   }
   lines.push("- shell: always available (deterministic command-only tasks).");
   lines.push("- manual: always available (human executes; only when automation is unsafe).");
   lines.push(
     "Tier semantics:",
-    "- claude-fable-5 (Fable 5) is Anthropic's premium, most expensive tier. Choose it only when the user's OWN message explicitly asks for Fable for the work; Codara also enforces the user's Allow Fable 5 setting. If either gate is closed it is downgraded to claude-opus-4-8, so use Opus as the normal tier=top worker model.",
+    "- claude-fable-5 (Fable 5) is Anthropic's premium, most expensive tier. Choose it when the work genuinely warrants the strongest model; Opus remains the normal tier=top worker model for everything else.",
     "- Multi-model runtime (Claude): skeleton → claude-opus-4-8 (tier=top) + highest available effort; feature → tier=mid model + medium effort; leaf → tier=mid (sonnet) at low/minimal effort. Never assign claude-opus-4-8 to a leaf task.",
     "- Codex has a real GPT-5.6 ladder: skeleton/verifier → gpt-5.6-sol at high/max, feature → gpt-5.6-terra at medium, leaf → gpt-5.6-luna at low.",
     "- Never pick a top tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",

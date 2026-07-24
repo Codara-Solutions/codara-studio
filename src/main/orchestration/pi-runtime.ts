@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
-export const CODARA_PI_VERSION = "0.80.10";
+export const CODARA_PI_VERSION = "0.82.0";
 export const CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT =
   "You are Claude Code, Anthropic's official CLI for Claude.";
 

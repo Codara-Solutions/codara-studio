@@ -7,6 +7,7 @@ import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
 
 import { resolveBundledResourcePath } from "../bundled-resources";
 import { sparkHome } from "../spark-home";
+import { managedPiRuntimeNodeModules } from "./pi-runtime-install";
 import { writeFileAtomic } from "../fs-atomic";
 import {
   admissionArtifactSha256,
@@ -117,7 +118,11 @@ export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
         join(process.resourcesPath, "app.asar.unpacked", "node_modules"),
       ]
     : developmentNodeModulesRoots();
-  return resolvePinnedPiRuntime(roots);
+  // The managed root ($CODARA_HOME/pi-runtime) comes last: an app-bundled
+  // build is the one Codara shipped and tested, and Settings' installer only
+  // exists to fill the gap when that build is absent. Both are version-exact,
+  // so ordering only decides which identical build wins.
+  return resolvePinnedPiRuntime([...roots, managedPiRuntimeNodeModules()]);
 }
 
 export async function inspectCodaraPiAuth(

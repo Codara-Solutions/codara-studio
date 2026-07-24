@@ -315,19 +315,14 @@ export default function ChatComposer({
     void Promise.all([
       window.spark.agents.runtimes(),
       window.spark.settings.load(),
-      window.spark.preferences.load(),
     ])
-      .then(([diagnostics, settings, preferences]) => {
+      .then(([diagnostics, settings]) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
         const orModel = (settings.openRouterModel ?? "").trim();
         const groups = buildVisibleGroups({
           diagnostics: diagnostics ?? [],
           openRouterModel: orModel,
-          // Keep Fable out of the default-draft resolution unless opted in;
-          // otherwise the first Claude row (Fable, top of CLAUDE_MODELS) would
-          // become the default chat model.
-          fableEnabled: preferences?.fableEnabled === true,
         });
         const first = groups[0]?.models[0];
         if (!first) return;

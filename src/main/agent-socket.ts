@@ -11,7 +11,7 @@ import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./pr
 import { requestTerminalOp } from "./terminal-bridge";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
-import { loadSettings, loadState, saveState } from "./storage";
+import { loadState, saveState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
 import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
@@ -1625,19 +1625,16 @@ async function handleOrchestratorSpawnWorkers(
     );
     if (latestImplementation?.runtimePreference === onlyRequestedWorker.runtimePreference) {
       const opposite = latestImplementation.runtimePreference === "claude" ? "codex" : "claude";
-      const [{ applyAgentRuntimeSettings, detectAgentRuntimes }, settings] = await Promise.all([
-        import("./agent-runtimes"),
-        loadSettings(),
-      ]);
-      const runtimes = applyAgentRuntimeSettings(
-        await detectAgentRuntimes(),
-        settings,
-      );
+      const { detectAgentRuntimes } = await import("./agent-runtimes");
+      const runtimes = await detectAgentRuntimes();
       // Cross-provider verification is valuable only when that provider is
-      // healthy. If it already failed environmentally in this run (expired
-      // OAuth, launch failure, etc.), keep the manager's requested runtime
-      // instead of deterministically sending another worker into the same
-      // broken subscription—as happened twice in run-mrwp6vfh-wkticw.
+      // healthy: it must be installed and must not have already failed
+      // environmentally in this run (expired OAuth, launch failure, etc.) —
+      // rerouting into a provider that just failed sent workers into the same
+      // broken subscription twice in run-mrwp6vfh-wkticw. The sign-in probe is
+      // deliberately NOT consulted: `authenticated === false` is advisory (the
+      // probe misses env/helper credentials), and an actual sign-out shows up
+      // as an environmental failure on first use anyway.
       const oppositeAvailable =
         runtimes.some((runtime) => runtime.kind === opposite && runtime.installed) &&
         !runtimeHadEnvironmentalFailure(run, opposite);
@@ -1724,14 +1721,6 @@ async function handleOrchestratorSpawnWorkers(
   // find the surviving worker's class for the solo-spawn advisory below).
   const createdTaskClasses: (string | undefined)[] = [];
   const attemptIdsToLaunch: string[] = [];
-  // Fable 5 is the premium tier — a Cora-spawned worker may run it only when
-  // the setting is enabled AND the user explicitly asked for Fable this run.
-  // Otherwise downgrade any fable modelHint the manager emits to Opus 4.8 here
-  // (the spawn chokepoint) and remember the titles so we can surface ONE visible
-  // system note after the loop. Computed once per spawn RPC — the run's
-  // user-authored messages don't change mid-call.
-  const allowFable = runStore.workerFableAllowed(run);
-  const downgradedFableTitles: string[] = [];
   // Create every task BEFORE preparing any: prepareWorkerTask renders the
   // worker prompt and evaluates shouldUsePeerComms against the run snapshot at
   // that instant. If we interleaved create+prepare, the first worker's prompt
@@ -1745,11 +1734,7 @@ async function handleOrchestratorSpawnWorkers(
     const effectiveRuntime = verifierPeerOverride?.runtime ?? w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
     const effectiveModelHint = verifierPeerOverride?.modelHint ??
       (typeof w.modelHint === "string" ? w.modelHint : undefined);
-    const sanitizedModel = runStore.sanitizeWorkerModelHint(
-      effectiveModelHint,
-      { allowFable },
-    );
-    if (sanitizedModel.downgraded) downgradedFableTitles.push(title);
+    const sanitizedModel = runStore.sanitizeWorkerModelHint(effectiveModelHint);
     const updated = await runStore.createWorkerTask({
       runId,
       stepId: synthStepId,
@@ -1757,7 +1742,7 @@ async function handleOrchestratorSpawnWorkers(
       description,
       runtimePreference: effectiveRuntime as
         | "claude" | "codex" | "shell" | "manual",
-      modelHint: sanitizedModel.hint,
+      modelHint: sanitizedModel,
       effortHint: w.effortHint,
       allowedPaths: Array.isArray(w.allowedPaths) ? w.allowedPaths.filter((p): p is string => typeof p === "string") : [],
       forbiddenPaths: Array.isArray(w.forbiddenPaths) ? w.forbiddenPaths.filter((p): p is string => typeof p === "string") : [],
@@ -1798,23 +1783,6 @@ async function handleOrchestratorSpawnWorkers(
       );
     }
   }
-  if (downgradedFableTitles.length > 0) {
-    const list = downgradedFableTitles.map((t) => `"${t}"`).join(", ");
-    const note =
-      `Fable 5 (claude-fable-5) is the premium tier — a worker runs it only when “Allow Fable 5” ` +
-      `is enabled in Settings → Agents and you explicitly ask for Fable in your message. ` +
-      `Downgraded ${downgradedFableTitles.length === 1 ? "worker" : "workers"} ${list} to Opus 4.8 (claude-opus-4-8).`;
-    try {
-      await runStore.addRunMessage({
-        runId,
-        author: "system",
-        kind: "note",
-        message: note,
-      });
-    } catch {
-      /* the note is advisory — never block the spawn on it */
-    }
-  }
   if (attemptIdsToLaunch.length > 0) {
     runStore.scheduleAutopilotCycles(runId, attemptIdsToLaunch);
   }
@@ -1824,11 +1792,6 @@ async function handleOrchestratorSpawnWorkers(
   // runs when fleet/model policy evolves underneath them.
   const notes: string[] = [...guardrailNotes];
   if (verifierPeerOverride) notes.push(verifierPeerOverride.note);
-  if (downgradedFableTitles.length > 0) {
-    notes.push(
-      `Fable 5 (claude-fable-5) is the premium tier; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8 because Codara's two-part gate was not satisfied. Fable workers require BOTH “Allow Fable 5” in Settings and an explicit Fable request in the user's own message.`,
-    );
-  }
   // Solo-spawn advisory. Legitimate solo spawns exist — a lone verifier or
   // leaf, a skeleton before a fan-out (the prompts' own endorsed pattern), a
   // targeted corrective fix after a failed verify — so the note names them as
@@ -2154,14 +2117,25 @@ async function handleOrchestratorRequestNextIteration(
   let nextModel: string | undefined;
   let nextEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined;
   let warning: string | undefined;
+  // Non-blocking caveat attached to an ACCEPTED handoff (vs `warning`, which
+  // marks steering that was rejected and feeds the handoff_rejected event).
+  let advisory: string | undefined;
   if (requestedEngine !== undefined || requestedModel !== undefined || requestedEffort !== undefined) {
     try {
       const { detectAgentRuntimes } = await import("./agent-runtimes");
       const runtimes = await detectAgentRuntimes();
       if (requestedEngine === "claude" || requestedEngine === "codex") {
         const runtime = runtimes.find((r) => r.kind === requestedEngine);
-        if (runtime?.installed && !runtime.disabledBySettings) {
+        if (runtime?.installed) {
           nextEngine = requestedEngine;
+          if (runtime.authenticated === false) {
+            // Advisory, never a refusal: the sign-in probe cannot see
+            // shell-exported credentials from a Finder-launched app, so "no
+            // credential detected" must not veto the handoff.
+            advisory =
+              `nextEngine "${requestedEngine}" may not be signed in on this machine` +
+              `${runtime.authHint ? ` (${runtime.authHint})` : ""} — proceeding anyway.`;
+          }
           if (requestedModel) {
             const known = runtime.models.map((m) => m.id);
             if (known.length === 0 || known.includes(requestedModel)) {
@@ -2171,7 +2145,7 @@ async function handleOrchestratorRequestNextIteration(
             }
           }
         } else {
-          warning = `nextEngine "${requestedEngine}" is not installed/enabled — keeping the current engine.`;
+          warning = `nextEngine "${requestedEngine}" is not installed — keeping the current engine.`;
         }
       } else if (requestedEngine !== undefined) {
         warning = `nextEngine must be "claude" or "codex" — got "${requestedEngine}".`;
@@ -2196,6 +2170,7 @@ async function handleOrchestratorRequestNextIteration(
       nextEngine = undefined;
       nextModel = undefined;
       nextEffort = undefined;
+      advisory = undefined;
     }
   }
 
@@ -2204,7 +2179,8 @@ async function handleOrchestratorRequestNextIteration(
     recordAgentSignal(runId, { continue: !done, prompt, nextEngine, nextModel, nextEffort, nodeId });
     const accepted =
       nextEngine || nextModel || nextEffort ? { nextEngine, nextModel, nextEffort } : undefined;
-    return successResponse(id, { ok: true, continue: !done, accepted, warning });
+    const responseWarning = [warning, advisory].filter(Boolean).join(" ") || undefined;
+    return successResponse(id, { ok: true, continue: !done, accepted, warning: responseWarning });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, (err as Error).message);
   }
@@ -2945,7 +2921,6 @@ function validateGraph(graph: LoomGraph): string | null {
 // create/update path so the architect corrects itself.)
 const CONCRETE_ENGINES = new Set(["claude", "codex"]);
 const WORKER_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
-const CODEX_AUTOMATION_MODELS = new Set(CODEX_MODEL_CATALOG.map((model) => model.id));
 
 /** Reject any worker that fails to pin a concrete engine ∈ {claude, codex}, a
  *  non-blank model, and a valid effort. Returns an instructive error naming the
@@ -2964,9 +2939,21 @@ function validateConcreteWorker(
     return `${label} must set an explicit model (claude: claude-opus-4-8 or claude-sonnet-5; codex: gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) — a CLI-default/blank model is no longer allowed`;
   }
   if (worker.engine === "codex") {
-    const normalized = normalizeCodexModelId(worker.model.trim());
-    if (!CODEX_AUTOMATION_MODELS.has(normalized as (typeof CODEX_MODEL_CATALOG)[number]["id"])) {
-      return `${label} has unknown Codex model '${worker.model}' — choose gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna`;
+    // Lowercase before validating AND persisting: OpenAI model ids are
+    // lowercase, so "GPT-5.6-Sol" would otherwise be stored as-is, match no
+    // picker row in NodeContextPanel, and reach the codex CLI verbatim as an
+    // unusable `-m` value. Loom workers launch the codex CLI directly via
+    // buildLaunchCommandLine (usePiWorkerHarness excludes automation runs), so
+    // there is NO downstream validation on this path — this normalization is
+    // the only gate before the id hits the CLI.
+    const normalized = normalizeCodexModelId(worker.model.trim()).toLowerCase();
+    // Shape check, not an allow-list. This used to reject anything outside the
+    // three curated ids, which meant a model released after this build could
+    // not be used in an automation until someone shipped a catalog edit. A
+    // typo that breaks the gpt-* shape is still caught here while a genuinely
+    // new GPT model goes through.
+    if (!/^gpt-[a-z0-9.\-]+$/.test(normalized)) {
+      return `${label} has an invalid Codex model '${worker.model}' — expected a gpt-* model id such as ${CODEX_MODEL_CATALOG.map((model) => model.id).join(", ")}`;
     }
     // Migrate legacy model ids from a long-lived architect session before the
     // automation is persisted, so the saved loom opens on a real picker row.

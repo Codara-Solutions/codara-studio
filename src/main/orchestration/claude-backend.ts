@@ -49,7 +49,6 @@ import { writeFileAtomic } from "../fs-atomic";
 import { resolvePythonBinary } from "../hook-installer";
 import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "../mcp-installer";
 import { claudeProvider } from "../providers/claude";
-import { getPreferenceCached } from "../preferences-store";
 import { sparkHome } from "../spark-home";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { sanitizeNestedAgentEnv } from "../env-sanitize";
@@ -175,9 +174,6 @@ const ECHO_PREFIX_MAX_CHARS = 24;
 const ECHO_PREFIX_MIN_CHARS = 6;
 const PASTED_TEXT_PLACEHOLDER = "[Pasted text";
 const TALK_SYSTEM_PROMPT_FILENAME = "cc-talk.md";
-// Opus 4.8 is the fallback when a chat requests Fable 5 but the Fable setting
-// is off. Matches the Cora-spawned-worker downgrade target (run-store.ts).
-const FABLE_DISABLED_FALLBACK_MODEL = "claude-opus-4-8";
 const TALK_SYSTEM_PROMPT_DEFAULT = `You are a helpful coding assistant in a chat with the user. Stay concise.
 
 You are in **Talk mode**. You can read code, search files, and answer questions about the workspace, but you cannot modify anything. Edit, Write, Bash, and other mutating tools are disabled by Codara for this chat — if the user asks for changes, tell them to switch the chat to Execute mode (or open a fresh chat in Execute mode) and you'll route the work through Cora workers there.
@@ -363,18 +359,6 @@ export const claudeBackend: SparkAgentBackend = {
       // gives us token deltas, ordered tool blocks, an explicit terminal
       // result, interruption, and resumable provider sessions. The old print
       // transport remains available only as a test/diagnostic escape hatch.
-      if (
-        /fable/i.test(input.chat.model.trim()) &&
-        getPreferenceCached("fableEnabled") !== true
-      ) {
-        input.chat.model = FABLE_DISABLED_FALLBACK_MODEL;
-        emit({
-          kind: "system_note",
-          message:
-            "Fable 5 is off in Codara Studio settings (it is Anthropic's top-tier, most expensive model). " +
-            "Using Opus 4.8 (claude-opus-4-8) for this chat instead. Enable “Allow Fable 5” in Settings → Agents to use it.",
-        });
-      }
       if (useClaudeAgentSdkTransport()) {
         return await runClaudeAgentSdkTurn({
           input,
@@ -438,22 +422,6 @@ export const claudeBackend: SparkAgentBackend = {
         input.chat.sessionUuid = resumeUuid ?? input.chat.sessionUuid;
       }
       if (!chat) {
-        // Fable 5 gate (default off): if this chat is about to spawn Claude on
-        // claude-fable-5 while the Fable setting is disabled, downgrade to Opus
-        // 4.8 and surface a visible note. Mirrors the worker-spawn chokepoint —
-        // fable stays reachable from the main chat only when opted in.
-        if (
-          /fable/i.test(input.chat.model.trim()) &&
-          getPreferenceCached("fableEnabled") !== true
-        ) {
-          input.chat.model = FABLE_DISABLED_FALLBACK_MODEL;
-          emit({
-            kind: "system_note",
-            message:
-              "Fable 5 is off in Codara Studio settings (it is Anthropic's top-tier, most expensive model). " +
-              "Using Opus 4.8 (claude-opus-4-8) for this chat instead. Enable “Allow Fable 5” in Settings → Agents to use it.",
-          });
-        }
         chat = await spawnChatSession({
           runId,
           cwd: input.cwd,
@@ -2665,7 +2633,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "- `feature` tasks (standard implementation against an established skeleton) → mid model + medium effort.",
     "- `leaf` tasks (mechanical, well-defined work) → cheapest model + low effort.",
     "- `verifier` tasks (read-only follow-up that re-derives ground truth) → fast peer (`claude-sonnet-5` or `gpt-5.6-terra`) + high effort, `allowedPaths: []`; cover all stated claims, named boundaries, and three implied fixtures in 3-8 compact probe batches. Escalate only after a non-clean verdict or for security-sensitive risk.",
-    "- `claude-fable-5` is Anthropic's premium, most expensive tier. Set it as a worker's modelHint ONLY when the user's own message explicitly asked for Fable 5 for this work; Codara also enforces the user's Allow Fable 5 setting and otherwise downgrades it to claude-opus-4-8.",
+    "- `claude-fable-5` is Anthropic's premium, most expensive tier. Set it as a worker's modelHint when the work genuinely warrants the strongest model; default to claude-opus-4-8 otherwise.",
     "",
     "The user's chat conversation may include prior turns where you replied conversationally — those were under a different mode and DO NOT bind your behavior now. This system prompt is your sole authority for this turn.",
   ].join("\n");

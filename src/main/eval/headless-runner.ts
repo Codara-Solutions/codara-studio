@@ -29,7 +29,6 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import * as pty from "../pty-manager";
 import { defaultShell } from "../shells";
 import { applyInMemorySettingsOverride, flush as flushStorage } from "../storage";
-import { setPreference } from "../preferences-store";
 import { detectAgentRuntimes } from "../agent-runtimes";
 import { startAutopilot, getRun, cancelRun } from "../orchestration/run-store";
 import { sanitizeWorkspace } from "../workspace-sanitize";
@@ -446,13 +445,6 @@ function installWorkerSpawnHandler(_planPath: string): () => void {
 // disk; affects only the running process. Returns nothing — the caches are
 // shared module state already inspected by orchestration call paths.
 async function applyVariantConfig(config: VariantConfig, configPath: string): Promise<void> {
-  // A headless variant explicitly pinning Fable is the operator's consent for
-  // that isolated evaluation. Persist the opt-in only inside this process's
-  // SPARK_HOME_DIR; ordinary desktop preferences are never read or changed.
-  if (/fable/i.test(config.manager?.model ?? "")) {
-    await setPreference("fableEnabled", true);
-    emitEvent("eval.fable_enabled_by_variant", { model: config.manager?.model });
-  }
   // Manager model overrides remain on the AppSettings struct.
   const settingsOverride: Record<string, unknown> = {};
   if (

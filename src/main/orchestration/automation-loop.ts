@@ -759,7 +759,7 @@ async function resolveWorker(
   const runtimes = await detectAgentRuntimes();
   const installed = new Set(
     runtimes
-      .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed && !r.disabledBySettings)
+      .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed)
       .map((r) => r.kind as LoomEngine),
   );
 

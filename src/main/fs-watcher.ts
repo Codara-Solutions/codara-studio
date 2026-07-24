@@ -1,4 +1,4 @@
-import { watch, readdirSync, promises as fsp, FSWatcher } from "node:fs";
+import { watch, existsSync, readdirSync, promises as fsp, FSWatcher } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import type { WebContents } from "electron";
@@ -65,6 +65,9 @@ interface State {
 }
 
 const byContents = new Map<number, State>();
+/** Workspace roots already reported as missing, so N windows re-registering the
+ * same stale workspace produce one line rather than N. */
+const missingRootsReported = new Set<string>();
 
 // Resolve a watcher event into the absolute directory whose contents changed
 // and stage it for the next debounced flush. `base` is the absolute path of
@@ -185,6 +188,23 @@ export async function setWatchRoot(
     byContents.delete(id);
   }
   if (!root) return;
+
+  // A workspace whose folder has been moved or deleted is a normal, expected
+  // state — the workspace list outlives the directory. fs.watch would throw
+  // ENOENT here, and because every window re-runs this on boot, one stale
+  // workspace produced several multi-line stack traces in the dev console on
+  // every start. Report it once per path, in one line, and skip: there is
+  // nothing to watch, and it is not an error worth a stack.
+  if (!existsSync(root)) {
+    if (!missingRootsReported.has(root)) {
+      missingRootsReported.add(root);
+      console.warn(`[fs-watcher] skipping missing workspace ${root}`);
+    }
+    return;
+  }
+  // The path exists again (workspace restored / remounted) — allow a future
+  // disappearance to be reported afresh.
+  missingRootsReported.delete(root);
 
   const state: State = {
     root,

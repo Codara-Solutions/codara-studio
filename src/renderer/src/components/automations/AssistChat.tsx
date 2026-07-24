@@ -284,10 +284,7 @@ export default function AssistChat({
   const cliReady =
     runtimes.length === 0 ||
     runtimes.some(
-      (r) =>
-        (r.kind === "claude" || r.kind === "codex") &&
-        r.installed === true &&
-        r.disabledBySettings !== true,
+      (r) => (r.kind === "claude" || r.kind === "codex") && r.installed === true,
     );
 
   const loading = assistRuns === null;

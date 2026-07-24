@@ -187,21 +187,13 @@ import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree 
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
 import { defaultShell } from "../shells";
-import { getPreferenceCached } from "../preferences-store";
 import {
   sanitizeWorkerModelHint,
-  runUserRequestedFable,
-  SPARK_WORKER_FABLE_FALLBACK,
+  WORKER_DEFAULT_CLAUDE_MODEL,
 } from "./worker-model-hint";
 import * as pty from "../pty-manager";
-import {
-  formatStuckReason,
-  installStuckWatchdog,
-  STUCK_REASON_PREFIX,
-  type StuckWatchdog,
-} from "./worker-watchdog";
 import { runStructuredWorker } from "./structured-worker";
-import { applyAgentRuntimeSettings, detectAgentRuntimes } from "../agent-runtimes";
+import { detectAgentRuntimes } from "../agent-runtimes";
 import { renderAgentSyncManagerContext } from "../agent-sync";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
@@ -389,12 +381,8 @@ interface RuntimeReroute {
   reason: string;
 }
 
-async function detectConfiguredAgentRuntimes(
-  settings?: AppSettings,
-): Promise<AgentRuntimeDiagnostic[]> {
-  const liveSettings = settings ?? await loadSettings();
-  const runtimes = await detectAgentRuntimes().catch(() => []);
-  return applyAgentRuntimeSettings(runtimes, liveSettings);
+async function detectConfiguredAgentRuntimes(): Promise<AgentRuntimeDiagnostic[]> {
+  return detectAgentRuntimes().catch(() => []);
 }
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
@@ -1263,7 +1251,7 @@ async function launchDirectNodeTasks(
     const runtimes = await detectAgentRuntimes();
     const installed = new Set(
       runtimes
-        .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed && !r.disabledBySettings)
+        .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed)
         .map((r) => r.kind),
     );
     resolveAuto = (engine) =>
@@ -3195,12 +3183,6 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     return;
   }
 
-  const retry = await maybeAutoRetryStuckAttempt(launched, attemptId);
-  if (retry) {
-    scheduleAutopilotCycles(runId, [retry.attemptId]);
-    return;
-  }
-
   const latest = await requireRun(launched.id);
   if (
     latest.status === "paused" ||
@@ -3317,79 +3299,6 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
       scheduleAutopilotReview(runId, cwd);
     }
   }
-}
-
-// Auto-restart-from-disk for stuck workers. When the watchdog fails an attempt
-// with the STUCK_REASON_PREFIX, skip the manager replan: the workspace state
-// the worker was editing is still on disk, so we just prepare + launch a fresh
-// attempt for the same task. Capped by workerStuckMaxAutoRetries so a truly
-// broken model can't loop forever.
-async function maybeAutoRetryStuckAttempt(
-  run: RunState,
-  attemptId: string,
-): Promise<{ attemptId: string } | null> {
-  const failed = run.workerAttempts.find((a) => a.id === attemptId);
-  if (!failed || failed.status !== "failed") return null;
-  if (!failed.error?.startsWith(STUCK_REASON_PREFIX)) return null;
-
-  const settings = await loadSettings();
-  const max = settings.workerStuckMaxAutoRetries;
-  if (max <= 0) return null;
-
-  const task = run.workerTasks.find((t) => t.id === failed.workerTaskId);
-  if (!task) return null;
-  // reviewWorkerReportArtifact may already have converted this environmental
-  // failure into an opposite-runtime fallback and cancelled the original
-  // task. Do not also revive the cancelled task: that creates two retry
-  // lineages, strands one queued, and blocks codara_complete forever.
-  if (task.status === "cancelled") return null;
-  const stuckCount = run.workerAttempts.filter(
-    (a) => a.workerTaskId === task.id && a.error?.startsWith(STUCK_REASON_PREFIX),
-  ).length;
-  if (stuckCount > max) return null;
-
-  await appendEvent({
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    stepId: task.stepId,
-    workerTaskId: task.id,
-    attemptId,
-    type: "worker_attempt.auto_retry_stuck",
-    message: `Auto-retrying stuck worker (attempt ${stuckCount} of ${max})`,
-    payload: {
-      runtime: task.runtimePreference,
-      stuckAttemptId: attemptId,
-      stuckCount,
-      maxRetries: max,
-    },
-  });
-
-  await commitRunChange(run, {
-    type: "worker_attempt.auto_retry_reset",
-    message: `Resetting task + step state for stuck-retry: ${task.title}`,
-    payload: { workerTaskId: task.id, stepId: task.stepId },
-    mutate: (draft, timestamp) => {
-      const t = draft.workerTasks.find((x) => x.id === task.id);
-      if (t) {
-        t.status = "queued";
-        t.updatedAt = timestamp;
-      }
-      const s = task.stepId ? draft.steps.find((x) => x.id === task.stepId) : undefined;
-      if (s && s.status === "failed") {
-        s.status = "ready";
-        s.updatedAt = timestamp;
-      }
-      draft.updatedAt = timestamp;
-    },
-  });
-
-  const envelope = await prepareWorkerTask({
-    runId: run.id,
-    workerTaskId: task.id,
-    cwd: failed.cwd,
-    unattended: true,
-  });
-  return { attemptId: envelope.attemptId };
 }
 
 export function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
@@ -4140,7 +4049,7 @@ async function askOpenRouterManager(
   const frozenRun = structuredClone(run);
   const managerMode = normalizeOpenRouterManagerMode(mode);
   const workerReports = await collectWorkerReportContext(frozenRun, managerMode);
-  const availableRuntimes = await detectConfiguredAgentRuntimes(settings);
+  const availableRuntimes = await detectConfiguredAgentRuntimes();
   const agentSyncContext = renderAgentSyncManagerContext({ cwd, settings });
   const requestBody = buildOpenRouterManagerRequest({
     run: frozenRun,
@@ -4200,7 +4109,6 @@ async function askOpenRouterManager(
     openRouterModel: config.model,
     openRouterBaseUrl: config.baseUrl,
     openRouterStructuredOutputFallbackModel: config.structuredOutputFallbackModel,
-    agentRuntimeSelection: settings.agentRuntimeSelection,
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled,
   };
@@ -4768,22 +4676,11 @@ function isTopTierModel(hint: string | undefined): boolean {
   return TOP_TIER_MODEL_BASES.has(normalizeModelHint(hint));
 }
 
-// sanitizeWorkerModelHint (the fable downgrade + superseded-Sonnet remap) lives
-// in worker-model-hint.ts so it can be unit-tested without run-store's deps.
-// Re-exported here because callers (e.g. agent-socket) reach it through the
-// run-store namespace.
+// sanitizeWorkerModelHint (the superseded-Sonnet remap + Codex id
+// normalization) lives in worker-model-hint.ts so it can be unit-tested
+// without run-store's deps. Re-exported here because callers (e.g.
+// agent-socket) reach it through the run-store namespace.
 export { sanitizeWorkerModelHint } from "./worker-model-hint";
-
-// A Cora-spawned worker may run Fable 5 only when BOTH gates are open: the user
-// enabled the premium model in Settings and explicitly named Fable in their OWN
-// message this run. The manager LLM cannot self-authorize the most expensive
-// tier, and leaving the setting off is an unconditional veto. Callers pass this
-// combined result as
-// `sanitizeWorkerModelHint(hint, { allowFable })` so a fable hint passes through
-// unchanged; otherwise it is downgraded to Opus 4.8 with a visible note.
-export function workerFableAllowed(run: RunState): boolean {
-  return getPreferenceCached("fableEnabled") === true && runUserRequestedFable(run);
-}
 
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
   // Skeleton/verifier are exempt from the floor by design; leaf is mechanical
@@ -5644,22 +5541,9 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   // The "main AI" judge runs on the model + effort the user picked in the
   // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
   // from each candidate. Fall back to a top-tier default only if the run didn't
-  // record a selection. The judge is a Cora-spawned WORKER, so a fable pick is
-  // downgraded to Opus 4.8 UNLESS the setting is enabled and the user explicitly
-  // asked for Fable this run (workerFableAllowed). Sanitize the hint and surface any
-  // downgrade so it isn't a silent swap by the launch-command backstop.
-  const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime], {
-    allowFable: workerFableAllowed(run),
-  });
-  if (judgeModel.downgraded) {
-    updated = await addRunMessage({
-      runId: updated.id,
-      author: "spark",
-      kind: "note",
-      message:
-        "Fable is the premium tier and its Settings + explicit-request gate was not satisfied, so the plan-council synthesis judge runs on Opus 4.8 instead.",
-    });
-  }
+  // record a selection. Sanitize the hint so a stale superseded-Sonnet or
+  // legacy Codex id from an old run is remapped to the current catalog.
+  const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime]);
 
   updated = await createWorkerTask({
     runId: updated.id,
@@ -5667,7 +5551,7 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
     title: "Synthesize best-of-all plan",
     description: synthPrompt,
     runtimePreference: runtime,
-    modelHint: judgeModel.hint,
+    modelHint: judgeModel,
     effortHint: run.chatEffort ?? "high",
     allowedPaths: [`${councilPlanDir(run.id)}/`],
     forbiddenPaths: [],
@@ -6341,19 +6225,9 @@ function buildStandingTerminalCommand(
     effectiveEffort = effort as SpawnOpts["effort"];
   }
 
-  // Fable 5 gate (default off): a Cora-opened standing terminal must not launch
-  // on claude-fable-5 unless the user opted in via the Fable setting. Downgrade
-  // to Opus 4.8 when the pref is off, matching the worker/main-chat chokepoints.
   let effectiveModel = model?.trim() || undefined;
   if (runtime === "codex" && effectiveModel) {
     effectiveModel = normalizeCodexModelId(effectiveModel);
-  }
-  if (
-    effectiveModel &&
-    /fable/i.test(effectiveModel) &&
-    getPreferenceCached("fableEnabled") !== true
-  ) {
-    effectiveModel = SPARK_WORKER_FABLE_FALLBACK;
   }
 
   const provider = getProvider(runtime);
@@ -9863,21 +9737,17 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (task.runtimePreference === "codex") {
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
   }
-  // Automation (loom) workers are allowed fable ONLY when the user opted in
-  // via the Fable setting (default off); the fable backstop in
-  // buildLaunchCommandLine only fires for Cora-spawned workers. A direct run
-  // bound to an automationId is the automation worker path. With the pref off
-  // we leave isAutomationLaunch false so the backstop downgrades any fable hint
-  // to Opus 4.8, matching the Cora-spawned-worker chokepoint.
+  // A direct run bound to an automationId is the automation (loom) worker
+  // path: it launches on a pinned/handoff model the automation engine already
+  // validated, so buildLaunchCommandLine passes its hint verbatim instead of
+  // running the Cora-worker sanitize backstop.
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
-  const isAutomationLaunch =
-    getPreferenceCached("fableEnabled") === true && isAutomationRun;
   const usePiWorkerHarness =
     process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
     !isAutomationRun &&
     (task.runtimePreference === "claude" || task.runtimePreference === "codex");
   const piWorkerModel = usePiWorkerHarness
-    ? piModelForWorker(task, workerFableAllowed(run))
+    ? piModelForWorker(task)
     : undefined;
   // Dirs a sandboxed codex worker must be able to WRITE despite them living
   // outside the workspace: the attempt dir (holds final-report.json + logs) and,
@@ -9889,10 +9759,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ];
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
-    isAutomation: isAutomationLaunch,
-    // Cora-spawned workers require both the setting and an explicit user request
-    // (workerFableAllowed). Automation launches use their existing setting gate.
-    allowFable: isAutomationRun ? isAutomationLaunch : workerFableAllowed(run),
+    isAutomation: isAutomationRun,
     extraWritableDirs,
   });
   const command = usePiWorkerHarness
@@ -11878,7 +11745,7 @@ async function maybeQueueVerifierFeedbackRetry({
   if (retriesUsed >= MAX_WORKER_ATTEMPTS) return null;
   // "Fast" means at most one corrective rework in code, not just in prose.
   // Count FEEDBACK-driven requeues specifically — countWorkerAttempts also
-  // includes watchdog/stuck retries, which are not verification rework. The
+  // includes non-verification retries (e.g. environmental relaunches). The
   // policy is only honored by the Pi backend (other backends persist but
   // ignore it), so the cap keys off chatBackend to avoid changing OpenRouter
   // and CC/Codex behavior via the fast default.
@@ -14317,23 +14184,23 @@ function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
   return "high";
 }
 
-function piModelForWorker(task: WorkerTask, allowFable: boolean): string | undefined {
+function piModelForWorker(task: WorkerTask): string | undefined {
   const model = task.modelHint?.trim();
   // Never let Pi choose Anthropic's subscription default implicitly. That
-  // default can be Fable 5, which would bypass Codara's visible premium-model
-  // setting whenever a planner omitted modelHint. Opus 4.8 is the documented
-  // worker fallback; an allowed, explicit Fable hint still passes below.
+  // default can be Fable 5, the premium tier, which a planner that omitted
+  // modelHint never chose on purpose. Opus 4.8 is the documented worker
+  // fallback; an explicit Fable hint still passes below.
   if (!model) {
     return task.runtimePreference === "claude"
-      ? SPARK_WORKER_FABLE_FALLBACK
+      ? WORKER_DEFAULT_CLAUDE_MODEL
       : undefined;
   }
   if (task.runtimePreference === "claude" && model.startsWith("claude-")) {
-    return sanitizeWorkerModelHint(model, { allowFable }).hint ?? SPARK_WORKER_FABLE_FALLBACK;
+    return sanitizeWorkerModelHint(model) ?? WORKER_DEFAULT_CLAUDE_MODEL;
   }
   if (task.runtimePreference === "codex" && model.startsWith("gpt-")) return model;
   return task.runtimePreference === "claude"
-    ? SPARK_WORKER_FABLE_FALLBACK
+    ? WORKER_DEFAULT_CLAUDE_MODEL
     : undefined;
 }
 
@@ -14597,7 +14464,7 @@ async function runPiWorkerSession({
   await pty.waitForResize(attemptId, 5_000);
 
   const provider = piProviderForWorker(task);
-  const model = piModelForWorker(task, workerFableAllowed(run));
+  const model = piModelForWorker(task);
   const thinking = piThinkingForWorker(task);
   const modelLabel = model ?? (provider === "anthropic" ? "Claude subscription default" : "Codex subscription default");
   pty.publishOutput(
@@ -14820,10 +14687,7 @@ async function runWorkerSession({
   const rawStream = createWriteStream(paths.rawLog, { flags: "a" });
   let fatalErrorTimer: NodeJS.Timeout | undefined;
   let fatalErrorBuffer = "";
-  let stuckWatchdog: StuckWatchdog | null = null;
-  let sessionSettled = false;
   const offRawTap = pty.tap(attemptId, (chunk) => {
-    stuckWatchdog?.bumpPtyActivity();
     try {
       rawStream.write(chunk);
     } catch {
@@ -14910,7 +14774,6 @@ async function runWorkerSession({
     const finish = (value: { exitCode: number; error?: string }) => {
       if (settled) return;
       settled = true;
-      sessionSettled = true;
       // Tear down the worker tree BEFORE resolving so callers awaiting
       // exitPromise observe a fully cleaned-up worker. killImmediate is a
       // no-op if the pty already exited via offExit, so success paths cost
@@ -14922,7 +14785,6 @@ async function runWorkerSession({
       clearInterval(reportPoll);
       clearTimeout(hardTimeout);
       if (fatalErrorTimer) clearTimeout(fatalErrorTimer);
-      stuckWatchdog?.stop();
       resolve(value);
     };
     const offExit = pty.onExit(attemptId, (info) => {
@@ -15012,45 +14874,6 @@ async function runWorkerSession({
       finish({ exitCode: 1, error: reason });
     };
   });
-
-  void (async () => {
-    const settings = await loadSettings();
-    if (!settings.workerStuckDetectEnabled) return;
-    stuckWatchdog = installStuckWatchdog({
-      task,
-      cwd,
-      launchTimestampMs: Date.now(),
-      idleThresholdMs: settings.workerStuckIdleSeconds * 1000,
-      onStuck: (info) => {
-        const reason = formatStuckReason(info);
-        void (async () => {
-          await recordWorkerOutput(run, task, attemptId, paths, "stderr", `\n[spark] ${reason}\n`);
-          await writeAutoFailureReport(paths, task, reason);
-          await appendEvent({
-            workspaceId: run.workspaceId,
-            runId: run.id,
-            stepId: task.stepId,
-            workerTaskId: task.id,
-            attemptId,
-            type: "worker_attempt.stuck",
-            message: `Worker stuck — auto-killed: ${reason}`,
-            payload: {
-              runtime: task.runtimePreference,
-              ptyIdleMs: info.ptyIdleMs,
-              sessionLogIdleMs: info.sessionLogIdleMs,
-              workspaceIdleMs: info.workspaceIdleMs,
-              sessionLogPath: info.sessionLogPath,
-            },
-          }).catch(() => undefined);
-          failFast(reason);
-        })();
-      },
-    });
-    if (sessionSettled) {
-      stuckWatchdog.stop();
-      stuckWatchdog = null;
-    }
-  })();
 
   // Stagger launch + prompt the same way the TEST CLAUDE button does:
   //  1. wait 1.5s for pwsh to render its prompt,
@@ -15171,7 +14994,7 @@ async function recordWorkerOutput(
 function buildLaunchCommandLine(
   task: WorkerTask,
   cwd: string,
-  opts?: { sandboxDir?: string; isAutomation?: boolean; allowFable?: boolean; extraWritableDirs?: string[] },
+  opts?: { sandboxDir?: string; isAutomation?: boolean; extraWritableDirs?: string[] },
 ): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
   // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
@@ -15190,24 +15013,20 @@ function buildLaunchCommandLine(
     // Per-worker tool access is appended LAST (below), after model/effort, so the
     // variadic --disallowedTools <tools...> can't swallow a following flag.
     const disallowed = claudeDisallowedTools(task.accessHint, task.blockedToolsHint);
-    // Model-hint backstop: downgrades fable to Opus 4.8 and remaps superseded
-    // Sonnet ids to the current one. Automation (loom) workers are ALLOWED
-    // fable and get their hint verbatim, so skip the sanitize for
-    // automation-originated launches; for every other claude worker (the
-    // Cora-spawned execute/council/autopilot path) this is defence-in-depth —
-    // the visible fable note is emitted earlier at the spawn chokepoint
-    // (agent-socket), and tasks persisted by pre-remap builds still get their
-    // stale sonnet hint fixed here at launch. `allowFable` (the caller's
-    // opted-in + explicitly-requested gate) lets a fable hint pass the backstop
-    // unchanged, matching the decision made at the spawn chokepoint.
+    // Model-hint backstop: remaps superseded Sonnet ids to the current one.
+    // Automation (loom) workers launch on a pinned/handoff model the
+    // automation engine already validated, so their hint goes through
+    // verbatim; for every other claude worker (the Cora-spawned execute/
+    // council/autopilot path) this is defence-in-depth — tasks persisted by
+    // pre-remap builds still get their stale sonnet hint fixed here at launch.
     const rawModel = task.modelHint?.trim();
     const launchModel = opts?.isAutomation
       ? rawModel
-      : sanitizeWorkerModelHint(rawModel, { allowFable: opts?.allowFable }).hint;
+      : sanitizeWorkerModelHint(rawModel);
     // A missing hint must not delegate model choice to Claude's current CLI
-    // default: that default may be Fable 5 and would bypass the off-by-default
-    // premium-model gate. Pin the documented worker fallback instead.
-    args.push("--model", quoteShellArg(launchModel || SPARK_WORKER_FABLE_FALLBACK));
+    // default: that default may be Fable 5, the premium tier, which nobody
+    // chose on purpose here. Pin the documented worker fallback instead.
+    args.push("--model", quoteShellArg(launchModel || WORKER_DEFAULT_CLAUDE_MODEL));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
     // Tool fence LAST: --dangerously-skip-permissions suppresses the prompts, but

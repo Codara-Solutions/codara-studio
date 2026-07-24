@@ -247,10 +247,6 @@ function normalize(
     copyBranchSetupCommandByRepo: normalizeCopyBranchSetupCommands(
       src.copyBranchSetupCommandByRepo,
     ),
-    fableEnabled:
-      typeof src.fableEnabled === "boolean"
-        ? src.fableEnabled
-        : DEFAULT_PREFERENCES.fableEnabled,
     restoreAgentSessions:
       typeof src.restoreAgentSessions === "boolean"
         ? src.restoreAgentSessions

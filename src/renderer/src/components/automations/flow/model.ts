@@ -360,20 +360,30 @@ export function validateNode(
     return null;
   }
   // worker
-  const installed = installedEngines(ctx.runtimes);
-  if (installed.size === 0) return "Install Claude Code or Codex to run looms.";
-  if (!installed.has(draft.worker.engine)) {
-    return `${draft.worker.engine === "claude" ? "Claude Code" : "Codex"} is not installed/enabled.`;
+  //
+  // Only a missing binary blocks. `authenticated === false` is advisory (the
+  // probe cannot see shell-exported credentials from a Finder-launched app),
+  // so a possibly-signed-out engine still validates — the sign-in doubt is
+  // surfaced as a warning badge in NodeContextPanel instead.
+  const usable = installedEngines(ctx.runtimes);
+  if (usable.size === 0) {
+    return "Install Claude Code or Codex to run looms.";
+  }
+  if (!usable.has(draft.worker.engine)) {
+    const label = draft.worker.engine === "claude" ? "Claude Code" : "Codex";
+    return `${label} is not installed.`;
   }
   return null;
 }
 
+// Engines a loom can actually run on: exactly the ones whose CLI binary is
+// present. Sign-in state is deliberately NOT consulted — `authenticated` is an
+// advisory signal (the probe can miss env/helper credentials), and treating it
+// as a gate wrongly bricked looms for users with a working CLI.
 export function installedEngines(runtimes: AgentRuntimeDiagnostic[]): Set<LoomEngine> {
   return new Set(
     runtimes
-      .filter(
-        (r) => (r.kind === "claude" || r.kind === "codex") && r.installed && !r.disabledBySettings,
-      )
+      .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed)
       .map((r) => r.kind as LoomEngine),
   );
 }

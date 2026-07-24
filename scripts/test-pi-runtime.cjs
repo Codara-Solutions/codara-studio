@@ -36,7 +36,7 @@ const runtime = loadTypeScriptModule(
 );
 
 async function main() {
-  assert.equal(runtime.CODARA_PI_VERSION, "0.80.10");
+  assert.equal(runtime.CODARA_PI_VERSION, "0.82.0");
   assert.equal(
     runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT,
     "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -44,7 +44,7 @@ async function main() {
   const installedRuntime = await runtime.resolvePinnedPiRuntime([
     path.join(__dirname, "..", "node_modules"),
   ]);
-  assert.equal(installedRuntime.version, "0.80.10");
+  assert.equal(installedRuntime.version, "0.82.0");
   assert.equal(path.basename(installedRuntime.entrypoint), "cli.js");
 
   await withTempDirectory(async (directory) => {
@@ -57,12 +57,12 @@ async function main() {
     fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
     fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
       name: "@earendil-works/pi-coding-agent",
-      version: "0.80.10",
+      version: "0.82.0",
       bin: { pi: "dist/cli.js" },
     }));
     fs.writeFileSync(path.join(packageRoot, "dist", "cli.js"), "// fixture\n");
     const located = await runtime.resolvePinnedPiRuntime([path.join(directory, "node_modules")]);
-    assert.equal(located.version, "0.80.10");
+    assert.equal(located.version, "0.82.0");
     assert.equal(located.entrypoint, path.join(packageRoot, "dist", "cli.js"));
 
     fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
@@ -130,7 +130,7 @@ async function main() {
     packageRoot: "/runtime/pi",
     packageJsonPath: "/runtime/pi/package.json",
     entrypoint: "/runtime/pi/dist/cli.js",
-    version: "0.80.10",
+    version: "0.82.0",
   };
   const anthropicPlan = runtime.buildPiManagerLaunchPlan({
     runtime: fakeRuntime,

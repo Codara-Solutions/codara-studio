@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentRuntimeDiagnostic, ChatBackendKind } from "@shared/types";
-import { usePreferences } from "../../../preferences/usePreferences";
+import type { AgentRuntimeDiagnostic, ChatBackendKind, PiCatalogModel } from "@shared/types";
 import {
   buildVisibleGroups,
   composeModelId,
@@ -30,17 +29,21 @@ export default function ModelPicker({
   const [open, setOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[]>([]);
   const [openRouterModel, setOpenRouterModel] = useState<string>("");
-  const { preferences } = usePreferences();
+  const [piCatalog, setPiCatalog] = useState<PiCatalogModel[]>([]);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // One-shot load of runtimes + the configured OpenRouter model. Settings
   // can change while the user is in the bar (they hit Settings, change the
-  // OR model, come back), so we refresh on every open.
+  // OR model, come back), so we refresh on every open. Pi's live model
+  // catalog rides along on the same cadence — the main process caches it, so
+  // reopening the menu is cheap, and a newly released model shows up on the
+  // next open rather than requiring a restart.
   useEffect(() => {
     void window.spark.agents.runtimes().then((rs) => setDiagnostics(rs ?? []));
     void window.spark.settings
       .load()
       .then((s) => setOpenRouterModel((s.openRouterModel ?? "").trim()));
+    void window.spark.piSubscriptions.catalog().then((models) => setPiCatalog(models ?? []));
   }, []);
   useEffect(() => {
     if (!open) return;
@@ -48,6 +51,7 @@ export default function ModelPicker({
     void window.spark.settings
       .load()
       .then((s) => setOpenRouterModel((s.openRouterModel ?? "").trim()));
+    void window.spark.piSubscriptions.catalog().then((models) => setPiCatalog(models ?? []));
   }, [open]);
 
   // Click-outside / Escape to close.
@@ -72,7 +76,7 @@ export default function ModelPicker({
   const groups: ChatBackendGroup[] = buildVisibleGroups({
     diagnostics,
     openRouterModel,
-    fableEnabled: preferences.fableEnabled === true,
+    piCatalog,
   });
   const activeCompoundId = composeModelId(activeModelId, activeOneMillion);
   // Claude/Codex labels come from the static catalog immediately. Waiting for

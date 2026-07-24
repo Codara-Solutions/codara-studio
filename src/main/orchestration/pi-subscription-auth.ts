@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { shell, type WebContents } from "electron";
 import type {
+  PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
   PiSubscriptionConnection,
   PiSubscriptionOverview,
@@ -12,7 +13,8 @@ import type {
 } from "@shared/types";
 
 import { codaraPiPaths, resolveCodaraPiRuntime } from "./pi-runtime-electron";
-import { inspectPiSubscriptionAuth } from "./pi-runtime";
+import { CODARA_PI_VERSION, inspectPiSubscriptionAuth } from "./pi-runtime";
+import { installPinnedPiRuntime, isPinnedPiRuntimeInstalling } from "./pi-runtime-install";
 
 interface OAuthCredential {
   type: "oauth";
@@ -48,6 +50,10 @@ interface OAuthAuth {
     prompt(prompt: OAuthInteractionPrompt): Promise<string>;
     notify(event: OAuthInteractionEvent): void;
   }): Promise<OAuthCredential>;
+  /** Exchange the refresh token for a fresh credential. Network call; throws on
+   * failure. Pi's own runtime calls this under the auth-store lock, and so must
+   * we — see refreshPiSubscriptionCredential. */
+  refresh?(credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredential>;
 }
 
 interface AuthStorageInstance {
@@ -90,6 +96,14 @@ const PROVIDER_META: Record<
 };
 
 const activeFlows = new Map<string, ActiveFlow>();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
 
 function providerFrom(value: unknown): PiSubscriptionProvider {
   if (value === "anthropic" || value === "openai-codex") return value;
@@ -213,8 +227,40 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     runtimeInstalled: runtimeResult.installed,
     runtimeVersion: runtimeResult.version,
     ...(runtimeResult.error ? { runtimeError: runtimeResult.error } : {}),
+    runtimeExpectedVersion: CODARA_PI_VERSION,
+    ...(isPinnedPiRuntimeInstalling() ? { runtimeInstalling: true } : {}),
     connections,
   };
+}
+
+/**
+ * Install the pinned Pi runtime for a Settings window, streaming npm's
+ * progress back to that window and finishing with a fresh overview so the
+ * subscription rows re-enable without a manual refresh.
+ */
+export async function installPiRuntimeForWindow(owner: WebContents): Promise<PiSubscriptionOverview> {
+  const emit = (event: PiRuntimeInstallEvent): void => {
+    if (!owner.isDestroyed()) owner.send("pi-runtime:install-event", event);
+  };
+  emit({ type: "started", message: `Installing Pi ${CODARA_PI_VERSION}…` });
+  try {
+    const version = await installPinnedPiRuntime(({ message }) => {
+      emit({ type: "progress", message });
+    });
+    const overview = await inspectPiSubscriptions();
+    emit({
+      type: "completed",
+      message: `Pi ${version} is installed. Connect a subscription to finish setting up Cora.`,
+      overview,
+    });
+    return overview;
+  } catch (error) {
+    // Registry URLs and local paths are fine to show; the redaction pass is
+    // shared with auth so a token echoed by a proxy error never reaches the UI.
+    const message = safeAuthError(error);
+    emit({ type: "failed", message });
+    throw new Error(message);
+  }
 }
 
 function settlePendingPrompt(flow: ActiveFlow, error: Error): void {
@@ -232,6 +278,12 @@ async function persistCredential(provider: PiSubscriptionProvider, credential: O
   const storage = AuthStorage.create(paths.authFile);
   await storage.modify(provider, async () => credential);
   if (process.platform !== "win32") await chmod(paths.authFile, 0o600);
+  // A newly connected subscription must not read its limits — or its model
+  // catalog — through a cache populated while it was still disconnected.
+  const { invalidatePiSubscriptionUsageCache } = await import("./pi-subscription-usage");
+  invalidatePiSubscriptionUsageCache();
+  const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
+  invalidatePiModelCatalogCache();
 }
 
 async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
@@ -397,11 +449,55 @@ export function cancelPiSubscriptionLogin(rawRequestId: unknown, owner: WebConte
   settlePendingPrompt(flow, new Error("Login cancelled"));
 }
 
+/**
+ * Exchange a provider's refresh token for a fresh access token and persist it,
+ * returning the new access token (or null when the credential cannot be
+ * refreshed). Used by the usage-limits check, whose vendor endpoints reject an
+ * expired bearer token.
+ *
+ * The refresh runs INSIDE Pi's `AuthStorage.modify` lock, which is not an
+ * optimization but a correctness requirement: these providers rotate refresh
+ * tokens, so a refresh racing a live Pi session's own refresh would write back
+ * a superseded token and silently sign the user out. Under the lock we also
+ * re-check expiry, because the session that beat us here may have already
+ * produced a perfectly good token.
+ */
+export async function refreshPiSubscriptionCredential(
+  rawProvider: unknown,
+): Promise<string | null> {
+  const provider = providerFrom(rawProvider);
+  const oauth = await loadOAuth(provider);
+  if (typeof oauth.refresh !== "function") return null;
+  const paths = codaraPiPaths();
+  const AuthStorage = await loadAuthStorage();
+  const storage = AuthStorage.create(paths.authFile);
+  let access: string | null = null;
+  await storage.modify(provider, async (current) => {
+    if (!isRecord(current) || current.type !== "oauth") return undefined;
+    const credential = current as unknown as OAuthCredential;
+    // A minute of headroom: a token expiring as we speak is not worth a request.
+    if (typeof credential.expires === "number" && credential.expires > Date.now() + 60_000) {
+      access = nonEmptyString(credential.access) ? credential.access : null;
+      return undefined;
+    }
+    if (!nonEmptyString(credential.refresh)) return undefined;
+    const next = await oauth.refresh!(credential);
+    access = nonEmptyString(next.access) ? next.access : null;
+    return next;
+  });
+  if (process.platform !== "win32") await chmod(paths.authFile, 0o600).catch(() => undefined);
+  return access;
+}
+
 export async function disconnectPiSubscription(rawProvider: unknown): Promise<PiSubscriptionOverview> {
   const provider = providerFrom(rawProvider);
   const paths = codaraPiPaths();
   const AuthStorage = await loadAuthStorage();
   await AuthStorage.create(paths.authFile).delete(provider);
   if (process.platform !== "win32") await chmod(paths.authFile, 0o600).catch(() => undefined);
+  const { invalidatePiSubscriptionUsageCache } = await import("./pi-subscription-usage");
+  invalidatePiSubscriptionUsageCache();
+  const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
+  invalidatePiModelCatalogCache();
   return inspectPiSubscriptions();
 }

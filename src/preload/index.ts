@@ -65,8 +65,11 @@ import type {
   WorkerSessionRuntime,
   WorkerSessionSummary,
   PauseRunInput,
+  PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
+  PiCatalogModel,
   PiSubscriptionOverview,
+  PiUsageOverview,
   PiSubscriptionProvider,
   PlanFile,
   PrefKey,
@@ -201,6 +204,20 @@ const api = {
         handler(authEvent);
       ipcRenderer.on("pi-subscriptions:event", listener);
       return () => ipcRenderer.off("pi-subscriptions:event", listener);
+    },
+    installRuntime: (): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-runtime:install"),
+    usage: (force = false): Promise<PiUsageOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:usage", { force }),
+    // Returns [] rather than throwing when Pi is absent, so the picker falls
+    // back to its curated rows instead of failing to render.
+    catalog: (force = false): Promise<PiCatalogModel[]> =>
+      ipcRenderer.invoke("pi-models:catalog", { force }).catch(() => []),
+    onRuntimeInstallEvent: (handler: (event: PiRuntimeInstallEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, installEvent: PiRuntimeInstallEvent) =>
+        handler(installEvent);
+      ipcRenderer.on("pi-runtime:install-event", listener);
+      return () => ipcRenderer.off("pi-runtime:install-event", listener);
     },
   },
   agents: {

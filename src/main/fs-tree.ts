@@ -4,7 +4,6 @@ import { basename, dirname, extname, isAbsolute, join, relative } from "node:pat
 import type { FileListResult, FsEntry, FsFileContent, FsReadResult, FsWriteResult, PlanFile } from "@shared/types";
 import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
-import { recordEditorWrite } from "./editor-write-tracker";
 import { isRemotePath } from "@shared/remote";
 import * as remoteFs from "./remote/remote-fs";
 
@@ -187,7 +186,6 @@ export async function writeTextFile(
   }
   await writeFileAtomic(path, content);
   const st = await fs.stat(path);
-  recordEditorWrite(path, st.mtimeMs);
   return { kind: "ok", path, size: st.size, mtimeMs: st.mtimeMs };
 }
 

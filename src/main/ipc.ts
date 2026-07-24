@@ -384,6 +384,18 @@ export function registerIpc(): void {
     const { disconnectPiSubscription } = await getPiSubscriptionAuth();
     return disconnectPiSubscription(input?.provider);
   });
+  ipcMain.handle("pi-runtime:install", async (event) => {
+    const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();
+    return installPiRuntimeForWindow(event.sender);
+  });
+  ipcMain.handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
+    const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
+    return inspectPiSubscriptionUsage(input?.force === true);
+  });
+  ipcMain.handle("pi-models:catalog", async (_event, input?: { force?: unknown }) => {
+    const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
+    return inspectPiModelCatalog(input?.force === true);
+  });
 
   ipcMain.handle(
     "agents:runtimes",

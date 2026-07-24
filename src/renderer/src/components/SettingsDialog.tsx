@@ -1,8 +1,5 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  AgentRuntimeDiagnostic,
-  AgentRuntimeKind,
-  AgentRuntimeSelection,
   AppSettings,
   EditorThemeId,
   PiSubscriptionAuthEvent,
@@ -32,8 +29,8 @@ import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/ThemeProvider";
 import { usePreferences } from "../preferences/usePreferences";
 import KeybindingsSection from "../shortcuts/KeybindingsSection";
+import SubscriptionUsage from "./SubscriptionUsage";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
-import { Capability } from "./Capability";
 import packageJson from "../../../../package.json";
 
 // Settings is a single in-app dialog with seven tabs. Everything renders
@@ -421,7 +418,7 @@ export default function SettingsDialog({
             )}
             {renderedTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
             {renderedTab === "agents" && (
-              <AgentsSettings draft={draft} onChange={setDraft} />
+              <AgentsSettings />
             )}
             {renderedTab === "sessions" && (
               <SessionsSettings
@@ -1450,8 +1447,6 @@ function EditorSettings() {
   );
 }
 
-const ALL_AGENT_RUNTIME_KINDS: ReadonlyArray<AgentRuntimeKind> = ["claude", "codex"];
-
 interface PiLoginView {
   requestId: string;
   provider: PiSubscriptionProvider;
@@ -1463,12 +1458,22 @@ interface PiLoginView {
   prompt?: PiSubscriptionPrompt;
 }
 
+interface PiInstallView {
+  status: "running" | "completed" | "failed";
+  message: string;
+}
+
 function PiSubscriptionSettings() {
   const [overview, setOverview] = useState<PiSubscriptionOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [login, setLogin] = useState<PiLoginView | null>(null);
   const [promptValue, setPromptValue] = useState("");
+  const [install, setInstall] = useState<PiInstallView | null>(null);
+  // Bumped on connect/disconnect to force the usage panel to re-read; the main
+  // process caches usage for a minute, which is right for idle re-renders but
+  // wrong immediately after the set of connected subscriptions changes.
+  const [usageEpoch, setUsageEpoch] = useState(0);
 
   const refresh = () => {
     setLoading(true);
@@ -1486,6 +1491,7 @@ function PiSubscriptionSettings() {
       setPromptValue("");
       if (event.type === "completed") {
         setOverview(event.overview);
+        setUsageEpoch((epoch) => epoch + 1);
         setLogin({
           requestId: event.requestId,
           provider: event.provider,
@@ -1545,6 +1551,37 @@ function PiSubscriptionSettings() {
     return remove;
   }, []);
 
+  // The install runs in the main process, so its progress arrives on its own
+  // channel. A Settings dialog reopened mid-install picks the run back up from
+  // the overview's runtimeInstalling flag below.
+  useEffect(() => {
+    return window.spark.piSubscriptions.onRuntimeInstallEvent((event) => {
+      if (event.type === "completed") {
+        setOverview(event.overview);
+        setInstall({ status: "completed", message: event.message });
+        return;
+      }
+      setInstall({
+        status: event.type === "failed" ? "failed" : "running",
+        message: event.message,
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (overview?.runtimeInstalling && !install) {
+      setInstall({ status: "running", message: "Installing Pi…" });
+    }
+  }, [overview?.runtimeInstalling, install]);
+
+  const installRuntime = () => {
+    setError(null);
+    setInstall({ status: "running", message: "Starting install…" });
+    void window.spark.piSubscriptions.installRuntime().catch((err) => {
+      setInstall({ status: "failed", message: (err as Error).message });
+    });
+  };
+
   const connect = (provider: PiSubscriptionProvider) => {
     setError(null);
     setLogin({
@@ -1570,6 +1607,7 @@ function PiSubscriptionSettings() {
       .disconnect(provider)
       .then((next) => {
         setOverview(next);
+        setUsageEpoch((epoch) => epoch + 1);
         setLogin(null);
       })
       .catch((err) => setError((err as Error).message))
@@ -1619,7 +1657,13 @@ function PiSubscriptionSettings() {
             key={connection.provider}
             connection={connection}
             busy={busyProvider === connection.provider}
-            disabled={busyProvider !== null && busyProvider !== connection.provider}
+            disabled={
+              // Connecting without the runtime can only fail — the OAuth flow
+              // itself is loaded out of the Pi package. Point at Install
+              // instead of letting the user earn the error.
+              !overview.runtimeInstalled ||
+              (busyProvider !== null && busyProvider !== connection.provider)
+            }
             onConnect={() => connect(connection.provider)}
             onDisconnect={() => disconnect(connection.provider)}
           />
@@ -1637,9 +1681,12 @@ function PiSubscriptionSettings() {
             Pinned Pi {overview.runtimeVersion} · one auth store for manager + workers
           </div>
         ) : overview ? (
-          <div style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
-            {overview.runtimeError || "Codara's pinned Pi runtime is unavailable."}
-          </div>
+          <PiRuntimeInstallRow
+            expectedVersion={overview.runtimeExpectedVersion}
+            runtimeError={overview.runtimeError}
+            install={install}
+            onInstall={installRuntime}
+          />
         ) : null}
       </div>
 
@@ -1664,6 +1711,10 @@ function PiSubscriptionSettings() {
           {error}
         </div>
       ) : null}
+
+      {/* Remounted whenever a connection changes so the bars re-read instead of
+          showing the pre-login state of a subscription you just connected. */}
+      {overview?.runtimeInstalled ? <SubscriptionUsage key={usageEpoch} /> : null}
 
       <div
         style={{
@@ -1755,6 +1806,74 @@ function PiSubscriptionRow({
           <FooterButton onClick={onDisconnect} disabled={disabled || busy}>Disconnect</FooterButton>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The missing-runtime state. Cora cannot chat, plan, or launch a worker
+ * without the pinned Pi build, so the one thing this row has to do is make
+ * getting it a single click instead of a terminal errand.
+ */
+function PiRuntimeInstallRow({
+  expectedVersion,
+  runtimeError,
+  install,
+  onInstall,
+}: {
+  expectedVersion: string;
+  runtimeError?: string;
+  install: PiInstallView | null;
+  onInstall: () => void;
+}) {
+  const running = install?.status === "running";
+  const failed = install?.status === "failed";
+  const tone = failed ? "var(--danger)" : running ? "var(--accent)" : "var(--danger)";
+  return (
+    <div
+      aria-live="polite"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 10,
+        padding: "9px 10px",
+        borderRadius: "var(--radius-control, 5px)",
+        border: `1px solid color-mix(in oklab, ${tone} 38%, var(--rule-soft))`,
+        background: "color-mix(in oklab, var(--ink) 3%, transparent)",
+      }}
+    >
+      <div style={{ minWidth: 0, display: "grid", gap: 3 }}>
+        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
+          {running ? `Installing Pi ${expectedVersion}…` : `Pi ${expectedVersion} is not installed`}
+        </span>
+        <span
+          style={{
+            color: failed ? "var(--danger)" : "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            lineHeight: 1.4,
+            // npm's progress lines and error tails are long; keep the row from
+            // stretching the dialog while staying readable.
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+            maxHeight: 74,
+            overflowY: "auto",
+          }}
+        >
+          {install?.message ||
+            runtimeError ||
+            "Cora needs this exact Pi build for chat, planning, and every worker."}
+        </span>
+        {!running ? (
+          <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+            Installs into your Codara home · needs npm on your PATH
+          </span>
+        ) : null}
+      </div>
+      <FooterButton onClick={onInstall} disabled={running} primary>
+        {running ? "Installing…" : failed ? "Retry install" : `Install Pi ${expectedVersion}`}
+      </FooterButton>
     </div>
   );
 }
@@ -1873,76 +1992,13 @@ function PiLoginPanel({
   );
 }
 
-function AgentsSettings({
-  draft,
-  onChange,
-}: {
-  draft: AppSettings;
-  onChange: (settings: AppSettings) => void;
-}) {
-  const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const { preferences, setPreference } = usePreferences();
-
-  useEffect(() => {
-    let alive = true;
-    void window.spark.agents
-      .runtimes(true)
-      .then((next) => {
-        if (!alive) return;
-        setDiagnostics(next);
-        setError(null);
-      })
-      .catch((err) => {
-        if (!alive) return;
-        setError((err as Error).message);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  const enabledKinds = enabledRuntimeKinds(draft.agentRuntimeSelection);
-
-  const toggleRuntime = (kind: AgentRuntimeKind) => {
-    const next = new Set(enabledKinds);
-    if (next.has(kind)) next.delete(kind);
-    else next.add(kind);
-    // Preserve canonical order so the persisted form is stable.
-    const ordered = ALL_AGENT_RUNTIME_KINDS.filter((k) => next.has(k));
-    onChange({ ...draft, agentRuntimeSelection: ordered });
-  };
-
+function AgentsSettings() {
   return (
     <div style={{ display: "grid", gap: 18 }}>
       <PiSubscriptionSettings />
 
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
-      <div style={{ display: "grid", gap: 12 }}>
-        <SectionTitle
-          title="Agent runtimes"
-          detail="Pick which local agent CLIs Cora may dispatch workers to. Each runtime can be toggled independently — deselect any that you do not want Cora to spawn."
-        />
-        <div style={{ display: "grid", gap: 8 }}>
-          {diagnostics?.map((runtime) => (
-            <RuntimeDiagnosticRow
-              key={runtime.kind}
-              runtime={runtime}
-              enabled={enabledKinds.has(runtime.kind)}
-              onToggle={() => toggleRuntime(runtime.kind)}
-            />
-          ))}
-          {!diagnostics && !error ? (
-            <RuntimeDiagnosticSkeleton />
-          ) : null}
-          {error ? (
-            <div style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}>
-              {error}
-            </div>
-          ) : null}
-        </div>
-      </div>
       <div
         style={{
           border: "1px solid var(--rule-soft)",
@@ -1958,60 +2014,6 @@ function AgentsSettings({
       >
         MCP servers and skills now live in the Capability Center from the Cora composer. That space is larger and gives
         per-item activation, compatibility, deletion, and sync controls.
-      </div>
-
-      <hr className="spark-divider" style={{ margin: "2px 0" }} />
-
-      <div style={{ display: "grid", gap: 8 }}>
-        <SectionTitle
-          title="Stuck-worker watchdog"
-          detail="Three-channel idle detector. A worker is killed and auto-restarted from its on-disk state only when the pty stream, the agent's session log, and the workspace filesystem are ALL silent for the threshold. Long thinks and tool work each ping at least one channel, so false positives are essentially zero."
-        />
-        <ToggleRow
-          title="Auto-kill stuck workers"
-          desc="If a Claude or Codex worker stops emitting any activity at all, kill it and (optionally) spin up a fresh attempt on the same task."
-          checked={draft.workerStuckDetectEnabled}
-          onChange={(workerStuckDetectEnabled) =>
-            onChange({ ...draft, workerStuckDetectEnabled })
-          }
-        />
-        <NumberRow
-          title="Idle threshold (seconds)"
-          desc="All three channels (pty, session log, workspace) must be silent for this long before the worker is declared stuck. Default 180s."
-          min={60}
-          max={3600}
-          value={draft.workerStuckIdleSeconds}
-          disabled={!draft.workerStuckDetectEnabled}
-          onChange={(workerStuckIdleSeconds) =>
-            onChange({ ...draft, workerStuckIdleSeconds })
-          }
-        />
-        <NumberRow
-          title="Max auto-retries per task"
-          desc="After this many stuck-fails on the same task, Cora stops auto-retrying and surfaces it to the planner instead. 0 disables auto-retry (kill only). Default 2."
-          min={0}
-          max={5}
-          value={draft.workerStuckMaxAutoRetries}
-          disabled={!draft.workerStuckDetectEnabled}
-          onChange={(workerStuckMaxAutoRetries) =>
-            onChange({ ...draft, workerStuckMaxAutoRetries })
-          }
-        />
-      </div>
-
-      <hr className="spark-divider" style={{ margin: "2px 0" }} />
-
-      <div style={{ display: "grid", gap: 8 }}>
-        <SectionTitle
-          title="Models"
-          detail="Extra models that are hidden by default because they cost significantly more."
-        />
-        <ToggleRow
-          title="Allow Fable 5"
-          desc="Fable 5 is Anthropic's top-tier model — significantly more expensive than Opus 4.8. Off by default: when off it is hidden from the chat model picker and Cora workers or automations that request it fall back to Opus 4.8."
-          checked={preferences.fableEnabled === true}
-          onChange={(v) => void setPreference("fableEnabled", v)}
-        />
       </div>
     </div>
   );
@@ -2148,214 +2150,6 @@ function NumberRow({
     />
   );
 }
-
-type CapabilityChipTone = "neutral" | "success" | "warning" | "blue" | "violet";
-
-function CapabilityChip({
-  text,
-  tone,
-  title,
-}: {
-  text: string;
-  tone: CapabilityChipTone;
-  title?: string;
-}) {
-  // Adopt the shared .spark-badge so every status tint re-tints across the 8
-  // OKLCH palettes (the old hardcoded hex froze a color that clashed on light
-  // themes). Tones map onto the badge's token-backed modifiers: success -> ok,
-  // warning -> warn, blue -> info, violet -> accent (brand).
-  const toneClass: Record<CapabilityChipTone, string> = {
-    neutral: "",
-    success: "is-ok",
-    warning: "is-warn",
-    blue: "is-info",
-    violet: "is-accent",
-  };
-  return (
-    <span
-      className={`spark-badge ${toneClass[tone]}`.trim()}
-      title={title}
-      style={{
-        // These tags read as lowercase code-ish identifiers, not shouted
-        // labels — keep mono + lowercase rather than the badge's uppercase.
-        fontFamily: "var(--font-mono)",
-        textTransform: "none",
-        letterSpacing: "0.02em",
-      }}
-    >
-      {text}
-    </span>
-  );
-}
-
-function enabledRuntimeKinds(selection: AgentRuntimeSelection): Set<AgentRuntimeKind> {
-  if (Array.isArray(selection)) {
-    return new Set(selection.filter((kind) => ALL_AGENT_RUNTIME_KINDS.includes(kind)));
-  }
-  if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
-  if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
-  if (selection === "both") return new Set<AgentRuntimeKind>(["claude", "codex"]);
-  return new Set<AgentRuntimeKind>(ALL_AGENT_RUNTIME_KINDS);
-}
-
-function RuntimeDiagnosticRow({
-  runtime,
-  enabled,
-  onToggle,
-}: {
-  runtime: AgentRuntimeDiagnostic;
-  enabled: boolean;
-  onToggle: () => void;
-}) {
-  const active = runtime.installed && enabled;
-  const status = !runtime.installed
-    ? "Missing"
-    : enabled
-      ? "Enabled"
-      : "Off";
-  const dotColor = active
-    ? "var(--accent)"
-    : runtime.installed
-      ? "var(--muted)"
-      : "var(--danger)";
-  const detail = runtime.installed
-    ? runtime.version || runtime.executablePath || "Installed"
-    : runtime.installHint;
-  const canToggle = runtime.installed;
-  const { hover, focus, pressed, handlers } = useInteractive();
-  const restShadow = active ? "var(--lift-hi)" : undefined;
-
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      onClick={canToggle ? onToggle : undefined}
-      disabled={!canToggle}
-      {...handlers}
-      title={
-        !canToggle
-          ? "Install this runtime to enable it."
-          : enabled
-            ? `Click to disable ${runtime.label} workers.`
-            : `Click to enable ${runtime.label} workers.`
-      }
-      style={{
-        display: "grid",
-        gridTemplateColumns: "10px minmax(0, 1fr) auto auto",
-        alignItems: "center",
-        gap: 10,
-        padding: "9px 10px",
-        // One soft cue for the enabled state: accent-edge border + accent-soft
-        // fill. No stacked glow halo.
-        border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
-        borderRadius: "var(--radius-surface, 7px)",
-        background: active
-          ? "var(--accent-soft)"
-          : !canToggle
-            ? "color-mix(in oklab, var(--ink) 2%, transparent)"
-            : pressed
-              ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
-              : hover
-                ? "var(--hover)"
-                : "color-mix(in oklab, var(--ink) 3%, transparent)",
-        // Default arrow cursor when togglable (matching the .spark-* utility
-        // classes); a not-allowed cue only when the runtime can't be enabled.
-        cursor: canToggle ? "default" : "not-allowed",
-        textAlign: "left",
-        font: "inherit",
-        color: "inherit",
-        width: "100%",
-        boxShadow: withFocusRing(restShadow, focus),
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: 999,
-          background: dotColor,
-          boxShadow: active ? "0 0 8px var(--accent-glow)" : "none",
-        }}
-      />
-      <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
-        <span
-          style={{
-            color: "var(--ink)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 13,
-            fontWeight: 600,
-          }}
-        >
-          {runtime.label}
-        </span>
-        <span
-          title={detail}
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {detail}
-        </span>
-        {runtime.installed ? (
-          <span style={capabilityChipRowStyle}>
-            <Capability runtime={runtime} feature="costTracking">
-              <CapabilityChip text="cost" tone="neutral" title="Reports per-run cost" />
-            </Capability>
-            <Capability runtime={runtime} feature="contextWindow">
-              <CapabilityChip text="context" tone="neutral" title="Reports context-window usage" />
-            </Capability>
-            <Capability runtime={runtime} feature="hookStatus">
-              <CapabilityChip text="hooks" tone="neutral" title="Supports hook status events" />
-            </Capability>
-            <Capability runtime={runtime} feature="planModeArg">
-              <CapabilityChip text="plan-mode" tone="neutral" title="Accepts a plan-mode argument" />
-            </Capability>
-            <Capability runtime={runtime} feature="shiftEnterNewline">
-              <CapabilityChip text="shift+enter" tone="neutral" title="Supports shift+enter newline" />
-            </Capability>
-            <Capability runtime={runtime} feature="systemPromptInjection">
-              <CapabilityChip text="sys-prompt" tone="neutral" title="Accepts an injected system prompt" />
-            </Capability>
-            <Capability runtime={runtime} feature="sessionResume">
-              <CapabilityChip text="resume" tone="neutral" title="Supports session resume" />
-            </Capability>
-          </span>
-        ) : null}
-      </span>
-      <span
-        style={{
-          color: active ? "var(--ink)" : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.1em",
-          textTransform: "uppercase",
-        }}
-      >
-        {status}
-      </span>
-      {/* One switch metric: the same visual track as ToggleRow, rendered as a
-          decorative indicator because the whole row is the clickable target. */}
-      <SwitchTrack checked={enabled} disabled={!canToggle} />
-    </button>
-  );
-}
-
-const capabilityChipRowStyle: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 4,
-  marginTop: 4,
-};
 
 function RuntimeDiagnosticSkeleton() {
   return (
@@ -3876,8 +3670,8 @@ function ToggleRow({
 // One switch metric, app-wide. 34x20 track, 16px knob, 2px inset, accent fill
 // + glow when on. SwitchTrack is the pure-visual part so the same geometry can
 // be (a) an interactive role=switch button, or (b) a decorative indicator
-// nested inside a larger clickable row (RuntimeDiagnosticRow), where a nested
-// <button> would be invalid HTML.
+// nested inside a larger clickable row, where a nested <button> would be
+// invalid HTML.
 const SWITCH_W = 34;
 const SWITCH_H = 20;
 const SWITCH_KNOB = 16;

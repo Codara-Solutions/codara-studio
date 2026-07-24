@@ -61,7 +61,7 @@
     "@codemirror/search": "^6.7.0",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.42.1",
-    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.82.0",
     "@iconify-json/catppuccin": "^1.2.17",
     "@replit/codemirror-vim": "^6.3.0",
     "@uiw/codemirror-theme-atomone": "^4.25.9",

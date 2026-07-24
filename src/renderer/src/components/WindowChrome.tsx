@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import type { ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
+import UsageMeters from "./UsageMeters";
 import type { NavigateTo } from "../notifications/routing";
 
 type AppRegionStyle = React.CSSProperties & {
@@ -313,6 +314,7 @@ function WindowChrome({
           alignItems: "stretch",
         }}
       >
+        <UsageMeters />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
         <NotificationCenter
           navigateTo={notifyNavigateTo}

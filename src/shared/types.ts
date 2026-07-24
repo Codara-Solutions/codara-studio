@@ -130,15 +130,11 @@ export interface AppSettings {
   terminalScrollbackLineLimit: number;
   openRouterApiKey: string;
   openRouterModel: string;
-  agentRuntimeSelection: AgentRuntimeSelection;
   agentMcpSyncEnabled: boolean;
   agentSkillSyncEnabled: boolean;
   agentDisabledMcpIds: string[];
   agentDisabledSkillIds: string[];
   playwrightMcpAutoInstall: boolean;
-  workerStuckDetectEnabled: boolean;
-  workerStuckIdleSeconds: number;
-  workerStuckMaxAutoRetries: number;
   // When true, autopilot/unattended workers launch inside a throwaway git
   // worktree forked off the run checkpoint (refs/spark/runs/{runId}) and run
   // with worktree-scoped permissions instead of full skip-permissions —
@@ -170,8 +166,66 @@ export interface PiSubscriptionOverview {
   runtimeInstalled: boolean;
   runtimeVersion: string | null;
   runtimeError?: string;
+  /** The Pi build Codara is pinned to, present whether or not it is installed
+   * — Settings labels its install button with this. */
+  runtimeExpectedVersion: string;
+  /** True while Settings' managed install is running, so a reopened dialog
+   * shows the in-progress state instead of an idle Install button. */
+  runtimeInstalling?: boolean;
   connections: PiSubscriptionConnection[];
 }
+
+/**
+ * A model Pi reports as usable by a connected subscription right now. This is
+ * what lets a newly released model appear in the picker with no code change;
+ * the renderer merges it under its curated rows rather than replacing them.
+ */
+export interface PiCatalogModel {
+  id: string;
+  /** Vendor display name, falling back to the id. */
+  label: string;
+  provider: PiSubscriptionProvider;
+  reasoning: boolean;
+  contextWindow?: number;
+  /** Pi thinking levels this model actually supports; empty when it has none. */
+  thinkingLevels: string[];
+}
+
+/** One quota window (Claude's 5-hour/7-day, Codex's primary/secondary). */
+export interface PiUsageWindow {
+  id: string;
+  /** Human window length — "5-hour", "7-day", "Opus 7-day", "Code review 7-day". */
+  label: string;
+  usedPercent: number;
+  remainingPercent: number;
+  /** Countdown to reset, pre-formatted ("3h 12m"). Absent when unknown. */
+  resetsIn?: string;
+  resetsAt?: string;
+}
+
+export interface PiUsageProvider {
+  provider: PiSubscriptionProvider;
+  label: string;
+  /** `not_connected` is reported rather than omitted, so the UI can say so
+   * instead of leaving a gap the user has to interpret. */
+  status: "ok" | "not_connected" | "expired" | "error";
+  windows: PiUsageWindow[];
+  checkedAt: string;
+  plan?: string;
+  limitReached?: boolean;
+  message?: string;
+}
+
+export interface PiUsageOverview {
+  checkedAt: string;
+  providers: PiUsageProvider[];
+}
+
+/** Progress for the managed install of Codara's pinned Pi runtime. */
+export type PiRuntimeInstallEvent =
+  | { type: "started" | "progress"; message: string }
+  | { type: "completed"; message: string; overview: PiSubscriptionOverview }
+  | { type: "failed"; message: string };
 
 export type PiSubscriptionPrompt =
   | {
@@ -385,13 +439,6 @@ export interface AppPreferences {
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
   copyBranchSetupCommandByRepo: Record<string, string>;
-  // Gate for Fable 5 (`claude-fable-5`), Anthropic's top-tier and most
-  // expensive model. Default OFF: when false Fable is hidden from every model
-  // picker and automations that request it fall back to Opus 4.8. Flip on to
-  // opt into the extra cost. When false it is also an unconditional veto for
-  // Cora-spawned workers; when true, a worker still requires an explicit Fable
-  // request in the user's own message.
-  fableEnabled?: boolean;
   // When enabled, terminal tabs that still had a Claude or Codex CLI in the
   // foreground when Codara quit resume that exact CLI session on next launch.
   // Ordinary shell tabs and agent sessions that had already exited still open
@@ -530,7 +577,6 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
-  fableEnabled: false,
   restoreAgentSessions: false,
 };
 
@@ -694,18 +740,6 @@ export interface DeleteWorkerSessionResult {
   warnings: string[];
 }
 
-// "auto" means "use every installed runtime" (Codara detects what is on PATH).
-// An array enumerates the exact runtimes the user opted in to — deselecting a
-// runtime in Settings removes it from this array so Codara will not spawn
-// workers on it even if the CLI is installed. Legacy string variants are
-// accepted on read for migration; writes always use the array form.
-export type AgentRuntimeSelection =
-  | "auto"
-  | "both"
-  | "claude"
-  | "codex"
-  | readonly AgentRuntimeKind[];
-
 export type AgentEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 // Capability tier the manager uses to pick a model from a runtime's list.
@@ -749,8 +783,18 @@ export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
   installed: boolean;
-  disabledBySettings?: boolean;
-  disabledReason?: string;
+  // Tri-state sign-in signal. `installed` only means the binary was found on
+  // PATH; a CLI can be present but signed out, which fails at launch time.
+  // true/false when detection could establish credential PRESENCE (never the
+  // secret itself); undefined when it could not determine either way — treat
+  // undefined as "assume usable". ADVISORY ONLY: detection cannot see the
+  // user's shell environment or every credential route, so `false` means "no
+  // credential detected", not "signed out" — warn on it, but never let it
+  // (rather than installed=false) refuse to run or assign work.
+  authenticated?: boolean;
+  // Short human-readable hint for the authenticated=false case
+  // (e.g. "run `claude` and sign in"). Never contains secret material.
+  authHint?: string;
   executablePath: string | null;
   version: string | null;
   versionError: string | null;
@@ -2141,10 +2185,10 @@ export interface WorkerTask {
     | "synthetic_step_ceiling";
   /**
    * How many verifier-FEEDBACK corrective requeues this task has consumed.
-   * Tracked separately from raw attempt counts, which also include watchdog
-   * and environmental-fallback retries — the fast execution policy caps
-   * FEEDBACK rework at one round and must not miscount stuck retries as
-   * verification rework.
+   * Tracked separately from raw attempt counts, which also include
+   * environmental-fallback retries — the fast execution policy caps
+   * FEEDBACK rework at one round and must not miscount environmental
+   * retries as verification rework.
    */
   verifierFeedbackRounds?: number;
   /**

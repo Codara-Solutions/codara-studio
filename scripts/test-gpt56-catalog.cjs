@@ -83,24 +83,22 @@ async function main() {
     { kind: "claude", label: "Claude Code", installed: true, disabledBySettings: false },
     { kind: "codex", label: "Codex CLI", installed: true, disabledBySettings: false },
   ];
-  const groups = composer.buildVisibleGroups({ diagnostics, openRouterModel: "", fableEnabled: false });
+  const groups = composer.buildVisibleGroups({ diagnostics, openRouterModel: "" });
   const codex = groups.find((group) => group.backend === "codex");
   check(
     "Cora's picker exposes all three concrete GPT-5.6 variants",
     codex?.models.map((model) => model.id).join(",") === ids.join(","),
   );
+  const claude = groups.find((group) => group.backend === "claude");
   check(
-    "premium Fable opt-in does not replace Opus as the default Claude row",
-    composer.buildVisibleGroups({ diagnostics, openRouterModel: "", fableEnabled: true })
-      .find((group) => group.backend === "claude")?.models[0]?.id === "claude-opus-4-8:1m",
+    "Claude group shows Fable but keeps Opus as the default (first) row",
+    claude?.models[0]?.id === "claude-opus-4-8:1m" &&
+      claude?.models.some((model) => model.id === "claude-fable-5"),
   );
-  const piWithoutFable = groups.find((group) => group.backend === "pi");
-  const piWithFable = composer.buildVisibleGroups({ diagnostics, openRouterModel: "", fableEnabled: true })
-    .find((group) => group.backend === "pi");
+  const pi = groups.find((group) => group.backend === "pi");
   check(
-    "experimental Pi picker defaults to Sol and gates Fable behind the premium opt-in",
-    piWithoutFable?.models.map((model) => model.id).join(",") === "gpt-5.6-sol" &&
-      piWithFable?.models.map((model) => model.id).join(",") === "gpt-5.6-sol,claude-fable-5",
+    "experimental Pi picker defaults to Sol with Fable available second",
+    pi?.models.map((model) => model.id).join(",") === "gpt-5.6-sol,claude-fable-5",
   );
 
   check(
