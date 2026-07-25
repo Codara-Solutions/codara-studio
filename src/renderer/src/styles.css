@@ -902,6 +902,19 @@ a { color: inherit; }
   pointer-events: auto;
 }
 
+/* Docked into the inner tab strip's right-hand slot: the strip provides the
+   surface, so the floating card chrome comes off and the buttons sit flush
+   with the Chat / Runs pills instead of covering a pane title. */
+.cora-worker-terminal-controls.is-docked {
+  position: static;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  gap: 4px;
+}
+
 .cora-worker-terminal-control {
   min-height: 24px;
   padding: 0 8px;

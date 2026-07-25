@@ -613,6 +613,15 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   // fresh app/tab mount returns to protected input automatically.
   const [workerInputProtected, setWorkerInputProtected] = useState(true);
   const workerWasVisibleRef = useRef(false);
+  // Where the guard controls dock: the inner tab strip's right-aligned slot,
+  // so they sit in the strip's empty space instead of covering the top-right
+  // pane's title. Null (strip not rendered) falls back to floating in-tab.
+  const [guardSlot, setGuardSlot] = useState<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!workerTerminal || !visible) return;
+    setGuardSlot(document.querySelector<HTMLElement>("[data-cora-guard-slot]"));
+  }, [workerTerminal, visible]);
 
   useLayoutEffect(() => {
     if (!workerTerminal) return;
@@ -985,11 +994,13 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             {workerTerminal && leaf.worker ? (
               <WorkerPaneHeader
                 worker={leaf.worker}
-                // The tab-level guard controls (Back to Runs / input lock)
-                // float over the tab's top-right corner; the pane rendered
-                // there keeps its header meta clear of them.
+                // Only when the guard controls could not dock into the inner
+                // tab strip do they float over the tab's top-right corner; the
+                // pane rendered there then keeps its header meta clear of them.
                 reserveControlsSpace={
-                  renderRect.top < 0.001 && renderRect.left + renderRect.width > 0.999
+                  guardSlot === null &&
+                  renderRect.top < 0.001 &&
+                  renderRect.left + renderRect.width > 0.999
                 }
               />
             ) : null}
@@ -1048,6 +1059,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       })}
       {workerTerminal && visible ? (
         <WorkerTerminalGuard
+          slot={guardSlot}
           protectedInput={workerInputProtected}
           onToggleProtection={() => setWorkerInputProtected((current) => !current)}
           onBackToRuns={() => {
@@ -1089,32 +1101,24 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
 });
 
 function WorkerTerminalGuard({
+  slot,
   protectedInput,
   onToggleProtection,
   onBackToRuns,
 }: {
+  // Inner tab strip slot to dock the controls into. Null floats them over
+  // the tab's top-right corner instead (strip not rendered).
+  slot: HTMLElement | null;
   protectedInput: boolean;
   onToggleProtection: () => void;
   onBackToRuns: () => void;
 }) {
-  return (
+  const controls = (
     <div
-      className="cora-worker-terminal-guard"
-      data-testid="cora-worker-terminal-guard"
-      data-input-protected={protectedInput ? "true" : "false"}
+      className={`cora-worker-terminal-controls${slot ? " is-docked" : ""}`}
+      role="toolbar"
+      aria-label="Worker terminal controls"
     >
-      {protectedInput ? (
-        <div
-          className="cora-worker-terminal-veil"
-          data-testid="cora-worker-terminal-veil"
-          aria-hidden="true"
-        />
-      ) : null}
-      <div
-        className="cora-worker-terminal-controls"
-        role="toolbar"
-        aria-label="Worker terminal controls"
-      >
         <button
           type="button"
           className="cora-worker-terminal-control"
@@ -1139,7 +1143,22 @@ function WorkerTerminalGuard({
           <LockIcon size={12} />
           <span>{protectedInput ? "Input protected" : "Input enabled"}</span>
         </button>
-      </div>
+    </div>
+  );
+  return (
+    <div
+      className="cora-worker-terminal-guard"
+      data-testid="cora-worker-terminal-guard"
+      data-input-protected={protectedInput ? "true" : "false"}
+    >
+      {protectedInput ? (
+        <div
+          className="cora-worker-terminal-veil"
+          data-testid="cora-worker-terminal-veil"
+          aria-hidden="true"
+        />
+      ) : null}
+      {slot ? createPortal(controls, slot) : controls}
     </div>
   );
 }

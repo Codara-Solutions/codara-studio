@@ -122,6 +122,13 @@ export default function InnerTabStrip({
       {!showWhiteboardPill && (
         <NewWhiteboardButton onClick={onWhiteboardClick} />
       )}
+      {/* Right-aligned slot the worker terminal guard portals its controls
+          into (TerminalStack). Docking them here uses the strip's empty right
+          half instead of floating over the top-right pane's title. */}
+      <div
+        data-cora-guard-slot
+        style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}
+      />
     </div>
   );
 }
