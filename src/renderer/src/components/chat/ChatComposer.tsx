@@ -18,6 +18,7 @@ import {
   normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
 import { findOpenQuestion } from "./timeline";
+import { workerModelLabel } from "../runs/run-format";
 import ContextPill from "./composer/ContextPill";
 import ModelPicker from "./composer/ModelPicker";
 import ThinkingControl from "./composer/ThinkingControl";
@@ -208,6 +209,11 @@ export default function ChatComposer({
   // millions/billions of tokens.
   const [tokensUsed, setTokensUsed] = useState(0);
   const [reportedContextBudget, setReportedContextBudget] = useState<number | null>(null);
+  // Read by the run-change seed below, which must see the run being switched TO
+  // without taking `run` as a dependency (that would re-seed on every snapshot
+  // and stomp the live gauge mid-turn).
+  const runRef = useRef(run);
+  runRef.current = run;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Synchronous in-flight latch — blocks a second send before React has
   // re-rendered the busy state, which a fast double-click or Enter-key
@@ -384,11 +390,20 @@ export default function ChatComposer({
     return () => observer.disconnect();
   }, [autosizeTextarea]);
 
-  // Reset the token accumulator on run change so a freshly-selected chat
-  // starts at 0 rather than carrying the previous chat's running total.
+  // Re-seed the gauge on run change so a freshly-selected chat never carries
+  // the previous chat's number. chat.usage only streams while a turn is live,
+  // so a chat that is merely opened has to read its occupancy from the last
+  // manager call the run persisted; the stream takes over from there.
   useEffect(() => {
-    setTokensUsed(0);
-    setReportedContextBudget(null);
+    const call = [...(runRef.current?.sparkCalls ?? [])]
+      .reverse()
+      .find((item) => typeof item.promptTokens === "number" && item.promptTokens > 0);
+    setTokensUsed(call?.promptTokens ?? 0);
+    setReportedContextBudget(
+      typeof call?.contextWindowTokens === "number" && call.contextWindowTokens > 0
+        ? call.contextWindowTokens
+        : null,
+    );
   }, [run?.id]);
 
   // Track the latest live context gauge. Modern backends provide
@@ -495,15 +510,21 @@ export default function ChatComposer({
   // Pick the first active task for the status pill — multi-worker shows the
   // count and one representative title to keep the line short.
   const primaryActiveWorker = activeWorkers[0] ?? null;
-  const activeWorkerRuntime = primaryActiveWorker
+  const activeWorkerAttempt = primaryActiveWorker
     ? run?.workerAttempts?.find(
         (a) =>
           a.workerTaskId === primaryActiveWorker.id &&
           a.status !== "succeeded" &&
           a.status !== "failed" &&
           a.status !== "cancelled",
-      )?.runtime ?? primaryActiveWorker.runtimePreference
+      ) ?? null
     : null;
+  const activeWorkerRuntime = primaryActiveWorker
+    ? activeWorkerAttempt?.runtime ?? primaryActiveWorker.runtimePreference
+    : null;
+  // The pill names the model the attempt actually launched on; the runtime is
+  // only the fallback, since it names the subscription, not the agent.
+  const activeWorkerModel = activeWorkerAttempt?.model;
   const filesForSend = collectFileReferencesForSend(draft, fileReferences, fileMentions).slice(
     0,
     Math.max(0, MAX_ATTACHMENTS - images.length),
@@ -1109,6 +1130,7 @@ export default function ChatComposer({
             <WorkerActivityStatus
               count={activeWorkers.length}
               runtime={activeWorkerRuntime}
+              model={activeWorkerModel}
               title={primaryActiveWorker?.title ?? null}
             />
           ) : (
@@ -1176,13 +1198,16 @@ function messageForSend(draft: string, attachmentCount: number): string {
 function WorkerActivityStatus({
   count,
   runtime,
+  model,
   title,
 }: {
   count: number;
   runtime: string | null;
+  model?: string;
   title: string | null;
 }): JSX.Element {
   const runtimeLabel = runtime === "claude" ? "claude" : runtime === "codex" ? "codex" : runtime ?? "worker";
+  const engineLabel = workerModelLabel(model, runtimeLabel);
   const countLabel = count > 1 ? `${count} workers` : "worker";
   return (
     <span
@@ -1201,7 +1226,7 @@ function WorkerActivityStatus({
         }}
       />
       <span style={{ color: "var(--accent)", fontWeight: 600 }}>
-        {runtimeLabel} {countLabel} running
+        {engineLabel} {countLabel} running
       </span>
       {/* The only elastic child: when the row runs out of room the task title
           ellipsises, rather than every child being cut mid-glyph. Sizing lives

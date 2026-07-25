@@ -10,6 +10,7 @@ import type {
 } from "@shared/types";
 import { resolveOpenRunQuestion } from "@shared/run-questions";
 import { logicalWorkers, type LogicalWorker } from "../../lib/worker-identity";
+import { workerModelLabel } from "../runs/run-format";
 
 // Timeline model for the chat conversation. A chat is a RunState: its
 // humanMessages are the back-and-forth, and its sparkCalls, worker attempts,
@@ -33,6 +34,14 @@ export interface ChatWorker {
   runtimeState?: RuntimeState;
   /** How many attempts have run for this logical worker (retries included). */
   attemptCount?: number;
+  /**
+   * The model the most recent attempt launched on ("claude-opus-5"), when the
+   * attempt reported one. The row names this, not `runtime`: every worker runs
+   * under Pi, so the runtime only says which subscription Pi authenticates
+   * against. Undefined for shell workers and for attempts that predate the
+   * field, which fall back to the runtime label.
+   */
+  model?: string;
 }
 
 // One beat of a logical worker's retry lineage, for the expanded worker row:
@@ -91,6 +100,12 @@ export type ChatTimelineItem =
       // Retry lineage for worker rows: one entry per attempt in the logical
       // worker's chain, oldest first. Absent on context/manager rows.
       attempts?: ChatToolAttempt[];
+      // Wall-clock anchors for a row whose elapsed time is still moving. The
+      // Duration meta is a snapshot taken when the timeline was built, so a
+      // running row would freeze between state updates; toolDurationLabel
+      // recomputes from these at render time instead.
+      startedAt?: string;
+      finishedAt?: string;
     }
   | {
       kind: "step";
@@ -181,6 +196,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         status: worker.task.status,
         runtimeState: worker.latestAttempt?.runtimeState,
         attemptCount: worker.attempts.length,
+        model: worker.latestAttempt?.model,
       }));
     items.push({
       kind: "step",
@@ -290,15 +306,17 @@ function logicalWorkerTimelineItem(
   const status = workerAttemptToolStatus(latest);
   const live = status === "started";
   const failed = status === "failed";
-  const runtime = runtimeLabel(latest.runtime);
+  // The row is named by the model that did the work, with the runtime label
+  // as the fallback until the attempt reports one.
+  const engine = workerModelLabel(latest.model, runtimeLabel(latest.runtime));
   // "of N" counts attempts that actually exist in the lineage, not the
   // main-process retry cap — the renderer never learns that constant.
   const ordinal = `attempt ${attempts.length} of ${attempts.length}`;
   const detailParts: string[] = [];
-  if (attempts.length > 1) detailParts.push(`${runtime} · ${ordinal}`);
+  if (attempts.length > 1) detailParts.push(`${engine} · ${ordinal}`);
   if (failed && latest.error) detailParts.push(latest.error);
 
-  const meta: ChatToolMeta[] = [{ label: "Runtime", value: runtime }];
+  const meta: ChatToolMeta[] = [{ label: "Model", value: engine }];
   if (attempts.length > 1) meta.push({ label: "Attempt", value: ordinal });
   meta.push({ label: "Status", value: latest.status.replace(/_/g, " ") });
   const duration = formatAttemptDuration(latest);
@@ -319,6 +337,8 @@ function logicalWorkerTimelineItem(
     at: attempts[0].startedAt ?? firstTask.createdAt ?? fallbackAt,
     meta,
     files: [],
+    startedAt: latest.startedAt,
+    finishedAt: latest.finishedAt,
     attempts: attempts.map((attempt, index) => ({
       id: attempt.id,
       number: index + 1,
@@ -368,6 +388,30 @@ export function runtimeLabel(runtime: WorkerRuntime): string {
     default:
       return "Worker";
   }
+}
+
+// The render-time twin of the Duration meta. A row that carries clock anchors
+// recomputes its elapsed on every render, so a per-second ticker is all a
+// running row needs to keep counting; rows without anchors (context, manager)
+// keep reading the snapshot the timeline baked in.
+export function toolDurationLabel(
+  item: Extract<ChatTimelineItem, { kind: "tool" }>,
+): string | null {
+  if (!item.startedAt) {
+    return item.meta.find((meta) => meta.label === "Duration")?.value ?? null;
+  }
+  const started = Date.parse(item.startedAt);
+  const finished = item.finishedAt ? Date.parse(item.finishedAt) : Date.now();
+  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return null;
+  return formatDurationShort(finished - started);
+}
+
+// True while a row's clock is genuinely still counting. This is the gate for
+// the per-second ticker, so a settled conversation never re-renders on a timer.
+export function isToolRowTicking(
+  item: Extract<ChatTimelineItem, { kind: "tool" }>,
+): boolean {
+  return item.status === "started" && Boolean(item.startedAt) && !item.finishedAt;
 }
 
 function formatAttemptDuration(attempt: WorkerAttempt): string | null {

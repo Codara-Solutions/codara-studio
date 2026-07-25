@@ -179,6 +179,15 @@ function sparkPreviewToolsAvailable(
   });
 }
 
+// Only the Pi harness loads the vendored pi-web-search extension, so only
+// those workers are told the tool exists.
+function renderWebResearchGuidance(run: RunState, task: WorkerTask): string[] {
+  if (!usesPiWorkerHarness(run, task)) return [];
+  return [
+    "- Use the `web_search` tool for anything you need from the open web instead of fetching pages with curl or driving the preview browser, and cite the sources it returns in `proof[]`.",
+  ];
+}
+
 function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
   const isVerifier = task.taskClass === "verifier";
 
@@ -501,6 +510,11 @@ function renderImplementationWorkerPrompt({
     lines.push("", "## ORIGINAL IMAGE ASSETS", ...imageGenerationGuidance);
   }
 
+  const webResearchGuidance = renderWebResearchGuidance(run, task);
+  if (webResearchGuidance.length) {
+    lines.push("", "## WEB RESEARCH", ...webResearchGuidance);
+  }
+
   if (task.allowedPaths.length || task.forbiddenPaths.length || task.conflictsWith.length || task.canRunParallel) {
     lines.push("", "## BOUNDARIES");
     if (task.allowedPaths.length) {
@@ -666,6 +680,11 @@ function renderVerifierWorkerPrompt({
   const uiVerifierGuidance = renderUiVerifierGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiVerifierGuidance.length) {
     lines.push("", ...uiVerifierGuidance);
+  }
+
+  const webResearchGuidance = renderWebResearchGuidance(run, task);
+  if (webResearchGuidance.length) {
+    lines.push("", "## WEB RESEARCH", ...webResearchGuidance);
   }
 
   const delegationGuidance = shouldOfferRuntimeDelegation(step, task)

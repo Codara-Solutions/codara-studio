@@ -4464,6 +4464,10 @@ async function askManagerBackend(
       targetCall.durationMs = result.durationMs;
       if (typeof result.promptTokens === "number") targetCall.promptTokens = result.promptTokens;
       if (typeof result.completionTokens === "number") targetCall.completionTokens = result.completionTokens;
+      if (typeof result.contextWindowTokens === "number" && result.contextWindowTokens > 0) {
+        targetCall.contextWindowTokens = result.contextWindowTokens;
+        targetCall.contextWindowSource = "known";
+      }
       if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
       if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
       if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;

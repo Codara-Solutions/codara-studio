@@ -35,6 +35,7 @@ import {
   buildPiManagerLaunchPlan,
   inspectPiSubscriptionAuth,
   resolvePinnedPiRuntime,
+  resolvePiWebSearchExtension,
   type PiManagerLaunchPlan,
   type PiSubscriptionAuthStatus,
   type PiSubscriptionProvider,
@@ -200,6 +201,21 @@ export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
   return resolvePinnedPiRuntime([...roots, managedPiRuntimeNodeModules()]);
 }
 
+/**
+ * Path of the vendored pi-web-search extension, or null when the package is
+ * absent. Pi transpiles the package's TypeScript from disk, so packaged builds
+ * prefer the unpacked copy (package.json keeps pi-web-search in asarUnpack).
+ */
+export async function resolveCodaraPiWebSearchExtension(): Promise<string | null> {
+  const roots = app.isPackaged
+    ? [
+        join(process.resourcesPath, "app.asar.unpacked", "node_modules"),
+        join(process.resourcesPath, "app.asar", "node_modules"),
+      ]
+    : developmentNodeModulesRoots();
+  return resolvePiWebSearchExtension(roots);
+}
+
 export async function inspectCodaraPiAuth(
   provider: PiSubscriptionProvider,
 ): Promise<PiSubscriptionAuthStatus> {
@@ -212,10 +228,11 @@ export async function createCodaraPiLaunchPlan(
 ): Promise<PiManagerLaunchPlan> {
   const paths = codaraPiPaths();
   const frontierEnabled = options.mode === "execute" && options.executionPolicy === "frontier";
-  const [runtime, auth, frontierManifest, mcp] = await Promise.all([
+  const [runtime, auth, frontierManifest, webSearchExtensionPath, mcp] = await Promise.all([
     resolveCodaraPiRuntime(),
     inspectPiSubscriptionAuth(paths.authFile, options.provider),
     frontierEnabled ? discoverPiFrontierVerification(options.cwd, options.contractPrompt) : Promise.resolve(null),
+    resolveCodaraPiWebSearchExtension(),
     writePiMcpBridgeConfig({
       audience: "cora",
       sessionId: options.sessionId,
@@ -280,13 +297,18 @@ export async function createCodaraPiLaunchPlan(
     executionPolicy: options.executionPolicy,
     cwd: options.cwd,
     bridgePath: paths.bridgePath,
-    extensionPaths: frontierEnabled
-      ? [
-          paths.extensionPath,
-          join(runtime.packageRoot, "examples", "extensions", "subagent", "index.ts"),
-          paths.frontierExtensionPath,
-        ]
-      : [paths.extensionPath],
+    extensionPaths: [
+      ...(frontierEnabled
+        ? [
+            paths.extensionPath,
+            join(runtime.packageRoot, "examples", "extensions", "subagent", "index.ts"),
+            paths.frontierExtensionPath,
+          ]
+        : [paths.extensionPath]),
+      // Web search is optional: an absent package simply leaves the roster
+      // unchanged rather than handing Pi a path it cannot load.
+      ...(webSearchExtensionPath ? [webSearchExtensionPath] : []),
+    ],
     frontierManifestPath,
     frontierManifestSha256,
     frontierAdmissionArtifactPath,
@@ -329,9 +351,10 @@ export async function createCodaraPiWorkerLaunchPlan(
   options: CreateCodaraPiWorkerLaunchOptions,
 ): Promise<PiManagerLaunchPlan> {
   const paths = codaraPiPaths();
-  const [runtime, auth] = await Promise.all([
+  const [runtime, auth, webSearchExtensionPath] = await Promise.all([
     resolveCodaraPiRuntime(),
     inspectPiSubscriptionAuth(paths.authFile, options.provider),
+    resolveCodaraPiWebSearchExtension(),
   ]);
   if (auth.expired && !auth.canRefresh) {
     throw new Error(`Pi provider ${options.provider} OAuth session expired and cannot refresh`);
@@ -365,7 +388,12 @@ export async function createCodaraPiWorkerLaunchPlan(
     executionPolicy: options.executionPolicy ?? "fast",
     cwd: options.cwd,
     bridgePath: paths.bridgePath,
-    extensionPaths: [paths.workerExtensionPath],
+    // Research workers get web_search alongside the worker extension; see the
+    // manager plan above for why a missing package is not an error.
+    extensionPaths: [
+      paths.workerExtensionPath,
+      ...(webSearchExtensionPath ? [webSearchExtensionPath] : []),
+    ],
     mcpConfigPath: mcp?.mcpConfigPath,
     mcpSdkDir: mcp?.mcpSdkDir,
     model: options.model,

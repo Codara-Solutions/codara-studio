@@ -4,14 +4,16 @@ import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
   findOpenQuestion,
+  isToolRowTicking,
   runtimeLabel,
   stepStatusColor,
+  toolDurationLabel,
   workerStatusColor,
   workerStatusLabel,
   type ChatTimelineItem,
   type ChatWorker,
 } from "./timeline";
-import { buildRunMaps, useRunReports } from "../runs/run-format";
+import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
 import { compactPreview, formatToolPayload, toolCallHeadline } from "./tool-labels";
@@ -153,25 +155,12 @@ export default function ChatConversation({ run }: { run: RunState }) {
     () => ({ executionByCallId, finalAnswerByCallId }),
     [executionByCallId, finalAnswerByCallId],
   );
-  const manifest = execution.result;
-  // A completed chat gets a manifest for durable inspection even when it only
-  // answered a question. Do not turn an observed dirty working tree into a
-  // giant "Evidence-backed result" card with 0/0 checks. The conversation
-  // surface shows this card only when the collector has substantive result
-  // claims; raw workspace deltas remain available in the Runs/Session
-  // inspectors.
-  const showResult =
-    run.status === "complete" &&
-    Boolean(
-      manifest &&
-        (manifest.outcomes.length > 0 ||
-          manifest.checks.length > 0 ||
-          manifest.evidence.length > 0 ||
-          manifest.risks.length > 0 ||
-          manifest.followups.length > 0),
-    );
-  const resultIndex = items.length;
-  const rowCount = items.length + (showResult ? 1 : 0);
+  // The result manifest is the worker's final-report envelope, written for
+  // Cora to review, not for the reader. It no longer gets a row here: the
+  // conversation keeps its one-line acknowledgement of a finished worker and
+  // the full evidence stays on the technical surfaces (the Runs inspector's
+  // "Result evidence" section and the RunsView header's checks count).
+  const rowCount = items.length;
   const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
 
   return (
@@ -204,15 +193,11 @@ export default function ChatConversation({ run }: { run: RunState }) {
           rangeChanged={setVisibleRange}
           increaseViewportBy={{ top: 600, bottom: 400 }}
           computeItemKey={(index) =>
-            index < items.length ? timelineItemKey(items[index]) : index === resultIndex && showResult ? "result-manifest" : "live"
+            index < items.length ? timelineItemKey(items[index]) : "live"
           }
           itemContent={(index, _data, context) => {
             const item = items[index];
-            const rowKind = index === resultIndex && showResult
-              ? "result"
-              : item?.kind === "activity-group"
-                ? "work"
-                : item?.kind ?? "empty";
+            const rowKind = item?.kind === "activity-group" ? "work" : item?.kind ?? "empty";
             const compactRow = rowKind === "tool" || rowKind === "work" || rowKind === "step";
             return (
               <div
@@ -230,9 +215,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
                   data-timeline-kind={rowKind}
                   style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
                 >
-                  {index === resultIndex && showResult && manifest ? (
-                    <ResultManifestCard manifest={manifest} />
-                  ) : item?.kind === "message" ? (
+                  {item?.kind === "message" ? (
                     <MessageTurn
                       item={item}
                       runId={run.id}
@@ -376,7 +359,13 @@ function ConversationMinimap({
   );
 }
 
-function ResultManifestCard({ manifest }: { manifest: NonNullable<RunState["resultManifest"]> }) {
+// Deliberately not mounted in the conversation. The manifest is the worker's
+// report to Cora, internal review machinery rather than something the reader
+// asked for, so the chat stream stays prose plus quiet activity rows. Exported
+// rather than deleted: the manifest data is untouched and a technical surface
+// can mount this as-is. The Runs inspector already renders the same manifest
+// under "Result evidence".
+export function ResultManifestCard({ manifest }: { manifest: NonNullable<RunState["resultManifest"]> }) {
   const cwd = manifest.workspace.cwd?.replace(/[\\/]+$/, "");
   const absolute = (path: string) =>
     !cwd || /^(?:[A-Za-z]:[\\/]|\/)/.test(path) ? path : `${cwd}/${path}`;
@@ -1404,6 +1393,10 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   finalAnswer?: string;
 }) {
   const live = item.tone === "live";
+  // Drives the elapsed readouts (the inline stats and the expanded meta line)
+  // off the wall clock while the row is running. Gated on the row itself, so a
+  // conversation with nothing in flight never re-renders on a timer.
+  useNowTick(1000, isToolRowTicking(item));
   // Failures stay compact by default: the headline already carries the exact
   // error and status, while the verbose manager metadata remains one click
   // away. Auto-expanding every failure produced the oversized red slabs seen
@@ -1758,9 +1751,12 @@ function ToolDetails({ item, compact = false }: { item: ToolItem; compact?: bool
   // stay in the data as lookup keys (compactToolStats, shouldRenderTimelineItem
   // match them by string); values are already self-describing. "Files" is
   // skipped — the file list below carries it.
+  // Duration reads through the live helper so an open row counts up in step
+  // with the collapsed one.
+  const liveDuration = toolDurationLabel(item);
   const metaLine = item.meta
     .filter((meta) => meta.label !== "Files")
-    .map((meta) => meta.value)
+    .map((meta) => (meta.label === "Duration" ? liveDuration ?? meta.value : meta.value))
     .join(" · ");
   const lineage = item.attempts && item.attempts.length > 1 ? item.attempts : null;
   return (
@@ -1841,7 +1837,7 @@ function activityGroupSummary(items: ToolItem[]): { title: string; detail: strin
 }
 
 function compactToolStats(item: ToolItem): string {
-  const duration = toolMetaValue(item, "Duration");
+  const duration = toolDurationLabel(item);
   if (item.activity === "context") {
     const files = toolMetaValue(item, "Files");
     return files ? `${files} ${files === "1" ? "file" : "files"}` : "";
@@ -1894,7 +1890,10 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   const pulse = worker.runtimeState === "working";
   const titleSuffix = worker.runtimeState ? ` · ${worker.runtimeState}` : "";
   const detail = [
-    runtimeLabel(worker.runtime),
+    // The model, not the runtime: "claude" only names the subscription Pi
+    // authenticates against, and two workers wearing it can be very different
+    // models. Falls back to the runtime label until an attempt reports one.
+    workerModelLabel(worker.model, runtimeLabel(worker.runtime)),
     workerStatusLabel(worker.status),
     (worker.attemptCount ?? 0) > 1 ? `attempt ${worker.attemptCount}` : null,
   ].filter(Boolean).join(" · ");

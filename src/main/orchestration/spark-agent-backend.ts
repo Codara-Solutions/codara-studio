@@ -126,6 +126,10 @@ export interface ManagerCallResult {
   cacheReadTokens?: number;
   promptTokens?: number;
   completionTokens?: number;
+  /** The model's context window, when the backend reported one for this turn.
+   *  Persisted onto the SparkCall so the context meter reads a real window
+   *  instead of contextWindowForModel()'s per-model default. */
+  contextWindowTokens?: number;
   /**
    * If the backend rotated this chat onto a new CLI session UUID (e.g. a
    * fresh `claude` spawn that printed a new id), it returns the new id here.

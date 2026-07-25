@@ -292,6 +292,17 @@ async function requestPiDecision(
       outputTokens: (restartContext?.outputTokens ?? 0) + accumulated.usage.outputTokens,
       cacheReadTokens: (restartContext?.cacheReadTokens ?? 0) + accumulated.usage.cacheReadTokens,
     };
+    // Context occupancy is a gauge, so it is the newest request's prompt size
+    // rather than a sum over the turn, and it is deliberately NOT carried into
+    // a Frontier restart: a restarted turn measures its own fresh session.
+    // promptTokens is the field run-store persists onto the SparkCall, which is
+    // where the Runs inspector and a re-opened chat read the meter from.
+    const contextUsage = {
+      ...(accumulated.contextTokens > 0 ? { promptTokens: accumulated.contextTokens } : {}),
+      ...(accumulated.contextWindowTokens !== null
+        ? { contextWindowTokens: accumulated.contextWindowTokens }
+        : {}),
+    };
     if (contractDriftDetected && session.executionPolicy === "frontier") {
       const restartCount = restartContext?.count ?? 0;
       if (restartCount >= MAX_FRONTIER_CONTRACT_RESTARTS) {
@@ -302,6 +313,7 @@ async function requestPiDecision(
           model: input.chat.model,
           newSessionUuid: session.sessionId,
           ...cumulativeUsage,
+          ...contextUsage,
           notice,
           turnFailed: true,
         };
@@ -333,6 +345,7 @@ async function requestPiDecision(
         model: input.chat.model,
         newSessionUuid: session.sessionId,
         ...cumulativeUsage,
+        ...contextUsage,
         notice: accumulated.failure,
         turnFailed: true,
       };
@@ -348,6 +361,7 @@ async function requestPiDecision(
         model: input.chat.model,
         newSessionUuid: session.sessionId,
         ...cumulativeUsage,
+        ...contextUsage,
         notice,
         turnFailed: true,
       };
@@ -390,6 +404,7 @@ async function requestPiDecision(
       model: input.chat.model,
       newSessionUuid: session.sessionId,
       ...cumulativeUsage,
+      ...contextUsage,
       notice: contractBlocked ? "Cora Frontier found a machine-validated contract blocker; repository mutation remained locked." : undefined,
     };
   } catch (error) {

@@ -78,6 +78,8 @@ Worker contract:
   built-in preview and agent terminal tabs, the same surface the user
   watches. Use them to verify visible UI and long-running commands for real
   (navigate, snapshot, evaluate, console, network) instead of guessing.
+- For web research, use the web_search tool rather than fetching pages with
+  curl or driving the preview browser, and cite the sources it returns.
 - Preserve existing user changes and obey every allowedPaths, forbiddenPaths,
   access, and verification constraint in the task prompt.
 - Inspect evidence before editing, run the requested verification, and inspect

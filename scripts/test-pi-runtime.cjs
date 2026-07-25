@@ -2,11 +2,14 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const esbuild = require("esbuild");
 const fs = require("node:fs");
 const Module = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
 const ts = require("typescript");
+
+const ROOT = path.resolve(__dirname, "..");
 
 function loadTypeScriptModule(sourcePath) {
   const source = fs.readFileSync(sourcePath, "utf8");
@@ -34,6 +37,53 @@ async function withTempDirectory(run) {
 const runtime = loadTypeScriptModule(
   path.join(__dirname, "..", "src", "main", "orchestration", "pi-runtime.ts"),
 );
+
+/**
+ * The launch plans themselves live in pi-runtime-electron.ts, which reaches
+ * Electron, Codara's settings store, and the MCP roster. Bundle it with those
+ * three edges stubbed so the assembled --extension roster can be asserted for
+ * real instead of being re-implemented here.
+ */
+async function loadElectronLaunchPlans(outDirectory) {
+  const stub = (contents) => ({ contents, loader: "js" });
+  const stubs = {
+    electron: `module.exports = { app: {
+      isPackaged: false,
+      getAppPath: () => ${JSON.stringify(ROOT)},
+      getPath: () => ${JSON.stringify(outDirectory)},
+    } };`,
+    storage: "module.exports = { loadSettings: async () => ({}) };",
+    "agent-sync": "module.exports = { listPiMcpServers: () => [] };",
+  };
+  const outfile = path.join(outDirectory, "pi-runtime-electron.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "main", "orchestration", "pi-runtime-electron.ts")],
+    outfile,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    logLevel: "silent",
+    plugins: [{
+      name: "pi-runtime-electron-harness",
+      setup(build) {
+        build.onResolve({ filter: /^@shared\// }, (args) => ({
+          path: path.join(ROOT, "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
+        }));
+        build.onResolve({ filter: /^(electron|\.\.\/storage|\.\.\/agent-sync)$/ }, (args) => ({
+          path: args.path.replace("../", ""),
+          namespace: "stub",
+        }));
+        build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => stub(stubs[args.path]));
+      },
+    }],
+  });
+  return require(outfile);
+}
+
+/** The values Pi receives, in order, from every --extension flag pair. */
+function extensionArgs(plan) {
+  return plan.args.filter((_value, index) => plan.args[index - 1] === "--extension");
+}
 
 async function main() {
   assert.equal(runtime.CODARA_PI_VERSION, "0.82.0");
@@ -74,6 +124,29 @@ async function main() {
       runtime.resolvePinnedPiRuntime([path.join(directory, "node_modules")]),
       /Version mismatches/,
     );
+  });
+
+  // Web search ships as a normal dependency of this repo. The resolver reads
+  // the package's own pi manifest, so it must find the real entry here.
+  const webSearchExtension = await runtime.resolvePiWebSearchExtension([
+    path.join(ROOT, "node_modules"),
+  ]);
+  assert.equal(typeof webSearchExtension, "string");
+  assert.equal(fs.existsSync(webSearchExtension), true);
+  assert.equal(
+    webSearchExtension.startsWith(path.join(ROOT, "node_modules", "pi-web-search") + path.sep),
+    true,
+  );
+  // A build without the package must degrade to no web search, never throw.
+  await withTempDirectory(async (directory) => {
+    assert.equal(await runtime.resolvePiWebSearchExtension([directory]), null);
+    const packageRoot = path.join(directory, "pi-web-search");
+    fs.mkdirSync(packageRoot, { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
+      name: "pi-web-search",
+      pi: { extensions: ["./src/index.ts"] },
+    }));
+    assert.equal(await runtime.resolvePiWebSearchExtension([directory]), null);
   });
 
   await withTempDirectory(async (directory) => {
@@ -125,6 +198,12 @@ async function main() {
   assert.equal(sanitized.SAFE_SETTING, "preserved");
   assert.equal(sanitized.PI_TELEMETRY, "0");
   assert.equal(sanitized.ELECTRON_RUN_AS_NODE, "1");
+  // Pinned inside Codara's own agent dir: pi-web-search must never fall back to
+  // reading the user's personal pi installation under $HOME/.pi.
+  assert.equal(
+    sanitized.PI_WEB_SEARCH_CONFIG,
+    path.join(path.resolve("/tmp/codara-pi-config"), "web-search.json"),
+  );
 
   const fakeRuntime = {
     packageRoot: "/runtime/pi",
@@ -261,6 +340,42 @@ async function main() {
     frontierAdmissionArtifactPath: "/config/frontier/incomplete.json",
     frontierAdmissionArtifactSha256: undefined,
   }), /complete content-addressed pair/);
+
+  await withTempDirectory(async (directory) => {
+    process.env.CODARA_HOME_DIR = directory;
+    const plans = await loadElectronLaunchPlans(directory);
+    const configDir = path.join(directory, "pi-agent");
+    fs.mkdirSync(configDir, { recursive: true });
+    const authPath = path.join(configDir, "auth.json");
+    fs.writeFileSync(authPath, JSON.stringify({
+      anthropic: { type: "oauth", access: "synthetic-access", refresh: "synthetic-refresh" },
+    }));
+    fs.chmodSync(authPath, 0o600);
+
+    const managerPlan = await plans.createCodaraPiLaunchPlan({
+      provider: "anthropic",
+      runId: "run-web-search",
+      mode: "execute",
+      sessionId: "session-web-search",
+      cwd: directory,
+    });
+    const managerExtensions = extensionArgs(managerPlan);
+    assert.equal(managerExtensions.length, 2);
+    assert.equal(path.basename(path.dirname(managerExtensions[0])), "pi-cora");
+    assert.equal(managerExtensions[1], webSearchExtension);
+    assert.equal(managerPlan.env.PI_WEB_SEARCH_CONFIG, path.join(configDir, "web-search.json"));
+
+    const workerPlan = await plans.createCodaraPiWorkerLaunchPlan({
+      provider: "anthropic",
+      runId: "run-web-search",
+      attemptId: "attempt-1",
+      cwd: directory,
+    });
+    const workerExtensions = extensionArgs(workerPlan);
+    assert.equal(workerExtensions.length, 2);
+    assert.equal(path.basename(workerExtensions[0]), "worker.ts");
+    assert.equal(workerExtensions[1], webSearchExtension);
+  });
 
   console.log("pi runtime policy: ok");
 }

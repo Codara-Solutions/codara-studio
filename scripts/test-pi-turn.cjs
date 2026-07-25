@@ -85,9 +85,46 @@ assert.deepEqual(turn.result(), {
   toolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
   successfulToolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
   usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 },
+  contextTokens: 180,
+  contextWindowTokens: null,
   failure: null,
   settled: true,
 });
+// The context gauge is the newest request's prompt (uncached input + cached
+// reads), and a second round replaces the first rather than adding to it,
+// while the billing counters keep accumulating.
+const gauge = new PiTurnAccumulator();
+gauge.consume({
+  type: "message_end",
+  message: { role: "assistant", timestamp: 1, content: [], usage: { input: 100, output: 5, cacheRead: 20 } },
+});
+gauge.consume({
+  type: "message_end",
+  message: {
+    role: "assistant",
+    timestamp: 2,
+    content: [],
+    // contextWindow is NOT a field the pinned Pi 0.82 ever emits on
+    // message_end; it is asserted here only to pin the forward-compat read in
+    // contextWindowFrom. Production Pi turns leave contextWindowTokens null
+    // and the renderer falls back to contextWindowForModel().
+    usage: { input: 40, output: 7, cacheRead: 300, contextWindow: 200000 },
+  },
+});
+assert.deepEqual(gauge.result().usage, { inputTokens: 140, outputTokens: 12, cacheReadTokens: 320 });
+assert.equal(gauge.result().contextTokens, 340);
+assert.equal(gauge.result().contextWindowTokens, 200000);
+// A production-shaped stream (no contextWindow anywhere) must leave the
+// window null rather than fabricating one.
+{
+  const bare = new PiTurnAccumulator();
+  bare.consume({
+    type: "message_end",
+    message: { role: "assistant", timestamp: 3, content: [], usage: { input: 9, output: 1 } },
+  });
+  assert.equal(bare.result().contextTokens, 9);
+  assert.equal(bare.result().contextWindowTokens, null);
+}
 assert.deepEqual(stream.filter((event) => event.kind === "assistant_block").map((event) => event.text), ["Hello ", "world"]);
 assert.equal(stream.filter((event) => event.kind === "tool_use").length, 1);
 assert.deepEqual(stream.find((event) => event.kind === "tool_result"), {

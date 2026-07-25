@@ -4,6 +4,9 @@ import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
 export const CODARA_PI_VERSION = "0.82.0";
+/** Vendored Pi extension that registers the provider-native web_search tool.
+ * It is a normal dependency of this repo, never the user's own pi packages. */
+export const CODARA_PI_WEB_SEARCH_PACKAGE = "pi-web-search";
 export const CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT =
   "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -169,6 +172,36 @@ export async function resolvePinnedPiRuntime(
 }
 
 /**
+ * Locate the vendored pi-web-search extension entry, reading the package's own
+ * `pi` manifest instead of hardcoding its layout. Returns null rather than
+ * throwing: web search is an enhancement, so a build without the package must
+ * still launch a session.
+ */
+export async function resolvePiWebSearchExtension(
+  nodeModulesRoots: readonly string[],
+): Promise<string | null> {
+  for (const root of nodeModulesRoots) {
+    const packageRoot = join(resolve(root), CODARA_PI_WEB_SEARCH_PACKAGE);
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!isRecord(manifest) || manifest.name !== CODARA_PI_WEB_SEARCH_PACKAGE) continue;
+    const piManifest = isRecord(manifest.pi) ? manifest.pi : null;
+    const declared = Array.isArray(piManifest?.extensions) ? piManifest.extensions : [];
+    for (const entry of declared) {
+      if (!nonEmptyString(entry)) continue;
+      const entryPath = resolve(packageRoot, entry);
+      const entryStat = await stat(entryPath).catch(() => null);
+      if (entryStat?.isFile()) return entryPath;
+    }
+  }
+  return null;
+}
+
+/**
  * Validate that Pi will authenticate through an OAuth subscription record. The
  * returned object deliberately contains no access or refresh token.
  */
@@ -224,6 +257,11 @@ export function buildPiSubscriptionEnvironment(
   env.PI_CODING_AGENT_DIR = resolve(configDir);
   env.PI_CODING_AGENT_SESSION_DIR = resolve(sessionDir);
   env.PI_TELEMETRY = "0";
+  // pi-web-search reads an optional search-model override from this path and
+  // otherwise defaults to $HOME/.pi, the user's own pi installation. Pin it
+  // inside Codara's isolated agent dir: no file exists there, so the extension
+  // searches with the session's own model and Codara never reads ~/.pi.
+  env.PI_WEB_SEARCH_CONFIG = join(resolve(configDir), "web-search.json");
   return env;
 }
 
