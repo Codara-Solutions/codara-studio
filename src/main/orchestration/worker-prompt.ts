@@ -185,6 +185,7 @@ function renderWebResearchGuidance(run: RunState, task: WorkerTask): string[] {
   if (!usesPiWorkerHarness(run, task)) return [];
   return [
     "- Use the `web_search` tool for anything you need from the open web instead of fetching pages with curl or driving the preview browser, and cite the sources it returns in `proof[]`.",
+    "- If `web_search` fails or rate-limits, fall back to fetching public endpoints (RSS feeds, published APIs) directly rather than waiting for the limit to clear. Never sleep longer than 60 seconds in one command; the wall clock is user-visible.",
   ];
 }
 
@@ -586,7 +587,7 @@ function renderImplementationWorkerPrompt({
       {
         status: "complete | partial | blocked | failed",
         summary: "What changed and why.",
-        files_changed: [{ path: "path/to/file", reason: "Why it changed." }],
+        files_changed: [{ path: "path/to/file", reason: "Why it changed. Workspace files only: never list this report file or anything under the run's artifact directory." }],
         commands_run: [{ command: "npm run typecheck", exitCode: 0, summary: "What the command proved." }],
         tests: [{ command: "npm run typecheck", result: "passed | failed | not_run", details: "Optional detail." }],
         proof: ["Concrete evidence that the task is done."],

@@ -79,7 +79,11 @@ Worker contract:
   watches. Use them to verify visible UI and long-running commands for real
   (navigate, snapshot, evaluate, console, network) instead of guessing.
 - For web research, use the web_search tool rather than fetching pages with
-  curl or driving the preview browser, and cite the sources it returns.
+  curl or driving the preview browser, and cite the sources it returns. If a
+  search fails or rate-limits, fall back to fetching public endpoints (RSS
+  feeds, published APIs) directly instead of waiting for the limit to clear.
+- Never sleep longer than 60 seconds in one command. Long waits burn the wall
+  clock the user is watching; retry sooner or switch data source instead.
 - Preserve existing user changes and obey every allowedPaths, forbiddenPaths,
   access, and verification constraint in the task prompt.
 - Inspect evidence before editing, run the requested verification, and inspect
