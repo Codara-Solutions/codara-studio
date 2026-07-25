@@ -152,6 +152,15 @@ export default function SubscriptionUsage() {
     load(false);
   }, [load]);
 
+  // A connect, disconnect, or completed login flow anywhere in the app drops
+  // the main-process cache and pushes this event; re-read so the panel shows
+  // the new session's limits without the user pressing Refresh.
+  useEffect(() => {
+    return window.spark.piSubscriptions.onEvent((event) => {
+      if (event.type === "changed" || event.type === "completed") load(false);
+    });
+  }, [load]);
+
   const anyConnected = overview?.providers.some((provider) => provider.status !== "not_connected");
 
   return (

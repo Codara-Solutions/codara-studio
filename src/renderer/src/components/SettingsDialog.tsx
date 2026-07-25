@@ -1488,6 +1488,13 @@ function PiSubscriptionSettings() {
   useEffect(() => {
     refresh();
     const remove = window.spark.piSubscriptions.onEvent((event) => {
+      // Broadcast store-change pings carry no login-flow state; they exist for
+      // the always-on usage surfaces. This dialog re-reads the connection
+      // overview and leaves the login view alone.
+      if (event.type === "changed") {
+        refresh();
+        return;
+      }
       setPromptValue("");
       if (event.type === "completed") {
         setOverview(event.overview);

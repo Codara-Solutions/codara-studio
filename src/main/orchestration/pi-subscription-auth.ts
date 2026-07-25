@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { shell, type WebContents } from "electron";
+import { BrowserWindow, shell, type WebContents } from "electron";
 import type {
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
@@ -139,6 +139,17 @@ function publicPrompt(prompt: OAuthInteractionPrompt): PiSubscriptionPrompt {
 
 function send(owner: WebContents, event: PiSubscriptionAuthEvent): void {
   if (!owner.isDestroyed()) owner.send("pi-subscriptions:event", event);
+}
+
+// Auth-store mutations reach EVERY window, not just the one that ran the login
+// flow. The title-bar usage pills poll on a slow interval and hide anything
+// that is not status "ok", so without this push a reconnected subscription
+// stayed invisible until the next poll or an app restart.
+function broadcastSubscriptionsChanged(provider: PiSubscriptionProvider): void {
+  const event: PiSubscriptionAuthEvent = { type: "changed", provider };
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send("pi-subscriptions:event", event);
+  }
 }
 
 async function openOAuthUrl(url: string): Promise<void> {
@@ -284,6 +295,7 @@ async function persistCredential(provider: PiSubscriptionProvider, credential: O
   invalidatePiSubscriptionUsageCache();
   const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
   invalidatePiModelCatalogCache();
+  broadcastSubscriptionsChanged(provider);
 }
 
 async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
@@ -499,5 +511,6 @@ export async function disconnectPiSubscription(rawProvider: unknown): Promise<Pi
   invalidatePiSubscriptionUsageCache();
   const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
   invalidatePiModelCatalogCache();
+  broadcastSubscriptionsChanged(provider);
   return inspectPiSubscriptions();
 }

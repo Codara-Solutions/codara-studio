@@ -296,15 +296,20 @@ function UsagePill({
 }) {
   const [hover, setHover] = useState(false);
   const ref = useRef<HTMLButtonElement>(null);
+  // An expired session keeps its pill: silently dropping it made a dead
+  // subscription look like it was never connected, and the user only learned
+  // about it when workers started failing. The pill says "reconnect" instead
+  // of numbers; the popover carries the full message.
+  const expired = usage.status === "expired";
   const worst = tightestWindow(usage);
-  if (!worst) return null;
+  if (!worst && !expired) return null;
   // Every plan window gets its own labelled entry. Showing only the tightest
   // one hid the fact that Anthropic HAS two, and made the number ambiguous:
   // "45%" could have been either window depending on which was worse today.
   // Falls back to the tightest window if none of them parse as a plan window,
   // so an unrecognized shape still renders something truthful.
   const shown = planWindows(usage);
-  const entries = shown.length > 0 ? shown : [worst];
+  const entries = shown.length > 0 ? shown : worst ? [worst] : [];
   return (
     <button
       ref={ref}
@@ -312,9 +317,13 @@ function UsagePill({
       data-window-control
       data-usage-pill
       aria-expanded={open}
-      title={`${usage.label} · ${entries
-        .map((entry) => `${entry.label} ${Math.round(entry.usedPercent)}% used`)
-        .join(" · ")}`}
+      title={
+        entries.length > 0
+          ? `${usage.label} · ${entries
+              .map((entry) => `${entry.label} ${Math.round(entry.usedPercent)}% used`)
+              .join(" · ")}`
+          : `${usage.label} · session expired, reconnect`
+      }
       onClick={() => onToggle(open ? null : (ref.current?.getBoundingClientRect() ?? null))}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -354,6 +363,9 @@ function UsagePill({
       >
         <ProviderGlyph provider={usage.provider} />
       </span>
+      {entries.length === 0 && expired ? (
+        <span style={{ color: "var(--warn, #d99a2b)", fontWeight: 650 }}>reconnect</span>
+      ) : null}
       {entries.map((entry, index) => (
         <span
           key={entry.id}
@@ -403,6 +415,17 @@ export default function UsageMeters() {
     return () => clearInterval(timer);
   }, [load]);
 
+  // Re-read the moment the auth store changes (connect, disconnect, or a
+  // login flow completing). The main process has already dropped its usage
+  // cache by the time these events fire, so a non-forced load reads live and
+  // a fresh reconnect surfaces here immediately instead of after the next
+  // poll tick or an app restart.
+  useEffect(() => {
+    return window.spark.piSubscriptions.onEvent((event) => {
+      if (event.type === "changed" || event.type === "completed") load(false);
+    });
+  }, [load]);
+
   // Dismiss on outside click / Escape, and on any scroll or resize — the
   // popover is anchored to a rect captured at click time, so it would otherwise
   // drift away from its pill.
@@ -429,9 +452,14 @@ export default function UsageMeters() {
   }, [openProvider]);
 
   // Only connected subscriptions earn space up here; an unconnected provider
-  // has nothing to report and a "not connected" chip would be pure noise.
+  // has nothing to report and a "not connected" chip would be pure noise. An
+  // EXPIRED one is different: it was connected, its workers will fail, and
+  // hiding it is how the user finds out the hard way. It keeps a pill that
+  // says "reconnect".
   const connected = (overview?.providers ?? []).filter(
-    (provider) => provider.status === "ok" && provider.windows.length > 0,
+    (provider) =>
+      (provider.status === "ok" && provider.windows.length > 0) ||
+      provider.status === "expired",
   );
   if (connected.length === 0) return null;
   const active = connected.find((provider) => provider.provider === openProvider) ?? null;

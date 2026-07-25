@@ -304,6 +304,16 @@ export type PiSubscriptionAuthEvent =
       requestId: string;
       provider: PiSubscriptionProvider;
       message: string;
+    }
+  | {
+      // The auth store changed outside a login flow this window is watching:
+      // a credential was written (connect or refresh recovery) or deleted
+      // (disconnect). Broadcast to every window so always-on surfaces like the
+      // title-bar usage pills re-read immediately instead of waiting out their
+      // poll interval, which is why a reconnect used to need an app restart to
+      // show up.
+      type: "changed";
+      provider: PiSubscriptionProvider;
     };
 
 // User-facing preferences (theme, editor flags, etc.) live in a separate

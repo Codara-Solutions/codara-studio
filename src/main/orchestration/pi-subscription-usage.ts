@@ -136,7 +136,7 @@ async function readStoredCredential(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error("Pi's auth store is not valid JSON — reconnect the subscription.");
+    throw new Error("Pi's auth store is not valid JSON. Reconnect the subscription.");
   }
   if (!isRecord(parsed)) return null;
   const record = parsed[provider];
@@ -346,7 +346,7 @@ async function anthropicUsage(checkedAt: string): Promise<PiUsageProvider> {
   const resolved = await usableAccessToken("anthropic");
   if (!resolved) return notConnected("anthropic", checkedAt);
   if (!resolved.access) {
-    return problem("anthropic", checkedAt, "expired", "Session expired — reconnect Claude Pro / Max.");
+    return problem("anthropic", checkedAt, "expired", "Session expired. Reconnect Claude Pro / Max.");
   }
   const result = await fetchJsonRecord("https://api.anthropic.com/api/oauth/usage", {
     authorization: `Bearer ${resolved.access}`,
@@ -355,7 +355,7 @@ async function anthropicUsage(checkedAt: string): Promise<PiUsageProvider> {
   });
   if (!result.ok) {
     if (result.status === 401 || result.status === 403) {
-      return problem("anthropic", checkedAt, "expired", "Claude rejected the stored session — reconnect.");
+      return problem("anthropic", checkedAt, "expired", "Claude rejected the stored session. Reconnect.");
     }
     return problem("anthropic", checkedAt, "error", `Claude usage check failed (HTTP ${result.status}).`);
   }
@@ -395,7 +395,7 @@ async function codexUsage(checkedAt: string): Promise<PiUsageProvider> {
   const resolved = await usableAccessToken("openai-codex");
   if (!resolved) return notConnected("openai-codex", checkedAt);
   if (!resolved.access) {
-    return problem("openai-codex", checkedAt, "expired", "Session expired — reconnect ChatGPT Plus / Pro.");
+    return problem("openai-codex", checkedAt, "expired", "Session expired. Reconnect ChatGPT Plus / Pro.");
   }
   const accountId = resolved.credential.accountId ?? accountIdFromAccessToken(resolved.access);
   if (!accountId) {
@@ -403,7 +403,7 @@ async function codexUsage(checkedAt: string): Promise<PiUsageProvider> {
       "openai-codex",
       checkedAt,
       "error",
-      "ChatGPT usage needs an account id that this session did not provide — reconnect.",
+      "ChatGPT usage needs an account id that this session did not provide. Reconnect.",
     );
   }
   const result = await fetchJsonRecord("https://chatgpt.com/backend-api/wham/usage", {
@@ -414,7 +414,7 @@ async function codexUsage(checkedAt: string): Promise<PiUsageProvider> {
   });
   if (!result.ok) {
     if (result.status === 401 || result.status === 403) {
-      return problem("openai-codex", checkedAt, "expired", "ChatGPT rejected the stored session — reconnect.");
+      return problem("openai-codex", checkedAt, "expired", "ChatGPT rejected the stored session. Reconnect.");
     }
     return problem("openai-codex", checkedAt, "error", `ChatGPT usage check failed (HTTP ${result.status}).`);
   }
