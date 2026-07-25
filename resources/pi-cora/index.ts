@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import {
   buildCoraPiSystemPrompt,
@@ -91,6 +92,10 @@ ${mcp?.promptSuffix() ?? ""}`,
       },
     });
   }
+
+  // The manager shares the workers' free search fallback: web_search first,
+  // deep_search when it fails or a plan needs page-level depth.
+  registerDeepSearch(pi);
 
   // An unreachable or misconfigured MCP roster must never cost Cora her studio
   // tools or her system contract, so registration is isolated from the rest of

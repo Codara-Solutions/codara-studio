@@ -37,6 +37,7 @@ const PROMPT_SURFACES = [
   "resources/pi-cora/prompt.ts",
   "resources/pi-cora/worker.ts",
   "resources/pi-cora/mcp-bridge.ts",
+  "resources/pi-cora/deep-search.ts",
 ];
 
 const EM_DASH = "—";

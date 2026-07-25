@@ -24,6 +24,7 @@
     "test:pi-frontier-gate": "node scripts/test-pi-frontier-gate.mjs",
     "test:pi-rpc": "node scripts/test-pi-rpc-client.cjs",
     "test:pi-turn": "node scripts/test-pi-turn.cjs && node scripts/test-pi-cora-extension.cjs",
+    "test:deep-search": "node scripts/test-deep-search.cjs",
     "smoke:pi-live": "node scripts/smoke-pi-live.cjs",
     "smoke:pi-worker-live": "node scripts/smoke-pi-worker-live.cjs",
     "smoke:pi-frontier-live": "node scripts/smoke-pi-frontier-live.cjs",
@@ -50,7 +51,8 @@
     "postinstall": "electron-builder install-app-deps",
     "test:usage-windows": "node scripts/test-usage-windows.cjs",
     "test:prompt-punctuation": "node scripts/test-prompt-punctuation.cjs",
-    "test:chat-timeline": "node scripts/test-chat-timeline.cjs"
+    "test:chat-timeline": "node scripts/test-chat-timeline.cjs",
+    "test:run-graph-layout": "node scripts/test-run-graph-layout.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",

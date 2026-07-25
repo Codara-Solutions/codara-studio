@@ -2260,6 +2260,13 @@ export interface WorkerTask {
   // serial chain. Undefined on planner/autopilot-created tasks, which stay
   // subject to the fan-out no-concrete-scope serial downgrade.
   parallelTrust?: "manager_batch";
+  // True when this task's attempt was wired for peer comms: the worker got the
+  // shared mailbox (peer_send / peer_inbox and the manager channel riding the
+  // same artifacts) because it runs alongside same-step siblings. Written by
+  // prepareWorkerTask from shouldUsePeerComms, so the renderer can draw the
+  // batch as a team instead of guessing at the gate. Undefined on tasks that
+  // predate the flag and on every solo worker, both of which render unchanged.
+  peerComms?: boolean;
   // Plan-mode council: candidates of the same council share this id and each
   // carries its 0-based candidateIndex. Undefined for normal tasks. Lets same-
   // scope council candidates run in parallel and groups them in the run graph.

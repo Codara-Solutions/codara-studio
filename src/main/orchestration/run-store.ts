@@ -9719,6 +9719,12 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     createdAt: timestamp,
   };
   const peerCommsEnabled = shouldUsePeerComms(run, step, task);
+  // Persist the gate's answer on the task itself. The renderer already receives
+  // workerTasks, so this is what lets the run graph draw the batch as a team
+  // that can message itself rather than as isolated satellites. `task` is the
+  // live run record, and both the envelope JSON below and saveRun pick it up.
+  if (peerCommsEnabled) task.peerComms = true;
+  else delete task.peerComms;
   if (peerCommsEnabled) {
     await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
   }
@@ -11432,6 +11438,9 @@ async function maybeQueueCliLaunchFallback({
         // must be picked into the same relaunch wave as its sibling fallbacks
         // instead of serializing behind them.
         parallelTrust: task.parallelTrust,
+        // The replacement joins the same batch, so it inherits the team marker
+        // and the graph keeps showing the peer link across the runtime swap.
+        peerComms: task.peerComms,
         createdBy: "system",
         createdAt: timestamp,
         updatedAt: timestamp,

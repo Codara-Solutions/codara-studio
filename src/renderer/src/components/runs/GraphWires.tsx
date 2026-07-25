@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import type { RunState, StepState } from "@shared/types";
-import type { FanWire, RunGraphLayout, SpineWire } from "./graph-layout";
+import type { FanWire, PeerWire, Point, RunGraphLayout, SpineWire } from "./graph-layout";
 import { deriveAgentStatus, type RunMaps } from "./run-format";
 
 // The wire layer. One SVG sized to the whole graph, drawn beneath the nodes:
@@ -22,6 +22,13 @@ const WIRE_COLOR: Record<WireState, string> = {
   blocked: "var(--danger)",
   paused: "color-mix(in oklch, var(--info) 60%, var(--rule-strong))",
 };
+
+// The peer thread is deliberately outside the WireState palette: it carries no
+// status at all. It says two worker cards share a mailbox, so it stays a quiet
+// neutral hairline that can never be mistaken for a lane doing work.
+const PEER_WIRE_COLOR = "color-mix(in oklab, var(--ink) 26%, transparent)";
+const PEER_TOOLTIP =
+  "Peer link: these workers share a mailbox and can message each other while they work.";
 
 // The dash flow collapses via CSS for prefers-reduced-motion; the travelling
 // dot is SMIL, so it needs an explicit gate. Snapshot at load — a live
@@ -58,6 +65,34 @@ function flowPath(wire: {
   }
   const dx = Math.max(46, Math.abs(to.x - from.x) * 0.5);
   return `M ${from.x},${from.y} C ${from.x + dx},${from.y} ${to.x - dx},${to.y} ${to.x},${to.y}`;
+}
+
+// The peer thread is an axis-aligned polyline, so it draws as straight runs
+// with softened corners rather than beziers: it must not mimic the flowing
+// shape of a branch wire. A hard right angle on a hairline dash reads as a
+// glitch, so each corner is eased with a short quadratic.
+function polylinePath(points: readonly Point[], radius = 12): string {
+  if (points.length < 2) return "";
+  let d = `M ${points[0].x},${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const corner = points[i];
+    const entry = pointToward(corner, points[i - 1], radius);
+    const exit = pointToward(corner, points[i + 1], radius);
+    d += ` L ${entry.x},${entry.y} Q ${corner.x},${corner.y} ${exit.x},${exit.y}`;
+  }
+  const last = points[points.length - 1];
+  return `${d} L ${last.x},${last.y}`;
+}
+
+// A point `radius` along the way from `from` to `towards`, never past the
+// halfway mark so two close corners cannot swallow each other's segment.
+function pointToward(from: Point, towards: Point, radius: number): Point {
+  const dx = towards.x - from.x;
+  const dy = towards.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return { x: from.x, y: from.y };
+  const scale = Math.min(radius, length / 2) / length;
+  return { x: from.x + dx * scale, y: from.y + dy * scale };
 }
 
 // A paused run has no travelling work, so no wire may animate. Everything that
@@ -189,6 +224,50 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
         pointerEvents: "none",
       }}
     >
+      {/* Peer threads, painted first so every real wire crosses over them: the
+          dashed link between sibling workers that were given a shared mailbox.
+          It is a relationship, not a route, so it never lights up and never
+          animates. The group re-enables pointer events on its own strokes and
+          label so the tooltip explains itself on hover. */}
+      {layout.peerWires.length > 0 && (
+        <g style={{ pointerEvents: "visiblePainted" }}>
+          <title>{PEER_TOOLTIP}</title>
+          {layout.peerWires.map((wire) => (
+            <path
+              key={wire.id}
+              d={polylinePath(wire.points)}
+              fill="none"
+              stroke={PEER_WIRE_COLOR}
+              strokeWidth={1.1}
+              strokeDasharray="3 5"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+          {layout.peerWires.map((wire) => {
+            const anchor = peerLabelAnchor(wire);
+            if (!anchor) return null;
+            return (
+              <text
+                key={`${wire.id}:label`}
+                x={anchor.x}
+                y={anchor.y}
+                textAnchor="middle"
+                style={{
+                  fill: "var(--muted)",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 9,
+                  letterSpacing: "0.07em",
+                  opacity: 0.72,
+                }}
+              >
+                peers
+              </text>
+            );
+          })}
+        </g>
+      )}
+
       {/* Spine wires — links with no fan between them. */}
       {layout.spineWires.map((wire) => {
         const state = settleWhilePaused(
@@ -292,6 +371,16 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
       />
     </svg>
   );
+}
+
+// Where the one-word legend for a peer thread sits: centred just under the
+// bridge that closes the team loop below the fan, the only stretch of the
+// thread with clear space around it. Chain segments run in the gap between two
+// cards and get no label, one legend per fan is the point.
+function peerLabelAnchor(wire: PeerWire): Point | null {
+  if (wire.kind !== "bridge" || wire.points.length < 4) return null;
+  const [, corner, nextCorner] = wire.points;
+  return { x: (corner.x + nextCorner.x) / 2, y: corner.y + 13 };
 }
 
 // State for one worker's branch: it mirrors the agent's live state, so a

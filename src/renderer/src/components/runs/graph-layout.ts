@@ -13,9 +13,13 @@
  * width and spend the height the canvas already has. Each worker connects only
  * to its own step: the branch leaves the step's bottom edge and enters the
  * near vertical edge of the card, so the branches nest like a bracket instead
- * of crossing the cards below them. Past COLUMN_SPLIT_AT workers the stack
- * splits into two mirrored columns (left column first, reading top-down, then
- * the right) so a very wide batch does not become a very tall one.
+ * of crossing the cards below them. Any fan of two or more hangs off BOTH
+ * sides of the step's centreline like octopus arms, which keeps the batch
+ * balanced under the step it belongs to and halves how deep the stack runs.
+ *
+ * Workers a step wired for peer comms can message each other, and the layout
+ * says so: a dashed thread chains the peer cards down each column and closes
+ * under the fan, so a batch reads as a team rather than as isolated satellites.
  *
  * The spine runs clear above the whole fan. Nodes are placed absolutely and
  * the wire layer draws from these same boxes, so the graph reads as one
@@ -36,9 +40,10 @@ export interface Point {
   y: number;
 }
 
-// Which side of its step's centreline a worker card sits on. A one-column fan
-// is always "right"; a split fan mirrors, so both columns are entered from the
-// centre and neither branch crosses the other column's cards.
+// Which side of its step's centreline a worker card sits on. A lone worker is
+// always "right"; every larger fan mirrors across the centreline, so both
+// columns are entered from the centre and neither branch crosses the other
+// column's cards.
 export type FanSide = "left" | "right";
 
 export interface WorkerLayout {
@@ -49,6 +54,10 @@ export interface WorkerLayout {
   agentIndex: number;
   box: Box;
   side: FanSide;
+  // True when this worker's task was wired for peer comms, so it can message
+  // its same-step siblings. Drives the dashed team thread; false for solo
+  // workers and for every task that predates the flag.
+  peerComms: boolean;
   // Where this worker's branch lands: the midpoint of the card edge facing the
   // step's centreline. The wire layer draws its port here too, so the wire and
   // the port can never disagree about where the branch meets the card.
@@ -88,12 +97,26 @@ export interface FanWire {
   taskId?: string;
 }
 
+// A link between SIBLING workers, not a path work travels along: it says the
+// two cards it touches share a mailbox and can message each other. Drawn as an
+// open polyline (a "chain" segment down one column, or the "bridge" that dips
+// under the fan to join the two columns) so the whole batch ends up on one
+// dashed thread without an N-squared mesh. The wire layer strokes it dashed
+// and muted, and never lets it read as active work.
+export interface PeerWire {
+  id: string;
+  stepId: string;
+  kind: "chain" | "bridge";
+  points: Point[];
+}
+
 export interface RunGraphLayout {
   sparkBox: Box;
   steps: StepLayout[];
   endBox: Box;
   spineWires: SpineWire[];
   fanWires: FanWire[];
+  peerWires: PeerWire[];
   width: number;
   height: number;
 }
@@ -121,9 +144,10 @@ const WORKER_V_GAP = 16;
 // Horizontal clearance from the step's centreline (where the branches leave)
 // to the near edge of a worker column. This is the bracket's elbow room.
 const FAN_INDENT = 46;
-// Past this many workers one column would out-run the canvas' height, so the
-// stack splits into two mirrored columns.
-const COLUMN_SPLIT_AT = 6;
+// How far under the deepest card of a fan the peer bridge runs. The dashed
+// thread closes below every card, which is empty space no branch wire reaches,
+// so joining the two columns costs no crossings.
+const PEER_BUS_DROP = 26;
 
 export function boxCenter(box: Box): Point {
   return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
@@ -141,21 +165,80 @@ function bottomPort(box: Box): Point {
   return { x: box.x + box.w / 2, y: box.y + box.h };
 }
 
+function topPort(box: Box): Point {
+  return { x: box.x + box.w / 2, y: box.y };
+}
+
 // Where each worker of a fan of `count` sits: which column, and how far down
-// it. One column hangs to the right of the step's centreline; a fan past the
-// split threshold mirrors into two, filling the left column top-down first so
-// it reads like any two-column layout.
+// it. A lone worker hangs to the right of the step's centreline. Every fan of
+// two or more mirrors into two columns, ceil(n/2) on the right and the rest on
+// the left, each column filled top-down in spawn order. Splitting from two up
+// (rather than only past some width) is what makes a batch read as arms either
+// side of the step instead of a lopsided tail, and it keeps the deepest column
+// half as long.
 function fanSlots(count: number): Array<{ side: FanSide; row: number }> {
   if (count <= 0) return [];
-  if (count <= COLUMN_SPLIT_AT) {
-    return Array.from({ length: count }, (_, index) => ({ side: "right" as const, row: index }));
-  }
-  const leftCount = Math.ceil(count / 2);
+  if (count === 1) return [{ side: "right", row: 0 }];
+  const rightCount = Math.ceil(count / 2);
   return Array.from({ length: count }, (_, index) =>
-    index < leftCount
-      ? { side: "left" as const, row: index }
-      : { side: "right" as const, row: index - leftCount },
+    index < rightCount
+      ? { side: "right" as const, row: index }
+      : { side: "left" as const, row: index - rightCount },
   );
+}
+
+// The dashed team thread for one step's fan. Peers chain to the sibling below
+// them in their own column, and one bridge dips under the fan to join the two
+// columns, so every peer ends up on a single connected thread with n-1 links
+// rather than an unreadable n-squared mesh. Cards without the flag are skipped;
+// a fan with fewer than two peers gets no thread at all.
+function peerWiresForStep(stepId: string, workers: readonly WorkerLayout[]): PeerWire[] {
+  const peers = workers.filter((worker) => worker.peerComms);
+  if (peers.length < 2) return [];
+  // Peer comms is a per-batch fact, so a step is either all-flagged or (across
+  // an upgrade boundary, where some sibling tasks predate the flag) mixed. In
+  // the mixed case the chain and bridge would run behind the unflagged cards,
+  // visually enrolling them in a mailbox they do not have, so draw nothing:
+  // truthful and only transitional. Task-less agent slots never veto.
+  const mixed = workers.some((worker) => worker.taskId && !worker.peerComms);
+  if (mixed) return [];
+  const left = peers.filter((peer) => peer.side === "left");
+  const right = peers.filter((peer) => peer.side === "right");
+  const wires: PeerWire[] = [];
+  for (const column of [left, right]) {
+    for (let i = 0; i + 1 < column.length; i++) {
+      const upper = column[i];
+      const lower = column[i + 1];
+      wires.push({
+        id: `peer:${stepId}:${upper.rowKey}:${lower.rowKey}`,
+        stepId,
+        kind: "chain",
+        // Straight down the card's own centre line, through the gap between
+        // the two cards. Branch wires never enter that band, so the thread
+        // crosses nothing on its way.
+        points: [bottomPort(upper.box), topPort(lower.box)],
+      });
+    }
+  }
+  const lastLeft = left[left.length - 1];
+  const lastRight = right[right.length - 1];
+  if (lastLeft && lastRight) {
+    const busY =
+      peers.reduce((deepest, peer) => Math.max(deepest, peer.box.y + peer.box.h), 0) +
+      PEER_BUS_DROP;
+    wires.push({
+      id: `peer:${stepId}:bridge`,
+      stepId,
+      kind: "bridge",
+      points: [
+        bottomPort(lastLeft.box),
+        { x: lastLeft.box.x + lastLeft.box.w / 2, y: busY },
+        { x: lastRight.box.x + lastRight.box.w / 2, y: busY },
+        bottomPort(lastRight.box),
+      ],
+    });
+  }
+  return wires;
 }
 
 // How far a step's fan reaches past the step box on either side. The column
@@ -225,6 +308,7 @@ export function computeRunGraphLayout(
         agentIndex: j,
         box: workerBox,
         side: slot.side,
+        peerComms: row.task?.peerComms === true,
         port: {
           x: slot.side === "right" ? workerBox.x : workerBox.x + workerBox.w,
           y: workerBox.y + workerBox.h / 2,
@@ -249,6 +333,7 @@ export function computeRunGraphLayout(
   // to, never stops on the spine.
   const spineWires: SpineWire[] = [];
   const fanWires: FanWire[] = [];
+  const peerWires: PeerWire[] = [];
   if (stepLayouts.length === 0) {
     spineWires.push({
       id: "spark-end",
@@ -287,13 +372,15 @@ export function computeRunGraphLayout(
           taskId: worker.taskId,
         });
       }
+      peerWires.push(...peerWiresForStep(layout.stepId, layout.workers));
     });
   }
 
   // Content extent. The deepest point is the bottom of the longest worker
-  // stack, and the rightmost is normally COMPLETE, but the right column under
-  // the final step can reach past it. The canvas fits to these numbers, so
-  // anything missed here would be silently cropped out of the view.
+  // stack (or the peer bridge running under it), and the rightmost is normally
+  // COMPLETE, but the right column under the final step can reach past it. The
+  // canvas fits to these numbers, so anything missed here would be silently
+  // cropped out of the view.
   let maxBottom = Math.max(sparkBox.y + sparkBox.h, endBox.y + endBox.h);
   let maxRight = endBox.x + endBox.w;
   for (const layout of stepLayouts) {
@@ -304,6 +391,12 @@ export function computeRunGraphLayout(
     }
     if (bottom > maxBottom) maxBottom = bottom;
   }
+  for (const wire of peerWires) {
+    for (const point of wire.points) {
+      if (point.y > maxBottom) maxBottom = point.y;
+      if (point.x > maxRight) maxRight = point.x;
+    }
+  }
 
   return {
     sparkBox,
@@ -311,6 +404,7 @@ export function computeRunGraphLayout(
     endBox,
     spineWires,
     fanWires,
+    peerWires,
     width: maxRight + PAD_X,
     height: maxBottom + BOTTOM_PAD,
   };
