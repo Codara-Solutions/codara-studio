@@ -23,7 +23,7 @@ Use `codara_whiteboard_get` and `codara_whiteboard_update` when a spatial explan
 ### `codara_spawn_terminals({ terminals: [...] })`
 Open one persistent terminal tab containing a balanced grid of user-driven agent sessions. Each entry is `{ runtime: "claude" | "codex", count: number, model?: string, effort?: "low" | "medium" | "high" | "xhigh" | "max" }`. Two Claude panes: `{ terminals: [{ runtime: "claude", count: 2 }] }`. One Claude and one Codex: use two entries. Claude launches with `--dangerously-skip-permissions`; Codex launches with `--yolo`. End the turn after this call, never pair it with `codara_spawn_workers` or `codara_complete`.
 
-### `codara_spawn_workers({ workers: [...] })`
+### `codara_spawn_workers({ taskComplexity, workers: [...] })`
 Delegate one or more focused tasks to Cora workers. Each worker is a fresh `claude` or `codex` CLI process Cora launches in its own pane, with its own filesystem allowlist. Returns `{ worker_task_ids: string[] }`.
 
 Each worker object:
@@ -41,6 +41,8 @@ Each worker object:
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier"
 }
 ```
+
+`taskComplexity: "trivial" | "standard" | "complex"` is a top-level argument, not a per-worker field. Set it on the FIRST spawn for a request and re-send it only if the scope genuinely changed. It is the only signal Codara has for how much scrutiny to buy: the user has no depth control, so your call alone sets the run's execution tier, the verifier-round budget, and whether a worker gets more than one corrective rework. `complex` buys the deep tier; `trivial` and `standard` run the fast tier. Report what the work IS, do not bid for budget: inflating it spends the user's wall-clock and money on ceremony the task does not need, deflating it strands subtle work with one verification round and no rework. `trivial` = one module under change, at most 3 atomic acceptance criteria, no public API rename. `standard` = multi-file change or a public API touch with clear scope. `complex` = subtle or byte-level work where almost-right answers survive a happy-path test, or a cross-module refactor where at least 3 files change semantics. Bias toward `standard` when genuinely uncertain.
 
 Rules for decomposition:
 - Workers that can run **in parallel** MUST have non-overlapping `allowedPaths`. Same-file writes serialize.

@@ -352,11 +352,23 @@ async function installMcpAssetToRuntime(
   }
   const result = blankSyncResult();
   if (target === "claude") {
-    const added = await writeClaudeMcpServers(join(homedir(), ".claude.json"), [server], result);
+    // Unlike a full sync, an explicit copy of one server carries its headers:
+    // the destination is JSON, and a remote server without its Authorization
+    // header is a connection that fails on the first call.
+    const added = await writeClaudeMcpServers(join(homedir(), ".claude.json"), [server], result, {
+      keepHeaders: true,
+    });
     if (added.length === 0) {
       return { ok: false, installed: [], error: firstMcpMessage(result, `Could not add '${asset.name}' to Claude.`) };
     }
     return { ok: true, installed: added };
+  }
+  if (server.url && server.headers) {
+    return {
+      ok: false,
+      installed: [],
+      error: `'${asset.name}' sends request headers, which Codex config.toml cannot carry. Keep it in a JSON config.`,
+    };
   }
   const added = await writeCodexManagedMcpServers(
     join(homedir(), ".codex", "config.toml"),
@@ -565,8 +577,8 @@ function sourcesToInventory(
     for (const name of source.names) {
       const key = sessionKey(source.kind, name);
       const skillDir = skillDirs?.get(name) ?? null;
-      const compatibility = describeAssetCompatibility(source, skillDir);
       const config = source.kind === "mcp" ? source.configs?.get(name) ?? null : null;
+      const compatibility = describeAssetCompatibility(source, skillDir, config);
       items.push({
         id: assetId({ kind: source.kind, runtime: source.runtime, scope: source.scope, name, path: source.path }),
         sessionKey: key,
@@ -594,8 +606,20 @@ function sourcesToInventory(
 function describeAssetCompatibility(
   source: SyncSource,
   skillDir: string | null,
+  config?: McpServerConfig | null,
 ): { compatibility: AgentAssetCompatibility; reason: string; syncable: boolean } {
   if (source.kind === "mcp") {
+    // Codex reads its servers out of config.toml, which has no place for the
+    // request headers a remote server authenticates with. Copying such a server
+    // over would produce an entry that connects and then fails on the first
+    // call, so it is reported as Claude-only rather than silently degraded.
+    if (config?.url && config.headers) {
+      return {
+        compatibility: "claude",
+        reason: "This server sends request headers, which Codex config.toml cannot carry. Keep it in a JSON config.",
+        syncable: true,
+      };
+    }
     return {
       compatibility: "both",
       reason: "MCP servers are runtime-agnostic if the local command or URL is reachable.",
@@ -844,10 +868,22 @@ async function writeCodexManagedMcpServers(
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   const stripped = stripManagedMcpBlock(existing);
+  // The block is rewritten whole, so whatever an earlier sync put in it has to
+  // be carried over: a one-server copy from the Capability Center would
+  // otherwise uninstall every other managed server.
+  const managed = readManagedMcpBlockServers(existing);
   const existingNames = new Set(parseCodexTomlMcpServers(stripped.text).map((server) => server.name));
   const syncable = sourceServers.filter((server) => {
     if (existingNames.has(server.name)) {
       result.mcp.skipped.push(`Codex already has MCP server '${server.name}'.`);
+      return false;
+    }
+    // config.toml has no headers table, so copying one over would drop the
+    // credential and leave a server that connects but cannot call.
+    if (server.url && server.headers) {
+      result.mcp.skipped.push(
+        `MCP server '${server.name}' sends request headers, which Codex config.toml cannot carry.`,
+      );
       return false;
     }
     if (!server.command && !server.url) {
@@ -859,7 +895,11 @@ async function writeCodexManagedMcpServers(
   if (syncable.length === 0 && !stripped.removed) return [];
 
   await fs.mkdir(join(homedir(), ".codex"), { recursive: true });
-  const block = syncable.length > 0 ? renderCodexManagedBlock(syncable) : "";
+  // Source definitions win over the copy already in the block, so a re-sync
+  // still refreshes a changed command or env.
+  const merged = new Map(managed.map((server) => [server.name, server]));
+  for (const server of syncable) merged.set(server.name, server);
+  const block = merged.size > 0 ? renderCodexManagedBlock([...merged.values()]) : "";
   const base = stripped.text.trimEnd();
   const next = [base, block].filter(Boolean).join("\n\n") + "\n";
   await fs.writeFile(path, next, "utf8");
@@ -870,6 +910,7 @@ async function writeClaudeMcpServers(
   path: string,
   sourceServers: McpServerConfig[],
   result: AgentSyncResult,
+  options?: { keepHeaders?: boolean },
 ): Promise<string[]> {
   if (sourceServers.length === 0) return [];
   let parsed: Record<string, unknown> = {};
@@ -891,7 +932,9 @@ async function writeClaudeMcpServers(
       result.mcp.skipped.push(`Claude already has MCP server '${server.name}'.`);
       continue;
     }
-    existing[server.name] = renderClaudeMcpServer(server);
+    existing[server.name] = options?.keepHeaders
+      ? renderUserMcpServer(server)
+      : renderClaudeMcpServer(server);
     added.push(server.name);
   }
   if (added.length === 0) return [];
@@ -1213,6 +1256,15 @@ function stripManagedMcpBlock(text: string): { text: string; removed: boolean } 
     text: `${text.slice(0, start).trimEnd()}\n${text.slice(after).trimStart()}`.trimEnd() + "\n",
     removed: true,
   };
+}
+
+// Servers currently living between the managed markers. Callers that rebuild
+// the block need them to keep the servers earlier syncs installed.
+function readManagedMcpBlockServers(text: string): McpServerConfig[] {
+  const start = text.indexOf(MCP_SYNC_START);
+  const end = text.indexOf(MCP_SYNC_END);
+  if (start === -1 || end === -1 || end < start) return [];
+  return parseCodexTomlMcpServers(text.slice(start + MCP_SYNC_START.length, end));
 }
 
 function removeCodexMcpServerBlock(text: string, name: string): string {

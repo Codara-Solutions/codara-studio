@@ -1002,6 +1002,12 @@ const EXECUTE_TOOLS = [
           description:
             "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
         },
+        taskComplexity: {
+          type: "string",
+          enum: ["trivial", "standard", "complex"],
+          description:
+            "Your honest complexity call for the WHOLE user request. Set it on the first spawn of a request and re-send it only if the scope genuinely changed. Codara derives the run's execution tier from this and from nothing else: 'complex' buys a deeper contract-mapping and falsification prompt, a wider verifier-round budget, and more than one corrective rework; trivial/standard run the fast tier. It is a description of the work, not a request for budget. Inflating it burns wall-clock and money on ceremony the task does not need; deflating it strands genuinely subtle work with one verification round and no rework. trivial: ONE module under change, at most 3 atomic acceptance criteria, no public API rename. standard: multi-file change OR public API touch with clear scope. complex: subtle or byte-level work where atomic claims compound, OR a cross-module refactor where at least 3 files change semantics. Bias toward standard when genuinely uncertain.",
+        },
         workers: {
           type: "array",
           minItems: 1,
@@ -1063,7 +1069,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_ask_user",
     description:
-      "Ask the human user only for credentials/access, destructive or irreversible work, safety/policy, or irreducible product scope with no safe default. Reversible engineering choices must be decided autonomously. Include a concrete category and reason; provide up to 4 option objects with stable ids and one recommendation when choices are bounded.",
+      "Ask the human user only for credentials/access, destructive or irreversible work, safety/policy, irreducible product scope with no safe default, or approval of a plan you proposed for a large or risky request. Reversible engineering choices must be decided autonomously. Include a concrete category and reason; provide up to 4 option objects with stable ids and one recommendation when choices are bounded.",
     inputSchema: {
       type: "object",
       required: ["question", "category", "reason"],
@@ -1084,9 +1090,10 @@ const EXECUTE_TOOLS = [
             "destructive_irreversible",
             "safety_policy",
             "irreducible_product_scope",
+            "plan_approval",
           ],
           description:
-            "Why this truly requires human judgment. Reversible engineering choices must not call this tool.",
+            "Why this truly requires human judgment. Reversible engineering choices must not call this tool. Use 'plan_approval' when the question IS the plan you propose for a large or risky request and you are waiting for the user to accept, modify, or reject it.",
         },
         reason: {
           type: "string",

@@ -84,8 +84,9 @@ export function piProviderForModel(model: string): PiSubscriptionProvider {
   throw new Error(`Pi subscription backend does not support model ${model}`);
 }
 
+// resolveChatBackendConfig already collapses every chat to auto or automation,
+// so the retired talk/plan personas can no longer reach the Pi runtime.
 function piModeForChat(mode: ChatMode): "talk" | "execute" | "automation" {
-  if (mode === "talk" || mode === "plan") return "talk";
   if (mode === "automation") return "automation";
   return "execute";
 }

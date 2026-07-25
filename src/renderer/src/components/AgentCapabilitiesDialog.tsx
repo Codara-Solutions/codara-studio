@@ -13,8 +13,19 @@ import type {
 
 // codara-studio ships inside Codara itself. It stays at the top of the MCP list
 // with its own install controls and is hidden from the discovered inventory so
-// it never reads as a third-party connector.
-const SPARK_BUILTIN_NAMES = new Set(["codara-studio"]);
+// it never reads as a third-party connector. The retired names are earlier
+// copies of the same server: a workspace config can still hold one, and Pi
+// drops all five by name, so a row with live-looking switches would be a lie.
+// Mirrors RESERVED_MCP_SERVER_NAMES in src/main/orchestration/pi-mcp-config.ts,
+// which the renderer cannot import (main-process module); scripts/test-pi-mcp-
+// config.cjs asserts the two lists stay identical.
+const RESERVED_MCP_NAMES = new Set([
+  "codara-studio",
+  "spark-preview",
+  "cora-preview",
+  "spark-orchestrator",
+  "cora-orchestrator",
+]);
 
 interface Props {
   settings: AppSettings;
@@ -54,6 +65,9 @@ interface EditorState {
   url: string;
   headers: Pair[];
 }
+
+// Which config files a remove touches: one runtime column, or all of them.
+type RemoveScope = RuntimeColumn | "all";
 
 const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "shared"];
 const PAGE_SIZE = 40;
@@ -214,7 +228,7 @@ export default function AgentCapabilitiesDialog({
   }, [editor, onClose]);
 
   const mcp = useMemo(
-    () => (assets?.mcp ?? []).filter((item) => !SPARK_BUILTIN_NAMES.has(item.name.toLowerCase())),
+    () => (assets?.mcp ?? []).filter((item) => !RESERVED_MCP_NAMES.has(item.name.toLowerCase())),
     [assets?.mcp],
   );
   const skills = assets?.skills ?? [];
@@ -302,8 +316,12 @@ export default function AgentCapabilitiesDialog({
     }));
   };
 
-  const removeGroup = (group: NameGroup) => {
-    const items = RUNTIME_COLUMNS.flatMap((rt) => group.installs[rt]).filter((item) => item.canDelete);
+  // `scope` is one runtime column or every column at once. A server registered
+  // in both runtimes can be dropped from one and kept in the other, which the
+  // old all-or-nothing remove forced the user into a text editor for.
+  const removeGroup = (group: NameGroup, scope: RemoveScope) => {
+    const columns = scope === "all" ? RUNTIME_COLUMNS : [scope];
+    const items = columns.flatMap((rt) => group.installs[rt]).filter((item) => item.canDelete);
     if (items.length === 0) return;
     setBusyKey(group.sessionKey);
     setStatus(null);
@@ -317,7 +335,12 @@ export default function AgentCapabilitiesDialog({
           failures.push((err as Error).message);
         }
       }
-      setStatus(failures[0] ?? `Removed ${group.name}.`);
+      setStatus(
+        failures[0] ??
+        (scope === "all"
+          ? `Removed ${group.name} from every config file.`
+          : `Removed ${group.name} from ${RUNTIME_LABEL[scope]}.`),
+      );
       refreshAssets();
       setBusyKey(null);
     })();
@@ -335,8 +358,8 @@ export default function AgentCapabilitiesDialog({
       .then((result) => {
         setStatus(
           result.ok
-            ? `Added ${group.name} to ${RUNTIME_LABEL[target]}.`
-            : result.error ?? `Could not add ${group.name} to ${RUNTIME_LABEL[target]}.`,
+            ? `Shared ${group.name} with ${RUNTIME_LABEL[target]}.`
+            : result.error ?? `Could not share ${group.name} with ${RUNTIME_LABEL[target]}.`,
         );
         refreshAssets();
       })
@@ -742,12 +765,11 @@ function McpRow({
   workerAssigned: boolean;
   onTogglePiScope: (group: NameGroup, scope: "cora" | "worker", assigned: boolean) => void;
   onEdit: (group: NameGroup) => void;
-  onRemove: (group: NameGroup) => void;
+  onRemove: (group: NameGroup, scope: RemoveScope) => void;
   onInstall: (group: NameGroup, target: "claude" | "codex") => void;
 }) {
   const transport = group.any.mcpTransport ?? "stdio";
   const summary = group.any.mcpSummary ?? group.any.path;
-  const deletable = RUNTIME_COLUMNS.some((rt) => group.installs[rt].some((item) => item.canDelete));
   return (
     <div className="agent-capability-row" style={rowStyle}>
       <div style={{ minWidth: 0 }}>
@@ -783,11 +805,11 @@ function McpRow({
         <button type="button" className="spark-btn" style={smallBtnStyle} onClick={() => onEdit(group)}>
           Edit
         </button>
-        <ConfirmRemoveButton
+        <RemoveControl
+          group={group}
           busy={busyKey === group.sessionKey}
-          disabled={!deletable}
-          title={deletable ? `Remove ${group.name} from every config file` : "Protected entry"}
-          onConfirm={() => onRemove(group)}
+          protectedTitle="Protected entry"
+          onRemove={onRemove}
         />
       </div>
     </div>
@@ -806,10 +828,9 @@ function SkillRow({
   busyKey: string | null;
   enabled: boolean;
   onToggle: (group: NameGroup, enabled: boolean) => void;
-  onRemove: (group: NameGroup) => void;
+  onRemove: (group: NameGroup, scope: RemoveScope) => void;
   onInstall: (group: NameGroup, target: "claude" | "codex") => void;
 }) {
-  const deletable = RUNTIME_COLUMNS.some((rt) => group.installs[rt].some((item) => item.canDelete));
   return (
     <div className="agent-capability-row" style={{ ...rowStyle, opacity: enabled ? 1 : 0.55 }}>
       <div style={{ minWidth: 0 }}>
@@ -833,19 +854,22 @@ function SkillRow({
           onChange={(next) => onToggle(group, next)}
           title={`Let workers load ${group.name}`}
         />
-        <ConfirmRemoveButton
+        <RemoveControl
+          group={group}
           busy={busyKey === group.sessionKey}
-          disabled={!deletable}
-          title={deletable ? `Delete ${group.name} from disk` : "Protected skill"}
-          onConfirm={() => onRemove(group)}
+          protectedTitle="Protected skill"
+          onRemove={onRemove}
         />
       </div>
     </div>
   );
 }
 
-// Which runtimes already carry this entry, plus a copy action for the one that
-// does not. A shared-scope install covers both runtimes, so it offers neither.
+// Which runtimes can actually reach this entry, said once and plainly, plus a
+// share action for a runtime that is missing it. A shared-scope config file is
+// read by both runtimes, so it counts as full reach on its own. When a runtime
+// cannot take the entry, the reason takes the button's place instead of a
+// button that would quietly write a broken copy.
 function RuntimeStrip({
   group,
   busyKey,
@@ -855,22 +879,14 @@ function RuntimeStrip({
   busyKey: string | null;
   onInstall: (group: NameGroup, target: "claude" | "codex") => void;
 }) {
-  const installed = RUNTIME_COLUMNS.filter((rt) => group.installs[rt].length > 0);
-  const sharedCovers = group.installs.shared.length > 0;
-  const canInstallTo = (rt: "claude" | "codex"): boolean =>
-    !sharedCovers &&
-    group.installs[rt].length === 0 &&
-    installed.length > 0 &&
-    group.any.syncable &&
-    group.any.compatibility !== (rt === "claude" ? "codex" : "claude");
+  const reach = describeReach(group);
   const protectedEntry = RUNTIME_COLUMNS.some((rt) => group.installs[rt].some((item) => !item.canDelete));
+  const shares = (["claude", "codex"] as const).map((rt) => ({ rt, state: shareState(group, rt) }));
   return (
     <>
-      {installed.map((rt) => (
-        <span key={rt} className="spark-badge" style={runtimeBadgeStyle(rt)}>
-          {RUNTIME_LABEL[rt]}
-        </span>
-      ))}
+      <span className="spark-badge" style={runtimeBadgeStyle(reach.tone)} title={reach.title}>
+        {reach.label}
+      </span>
       {!group.any.syncable ? (
         <span className="spark-badge is-warn" style={flagBadgeStyle} title={group.any.compatibilityReason}>
           native
@@ -881,7 +897,15 @@ function RuntimeStrip({
           protected
         </span>
       ) : null}
-      {(["claude", "codex"] as const).filter(canInstallTo).map((rt) => {
+      {shares.map(({ rt, state }) => {
+        if (state.kind === "covered") return null;
+        if (state.kind === "blocked") {
+          return (
+            <span key={rt} className="spark-badge is-warn" style={flagBadgeStyle} title={state.reason}>
+              not for {RUNTIME_LABEL[rt]}
+            </span>
+          );
+        }
         const busy = busyKey === `${group.sessionKey}:${rt}`;
         return (
           <button
@@ -893,11 +917,165 @@ function RuntimeStrip({
             onClick={() => onInstall(group, rt)}
             title={`Copy this into the ${RUNTIME_LABEL[rt]} config`}
           >
-            {busy ? "Adding" : `Add to ${RUNTIME_LABEL[rt]}`}
+            {busy ? "Sharing" : `Share to ${RUNTIME_LABEL[rt]}`}
           </button>
         );
       })}
     </>
+  );
+}
+
+// The one-glance answer to "who can use this". Tone follows the same per-
+// runtime palette the badges have always used.
+function describeReach(group: NameGroup): { label: string; tone: RuntimeColumn; title: string } {
+  const files = RUNTIME_COLUMNS.flatMap((rt) => group.installs[rt].map((item) => item.path));
+  const title = files.join("\n");
+  const hasClaude = group.installs.claude.length > 0;
+  const hasCodex = group.installs.codex.length > 0;
+  if (group.installs.shared.length > 0 || (hasClaude && hasCodex)) {
+    return { label: "Claude + Codex", tone: "shared", title };
+  }
+  if (hasClaude) return { label: "Claude only", tone: "claude", title };
+  if (hasCodex) return { label: "Codex only", tone: "codex", title };
+  return { label: "no runtime", tone: "shared", title };
+}
+
+type ShareState = { kind: "covered" } | { kind: "ready" } | { kind: "blocked"; reason: string };
+
+function shareState(group: NameGroup, target: "claude" | "codex"): ShareState {
+  if (group.installs.shared.length > 0 || group.installs[target].length > 0) return { kind: "covered" };
+  const source = RUNTIME_COLUMNS.some((rt) => group.installs[rt].length > 0);
+  if (!source) return { kind: "covered" };
+  if (!group.any.syncable) {
+    return {
+      kind: "blocked",
+      reason: group.any.compatibilityReason ?? `This entry cannot be copied to ${RUNTIME_LABEL[target]}.`,
+    };
+  }
+  if (group.any.compatibility === (target === "claude" ? "codex" : "claude")) {
+    return {
+      kind: "blocked",
+      reason: group.any.compatibilityReason ?? `This entry does not work under ${RUNTIME_LABEL[target]}.`,
+    };
+  }
+  return { kind: "ready" };
+}
+
+// Remove, scoped. One runtime column present keeps the plain two-step confirm.
+// Several columns turn the second step into the choice itself: which config
+// files this removal is allowed to touch.
+function RemoveControl({
+  group,
+  busy,
+  protectedTitle,
+  onRemove,
+}: {
+  group: NameGroup;
+  busy: boolean;
+  protectedTitle: string;
+  onRemove: (group: NameGroup, scope: RemoveScope) => void;
+}) {
+  const columns = RUNTIME_COLUMNS.filter((rt) => group.installs[rt].some((item) => item.canDelete));
+  if (columns.length === 0) {
+    return <ConfirmRemoveButton busy={busy} disabled title={protectedTitle} onConfirm={() => {}} />;
+  }
+  if (columns.length === 1) {
+    const only = columns[0];
+    return (
+      <ConfirmRemoveButton
+        busy={busy}
+        disabled={false}
+        title={`Remove ${group.name} from ${RUNTIME_LABEL[only]}:\n${group.installs[only].map((item) => item.path).join("\n")}`}
+        onConfirm={() => onRemove(group, only)}
+      />
+    );
+  }
+  return <ScopedRemoveButton group={group} busy={busy} columns={columns} onRemove={onRemove} />;
+}
+
+function ScopedRemoveButton({
+  group,
+  busy,
+  columns,
+  onRemove,
+}: {
+  group: NameGroup;
+  busy: boolean;
+  columns: RuntimeColumn[];
+  onRemove: (group: NameGroup, scope: RemoveScope) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const close = () => {
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    setOpen(false);
+  };
+
+  const arm = () => {
+    if (busy) return;
+    setOpen(true);
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setOpen(false), 6000);
+  };
+
+  const choose = (scope: RemoveScope) => {
+    close();
+    onRemove(group, scope);
+  };
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="spark-btn"
+        style={smallBtnStyle}
+        disabled={busy}
+        onClick={arm}
+        title={`${group.name} lives in ${columns.length} config locations. Pick which one to remove it from.`}
+      >
+        {busy ? "Working" : "Remove"}
+      </button>
+    );
+  }
+
+  return (
+    <div style={removeChoiceStyle}>
+      <span style={cellLabelStyle}>Remove from</span>
+      <div style={removeChoiceRowStyle}>
+        {columns.map((rt) => (
+          <button
+            key={rt}
+            type="button"
+            className="spark-btn is-danger"
+            style={microBtnStyle}
+            onClick={() => choose(rt)}
+            title={group.installs[rt].map((item) => item.path).join("\n")}
+          >
+            {RUNTIME_LABEL[rt]}
+          </button>
+        ))}
+        <button
+          type="button"
+          className="spark-btn is-danger"
+          style={microBtnStyle}
+          onClick={() => choose("all")}
+          title={`Remove ${group.name} from every config file`}
+        >
+          All
+        </button>
+        <button type="button" className="spark-btn" style={microBtnStyle} onClick={close}>
+          Keep
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -942,6 +1120,22 @@ function BuiltinRow({
         </div>
       </div>
       <div style={rowControlsStyle}>
+        {/* Pi loads this server in-process from the app bundle, so Cora and the
+            workers have it whatever the Claude/Codex config files say. Rendered
+            as a fact, never as a switch: an assignment here would be dropped by
+            the Pi roster's reserved-name filter. */}
+        {builtin.id === "codara-studio" ? (
+          <>
+            <BuiltinFactCell
+              label="Cora"
+              title="Cora always loads the preview, terminal and whiteboard tools in-process. No assignment needed."
+            />
+            <BuiltinFactCell
+              label="Workers"
+              title="Workers always load the preview and terminal tools plus whiteboard read, in-process. No assignment needed."
+            />
+          </>
+        ) : null}
         {runtimes.map((runtime) => (
           <BuiltinRuntimeCell
             key={runtime}
@@ -953,6 +1147,19 @@ function BuiltinRow({
           />
         ))}
       </div>
+    </div>
+  );
+}
+
+// A cell in the switch column that states a standing fact instead of offering a
+// control, so an always-on capability never reads as a toggle left off.
+function BuiltinFactCell({ label, title }: { label: string; title: string }) {
+  return (
+    <div style={builtinCellStyle} title={title}>
+      <span style={cellLabelStyle}>{label}</span>
+      <span className="spark-badge is-ok" style={flagBadgeStyle}>
+        Built in
+      </span>
     </div>
   );
 }
@@ -1805,6 +2012,18 @@ const switchCellStyle: React.CSSProperties = {
 const builtinCellStyle: React.CSSProperties = {
   display: "grid",
   justifyItems: "center",
+  gap: 4,
+};
+
+const removeChoiceStyle: React.CSSProperties = {
+  display: "grid",
+  justifyItems: "end",
+  gap: 4,
+};
+
+const removeChoiceRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
   gap: 4,
 };
 

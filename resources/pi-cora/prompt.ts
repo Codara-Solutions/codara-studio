@@ -54,6 +54,25 @@ const WORKER_TASK_CLASS_CONTRACT = `Worker taskClass contract:
   in a batch. An all-verifier batch with no implementation worker to check is
   rejected by Codara.`;
 
+// The user has no depth control any more, so the taskComplexity argument on the
+// first spawn is the only signal that selects this session's execution policy.
+// Stated here because the MCP schema alone left it optional in practice.
+const TASK_COMPLEXITY_CONTRACT = `Task complexity contract:
+- Set taskComplexity on codara_spawn_workers the first time you fan out for a
+  request, and re-send it only if the scope genuinely changed.
+- It is the only thing that decides how much scrutiny Codara buys: complex
+  selects the deep policy (contract mapping before mutation, active
+  falsification, a wider verifier-round budget, more than one corrective rework
+  per worker), trivial and standard select the fast policy.
+- Classify what the work IS, do not bid for budget. Inflating it spends the
+  user's wall-clock and money on ceremony the task does not need. Deflating it
+  strands genuinely subtle work with one verification round and no rework.
+- trivial: one module under change, at most 3 atomic acceptance criteria, no
+  public API rename. standard: multi-file change or a public API touch with
+  clear scope. complex: subtle or byte-level work where almost-right answers
+  survive a happy-path test, or a cross-module refactor where at least 3 files
+  change semantics. Bias toward standard when genuinely uncertain.`;
+
 export function buildCoraPiSystemPrompt(
   mode: CoraPiMode,
   policy: CoraPiExecutionPolicy = "fast",
@@ -117,7 +136,21 @@ using orchestration tools:
   requests that do not require project changes, answer directly. Do not spawn a
   worker and do not call codara_complete. A natural-language answer finishes the
   turn.
-- If the user requests implementation or another project mutation, switch into
+- Propose a plan and wait when the user explicitly asks you to plan, design, or
+  scope something, or when the request is large or risky: many files or surfaces,
+  a migration / schema / auth / build-config change, deleting or rewriting
+  existing behavior, anything not cleanly revertible, or a choice between
+  materially different approaches a reasonable engineer would weigh. Ground the
+  plan in the repository first, then call codara_ask_user with
+  category "plan_approval", the plan itself as the question (the steps, the
+  surfaces each touches, what runs in parallel, what verifies), a reason naming
+  the risk that motivates the gate, and 2-3 options such as "Approve and build
+  it", "Change the plan first", "Do not build this" with the approve option
+  recommended. Spawn nothing on that turn. Execute as one round once the answer
+  approves; re-plan if it redirects.
+- One plan gate per request. After the user approves, build it: never propose a
+  second plan for the same request, and never gate an ordinary scoped feature.
+- For any other request for implementation or project mutation, switch into
   managed execution: inspect relevant evidence, spawn at least one bounded worker
   with Codara's orchestration tools, wait for it, verify its report, and only then
   call codara_complete.
@@ -127,6 +160,8 @@ using orchestration tools:
   investigate first. Ask the user only for a consequential unresolved choice.
 
 ${WORKER_TASK_CLASS_CONTRACT}
+
+${TASK_COMPLEXITY_CONTRACT}
 
 ${executionPolicyContract(policy)}`;
   }
@@ -145,6 +180,8 @@ This is Execute mode:
   are real. Report remaining uncertainty explicitly.
 
 ${WORKER_TASK_CLASS_CONTRACT}
+
+${TASK_COMPLEXITY_CONTRACT}
 
 ${executionPolicyContract(policy)}`;
 }

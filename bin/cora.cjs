@@ -55,7 +55,7 @@ PREVIEW (the in-app browser tab; navigate opens one if none exists)
 
 CORA SESSIONS
   start <prompt> [--cwd DIR] [--title TITLE] [--backend ENGINE]
-                 [--model MODEL] [--mode MODE] [--effort LEVEL] [--wait]
+                 [--model MODEL] [--effort LEVEL] [--wait]
                                       create and run a Cora session; creates the
                                       Codara workspace when DIR is not registered
   send <runId> <message> [--wait]     continue a session or answer its question

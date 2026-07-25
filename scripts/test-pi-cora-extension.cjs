@@ -71,8 +71,40 @@ assert.equal(studioToolNames.has("codara_whiteboard_update"), true);
 assert.equal(policies.normalizeCoraExecutionPolicy("deep"), "deep");
 assert.equal(policies.normalizeCoraExecutionPolicy("frontier"), "frontier");
 assert.equal(policies.normalizeCoraExecutionPolicy("invalid"), "fast");
-assert.equal(policies.effectiveCoraExecutionPolicy("pi", "frontier"), "frontier");
-assert.equal(policies.effectiveCoraExecutionPolicy("codex", "frontier"), "fast");
-assert.equal(policies.coraExecutionPolicyProfile("frontier").auditedStateReuse, true);
+// The picker is gone: the policy is derived in main from taskComplexity, so
+// the shared module keeps normalization only.
+assert.equal(policies.effectiveCoraExecutionPolicy, undefined);
+assert.equal(policies.coraExecutionPolicyProfile, undefined);
+assert.equal(policies.CORA_EXECUTION_POLICIES, undefined);
+
+// The complexity contract is the manager's only channel into the tier now, so
+// it must reach every orchestrating mode and must NOT leak into Talk.
+assert.match(auto, /Task complexity contract/);
+assert.match(execute, /Task complexity contract/);
+assert.match(execute, /Set taskComplexity on codara_spawn_workers/);
+assert.match(execute, /do not bid for budget/);
+assert.doesNotMatch(talk, /Task complexity contract/);
+assert.doesNotMatch(automation, /Task complexity contract/);
+
+// The spawn tool must actually accept the classification the prompt demands.
+// The roster is picked once at module load from SPARK_MCP_MODE, so re-require
+// the bridge in execute mode to see the orchestration tools.
+const studioBridgePath = path.join(
+  __dirname,
+  "..",
+  "resources",
+  "codara-studio-mcp",
+  "server.js",
+);
+process.env.SPARK_MCP_MODE = "execute";
+delete require.cache[require.resolve(studioBridgePath)];
+const executeBridge = require(studioBridgePath);
+const spawnTool = executeBridge.listTools().find((tool) => tool.name === "codara_spawn_workers");
+assert.ok(spawnTool, "codara_spawn_workers is not exposed in execute mode");
+assert.deepEqual(spawnTool.inputSchema.properties.taskComplexity.enum, [
+  "trivial",
+  "standard",
+  "complex",
+]);
 
 console.log("pi Cora mode + execution-policy prompts: ok");

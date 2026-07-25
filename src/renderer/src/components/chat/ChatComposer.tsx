@@ -4,7 +4,6 @@ import type {
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
-  CoraExecutionPolicy,
   FsEntry,
   RunState,
   SparkEvent,
@@ -18,16 +17,10 @@ import {
   effectiveChatOneMillionContext,
   normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
-import {
-  DEFAULT_CORA_EXECUTION_POLICY,
-  normalizeCoraExecutionPolicy,
-} from "@shared/cora-execution-policy";
 import { findOpenQuestion } from "./timeline";
 import ContextPill from "./composer/ContextPill";
 import ModelPicker from "./composer/ModelPicker";
-import PlanModeToggle from "./composer/PlanModeToggle";
 import ThinkingControl from "./composer/ThinkingControl";
-import ExecutionPolicyPicker from "./composer/ExecutionPolicyPicker";
 import {
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
@@ -51,7 +44,6 @@ export interface ChatComposerStartConfig {
   model?: string;
   mode?: ChatMode;
   effort?: AgentEffortLevel;
-  executionPolicy?: CoraExecutionPolicy;
   fastMode?: boolean;
   oneMillionContext?: boolean;
 }
@@ -74,11 +66,10 @@ interface Props {
   // unfinished prompt across navigation.
   draftKey?: string;
   disabled?: boolean;
-  // Pin the manager mode: the PlanModeToggle is hidden and every send (draft
-  // and follow-up alike) carries exactly this mode. Used by embedded surfaces
-  // that exist FOR one mode — e.g. the Automations Hub's loom-architect chat,
-  // which is always chatMode "automation". Leaving this unset keeps the normal
-  // user-cycling pill.
+  // Pin the manager mode for every send (draft and follow-up alike). Used by
+  // embedded surfaces that exist FOR one mode, i.e. the Automations Hub's
+  // loom-architect chat, which is always chatMode "automation". Unset means the
+  // ordinary chat contract: Auto, which the user cannot change.
   lockedMode?: ChatMode;
   // Detach the window-level spark:focus-composer / spark:prefill-composer
   // listeners while true. The chat tab only ever mounts ONE composer, but an
@@ -140,9 +131,7 @@ interface ChatComposerDraftSnapshot {
   fileReferences: FileMention[];
   backend: ChatBackendKind;
   model: string;
-  mode: ChatMode;
   effort: AgentEffortLevel;
-  executionPolicy: CoraExecutionPolicy;
   fastMode: boolean;
   oneMillionContext: boolean;
 }
@@ -198,16 +187,8 @@ export default function ChatComposer({
   const [draftChatModel, setDraftChatModel] = useState<string>(
     run?.chatModel ?? restoredDraft?.model ?? DEFAULT_CHAT_MODEL,
   );
-  const [draftChatMode, setDraftChatMode] = useState<ChatMode>(
-    lockedMode ?? run?.chatMode ?? (run ? "execute" : restoredDraft?.mode ?? DEFAULT_CHAT_MODE),
-  );
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(
     run?.chatEffort ?? restoredDraft?.effort ?? DEFAULT_CHAT_EFFORT,
-  );
-  const [draftExecutionPolicy, setDraftExecutionPolicy] = useState<CoraExecutionPolicy>(
-    normalizeCoraExecutionPolicy(
-      run?.coraExecutionPolicy ?? restoredDraft?.executionPolicy ?? DEFAULT_CORA_EXECUTION_POLICY,
-    ),
   );
   // Tracks whether the draft default has been resolved from settings + runtime
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
@@ -247,9 +228,7 @@ export default function ChatComposer({
     fileReferences: [...fileReferences],
     backend: draftChatBackend,
     model: draftChatModel,
-    mode: draftChatMode,
     effort: draftChatEffort,
-    executionPolicy: draftExecutionPolicy,
     fastMode: draftFastMode,
     oneMillionContext: draftOneMillionContext,
   };
@@ -280,20 +259,14 @@ export default function ChatComposer({
     if (!run) return;
     if (run.chatBackend !== undefined) setDraftChatBackend(run.chatBackend);
     if (run.chatModel !== undefined) setDraftChatModel(run.chatModel);
-    if (run.chatMode !== undefined) setDraftChatMode(run.chatMode);
     if (run.chatEffort !== undefined) setDraftChatEffort(run.chatEffort);
-    if (run.coraExecutionPolicy !== undefined) {
-      setDraftExecutionPolicy(normalizeCoraExecutionPolicy(run.coraExecutionPolicy));
-    }
     if (run.chatFastMode !== undefined) setDraftFastMode(run.chatFastMode);
     if (run.chat1mContext !== undefined) setDraftOneMillionContext(run.chat1mContext);
   }, [
     run?.id,
     run?.chatBackend,
     run?.chatModel,
-    run?.chatMode,
     run?.chatEffort,
-    run?.coraExecutionPolicy,
     run?.chatFastMode,
     run?.chat1mContext,
   ]);
@@ -587,9 +560,8 @@ export default function ChatComposer({
         const chatConfig: ChatComposerStartConfig = {
           backend: draftChatBackend,
           model: draftChatModel,
-          mode: lockedMode ?? draftChatMode,
+          mode: lockedMode ?? DEFAULT_CHAT_MODE,
           effort: draftChatEffort,
-          executionPolicy: draftExecutionPolicy,
           fastMode: draftFastMode,
           oneMillionContext: draftOneMillionContext,
         };
@@ -845,17 +817,7 @@ export default function ChatComposer({
 
   const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
-  // lockedMode wins even over a run's persisted chatMode — the embedding
-  // surface owns the mode outright, so the shell styling and every send stay
-  // pinned to it no matter what the run record says. An EXISTING run with no
-  // stamped chatMode dispatches as execute (resolveChatBackendConfig's
-  // fallback), so display that — not the draft default, which is now "auto".
-  const activeChatMode: ChatMode =
-    lockedMode ?? run_?.chatMode ?? (run_ ? "execute" : draftChatMode);
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
-  const activeExecutionPolicy: CoraExecutionPolicy = normalizeCoraExecutionPolicy(
-    run_?.coraExecutionPolicy ?? draftExecutionPolicy,
-  );
   const rawFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
   const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
   const activeFastMode: boolean = effectiveChatFastMode(activeChatBackend, rawFastMode);
@@ -884,9 +846,7 @@ export default function ChatComposer({
   const applyChatBackendChange = (changes: {
     chatBackend?: ChatBackendKind;
     chatModel?: string;
-    chatMode?: ChatMode;
     chatEffort?: AgentEffortLevel;
-    coraExecutionPolicy?: CoraExecutionPolicy;
     chatFastMode?: boolean;
     chat1mContext?: boolean;
   }) => {
@@ -910,11 +870,7 @@ export default function ChatComposer({
     }
     if (normalizedChanges.chatBackend !== undefined) setDraftChatBackend(normalizedChanges.chatBackend);
     if (normalizedChanges.chatModel !== undefined) setDraftChatModel(normalizedChanges.chatModel);
-    if (normalizedChanges.chatMode !== undefined) setDraftChatMode(normalizedChanges.chatMode);
     if (normalizedChanges.chatEffort !== undefined) setDraftChatEffort(normalizedChanges.chatEffort);
-    if (normalizedChanges.coraExecutionPolicy !== undefined) {
-      setDraftExecutionPolicy(normalizeCoraExecutionPolicy(normalizedChanges.coraExecutionPolicy));
-    }
     if (normalizedChanges.chatFastMode !== undefined) setDraftFastMode(normalizedChanges.chatFastMode);
     if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
     if (!run_) return;
@@ -951,14 +907,6 @@ export default function ChatComposer({
 
   const onPickEffort = (effort: AgentEffortLevel) => {
     applyChatBackendChange({ chatEffort: effort });
-  };
-
-  const onPickExecutionPolicy = (policy: CoraExecutionPolicy) => {
-    applyChatBackendChange({ coraExecutionPolicy: policy });
-  };
-
-  const onSelectMode = (mode: ChatMode) => {
-    applyChatBackendChange({ chatMode: mode });
   };
 
   const onToggleFastMode = () => {
@@ -1026,7 +974,7 @@ export default function ChatComposer({
         )}
         <div
           ref={composerShellRef}
-          className={`composer-shell spark-glass--strong${activeChatMode === "execute" ? " is-execute-mode" : ""}`}
+          className="composer-shell spark-glass--strong"
           onMouseDown={focusComposerShell}
           onDragOver={onComposerDragOver}
           onDrop={onComposerDrop}
@@ -1135,18 +1083,11 @@ export default function ChatComposer({
               activeOneMillion={activeOneMillionContext}
               onPick={onPickModel}
             />
-            {activeChatBackend === "pi" && (
-              <ExecutionPolicyPicker
-                value={activeExecutionPolicy}
-                onPick={onPickExecutionPolicy}
-              />
-            )}
             <ThinkingControl
               effort={visibleEffort}
               availableEfforts={availableEfforts}
               onCycle={onPickEffort}
             />
-            {!lockedMode && <PlanModeToggle mode={activeChatMode} onSelect={onSelectMode} />}
             {fastModeAvailable && (
               <button
                 type="button"

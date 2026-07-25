@@ -217,7 +217,6 @@ export default function AssistChat({
         chatModel: chatConfig?.model,
         chatMode: "automation",
         chatEffort: chatConfig?.effort,
-        coraExecutionPolicy: chatConfig?.executionPolicy,
         chatFastMode: chatConfig?.fastMode,
         chat1mContext: chatConfig?.oneMillionContext,
       });

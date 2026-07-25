@@ -36,16 +36,15 @@ test("automations hub mounts the Create-with-Cora assist chat", async () => {
     await expect(assistButton).toBeVisible();
     await expect(page.getByRole("button", { name: /Build a flow/ })).toBeVisible();
 
-    // Enter the assist view: architect chat panel + session controls mount,
-    // the composer is pinned to automation mode (placeholder proves the
-    // lockedMode draft path; the mode-cycle pill must be absent).
+    // Enter the assist view: architect chat panel + session controls mount, and
+    // the composer is pinned to automation mode (the placeholder proves the
+    // lockedMode draft path).
     await clickAttached(assistButton);
     await expect(page.getByText("Cora · Automation architect", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     await expect(
       page.getByPlaceholder("Describe the loom you want — trigger, loop, and worker."),
     ).toBeVisible();
-    await expect(page.locator(".composer-mode-cycle:visible")).toHaveCount(0);
     await expect(page.getByText("Describe the outcome, not the plumbing", { exact: true })).toBeVisible();
     await clickAttached(page.getByRole("button", { name: /Keep tests green/ }));
     await expect(

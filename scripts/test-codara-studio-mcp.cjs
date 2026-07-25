@@ -156,6 +156,7 @@ function sortedEqual(actual, expected, label) {
         "destructive_irreversible",
         "safety_policy",
         "irreducible_product_scope",
+        "plan_approval",
       ],
       "codara_ask_user category enum mismatch",
     );

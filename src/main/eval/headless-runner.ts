@@ -530,10 +530,11 @@ function normalizeManagerBackend(value: string | undefined): ChatBackendKind | u
   return value === "claude" || value === "codex" || value === "pi" ? value : undefined;
 }
 
+// Auto is the only manager persona an eval run can select; a variant config
+// still naming a retired mode falls through to the same default rather than
+// stamping a chatMode the dispatcher would ignore.
 function normalizeManagerMode(value: string | undefined): ChatMode | undefined {
-  return value === "auto" || value === "execute" || value === "talk" || value === "plan"
-    ? value
-    : undefined;
+  return value === "auto" ? value : undefined;
 }
 
 function normalizeManagerEffort(value: string | undefined): AgentEffortLevel | undefined {

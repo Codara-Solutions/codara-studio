@@ -1564,11 +1564,6 @@ a { color: inherit; }
     outline-color var(--motion-fast) var(--ease-out),
     background var(--motion-fast) var(--ease-out);
 }
-.composer-shell.is-execute-mode {
-  border-color: color-mix(in oklch, var(--accent) 72%, var(--rule-soft));
-  outline-color: color-mix(in oklch, var(--accent) 20%, transparent);
-  box-shadow: var(--lift-hi), 0 10px 28px color-mix(in oklch, var(--accent) 10%, transparent);
-}
 
 .cora-user-turn__meta {
   opacity: 0;
@@ -1862,7 +1857,6 @@ a { color: inherit; }
      editor toolbar uses. Each control carries a title and aria-label, so
      nothing loses its accessible name. */
   .composer-toolbar .composer-thinking-label,
-  .composer-toolbar .composer-mode-label,
   .composer-toolbar .composer-chevron {
     display: none;
   }
@@ -2015,55 +2009,14 @@ a { color: inherit; }
   flex: 0 0 auto;
   padding-top: 1px;
 }
-/* A row that is just a name. The base row aligns to flex-start for the
-   two-line rows in the policy menu; with no second line that reads as a
-   top-heavy row, so centre it. */
+/* A row that is just a name. The base row aligns to flex-start for rows that
+   carry a description line; with no second line that reads as a top-heavy
+   row, so centre it. */
 .composer-model-row.is-compact {
   align-items: center;
 }
 
-.composer-policy-menu {
-  min-width: 370px;
-  overflow: visible;
-}
-.composer-policy-pill {
-  position: relative;
-}
-.composer-policy-pill.is-frontier {
-  border-color: color-mix(in oklch, var(--accent) 55%, var(--rule-soft));
-}
-.composer-policy-glyph {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  height: 10px;
-}
-.composer-policy-glyph > span {
-  width: 3px;
-  height: 3px;
-  border-radius: 999px;
-  background: currentColor;
-  box-shadow: 0 0 5px color-mix(in oklch, currentColor 45%, transparent);
-}
-.composer-policy-glyph > span:nth-child(2) {
-  width: 4px;
-  height: 4px;
-}
-.composer-policy-glyph > span:nth-child(3) {
-  width: 5px;
-  height: 5px;
-}
-.composer-policy-footnote {
-  margin: 4px 5px 3px;
-  padding: 7px 8px 5px;
-  border-top: 1px solid var(--rule-soft);
-  color: var(--muted);
-  font-size: 9px;
-  line-height: 1.4;
-}
-
-.composer-thinking-wrap,
-.composer-mode {
+.composer-thinking-wrap {
   position: relative;
 }
 .composer-thinking {
@@ -2110,144 +2063,14 @@ a { color: inherit; }
   transform: translateY(-1px);
 }
 
-.composer-plan {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: transparent;
-  border: 1px solid var(--rule-soft);
-  color: var(--ink-dim);
-  font-size: 11px;
-  cursor: default;
-  font-family: var(--font-sans);
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out);
-}
-.composer-plan:hover {
-  background: var(--hover-strong);
-  color: var(--ink);
-}
-.composer-plan:active {
-  background: var(--press);
-}
-.composer-plan.is-execute {
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-color: var(--accent-edge);
-}
-.composer-plan-label {
-  white-space: nowrap;
-}
-
-/* Manager-mode selector — a SINGLE pill that CYCLES on each press:
-   Auto → Talk → Plan → Execute → Auto. The label shows the current mode; the
-   colour and the leading dot shift per mode so the active state reads at a
-   glance (Auto = ok-green, Talk = muted, Plan = info-blue, Execute =
-   accent/armed). Execute also lights the composer shell's dashed "armed"
-   border (.composer-shell.is-execute-mode).
-   Replaces the old three-segment Execute/Plan/Talk pill. */
-.composer-mode-cycle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--rule-soft);
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
-  font-family: var(--font-sans);
-  line-height: 1.7;
-  white-space: nowrap;
-  cursor: pointer;
-  user-select: none;
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out);
-}
-.composer-mode-cycle.is-open {
-  box-shadow: var(--focus-ring);
-}
-/* Leading dot picks up the mode's colour via currentColor. */
-.composer-mode-cycle::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.85;
-  flex: 0 0 auto;
-}
-/* Auto — ok-green; Cora routes each message herself. The default mode. */
-.composer-mode-cycle.is-auto {
-  color: var(--ok);
-  border-color: color-mix(in oklch, var(--ok) 45%, var(--rule-soft));
-  background: color-mix(in oklch, var(--ok) 12%, transparent);
-}
-.composer-mode-cycle.is-auto:hover {
-  border-color: color-mix(in oklch, var(--ok) 60%, var(--rule-soft));
-  background: color-mix(in oklch, var(--ok) 22%, transparent);
-}
-/* Talk — quiet/neutral. */
-.composer-mode-cycle.is-talk {
-  color: var(--muted);
-}
-.composer-mode-cycle.is-talk:hover {
-  color: var(--ink);
-  border-color: var(--rule);
-  background: color-mix(in oklab, var(--ink) 9%, transparent);
-}
-/* Plan — info-blue, distinct from Execute's gold. */
-.composer-mode-cycle.is-plan {
-  color: var(--info);
-  border-color: color-mix(in oklch, var(--info) 45%, var(--rule-soft));
-  background: var(--info-soft);
-}
-.composer-mode-cycle.is-plan:hover {
-  border-color: color-mix(in oklch, var(--info) 60%, var(--rule-soft));
-  background: color-mix(in oklch, var(--info) 22%, transparent);
-}
-/* Execute — armed; accent fill matching the shell's dashed border. */
-.composer-mode-cycle.is-execute {
-  color: var(--accent);
-  border-color: var(--accent-edge);
-  background: var(--accent-soft);
-}
-.composer-mode-cycle.is-execute:hover {
-  border-color: var(--accent);
-  background: color-mix(in oklch, var(--accent) 26%, transparent);
-}
-/* Automation — violet; the "architect" mode that builds looms, distinct from
-   Plan's blue and Execute's gold. Uses a fixed violet so it reads as its own
-   thing even where no --violet token exists. */
-.composer-mode-cycle.is-automation {
-  color: oklch(0.62 0.19 295);
-  border-color: color-mix(in oklch, oklch(0.62 0.19 295) 45%, var(--rule-soft));
-  background: color-mix(in oklch, oklch(0.62 0.19 295) 14%, transparent);
-}
-.composer-mode-cycle.is-automation:hover {
-  border-color: color-mix(in oklch, oklch(0.62 0.19 295) 60%, var(--rule-soft));
-  background: color-mix(in oklch, oklch(0.62 0.19 295) 24%, transparent);
-}
-
 /* Placement is owned by AnchoredMenu, which portals these to <body> and sets
    position/left/bottom inline. (They must escape the composer shell: it
    carries spark-glass--strong, and a backdrop-filter ancestor is a backdrop
    root, so a .spark-menu nested inside it frosts the shell's empty interior
    and paints flat.) Only the intrinsic box belongs here. */
-.composer-mode-menu,
-.composer-thinking-menu {
-  width: 326px;
-  max-width: min(360px, calc(100vw - 32px));
-}
 .composer-thinking-menu {
   width: 310px;
+  max-width: min(360px, calc(100vw - 32px));
 }
 .composer-menu-heading {
   padding: 5px 8px 7px;
@@ -2257,7 +2080,6 @@ a { color: inherit; }
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.composer-mode-option,
 .composer-effort-option {
   display: flex;
   align-items: flex-start;
@@ -2273,27 +2095,15 @@ a { color: inherit; }
   text-align: left;
   cursor: default;
 }
-.composer-mode-option:hover,
 .composer-effort-option:hover {
   background: var(--hover);
 }
-.composer-mode-option.is-active,
 .composer-effort-option.is-active {
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
-.composer-mode-option-dot {
-  width: 7px;
-  height: 7px;
-  margin-top: 5px;
-  border-radius: 999px;
-  background: var(--muted);
-  flex: 0 0 7px;
-}
-.composer-mode-option.is-auto .composer-mode-option-dot { background: var(--ok); }
-.composer-mode-option.is-plan .composer-mode-option-dot { background: var(--info); }
-.composer-mode-option.is-execute .composer-mode-option-dot { background: var(--accent); }
-.composer-mode-option.is-automation .composer-mode-option-dot { background: oklch(0.62 0.19 295); }
+/* Two-line label/description copy inside a composer menu row. Shared by the
+   thinking menu; the mode menu that introduced the names is gone. */
 .composer-mode-option-copy {
   display: flex;
   flex: 1;
@@ -2355,9 +2165,7 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
-/* Row badges. The model picker carries none any more: these are the
-   execution-policy pills, which sit to the right of the row label and stay
-   fixed width. */
+/* Row badge. Fixed width, sits to the right of a menu row's label. */
 .composer-badge {
   font-size: 9px;
   letter-spacing: 0.08em;
@@ -2367,15 +2175,6 @@ a { color: inherit; }
   border-radius: 3px;
   padding: 1px 4px;
   flex: 0 0 auto;
-}
-.composer-badge.is-policy-deep {
-  color: var(--ink-dim);
-  background: color-mix(in oklab, var(--ink) 5%, transparent);
-}
-.composer-badge.is-policy-frontier {
-  color: var(--accent);
-  border-color: var(--accent-edge);
-  background: var(--accent-soft);
 }
 .composer-model-empty {
   padding: 8px;

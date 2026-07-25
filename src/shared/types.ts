@@ -1271,14 +1271,20 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
-// Human input is reserved for choices Cora cannot safely infer. These four
+// Human input is reserved for choices Cora cannot safely infer. These
 // categories are intentionally narrow; reversible engineering preferences are
 // recorded as assumptions instead of blockers.
+//
+// `plan_approval` is the one gate that is not about danger: Auto proposes a plan
+// for a large or risky request and blocks on accept / modify / reject. It must
+// stay a real category, because an uncategorized question is auto-assumed by
+// decideRunManagerQuestion, i.e. the manager would silently approve itself.
 export type RunQuestionCategory =
   | "credentials_access"
   | "destructive_irreversible"
   | "safety_policy"
-  | "irreducible_product_scope";
+  | "irreducible_product_scope"
+  | "plan_approval";
 
 export type RunQuestionSource =
   | "manager_decision"
@@ -1627,9 +1633,11 @@ export interface RunState {
   /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
    * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
   chatEffort?: AgentEffortLevel;
-  /** Configurable Pi orchestration depth. Undefined migrates to Fast. Other
-   * manager backends persist the value but ignore it, so switching back to Pi
-   * restores the user's chosen policy. */
+  /** Pinned Pi orchestration depth. NOT user-selectable: the effective policy
+   * is derived from taskComplexity by effectiveRunExecutionPolicy in main.
+   * This field survives for pre-picker runs and for non-UI callers (frontier
+   * smoke scripts, automations) that pin a policy deliberately. Undefined
+   * migrates to Fast. Non-Pi backends persist it but ignore it. */
   coraExecutionPolicy?: CoraExecutionPolicy;
   /**
    * Provider-side session UUID for the CC/Codex CLI backing this chat. Stored
@@ -2115,6 +2123,9 @@ export type PlannedStepAgentTaskClass = "skeleton" | "feature" | "leaf" | "verif
 //              verifier follow-up (cross-provider, single peer).
 //   - complex: subtle/byte-level work where atomic claims compound. 2 peer
 //              verifiers in parallel (Claude + Codex) — the existing pattern.
+// It is ALSO the sole input to the run's execution policy now that the policy
+// picker is gone: complex derives deep (wider verification budget, no
+// one-rework cap), everything else derives fast. See effectiveRunExecutionPolicy.
 export type TaskComplexity = "trivial" | "standard" | "complex";
 
 export interface PlannedStepAgent {

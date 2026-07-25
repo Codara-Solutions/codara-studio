@@ -67,7 +67,7 @@
       "plan_analysis": [
         "You plan a coding task for parallel CLI workers. Output JSON matching the schema, nothing else.",
         "",
-        "- TASK COMPLEXITY (REQUIRED on this call): classify the WHOLE RUN into one of three buckets and set the schema's `taskComplexity` field. This drives downstream verifier depth and step caps; getting it wrong is the orchestrator's largest wall-clock risk:",
+        "- TASK COMPLEXITY (REQUIRED on this call): classify the WHOLE RUN into one of three buckets and set the schema's `taskComplexity` field. This drives downstream verifier depth, step caps, AND the run's execution tier: the user has no depth control, so your classification is the only thing that decides how much scrutiny Codara buys. `complex` derives the deep tier (wider verifier-round budget, more than one corrective rework per worker); trivial and standard derive the fast tier. Report what the work IS, do not bid for budget. Getting it wrong is the orchestrator's largest wall-clock risk:",
         "    * trivial: ONE module/file under change, ≤3 atomic acceptance criteria, no public API rename, no cross-module refactor, no byte-level canonical work. Plan body verbs: 'fix', 'tighten', 'wire up', 'make X work on Y'. Max 2 worker_batch steps. NO recon (cost 5-10min wall-clock that this complexity cannot afford). NO skeleton.",
         "    * standard (DEFAULT under uncertainty): multi-file change OR public API touch OR test-writing against an existing API. Plan body verbs: 'add', 'rename across', 'fix and add a regression test'. Max 3-4 steps. Recon allowed only when the target surface is genuinely unknown (not just 'the user didn't list paths').",
         "    * complex: subtle/byte-level work where almost-right answers fail strict adversarial verification, OR cross-module refactor with ≥3 files changing semantics. Plan body verbs/words: 'library-quality', 'shell-portable', 'safe quoting', 'byte-for-byte', 'canonical', 'idiomatic', 'metacharacter', 'argv', 'cross-platform', or names specific shell families (pwsh / bash / zsh / cmd). No step cap. Recon and skeleton allowed.",
@@ -230,7 +230,7 @@
   "modeRules": {
     "plan_analysis": [
       "- Return status run_workers with the full durable step-by-step division in steps.",
-      "- Set taskComplexity to one of trivial / standard / complex per the classification rules (see systemPromptOverrides.plan_analysis). REQUIRED on this mode. Bias toward standard on uncertainty.",
+      "- Set taskComplexity to one of trivial / standard / complex per the classification rules (see systemPromptOverrides.plan_analysis). REQUIRED on this mode. It is the sole input to the run's execution tier now that the user has no depth control, so classify honestly: never inflate it to look thorough, never deflate it to look fast. Bias toward standard on uncertainty.",
       "- Return tasks as an empty array. Do not generate implementation prompts in this mode.",
       "- Set step.kind to worker_batch (1+ parallel workers, non-overlapping write scopes) or brake (no workers; plannedAgents=[]; checkpoint where Cora replans downstream with prior worker reports).",
       "- HARD STOP at the first brake: when you emit a brake step, your steps array MUST end at that brake. Do not emit any worker_batch or brake step after a brake. Cora re-invokes plan_analysis when the brake resolves, with prior worker reports appended; you plan the next slice then. Speculating past a brake is a planning failure because you do not yet have the evidence the brake exists to gather.",

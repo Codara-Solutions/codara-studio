@@ -15,7 +15,8 @@ import { loadState, saveState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
 import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
-import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
+import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
+import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
   CODEX_MODEL_CATALOG,
@@ -718,7 +719,9 @@ async function handleChatAppend(
 }
 
 const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["claude", "codex", "pi"]);
-const CLI_CHAT_MODES = new Set<ChatMode>(["auto", "execute", "talk", "plan"]);
+// Auto is the only chat mode a user-facing chat can be started in. Rejecting an
+// old `--mode plan` loudly beats silently coercing it to something else.
+const CLI_CHAT_MODES = new Set<ChatMode>(["auto"]);
 const CLI_CHAT_EFFORTS = new Set<AgentEffortLevel>([
   "minimal",
   "low",
@@ -845,7 +848,7 @@ async function handleChatCreate(
   }
   const mode = enumParam(params, "mode", CLI_CHAT_MODES);
   if (mode === null) {
-    return errorResponse(id, ERR_INVALID_PARAMS, "mode must be auto, execute, talk, or plan");
+    return errorResponse(id, ERR_INVALID_PARAMS, "mode must be auto");
   }
   const effort = enumParam(params, "effort", CLI_CHAT_EFFORTS);
   if (effort === null) {
@@ -868,12 +871,11 @@ async function handleChatCreate(
   }
 
   // Visible Claude/Codex worker panes are owned by the renderer workspace
-  // store. An Execute run left in a background workspace can create task
-  // envelopes, but the renderer correctly refuses to put their PTYs in the
-  // currently active project's tab store. Activate only modes that can spawn
-  // workers; conversational Talk/Plan sessions stay non-disruptive.
-  const effectiveMode = mode ?? "execute";
-  if (effectiveMode === "execute" || effectiveMode === "auto") {
+  // store. A run left in a background workspace can create task envelopes, but
+  // the renderer correctly refuses to put their PTYs in the currently active
+  // project's tab store, so activate the workspace for any mode that can spawn
+  // workers.
+  if (effectiveChatMode(mode) === "auto") {
     await activateCliWorkspace(binding.workspace.id);
   }
 
@@ -1332,6 +1334,16 @@ async function handleAppPrefsSet(
 
 const ASK_USER_POLL_MS = 500;
 const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers the user being AFK
+// A plan approval is read-then-decide: the user reads a whole proposed plan
+// before answering, so the manager waits longer than for a one-line blocker.
+// Hard bound: the MCP client (and the in-process Pi bridge) abort every
+// orchestrator.* RPC at ORCHESTRATION_TIMEOUT_MS = 20 min
+// (resources/codara-studio-mcp/server.js). Overshooting that does NOT buy the
+// user more time: the socket dies first, clientGone releases the blocker, and
+// the plan card becomes unanswerable while the manager gets a transport error
+// instead of the graceful "ask_user timed out". Stay under the ceiling, like
+// ASK_USER_TIMEOUT_MS does.
+const PLAN_APPROVAL_TIMEOUT_MS = 18 * 60 * 1000;
 const ORCHESTRATOR_RUNTIME_FALLBACK = "claude" as const;
 
 interface OrchestratorWorkerInput {
@@ -1481,10 +1493,10 @@ function countVerifierRoundsForScope(
 }
 
 // Verifier rounds allowed per implementation scope, derived from the run's
-// execution policy (and complexity classification when present): fast gets a
-// single independent verification, deep two, frontier three.
+// execution policy (itself derived from the manager's complexity call): fast
+// gets a single independent verification, deep two, frontier three.
 function verifierRoundCapForRun(run: RunState): number {
-  const policy = normalizeCoraExecutionPolicy(run.coraExecutionPolicy);
+  const policy = effectiveRunExecutionPolicy(run);
   const base = policy === "frontier" ? 3 : policy === "deep" ? 2 : 1;
   return run.taskComplexity === "complex" ? Math.max(base, 2) : base;
 }
@@ -1509,12 +1521,26 @@ async function handleOrchestratorSpawnWorkers(
     return errorResponse(id, ERR_INVALID_PARAMS, "workers array is required and non-empty");
   }
   const runStore = await getRunStore();
-  const run = await runStore.getRun(runId);
+  let run = await runStore.getRun(runId);
   if (!run) {
     return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   }
   const blocked = rejectIfAutomationRun(run, id, "codara_spawn_workers");
   if (blocked) return blocked;
+  // The MCP orchestrator has no plan_analysis JSON decision to carry its
+  // complexity call, so this is its only channel. Persist before the verifier
+  // cap below is computed: the classification is what the cap derives from.
+  const declaredComplexity = params.taskComplexity;
+  if (
+    declaredComplexity === "trivial" ||
+    declaredComplexity === "standard" ||
+    declaredComplexity === "complex"
+  ) {
+    const reclassified = await runStore
+      .recordTaskComplexity(runId, declaredComplexity)
+      .catch(() => null);
+    if (reclassified) run = reclassified;
+  }
   const cwd = typeof run.settingsSnapshot?.workspaceCwd === "string"
     ? run.settingsSnapshot.workspaceCwd
     : process.cwd();
@@ -1596,7 +1622,7 @@ async function handleOrchestratorSpawnWorkers(
     const verifierRoundCap = verifierRoundCapForRun(run);
     const verifierRoundsUsed = countVerifierRoundsForScope(run, requestedVerifiers);
     if (verifierRoundsUsed >= verifierRoundCap) {
-      const policy = normalizeCoraExecutionPolicy(run.coraExecutionPolicy);
+      const policy = effectiveRunExecutionPolicy(run);
       const capNote =
         `Verification cap reached: ${verifierRoundsUsed} verifier round(s) already ran against this scope ` +
         `(cap ${verifierRoundCap} for the ${policy} policy). Do not spawn another verifier. Either accept ` +
@@ -1876,6 +1902,7 @@ async function handleOrchestratorAskUser(
     "destructive_irreversible",
     "safety_policy",
     "irreducible_product_scope",
+    "plan_approval",
   ]);
   const category =
     requestedCategory && validCategories.has(requestedCategory as RunQuestionCategory)
@@ -1926,7 +1953,9 @@ async function handleOrchestratorAskUser(
     }
   };
 
-  const deadline = Date.now() + ASK_USER_TIMEOUT_MS;
+  const deadline =
+    Date.now() +
+    (category === "plan_approval" ? PLAN_APPROVAL_TIMEOUT_MS : ASK_USER_TIMEOUT_MS);
   while (Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, ASK_USER_POLL_MS));
     // Client hung up — stop polling; writeJsonRpc on a dead socket is a no-op.
@@ -2014,13 +2043,13 @@ async function handleOrchestratorComplete(
   // response into a successful zero-edit run. Read-only chat answers do not
   // call this tool, and completed managed runs always retain worker history.
   if (
-    (run.chatMode === "execute" || run.chatMode === "auto") &&
+    effectiveChatMode(run.chatMode) === "auto" &&
     (run.workerTasks ?? []).length === 0
   ) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "Cannot complete an execute-mode run before any worker task exists. " +
+      "Cannot complete a run before any worker task exists. " +
         "Call codara_spawn_workers for the active user request, wait for the workers, verify their reports, then call codara_complete.",
     );
   }
@@ -2052,38 +2081,17 @@ async function handleOrchestratorComplete(
         `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).`,
     );
   }
-  // Verification freshness invariant: an earlier green verifier does not
-  // cover a later corrective edit, and a FEEDBACK report is evidence of a
-  // defect rather than permission to land. Compare report timestamps so every
-  // files-changing implementation has a terminal-OK verifier after it.
-  let latestChangedImplementationAt = 0;
-  let latestPassingVerifierAt = 0;
-  let latestVerifierConfidence: string | null = null;
-  for (const attempt of run.workerAttempts ?? []) {
-    if (!attempt.finalReportPath) continue;
-    const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
-    if (!task) continue;
-    const report = await runStore.readWorkerReport(attempt.finalReportPath).catch(() => null);
-    if (!report) continue;
-    const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
-    if (task.taskClass === "verifier" && report.verifier) {
-      latestVerifierConfidence = report.verifier.confidence;
-      if (["PERFECT", "VERIFIED", "PARTIAL"].includes(report.verifier.confidence)) {
-        latestPassingVerifierAt = Math.max(latestPassingVerifierAt, finishedAt);
-      }
-    } else if (report.filesChanged.length > 0) {
-      latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
-    }
-  }
-  if (
-    latestChangedImplementationAt > 0 &&
-    latestPassingVerifierAt < latestChangedImplementationAt
-  ) {
+  // Verification freshness invariant: an earlier green verifier does not cover
+  // a later corrective edit. One implementation (run-store), shared with the
+  // orchestrator-side terminal hops that complete a run when this tool never
+  // arrives, so a manager that skips codara_complete cannot skip the rule.
+  const verification = await runStore.describeVerificationFreshness(run);
+  if (!verification.ok) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
       "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
-        `Latest verifier confidence: ${latestVerifierConfidence ?? "none"}. ` +
+        `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
         "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
     );
   }
@@ -3625,11 +3633,11 @@ async function handleOrchestratorNameChat(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
-  if (run.chatMode !== "execute" && run.chatMode !== "auto") {
+  if (effectiveChatMode(run.chatMode) !== "auto") {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      `orchestrator.name_chat is only available for execute/auto chats (this run's chatMode is "${run.chatMode ?? "unset"}"). Automation chats use automation.name_chat.`,
+      `orchestrator.name_chat is only available for auto chats (this run's chatMode is "${run.chatMode ?? "unset"}"). Automation chats use automation.name_chat.`,
     );
   }
   const title = sanitizeChatTitle(rawTitle);

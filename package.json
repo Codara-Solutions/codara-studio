@@ -17,6 +17,7 @@
     "test:cora-cli": "node scripts/test-cora-cli.cjs",
     "test:step-lifecycle": "node scripts/test-step-lifecycle.cjs",
     "test:spawn-batch-guard": "node scripts/test-spawn-batch-guard.cjs",
+    "test:wedged-run": "node scripts/test-wedged-run-recovery.cjs",
     "test:parallel-wave": "node scripts/test-parallel-wave.cjs",
     "test:outcome-memory": "node scripts/test-outcome-memory.cjs",
     "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-verification.cjs && node scripts/test-pi-admission-cache.mjs && node scripts/test-pi-frontier-evidence.cjs && node scripts/test-pi-frontier-gate.mjs",

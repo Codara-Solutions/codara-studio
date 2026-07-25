@@ -386,12 +386,21 @@ export function loadManagerPromptProfileFromPath(
 const MANAGER_PUNCTUATION_RULE =
   "PUNCTUATION: never write an em dash or an en dash in any human-facing string (chatReply, question, questionReason, summary, step and task titles). Use a comma, a colon, parentheses, or a second sentence instead. This is absolute: the character must not appear in your output even when the surrounding text you were given uses it.";
 
+// Same structural argument as the punctuation rule: the user has no execution
+// policy control any more, so taskComplexity is the ONLY thing that decides how
+// much scrutiny Codara buys. A mode override must not be able to drop it.
+const MANAGER_COMPLEXITY_HONESTY_RULE =
+  "COMPLEXITY IS A MEASUREMENT, NOT A BUDGET REQUEST: taskComplexity is the only signal Codara has for how much scrutiny to spend. The user cannot choose a depth; your classification alone decides the run's execution tier, the verifier-round budget, and whether a worker gets more than one corrective rework. Classify what the work actually is. Calling easy work complex spends the user's wall-clock and money on ceremony it does not need; calling subtle work standard strands it with one verification round and no rework. Never inflate it to look thorough and never deflate it to look fast.";
+
 /** Append the always-on rules to a prompt built by any path. */
 function withGlobalManagerRules(prompt: string): string {
-  // Cheap idempotence guard: a profile that already carries the rule inline
+  // Cheap idempotence guard: a profile that already carries a rule inline
   // must not get it twice.
-  if (prompt.includes("PUNCTUATION: never write an em dash")) return prompt;
-  return `${prompt}\n\n${MANAGER_PUNCTUATION_RULE}`;
+  const rules = [MANAGER_PUNCTUATION_RULE, MANAGER_COMPLEXITY_HONESTY_RULE].filter(
+    (rule) => !prompt.includes(rule.slice(0, 40)),
+  );
+  if (rules.length === 0) return prompt;
+  return `${prompt}\n\n${rules.join("\n\n")}`;
 }
 
 export function buildManagerSystemPrompt(

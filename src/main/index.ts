@@ -1004,6 +1004,11 @@ app.whenReady().then(async () => {
       // startAutopilot's attemptInFlight guard). Must run before the scheduler
       // and the queue below, so both see a coherent world.
       await runStore.recoverOrphanedManagedWorkerAttempts();
+      // ...then close out runs whose work was already finished when the process
+      // died. Must sit between the attempt recovery (which settles the dead
+      // workers this pass reads) and the pause below (which would otherwise
+      // park a finished run as "press Resume"). Starts nothing.
+      await runStore.completeSettledManagedRunsAfterRestart();
       // ...then park what the restart interrupted. Nothing above re-drives a
       // run any more: relaunching the app never resumes Cora on its own, so
       // every recovery step is repair-only and the user's Resume is the sole

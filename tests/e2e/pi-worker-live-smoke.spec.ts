@@ -62,7 +62,7 @@ test("a real Cora Codex worker executes through Pi and completes the normal atte
         cwd,
         title: "Pi worker lifecycle",
         chatBackend: "pi",
-        chatMode: "execute",
+        chatMode: "auto",
         chatModel: "gpt-5.6-sol",
         chatEffort: "high",
       });

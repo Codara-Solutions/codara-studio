@@ -153,7 +153,6 @@ export default function OrchestrationSidebar({
             chatConfig.model !== undefined ||
             chatConfig.mode !== undefined ||
             chatConfig.effort !== undefined ||
-            chatConfig.executionPolicy !== undefined ||
             chatConfig.fastMode !== undefined ||
             chatConfig.oneMillionContext !== undefined),
       );
@@ -168,7 +167,6 @@ export default function OrchestrationSidebar({
           chatModel: chatConfig?.model,
           chatMode: chatConfig?.mode,
           chatEffort: chatConfig?.effort,
-          coraExecutionPolicy: chatConfig?.executionPolicy,
           chatFastMode: chatConfig?.fastMode,
           chat1mContext: chatConfig?.oneMillionContext,
         });

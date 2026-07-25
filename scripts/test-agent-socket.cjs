@@ -139,7 +139,9 @@ async function main() {
       prompt: "Create a deterministic socket-test session.",
       title: "CLI socket test",
       backend: "pi",
-      mode: "talk",
+      // Auto is the only mode a chat can be created in; talk/plan/execute are
+      // legacy stamps the socket rejects rather than coerces.
+      mode: "auto",
     });
     check(
       "chat.create starts a managed Cora run",

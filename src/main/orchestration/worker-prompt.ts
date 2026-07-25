@@ -16,6 +16,7 @@ import type {
   WorkerArtifactPaths,
   WorkerTask,
 } from "@shared/types";
+import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_MANAGER_PROMPT_PROFILE, loadManagerPromptProfile } from "./prompt-profile";
 import { isConfigShieldActive } from "./agent-config-shield";
 import { renderAgentSyncPromptLines } from "../agent-sync";
@@ -295,8 +296,9 @@ function renderPeerCommsGuidance(
 // execute/auto-manager runs). Keep the two predicates in sync.
 function managerInboxIsRead(run: RunState): boolean {
   return (
+    run.executionMode !== "direct" &&
     (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
-    (run.chatMode === "execute" || run.chatMode === "auto")
+    effectiveChatMode(run.chatMode) === "auto"
   );
 }
 

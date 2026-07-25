@@ -42,9 +42,10 @@ import type {
 } from "./manager-protocol";
 import {
   effectiveChatFastMode,
+  effectiveChatMode,
   effectiveChatOneMillionContext,
 } from "@shared/chat-policy";
-import { effectiveCoraExecutionPolicy } from "@shared/cora-execution-policy";
+import { effectiveRunExecutionPolicy } from "./execution-policy";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -314,12 +315,16 @@ export interface SparkAgentBackend {
  *   - backend: Pi (the bundled, subscription-only Cora harness)
  *   - model:   backend-specific default (Pi/Codex=GPT-5.6 Sol,
  *              Claude=opus-4-8)
- *   - mode:    execute (the original behaviour)
+ *   - mode:    auto for every chat except an Automations loom (effectiveChatMode)
  *   - effort:  high for Pi, medium for explicitly selected legacy backends
+ *
+ * This is the single authoritative mode seam: an unset chatMode (explorer "Run
+ * plan", `cora start` with no mode) and a legacy talk/plan/execute stamp both
+ * dispatch as Auto from here.
  */
 export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
   const backend: ChatBackendKind = run.chatBackend ?? "pi";
-  const mode: ChatMode = run.chatMode ?? "execute";
+  const mode: ChatMode = effectiveChatMode(run.chatMode);
   const effort: AgentEffortLevel = run.chatEffort ?? (backend === "pi" ? "high" : "medium");
   // Pi and Codex both drive the Codex runtime, so they share its default model.
   const model =
@@ -330,7 +335,7 @@ export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
     model,
     mode,
     effort,
-    executionPolicy: effectiveCoraExecutionPolicy(backend, run.coraExecutionPolicy),
+    executionPolicy: effectiveRunExecutionPolicy(run),
     sessionUuid: run.chatSessionUuid,
     sessionMode: run.chatSessionMode,
     fastMode: effectiveChatFastMode(backend, run.chatFastMode),

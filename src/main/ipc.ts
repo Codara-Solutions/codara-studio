@@ -408,7 +408,26 @@ export function registerIpc(): void {
     "agents:sync",
     async (_e, input?: { cwd?: string | null }) => {
       const { syncAgentAssets } = await getAgentSync();
-      return syncAgentAssets({ cwd: input?.cwd ?? null });
+      const result = await syncAgentAssets({ cwd: input?.cwd ?? null });
+      // Sync is also the manual repair path for the built-in: an entry stranded
+      // by a moved install (command path gone) is rewritten to the current app
+      // path here instead of waiting for the next launch. Repair only: a runtime
+      // the user removed the built-in from must not get it back from a sync
+      // click, so nothing is reported for it either.
+      const settings = await loadSettings();
+      if (settings.playwrightMcpAutoInstall !== false) {
+        try {
+          const { repairSparkBuiltinEntries, SPARK_BUILTIN_SERVER_NAME } = await getMcpInstaller();
+          const repaired = await repairSparkBuiltinEntries();
+          if (repaired.claude) result.mcp.toClaude.push(SPARK_BUILTIN_SERVER_NAME);
+          if (repaired.codex) result.mcp.toCodex.push(SPARK_BUILTIN_SERVER_NAME);
+        } catch (err) {
+          result.mcp.errors.push(
+            `Could not refresh the built-in MCP entry: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      return result;
     },
   );
   ipcMain.handle(

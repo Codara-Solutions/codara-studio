@@ -110,6 +110,22 @@ async function main() {
   // so assigning it to a Pi scope must actually deliver it.
   assert.equal(servers[3].command, "npx");
 
+  // The Capability Center hides exactly the names Pi drops. A name listed here
+  // but not there would render a row with Cora/Workers switches that silently
+  // do nothing.
+  const dialogSource = fs.readFileSync(
+    path.join(__dirname, "..", "src", "renderer", "src", "components", "AgentCapabilitiesDialog.tsx"),
+    "utf8",
+  );
+  const dialogList = dialogSource.match(/const RESERVED_MCP_NAMES = new Set\(\[([\s\S]*?)\]\)/);
+  assert.ok(dialogList, "AgentCapabilitiesDialog.tsx declares RESERVED_MCP_NAMES");
+  const dialogNames = [...dialogList[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(
+    dialogNames.slice().sort(),
+    [...config.RESERVED_MCP_SERVER_NAMES].slice().sort(),
+    "the dialog hides exactly the reserved MCP names",
+  );
+
   // Unresolved placeholders stay literal rather than collapsing to an empty
   // credential that would look like a successful expansion.
   const unresolved = config.normalizePiMcpServers(

@@ -56,6 +56,7 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StepState,
+  TaskComplexity,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -78,8 +79,9 @@ import {
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
-import { normalizeChatFeatureFlags } from "@shared/chat-policy";
+import { effectiveChatMode, normalizeChatFeatureFlags } from "@shared/chat-policy";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
+import { effectiveRunExecutionPolicy } from "./execution-policy";
 import {
   CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
   whiteboardNodeSizeLimits,
@@ -100,6 +102,7 @@ import {
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
 import { reconcileAcceptedVerifierOnlySteps } from "./step-lifecycle";
+import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
@@ -881,6 +884,26 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     const unfinishedSteps = run.steps.filter(
       (step) => !["complete", "completed_unverified", "failed", "skipped"].includes(step.status),
     );
+    // Every step complete, every worker task accepted, nothing in flight: the
+    // manager's own turn WAS the run, and it ended without codara_complete
+    // (execute/auto CLI managers reach here whenever that happens, since
+    // runAutopilotWorkerCycle deliberately skips scheduleAutopilotReview for
+    // them). Finish the run instead of asking the user about work that is
+    // already done. Reversible: a later user message reopens it through the
+    // steering-followup path. Completion still has to earn the same verifier
+    // freshness codara_complete demands: an execute/auto CLI manager
+    // auto-accepts a task on process exit without reading its report, so
+    // "everything accepted" is not evidence anything was verified.
+    if (isRunSettled(run)) {
+      const verification = await describeVerificationFreshness(run);
+      if (verification.ok) {
+        return completeRunFromOrchestrator(run.id);
+      }
+      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
+        managerMode: "worker_result_review",
+      });
+    }
     // A step sitting in review is NOT blocked on the user, it is blocked on
     // Cora. Boot recovery produces exactly this shape (a worker whose report
     // was already on disk becomes needs_review), so asking the user to unblock
@@ -2922,6 +2945,12 @@ export async function recoverPendingConversationRewinds(): Promise<void> {
   }
 }
 
+/** Stamped on every manager turn this pass fails. It is the ONLY durable trace
+ * that a turn was cut off mid-work: once this pass has run, the call is
+ * "failed" like any other, so a later boot step cannot use "started with no
+ * completedAt" to recognize an interrupted turn (see interruptedManagerCall). */
+export const MANAGER_TURN_INTERRUPTED_ERROR = "Manager turn interrupted by application restart.";
+
 /** Repair manager turns that were durable but had no live driver after process
  * exit. Claimed queued/submitted input is released, the orphaned call is marked
  * failed, and answer-driven continuations are recreated from the exact linked
@@ -2949,7 +2978,7 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         for (const call of draft.sparkCalls) {
           if (!orphanedIds.has(call.id) || call.status !== "started") continue;
           call.status = "failed";
-          call.error = "Manager turn interrupted by application restart.";
+          call.error = MANAGER_TURN_INTERRUPTED_ERROR;
           call.completedAt = timestamp;
           changed = true;
         }
@@ -3141,6 +3170,128 @@ export async function recoverOrphanedManagedWorkerAttempts(): Promise<void> {
         },
       }).catch(() => undefined);
     }
+  }
+}
+
+const PASSING_VERIFIER_CONFIDENCES = new Set(["PERFECT", "VERIFIED", "PARTIAL"]);
+
+export interface RunVerificationFreshness {
+  /** false when the latest files-changing report has no newer passing verdict. */
+  ok: boolean;
+  latestVerifierConfidence: string | null;
+  latestChangedImplementationAt: number;
+  latestPassingVerifierAt: number;
+}
+
+/**
+ * Verification freshness invariant: an earlier green verifier does not cover a
+ * later corrective edit, and a FEEDBACK report is evidence of a defect rather
+ * than permission to land, so every files-changing implementation needs a
+ * terminal-OK verifier verdict AFTER it before a run may be called done.
+ *
+ * Shared rule, one implementation. codara_complete rejects the manager on it
+ * (agent-socket handleOrchestratorComplete) and the orchestrator-side terminal
+ * hops gate on it too: an execute/auto CLI manager auto-accepts a worker task
+ * the moment the process exits, without reading the report, so "every task
+ * accepted" alone is not evidence that anything was verified.
+ */
+export async function describeVerificationFreshness(
+  run: RunState,
+): Promise<RunVerificationFreshness> {
+  let latestChangedImplementationAt = 0;
+  let latestPassingVerifierAt = 0;
+  let latestVerifierConfidence: string | null = null;
+  for (const attempt of run.workerAttempts ?? []) {
+    if (!attempt.finalReportPath) continue;
+    const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
+    if (!task) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (!report) continue;
+    const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
+    if (task.taskClass === "verifier" && report.verifier) {
+      latestVerifierConfidence = report.verifier.confidence;
+      if (PASSING_VERIFIER_CONFIDENCES.has(report.verifier.confidence)) {
+        latestPassingVerifierAt = Math.max(latestPassingVerifierAt, finishedAt);
+      }
+    } else if (report.filesChanged.length > 0) {
+      latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
+    }
+  }
+  return {
+    ok:
+      latestChangedImplementationAt === 0 ||
+      latestPassingVerifierAt >= latestChangedImplementationAt,
+    latestVerifierConfidence,
+    latestChangedImplementationAt,
+    latestPassingVerifierAt,
+  };
+}
+
+/** Asked instead of completing when the work is finished but unverified. The
+ * run stays reviewable and the user owns the call, rather than a cap-broken or
+ * never-verified run being reported as a clean green finish. */
+const UNVERIFIED_COMPLETION_QUESTION =
+  "Every worker finished, but the latest code changes never earned a passing verifier verdict, so I won't mark this done on my own. Tell me whether to run a verifier over the final state or accept the work as it stands.";
+
+/**
+ * Finish managed runs that a restart found already done.
+ *
+ * A run whose steps are all complete, whose worker tasks are all accepted and
+ * whose attempts are all terminal has nothing left to drive: the previous
+ * process died (or the manager turn ended) between the last acceptance and the
+ * terminal hop that codara_complete would have made. Parking that run as
+ * "Paused, press Resume" asks the user to restart work that is finished, and
+ * Resume would then spend a whole extra manager turn re-reviewing accepted
+ * reports.
+ *
+ * Ordering is load-bearing. This must run AFTER
+ * recoverOrphanedManagedWorkerAttempts, so attempts killed by the restart are
+ * already settled and a dead worker cannot read as "still in flight", and
+ * BEFORE pauseManagedRunsAfterRestart, which would otherwise claim the run
+ * first.
+ *
+ * This is not the app resuming work on its own: it starts nothing, it only
+ * records the terminal state the run already reached.
+ */
+export async function completeSettledManagedRunsAfterRestart(): Promise<void> {
+  let runs: RunState[];
+  try {
+    runs = await listRuns();
+  } catch {
+    return;
+  }
+  for (const run of runs) {
+    // Only live-looking managed runs. Paused/blocked status is user-owned, and
+    // a question the user never answered outranks a tidy ending: completing the
+    // run would bury it.
+    if (!["running", "reviewing"].includes(run.status)) continue;
+    if (run.blockedOn || unresolvedRunQuestions(run.humanMessages).length > 0) continue;
+    // An undelivered turn or a manager call the restart cut off is unfinished
+    // conversation, not finished work. Leave all of these to the user's Resume:
+    // a turn truncated mid-work (interruptedManagerCall, NOT activeManagerCall,
+    // the orphan pass above already failed every live call), a continuation
+    // whose lease was repaired to "pending", and an answer whose live RPC died
+    // with the process. Each is a piece of conversation the user is owed, and
+    // completing the run would bury it with no Resume left to reach it.
+    if (queuedManagerInputMessages(run).length > 0) continue;
+    if (interruptedManagerCall(run)) continue;
+    if (run.pendingManagerResume) continue;
+    if (unactedUserAnswer(run)) continue;
+    if (activeWorkersForRun(run.id).length > 0) continue;
+    const settlement = describeRunSettlement(run);
+    if (!settlement.settled) continue;
+    // Unverified work is never completed unattended, same rule codara_complete
+    // enforces. The pause pass below parks it instead, so Resume re-drives it
+    // into startAutopilot's question.
+    if (!(await describeVerificationFreshness(run)).ok) continue;
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "run.settled_after_restart",
+      message: "Every step finished before the app closed; marking the run complete",
+      payload: { priorStatus: run.status, steps: run.steps.length, workerTasks: run.workerTasks.length },
+    }).catch(() => undefined);
+    await completeRunFromOrchestrator(run.id).catch(() => undefined);
   }
 }
 
@@ -3353,7 +3504,22 @@ async function runInitialAutopilotPlanning(
   ) {
     return;
   }
-  await startAutopilot({ ...input, runId: run.id });
+  // This is the post-turn driver hop, not a fresh start: the initial note was
+  // already appended and already delivered to the manager. Re-feeding it makes
+  // startAutopilot take the initialNote branch again, which addRunMessage
+  // dedupes to nothing and then hands to scheduleInitialChatDecision, whose
+  // activeAutopilotPlans guard sees THIS cycle still in flight and returns. The
+  // hop then drives nothing at all, which is how a run whose workers all
+  // finished stays "running" with no timer, no worker and no pending call
+  // (run-ms0dijmk-54pw6g). Strip the initial-turn fields so the hop reaches the
+  // launch/finish decision below.
+  await startAutopilot({
+    ...input,
+    initialUserNote: undefined,
+    initialUserNoteClientMessageId: undefined,
+    initialAttachments: undefined,
+    runId: run.id,
+  });
 }
 
 async function markInitialAutopilotPlanningFailed(runId: string, err: unknown): Promise<void> {
@@ -3420,9 +3586,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // path that normally transitions needs_review → accepted via
   // decideWorkerReport is explicitly skipped below. So auto-accept on
   // success here; the CC manager will inspect the report and judge quality.
-  const isExecuteModeCliManager =
-    (latest.chatBackend === "claude" || latest.chatBackend === "codex" || latest.chatBackend === "pi") &&
-    (latest.chatMode === "execute" || latest.chatMode === "auto");
+  const isExecuteModeCliManager = runHasMcpManager(latest);
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
   const shouldAutoAccept =
@@ -3511,6 +3675,31 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // multiple worker-spawn rounds in run-mpo92kqf-7eaym0.
     if (!isExecuteModeCliManager) {
       scheduleAutopilotReview(runId, cwd);
+      return;
+    }
+    // ...but that only holds while the manager's turn is actually live. If its
+    // call already finished (the turn ended without codara_wait_for_workers, or
+    // the provider cut it short), no RPC will unblock and no re-entry is
+    // coming, so the run would sit at "reviewing" with every worker accepted
+    // and nothing driving it. When all the work is settled, take the terminal
+    // hop codara_complete would have taken. Deliberately narrow: an unsettled
+    // run still gets no re-prompt, that is the duplicate-spawn bug above.
+    //
+    // The manager never read the reports on this path (that is what "the turn
+    // ended early" means), so the verifier freshness invariant cannot be waived
+    // here: unverified work is handed to the user instead of being reported as
+    // a clean finish.
+    if (activeManagerCall(settled) || activeWorkersForRun(runId).length > 0) return;
+    if (isRunSettled(settled)) {
+      const verification = await describeVerificationFreshness(settled);
+      if (verification.ok) {
+        await completeRunFromOrchestrator(runId);
+        return;
+      }
+      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
+        managerMode: "worker_result_review",
+      });
     }
   }
 }
@@ -3613,14 +3802,11 @@ async function runAutopilotManagerReview(
   // no active workers). Synthesize the best merged PLAN.md + PRD.md and complete
   // the run — skip the verifier/manager review (planning docs aren't code).
   //
-  // Gate out chatMode "execute"/"auto": council tasks keep their councilGroupId
-  // forever, so isCouncilRun(run) stays true even after the plan is finalized.
-  // Once the user flips the SAME chat to Execute or Auto ("run the plan"),
-  // we must NOT re-route into council finalize — otherwise the flip would
-  // re-finalize the old plan instead of spawning execute workers. Any other
-  // mode (plan, or unset for a programmatic council) still advances/finalizes
-  // the council normally.
-  if (isCouncilRun(run) && run.chatMode !== "execute" && run.chatMode !== "auto") {
+  // Gate on the council's OWN state, not on chat mode: council tasks keep their
+  // councilGroupId forever, so isCouncilRun(run) stays true after the plan is
+  // finalized. The next round in the same chat ("run the plan") must review its
+  // own workers instead of re-finalizing the old plan.
+  if (isCouncilRun(run) && !councilAlreadyFinalized(run)) {
     await advanceCouncil(run, cwd);
     return;
   }
@@ -3876,6 +4062,56 @@ function activeManagerCall(run: RunState): SparkCall | undefined {
     if (call.status === "started" && !call.completedAt) return call;
   }
   return undefined;
+}
+
+/**
+ * The manager's most recent turn in this epoch never reached an ending: it is
+ * either still live, or recoverOrphanedManagerTurns already failed it with the
+ * restart marker. Boot recovery MUST use this rather than activeManagerCall:
+ * the orphan pass runs first and clears every "started" call, so by the time
+ * later boot steps look, a turn cut off mid-work is indistinguishable from a
+ * turn that finished cleanly without the marker.
+ *
+ * Only the newest call in the epoch is consulted. An older interrupted turn the
+ * user already resumed past is history, not unfinished conversation.
+ */
+function interruptedManagerCall(run: RunState): SparkCall | undefined {
+  const epoch = conversationEpoch(run);
+  for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
+    const call = run.sparkCalls[index];
+    if ((call.conversationEpoch ?? 0) !== epoch) continue;
+    if (call.status === "started" && !call.completedAt) return call;
+    if (call.status === "failed" && call.error === MANAGER_TURN_INTERRUPTED_ERROR) return call;
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * A user answer no manager turn ever consumed.
+ *
+ * An `active_rpc` answer (codara_ask_user on a CLI manager) is delivered by the
+ * live RPC and marked `acknowledged` on the spot, so nothing durable records
+ * whether the manager acted on it: it is neither queued input nor an unresolved
+ * question. Only a manager turn that STARTED after the answer proves it landed.
+ * Without this, a restart between "user says yes" and Cora acting on it buries
+ * the answer under a tidy completion.
+ */
+function unactedUserAnswer(run: RunState): HumanRunMessage | undefined {
+  const epoch = conversationEpoch(run);
+  const answer = [...run.humanMessages]
+    .reverse()
+    .find(
+      (message) =>
+        message.author === "user" &&
+        message.kind === "answer" &&
+        (message.conversationEpoch ?? 0) === epoch,
+    );
+  if (!answer) return undefined;
+  const consumed = run.sparkCalls.some(
+    (call) => (call.conversationEpoch ?? 0) === epoch && call.createdAt > answer.createdAt,
+  );
+  return consumed ? undefined : answer;
 }
 
 function queuedManagerInputMessages(run: RunState): HumanRunMessage[] {
@@ -5058,6 +5294,16 @@ function isCouncilRun(run: RunState): boolean {
   return run.workerTasks.some((task) => task.councilGroupId !== undefined);
 }
 
+// Title finalizeCouncil stamps on the merged plan. Doubles as the durable
+// "this council already produced its plan" marker (see councilAlreadyFinalized).
+const COUNCIL_PLAN_TITLE = "Synthesized plan (council)";
+
+// True once a council run has written its synthesized plan, so a later round in
+// the same chat routes through the normal verifier/manager review.
+function councilAlreadyFinalized(run: RunState): boolean {
+  return run.plans.some((plan) => plan.title === COUNCIL_PLAN_TITLE);
+}
+
 // The original planning task for a council run (latest user message / note).
 function councilTaskFromRun(run: RunState): string {
   return (
@@ -5081,18 +5327,15 @@ function councilSynthesisRuntime(run: RunState): WorkerRuntime | null {
   return null;
 }
 
-// Resolve the council directive for this startAutopilot call: an explicit
-// input.council wins; otherwise a run in chatMode "plan" treats the user's note
-// (or latest user message) as the planning task.
+// Resolve the council directive for this startAutopilot call. Only an explicit
+// input.council triggers the Best-of-N council now: there is no "plan" chat mode
+// to infer it from, so the council is a programmatic capability the manager's
+// own plan gate does not use.
 function resolveCouncilDirective(
-  run: RunState,
+  _run: RunState,
   input: StartAutopilotInput,
 ): CouncilDirective | null {
   if (input.council && input.council.task.trim().length > 0) return input.council;
-  if (run.chatMode === "plan") {
-    const task = input.initialUserNote?.trim() || councilTaskFromRun(run);
-    if (task) return { task, origin: "composer" };
-  }
   return null;
 }
 
@@ -5476,7 +5719,7 @@ async function finalizeCouncil(
         const plan = {
           id: makeId("plan"),
           workspaceId: draft.workspaceId,
-          title: "Synthesized plan (council)",
+          title: COUNCIL_PLAN_TITLE,
           // Point at the on-disk file so switching to Execute / "Run plan"
           // targets it directly (the execute path keys off plan.sourceFile).
           sourceFile: planFilePath,
@@ -7807,9 +8050,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // they re-drive via the resume signals sent above, not the autopilot
   // scheduler (scheduleAutopilotReview is never used for them — see the worker
   // cycle path). The scheduler itself dedupes, so this can't double-drive.
-  const isExecuteModeCliManager =
-    (resumed.chatBackend === "claude" || resumed.chatBackend === "codex" || resumed.chatBackend === "pi") &&
-    (resumed.chatMode === "execute" || resumed.chatMode === "auto");
+  const isExecuteModeCliManager = runHasMcpManager(resumed);
   // ...but that exemption assumes the manager session is still ALIVE to receive
   // those signals. A run parked by the restart pass has no live anything: its
   // manager session and every worker process died with the previous app
@@ -9038,7 +9279,11 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       }
       // A Pi policy change alters the active system contract and extension
       // set. Rotate the provider session instead of letting Deep/Frontier
-      // inherit a transcript created under Fast (or vice versa).
+      // inherit a transcript created under Fast (or vice versa). Reachable
+      // only when a caller PINS the policy explicitly (no UI does): a policy
+      // that moves because the manager reclassified complexity must NOT come
+      // through here, because dropping chatSessionUuid would drop the thread.
+      // Pi restarts its own runtime for that case via its session identity.
       if (
         nextBackend === "pi" &&
         input.coraExecutionPolicy !== undefined &&
@@ -9096,6 +9341,34 @@ export async function markRunSeen(input: MarkRunSeenInput): Promise<RunState> {
     mutate: (draft, timestamp) => {
       if (draft.seen === true) return false;
       draft.seen = true;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Complexity classification arriving from an MCP orchestrator (Pi / CC /
+// Codex execute mode) rather than from a JSON manager decision. Those turns
+// mutate the run live through tool calls, so they never reach the
+// plan_analysis branch in applySparkManagerDecision that persists the same
+// field. Emits the identical event so both paths read alike in the timeline.
+// No-op when unchanged; the classification may legitimately move as a chat
+// run's scope grows.
+export async function recordTaskComplexity(
+  runId: string,
+  taskComplexity: TaskComplexity,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  if (run.taskComplexity === taskComplexity) return run;
+  return commitRunChange(run, {
+    type: "spark_manager.task_complexity_classified",
+    message: `Manager classified the run as taskComplexity=${taskComplexity}`,
+    payload: {
+      taskComplexity,
+      priorComplexity: run.taskComplexity,
+      source: "orchestrator_tool",
+    },
+    mutate: (draft, timestamp) => {
+      draft.taskComplexity = taskComplexity;
       draft.updatedAt = timestamp;
     },
   });
@@ -10721,6 +10994,12 @@ function canCompleteStepImmediatelyAfterLocalReview(
   run: RunState,
   task: WorkerTask,
 ): boolean {
+  // MCP-managed runs settle their synthetic worker_batch steps here and
+  // nowhere else: codara_complete only moves the RUN status, so holding one in
+  // `reviewing` would strand it in the graph forever. They were never affected
+  // by this rule (they carried no classification at all until the orchestrator
+  // gained a taskComplexity argument), so keep them out of it.
+  if (runHasMcpManager(run)) return true;
   // For standard/complex runs, an implementation worker's local "complete"
   // report is not the end of the step. The manager still has to accept,
   // queue verifier work, or produce a corrective task. Keeping the step in
@@ -11201,7 +11480,7 @@ const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6, frontier: 9 } as const;
 async function maybeForceLandAtVerificationCeiling(run: RunState): Promise<RunState | null> {
   if (!runHasMcpManager(run)) return null;
   const rounds = run.verificationRounds ?? 0;
-  const ceiling = VERIFICATION_ROUND_CEILING[normalizeCoraExecutionPolicy(run.coraExecutionPolicy)];
+  const ceiling = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
   if (rounds < ceiling) return null;
   return forceLandRunUnverified(run.id, {
     trigger: "verification_rounds_capped",
@@ -11569,11 +11848,12 @@ async function maybeQueueVerifierFeedbackRetry({
   // includes non-verification retries (e.g. environmental relaunches). The
   // policy is only honored by the Pi backend (other backends persist but
   // ignore it), so the cap keys off chatBackend to avoid changing CC/Codex
-  // behavior via the fast default.
+  // behavior via the fast default. A run the manager called complex derives
+  // deep and is therefore exempt.
   const feedbackRoundsUsed = target.verifierFeedbackRounds ?? 0;
   if (
     run.chatBackend === "pi" &&
-    normalizeCoraExecutionPolicy(run.coraExecutionPolicy) === "fast" &&
+    effectiveRunExecutionPolicy(run) === "fast" &&
     feedbackRoundsUsed >= 1
   ) {
     return acceptVerifierFeedbackWithoutRetry({
@@ -13511,12 +13791,23 @@ const MANAGER_PEER_ID = "manager";
 // orchestrator.message_workers / check_messages RPCs and the wait_for_workers
 // drain). Fan-out, council, loom, and non-execute autopilot parallel batches
 // have no manager session, so advertising a `manager` mailbox participant
-// there would leave workers awaiting replies that can never come. Keep this
-// predicate in sync with isExecuteModeCliManager (worker auto-accept path).
+// there would leave workers awaiting replies that can never come.
+//
+// executionMode "direct" is the load-bearing exclusion. A loom/automation run
+// is created programmatically, so it carries chatBackend "pi" by default and no
+// chatMode at all, which effectiveChatMode collapses to "auto", so the backend
+// and mode fields alone can no longer tell a chat manager from a loom. Direct
+// runs are finalized by finalizeDirectRun via scheduleAutopilotReview, so
+// claiming a manager here would also strand every loom wave at "reviewing"
+// (the wave join, downstream layers and pass chaining all hang off it).
+// This is the single predicate for "a live CLI manager session drives this
+// run"; the worker auto-accept and resume paths call it rather than restating
+// it, and worker-prompt's managerInboxIsRead mirrors it.
 export function runHasMcpManager(run: RunState): boolean {
   return (
+    run.executionMode !== "direct" &&
     (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
-    (run.chatMode === "execute" || run.chatMode === "auto")
+    effectiveChatMode(run.chatMode) === "auto"
   );
 }
 
@@ -14263,7 +14554,7 @@ async function runPiWorkerSession({
       model,
       thinking,
       sessionName: task.title,
-      executionPolicy: normalizeCoraExecutionPolicy(run.coraExecutionPolicy),
+      executionPolicy: effectiveRunExecutionPolicy(run),
       // Frozen contract with resources/pi-cora/worker.ts: parallel-batch
       // workers get CODARA_PI_PEER_DIR + CODARA_PI_SELF_ID to reach the
       // run's mailbox natively. Same gate as the prompt-side guidance.

@@ -254,6 +254,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
         "destructive_irreversible",
         "safety_policy",
         "irreducible_product_scope",
+        "plan_approval",
       ],
       description:
         "Required hard-blocker category when status=ask_user; empty otherwise. Reversible technical preferences are not blockers and must not use ask_user.",
@@ -277,7 +278,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
       type: "string",
       enum: ["trivial", "standard", "complex", ""],
       description:
-        "Required during plan_analysis: classify the WHOLE RUN's complexity. Drives verifier depth (trivial=1, standard=1, complex=2 peer verifiers) and the step cap. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Every tier gets at least one verifier follow-up; trivial vs standard differ only in scope and step cap, not in whether work is verified. Bias toward standard on uncertainty, false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
+        "Required during plan_analysis: classify the WHOLE RUN's complexity, honestly. It drives verifier depth (trivial=1, standard=1, complex=2 peer verifiers), the step cap, AND the run's execution tier: the user has no depth control, so this field alone decides how much scrutiny Codara buys (complex derives the deep tier with a wider verifier-round budget and more than one corrective rework; trivial and standard derive the fast tier). It measures the work, it is not a budget request: inflating it spends wall-clock and money on ceremony the task does not need, deflating it strands subtle work with one verification round. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Every tier gets at least one verifier follow-up; trivial vs standard differ only in scope and step cap, not in whether work is verified. Bias toward standard on uncertainty, false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
     },
     terminals: {
       type: "array",
@@ -1105,7 +1106,8 @@ function normalizeQuestionCategory(value: unknown): RunQuestionCategory | undefi
     value === "credentials_access" ||
     value === "destructive_irreversible" ||
     value === "safety_policy" ||
-    value === "irreducible_product_scope"
+    value === "irreducible_product_scope" ||
+    value === "plan_approval"
   ) {
     return value;
   }
@@ -1404,17 +1406,20 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
     case "trivial":
       return [
         "trivial, single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
+        "Execution tier: fast (this classification set it, the user has no depth control).",
         "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof, the verifier re-derives correct behavior and runs adversarial input/output probes.",
         "Trivial keeps a tight step cap (max 2 worker_batch steps, no recon, no skeleton); it differs from standard only in scope, not in whether work gets verified.",
       ].join("\n");
     case "standard":
       return [
         "standard, multi-file change OR public API touch, with clear scope.",
+        "Execution tier: fast (this classification set it, the user has no depth control).",
         "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier.",
       ].join("\n");
     case "complex":
       return [
         "complex, subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics.",
+        "Execution tier: deep (this classification set it): a wider verifier-round budget and more than one corrective rework per worker.",
         "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker, one Claude (claude-opus-5@high) and one Codex (gpt-5.6-sol@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
       ].join("\n");
   }
