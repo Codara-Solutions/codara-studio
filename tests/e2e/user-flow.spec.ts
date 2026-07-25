@@ -1,9 +1,9 @@
 import { test, expect, type ElectronApplication, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { access, copyFile, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 const DEFAULT_USER_WORKSPACE = "C:\\Users\\Etienne\\Documents\\workspace\\test";
 const USER_FLOW_PLAN = "plan.md";
@@ -113,9 +113,8 @@ async function prepareUserFlowUserData(workspaceDir: string): Promise<{ userData
   const userDataDir = join(root, "user-data");
   await mkdir(userDataDir, { recursive: true });
 
-  const settingsPath = await copyRealSettings(userDataDir);
-  const settings = JSON.parse(await readFile(settingsPath, "utf8")) as { openRouterApiKey?: string };
-  test.skip(!settings.openRouterApiKey, "OpenRouter API key is required in Spark Agent settings.");
+  await copyRealSettings(userDataDir);
+  await copyRealPiAuth(userDataDir);
 
   await writeFile(
     join(userDataDir, "spark-state.json"),
@@ -152,8 +151,6 @@ async function copyRealSettings(userDataDir: string): Promise<string> {
       JSON.stringify(
         {
           defaultShellId: null,
-          openRouterApiKey: "",
-          openRouterModel: "google/gemini-flash-latest",
         },
         null,
         2,
@@ -162,6 +159,25 @@ async function copyRealSettings(userDataDir: string): Promise<string> {
     );
   }
   return target;
+}
+
+// Cora's manager runs on the local Pi runtime against the user's connected
+// subscriptions, there is no manager API key in settings any more, so the
+// throwaway user-data dir needs a copy of the real OAuth store. Pi resolves it
+// from <SPARK_USER_DATA_DIR>/pi-agent/auth.json (see codaraPiPaths).
+async function copyRealPiAuth(userDataDir: string): Promise<void> {
+  const source = join(homedir(), ".Codara", "pi-agent", "auth.json");
+  try {
+    await access(source, constants.R_OK);
+  } catch {
+    test.skip(true, "Connected Cora subscriptions (~/.Codara/pi-agent/auth.json) are required for the user flow.");
+    return;
+  }
+  const configDir = join(userDataDir, "pi-agent");
+  await mkdir(configDir, { recursive: true, mode: 0o700 });
+  const target = join(configDir, "auth.json");
+  await copyFile(source, target);
+  await chmod(target, 0o600);
 }
 
 function defaultSparkUserDataDir(): string {
@@ -183,9 +199,6 @@ function realUserFlowEnv(userDataDir: string): Record<string, string> {
   };
   delete env.SPARK_ENABLE_MANUAL_FALLBACK;
   delete env.SPARK_MANUAL_WORKER_DELAY_MS;
-  delete env.SPARK_OPENROUTER_BASE_URL;
-  delete env.SPARK_OPENROUTER_API_KEY;
-  delete env.SPARK_OPENROUTER_MODEL;
   delete env.SPARK_CLAUDE_WORKER_COMMAND;
   delete env.SPARK_CLAUDE_WORKER_ARGS;
   delete env.SPARK_CODEX_WORKER_COMMAND;

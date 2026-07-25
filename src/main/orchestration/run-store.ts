@@ -29,7 +29,6 @@ import type {
   UpdateChatBackendInput,
   UpdateCoraWhiteboardInput,
   CancelRunInput,
-  ContextPacket,
   ResumeRunInput,
   CreateStepInput,
   CreateRunInput,
@@ -78,11 +77,6 @@ import {
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
-import {
-  contextWindowForModel,
-  estimateImageTokens,
-  estimateTokensFromText,
-} from "@shared/context-window";
 import { normalizeChatFeatureFlags } from "@shared/chat-policy";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import {
@@ -140,22 +134,14 @@ import {
 } from "./worker-access";
 import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
-import { estimateWorkerCostUsd } from "../openrouter-prices";
+import { estimateWorkerCostUsd } from "../model-prices";
 import {
-  buildOpenRouterManagerRequest,
-  isStructuredOutputUnsupportedError,
-  readOpenRouterConfig,
-  requestOpenRouterManagerDecision,
-  type OpenRouterConfig,
-  type OpenRouterManagerMode,
-  type OpenRouterManagerRequest,
-  type OpenRouterManagerResult,
+  type ManagerMode,
   type SparkManagerDecision,
   type SparkManagerQuestionOption,
   type SparkManagerStepDecision,
   type SparkManagerTaskDecision,
-  type SparkManagerWorkerReportContext,
-} from "./openrouter-manager";
+} from "./manager-protocol";
 import {
   backEdgesToFire,
   computeSkips,
@@ -188,13 +174,14 @@ import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
 import { defaultShell } from "../shells";
 import {
+  coerceWorkerModelToRoster,
+  rosterModelFor,
   sanitizeWorkerModelHint,
   WORKER_DEFAULT_CLAUDE_MODEL,
 } from "./worker-model-hint";
 import * as pty from "../pty-manager";
 import { runStructuredWorker } from "./structured-worker";
 import { detectAgentRuntimes } from "../agent-runtimes";
-import { renderAgentSyncManagerContext } from "../agent-sync";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
 import {
@@ -702,9 +689,9 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       title: chatTitleFromInput(input),
       // Engine choice from the "Run plan" / "Smart Merge" pickers and from
       // per-automation loop config. Threading these through createRun stamps
-      // run.chatBackend/chatModel/chatMode/chatEffort so askOpenRouterManager
-      // dispatches to the Claude Code / Codex manager with the right model.
-      // Undefined → OpenRouter + backend defaults.
+      // run.chatBackend/chatModel/chatMode/chatEffort so askManagerBackend
+      // dispatches to the right manager backend with the right model.
+      // Undefined → Pi + backend defaults.
       chatBackend: input.chatBackend,
       chatModel: input.chatModel,
       chatMode: input.chatMode,
@@ -777,16 +764,13 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   const fanOutDirective = resolveFanOutDirective(input);
   const councilDirective = resolveCouncilDirective(run, input);
 
-  // OpenRouter's manager request includes the active plan directly, but the
-  // Claude/Codex manager transports intentionally consume only durable queued
-  // human messages. A "Run plan" invocation historically persisted planText
-  // in run.plans without queueing a turn, so a CLI-backed manager received
-  // "There is no new user message" and could mark untouched work complete.
-  // Mirror the plan into one stable user turn for those transports. A stable
-  // client id makes re-entered startAutopilot calls idempotent.
-  const cliManagerNeedsPlanTurn =
-    Boolean(planText) &&
-    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi");
+  // The manager transports intentionally consume only durable queued human
+  // messages. A "Run plan" invocation historically persisted planText in
+  // run.plans without queueing a turn, so the manager received "There is no
+  // new user message" and could mark untouched work complete. Mirror the plan
+  // into one stable user turn. A stable client id makes re-entered
+  // startAutopilot calls idempotent.
+  const cliManagerNeedsPlanTurn = Boolean(planText);
   const initialNote = input.initialUserNote?.trim() ||
     (cliManagerNeedsPlanTurn ? planText : undefined);
   if (initialNote) {
@@ -851,7 +835,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   // already has the answer to.
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
-    run = fastPathPlan ?? ((await askOpenRouterManager(run, input.cwd, "step_planning")) ?? run);
+    run = fastPathPlan ?? ((await askManagerBackend(run, input.cwd, "step_planning")) ?? run);
     if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return run;
     tasks = pickAutopilotTasks(run);
   }
@@ -878,15 +862,36 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     ) {
       return run;
     }
-    return askHumanQuestion(
-      run.id,
-      "I could not find a ready task to run. Please clarify the next goal.",
-      undefined,
-      {
-        reason: "No safe runnable task can be inferred from the current plan.",
-        managerMode: run.workerAttempts.length > 0 ? "worker_result_review" : "plan_analysis",
-      },
+    // Say WHY there is nothing to run. "I could not find a ready task" reads as
+    // the model being confused, when the usual cause is concrete and visible in
+    // the plan, most often every step already failed. Naming the real state
+    // tells the user what decision is actually in front of them.
+    const failedSteps = run.steps.filter((step) => step.status === "failed");
+    const unfinishedSteps = run.steps.filter(
+      (step) => !["complete", "completed_unverified", "failed", "skipped"].includes(step.status),
     );
+    // A step sitting in review is NOT blocked on the user, it is blocked on
+    // Cora. Boot recovery produces exactly this shape (a worker whose report
+    // was already on disk becomes needs_review), so asking the user to unblock
+    // it would be both wrong and the most likely message they ever see after a
+    // restart. Re-drive the review instead of asking.
+    const reviewPending = run.steps.some((step) => step.status === "reviewing");
+    if (reviewPending) {
+      scheduleAutopilotReview(run.id, input.cwd);
+      return run;
+    }
+    const question =
+      run.steps.length > 0 && failedSteps.length > 0 && unfinishedSteps.length === 0
+        ? failedSteps.length === run.steps.length
+          ? "Every step in this plan has failed, so there is nothing left to run. Tell me how you'd like to proceed, retry the work, change the approach, or start over."
+          : `${failedSteps.length} of ${run.steps.length} steps failed and the rest are finished, so there is nothing left to run. Tell me whether to retry the failed work or move on.`
+        : run.steps.length === 0
+          ? "I don't have a plan to run yet. Tell me what you'd like me to do."
+          : "None of the remaining steps has runnable work, they're waiting on something I can't resolve myself. Tell me how you'd like to proceed.";
+    return askHumanQuestion(run.id, question, undefined, {
+      reason: "No safe runnable task can be inferred from the current plan.",
+      managerMode: run.workerAttempts.length > 0 ? "worker_result_review" : "plan_analysis",
+    });
   }
 
   // Observability: if the next batch was collapsed to a single serial task only
@@ -962,6 +967,23 @@ const DIRECT_ATTEMPT_TERMINAL = new Set<WorkerAttemptStatus>([
   "timed_out",
   "cancelled",
 ]);
+
+// The same set under a name that does not imply direct runs, managed-run boot
+// recovery needs it too, and "DIRECT_" reads as a scope restriction it never
+// had. Aliased rather than renamed so the direct-run call sites stay legible
+// against their own comments.
+const ATTEMPT_TERMINAL_STATUSES = DIRECT_ATTEMPT_TERMINAL;
+
+// Does this path exist? Boot recovery uses it to decide whether a worker that
+// vanished with the app had already written its final report.
+async function fileExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // LoomWorkerConfig and WorkerTask now share the full effort vocabulary,
 // including GPT-5.6's max setting, so automation workers preserve the user's
@@ -2779,7 +2801,7 @@ async function runManagerStageAfterQuestion(
     return;
   }
 
-  const decided = await askOpenRouterManager(
+  const decided = await askManagerBackend(
     run,
     cwd,
     mode,
@@ -2960,46 +2982,224 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         draft.updatedAt = timestamp;
       },
     });
+    void recovered;
+    // Deliberately does NOT re-drive the run. Restarting the app is not consent
+    // to resume: this pass repairs the record (the interrupted turn is failed,
+    // its input returns to queued, an answered question's continuation returns
+    // to pending) and stops there. pauseManagedRunsAfterRestart then parks the
+    // run, and the user's Resume, which re-drives everything, including a
+    // queued input and a pending continuation, is what starts work again.
+  }
+}
 
-    if (recovered.pendingManagerResume) {
-      schedulePendingManagerResume(recovered);
-    } else if (
-      recovered.executionMode !== "direct" &&
-      queuedManagerInputMessages(recovered).length > 0 &&
-      recovered.status !== "paused" &&
-      recovered.status !== "blocked" &&
-      recovered.status !== "cancelled" &&
-      !isTerminalRunStatus(recovered.status)
-    ) {
-      scheduleInitialChatDecision(recovered.id, autopilotInputFromRun(recovered), {
-        afterCurrent: true,
-      });
+/**
+ * Boot recovery for MANAGED (non-direct) runs' worker attempts.
+ *
+ * Direct/loom runs get recoverDirectRuns (direct-worker.ts); orchestrated runs
+ * got nothing, so an attempt left non-terminal when the app died stayed
+ * "running" forever. Every mechanism that can end a worker attempt lives in
+ * memory, the Pi RPC client's child exit listeners, the final-report poll, the
+ * 90-minute cap, so all of them die with the process and none is re-armed at
+ * boot. The stale attempt then wedges the run shut: startAutopilot's
+ * attemptInFlight guard returns quietly while any attempt is non-terminal,
+ * deferring to "the real driver (resume, worker finish, or review)" that no
+ * longer exists. Observed on run-mrzgc7xm-u7ljcx.
+ *
+ * This is EXIT detection, not stuck detection. A worker is a child of the main
+ * process, so at boot the absence of its live handle IS proof that it died , 
+ * nothing here is time-based and nothing polls. (The deleted stuck-worker
+ * watchdog is unrelated: it only ever covered the legacy PTY path, never Pi
+ * workers, and being an in-process interval it died with the app too.)
+ *
+ * Report-first, mirroring recoverDirectRuns: a worker that finished before the
+ * app went away left final-report.json on disk, and that work is kept rather
+ * than discarded.
+ */
+export async function recoverOrphanedManagedWorkerAttempts(): Promise<void> {
+  let runs: RunState[];
+  try {
+    runs = await listRuns();
+  } catch {
+    return;
+  }
+  for (const run of runs) {
+    // Direct runs are recoverDirectRuns' job, it can relaunch them, which
+    // needs loom ownership checks this pass has no business making.
+    if (run.executionMode === "direct") continue;
+    if (isTerminalRunStatus(run.status)) continue;
+    // Paused and blocked runs are NOT skipped. Their status is user-owned and
+    // this pass never changes it, but their worker processes died with the
+    // app just the same, and leaving those attempts non-terminal reproduces
+    // the original bug precisely where a human is already waiting: the user
+    // answers the question, startAutopilot hits its attemptInFlight guard, and
+    // nothing happens. Settling the corpse is what makes their answer work.
+
+    const orphaned = run.workerAttempts.filter(
+      (attempt) =>
+        !ATTEMPT_TERMINAL_STATUSES.has(attempt.status) &&
+        // A "prompt_ready" attempt was PREPARED but never launched, it has no
+        // process because it never had one, not because it died. Failing it
+        // would be both a lie and destructive: the cascade marks its step
+        // failed, which is terminal, so the step's work would be skipped
+        // forever. startAutopilot deliberately REUSES a prompt_ready attempt on
+        // the next launch, so leaving it alone is what lets the run pick that
+        // work back up.
+        attempt.status !== "preparing" &&
+        attempt.status !== "prompt_ready" &&
+        // Guard against dev hot-reload re-entering recovery inside a process
+        // whose workers are genuinely still alive. In a real boot neither of
+        // these in-memory handles can exist.
+        !pty.exists(attempt.id) &&
+        !activeWorkerProcesses.has(attempt.id),
+    );
+    if (orphaned.length === 0) continue;
+
+    for (const attempt of orphaned) {
+      const reportOnDisk = attempt.finalReportPath
+        ? await fileExists(attempt.finalReportPath)
+        : false;
+      if (reportOnDisk) {
+        // The worker finished; only the bookkeeping was lost. Settle it exactly
+        // as the live finish path would (attempt succeeded -> task needs_review
+        // -> step reviewing) so the normal review funnel can pick it up instead
+        // of the work being thrown away.
+        await commitRunChange(run, {
+          type: "worker_attempt.recovered",
+          message: "Worker finished before the app closed; recovered its report after restart",
+          payload: { attemptId: attempt.id },
+          mutate: (draft, timestamp) => {
+            const a = draft.workerAttempts.find((x) => x.id === attempt.id);
+            if (!a || ATTEMPT_TERMINAL_STATUSES.has(a.status)) return false;
+            a.status = "succeeded";
+            a.finishedAt = a.finishedAt ?? timestamp;
+            a.runtimeState = "done";
+            a.runtimeStateUpdatedAt = timestamp;
+            const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
+            if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
+              t.status = "needs_review";
+              t.updatedAt = timestamp;
+            }
+            const s = t?.stepId ? draft.steps.find((x) => x.id === t.stepId) : undefined;
+            if (
+              s &&
+              !["complete", "completed_unverified", "failed", "skipped"].includes(s.status) &&
+              !hasActiveStepWorkers(draft, s.id, t?.id)
+            ) {
+              s.status = "reviewing";
+              s.updatedAt = timestamp;
+            }
+            draft.updatedAt = timestamp;
+          },
+        }).catch(() => undefined);
+        // A sandboxed worker ran in an isolated worktree, so its edits have not
+        // touched the workspace yet, the live finish path merges them back and
+        // the direct-run recovery does the same. Without this the run would
+        // record the work as done while the workspace contains none of it, and
+        // the worktree is later destroyed with the run: silent loss of a
+        // completed worker's entire diff. Best-effort, exactly as the other two
+        // call paths treat it; sandboxMergedBack keeps it from double-applying.
+        await mergeBackRecoveredSandbox(run.id, attempt.id).catch(() => undefined);
+        continue;
+      }
+      // No report: the worker died mid-turn. Say so plainly rather than
+      // leaving a phantom spinner. failWorkerAttempt cascades attempt -> task
+      // -> step, is idempotent, and its finalizeDirectRun tail is gated on
+      // executionMode === "direct", so it is safe here.
+      await failWorkerAttempt(
+        run.id,
+        attempt.id,
+        "the app closed while this worker was running; its process is gone",
+      ).catch(() => undefined);
+      // requireRun is awaited as an ARGUMENT, so its rejection would escape the
+      // trailing .catch and abort recovery for every remaining run. A run
+      // deleted between listRuns() and here is entirely possible, so resolve it
+      // defensively first.
+      const refreshed = await getRun(run.id).catch(() => undefined);
+      if (!refreshed) continue;
+      await commitRunChange(refreshed, {
+        type: "worker_attempt.runtime_state_changed",
+        message: "Worker runtime state cleared after restart",
+        payload: { attemptId: attempt.id, state: "error" },
+        mutate: (draft, timestamp) => {
+          const a = draft.workerAttempts.find((x) => x.id === attempt.id);
+          // The stale "working" chip must not outlive the process it described.
+          if (!a || a.runtimeState === "error") return false;
+          a.runtimeState = "error";
+          a.runtimeStateUpdatedAt = timestamp;
+          draft.updatedAt = timestamp;
+        },
+      }).catch(() => undefined);
     }
   }
 }
 
-/** Re-arm durable queued input whose in-memory follow-up scheduler disappeared
- * on process exit. Claimed orphaned input is released by
- * recoverOrphanedManagerTurns first; this pass covers messages that were saved
- * immediately before the process exited and were never claimed. */
-export async function recoverQueuedManagerInputs(): Promise<void> {
-  const runs = await listRuns();
-  for (const run of runs) {
-    if (
-      run.executionMode === "direct" ||
-      run.status === "paused" ||
-      run.status === "blocked" ||
-      run.status === "cancelled" ||
-      activeManagerCall(run)
-    ) continue;
-    const queued = queuedManagerInputMessages(run);
-    if (queued.length === 0) continue;
-    if (queued.some((message) => message.intent === "steer")) {
-      scheduleQueuedSteeringFollowup(run);
-    } else {
-      scheduleInitialChatDecision(run.id, autopilotInputFromRun(run), { afterCurrent: true });
-    }
+/**
+ * Park every managed run that a restart interrupted.
+ *
+ * Relaunching the app is not consent to resume. Whatever was mid-flight , 
+ * a manager turn, a worker, a queued message, died with the previous process,
+ * and silently picking it back up means work starts while the user is still
+ * looking at the window. So any run whose status implies live activity is
+ * moved to `paused` with an honest reason, and the user's Resume (which
+ * re-drives the manager, a queued input, and a pending continuation alike) is
+ * the only thing that restarts it.
+ *
+ * Runs already paused, blocked, or terminal are left exactly as they are:
+ * their status is already the truth, and a blocked run is waiting on an answer
+ * the user can still give.
+ *
+ * Must run AFTER the attempt-level recovery above, so a run is parked with its
+ * dead workers already settled rather than mid-repair.
+ */
+export async function pauseManagedRunsAfterRestart(): Promise<void> {
+  let runs: RunState[];
+  try {
+    runs = await listRuns();
+  } catch {
+    return;
   }
+  const reason = "Paused because the app was restarted. Resume when you're ready.";
+  for (const run of runs) {
+    // Looms/automations are scheduled work the user set up to run on its own;
+    // their own recovery decides whether to continue. This is about Cora.
+    if (run.executionMode === "direct") continue;
+    if (!["planning", "running", "reviewing"].includes(run.status)) continue;
+    await commitRunChange(run, {
+      type: "run.paused_after_restart",
+      message: reason,
+      payload: { priorStatus: run.status },
+      mutate: (draft, timestamp) => {
+        if (!["planning", "running", "reviewing"].includes(draft.status)) return false;
+        draft.status = "paused";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "paused",
+          lastAction: "paused_after_restart",
+          stopReason: reason,
+          pausedAt: timestamp,
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    }).catch(() => undefined);
+  }
+}
+
+/**
+ * Queued manager input left by a prior process stays queued.
+ *
+ * This pass used to re-drive the run so the message wasn't stranded. It no
+ * longer does: relaunching the app must never start work on its own. The
+ * message is already durable on disk with deliveryState "queued", the composer
+ * shows it as QUEUED, and resumeRun consumes it, so nothing is lost by
+ * waiting for the user, and the alternative (Cora silently picking up a
+ * conversation the user walked away from) is exactly what we don't want.
+ *
+ * Kept as a no-op rather than deleted: the boot sequence documents its
+ * recovery steps in order, and a missing step reads as an oversight.
+ */
+export async function recoverQueuedManagerInputs(): Promise<void> {
+  /* intentionally empty, see the comment above */
 }
 
 /** Re-arm linked-answer manager continuations left by a prior process. Pending
@@ -3029,9 +3229,11 @@ export async function recoverPendingManagerResumes(): Promise<void> {
         draft.updatedAt = timestamp;
       },
     });
-    if (recovery.action === "pending" && recovered.pendingManagerResume) {
-      schedulePendingManagerResume(recovered);
-    }
+    // The lease is repaired (a launch that never completed returns to
+    // "pending") but the continuation is NOT scheduled: relaunching the app is
+    // not consent to resume. The record stays durable, so the user's Resume
+    // picks the continuation up exactly where it was left.
+    void recovered;
   }
 }
 
@@ -3080,8 +3282,8 @@ async function runInitialAutopilotPlanning(
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
 
   let managerPlannedRun = mode === "chat"
-    ? await askOpenRouterManager(run, input.cwd, "chat", managerResumeClaimId, autonomyRetryCount)
-    : await askOpenRouterManager(run, input.cwd, "plan_analysis", managerResumeClaimId, autonomyRetryCount);
+    ? await askManagerBackend(run, input.cwd, "chat", managerResumeClaimId, autonomyRetryCount)
+    : await askManagerBackend(run, input.cwd, "plan_analysis", managerResumeClaimId, autonomyRetryCount);
   if (
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
@@ -3105,19 +3307,22 @@ async function runInitialAutopilotPlanning(
   ) {
     const fastPath = await tryTrivialFastPathStepPlanning(managerPlannedRun);
     managerPlannedRun = fastPath
-      ?? (await askOpenRouterManager(managerPlannedRun, input.cwd, "step_planning"));
+      ?? (await askManagerBackend(managerPlannedRun, input.cwd, "step_planning"));
   }
 
+  // A null result means the manager backend threw before producing a decision
+  // (runtime missing, spawn failure, provider error), the failure itself is
+  // already journaled as spark_call.failed. Park the run on an accurate
+  // question instead of silently idling at status=running with no driver.
   if (!managerPlannedRun && (mode === "chat" || !manualFallbackEnabled())) {
     await askHumanQuestion(
       run.id,
       mode === "chat"
-        ? "OpenRouter is not configured, so Cora cannot think through this chat turn yet. Add the API key in Settings, then send the message again."
-        : "OpenRouter is not configured, so Cora cannot plan Claude/Codex worker tasks yet. Add the API key in Settings, then run the plan again.",
+        ? "Cora's manager turn failed before it could answer this chat message. Check the run log for the backend error, then send the message again."
+        : "Cora's manager turn failed before it could plan worker tasks. Check the run log for the backend error, then run the plan again.",
       undefined,
       {
-        category: "credentials_access",
-        reason: "The configured manager backend has no API credentials.",
+        reason: "The Cora manager backend could not complete the turn.",
         managerMode: mode,
       },
     );
@@ -3200,8 +3405,8 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // codara_wait_for_workers and deciding codara_complete vs spawn correctives).
   // We need the worker_task to reach a TERMINAL status (accepted/failed/
   // cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
-  // is non-terminal in the WorkerTaskStatus enum, and the OpenRouter-driven
-  // review path that normally transitions needs_review → accepted via
+  // is non-terminal in the WorkerTaskStatus enum, and the manager-review
+  // path that normally transitions needs_review → accepted via
   // decideWorkerReport is explicitly skipped below. So auto-accept on
   // success here; the CC manager will inspect the report and judge quality.
   const isExecuteModeCliManager =
@@ -3290,11 +3495,9 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // and the same CC/Codex session decides what to do next (read final
     // reports, then codara_complete or spawn correctives) — all inside its
     // active turn. Re-prompting it with latestUserPromptFromRun would be
-    // the SAME prompt as turn 1 (because askChatBackendNonOpenRouter has no
-    // mode-specific message builder), which is precisely how one user
-    // message produced multiple worker-spawn rounds in run-mpo92kqf-7eaym0.
-    // OpenRouter manager retains the review re-prompt because OpenRouter's
-    // openrouter-manager.ts:buildManagerUserMessage DOES vary by mode.
+    // the SAME prompt as turn 1 (askManagerBackend has no mode-specific
+    // message builder), which is precisely how one user message produced
+    // multiple worker-spawn rounds in run-mpo92kqf-7eaym0.
     if (!isExecuteModeCliManager) {
       scheduleAutopilotReview(runId, cwd);
     }
@@ -3411,34 +3614,6 @@ async function runAutopilotManagerReview(
     return;
   }
 
-  const settings = await loadSettings();
-  const config = readOpenRouterConfig(settings);
-  if (!config) {
-    if (manualFallbackEnabled()) {
-      await appendEvent({
-        workspaceId: run.workspaceId,
-        runId: run.id,
-        type: "autopilot.manager_review_skipped",
-        message: "Cora manager review skipped because OpenRouter is not configured",
-        payload: {
-          reason: "manual_fallback",
-        },
-      });
-      return;
-    }
-    await askHumanQuestion(
-      run.id,
-      "Worker results are ready, but OpenRouter is not configured for Cora manager review. Add the API key in Settings, then resume the run.",
-      undefined,
-      {
-        category: "credentials_access",
-        reason: "The manager review requires OpenRouter credentials.",
-        managerMode: "worker_result_review",
-      },
-    );
-    return;
-  }
-
   // NOTE: trivial runs used to skip the manager review entirely (a "rubber
   // stamp" fast-path). That blind-accepted whatever the implementation worker
   // self-reported — and eval runs proved a confident worker can fail even the
@@ -3475,7 +3650,7 @@ async function runAutopilotManagerReview(
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
   const REVIEW_REPROMPT_CAP = 3;
   for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
-    run = await askOpenRouterManager(
+    run = await askManagerBackend(
       run,
       cwd,
       "worker_result_review",
@@ -3510,7 +3685,7 @@ async function runAutopilotManagerReview(
   // context. Without this re-entry the run parks in reviewing/blocked forever.
   let tasks = pickAutopilotTasks(run);
   if (tasks.length === 0 && run.autopilot?.pendingPlanHint && !needsStepPlanning(run)) {
-    run = (await askOpenRouterManager(run, cwd, "plan_analysis")) ?? run;
+    run = (await askManagerBackend(run, cwd, "plan_analysis")) ?? run;
     if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
     tasks = pickAutopilotTasks(run);
   }
@@ -3520,7 +3695,7 @@ async function runAutopilotManagerReview(
   // task prompts before we try to launch.
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
-    run = fastPathPlan ?? ((await askOpenRouterManager(run, cwd, "step_planning")) ?? run);
+    run = fastPathPlan ?? ((await askManagerBackend(run, cwd, "step_planning")) ?? run);
     if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
     tasks = pickAutopilotTasks(run);
   }
@@ -3714,7 +3889,6 @@ interface PreparedManagerTurn {
 async function prepareManagerTurn(
   run: RunState,
   call: SparkCall,
-  backend: ReturnType<typeof resolveChatBackendConfig>["backend"],
 ): Promise<PreparedManagerTurn> {
   let selectedIds: string[] = [];
   let includeCanonicalReplay = false;
@@ -3730,11 +3904,7 @@ async function prepareManagerTurn(
     },
     mutate: (draft, timestamp) => {
       if (conversationEpoch(draft) !== epoch) return false;
-      includeCanonicalReplay = shouldIncludeCanonicalReplay(
-        draft,
-        backend,
-        epoch,
-      );
+      includeCanonicalReplay = shouldIncludeCanonicalReplay(draft, epoch);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
       call.inputMessageIds = selectedIds;
@@ -3831,9 +4001,7 @@ async function updateManagerInputDelivery(
   });
 }
 
-function normalizeOpenRouterManagerMode(
-  mode: SparkCall["mode"],
-): "plan_analysis" | "chat" | "step_planning" | "worker_result_review" {
+function normalizeManagerMode(mode: SparkCall["mode"]): ManagerMode {
   if (mode === "worker_result_review") return "worker_result_review";
   if (mode === "chat") return "chat";
   if (mode === "plan_analysis") return "plan_analysis";
@@ -3864,21 +4032,13 @@ async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotI
   });
 }
 
-async function askOpenRouterManagerForInitialTasks(
-  run: RunState,
-  cwd: string,
-  managerResumeClaimId?: string,
-): Promise<RunState | null> {
-  return askOpenRouterManager(run, cwd, "plan_analysis", managerResumeClaimId);
-}
-
-async function askOpenRouterManagerForChat(
+async function askManagerForChat(
   run: RunState,
   cwd: string,
   managerResumeClaimId?: string,
 ): Promise<RunState | null> {
   const enriched = await enrichLatestUserMessageWithMentionedFiles(run, cwd);
-  return askOpenRouterManager(enriched, cwd, "chat", managerResumeClaimId);
+  return askManagerBackend(enriched, cwd, "chat", managerResumeClaimId);
 }
 
 // Brake support: when the next active step has kind="brake", treat it as a
@@ -3911,48 +4071,14 @@ async function resolveActiveBrakeAndReplan(run: RunState, cwd: string): Promise<
     message: `Brake step "${next.title}" resolved; replanning with worker evidence`,
     payload: { stepId: next.id, stepIndex: next.index },
   });
-  return (await askOpenRouterManager(updated, cwd, "plan_analysis")) ?? updated;
+  return (await askManagerBackend(updated, cwd, "plan_analysis")) ?? updated;
 }
 
-// Retry the OpenRouter manager fetch on transient errors. Terminal failures
-// (auth, structured-output-unsupported, malformed config) re-throw immediately
-// so the outer catch in askOpenRouterManager handles them as before. Bounded
-// to 3 attempts with exponential backoff so a single provider outage costs
-// ~6s rather than hanging the autopilot loop for the rest of the budget.
-const MANAGER_REQUEST_MAX_ATTEMPTS = 3;
-const MANAGER_REQUEST_BACKOFF_BASE_MS = 1500;
+// Cap on the manager's autonomous question-retry loop; past this the pending
+// question escalates to the human instead of another silent self-answer.
 const MAX_MANAGER_QUESTION_REPROMPTS = 2;
 
-function isTerminalManagerError(message: string): boolean {
-  if (isStructuredOutputUnsupportedError(message)) return true;
-  if (/\b(401|403)\b/.test(message)) return true;
-  if (/invalid api key|unauthor[is]z/i.test(message)) return true;
-  if (/no api key|missing api key|not configured/i.test(message)) return true;
-  return false;
-}
-
-async function requestManagerWithRetries(
-  config: OpenRouterConfig,
-  requestBody: OpenRouterManagerRequest,
-  managerMode: OpenRouterManagerMode,
-): Promise<OpenRouterManagerResult> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= MANAGER_REQUEST_MAX_ATTEMPTS; attempt++) {
-    try {
-      return await requestOpenRouterManagerDecision(config, requestBody, managerMode);
-    } catch (err) {
-      lastErr = err;
-      const message = err instanceof Error ? err.message : String(err);
-      if (isTerminalManagerError(message)) throw err;
-      if (attempt >= MANAGER_REQUEST_MAX_ATTEMPTS) throw err;
-      const backoffMs = MANAGER_REQUEST_BACKOFF_BASE_MS * Math.pow(2, attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
-    }
-  }
-  throw lastErr ?? new Error("manager request failed without explicit error");
-}
-
-async function askOpenRouterManager(
+async function askManagerBackend(
   run: RunState,
   cwd: string,
   mode: SparkCall["mode"],
@@ -3973,341 +4099,16 @@ async function askOpenRouterManager(
     return null;
   }
   const settings = await loadSettings();
-  const chatConfig = resolveChatBackendConfig(run, settings);
+  const chatConfig = resolveChatBackendConfig(run);
 
-  // Non-OpenRouter backends own their own request lifecycle (spawn a real
-  // `claude` / `codex` CLI, tail its JSONL transcript, etc.). Dispatch and
-  // skip the OpenRouter-specific SparkCall and artifact pipeline
-  // below. Both backends still apply their resulting SparkManagerDecision
-  // through applySparkManagerDecision so downstream worker spawns + chat
-  // replies work identically.
-  if (chatConfig.backend !== "openrouter") {
-    return await askChatBackendNonOpenRouter(
-      run,
-      cwd,
-      mode,
-      chatConfig,
-      settings,
-      managerResumeClaimId,
-      autonomyRetryCount,
-    );
-  }
-
-  // Automation mode is a CLI-architect feature: it drives the spark_*_automation
-  // MCP tools, which only the Claude Code / Codex CLI backends can reach. The
-  // OpenRouter manager has no such tools — if we fell through here it would run
-  // the normal worker-spawning manager path and mutate the workspace, which is
-  // exactly what Automation mode must NOT do. Short-circuit with a conversational
-  // note telling the user to switch backends, and do nothing else.
-  if (run.chatMode === "automation") {
-    return await addRunMessage({
-      runId: run.id,
-      author: "spark",
-      kind: "note",
-      message:
-        "Automation mode requires the Claude Code or Codex CLI backend — the OpenRouter backend can't manage automations. Switch this chat's model to a Claude Code or Codex option to design, create, and run automations here.",
-    });
-  }
-
-  const baseConfig = readOpenRouterConfig(settings);
-  if (!baseConfig) return null;
-
-  // The composer chip's per-chat model override beats the global setting. We
-  // shadow `config` with the resolved version so the rest of the pipeline
-  // (request body, SparkCall record, artifacts) all see the chip's selected
-  // model without a per-call-site rewrite.
-  const config: OpenRouterConfig =
-    chatConfig.model && chatConfig.model !== baseConfig.model
-      ? { ...baseConfig, model: chatConfig.model }
-      : baseConfig;
-
-  const callId = makeId("spark");
-  const callDir = join(runDir(run.id), "spark-calls", callId);
-  const requestPath = join(callDir, "request.json");
-  const responsePath = join(callDir, "response.json");
-  const parsedJsonPath = join(callDir, "parsed-decision.json");
-  const contextPacketPath = join(callDir, "context-packet.json");
-  const sparkCall: SparkCall = {
-    id: callId,
-    runId: run.id,
-    stepId: run.currentStepId,
-    mode,
-    model: config.model,
-    status: "started",
-    managerResumeClaimId,
-    requestPath,
-    responsePath,
-    parsedJsonPath,
-    createdAt: new Date().toISOString(),
-  };
-  const preparedTurn = await prepareManagerTurn(run, sparkCall, "openrouter");
-  run = preparedTurn.run;
-  const startedAt = preparedTurn.call.createdAt;
-
-  // Build the stateless OpenRouter request once from the prepared run snapshot.
-  // Later steering remains queued for another SparkCall and cannot leak into it.
-  const frozenRun = structuredClone(run);
-  const managerMode = normalizeOpenRouterManagerMode(mode);
-  const workerReports = await collectWorkerReportContext(frozenRun, managerMode);
-  const availableRuntimes = await detectConfiguredAgentRuntimes();
-  const agentSyncContext = renderAgentSyncManagerContext({ cwd, settings });
-  const requestBody = buildOpenRouterManagerRequest({
-    run: frozenRun,
-    cwd,
-    model: config.model,
-    mode: managerMode,
-    workerReports,
-    availableRuntimes,
-    agentSyncContext,
-  });
-  const requestUserMessage = [...requestBody.messages]
-    .reverse()
-    .find((message) => message.role === "user");
-  if (requestUserMessage && preparedTurn.inputMessages.length > 0) {
-    requestUserMessage.content += [
-      "",
-      "IMMUTABLE QUEUED TURN INPUT",
-      "The messages below are the exact FIFO bundle owned by this SparkCall. Process every entry exactly once; do not replace it with only the newest chat row.",
-      JSON.stringify(
-        preparedTurn.inputMessages.map((message) => ({
-          id: message.id,
-          kind: message.kind,
-          intent: message.intent,
-          message: message.message,
-          attachments: (message.attachments ?? []).map(
-            (attachment) =>
-              `${attachment.kind}:${attachment.name} (${attachment.path})`,
-          ),
-        })),
-        null,
-        2,
-      ),
-    ].join("\n");
-  }
-  const contextWindow = contextWindowForModel(config.model);
-  const contextPacket = buildContextPacket({
-    runId: run.id,
-    callId,
-    mode,
-    requestBody,
-    tokenBudget: contextWindow.tokens,
-  });
-  await fs.mkdir(callDir, { recursive: true });
-  await Promise.all([
-    fs.writeFile(requestPath, JSON.stringify(redactRequestBodyForArtifact(requestBody), null, 2), "utf8"),
-    fs.writeFile(contextPacketPath, JSON.stringify(contextPacket, null, 2), "utf8"),
-  ]);
-  const preparedCall = run.sparkCalls.find((call) => call.id === callId);
-  if (preparedCall) {
-    preparedCall.contextPacketId = contextPacket.id;
-    preparedCall.promptTokenEstimate = contextPacket.tokenEstimate;
-    preparedCall.contextWindowTokens = contextWindow.tokens;
-    preparedCall.contextWindowSource = contextWindow.source;
-  }
-  run.settingsSnapshot = {
-    ...(run.settingsSnapshot ?? {}),
-    openRouterModel: config.model,
-    openRouterBaseUrl: config.baseUrl,
-    openRouterStructuredOutputFallbackModel: config.structuredOutputFallbackModel,
-    agentMcpSyncEnabled: settings.agentMcpSyncEnabled,
-    agentSkillSyncEnabled: settings.agentSkillSyncEnabled,
-  };
-  await saveRun(run);
-
-  try {
-    // Transient OpenRouter / provider errors (network, 5xx, provider-routed
-    // backends crashing mid-request) used to bubble straight to the catch
-    // block, which returns null and exits the autopilot loop silently —
-    // observed in practice as multi-hour run hangs after a single fireworks
-    // outage. Retry the inner request a small number of times with backoff;
-    // re-throw structured-output-unsupported and other terminal errors
-    // unchanged so the outer catch still routes them to the operator.
-    await updateManagerInputDelivery(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-      "submitted",
-    );
-    const result = await requestManagerWithRetries(config, requestBody, managerMode);
-    await Promise.all([
-      fs.writeFile(responsePath, JSON.stringify(result.rawResponse, null, 2), "utf8"),
-      fs.writeFile(parsedJsonPath, JSON.stringify(result.decision, null, 2), "utf8"),
-    ]);
-
-    const latest = await requireRun(run.id);
-    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
-    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
-      return latest;
-    }
-    const completedAt = new Date().toISOString();
-    const completedContextWindow = contextWindowForModel(result.model);
-    if (targetCall) {
-      targetCall.model = result.model;
-      targetCall.durationMs = result.durationMs;
-      targetCall.promptTokens = result.promptTokens;
-      targetCall.completionTokens = result.completionTokens;
-      targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
-      targetCall.contextWindowTokens = completedContextWindow.tokens;
-      targetCall.contextWindowSource = completedContextWindow.source;
-      // Cost + token-split fields from the OpenRouter-prices layer. Optional —
-      // older runs and unknown models leave these undefined; the Costs tab and
-      // header pill handle that gracefully.
-      if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
-      if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
-      if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
-      if (typeof result.cacheReadTokens === "number") {
-        targetCall.cacheReadTokens = result.cacheReadTokens;
-      }
-    }
-    // Recompute the run-level rollup + per-step rollups now that we have a
-    // fresh call cost. Cheap (O(calls) per save) and keeps the pill reactive
-    // without a separate aggregator.
-    recomputeRunCostRollups(latest);
-    latest.updatedAt = completedAt;
-    await saveRun(latest);
-    if (result.fallbackFrom) {
-      await appendEvent({
-        timestamp: completedAt,
-        workspaceId: latest.workspaceId,
-        runId: latest.id,
-        sparkCallId: callId,
-        type: "spark_call.model_fallback",
-        message: `Cora manager retried with structured-output fallback model: ${result.model}`,
-        payload: {
-          mode,
-          requestedModel: result.fallbackFrom,
-          fallbackModel: result.model,
-          reason: "requested model did not support strict JSON Schema structured outputs",
-        },
-      });
-    }
-    await appendEvent({
-      timestamp: completedAt,
-      workspaceId: latest.workspaceId,
-      runId: latest.id,
-      sparkCallId: callId,
-        type: "spark_call.decision_received",
-        message: `Cora manager decision received: ${result.decision.status}`,
-      payload: {
-        mode,
-        model: result.model,
-        requestedModel: result.fallbackFrom ?? config.model,
-        fallbackFrom: result.fallbackFrom,
-        durationMs: result.durationMs,
-        promptTokens: result.promptTokens,
-        completionTokens: result.completionTokens,
-        promptTokenEstimate: contextPacket.tokenEstimate,
-        contextWindowTokens: completedContextWindow.tokens,
-        contextWindowSource: completedContextWindow.source,
-        // Cost / token-split fields from the price-table layer so the event
-        // log carries the same data the SparkCall record does. Lets the
-        // Session Inspector Costs tab and any external audit replay both.
-        costUsd: result.costUsd,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        cacheReadTokens: result.cacheReadTokens,
-        runTotalCostUsd: latest.totalCostUsd,
-        parsedJsonPath,
-        decision: result.decision,
-      },
-    });
-
-    const applied = await applySparkManagerDecision(
-      latest,
-      result.decision,
-      mode,
-      cwd,
-      callId,
-      preparedTurn.conversationEpoch,
-      autonomyRetryCount,
-    );
-    await updateManagerInputDelivery(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-      "acknowledged",
-    );
-    const finalized = await finalizeAppliedManagerCall(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-    );
-    if (managerResumeClaimId) {
-      await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
-    }
-    scheduleQueuedSteeringFollowup(finalized);
-    return finalized;
-  } catch (err) {
-    const latest = await requireRun(run.id);
-    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
-    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
-      return latest;
-    }
-    await releaseUnsubmittedManagerInput(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-    );
-    const completedAt = new Date().toISOString();
-    const error = err instanceof Error ? err.message : String(err);
-    if (targetCall) {
-      targetCall.status = "failed";
-      targetCall.error = error;
-      targetCall.completedAt = completedAt;
-      targetCall.durationMs = Date.now() - Date.parse(startedAt);
-      targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
-      targetCall.contextWindowTokens = contextWindow.tokens;
-      targetCall.contextWindowSource = contextWindow.source;
-    }
-    latest.updatedAt = completedAt;
-    await saveRun(latest);
-    await appendEvent({
-      timestamp: completedAt,
-      workspaceId: latest.workspaceId,
-      runId: latest.id,
-      sparkCallId: callId,
-      type: "spark_call.failed",
-      message: `Cora manager call failed: ${error}`,
-      payload: {
-        mode,
-        model: config.model,
-        error,
-      },
-    });
-    if (isStructuredOutputUnsupportedError(error)) {
-      return askHumanQuestion(
-        latest.id,
-        [
-          "The selected OpenRouter manager model does not support strict JSON Schema structured outputs.",
-          "Choose a manager model that supports `response_format: json_schema` in Settings, then resume the run.",
-        ].join(" "),
-        undefined,
-        {
-          reason: "The selected manager model cannot satisfy the required structured-output contract.",
-          managerMode: mode,
-        },
-      );
-    }
-    return null;
-  }
-}
-
-// Non-OpenRouter backend dispatch — see askOpenRouterManager's top branch.
-// Calls the chosen backend (Claude Code or Codex) via the backend registry,
-// forwards streaming chat events onto the orchestration event bus, persists
-// any new CLI-side session UUID returned by the backend onto the RunState,
-// records a minimal SparkCall for cost/audit consistency, and applies the
-// resulting SparkManagerDecision through the same downstream path the
-// OpenRouter pipeline uses.
-async function askChatBackendNonOpenRouter(
-  run: RunState,
-  cwd: string,
-  mode: SparkCall["mode"],
-  chatConfig: ReturnType<typeof resolveChatBackendConfig>,
-  settings: AppSettings,
-  managerResumeClaimId?: string,
-  autonomyRetryCount = 0,
-): Promise<RunState | null> {
+  // Every manager backend (Claude Code, Codex, Pi) owns its own request
+  // lifecycle, spawn/resume a real agent session, stream events, and return
+  // a SparkManagerDecision. Run-store forwards streaming chat events onto the
+  // orchestration event bus, persists any new CLI-side session UUID returned
+  // by the backend onto the RunState, records a SparkCall for cost/audit
+  // consistency, and applies the resulting SparkManagerDecision through
+  // applySparkManagerDecision so downstream worker spawns and chat replies
+  // work identically across backends.
   const backend = getBackend(chatConfig.backend);
   const callId = makeId("spark");
   const sparkCall: SparkCall = {
@@ -4320,9 +4121,8 @@ async function askChatBackendNonOpenRouter(
     managerResumeClaimId,
     createdAt: new Date().toISOString(),
   };
-  const preparedTurn = await prepareManagerTurn(run, sparkCall, chatConfig.backend);
+  const preparedTurn = await prepareManagerTurn(run, sparkCall);
   run = preparedTurn.run;
-  const startedAt = preparedTurn.call.createdAt;
   const frozenRun = structuredClone(run);
 
   // Once requestManagerDecision settles, that SparkCall owns no more stream
@@ -4370,7 +4170,7 @@ async function askChatBackendNonOpenRouter(
       {
         run: frozenRun,
         cwd,
-        mode: normalizeOpenRouterManagerMode(mode),
+        mode: normalizeManagerMode(mode),
         settings,
         chat: { ...chatConfig },
         prompt: preparedTurn.prompt,
@@ -4647,7 +4447,7 @@ async function askChatBackendNonOpenRouter(
 // runs, so the implementation worker is the only check on the work and must
 // have the stronger 'taste' that catches all distinct issues in one pass.
 const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHint: WorkerTask["effortHint"] }> = {
-  claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
+  claude: { modelHint: "claude-opus-5", effortHint: "high" },
   codex: { modelHint: CODEX_MODEL_BY_TIER.top, effortHint: "high" },
 };
 
@@ -4658,7 +4458,7 @@ const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHin
 // `"claude-sonnet-4-6@medium"` as the modelHint string across runs, and an
 // allow-list keyed on raw strings silently misses the suffixed variant.
 const TOP_TIER_MODEL_BASES = new Set([
-  "claude-opus-4-8",
+  "claude-opus-5",
   "opus",
   CODEX_MODEL_BY_TIER.top,
   // Legacy persisted assignments remain top-tier semantically; the launch
@@ -5209,7 +5009,7 @@ async function forceFanOutBatch(
 // finish, runAutopilotManagerReview calls synthesizePlanCouncil to judge + merge.
 
 const COUNCIL_TOP_TIER_MODEL: Partial<Record<WorkerRuntime, string>> = {
-  claude: "claude-opus-4-8",
+  claude: "claude-opus-5",
   codex: CODEX_MODEL_BY_TIER.top,
 };
 
@@ -5257,11 +5057,10 @@ function councilTaskFromRun(run: RunState): string {
   );
 }
 
-// Map the run's SELECTED chat backend to a council worker runtime. The user's
-// choice drives the synthesis engine — they explicitly don't want the judge on
-// OpenRouter — so synthesis runs on the same agent they picked. Returns null when
-// the selection isn't a CLI agent runtime (then we fall back to a deterministic
-// pick of the most complete candidate, still no OpenRouter).
+// Map the run's SELECTED chat backend to a council worker runtime, the user's
+// choice drives the synthesis engine, so synthesis runs on the same agent they
+// picked. Returns null when no backend is recorded on the run (a legacy chat);
+// then we fall back to a deterministic pick of the most complete candidate.
 function councilSynthesisRuntime(run: RunState): WorkerRuntime | null {
   if (run.chatBackend === "claude") return "claude";
   if (run.chatBackend === "codex") return "codex";
@@ -5438,8 +5237,8 @@ async function pickMostCompleteCandidate(
 }
 
 // Drive a council run forward at each review hop. Phase 1: the candidate planners
-// have finished — spawn ONE synthesis worker on the user's SELECTED backend (no
-// OpenRouter) that reads the drafts and writes the merged .spark/<runId>/spark-plan/ itself.
+// have finished, spawn ONE synthesis worker on the user's SELECTED backend
+// that reads the drafts and writes the merged .spark/<runId>/spark-plan/ itself.
 // Phase 2: the synthesis worker has finished — finalize the run from its files.
 async function advanceCouncil(run: RunState, cwd: string): Promise<void> {
   const synthesisTask = run.workerTasks.find((task) => task.councilRole === "synthesis");
@@ -5447,7 +5246,7 @@ async function advanceCouncil(run: RunState, cwd: string): Promise<void> {
     const prepared = await prepareCouncilSynthesis(run, cwd);
     if (!prepared) {
       // No CLI agent selected (or every candidate failed) — fall back to a
-      // deterministic pick of the most complete draft. No OpenRouter, no agent.
+      // deterministic pick of the most complete draft; no agent involved.
       await finalizeCouncilDeterministic(run, cwd);
       return;
     }
@@ -5607,7 +5406,7 @@ async function finalizeCouncilFromDisk(run: RunState, cwd: string): Promise<void
 }
 
 // Fallback when no CLI agent is available to synthesize: pick the most complete
-// candidate draft, write it to spark-plan/, complete the run. No OpenRouter.
+// candidate draft, write it to spark-plan/, complete the run. No agent involved.
 async function finalizeCouncilDeterministic(run: RunState, cwd: string): Promise<void> {
   const planDir = join(cwd, ".spark", run.id, "spark-plan");
   const planFilePath = join(planDir, "PLAN.md");
@@ -5813,7 +5612,7 @@ async function enforceUserRuntimeMandate(
     return { decision, overrides: [] };
   }
   const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
-    claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
+    claude: { modelHint: "claude-opus-5", effortHint: "high" },
     codex: { modelHint: CODEX_MODEL_BY_TIER.top, effortHint: "high" },
   };
   const defaults = modelDefaults[mandate] ?? { modelHint: undefined, effortHint: undefined };
@@ -7520,7 +7319,7 @@ export async function resolveManagerQuestion(
 
   // The budget is reconstructed from persisted assumptions, not the current
   // JavaScript call stack. This covers restarts and live Claude/Codex MCP turns
-  // as well as OpenRouter recursion.
+  // as well as manager-loop recursion.
   const durableRetryCount = (run.assumptions ?? []).filter(
     (assumption) =>
       assumption.managerMode === input.managerMode &&
@@ -7946,7 +7745,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const resumeInput = autopilotInputFromRun(run);
   const shouldScheduleManagerAfterResume = shouldResumeManagerPlanning(run);
   if (activeWorkersForRun(run.id).length === 0 && shouldRoutePausedResumeToChat(run)) {
-    const chatDecision = await askOpenRouterManagerForChat(run, resumeInput.cwd);
+    const chatDecision = await askManagerForChat(run, resumeInput.cwd);
     if (chatDecision) {
       if (
         chatDecision.status === "paused" ||
@@ -8000,8 +7799,18 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const isExecuteModeCliManager =
     (resumed.chatBackend === "claude" || resumed.chatBackend === "codex" || resumed.chatBackend === "pi") &&
     (resumed.chatMode === "execute" || resumed.chatMode === "auto");
+  // ...but that exemption assumes the manager session is still ALIVE to receive
+  // those signals. A run parked by the restart pass has no live anything: its
+  // manager session and every worker process died with the previous app
+  // process, and the resume signals are written to in-memory worker handles
+  // that no longer exist. Without this the default configuration (pi + auto)
+  // took the exemption, so Resume flipped the run to "running" with no workers
+  // and no scheduled manager, and nothing ever drove it again. That merely
+  // moved the wedge from boot to the first Resume click.
+  const parkedByRestart = resumed.autopilot?.lastAction === "paused_after_restart";
   const shouldScheduleDriver =
-    !isExecuteModeCliManager && activeWorkersForRun(resumed.id).length === 0;
+    (parkedByRestart || !isExecuteModeCliManager) &&
+    activeWorkersForRun(resumed.id).length === 0;
   if (shouldScheduleManagerAfterResume || shouldScheduleDriver) {
     if (resumed.workerAttempts.length > 0) {
       scheduleAutopilotReview(resumed.id, resumeInput.cwd);
@@ -9778,6 +9587,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   attempt.exitCode = undefined;
   attempt.error = undefined;
   attempt.command = command;
+  attempt.model = piWorkerModel ?? sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
   attempt.promptPath = paths.promptMd;
   attempt.stdoutLogPath = paths.stdoutLog;
   attempt.stderrLogPath = paths.stderrLog;
@@ -11747,8 +11557,8 @@ async function maybeQueueVerifierFeedbackRetry({
   // Count FEEDBACK-driven requeues specifically — countWorkerAttempts also
   // includes non-verification retries (e.g. environmental relaunches). The
   // policy is only honored by the Pi backend (other backends persist but
-  // ignore it), so the cap keys off chatBackend to avoid changing OpenRouter
-  // and CC/Codex behavior via the fast default.
+  // ignore it), so the cap keys off chatBackend to avoid changing CC/Codex
+  // behavior via the fast default.
   const feedbackRoundsUsed = target.verifierFeedbackRounds ?? 0;
   if (
     run.chatBackend === "pi" &&
@@ -12005,112 +11815,19 @@ async function maybeRestoreGreenClaimRegression({
   return { run: reverted, restoreFailed: false };
 }
 
-function buildContextPacket(input: {
-  runId: string;
-  callId: string;
-  mode: SparkCall["mode"];
-  requestBody: OpenRouterManagerRequest;
-  tokenBudget: number;
-}): ContextPacket {
-  const included = describeRequestContext(input.requestBody);
-  return {
-    id: `ctx-${input.callId}`,
-    runId: input.runId,
-    decisionType: input.mode,
-    included,
-    excluded: [
-      {
-        label: "older worker report detail",
-        reason: "kept as compact step review summaries and recent report excerpts",
-      },
-      {
-        label: "older image pixels",
-        reason: "stored as attachment artifacts; only the newest image turn is sent to planning/task-writing calls",
-      },
-    ],
-    tokenBudget: input.tokenBudget,
-    tokenEstimate: included.reduce((sum, item) => sum + (item.tokenEstimate ?? 0), 0),
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function describeRequestContext(
-  requestBody: OpenRouterManagerRequest,
-): ContextPacket["included"] {
-  const items: ContextPacket["included"] = [];
-  for (const message of requestBody.messages) {
-    if (typeof message.content === "string") {
-      items.push(...estimateTextSections(message.content, message.role));
-      continue;
-    }
-
-    for (const part of message.content) {
-      if (part.type === "text") {
-        for (const section of estimateTextSections(part.text, message.role)) {
-          items.push(section);
-        }
-      } else {
-        items.push({
-          label: "attached image",
-          reason: "latest user-provided visual context",
-          tokenEstimate: estimateImageTokens(),
-        });
-      }
-    }
-  }
-  return items;
-}
-
-function estimateTextSections(
-  text: string,
-  role: string,
-): ContextPacket["included"] {
-  if (role !== "user") {
-    return [{
-      label: `${role} message`,
-      reason: "manager instruction/context text",
-      tokenEstimate: estimateTokensFromText(text),
-    }];
-  }
-  const matches = [...text.matchAll(/^([A-Z][A-Z0-9 -]+)$/gm)];
-  if (matches.length === 0) {
-    return [{
-      label: "user message",
-      reason: "manager run context",
-      tokenEstimate: estimateTokensFromText(text),
-    }];
-  }
-  return matches.map((match, index) => {
-    const start = match.index ?? 0;
-    const end = matches[index + 1]?.index ?? text.length;
-    return {
-      label: match[1].toLowerCase(),
-      reason: "manager run context section",
-      tokenEstimate: estimateTokensFromText(text.slice(start, end)),
-    };
-  });
-}
-
 function fallbackModelHintForRuntime(
   runtime: WorkerRuntime,
   previousModelHint?: string,
 ): string | undefined {
   const prior = previousModelHint?.trim().toLowerCase() ?? "";
-  // Preserve the manager's intended price/speed tier across providers. A
-  // Terra verifier failing to launch should become Sonnet, not silently jump
-  // to Opus; likewise Sonnet should become Terra. Unknown/top-tier hints keep
-  // the conservative flagship fallback.
-  if (runtime === "claude") {
-    if (prior.includes("luna") || prior.includes("haiku")) return "claude-haiku-4-5";
-    if (prior.includes("terra") || prior.includes("sonnet")) return "claude-sonnet-5";
-    return "claude-opus-4-8";
-  }
-  if (runtime === "codex") {
-    if (prior.includes("haiku") || prior.includes("luna")) return CODEX_MODEL_BY_TIER.cheap;
-    if (prior.includes("sonnet") || prior.includes("terra")) return CODEX_MODEL_BY_TIER.mid;
-    return CODEX_MODEL_BY_TIER.top;
-  }
-  return undefined;
+  if (runtime !== "claude" && runtime !== "codex") return undefined;
+  // This used to preserve the manager's intended price/speed tier across
+  // providers (a Terra verifier falling back to Sonnet rather than jumping to
+  // Opus). The worker roster has a single standard tier per provider, so there
+  // are no longer intermediate tiers to preserve, the only distinction that
+  // survives a cross-provider fallback is premium vs standard, and premium
+  // exists on Anthropic alone.
+  return rosterModelFor(runtime, /fable/.test(prior) ? "premium" : "standard");
 }
 
 function fallbackEffortHintForRuntime(
@@ -12134,76 +11851,6 @@ function fallbackEffortHintForRuntime(
   return prior;
 }
 
-function redactRequestBodyForArtifact(requestBody: OpenRouterManagerRequest): OpenRouterManagerRequest {
-  return JSON.parse(JSON.stringify(requestBody, (_key, value) => {
-    if (typeof value === "string" && value.startsWith("data:image/")) {
-      const prefix = value.slice(0, Math.min(value.indexOf(";base64,"), 64));
-      return `${prefix};base64,[redacted image bytes]`;
-    }
-    return value;
-  })) as OpenRouterManagerRequest;
-}
-
-async function collectWorkerReportContext(
-  run: RunState,
-  mode: OpenRouterManagerMode,
-): Promise<SparkManagerWorkerReportContext[]> {
-  const contexts: SparkManagerWorkerReportContext[] = [];
-  const attemptLimit = mode === "worker_result_review" ? 6 : 4;
-  for (const attempt of run.workerAttempts.slice(-attemptLimit)) {
-    const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
-    if (!task) continue;
-    const reportPath =
-      attempt.finalReportPath ??
-      workerArtifactPaths(run.id, task.stepId, task.id, attempt.id).finalReportJson;
-    const report = await readWorkerReport(reportPath);
-    contexts.push({
-      taskTitle: task.title,
-      runtime: attempt.runtime,
-      taskStatus: task.status,
-      attemptStatus: attempt.status,
-      reportStatus: report?.status,
-      summary: truncateText(report?.summary, 700),
-      proof: compactStringList(report?.proof, 5, 280),
-      risks: compactStringList(report?.risks, 4, 260),
-      followups: compactStringList(report?.followups, 4, 260),
-      verifier: report?.verifier
-        ? {
-            status: report.verifier.status,
-            confidence: report.verifier.confidence,
-            atomicClaims: report.verifier.atomicClaims.map((claim) => ({
-              claim: truncateText(claim.claim, 260) ?? "",
-              verdict: claim.verdict,
-              evidence: truncateText(claim.evidence, 320) ?? "",
-            })),
-            correctivePrompt: truncateText(report.verifier.correctivePrompt, 1800),
-            missingOracle: truncateText(report.verifier.missingOracle, 600),
-          }
-        : undefined,
-      taskClass: task.taskClass,
-    });
-  }
-  return contexts;
-}
-
-function compactStringList(
-  value: string[] | undefined,
-  maxItems: number,
-  maxLength: number,
-): string[] {
-  const source = value ?? [];
-  const shown = source.slice(0, maxItems).map((item) => truncateText(item, maxLength) ?? "");
-  if (source.length > shown.length) {
-    shown.push(`[${source.length - shown.length} more item(s) omitted]`);
-  }
-  return shown.filter(Boolean);
-}
-
-function truncateText(value: string | undefined, maxLength: number): string | undefined {
-  if (!value) return value;
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength).trimEnd()}\n[truncated]`;
-}
 
 async function saveRun(run: RunState): Promise<void> {
   const previous = runWriteQueues.get(run.id) ?? Promise.resolve();
@@ -12270,6 +11917,15 @@ function normalizeRun(run: RunState): RunState {
   run.humanMessages ??= [];
   run.sparkCalls ??= [];
   run.conversationEpoch ??= 0;
+  // Chats persisted before the OpenRouter manager was removed can still carry
+  // chatBackend "openrouter" on disk. Migrate them to Pi (the bundled default)
+  // so the value stays inside the ChatBackendKind union. The stored chatModel
+  // was an OpenRouter catalog id that no surviving backend understands, so
+  // drop it and let resolveChatBackendConfig apply Pi's default model.
+  if ((run.chatBackend as string) === "openrouter") {
+    run.chatBackend = "pi";
+    run.chatModel = undefined;
+  }
   if (run.whiteboard) {
     const normalizedNodes: CoraWhiteboardNode[] = [];
     for (const node of run.whiteboard.nodes ?? []) {
@@ -13743,7 +13399,7 @@ const MANAGER_PEER_ID = "manager";
 // True only when a live CC/Codex execute- or auto-mode manager drives this run
 // — the ONLY flows where anything ever READS the manager inbox (the
 // orchestrator.message_workers / check_messages RPCs and the wait_for_workers
-// drain). Fan-out, council, loom, and OpenRouter-autopilot parallel batches
+// drain). Fan-out, council, loom, and non-execute autopilot parallel batches
 // have no manager session, so advertising a `manager` mailbox participant
 // there would leave workers awaiting replies that can never come. Keep this
 // predicate in sync with isExecuteModeCliManager (worker auto-accept path).
@@ -14185,23 +13841,14 @@ function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
 }
 
 function piModelForWorker(task: WorkerTask): string | undefined {
-  const model = task.modelHint?.trim();
-  // Never let Pi choose Anthropic's subscription default implicitly. That
-  // default can be Fable 5, the premium tier, which a planner that omitted
-  // modelHint never chose on purpose. Opus 4.8 is the documented worker
-  // fallback; an explicit Fable hint still passes below.
-  if (!model) {
-    return task.runtimePreference === "claude"
-      ? WORKER_DEFAULT_CLAUDE_MODEL
-      : undefined;
-  }
-  if (task.runtimePreference === "claude" && model.startsWith("claude-")) {
-    return sanitizeWorkerModelHint(model) ?? WORKER_DEFAULT_CLAUDE_MODEL;
-  }
-  if (task.runtimePreference === "codex" && model.startsWith("gpt-")) return model;
-  return task.runtimePreference === "claude"
-    ? WORKER_DEFAULT_CLAUDE_MODEL
-    : undefined;
+  // The roster is enforced HERE, at the spawn chokepoint, not only in the
+  // planner's prompt. A manager session keeps the system prompt it was born
+  // with for the whole run, so a prompt-only rule cannot bind an in-flight
+  // run (and cannot bind a resumed one at all). Coercion never rejects: an
+  // off-roster hint lands on the nearest allowed model instead of failing the
+  // spawn, and an omitted one pins the standard tier rather than delegating
+  // the choice to the subscription default (which can be the premium tier).
+  return coerceWorkerModelToRoster(task.runtimePreference, task.modelHint);
 }
 
 function piWorkerToolLabel(value: unknown): string {

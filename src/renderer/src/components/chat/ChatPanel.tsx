@@ -111,7 +111,7 @@ export default function ChatPanel({
     if (!usingHoistedChatView) setLocalChatView("chat");
   }, [activeRun?.id, usingHoistedChatView]);
 
-  // OpenRouter chats have no PTY to attach to — force back to Chat view if
+  // Pi chats have no PTY to attach to, force back to Chat view if
   // the backend doesn't support the terminal tab. Local-state path only: in
   // the hoisted path chatView is shared across every retained workspace
   // panel and App owns this reset for the ACTIVE run — a hidden panel with a
@@ -945,19 +945,19 @@ function StatusMeta({ run }: { run: RunState }) {
   );
 }
 
-// Cost for this run: ONLY the real, metered OpenRouter spend (`totalCostUsd`,
-// recomputed after each priced SparkCall). Worker agents run on the user's
-// Claude Code / Codex CLI subscription, so a price-table estimate of their token
-// usage is NOT real money — surfacing it implied a CLI plan/council run "cost"
-// something when it didn't. The pill therefore appears only when OpenRouter was
-// actually used (i.e. the API model was selected), and stays hidden otherwise.
+// Cost for this run: ONLY real, metered API spend (`totalCostUsd`, recomputed
+// after each priced SparkCall). Worker agents run on the user's Claude Code /
+// Codex CLI subscription, so a price-table estimate of their token usage is NOT
+// real money, surfacing it implied a CLI plan/council run "cost" something when
+// it didn't. The pill therefore appears only when a metered call was actually
+// billed, and stays hidden otherwise.
 function CostPill({ run }: { run: RunState }) {
   const mgr = run.totalCostUsd;
   const hasMgr = typeof mgr === "number" && Number.isFinite(mgr) && mgr > 0;
   if (!hasMgr) return null;
   return (
     <span
-      title={`Exact OpenRouter spend on this chat: ${formatCostUsd(mgr!)}.`}
+      title={`Exact metered API spend on this chat: ${formatCostUsd(mgr!)}.`}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -982,8 +982,8 @@ function CostPill({ run }: { run: RunState }) {
 
 // Cost is sub-cent for cheap models and tens of dollars for big runs, so a
 // single fixed precision feels wrong. The pill renders 2 decimals once a run
-// crosses 1¢ and 4 decimals below, so users see real activity even on
-// gemini-flash chats.
+// crosses 1¢ and 4 decimals below, so users see real activity even on the
+// cheapest models.
 function formatCostUsd(value: number, opts: { stripDollar?: boolean } = {}): string {
   const abs = Math.abs(value);
   let formatted: string;

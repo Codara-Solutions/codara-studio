@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { ChatMode } from "@shared/types";
+import AnchoredMenu from "./AnchoredMenu";
 
 interface Props {
   mode: ChatMode;
@@ -41,35 +42,18 @@ const META: Record<ChatMode, { label: string; blurb: string }> = {
 
 export default function PlanModeToggle({ mode, onSelect }: Props) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const current: ChatMode = META[mode] ? mode : CYCLE[0];
   const meta = META[current];
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
 
   const visibleModes: ReadonlyArray<ChatMode> =
     current === "automation" ? ["automation", ...CYCLE] : CYCLE;
 
   return (
-    <div className="composer-mode" ref={rootRef}>
+    <div className="composer-mode">
       <button
         type="button"
+        ref={triggerRef}
         className={`composer-mode-cycle is-${current}${open ? " is-open" : ""}`}
         title={`${meta.label} — ${meta.blurb}`}
         aria-label={`Manager mode: ${meta.label}`}
@@ -77,11 +61,17 @@ export default function PlanModeToggle({ mode, onSelect }: Props) {
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span>{meta.label}</span>
+        <span className="composer-mode-label">{meta.label}</span>
         <span aria-hidden className="composer-chevron">⌄</span>
       </button>
-      {open && (
-        <div className="composer-mode-menu spark-menu" role="listbox" aria-label="Cora mode">
+      <AnchoredMenu
+        anchorRef={triggerRef}
+        open={open}
+        onClose={() => setOpen(false)}
+        className="composer-mode-menu spark-menu"
+        role="listbox"
+        ariaLabel="Cora mode"
+      >
           <div className="composer-menu-heading">How Cora should handle this chat</div>
           {visibleModes.map((option) => {
             const optionMeta = META[option];
@@ -107,8 +97,7 @@ export default function PlanModeToggle({ mode, onSelect }: Props) {
               </button>
             );
           })}
-        </div>
-      )}
+      </AnchoredMenu>
     </div>
   );
 }

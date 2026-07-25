@@ -12,7 +12,7 @@ import { useRunExecutionRecord } from "../lib/useRunExecutionRecord";
 //   - Costs           — per-step + total cost rollup, if the run records
 //                       any cost data on its SparkCall log. Otherwise the
 //                       "enable cost tracking" placeholder, because the
-//                       OpenRouter cost-tracking big bet (G) hasn't shipped.
+//                       cost-tracking big bet (G) hasn't shipped.
 //   - Events log      — raw JSONL view of the run's event stream. Each row
 //                       collapses by default; click to expand and read the
 //                       JSON body.
@@ -294,8 +294,8 @@ function CloseButton({ onClick }: { onClick: () => void }) {
 // ── Costs tab ───────────────────────────────────────────────────────────────
 
 // Cost-related fields the run-store might surface on its SparkCall log once
-// the OpenRouter cost-tracking big bet lands. None of these exist yet at the
-// time the inspector lands; we detect their absence to swap in the
+// the cost-tracking big bet lands. None of these exist yet at the time the
+// inspector lands; we detect their absence to swap in the
 // "enable cost tracking in Settings" placeholder.
 type CostBearingCall = SparkCall & {
   costUsd?: number;
@@ -326,7 +326,7 @@ function CostsTab({ run }: { run: RunState }) {
         title="No cost data"
         detail={
           "Cost tracking isn't recording USD or input/output token splits for this run yet. " +
-          "Enable cost tracking in Settings once the OpenRouter-cost big bet ships."
+          "Enable cost tracking in Settings once the cost-tracking big bet ships."
         }
       />
     );

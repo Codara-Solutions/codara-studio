@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { CoraExecutionPolicy } from "@shared/types";
 import {
   CORA_EXECUTION_POLICIES,
   coraExecutionPolicyProfile,
 } from "@shared/cora-execution-policy";
+import AnchoredMenu from "./AnchoredMenu";
 
 interface Props {
   value: CoraExecutionPolicy;
@@ -12,29 +13,14 @@ interface Props {
 
 export default function ExecutionPolicyPicker({ value, onPick }: Props) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const active = coraExecutionPolicyProfile(value);
 
-  useEffect(() => {
-    if (!open) return;
-    const onPointer = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointer);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onPointer);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   return (
-    <div className="composer-model" ref={rootRef}>
+    <div className="composer-model">
       <button
         type="button"
+        ref={triggerRef}
         className={`composer-pill composer-policy-pill is-${active.id}${open ? " is-active" : ""}`}
         onClick={() => setOpen((current) => !current)}
         title={`Pi execution policy · ${active.label}`}
@@ -44,8 +30,13 @@ export default function ExecutionPolicyPicker({ value, onPick }: Props) {
         <PolicyGlyph policy={active.id} />
         {active.shortLabel}
       </button>
-      {open ? (
-        <div className="composer-model-menu composer-policy-menu spark-menu" role="listbox">
+      <AnchoredMenu
+        anchorRef={triggerRef}
+        open={open}
+        onClose={() => setOpen(false)}
+        className="composer-model-menu composer-policy-menu spark-menu"
+        role="listbox"
+      >
           <div className="composer-model-group-label">Pi execution policy</div>
           {CORA_EXECUTION_POLICIES.map((profile) => (
             <button
@@ -72,8 +63,7 @@ export default function ExecutionPolicyPicker({ value, onPick }: Props) {
             Policy is stored with this chat. Frontier may reuse analysis only for an exact tracked state;
             all patch verification remains fresh.
           </div>
-        </div>
-      ) : null}
+      </AnchoredMenu>
     </div>
   );
 }

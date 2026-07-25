@@ -148,7 +148,7 @@ async function main() {
     baseEnv: { ANTHROPIC_API_KEY: "metered" },
   });
   assert.equal(anthropicPlan.command, "/electron");
-  assert.equal(anthropicPlan.model, "claude-opus-4-8");
+  assert.equal(anthropicPlan.model, "claude-opus-5");
   assert.equal(anthropicPlan.thinking, "high");
   assert.equal(anthropicPlan.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(anthropicPlan.env.SPARK_MCP_MODE, "execute");
@@ -158,7 +158,7 @@ async function main() {
   assert.equal(anthropicPlan.env.CODARA_PI_EXECUTION_POLICY, "fast");
   assert.equal(anthropicPlan.env.CODARA_PI_BRIDGE_PATH, path.resolve("/bridge/server.js"));
   assert.ok(anthropicPlan.args.includes("rpc"));
-  assert.ok(anthropicPlan.args.includes("claude-opus-4-8"));
+  assert.ok(anthropicPlan.args.includes("claude-opus-5"));
   assert.ok(anthropicPlan.args.includes(runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT));
   assert.equal(anthropicPlan.args.includes("--api-key"), false);
 

@@ -643,7 +643,7 @@ function ApiSettings({
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="OpenRouter"
-        detail="Used by Cora to plan Claude and Codex worker tasks."
+        detail="Powers the editor's inline AI and git commit-message drafts. Cora's own models are picked in the chat composer, not here."
       />
       <Label text="OpenRouter API key">
         <input

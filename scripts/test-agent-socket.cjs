@@ -134,7 +134,7 @@ async function main() {
       cwd: cliWorkspace,
       prompt: "Create a deterministic socket-test session.",
       title: "CLI socket test",
-      backend: "openrouter",
+      backend: "pi",
       mode: "talk",
     });
     check(
@@ -184,14 +184,28 @@ async function main() {
         waited.result?.run?.id === createdRunId && typeof waited.result?.timedOut === "boolean",
         JSON.stringify(waited).slice(0, 180),
       );
+      // Whether cancel lands on "cancelled" or leaves an already-terminal
+      // status depends on the environment, not on the contract: this fixture
+      // has no subscription auth, so the run can reach "failed" on its own
+      // before the cancel arrives, and cancel must NOT resurrect or relabel a
+      // run that already finished. Assert against the status observed just
+      // before the call so both environments test something real, rather than
+      // pinning "cancelled" (green only where credentials happen to exist) or
+      // accepting any terminal status (green even if cancel did nothing).
+      const beforeCancel = waited.result?.run?.status;
+      const wasLive = !["cancelled", "complete", "failed"].includes(beforeCancel);
       const cancelled = await rpc(handshake, "chat.cancel", {
         runId: createdRunId.slice(0, 12),
         reason: "Socket integration cleanup",
       });
+      const afterCancel = cancelled.result?.run?.status;
       check(
         "chat.cancel resolves a run prefix and terminalizes the session",
-        cancelled.result?.run?.id === createdRunId && cancelled.result?.run?.status === "cancelled",
-        JSON.stringify(cancelled).slice(0, 180),
+        cancelled.result?.run?.id === createdRunId &&
+          (wasLive
+            ? afterCancel === "cancelled"
+            : afterCancel === beforeCancel),
+        JSON.stringify({ wasLive, beforeCancel, afterCancel }),
       );
     }
 

@@ -256,7 +256,17 @@ export default function ChatConversation({ run }: { run: RunState }) {
               </div>
             );
           }}
-          components={{ Footer: () => <div style={{ height: 24 }} /> }}
+          // "At bottom" must mean "you can actually SEE the last row", not
+          // "the scroller is within 4px of its end" (Virtuoso's default). The
+          // floating "New activity" pill and the minimap are absolutely
+          // positioned over the list's bottom-right, so the final rows sit
+          // underneath them: with the tight default the reader would scroll
+          // down, still be told there was new activity, and never reach a
+          // resting position where the last response was fully visible.
+          atBottomThreshold={72}
+          // Tall enough to scroll the last row clear of that pill (bottom 18 +
+          // ~32 tall) instead of leaving it pinned under it.
+          components={{ Footer: () => <div style={{ height: 84 }} /> }}
         />
       )}
       <ConversationMinimap
@@ -1890,7 +1900,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   ].filter(Boolean).join(" · ");
   return (
     <div
-      title={`${worker.title} — ${worker.status}${titleSuffix}`}
+      title={`${worker.title}: ${worker.status}${titleSuffix}`}
       style={{
         display: "flex",
         alignItems: "center",

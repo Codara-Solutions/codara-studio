@@ -2,10 +2,8 @@ import { test, expect, type ElectronApplication, type Locator, type Page } from 
 import { _electron as electron } from "playwright";
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 
 test("autopilot runs from a selected markdown plan", async () => {
   // Manual-fallback plan → pause → notes → resume → the TEST plays the worker
@@ -22,9 +20,11 @@ test("autopilot runs from a selected markdown plan", async () => {
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
-        // No OpenRouter key + manual fallback → one deterministic "manual"
-        // worker task whose pane is a plain shell: nothing external spawns
-        // and nothing completes until the test writes the report.
+        // Throwaway user-data dir → no Pi subscription auth → the manager
+        // produces no decision, and manual fallback turns that into one
+        // deterministic "manual" worker task whose pane is a plain shell:
+        // nothing external spawns and nothing completes until the test
+        // writes the report.
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
         SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         // Worker panes must stay open until the test writes their report;
@@ -450,81 +450,15 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
   }
 });
 
-test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
-  // The manager planning contract runs against a fake OpenRouter server; the
-  // workers themselves are played by the test (final-report.json writes, same
-  // trick as the autopilot test). Fake `claude`/`codex` CLIs are prepended to
-  // PATH so the worker panes never launch a real agent — and if the pane
-  // shell's rc re-prepends the real CLI dir, that's still harmless because
-  // completion is driven by the report file, not the CLI.
-  test.setTimeout(120_000);
-  const { userDataDir, workspaceDir } = await prepareElectronWorkspace("spark-agent-openrouter-e2e-");
-  const server = await startFakeOpenRouterServer();
-  const fakeBin = await makeFakeAgentBin(userDataDir);
-
-  let app: ElectronApplication | null = null;
-  try {
-    app = await electron.launch({
-      args: ["."],
-      env: {
-        ...process.env,
-        PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
-        SPARK_USER_DATA_DIR: userDataDir,
-        SPARK_OPENROUTER_API_KEY: "test-key",
-        SPARK_OPENROUTER_BASE_URL: server.baseUrl,
-        SPARK_OPENROUTER_MODEL: "test/unsupported-manager",
-        SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL: "test/spark-manager",
-        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
-        SPARK_NO_SHELL_INTEGRATION: "1",
-      },
-    });
-
-    const page = await app.firstWindow();
-    await page.waitForLoadState("domcontentloaded");
-    await startPlanRun(page, workspaceDir);
-    await openRunChat(page);
-
-    await waitForOnlyRun(userDataDir, (candidate) =>
-      candidate.sparkCalls.some((call) => call.status === "completed") &&
-      candidate.workerTasks.length === 2,
-    );
-    await expect(page.locator(".xterm-host")).toHaveCount(2, { timeout: 20_000 });
-    await completeLiveAttempts(userDataDir, 2);
-    const run = await waitForOnlyRun(userDataDir, (candidate) =>
-      candidate.status === "complete" &&
-      candidate.workerAttempts.length === 2 &&
-      candidate.workerAttempts.every((attempt) => attempt.status === "succeeded") &&
-      candidate.workerTasks.every((task) => task.status === "accepted"),
-    );
-
-    // plan_analysis → step_planning → 1+ worker_result_review calls (one per
-    // reviewed report batch; whether the two reports land in one review tick
-    // or two is scheduler timing).
-    const modes = run.sparkCalls.map((call) => call.mode);
-    expect(modes.slice(0, 2)).toEqual(["plan_analysis", "step_planning"]);
-    expect(modes.length).toBeGreaterThanOrEqual(3);
-    expect(modes.slice(2).every((mode) => mode === "worker_result_review")).toBe(true);
-    expect(run.sparkCalls.every((call) => call.status === "completed")).toBe(true);
-    expect(run.status).toBe("complete");
-    expect(run.autopilot?.status).toBe("complete");
-    expect(run.workerTasks).toHaveLength(2);
-    expect(run.workerTasks.map((task) => task.runtimePreference).sort()).toEqual(["claude", "codex"]);
-    expect(run.workerAttempts).toHaveLength(2);
-    expect(run.workerAttempts.every((attempt) => attempt.status === "succeeded")).toBe(true);
-    expect(run.workerTasks.every((task) => task.status === "accepted")).toBe(true);
-    // Prompt delivery: each attempt's on-disk prompt carries the structured
-    // task section plus the fake manager's task description for its runtime.
-    const prompts = await Promise.all(
-      run.workerAttempts.map(async (attempt) => readFile(attempt.promptPath!, "utf8")),
-    );
-    expect(prompts.every((prompt) => prompt.includes("## TASK"))).toBe(true);
-    expect(prompts.some((prompt) => prompt.includes("Use Claude Code to inspect the plan"))).toBe(true);
-    expect(prompts.some((prompt) => prompt.includes("Use Codex to inspect the plan"))).toBe(true);
-  } finally {
-    await app?.close();
-    await server.close();
-  }
-});
+// REMOVED: "OpenRouter manager can plan Claude and Codex worker tasks".
+// That test drove the manager through a fake OpenRouter HTTP server
+// (SPARK_OPENROUTER_* env + a strict-structured-output endpoint plus the
+// unsupported-model fallback). Cora no longer has an HTTP manager backend , 
+// claude / codex / pi are all local CLI/runtime backends with no mockable
+// endpoint, so the fixture has nothing left to point at. The equivalent
+// end-to-end manager planning contract is covered by
+// tests/e2e/pi-manager-live-smoke.spec.ts (opt-in via
+// CODARA_E2E_PI_MANAGER_LIVE=1, real subscription auth).
 
 async function prepareElectronWorkspace(prefix: string): Promise<{ userDataDir: string; workspaceDir: string }> {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -586,9 +520,10 @@ async function startPlanRun(page: Page, workspaceDir: string): Promise<string> {
       planPath,
       planTitle: "PLAN.md",
       planText: file.content,
-      // This deterministic fixture exercises the legacy manual fallback, not
-      // the new subscription-backed Pi default.
-      chatBackend: "openrouter",
+      // No chatBackend override: the run takes Cora's default (Pi). With no
+      // subscription auth in the throwaway user-data dir the manager yields
+      // no decision, which is what SPARK_ENABLE_MANUAL_FALLBACK turns into the
+      // deterministic manual worker task these fixtures drive.
     });
     return run.id as string;
   }, workspaceDir);
@@ -629,151 +564,6 @@ async function expectRunEvent(
     .toBe(true);
 }
 
-async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
-  const server = createServer((req, res) => {
-    if (req.method !== "POST" || req.url !== "/api/v1/chat/completions") {
-      res.writeHead(404).end();
-      return;
-    }
-
-    let body = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => {
-      body += chunk;
-    });
-    req.on("end", () => {
-      const parsedBody = JSON.parse(body) as {
-        model?: string;
-        messages?: Array<{ content?: string }>;
-        provider?: { require_parameters?: boolean };
-        response_format?: {
-          type?: string;
-          json_schema?: { strict?: boolean; schema?: { required?: string[] } };
-        };
-      };
-      if (
-        parsedBody.provider?.require_parameters !== true ||
-        parsedBody.response_format?.type !== "json_schema" ||
-        parsedBody.response_format.json_schema?.strict !== true ||
-        !parsedBody.response_format.json_schema.schema?.required?.includes("tasks")
-      ) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { message: "Expected strict OpenRouter structured output request." } }));
-        return;
-      }
-      if (parsedBody.model === "test/unsupported-manager") {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            error: {
-              message:
-                "No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection",
-            },
-          }),
-        );
-        return;
-      }
-      const prompt = parsedBody.messages?.map((message) => message.content ?? "").join("\n") ?? "";
-      const mode = prompt.match(/MANAGER MODE\n([a-z_]+)/)?.[1];
-      const isPlanAnalysis = mode === "plan_analysis";
-      const isReview = mode === "worker_result_review";
-      // A SINGLE step: the current engine walks every planned step, so a
-      // second "review" step would spawn a third worker instead of letting the
-      // worker_result_review "complete" verdict end the run.
-      const decision = isPlanAnalysis
-        ? {
-            status: "run_workers",
-            summary: "Analyze the fixture plan into a durable step-by-step division.",
-            steps: [
-              {
-                title: "Run local subscription workers",
-                goal: "Launch local coding workers through Spark's worker control path.",
-                plannedAgents: [
-                  {
-                    label: "agent 1",
-                    summary: "Run Claude Code fixture worker for broad implementation slice.",
-                    runtimePreference: "claude",
-                    modelHint: "sonnet",
-                    effortHint: "low",
-                  },
-                  {
-                    label: "agent 2",
-                    summary: "Run Codex fixture worker for validation slice.",
-                    runtimePreference: "codex",
-                    modelHint: "gpt-5.5",
-                    effortHint: "low",
-                  },
-                ],
-                acceptanceCriteria: ["Both worker tasks write final reports."],
-                verificationCommands: ["npm run typecheck"],
-                riskLevel: "low",
-              },
-            ],
-            tasks: [],
-          }
-        : isReview
-        ? {
-            status: "complete",
-            summary: "Both local subscription worker fixture reports are accepted, so the run is complete.",
-            steps: [],
-            tasks: [],
-          }
-        : {
-            status: "run_workers",
-            summary: "Create first-step worker prompts from the existing step division.",
-            steps: [],
-            tasks: [
-              {
-                stepIndex: 0,
-                title: "Claude fixture task",
-                description: "Use Claude Code to inspect the plan and report the first implementation slice.",
-                runtimePreference: "claude",
-                expectedOutputs: ["final-report.json"],
-                verificationCommands: ["npm run typecheck"],
-                canRunParallel: true,
-              },
-              {
-                stepIndex: 0,
-                title: "Codex fixture task",
-                description: "Use Codex to inspect the plan and report risks or missing pieces.",
-                runtimePreference: "codex",
-                expectedOutputs: ["final-report.json"],
-                verificationCommands: ["npm run typecheck"],
-                canRunParallel: true,
-              },
-            ],
-          };
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          choices: [
-            {
-              message: {
-                content: JSON.stringify(decision),
-              },
-            },
-          ],
-          usage: {
-            prompt_tokens: 100,
-            completion_tokens: 50,
-          },
-        }),
-      );
-    });
-  });
-
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address() as AddressInfo;
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}/api/v1`,
-    close: () =>
-      new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
-      }),
-  };
-}
-
 // The report the test writes when it plays a worker. "complete" reviews to an
 // accepted task; "partial" reviews to needs_review + a blocked autopilot.
 function fixtureWorkerReport(status: "complete" | "partial"): Record<string, unknown> {
@@ -787,45 +577,6 @@ function fixtureWorkerReport(status: "complete" | "partial"): Record<string, unk
     risks: [],
     followups: status === "partial" ? ["Continue the plan."] : [],
   };
-}
-
-// Fake `claude` / `codex` CLIs: print the TUI markers waitForAgentTui sniffs
-// for (see worker-launch.ts), then idle until the report poll kills the pane.
-async function makeFakeAgentBin(userDataDir: string): Promise<string> {
-  const dir = join(userDataDir, "fake-bin");
-  await mkdir(dir, { recursive: true });
-  const make = async (name: string, marker: string) =>
-    writeFile(join(dir, name), `#!/bin/sh\necho "${marker}"\nexec sleep 600\n`, {
-      encoding: "utf8",
-      mode: 0o755,
-    });
-  await make("claude", "Sonnet ready (fake) -- bypass permissions on");
-  await make("codex", "Codex GPT-5 ready (fake) /help");
-  return dir;
-}
-
-// Play the workers: as attempts go live (launching/running — i.e. after the
-// launch path has cleared any stale report file), write each one's
-// final-report.json. The launch driver polls that file every 750ms and
-// settles the attempt once it parses.
-async function completeLiveAttempts(userDataDir: string, count: number): Promise<void> {
-  const written = new Set<string>();
-  await expect
-    .poll(
-      async () => {
-        const run = await readOnlyRun(userDataDir);
-        for (const attempt of run.workerAttempts) {
-          const reportPath = attempt.finalReportPath;
-          if (!reportPath || written.has(reportPath)) continue;
-          if (!["launching", "running"].includes(attempt.status)) continue;
-          await writeFile(reportPath, JSON.stringify(fixtureWorkerReport("complete"), null, 2), "utf8");
-          written.add(reportPath);
-        }
-        return written.size;
-      },
-      { timeout: 60_000 },
-    )
-    .toBe(count);
 }
 
 // A run only needs to exist to appear in (and be deleted from) the chat
@@ -865,22 +616,6 @@ async function readOnlyRun(userDataDir: string): Promise<{
   expect(entries).toHaveLength(1);
   const raw = await readFile(join(runsDir, entries[0], "run.json"), "utf8");
   return JSON.parse(raw);
-}
-
-async function waitForOnlyRun(
-  userDataDir: string,
-  predicate: (run: Awaited<ReturnType<typeof readOnlyRun>>) => boolean,
-): Promise<Awaited<ReturnType<typeof readOnlyRun>>> {
-  await expect
-    .poll(async () => {
-      try {
-        return predicate(await readOnlyRun(userDataDir));
-      } catch {
-        return false;
-      }
-    }, { timeout: 20_000 })
-    .toBe(true);
-  return readOnlyRun(userDataDir);
 }
 
 async function waitForRunCount(

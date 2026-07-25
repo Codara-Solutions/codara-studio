@@ -177,6 +177,41 @@ export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
   }
 }
 
+// A worker card names the MODEL, not the runtime. Every worker runs under the
+// Pi harness now, so "claude"/"codex" only says which subscription Pi
+// authenticates against, it is the provider, not the thing that did the work,
+// and two workers wearing the same badge can be running very different models.
+// Full ids are too long for the card, so trim to what a human reads: family +
+// version for Anthropic ("claude-opus-5" -> "Opus 5"), the variant name for
+// OpenAI ("gpt-5.6-sol" -> "Sol"). Unknown shapes pass through rather than
+// being mangled, a new model must never render as an empty chip.
+// `runtime` is only the fallback text, so it is typed loosely: callers include
+// pane metadata whose runtime union ("opencode") is wider than WorkerRuntime.
+export function workerModelLabel(
+  model: string | undefined,
+  runtime: string,
+): string {
+  const base = (model ?? "").split("@")[0].trim().toLowerCase();
+  if (!base) return runtime;
+  if (base.startsWith("claude-")) {
+    const [family, ...version] = base.slice("claude-".length).split("-");
+    const number = version.join(".");
+    return number ? `${capitalizeWord(family)} ${number}` : capitalizeWord(family);
+  }
+  if (base.startsWith("gpt-")) {
+    const parts = base.slice("gpt-".length).split("-");
+    const variant = parts.length > 1 ? parts[parts.length - 1] : "";
+    // A trailing word is the variant name (Sol); a trailing number means the
+    // id carries no variant, so show the family version instead.
+    return variant && !/^[\d.]+$/.test(variant) ? capitalizeWord(variant) : `GPT-${parts[0]}`;
+  }
+  return base;
+}
+
+function capitalizeWord(value: string): string {
+  return value ? value[0].toUpperCase() + value.slice(1) : value;
+}
+
 // ── Run -> graph data shaping ────────────────────────────────────────────────
 
 // buildRunMaps derives the full per-task attempt lists alongside the

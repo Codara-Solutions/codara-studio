@@ -2372,7 +2372,7 @@ function FileMenu({
 }
 
 // The "Run plan" entry. Cora · Pi leads the list and clicking the row itself
-// runs it; Claude, Codex, and the API manager remain explicit flyout choices.
+// runs it; Claude and Codex remain explicit flyout choices.
 function RunPlanMenuItem({
   engines,
   onPick,
@@ -2387,7 +2387,7 @@ function RunPlanMenuItem({
 
   if (engines.length <= 1) {
     return (
-      <MenuButton accent onClick={() => onPick(undefined)}>
+      <MenuButton accent onClick={() => onPick(engines[0]?.backend)}>
         Run plan
       </MenuButton>
     );

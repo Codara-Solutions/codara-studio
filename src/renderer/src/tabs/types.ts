@@ -118,6 +118,12 @@ export interface TerminalLeafWorker {
   // WorkerAttempt.command, which is only stamped at launch — undefined before
   // then.
   harness?: "pi" | "cli";
+  // WorkerAttempt.model, the model this attempt actually launched on. The
+  // pane header names this rather than the provider, because under Pi every
+  // worker runs on the same harness and "Claude"/"Codex" only identifies the
+  // subscription. Undefined for attempts recorded before the field existed,
+  // which is why the header still falls back to the harness/provider label.
+  model?: string;
   // WorkerAttempt.startedAt (ISO). Drives the header's live elapsed readout;
   // absent until the attempt has actually launched.
   startedAt?: string;

@@ -48,8 +48,8 @@ function OpenAIGlyph({ size = 11 }: { size?: number }) {
         d="M12 8.2v7.6M8.6 10.1l6.8 3.8M15.4 10.1l-6.8 3.8"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.2"
-        opacity="0.75"
+        strokeWidth="1.4"
+        opacity="0.95"
       />
     </svg>
   );
@@ -67,10 +67,66 @@ function tightestWindow(usage: PiUsageProvider): PiUsageWindow | null {
   );
 }
 
+/**
+ * Headroom as a colour: green with plenty left, sliding through amber to red as
+ * the window fills.
+ *
+ * Continuous rather than three fixed steps, because the useful signal is "how
+ * close am I", and a step scale answers that only three times. It is also
+ * deliberately NOT the accent colour: accent means "interactive" everywhere
+ * else in the app, so painting a quota with it made a healthy 5% read as a
+ * control rather than as good news.
+ *
+ * Two segments, because a straight green-to-red interpolation passes through a
+ * muddy olive around the midpoint. Routing via amber keeps every intermediate
+ * value a colour that still means something.
+ */
 function toneFor(usedPercent: number): string {
-  if (usedPercent >= 90) return "var(--danger)";
-  if (usedPercent >= 75) return "var(--warn, #d99a2b)";
-  return "var(--accent)";
+  const used = Math.min(100, Math.max(0, usedPercent));
+  const AMBER = "var(--warn, #d99a2b)";
+  if (used <= 60) {
+    // 0% used is fully --ok; 60% is fully amber.
+    return `color-mix(in oklch, ${AMBER} ${(used / 60) * 100}%, var(--ok))`;
+  }
+  // 60% is amber; 100% is fully --danger.
+  return `color-mix(in oklch, var(--danger) ${((used - 60) / 40) * 100}%, ${AMBER})`;
+}
+
+/**
+ * "5-hour" -> "5h", "7-day" -> "1w". Returns null for a QUALIFIED window
+ * ("Fable 7-day", "Code review 7-day"): those are model or feature specific
+ * quotas, and the title bar shows the plan-wide ones. The full set, qualifiers
+ * included, is in the popover.
+ */
+function shortWindowLabel(label: string): string | null {
+  const match = /^(\d+)-(hour|day|minute)$/.exec(label.trim());
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (match[2] === "day") return amount % 7 === 0 ? `${amount / 7}w` : `${amount}d`;
+  if (match[2] === "hour") return `${amount}h`;
+  return `${amount}m`;
+}
+
+/** Seconds a window spans, for ordering shortest-first (5h before 1w). */
+function windowSeconds(label: string): number {
+  const match = /^(\d+)-(hour|day|minute)$/.exec(label.trim());
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const amount = Number(match[1]);
+  if (match[2] === "day") return amount * 86_400;
+  if (match[2] === "hour") return amount * 3600;
+  return amount * 60;
+}
+
+/**
+ * The plan-wide windows, shortest first. Anthropic reports two (5-hour and
+ * 7-day) and Codex commonly reports one, which is why the pill labels every
+ * entry rather than showing a bare percentage: with one window there is nothing
+ * to compare against, so "15%" alone never says of what.
+ */
+function planWindows(usage: PiUsageProvider): PiUsageWindow[] {
+  return usage.windows
+    .filter((usageWindow) => shortWindowLabel(usageWindow.label) !== null)
+    .sort((a, b) => windowSeconds(a.label) - windowSeconds(b.label));
 }
 
 function WindowRow({ window: usageWindow }: { window: PiUsageWindow }) {
@@ -242,8 +298,13 @@ function UsagePill({
   const ref = useRef<HTMLButtonElement>(null);
   const worst = tightestWindow(usage);
   if (!worst) return null;
-  const used = Math.round(worst.usedPercent);
-  const tone = toneFor(worst.usedPercent);
+  // Every plan window gets its own labelled entry. Showing only the tightest
+  // one hid the fact that Anthropic HAS two, and made the number ambiguous:
+  // "45%" could have been either window depending on which was worse today.
+  // Falls back to the tightest window if none of them parse as a plan window,
+  // so an unrecognized shape still renders something truthful.
+  const shown = planWindows(usage);
+  const entries = shown.length > 0 ? shown : [worst];
   return (
     <button
       ref={ref}
@@ -251,7 +312,9 @@ function UsagePill({
       data-window-control
       data-usage-pill
       aria-expanded={open}
-      title={`${usage.label} · ${worst.label} ${used}% used`}
+      title={`${usage.label} · ${entries
+        .map((entry) => `${entry.label} ${Math.round(entry.usedPercent)}% used`)
+        .join(" · ")}`}
       onClick={() => onToggle(open ? null : (ref.current?.getBoundingClientRect() ?? null))}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -264,9 +327,16 @@ function UsagePill({
           height: 18,
           padding: "0 6px",
           borderRadius: 99,
-          border: `1px solid ${open ? "var(--accent-edge, var(--rule))" : "var(--rule-soft)"}`,
+          border: `1px solid ${
+            open
+              ? "var(--accent-edge, var(--rule))"
+              : "color-mix(in oklab, var(--ink) 24%, transparent)"
+          }`,
           background: open || hover ? "var(--hover)" : "transparent",
-          color: tone,
+          // The glyph stays neutral: only the numbers carry the health colour,
+          // so a red pill means a real quota problem rather than just a
+          // provider that happens to be red today.
+          color: "var(--muted)",
           cursor: "default",
           font: "inherit",
           fontFamily: "var(--font-mono)",
@@ -277,8 +347,34 @@ function UsagePill({
         } as AppRegionStyle
       }
     >
-      <ProviderGlyph provider={usage.provider} />
-      <span style={{ fontWeight: 650 }}>{used}%</span>
+      {/* Neutral but bright: the marks read as ink, not as a health signal. */}
+      <span
+        aria-hidden
+        style={{ display: "flex", alignItems: "center", color: "var(--ink)" }}
+      >
+        <ProviderGlyph provider={usage.provider} />
+      </span>
+      {entries.map((entry, index) => (
+        <span
+          key={entry.id}
+          style={{ display: "flex", alignItems: "center", gap: 3 }}
+        >
+          {index > 0 && (
+            <span aria-hidden style={{ color: "var(--rule)", margin: "0 1px" }}>
+              ·
+            </span>
+          )}
+          {/* The window length is always shown, never inferred from position.
+              Codex reports a single window, so an unlabelled number there gave
+              no clue it was the weekly one. */}
+          <span style={{ color: "var(--muted)", fontSize: 9 }}>
+            {shortWindowLabel(entry.label) ?? entry.label}
+          </span>
+          <span style={{ fontWeight: 650, color: toneFor(entry.usedPercent) }}>
+            {Math.round(entry.usedPercent)}%
+          </span>
+        </span>
+      ))}
     </button>
   );
 }

@@ -1,8 +1,23 @@
+// Cora's manager protocol — the provider-agnostic contract between the
+// orchestrator and whichever manager backend is driving a run.
+//
+// Two halves live here:
+//   - Request side: `buildManagerRequest` assembles the system prompt, the run
+//     context, and the strict `spark_manager_decision` JSON schema.
+//   - Response side: `parseManagerDecisionJson` + `normalizeManagerDecision`
+//     turn a model's raw structured output into a validated
+//     SparkManagerDecision, applying the invariants the prompt asks for
+//     (brake-after-skeleton, hard stop at the first brake, verifier-class
+//     inference, mode-specific fallbacks).
+//
+// There is deliberately NO transport in this file. Backends own their own
+// wire protocol (Claude Code / Codex / Pi each drive a CLI session) and
+// register themselves in backend-registry.ts.
+
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   AgentRuntimeDiagnostic,
-  AppSettings,
   HumanRunMessage,
   PlannedStepAgent,
   RunState,
@@ -13,7 +28,6 @@ import type {
   WorkerRuntime,
   WorkerTask,
 } from "@shared/types";
-import { priceCall, type OpenRouterUsage } from "../openrouter-prices";
 import {
   buildManagerSystemPrompt,
   formatManagerModeRules,
@@ -21,13 +35,6 @@ import {
   type ManagerPromptProfile,
 } from "./prompt-profile";
 import { formatPriorRunsSection } from "./run-memory";
-
-export interface OpenRouterConfig {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  structuredOutputFallbackModel: string;
-}
 
 export interface SparkManagerStepDecision {
   kind: StepKind;
@@ -117,13 +124,13 @@ export interface SparkManagerWorkerReportContext {
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
 }
 
-export type OpenRouterContentPart =
+export type ManagerContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
 
-export interface OpenRouterMessage {
+export interface ManagerMessage {
   role: "system" | "user";
-  content: string | OpenRouterContentPart[];
+  content: string | ManagerContentPart[];
 }
 
 export interface SparkManagerQuestionOption {
@@ -134,17 +141,11 @@ export interface SparkManagerQuestionOption {
   recommended?: boolean;
 }
 
-export type OpenRouterManagerMode = "plan_analysis" | "chat" | "step_planning" | "worker_result_review";
+export type ManagerMode = "plan_analysis" | "chat" | "step_planning" | "worker_result_review";
 
-export interface OpenRouterManagerRequest {
+export interface ManagerRequest {
   model: string;
   temperature: number;
-  provider: {
-    require_parameters: true;
-    only?: string[];
-    order?: string[];
-    allow_fallbacks?: boolean;
-  };
   response_format: {
     type: "json_schema";
     json_schema: {
@@ -153,36 +154,26 @@ export interface OpenRouterManagerRequest {
       schema: Record<string, unknown>;
     };
   };
-  messages: OpenRouterMessage[];
+  messages: ManagerMessage[];
 }
 
-interface OpenRouterResponse {
-  choices?: Array<{
-    message?: {
-      content?: unknown;
-    };
-  }>;
-  // The `usage` block is provider-shaped; we type it as OpenRouterUsage (which
-  // is a permissive superset) so the cost-pricing layer can read every known
-  // variant — prompt_tokens / input_tokens, cache_read_input_tokens, etc.
-  usage?: OpenRouterUsage;
-  error?: {
-    message?: string;
-  };
-}
-
-export interface OpenRouterManagerResult {
+export interface ManagerResult {
   decision: SparkManagerDecision;
-  rawResponse: OpenRouterResponse;
+  /**
+   * Whatever the backend received for this turn, persisted verbatim as the
+   * call's response artifact. Backend-shaped, so this is only ever
+   * serialized — never inspected.
+   */
+  rawResponse: unknown;
   durationMs: number;
   model: string;
   fallbackFrom?: string;
   promptTokens?: number;
   completionTokens?: number;
   /**
-   * USD cost computed by `priceCall(...)` against the hardcoded price table.
-   * Zero (with token counts still populated) when the model isn't in the
-   * table or the response carried no usage block. Persisted onto the
+   * USD cost for the turn, priced by the backend against the model price
+   * table. Zero (with token counts still populated) when the model isn't in
+   * the table or the response carried no usage block. Persisted onto the
    * matching SparkCall record by the run-store completion handler.
    */
   costUsd?: number;
@@ -191,9 +182,6 @@ export interface OpenRouterManagerResult {
   cacheReadTokens?: number;
 }
 
-const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
-const DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL = "openai/gpt-4o-mini";
 const SPARK_MANAGER_DECISION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -289,7 +277,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
       type: "string",
       enum: ["trivial", "standard", "complex", ""],
       description:
-        "Required during plan_analysis: classify the WHOLE RUN's complexity. Drives verifier depth (trivial=1, standard=1, complex=2 peer verifiers) and the step cap. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Every tier gets at least one verifier follow-up; trivial vs standard differ only in scope and step cap, not in whether work is verified. Bias toward standard on uncertainty — false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
+        "Required during plan_analysis: classify the WHOLE RUN's complexity. Drives verifier depth (trivial=1, standard=1, complex=2 peer verifiers) and the step cap. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Every tier gets at least one verifier follow-up; trivial vs standard differ only in scope and step cap, not in whether work is verified. Bias toward standard on uncertainty, false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
     },
     terminals: {
       type: "array",
@@ -312,7 +300,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           model: {
             type: "string",
             description:
-              "Model id the user named (e.g. 'opus', 'sonnet', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'); empty string when unspecified.",
+              "Model id the user named (e.g. 'opus', 'fable', 'gpt-5.6-sol'); empty string when unspecified. This is a standing terminal the human drives, so any model they ask for by name is honoured, the three-model worker roster does not apply here.",
           },
           effort: {
             type: "string",
@@ -356,7 +344,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
                   type: "string",
                   enum: ["skeleton", "feature", "leaf", "verifier"],
                   description:
-                    "skeleton: architectural decisions later workers inherit (file layout, base components, state shape, design tokens) — strongest available model + highest effort. feature: standard implementation against an established skeleton — mid model + medium effort. leaf: mechanical, well-defined work (rename, plumb a known transformation, write tests against an existing API) — cheapest available model + low effort. verifier: read-only follow-up class spawned ONLY by worker_result_review after an implementation worker completes; never appears in a plan_analysis plannedAgents list — peer-strength model + high effort, allowedPaths=[], re-derives ground truth from filesystem.",
+                    "skeleton: architectural decisions later workers inherit (file layout, base components, state shape, design tokens): strongest available model + highest effort. feature: standard implementation against an established skeleton, mid model + medium effort. leaf: mechanical, well-defined work (rename, plumb a known transformation, write tests against an existing API): cheapest available model + low effort. verifier: read-only follow-up class spawned ONLY by worker_result_review after an implementation worker completes; never appears in a plan_analysis plannedAgents list, peer-strength model + high effort, allowedPaths=[], re-derives ground truth from filesystem.",
                 },
               },
             },
@@ -426,36 +414,16 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
   },
 } as const;
 
-export function readOpenRouterConfig(settings?: AppSettings): OpenRouterConfig | null {
-  const apiKey = (
-    settings?.openRouterApiKey ||
-    process.env.SPARK_OPENROUTER_API_KEY ||
-    process.env.OPENROUTER_API_KEY ||
-    ""
-  ).trim();
-  if (!apiKey) return null;
-
-  return {
-    apiKey,
-    baseUrl: (process.env.SPARK_OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).replace(/\/+$/, ""),
-    model: (settings?.openRouterModel || process.env.SPARK_OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL).trim(),
-    structuredOutputFallbackModel: (
-      process.env.SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL ||
-      DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL
-    ).trim(),
-  };
-}
-
-export function buildOpenRouterManagerRequest(input: {
+export function buildManagerRequest(input: {
   run: RunState;
   cwd: string;
   model: string;
-  mode?: OpenRouterManagerMode;
+  mode?: ManagerMode;
   workerReports?: SparkManagerWorkerReportContext[];
   availableRuntimes?: AgentRuntimeDiagnostic[];
   agentSyncContext?: string;
   promptProfile?: ReturnType<typeof loadManagerPromptProfile>;
-}): OpenRouterManagerRequest {
+}): ManagerRequest {
   const mode = input.mode ?? "step_planning";
   const activePlan = input.run.planId
     ? input.run.plans.find((plan) => plan.id === input.run.planId)
@@ -482,7 +450,6 @@ export function buildOpenRouterManagerRequest(input: {
   return {
     model: input.model,
     temperature: 0.2,
-    provider: buildProviderPreference(),
     response_format: {
       type: "json_schema",
       json_schema: {
@@ -508,25 +475,8 @@ export function buildOpenRouterManagerRequest(input: {
   };
 }
 
-// Build the OpenRouter `provider` preference block from env. `only` pins
-// fulfillment to a specific upstream provider (e.g. "sambanova") for routes
-// where we want guaranteed throughput / TPS. `allow_fallbacks=false` makes the
-// request fail loudly instead of silently rerouting to a slow provider.
-function buildProviderPreference(): OpenRouterManagerRequest["provider"] {
-  const pref: OpenRouterManagerRequest["provider"] = { require_parameters: true };
-  const onlyRaw = (process.env.SPARK_OPENROUTER_PROVIDER_ONLY ?? "").trim();
-  if (onlyRaw) {
-    const only = onlyRaw.split(",").map((s) => s.trim()).filter(Boolean);
-    if (only.length > 0) {
-      pref.only = only;
-      pref.allow_fallbacks = false;
-    }
-  }
-  return pref;
-}
-
 interface ManagerUserMessageInput {
-  mode: OpenRouterManagerMode;
+  mode: ManagerMode;
   cwd: string;
   run: RunState;
   recentMessages: Array<{ author: string; kind: string; message: string; attachments: string[] }>;
@@ -635,7 +585,7 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     } else {
       lines.push(
         "USER NOTES (binding additions to the project plan)",
-        "Treat each note below as part of the project plan. When designing new worker tasks, integrate these as if they had been in the original plan from the start — write the worker description at full design depth (objective, acceptance criteria, UI polish, behaviors), not as a thin patch on top of existing files. Existing artifacts may inform style/structure but must not constrain the new design's quality bar.",
+        "Treat each note below as part of the project plan. When designing new worker tasks, integrate these as if they had been in the original plan from the start, write the worker description at full design depth (objective, acceptance criteria, UI polish, behaviors), not as a thin patch on top of existing files. Existing artifacts may inform style/structure but must not constrain the new design's quality bar.",
         "",
         olderCount > 0 ? `Older user notes already reflected in the saved steps/reviews: ${olderCount}` : "",
         formattedAmendments,
@@ -815,12 +765,12 @@ function formatCompactRunState(
 
 function buildManagerUserContent(input: {
   run: RunState;
-  mode: OpenRouterManagerMode;
+  mode: ManagerMode;
   text: string;
-}): string | OpenRouterContentPart[] {
+}): string | ManagerContentPart[] {
   const imageParts = selectImageAttachmentsForManager(input.run, input.mode)
     .map((attachment) => attachmentToImagePart(attachment))
-    .filter((part): part is OpenRouterContentPart => Boolean(part));
+    .filter((part): part is ManagerContentPart => Boolean(part));
   if (imageParts.length === 0) return input.text;
   return [{ type: "text", text: input.text }, ...imageParts];
 }
@@ -832,7 +782,7 @@ const MAX_FILE_REFERENCE_PREVIEW_CHARS = 6000;
 
 function selectImageAttachmentsForManager(
   run: RunState,
-  mode: OpenRouterManagerMode,
+  mode: ManagerMode,
 ): RunMessageAttachment[] {
   if (mode === "worker_result_review") return [];
   for (let index = run.humanMessages.length - 1; index >= 0; index -= 1) {
@@ -844,7 +794,7 @@ function selectImageAttachmentsForManager(
   return [];
 }
 
-function attachmentToImagePart(attachment: RunMessageAttachment): OpenRouterContentPart | null {
+function attachmentToImagePart(attachment: RunMessageAttachment): ManagerContentPart | null {
   try {
     const stat = statSync(attachment.path);
     if (!stat.isFile() || stat.size > MAX_MANAGER_IMAGE_BYTES) return null;
@@ -981,152 +931,14 @@ function listWorkspaceContents(cwd: string): string {
   }
 }
 
-export async function requestOpenRouterManagerDecision(
-  config: OpenRouterConfig,
-  requestBody: OpenRouterManagerRequest,
-  mode: OpenRouterManagerMode,
-): Promise<OpenRouterManagerResult> {
-  const started = Date.now();
-  try {
-    return await performOpenRouterManagerRequest({
-      config,
-      requestBody,
-      mode,
-      started,
-      model: requestBody.model,
-    });
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    if (isImageInputUnsupportedError(error) && requestHasImageParts(requestBody)) {
-      return performOpenRouterManagerRequest({
-        config,
-        requestBody: stripImageParts(requestBody),
-        mode,
-        started,
-        model: requestBody.model,
-      });
-    }
-    const fallbackModel = config.structuredOutputFallbackModel.trim();
-    if (
-      !isStructuredOutputUnsupportedError(error) ||
-      !fallbackModel ||
-      fallbackModel === requestBody.model
-    ) {
-      throw err;
-    }
-
-    return performOpenRouterManagerRequest({
-      config,
-      requestBody: { ...requestBody, model: fallbackModel },
-      mode,
-      started,
-      model: fallbackModel,
-      fallbackFrom: requestBody.model,
-    });
-  }
-}
-
-export function isStructuredOutputUnsupportedError(error: string): boolean {
-  const normalized = error.toLowerCase();
-  return (
-    normalized.includes("no endpoints found") && normalized.includes("requested parameters")
-  ) || (
-    normalized.includes("response_format") && normalized.includes("not support")
-  ) || (
-    normalized.includes("json_schema") && normalized.includes("not support")
-  );
-}
-
-// Hard ceiling for a single manager HTTP request. Past this we abort and let
-// the retry layer try again rather than wedging the turn on a dead socket.
-const MANAGER_FETCH_TIMEOUT_MS = 120_000;
-
-async function performOpenRouterManagerRequest({
-  config,
-  requestBody,
-  mode,
-  started,
-  model,
-  fallbackFrom,
-}: {
-  config: OpenRouterConfig;
-  requestBody: OpenRouterManagerRequest;
-  mode: OpenRouterManagerMode;
-  started: number;
-  model: string;
-  fallbackFrom?: string;
-}): Promise<OpenRouterManagerResult> {
-  // Bound the request so a stalled connection can't hang the manager turn
-  // forever (which leaves the chat perpetually "busy" with no way to recover).
-  // A timeout surfaces as a rejected promise that isTerminalManagerError does
-  // NOT match, so requestManagerWithRetries treats it as transient and retries.
-  const ac = new AbortController();
-  const timer = setTimeout(
-    () => ac.abort(new Error("OpenRouter manager request timed out")),
-    MANAGER_FETCH_TIMEOUT_MS,
-  );
-  let response: Response;
-  try {
-    response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://spark-agent.local",
-        "X-Title": "Codara",
-      },
-      body: JSON.stringify(requestBody),
-      signal: ac.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-
-  const rawResponse = (await response.json().catch(() => ({}))) as OpenRouterResponse;
-  if (!response.ok) {
-    throw new Error(rawResponse.error?.message || `OpenRouter request failed with ${response.status}`);
-  }
-
-  const content = extractMessageContent(rawResponse);
-  const parsed = parseJsonObject(content);
-  // Price the call against the hardcoded model table. Missing usage / unknown
-  // model -> zero cost with whatever token counts we could parse, so a partial
-  // response never crashes the call site.
-  const priced = priceCall({ model, usage: rawResponse.usage });
-  return {
-    decision: normalizeManagerDecision(parsed, mode),
-    rawResponse,
-    durationMs: Date.now() - started,
-    model,
-    fallbackFrom,
-    promptTokens: rawResponse.usage?.prompt_tokens,
-    completionTokens: rawResponse.usage?.completion_tokens,
-    costUsd: priced.costUsd,
-    inputTokens: priced.inputTokens,
-    outputTokens: priced.outputTokens,
-    cacheReadTokens: priced.cacheReadTokens,
-  };
-}
-
-function extractMessageContent(response: OpenRouterResponse): string {
-  const content = response.choices?.[0]?.message?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object" && "text" in part) {
-          const text = (part as { text?: unknown }).text;
-          return typeof text === "string" ? text : "";
-        }
-        return "";
-      })
-      .join("");
-  }
-  throw new Error("OpenRouter response did not include message content.");
-}
-
-function parseJsonObject(content: string): Record<string, unknown> {
+/**
+ * Response side, step 1: take the raw text a manager backend produced for a
+ * `spark_manager_decision` structured-output call and get a JSON object out of
+ * it. Tolerates a ```json fence, because models add one even under a strict
+ * schema. Throws when the payload isn't a JSON object — the caller treats that
+ * as a failed turn rather than inventing a decision.
+ */
+export function parseManagerDecisionJson(content: string): Record<string, unknown> {
   const trimmed = content.trim();
   const withoutFence = trimmed
     .replace(/^```(?:json)?\s*/i, "")
@@ -1139,7 +951,17 @@ function parseJsonObject(content: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouterManagerMode): SparkManagerDecision {
+/**
+ * Response side, step 2: validate a parsed decision object against the
+ * protocol and fill in the mode-specific fallbacks. This is where the
+ * invariants the system prompt merely *asks* for get enforced — models that
+ * ignore them (a skeleton step with no brake behind it, steps speculating past
+ * a brake, a verifier follow-up with no taskClass) are corrected here.
+ */
+export function normalizeManagerDecision(
+  raw: Record<string, unknown>,
+  mode: ManagerMode,
+): SparkManagerDecision {
   const status = normalizeStatus(raw.status);
   const steps = normalizeSteps(raw.steps);
   const tasks = normalizeTasks(raw.tasks);
@@ -1545,7 +1367,7 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   const lines: string[] = [];
   for (const r of runtimes) {
     if (!r.installed) {
-      lines.push(`- ${r.kind} (${r.label}): NOT INSTALLED — do not assign work to this runtime.`);
+      lines.push(`- ${r.kind} (${r.label}): NOT INSTALLED: do not assign work to this runtime.`);
       continue;
     }
     const versionPart = r.version ? ` v${r.version.split(/\s+/)[0]}` : "";
@@ -1560,18 +1382,19 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
     // assigning work — only bias the choice when an equivalent peer exists.
     const authCaveat =
       r.authenticated === false
-        ? " (WARNING: no credential detected on this machine — it may not be signed in; prefer an equivalent runtime without this warning, but assigning work here is allowed)"
+        ? " (WARNING: no credential detected on this machine, it may not be signed in; prefer an equivalent runtime without this warning, but assigning work here is allowed)"
         : "";
     lines.push(`- ${r.kind} (${r.label})${versionPart} INSTALLED${authCaveat}. Models: ${modelList}`);
   }
   lines.push("- shell: always available (deterministic command-only tasks).");
   lines.push("- manual: always available (human executes; only when automation is unsafe).");
   lines.push(
-    "Tier semantics:",
-    "- claude-fable-5 (Fable 5) is Anthropic's premium, most expensive tier. Choose it when the work genuinely warrants the strongest model; Opus remains the normal tier=top worker model for everything else.",
-    "- Multi-model runtime (Claude): skeleton → claude-opus-4-8 (tier=top) + highest available effort; feature → tier=mid model + medium effort; leaf → tier=mid (sonnet) at low/minimal effort. Never assign claude-opus-4-8 to a leaf task.",
-    "- Codex has a real GPT-5.6 ladder: skeleton/verifier → gpt-5.6-sol at high/max, feature → gpt-5.6-terra at medium, leaf → gpt-5.6-luna at low.",
-    "- Never pick a top tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",
+    "Worker model roster, three models, and only these three. Any other id you name is coerced onto this roster at spawn time:",
+    "- claude-opus-5, STANDARD tier, the default workhorse.",
+    "- gpt-5.6-sol, STANDARD tier on the other provider. Reach for it when an independent model family genuinely helps, above all for cross-provider verification.",
+    "- claude-fable-5, PREMIUM tier, strongest and materially the most expensive. Reserve it for subtle invariants, tricky concurrency, large refactors, algorithmic depth, or a bug that already defeated a standard-tier worker.",
+    "- There is no mid or cheap tier. Effort is the dial for easy work: skeleton → claude-fable-5 at the highest available effort; feature → standard tier at medium/high; leaf → standard tier at low/minimal.",
+    "- Never pick the premium tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output): that wastes context and money for no gain.",
   );
   return lines.join("\n");
 }
@@ -1580,19 +1403,19 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
   switch (complexity) {
     case "trivial":
       return [
-        "trivial — single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
-        "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof — the verifier re-derives correct behavior and runs adversarial input/output probes.",
+        "trivial, single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
+        "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof, the verifier re-derives correct behavior and runs adversarial input/output probes.",
         "Trivial keeps a tight step cap (max 2 worker_batch steps, no recon, no skeleton); it differs from standard only in scope, not in whether work gets verified.",
       ].join("\n");
     case "standard":
       return [
-        "standard — multi-file change OR public API touch, with clear scope.",
-        "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier.",
+        "standard, multi-file change OR public API touch, with clear scope.",
+        "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier.",
       ].join("\n");
     case "complex":
       return [
-        "complex — subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics.",
-        "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker — one Claude (claude-opus-4-8@high) and one Codex (gpt-5.6-sol@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
+        "complex, subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics.",
+        "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker, one Claude (claude-opus-5@high) and one Codex (gpt-5.6-sol@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
       ].join("\n");
   }
 }
@@ -1651,42 +1474,6 @@ function normalizeQuestionOptions(value: unknown): SparkManagerQuestionOption[] 
     option.recommended = false;
   }
   return options;
-}
-
-function isImageInputUnsupportedError(error: string): boolean {
-  const normalized = error.toLowerCase();
-  return (
-    normalized.includes("image") &&
-    (
-      normalized.includes("not support") ||
-      normalized.includes("unsupported") ||
-      normalized.includes("invalid content") ||
-      normalized.includes("multimodal")
-    )
-  );
-}
-
-function requestHasImageParts(requestBody: OpenRouterManagerRequest): boolean {
-  return requestBody.messages.some(
-    (message) => Array.isArray(message.content) && message.content.some((part) => part.type === "image_url"),
-  );
-}
-
-function stripImageParts(requestBody: OpenRouterManagerRequest): OpenRouterManagerRequest {
-  return {
-    ...requestBody,
-    messages: requestBody.messages.map((message) => {
-      if (!Array.isArray(message.content)) return message;
-      const text = message.content
-        .filter((part): part is Extract<OpenRouterContentPart, { type: "text" }> => part.type === "text")
-        .map((part) => part.text)
-        .join("\n\n");
-      return {
-        ...message,
-        content: `${text}\n\n[Image pixels were omitted because the selected manager model rejected image inputs. Use the ATTACHMENTS artifact paths if workers need the files.]`,
-      };
-    }),
-  };
 }
 
 function formatPlannedAgents(agents: PlannedStepAgent[] | undefined): string {

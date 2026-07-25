@@ -8,11 +8,17 @@
 import React, { useCallback, useEffect, useState } from "react";
 import type { PiUsageOverview, PiUsageProvider, PiUsageWindow } from "@shared/types";
 
-/** Quota bars earn attention as they fill; below 75% they stay quiet. */
+/**
+ * Headroom as a colour: green with plenty left, through amber, to red as the
+ * window fills. Kept identical to the title bar's scale in UsageMeters.tsx so
+ * the same percentage never appears in two different colours depending on where
+ * you look at it. Not the accent colour, which means "interactive" elsewhere.
+ */
 function toneForUsage(usedPercent: number): string {
-  if (usedPercent >= 90) return "var(--danger)";
-  if (usedPercent >= 75) return "var(--warn, #d99a2b)";
-  return "var(--accent)";
+  const used = Math.min(100, Math.max(0, usedPercent));
+  const AMBER = "var(--warn, #d99a2b)";
+  if (used <= 60) return `color-mix(in oklch, ${AMBER} ${(used / 60) * 100}%, var(--ok))`;
+  return `color-mix(in oklch, var(--danger) ${((used - 60) / 40) * 100}%, ${AMBER})`;
 }
 
 function UsageBar({ window: usageWindow }: { window: PiUsageWindow }) {

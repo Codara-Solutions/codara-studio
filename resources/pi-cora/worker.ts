@@ -33,7 +33,7 @@ function loadBridge(): CodaraBridge {
 }
 
 // The worker launch plan runs with SPARK_MCP_MODE=talk, so the bridge already
-// exposes only the studio roster — but this allowlist, not the env-selected
+// exposes only the studio roster, but this allowlist, not the env-selected
 // roster, is what keeps manager orchestration tools (spawn_workers, complete,
 // message_workers, …) out of workers even if a future launch plan changes the
 // mode. Whiteboard stays read-only for workers; edits are the manager's call.
@@ -73,7 +73,7 @@ Worker contract:
   search, edit, write, and shell tools. Do not merely explain what another
   agent should do and do not spawn a second coding agent.
 - The codara_preview_* and codara_terminal_* tools drive Codara Studio's
-  built-in preview and agent terminal tabs — the same surface the user
+  built-in preview and agent terminal tabs, the same surface the user
   watches. Use them to verify visible UI and long-running commands for real
   (navigate, snapshot, evaluate, console, network) instead of guessing.
 - Preserve existing user changes and obey every allowedPaths, forbiddenPaths,
@@ -84,7 +84,7 @@ Worker contract:
   peer_send, peer_inbox, and peer_await to share findings early, claim a scope
   before editing shared territory, and ask before duplicating work. Cora, the
   orchestrator, oversees the batch and is the only one who ends a worker
-  session — finish your task and write the final report; never idle waiting
+  session, finish your task and write the final report; never idle waiting
   for peers.` : ""}
 - The final-report.json path and schema in the task prompt are mandatory. Write
   that report before ending, even when blocked or failed. Cora accepts the work

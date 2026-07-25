@@ -60,8 +60,8 @@ export default function CommitComposer({
 }: Props): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [amend, setAmend] = useState(false);
-  // Engines offered by the Smart Merge caret: Pi first, native Claude/Codex
-  // when installed, and the legacy API route last.
+  // Engines offered by the Smart Merge caret: Pi first, then native
+  // Claude/Codex when installed.
   const engines = useEngineOptions();
   const anyBusy = busy !== null;
   const committing = busy === "commit";
@@ -363,9 +363,8 @@ export default function CommitComposer({
 
 // Smart Merge action. With one engine it's the original full-width
 // button that runs it. With Claude / Codex installed it becomes a split
-// button: the main face runs the FIRST (recommended CLI) engine, and a ▾
-// caret opens a popover to hand the merge to a specific engine instead — the
-// demoted API manager only runs when picked explicitly.
+// button: the main face runs the FIRST (recommended) engine, and a ▾ caret
+// opens a popover to hand the merge to a specific engine instead.
 function SmartMergeControl({
   canSmartMerge,
   anyBusy,
@@ -546,9 +545,8 @@ function SmartMergeControl({
   );
 }
 
-// A single engine row inside the Smart Merge popover. The CLI agents lead and
-// read as plain rows; the API manager (key "spark", demoted to last) gets no
-// special treatment anymore.
+// A single engine row inside the Smart Merge popover. Every engine reads as a
+// plain row, no row gets special treatment.
 function EngineRow({
   engine,
   onClick,

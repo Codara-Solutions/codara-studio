@@ -10,6 +10,7 @@ import {
   stepStatusColor,
   stepStatusLabel,
   WORKER_ATTEMPT_CAP,
+  workerModelLabel,
 } from "./run-format";
 import { ElapsedTime } from "./elapsed";
 
@@ -906,7 +907,12 @@ export const WorkerNode = React.memo(function WorkerNode({
       ? "ready"
       : runtimeState === "working"
         ? "working"
-        : runtimeState
+        : runtimeState === "error"
+          // Matches the terminal pane chip. The raw state name ("error") is
+          // vaguer than what happened: the worker's process died on its own,
+          // which is never a sanctioned end since only Cora may stop a worker.
+          ? "crashed"
+          : runtimeState
     : queued
       ? "queued"
       : attempt?.status === "succeeded"
@@ -927,7 +933,17 @@ export const WorkerNode = React.memo(function WorkerNode({
 
   const label = task?.title || agent.label;
   const role = task?.taskClass ?? "worker";
-  const model = task?.modelHint ?? "default model";
+  // Prefer the model the attempt actually launched on, the planner's hint can
+  // be coerced onto the worker roster at spawn time, so the hint is a request
+  // and the attempt's value is the truth.
+  const liveModel = attempt?.model ?? task?.modelHint ?? agent.modelHint;
+  const modelBadge = workerModelLabel(liveModel, liveRuntime);
+  const effort = task?.effortHint ?? agent.effortHint;
+  const modelLine = liveModel
+    ? effort
+      ? `${liveModel} · ${effort}`
+      : liveModel
+    : "model pending";
   const stateColor = statusColor(status);
 
   // Attempt lineage: ordinal counts every try across the task's supersedes
@@ -978,15 +994,14 @@ export const WorkerNode = React.memo(function WorkerNode({
           : running
             ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
             : "var(--panel)",
-        // The runtime-colored left edge is the worker card's silhouette cue —
-        // same left-rule convention as the LiveBoard worker nodes. While the
-        // worker runs, the edge turns accent and the card lifts a level: the
-        // working lane must be structural, not just a tint. Runtime identity
-        // stays on the chip.
+        // The colored top edge is the worker card's silhouette cue, set where
+        // its tentacle enters from the step above. While the worker runs the
+        // edge turns accent and the card lifts a level: the working lane must
+        // be structural, not just a tint. Model identity stays on the chip.
         boxShadow: `${
           running
-            ? "inset 2px 0 0 var(--accent)"
-            : `inset 3px 0 0 color-mix(in oklch, ${tone.label} 78%, transparent)`
+            ? "inset 0 2px 0 var(--accent)"
+            : `inset 0 3px 0 color-mix(in oklch, ${tone.label} 78%, transparent)`
         }, ${
           selected
             ? "0 0 0 1.5px var(--accent), var(--shadow-1)"
@@ -995,7 +1010,7 @@ export const WorkerNode = React.memo(function WorkerNode({
               : "var(--lift-hi), var(--shadow-1)"
         }`,
         opacity: queued ? 0.62 : 1,
-        padding: "8px 10px 8px 14px",
+        padding: "11px 10px 8px 10px",
         display: "flex",
         flexDirection: "column",
         gap: 5,
@@ -1028,11 +1043,14 @@ export const WorkerNode = React.memo(function WorkerNode({
             fontSize: 9,
             fontWeight: 650,
             letterSpacing: "0.04em",
-            textTransform: "uppercase",
+            // Deliberately NOT uppercased, see ModelTag in Inspector.tsx. The
+            // chip holds a model name with a version, not a runtime label, and
+            // the same string renders un-uppercased in the run header.
             whiteSpace: "nowrap",
           }}
+          title={`${liveModel ?? "model not resolved yet"}, running on the Pi harness, authenticated as ${liveRuntime}`}
         >
-          {liveRuntime}
+          {modelBadge}
         </span>
         <span
           style={{
@@ -1116,7 +1134,7 @@ export const WorkerNode = React.memo(function WorkerNode({
             whiteSpace: "nowrap",
           }}
         >
-          {model}
+          {modelLine}
         </span>
         {attemptOrdinal > 1 && (
           <span

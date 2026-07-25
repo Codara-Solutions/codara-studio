@@ -19,9 +19,9 @@ import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
   CODEX_MODEL_CATALOG,
-  CODEX_MODEL_BY_TIER,
   normalizeCodexModelId,
 } from "@shared/model-catalog";
+import { ALLOWED_WORKER_MODELS, rosterModelFor } from "./orchestration/worker-model-hint";
 import type {
   AppPreferences,
   AppState,
@@ -717,7 +717,7 @@ async function handleChatAppend(
   }
 }
 
-const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["openrouter", "claude", "codex", "pi"]);
+const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["claude", "codex", "pi"]);
 const CLI_CHAT_MODES = new Set<ChatMode>(["auto", "execute", "talk", "plan"]);
 const CLI_CHAT_EFFORTS = new Set<AgentEffortLevel>([
   "minimal",
@@ -841,7 +841,7 @@ async function handleChatCreate(
 
   const backend = enumParam(params, "backend", CLI_CHAT_BACKENDS);
   if (backend === null) {
-    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be openrouter, claude, codex, or pi");
+    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be claude, codex, or pi");
   }
   const mode = enumParam(params, "mode", CLI_CHAT_MODES);
   if (mode === null) {
@@ -1347,19 +1347,17 @@ interface OrchestratorWorkerInput {
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
 }
 
+// Map a requested model onto its counterpart on the OTHER provider, for a
+// cross-provider peer (an independent verifier, usually). The worker roster
+// has one standard tier per provider, so the only distinction that can survive
+// the hop is premium vs standard, and premium exists on Anthropic alone, so a
+// premium Claude worker's Codex peer lands on the frontier model.
 function crossProviderPeerModel(
   runtime: "claude" | "codex",
   requestedModel?: string,
 ): string {
   const model = requestedModel?.trim().toLowerCase() ?? "";
-  if (runtime === "codex") {
-    if (model.includes("haiku") || model.includes("luna")) return CODEX_MODEL_BY_TIER.cheap;
-    if (model.includes("sonnet") || model.includes("terra")) return CODEX_MODEL_BY_TIER.mid;
-    return CODEX_MODEL_BY_TIER.top;
-  }
-  if (model.includes("luna") || model.includes("haiku")) return "claude-haiku-4-5";
-  if (model.includes("terra") || model.includes("sonnet")) return "claude-sonnet-5";
-  return "claude-opus-4-8";
+  return rosterModelFor(runtime, /fable/.test(model) ? "premium" : "standard");
 }
 
 function runtimeHadEnvironmentalFailure(
@@ -1808,8 +1806,9 @@ async function handleOrchestratorSpawnWorkers(
       "Note: this batch spawned a single worker. That is right for a cohesive same-file or sequential " +
         "change, a targeted corrective fix, or a deliberate skeleton before a fan-out. For a feature with " +
         "genuinely independent slices, prefer 2-4 workers on DISJOINT allowedPaths plus a verifier, mixing " +
-        "Claude and Codex when both CLIs are installed. Do not split a cohesive change or invent files just " +
-        `to manufacture parallelism; use a strong worker plus an independent verifier instead. Standard independent pieces can use claude-sonnet-5 / ${CODEX_MODEL_BY_TIER.mid}.`,
+        "Claude and Codex so two model families cover each other's blind spots. Do not split a cohesive " +
+        "change or invent files just to manufacture parallelism, but do not default to one worker out of " +
+        "caution either: independent slices run together should run together.",
     );
   }
   return successResponse(
@@ -2936,7 +2935,7 @@ function validateConcreteWorker(
     return `${label} has engine '${String(worker.engine)}' — it must be 'claude' or 'codex' ('auto' and an unset engine are no longer allowed; choose one explicitly)`;
   }
   if (typeof worker.model !== "string" || worker.model.trim().length === 0) {
-    return `${label} must set an explicit model (claude: claude-opus-4-8 or claude-sonnet-5; codex: gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) — a CLI-default/blank model is no longer allowed`;
+    return `${label} must set an explicit model (${ALLOWED_WORKER_MODELS.join(", ")}), a CLI-default/blank model is no longer allowed`;
   }
   if (worker.engine === "codex") {
     // Lowercase before validating AND persisting: OpenAI model ids are

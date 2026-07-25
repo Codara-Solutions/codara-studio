@@ -57,7 +57,7 @@ import type {
   SparkManagerDecision,
   SparkManagerQuestionOption,
   SparkManagerTaskDecision,
-} from "./openrouter-manager";
+} from "./manager-protocol";
 import { buildClaudeSandboxArgv, logConfigShieldOnce } from "./agent-config-shield";
 import { buildClaudeMcpToolAliases } from "./claude-mcp-tool-aliases";
 import { resolveLaunchTarget, startCliSession, type CliSession } from "./cli-session";
@@ -234,7 +234,7 @@ interface ClaudeChatSession {
    *  translator when CC fires `mcp__codara-studio__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
    *  ends to convert codara_spawn_terminals / codara_spawn_workers calls into a SparkManagerDecision
-   *  that the run-store can act on, exactly like grok/OpenRouter does. */
+   *  that the run-store can act on, the shape manager-protocol defines. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
   /** Wall-clock ms of the most recent JSONL line observed from CC. The
    *  turn-end waiter uses it only to detect *silence* (no transcript
@@ -624,7 +624,7 @@ export const claudeBackend: SparkAgentBackend = {
 
       const replyText = finalAssistantMessageText(chat);
       // Execute/Auto mode: convert codara_spawn_workers tool calls into the
-      // same SparkManagerDecision shape grok/OpenRouter produces. The
+      // canonical SparkManagerDecision shape manager-protocol defines. The
       // run-store already knows how to apply that decision (spawn workers,
       // ask user, mark complete). This is what makes CC in execute mode
       // behave like the existing manager pattern instead of a chat
@@ -1713,7 +1713,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //   behavior. `--disallowed-tools` blocks edits but leaves Read/Glob/Grep
   //   available so the user can ask about the code.
   //
-  // - Execute: CC is a *manager*. Same pattern grok/OpenRouter uses — the
+  // - Execute: CC is a *manager*. Same pattern every manager backend uses, the
   //   user message goes in, a worker-spawn spec comes out. We use
   //   `--system-prompt` (FULL OVERRIDE, not append) so CC's default
   //   "be a helpful coder" personality is gone and our orchestrator prompt
@@ -2379,8 +2379,8 @@ function sleep(ms: number): Promise<void> {
  * Convert the spark_* tool calls CC made this turn into a SparkManagerDecision
  * — the shape the rest of the run-store pipeline already knows how to apply
  * (open standing terminals, spawn workers, ask user, mark complete). This is the bridge that makes
- * CC-in-execute-mode behave identically to grok/OpenRouter from the
- * run-store's perspective.
+ * CC-in-execute-mode indistinguishable from any other manager backend from
+ * the run-store's perspective.
  *
  * Lookup order: spawn_terminals > complete > spawn_workers > ask_user. Everything else is
  * treated as conversational and produces a chatReply (which usually means
@@ -2577,7 +2577,7 @@ function coerceQuestionOption(
  * Execute-mode system prompt — passed via `--system-prompt` as a FULL
  * override of CC's default. This is the only instruction CC sees in
  * execute mode; the chat conversation history is treated as context, not
- * as authority. Mirrors the role grok/OpenRouter plays: turn each user
+ * as authority. The manager's whole job in this mode: turn each user
  * message into a `codara_spawn_workers` call.
  *
  * We deliberately don't reference Talk mode, don't apologize for the
@@ -2596,7 +2596,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "",
     "For every user turn that asks for changes (edits, refactors, new features, fixes, redesigns, file moves, anything that touches the workspace), your FIRST action is a call to `codara_spawn_workers`. The worker spec is the entire output of your turn — no prose alternatives, no clarifying refusals, no \"here's what I'd do\" lists. Just spawn. A single-sentence orchestration comment alongside the call is fine (\"Spawning a Claude worker to redesign the calculator UI.\") but optional.",
     "The manager has no filesystem tools, so every implementation worker must begin by reading the nearest project guidance and relevant entry points, preserving existing user changes, and discovering the project's real files/scripts/patterns before editing. Never invent paths merely to make a plan look parallel.",
-    "Use the smallest effective team: one strong implementation worker plus an independent verifier for a cohesive same-file or sequential change; 2-4 implementation workers only when the work has genuinely independent, non-overlapping surfaces and explicit interface contracts. The first verifier uses the fast peer tier (claude-sonnet-5 or gpt-5.6-terra) at high effort with compact table-driven probes. Escalate to Opus/Sol only after PARTIAL/FEEDBACK/FAILED, a missing oracle, or for security/auth/cryptographic/destructive-migration risk.",
+    "Size the team to the work, and do not under-staff it: one strong implementation worker plus an independent verifier for a cohesive same-file or sequential change; 2-4 implementation workers whenever the work has genuinely independent, non-overlapping surfaces, that case is common, and running those slices together instead of back-to-back is the main thing that makes a long task finish. The first verifier uses the OTHER provider's standard model at high effort with compact table-driven probes. Escalate to claude-fable-5 only after PARTIAL/FEEDBACK/FAILED, a missing oracle, or for security/auth/cryptographic/destructive-migration risk.",
     "After spawning, call codara_wait_for_workers. Its result includes each worker's normalized final_report, including verifier confidence, failed_claims, and corrective_prompt. A FEEDBACK or FAILED verifier verdict means the work is NOT complete: launch or wait for the narrow corrective implementation, then verify again. Never claim a defect was fixed merely because the verifier described the required fix.",
     "",
     "For genuinely ambiguous turns (the user wrote one vague word, or asked you to make a value judgment with no decision-relevant context), call `codara_ask_user` with 2-4 concrete options. Don't ask in prose.",
@@ -2616,7 +2616,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "    title: string,                       // 4-10 word chip label",
     "    description: string,                 // full prompt the worker sees — be specific",
     "    runtimePreference: 'claude' | 'codex',",
-    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-5' | 'gpt-5.6-sol' | 'gpt-5.6-terra' | 'gpt-5.6-luna' | 'claude-fable-5',",
+    "    modelHint?: 'claude-opus-5' | 'gpt-5.6-sol' | 'claude-fable-5',",
     "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max',",
     "    allowedPaths?: string[],             // cwd-relative; parallel workers must NOT overlap",
     "    forbiddenPaths?: string[],",
@@ -2627,13 +2627,22 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "]",
     "```",
     "",
+    "## The worker model roster",
+    "",
+    "Three models, and only these three. Anything else you name is coerced onto this roster at spawn time, so naming one is wasted precision.",
+    "- `claude-opus-5`: STANDARD tier. The default workhorse. Use it unless you have a reason not to.",
+    "- `gpt-5.6-sol`: STANDARD tier, other provider. Same weight class as Opus; reach for it when a second, independent model family genuinely helps (verification, a cross-check, a task that plays to it).",
+    "- `claude-fable-5`: PREMIUM tier. The strongest and materially the most expensive. Reserve it for genuinely hard work: subtle invariants, tricky concurrency, large refactors, algorithmic depth, or a bug that already defeated a standard-tier worker.",
+    "",
+    "Match the model to the difficulty, not to the importance. A mechanical rename in twelve files is an easy task even in a critical system, that is standard tier with low effort. Spending premium tokens on easy work is a real cost, and starving a hard task of capability wastes an entire worker run.",
+    "",
     "Rules of thumb:",
     "- Workers that can run in parallel MUST have non-overlapping `allowedPaths`. Same-file writes serialize.",
+    "- PREFER PARALLEL. If the work splits into slices that touch different files, spawn them together in one batch rather than one after another, that is the single biggest lever you have on wall-clock time. Do not serialize out of caution; serialize only for a real dependency (a slice needs another's output) or a real file conflict.",
     "- `skeleton` is ONLY for a genuinely new architecture/interface that later workers inherit. Existing-file changes, cohesive implementations, refactors, bug fixes, and public-API repairs are `feature` even when difficult.",
-    "- `feature` tasks (standard implementation against an established skeleton) → mid model + medium effort.",
-    "- `leaf` tasks (mechanical, well-defined work) → cheapest model + low effort.",
-    "- `verifier` tasks (read-only follow-up that re-derives ground truth) → fast peer (`claude-sonnet-5` or `gpt-5.6-terra`) + high effort, `allowedPaths: []`; cover all stated claims, named boundaries, and three implied fixtures in 3-8 compact probe batches. Escalate only after a non-clean verdict or for security-sensitive risk.",
-    "- `claude-fable-5` is Anthropic's premium, most expensive tier. Set it as a worker's modelHint when the work genuinely warrants the strongest model; default to claude-opus-4-8 otherwise.",
+    "- `feature` tasks (standard implementation against an established skeleton) → standard tier + medium/high effort.",
+    "- `leaf` tasks (mechanical, well-defined work) → standard tier + low effort.",
+    "- `verifier` tasks (read-only follow-up that re-derives ground truth) → the OTHER provider's standard model from the implementer (Claude implementation → `gpt-5.6-sol` verifier; Codex implementation → `claude-opus-5` verifier) + high effort, `allowedPaths: []`; cover all stated claims, named boundaries, and three implied fixtures in 3-8 compact probe batches. Escalate to `claude-fable-5` only after a non-clean verdict or for security-sensitive risk.",
     "",
     "The user's chat conversation may include prior turns where you replied conversationally — those were under a different mode and DO NOT bind your behavior now. This system prompt is your sole authority for this turn.",
   ].join("\n");

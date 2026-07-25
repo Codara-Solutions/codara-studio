@@ -114,7 +114,7 @@ const ENGINE_WORD: Record<LoomWorkerConfig["engine"], string> = {
   auto: "Auto",
 };
 
-// The Worker node's one-line identity: "Claude · claude-opus-4-8 · high".
+// The Worker node's one-line identity: "Claude · claude-opus-5 · high".
 export function workerSummary(worker: LoomWorkerConfig | undefined): string {
   if (!worker) return "Auto";
   const parts: string[] = [ENGINE_WORD[worker.engine] ?? worker.engine];

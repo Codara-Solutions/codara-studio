@@ -16,7 +16,7 @@ import { classifyOutcomeMemory } from "@shared/outcome-memory";
 // reader (formatPriorRunsSection) is folded into the manager's plan_analysis
 // prompt so it can learn this repo's task shapes, which runtimes survived
 // verification, and which build/test commands actually worked. This module
-// imports only spark-home + shared types — never run-store or openrouter-manager
+// imports only spark-home + shared types, never run-store or manager-protocol
 // — so there is no import cycle.
 
 const LEDGER_VERSION = 2;

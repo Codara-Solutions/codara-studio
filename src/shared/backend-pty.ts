@@ -5,7 +5,8 @@
 // either side having to invent or look up the id.
 //
 // Format is deterministic — no run-store round trip needed. Returns null for
-// backends that don't spawn a PTY (OpenRouter).
+// backends that don't spawn a chat PTY: Pi drives its runtime over RPC, so
+// there is no terminal for the renderer to attach to.
 
 import type { ChatBackendKind } from "./types";
 

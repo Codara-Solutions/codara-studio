@@ -1708,6 +1708,156 @@ a { color: inherit; }
   }
 }
 
+/* ── Composer toolbar: the bottom pill row ───────────────────────────────────
+   Reads as [pills · status · actions]. The window (or a dragged split) can make
+   this row far narrower than its natural width, so it yields in a strict
+   order instead of overflowing the shell:
+   1. The hint ellipsizes away (a tip, not state), then hides.
+   2. The context gauge drops its numeric label but keeps the bar; the exact
+      numbers survive in its tooltip. Narrower still, the gauge hides.
+   3. The thinking and mode pills drop their text and keep their glyphs.
+   4. Far below any real pane width, the left cluster scrolls horizontally
+      inside the shell rather than painting across its border.
+   The action cluster never shrinks. Compressing a cluster does not shrink
+   its fixed-width buttons, it spills them past its own edge and outside the
+   shell; the only safe move is to keep actions rigid and make everything
+   else yield, with the shed order above keeping the rigid part small. */
+.composer-toolbar {
+  container-type: inline-size;
+  container-name: composer-bar;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  min-width: 0;
+}
+/* Pressure valve of last resort: past every collapse step the pills scroll
+   inside the shell, so each control stays reachable and nothing ever paints
+   over the border. The scrollbar stays hidden; this is an escape hatch, not
+   an affordance. The 3px padding cancelled by the negative margin keeps
+   focus rings from being clipped by the scroll box. */
+.composer-toolbar__left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  padding: 3px;
+  margin: -3px;
+}
+.composer-toolbar__left::-webkit-scrollbar {
+  display: none;
+}
+/* Rigid: Send can never be pushed past the shell border because nothing can
+   compress this cluster. Pinned right even when the hint is hidden. */
+.composer-toolbar__right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+/* First to yield: the outsized shrink factor makes the hint absorb almost
+   the whole deficit (ellipsizing continuously) before the pills give
+   anything up. min-width:0 lets it collapse all the way to nothing. */
+.composer-toolbar__hint {
+  flex: 1 20 auto;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+/* The worker variant is a flex container, which makes the parent's
+   text-overflow inert: its children would be cut mid-glyph at both edges
+   instead of ellipsised. The truncation has to move onto the child that is
+   actually elastic, which is the task title. The dot and the two fixed labels
+   never shrink, so the row degrades by shortening the title. */
+.composer-toolbar__hint--worker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.composer-toolbar__hint--worker > * {
+  flex: 0 0 auto;
+}
+.composer-toolbar__hint--worker > .composer-toolbar__hint-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The model name is the one pill whose text has no upper bound, so its
+   wrapper is the one elastic item among the pills. The cqi cap makes the
+   truncation proportional to the row rather than one hard pixel step. The
+   pill tracks its wrapper (max-width 100%) so a squeezed wrapper truncates
+   the label instead of letting the pill paint over its neighbours. Scoped
+   with :has because the policy picker reuses .composer-model and its short
+   fixed label should stay rigid. */
+.composer-toolbar .composer-model {
+  flex: 0 0 auto;
+}
+.composer-toolbar .composer-model:has(.composer-pill-label) {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(240px, 42cqi);
+}
+.composer-toolbar .composer-pill:has(> .composer-pill-label) {
+  max-width: 100%;
+  min-width: 0;
+}
+.composer-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+@container composer-bar (max-width: 640px) {
+  /* A keyboard tip is the least valuable thing in the row. */
+  .composer-toolbar__hint:not(.composer-toolbar__hint--worker) {
+    display: none;
+  }
+}
+@container composer-bar (max-width: 560px) {
+  /* The bar alone still shows context fullness at a glance; the pill's
+     tooltip keeps the exact used/budget numbers. */
+  .composer-context-label {
+    display: none;
+  }
+}
+@container composer-bar (max-width: 470px) {
+  /* Worker activity outranks the tip but still yields to the controls. */
+  .composer-toolbar__hint--worker {
+    display: none;
+  }
+  .composer-context {
+    display: none;
+  }
+}
+@container composer-bar (max-width: 420px) {
+  /* Pills drop their text and keep their glyph, the same collapse the board
+     editor toolbar uses. Each control carries a title and aria-label, so
+     nothing loses its accessible name. */
+  .composer-toolbar .composer-thinking-label,
+  .composer-toolbar .composer-mode-label,
+  .composer-toolbar .composer-chevron {
+    display: none;
+  }
+  .composer-toolbar .composer-model:has(.composer-pill-label) {
+    max-width: 38cqi;
+  }
+}
+
 .composer-pill {
   display: inline-flex;
   align-items: center;
@@ -1743,15 +1893,17 @@ a { color: inherit; }
 .composer-model {
   position: relative;
 }
+/* Positioned by AnchoredMenu (fixed, portalled to <body>), so no static
+   placement here, only size and material. */
 .composer-model-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  z-index: 40;
   min-width: 330px;
   max-width: min(390px, calc(100vw - 32px));
   max-height: 360px;
   overflow: auto;
+  /* Stop a wheel at the top/bottom of the list from chaining into the page
+     behind it: that page scroll is what dismisses the menu, so without this
+     the list flicks shut the moment you overscroll it. */
+  overscroll-behavior: contain;
   padding: 4px;
   background: var(--panel-2);
   border: 1px solid var(--rule);
@@ -1769,6 +1921,31 @@ a { color: inherit; }
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
+}
+/* The harness heading: printed once above the vendor groups, and styled as the
+   stronger of the two so the hierarchy reads "all of this is Cora on Pi, and
+   within it these come from OpenAI and these from Anthropic". */
+.composer-model-section-label {
+  padding: 6px 8px 1px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--ink-dim);
+}
+/* Indented and quieter than the section above it: a subdivision, not a peer. */
+.composer-model-group-label.is-vendor {
+  padding-left: 16px;
+  color: var(--muted-2, var(--muted));
+  letter-spacing: 0.1em;
+}
+/* The vendor groups belong to one heading, so no divider between them. The
+   rule above adds a top border to every subsequent group; suppress it where
+   both sides sit under the same section. */
+.composer-model-group + .composer-model-group:not(:has(> .composer-model-section-label)) {
+  margin-top: 2px;
+  padding-top: 0;
+  border-top: none;
 }
 .composer-model-row {
   display: flex;
@@ -1824,6 +2001,12 @@ a { color: inherit; }
   gap: 4px;
   flex: 0 0 auto;
   padding-top: 1px;
+}
+/* A row that is just a name. The base row aligns to flex-start for the
+   two-line rows in the policy menu; with no second line that reads as a
+   top-heavy row, so centre it. */
+.composer-model-row.is-compact {
+  align-items: center;
 }
 
 .composer-policy-menu {
@@ -2040,12 +2223,13 @@ a { color: inherit; }
   background: color-mix(in oklch, oklch(0.62 0.19 295) 24%, transparent);
 }
 
+/* Placement is owned by AnchoredMenu, which portals these to <body> and sets
+   position/left/bottom inline. (They must escape the composer shell: it
+   carries spark-glass--strong, and a backdrop-filter ancestor is a backdrop
+   root, so a .spark-menu nested inside it frosts the shell's empty interior
+   and paints flat.) Only the intrinsic box belongs here. */
 .composer-mode-menu,
 .composer-thinking-menu {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 7px);
-  z-index: 42;
   width: 326px;
   max-width: min(360px, calc(100vw - 32px));
 }
@@ -2158,9 +2342,9 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
-/* Model-row badges. ".composer-badge" is the neutral pill ("API" tag);
-   ".is-onem" tints it with the accent for 1M-context variants. Both sit
-   to the right of the row label and stay fixed width. */
+/* Row badges. The model picker carries none any more: these are the
+   execution-policy pills, which sit to the right of the row label and stay
+   fixed width. */
 .composer-badge {
   font-size: 9px;
   letter-spacing: 0.08em;
@@ -2170,15 +2354,6 @@ a { color: inherit; }
   border-radius: 3px;
   padding: 1px 4px;
   flex: 0 0 auto;
-}
-.composer-badge.is-onem {
-  color: var(--accent);
-  border-color: var(--accent-edge);
-  background: var(--accent-soft);
-}
-.composer-badge.is-family {
-  color: var(--ink-dim);
-  background: color-mix(in oklab, var(--ink) 4%, transparent);
 }
 .composer-badge.is-policy-deep {
   color: var(--ink-dim);
@@ -2758,12 +2933,20 @@ a { color: inherit; }
      moves, producing visible half-second wheel lag on otherwise fast PCs.
      Preserve the liquid-glass sheen, rim, bloom, and translucent material,
      but preblend its face instead of filtering the live workbench underneath. */
+  /* Same recipe as .settings-dialog-surface above, deliberately: the two are
+     peer full-height panels and must read as the same material. The preblended
+     opaque face this used to carry made it the one "glass" surface in the app
+     that wasn't glass at all.
+     The scroll-lag the comment above warns about came from running the
+     three-channel SVG refraction lens over a viewport-sized surface. This uses
+     ONE composited blur layer and no lens, the same compromise Settings has
+     shipped with, and keeps `contain: paint` so the dense inventory's scroll
+     invalidations stay inside the panel instead of re-rasterizing the window
+     behind it. */
   html:not([data-glass="off"]) .agent-capabilities-surface {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    background-color: color-mix(in oklab, var(--panel) 94%, var(--bg));
-    contain: layout paint style;
-    isolation: isolate;
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    contain: paint;
   }
   html:not([data-glass="off"]) .settings-dialog-scrim,
   html:not([data-glass="off"]) .agent-capabilities-scrim {
@@ -2771,10 +2954,17 @@ a { color: inherit; }
     backdrop-filter: none;
     background: color-mix(in oklab, var(--bg) 44%, transparent);
   }
+  /* .spark-menu belongs in this list too: both surfaces carry their own
+     backdrop-filter AND `contain: paint`, each of which is a backdrop root, so
+     a dropdown nested inside one frosts the panel's interior rather than the
+     workbench and paints flat. Every other nested surface here was already
+     preblended on purpose; the menus were simply missed. */
   html:not([data-glass="off"]) .settings-dialog-surface .spark-glass,
   html:not([data-glass="off"]) .settings-dialog-surface .spark-glass--strong,
+  html:not([data-glass="off"]) .settings-dialog-surface .spark-menu,
   html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass,
-  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass--strong {
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass--strong,
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-menu {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
     background-color: color-mix(in oklab, var(--panel) 78%, transparent);

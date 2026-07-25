@@ -1658,6 +1658,7 @@ export default function App() {
       let attemptOrdinal: number | undefined;
       let harness: "pi" | "cli" | undefined;
       let startedAt: string | undefined;
+      let model: string | undefined;
       try {
         const run = await window.spark.orchestration.getRun(event.runId);
         const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
@@ -1672,6 +1673,9 @@ export default function App() {
         attemptOrdinal = attempt?.attemptNumber;
         harness = workerHarnessFromCommand(attempt?.command);
         startedAt = attempt?.startedAt;
+        // The attempt's resolved model beats the task's hint: the planner's
+        // hint is a request, and the spawn path may coerce it onto the roster.
+        model = attempt?.model ?? task?.modelHint;
       } catch {
         /* header metadata is decorative */
       }
@@ -1691,6 +1695,7 @@ export default function App() {
         title,
         attemptOrdinal,
         harness,
+        model,
         startedAt,
       };
 
@@ -1853,6 +1858,7 @@ export default function App() {
                 title: task?.title,
                 attemptOrdinal: attempt.attemptNumber,
                 harness: workerHarnessFromCommand(attempt.command),
+                model: attempt.model ?? task?.modelHint,
                 startedAt: attempt.startedAt,
               },
               // Level-triggered re-ensures run every second; they must never

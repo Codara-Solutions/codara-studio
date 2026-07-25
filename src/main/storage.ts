@@ -14,6 +14,10 @@ import { writeFileAtomic } from "./fs-atomic";
 
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
+// Default model for the OpenRouter-backed utilities (git commit-message
+// drafting; the editor's inline AI keeps its own preference). Cheap and fast
+// because these are one-shot helper calls, not orchestration, Cora's manager
+// and workers never read this setting.
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
 
 const EMPTY: AppState = {
@@ -280,12 +284,18 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
   return settingsCache;
 }
 
-// In-memory settings override used by the headless eval entry point. Loads
-// the on-disk settings, applies a partial override (variant config: manager
-// model tweaks), and pins the result in the module cache so
-// every subsequent `loadSettings()` returns the merged value WITHOUT
-// touching spark-settings.json on disk. Returns the merged settings object
-// for callers that want to inspect what they pinned.
+// In-memory settings override seam for the headless eval entry point. Loads
+// the on-disk settings, applies a partial override, and pins the result in the
+// module cache so every subsequent `loadSettings()` returns the merged value
+// WITHOUT touching spark-settings.json on disk. Returns the merged settings
+// object for callers that want to inspect what they pinned.
+//
+// Only for values that genuinely live in spark-settings.json. A variant's
+// manager backend/model/effort do NOT come through here, they are passed to
+// startAutopilot as the run's chat* fields (they were mirrored onto
+// openRouterModel back when the manager ran on the OpenRouter API; that
+// setting now only feeds commit messages and the editor's inline AI). No
+// caller today, kept as the headless override hook.
 export async function applyInMemorySettingsOverride(
   partial: Partial<AppSettings>,
 ): Promise<AppSettings> {

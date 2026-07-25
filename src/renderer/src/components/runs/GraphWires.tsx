@@ -5,9 +5,9 @@ import { deriveAgentStatus, type RunMaps } from "./run-format";
 
 // The wire layer. One SVG sized to the whole graph, drawn beneath the nodes:
 // curved bezier spine wires running SPARK → step → … → COMPLETE, and one fan
-// wire per worker branching off its step — each parallel agent's branch
+// wire per worker dropping out of its step, each parallel agent's tentacle
 // lights up independently, so a running batch reads as simultaneous live
-// lanes hanging off the line. Every wire carries one of four states; the
+// lanes hanging under the line. Every wire carries one of four states; the
 // live path animates a flowing dash.
 type WireState = "pending" | "done" | "active" | "blocked";
 
@@ -34,11 +34,20 @@ interface Props {
   runStatus: RunState["status"];
 }
 
-// Horizontal-flow cubic bezier: control handles pulled along x so the wire
-// leaves and enters its ports flat and curves smoothly through the middle
-// whenever the two ends sit at different heights (a fan-out sweep).
-function flowPath(wire: { from: { x: number; y: number }; to: { x: number; y: number } }): string {
+// Cubic bezier between two ports. The spine flows horizontally, handles
+// pulled along x so the wire leaves and enters flat. A fan wire drops out of
+// a step's bottom edge into a worker's top edge, so its handles pull along y
+// instead; without that the tentacles would leave sideways and kink.
+function flowPath(wire: {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  axis?: "v";
+}): string {
   const { from, to } = wire;
+  if (wire.axis === "v") {
+    const dy = Math.max(34, Math.abs(to.y - from.y) * 0.55);
+    return `M ${from.x},${from.y} C ${from.x},${from.y + dy} ${to.x},${to.y - dy} ${to.x},${to.y}`;
+  }
   const dx = Math.max(46, Math.abs(to.x - from.x) * 0.5);
   return `M ${from.x},${from.y} C ${from.x + dx},${from.y} ${to.x - dx},${to.y} ${to.x},${to.y}`;
 }
@@ -215,6 +224,15 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
               y={stepLayout.box.y + stepLayout.box.h / 2}
               state={step?.status === "complete" ? "done" : state}
             />
+            {/* The delegation port: where every tentacle leaves the step.
+                Only drawn when the step actually has workers hanging off it. */}
+            {stepLayout.workers.length > 0 && (
+              <Port
+                x={stepLayout.box.x + stepLayout.box.w / 2}
+                y={stepLayout.box.y + stepLayout.box.h}
+                state={state}
+              />
+            )}
             {stepLayout.workers.map((worker) => {
               const task = worker.taskId ? maps.taskById.get(worker.taskId) : undefined;
               const attempt = worker.taskId ? maps.attemptByTask.get(worker.taskId) : undefined;
@@ -230,8 +248,8 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
               return (
                 <Port
                   key={`wports-${worker.rowKey}`}
-                  x={worker.box.x}
-                  y={worker.box.y + worker.box.h / 2}
+                  x={worker.box.x + worker.box.w / 2}
+                  y={worker.box.y}
                   state={laneState}
                 />
               );

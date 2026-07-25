@@ -15,7 +15,7 @@
 //   - "worker": the studio roster minus whiteboard writes, plus the two
 //     run-lifecycle tools a headless automation pass needs (codara_ask_user,
 //     codara_request_next_iteration). Spawned by structured-worker.ts for
-//     automation workers — never the manager orchestration tools.
+//     automation workers, never the manager orchestration tools.
 //   - "execute": the studio roster + the Execute worker-orchestration tools
 //     (spawn/steer Cora workers, ask the user, complete the run). Written by
 //     the Claude/Codex backends into a per-run config for the manager CLI.
@@ -46,7 +46,7 @@ const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Codara");
 
 // Roster gating. Chosen once, at startup. Anything other than "execute" /
 // "automation" / "worker" (unset, "studio", empty) means the global studio
-// roster — preview + terminal only.
+// roster, preview + terminal only.
 const SPARK_MCP_MODE = (process.env.SPARK_MCP_MODE || "").trim().toLowerCase();
 const IS_EXECUTE_MODE = SPARK_MCP_MODE === "execute";
 const IS_AUTOMATION_MODE = SPARK_MCP_MODE === "automation";
@@ -196,7 +196,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_mouse",
     description:
-      "Trusted mouse input at a CSS selector's center or explicit coordinates — indistinguishable from a real user's click (event.isTrusted=true), unlike codara_preview_click's synthetic DOM events. Actions: click, dblclick, rightclick, down, up. Coordinates are CSS pixels relative to the page viewport (top-left origin); if you measured a point on a codara_preview_screenshot, divide by the screenshot's scale (screenshot width ÷ viewport width) first.",
+      "Trusted mouse input at a CSS selector's center or explicit coordinates, indistinguishable from a real user's click (event.isTrusted=true), unlike codara_preview_click's synthetic DOM events. Actions: click, dblclick, rightclick, down, up. Coordinates are CSS pixels relative to the page viewport (top-left origin); if you measured a point on a codara_preview_screenshot, divide by the screenshot's scale (screenshot width ÷ viewport width) first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -230,7 +230,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_hover",
     description:
-      "Move the mouse over a selector's center or explicit CSS-pixel coordinates with a trusted mouseMove — triggers real :hover styles, tooltips, and mouseenter handlers.",
+      "Move the mouse over a selector's center or explicit CSS-pixel coordinates with a trusted mouseMove, triggers real :hover styles, tooltips, and mouseenter handlers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -315,7 +315,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_network",
     description:
-      "Read the preview tab's captured network requests (url, method, status, mimeType, failures; ring buffer cap 500). Capture attaches on first call — issue one codara_preview_network before the interaction you want to observe, then again after. filter substring-matches the URL; clear=true resets.",
+      "Read the preview tab's captured network requests (url, method, status, mimeType, failures; ring buffer cap 500). Capture attaches on first call, issue one codara_preview_network before the interaction you want to observe, then again after. filter substring-matches the URL; clear=true resets.",
     inputSchema: {
       type: "object",
       properties: {
@@ -345,7 +345,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_run",
     description:
-      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical — you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single codara_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
+      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical, you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single codara_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
     inputSchema: {
       type: "object",
       required: ["steps"],
@@ -359,7 +359,7 @@ const PREVIEW_TOOLS = [
           type: "array",
           minItems: 1,
           description:
-            "Ordered steps. Each is { action, ...args } where action is one of navigate|click|type|press_key|evaluate|wait_for|snapshot|screenshot and the remaining fields mirror the matching codara_preview_* tool — e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
+            "Ordered steps. Each is { action, ...args } where action is one of navigate|click|type|press_key|evaluate|wait_for|snapshot|screenshot and the remaining fields mirror the matching codara_preview_* tool, e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
           items: {
             type: "object",
             required: ["action"],
@@ -458,7 +458,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd } — the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
+      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd }, the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
     inputSchema: {
       type: "object",
       properties: {
@@ -472,7 +472,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_write",
     description:
-      "Write text to an agent-owned terminal pane (identified by the paneId returned from codara_terminal_create). By default the text is submitted as if the user pressed Enter; set submit=false to type without submitting (e.g. to build up a line or send a raw control sequence). Read the resulting output with codara_terminal_read. Ownership is enforced: you can only write to a paneId your OWN codara_terminal_create returned in this session — a paneId you discovered another way (e.g. a sibling worker's pane sampled via codara_terminal_read) is rejected, so call codara_terminal_create to get a pane you own rather than writing to someone else's.",
+      "Write text to an agent-owned terminal pane (identified by the paneId returned from codara_terminal_create). By default the text is submitted as if the user pressed Enter; set submit=false to type without submitting (e.g. to build up a line or send a raw control sequence). Read the resulting output with codara_terminal_read. Ownership is enforced: you can only write to a paneId your OWN codara_terminal_create returned in this session, a paneId you discovered another way (e.g. a sibling worker's pane sampled via codara_terminal_read) is rejected, so call codara_terminal_create to get a pane you own rather than writing to someone else's.",
     inputSchema: {
       type: "object",
       required: ["paneId", "text"],
@@ -678,14 +678,14 @@ const LOOP_SCHEMA = {
 const WORKER_SCHEMA = {
   type: "object",
   description:
-    "Per-iteration worker (CLI agent) config. You MUST always set engine, model, AND effort explicitly — there is no 'auto' engine and no CLI-default model/effort; a worker missing any of the three is rejected.",
+    "Per-iteration worker (CLI agent) config. You MUST always set engine, model, AND effort explicitly, there is no 'auto' engine and no CLI-default model/effort; a worker missing any of the three is rejected.",
   required: ["engine", "model", "effort"],
   properties: {
-    engine: { type: "string", enum: ["claude", "codex"], description: "Which CLI runs this worker — pick 'claude' or 'codex'." },
+    engine: { type: "string", enum: ["claude", "codex"], description: "Which CLI runs this worker, pick 'claude' or 'codex'." },
     model: {
       type: "string",
       description:
-        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude; 'gpt-5.6-sol', 'gpt-5.6-terra', or 'gpt-5.6-luna' for codex. Use Sol for flagship/complex work, Terra for balanced everyday work, and Luna for fast repeatable work. NOTE: 'claude-fable-5' (Fable 5, premium top-tier) is permitted only when Allow Fable 5 is enabled in Settings AND the user's own message explicitly asked for Fable for this work. Otherwise Codara downgrades it to claude-opus-4-8.",
+        "Engine-native model id (REQUIRED). Worker roster, three models and only these three: 'claude-opus-5' (STANDARD workhorse) and 'claude-fable-5' (PREMIUM, strongest and most expensive) for claude; 'gpt-5.6-sol' (STANDARD frontier) for codex. There is no mid or cheap tier, turn EFFORT down for easy work instead of reaching for a weaker model. Reserve claude-fable-5 for genuinely hard work: subtle invariants, tricky concurrency, large refactors, algorithmic depth, or a bug a standard-tier worker already failed. Any other id is coerced onto this roster at spawn time.",
     },
     effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"], description: "Reasoning effort (REQUIRED)." },
     timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },
@@ -728,8 +728,8 @@ const GRAPH_SCHEMA = {
           worker: WORKER_SCHEMA,
           prompt: { type: "string", description: "worker only: the prompt template for this node (supports {{var}}/{{node:id}}/{{incoming}})." },
           isolate: { type: "boolean", description: "worker only: run this node in a fresh run lineage." },
-          access: { type: "string", enum: ["full", "edits", "readonly"], description: "worker only, optional (default full): tool-access preset. full = all tools; edits = file edits but no shell/web (codex: workspace-write sandbox). readonly = no edits to existing files, no shell/web (Claude can still create files via Write for its report). readonly is CLAUDE ONLY — rejected on codex workers, whose read-only sandbox cannot write the worker's final report; use edits for a fenced codex worker." },
-          blockedTools: { type: "array", items: { type: "string" }, description: "worker only, CLAUDE ONLY: extra BARE tool names hard-denied on top of the access preset (e.g. [\"WebSearch\",\"Bash\"]). Parenthesized/scoped forms like \"Bash(rm *)\" are rejected — the claude CLI silently ignores them. Rejected entirely on codex workers (no per-tool deny)." },
+          access: { type: "string", enum: ["full", "edits", "readonly"], description: "worker only, optional (default full): tool-access preset. full = all tools; edits = file edits but no shell/web (codex: workspace-write sandbox). readonly = no edits to existing files, no shell/web (Claude can still create files via Write for its report). readonly is CLAUDE ONLY, rejected on codex workers, whose read-only sandbox cannot write the worker's final report; use edits for a fenced codex worker." },
+          blockedTools: { type: "array", items: { type: "string" }, description: "worker only, CLAUDE ONLY: extra BARE tool names hard-denied on top of the access preset (e.g. [\"WebSearch\",\"Bash\"]). Parenthesized/scoped forms like \"Bash(rm *)\" are rejected, the claude CLI silently ignores them. Rejected entirely on codex workers (no per-tool deny)." },
           collab: { type: "object", additionalProperties: false, properties: { awareness: { type: "boolean" }, chat: { type: "boolean" } }, description: "worker only, optional: parallel-wave collaboration. awareness = list this node's same-wave peers in its prompt; chat = give peers a shared markdown board in the run folder. Only matter when 2+ workers run in one wave." },
           predicate: GUARD_PREDICATE_SCHEMA,
           joinMode: { type: "string", enum: ["all", "any"], description: "merge only: wait for ALL inbound branches or ANY." },
@@ -791,7 +791,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "codara_create_automation",
     description:
-      "Create a new automation bound to THIS chat's workspace (Codara resolves the workspace/cwd from the run — never supply paths). Provide name, trigger, loop, prompt_template, worker, and optionally a node graph. Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
+      "Create a new automation bound to THIS chat's workspace (Codara resolves the workspace/cwd from the run, never supply paths). Provide name, trigger, loop, prompt_template, worker, and optionally a node graph. Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
     inputSchema: {
       type: "object",
       required: ["name", "trigger", "loop", "prompt_template", "worker"],
@@ -814,8 +814,8 @@ const AUTOMATION_TOOLS = [
     name: "codara_update_automation",
     description:
       "Update an existing automation. Only the fields you pass are changed; omit the rest. Same field shapes as codara_create_automation. " +
-      "The user will be asked to APPROVE the edit in the chat before it is applied (enforced server-side) — so narrate the change you intend to make in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
-      "The result includes an `approved` flag: when `approved:false` the user declined and the automation was left UNCHANGED — do not retry, ask the user what they'd like instead.",
+      "The user will be asked to APPROVE the edit in the chat before it is applied (enforced server-side), so narrate the change you intend to make in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
+      "The result includes an `approved` flag: when `approved:false` the user declined and the automation was left UNCHANGED, do not retry, ask the user what they'd like instead.",
     inputSchema: {
       type: "object",
       required: ["automation_id"],
@@ -864,7 +864,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "codara_set_automation_enabled",
     description:
-      "Enable or disable an automation's trigger without deleting it. The user is asked to approve the toggle in the chat before it applies (same consent flow as update/delete) — call once and read the `approved` flag in the result.",
+      "Enable or disable an automation's trigger without deleting it. The user is asked to approve the toggle in the chat before it applies (same consent flow as update/delete), call once and read the `approved` flag in the result.",
     inputSchema: {
       type: "object",
       required: ["automation_id", "enabled"],
@@ -905,8 +905,8 @@ const AUTOMATION_TOOLS = [
   {
     name: "codara_delete_automation",
     description:
-      "Permanently delete an automation. DESTRUCTIVE. The user will be asked to APPROVE the deletion in the chat before it happens (enforced server-side) — so narrate which automation you're about to delete in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
-      "The result includes an `approved` flag: when `approved:false` the user declined and NOTHING was deleted — do not retry.",
+      "Permanently delete an automation. DESTRUCTIVE. The user will be asked to APPROVE the deletion in the chat before it happens (enforced server-side), so narrate which automation you're about to delete in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
+      "The result includes an `approved` flag: when `approved:false` the user declined and NOTHING was deleted, do not retry.",
     inputSchema: {
       type: "object",
       required: ["automation_id"],
@@ -917,7 +917,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "codara_name_chat",
     description:
-      "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Call this EARLY — right after you understand what the user wants automated — and again if the topic shifts substantially. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
+      "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Call this EARLY, right after you understand what the user wants automated, and again if the topic shifts substantially. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
     inputSchema: {
       type: "object",
       required: ["title"],
@@ -1126,7 +1126,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_complete",
     description:
-      "Mark a managed execution run as complete. Call this exactly once only after at least one coding worker was spawned for the active implementation request, all worker work settled, and its evidence was verified. Never call it for greetings, conversation, explanations, advice, read-only questions, or any Auto-mode turn with no worker; a natural-language answer ends those turns. Optionally include a short summary of what was accomplished — it is posted as a system note in the chat.",
+      "Mark a managed execution run as complete. Call this exactly once only after at least one coding worker was spawned for the active implementation request, all worker work settled, and its evidence was verified. Never call it for greetings, conversation, explanations, advice, read-only questions, or any Auto-mode turn with no worker; a natural-language answer ends those turns. Optionally include a short summary of what was accomplished, it is posted as a system note in the chat.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1146,7 +1146,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_name_chat",
     description:
-      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY — once the goal for the session is clear — and again if the topic shifts substantially. The title shows in the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
+      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY, once the goal for the session is clear, and again if the topic shifts substantially. The title shows in the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
     inputSchema: {
       type: "object",
       required: ["title"],
@@ -1167,7 +1167,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_request_next_iteration",
     description:
-      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored for the next pass regardless of the loom's pinned engine, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
+      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort, honored for the next pass regardless of the loom's pinned engine, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -1194,7 +1194,7 @@ const EXECUTE_TOOLS = [
         nextModel: {
           type: "string",
           description:
-            "Optional engine-native model id for the NEXT iteration (e.g. claude-opus-4-8, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna). Requires nextEngine; unknown ids fall back to the CLI default.",
+            "Optional engine-native model id for the NEXT iteration (e.g. claude-opus-5, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna). Requires nextEngine; unknown ids fall back to the CLI default.",
         },
         nextEffort: {
           type: "string",
@@ -1208,7 +1208,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_get_worker_status",
     description:
-      "One-shot snapshot of a worker task's current status — use sparingly for ad-hoc spot checks. For waiting on completion, prefer codara_wait_for_workers, which long-polls and returns when workers reach a terminal state. Returns worker_task_id, task_status, the latest attempt's status / runtime / timestamps, and the final_report_path if the worker has finished.",
+      "One-shot snapshot of a worker task's current status, use sparingly for ad-hoc spot checks. For waiting on completion, prefer codara_wait_for_workers, which long-polls and returns when workers reach a terminal state. Returns worker_task_id, task_status, the latest attempt's status / runtime / timestamps, and the final_report_path if the worker has finished.",
     inputSchema: {
       type: "object",
       required: ["worker_task_id"],
@@ -1229,7 +1229,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_message_workers",
     description:
-      "Send a message from you (the manager) into the running batch's shared mailbox — the same mailbox the workers use to coordinate with each other. Use it to steer a drifting worker mid-flight (before it finishes wrong), answer a question a worker sent you, or broadcast a contract clarification to the whole batch. Address one worker by its worker_task_id or use \"all\" to reach every worker in the batch. Workers see it the next time they check their inbox. The response carries a warning when the recipient likely will not read it (already terminal, or spawned solo without mailbox briefing) — do not assume such steering landed. This is worker coordination, NOT the human channel — use codara_ask_user to reach the user.",
+      "Send a message from you (the manager) into the running batch's shared mailbox, the same mailbox the workers use to coordinate with each other. Use it to steer a drifting worker mid-flight (before it finishes wrong), answer a question a worker sent you, or broadcast a contract clarification to the whole batch. Address one worker by its worker_task_id or use \"all\" to reach every worker in the batch. Workers see it the next time they check their inbox. The response carries a warning when the recipient likely will not read it (already terminal, or spawned solo without mailbox briefing), do not assume such steering landed. This is worker coordination, NOT the human channel, use codara_ask_user to reach the user.",
     inputSchema: {
       type: "object",
       required: ["to", "body"],
@@ -1250,7 +1250,7 @@ const EXECUTE_TOOLS = [
         },
         body: {
           type: "string",
-          description: "Message body. Keep it tight and actionable — exact files, the correction, or the answer.",
+          description: "Message body. Keep it tight and actionable, exact files, the correction, or the answer.",
         },
       },
       additionalProperties: false,
@@ -1259,7 +1259,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_check_messages",
     description:
-      "Read messages workers have sent you (the manager) that you have not seen yet — questions when they are blocked, and milestone/progress notes — plus any batch-wide `all` broadcasts. Use it to poll for worker questions mid-flight without blocking; codara_wait_for_workers also returns these (as manager_messages) at each return. Returns { messages: [...] } and marks each returned message read so it is not surfaced again — this is the acknowledging read (codara_wait_for_workers only peeks).",
+      "Read messages workers have sent you (the manager) that you have not seen yet, questions when they are blocked, and milestone/progress notes, plus any batch-wide `all` broadcasts. Use it to poll for worker questions mid-flight without blocking; codara_wait_for_workers also returns these (as manager_messages) at each return. Returns { messages: [...] } and marks each returned message read so it is not surfaced again, this is the acknowledging read (codara_wait_for_workers only peeks).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1275,7 +1275,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_wait_for_workers",
     description:
-      "Block until the listed worker tasks reach a terminal state (accepted / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers — call it once after codara_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to codara_complete (default) or codara_spawn_workers (only for genuine regressions/corrective fixes). Also returns manager_messages: unread questions/progress workers sent you, surfaced NON-destructively (they stay unread and re-appear on later waits until you acknowledge them with codara_check_messages) — answer or steer with codara_message_workers.",
+      "Block until the listed worker tasks reach a terminal state (accepted / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers, call it once after codara_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to codara_complete (default) or codara_spawn_workers (only for genuine regressions/corrective fixes). Also returns manager_messages: unread questions/progress workers sent you, surfaced NON-destructively (they stay unread and re-appear on later waits until you acknowledge them with codara_check_messages), answer or steer with codara_message_workers.",
     inputSchema: {
       type: "object",
       required: ["worker_task_ids"],
@@ -1355,10 +1355,10 @@ const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS];
 const STUDIO_TOOL_TO_RPC = { ...PREVIEW_TOOL_TO_RPC, ...TERMINAL_TOOL_TO_RPC, ...WHITEBOARD_TOOL_TO_RPC };
 
 // Worker mode: the studio surface a headless automation worker may drive
-// (whiteboard stays read-only — edits are the manager's call) plus the two
+// (whiteboard stays read-only, edits are the manager's call) plus the two
 // run-lifecycle tools its loop prompt references: codara_ask_user (blocked on
 // a genuinely human decision) and codara_request_next_iteration (agent-loop
-// continuation). Deliberately NO manager orchestration tools — a worker never
+// continuation). Deliberately NO manager orchestration tools, a worker never
 // spawns, steers, messages, or completes.
 const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
 const WORKER_TOOLS = [
@@ -1397,7 +1397,7 @@ function isOrchestrationRpc(rpc) {
 
 // terminal.create and preview.navigate can MINT a new renderer tab. Stamp the
 // calling run's identity (SPARK_RUN_ID, injected by pty-manager at spawn) so
-// the tab is attributed to — and routed into — that run's workspace rather
+// the tab is attributed to, and routed into, that run's workspace rather
 // than whichever run/workspace the user happens to be viewing when the RPC
 // lands. Caller-supplied runId always wins; user-facing agents with no
 // SPARK_RUN_ID keep the active-workspace behavior.

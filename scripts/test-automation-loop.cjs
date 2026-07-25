@@ -388,7 +388,8 @@ async function main() {
     ok("loop + state + history persisted to disk", Boolean(persisted.loop && persisted.state && Array.isArray(persisted.history) && persisted.history.length >= 1));
 
     // Legacy jobs (no loop/state/history/worker) backfill on read — including
-    // the Looms v2 worker migration: openrouter → auto; claude carries
+    // the Looms v2 worker migration: the removed API backend (a persisted
+    // "openrouter" chatBackend from an older install) → auto; claude carries
     // model/effort onto the worker config.
     const legacy = { id: "legacy-1", name: "old", trigger: { kind: "manual" }, enabled: true, input: baseInput, createdAt: new Date().toISOString() };
     const legacyOpenrouter = { id: "legacy-or", name: "or", trigger: { kind: "manual" }, enabled: true, input: { ...baseInput, chatBackend: "openrouter", chatModel: "x-ai/grok-4.3" }, createdAt: new Date().toISOString() };
@@ -407,7 +408,7 @@ async function main() {
     );
     const or = jobs2.find((j) => j.id === "legacy-or");
     ok(
-      "legacy openrouter loom migrates to worker engine=auto (model dropped)",
+      "legacy removed-API-backend loom migrates to worker engine=auto (model dropped)",
       or && or.worker?.engine === "auto" && or.worker?.model === undefined,
     );
     const cc = jobs2.find((j) => j.id === "legacy-cc");

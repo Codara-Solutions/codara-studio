@@ -23,6 +23,7 @@ import {
   stepStatusColor,
   stepStatusLabel,
   WORKER_ATTEMPT_CAP,
+  workerModelLabel,
 } from "./run-format";
 import { attemptsForTask, logicalWorkers, logicalWorkersForStep } from "../../lib/worker-identity";
 import { ElapsedChip, ElapsedTime } from "./elapsed";
@@ -496,10 +497,21 @@ function Mark({ kind }: { kind: "done" | "failed" | "running" | "pending" }) {
   );
 }
 
-function RuntimeTag({ runtime }: { runtime: WorkerTask["runtimePreference"] }) {
+// Names the MODEL; the runtime only picks the chip's colour. Under Pi the
+// provider is just which subscription was authenticated, so it belongs in the
+// tooltip, not in the chip the eye lands on. Falls back to the runtime name
+// for attempts recorded before the model was persisted.
+function ModelTag({
+  runtime,
+  model,
+}: {
+  runtime: WorkerTask["runtimePreference"];
+  model?: string;
+}) {
   const tone = runtimeTone(runtime);
   return (
     <span
+      title={model ? `${model}, Pi harness, authenticated as ${runtime}` : undefined}
       style={{
         flex: "0 0 auto",
         color: tone.label,
@@ -511,10 +523,13 @@ function RuntimeTag({ runtime }: { runtime: WorkerTask["runtimePreference"] }) {
         fontSize: 9,
         fontWeight: 650,
         letterSpacing: "0.04em",
-        textTransform: "uppercase",
+        // No uppercase: this chip used to hold a bare runtime name ("claude"),
+        // which reads as a label, but now holds a model name with a version in
+        // it. "OPUS 4.8" is harder to read than "Opus 4.8", and the run header
+        // renders the same string, they must not disagree.
       }}
     >
-      {runtime}
+      {workerModelLabel(model, runtime)}
     </span>
   );
 }
@@ -1025,6 +1040,7 @@ function StepDetail({
               const attempt = maps.attemptByTask.get(task.id);
               const status = deriveAgentStatus(task, attempt, step.status);
               const liveRuntime = attempt?.runtime ?? task.runtimePreference;
+              const liveModel = attempt?.model ?? task.modelHint;
               return (
                 <button
                   type="button"
@@ -1053,7 +1069,7 @@ function StepDetail({
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-                    <RuntimeTag runtime={liveRuntime} />
+                    <ModelTag runtime={liveRuntime} model={liveModel} />
                     <span
                       style={{
                         flex: 1,
@@ -1159,7 +1175,15 @@ function WorkerDetail({
       ? attemptIndex + 1
       : attempt.attemptNumber
     : 0;
-  const meta = [task.modelHint, task.effortHint, task.taskClass, attempt ? `attempt ${attemptOrdinal}` : null]
+  // The attempt's resolved model beats the task's hint, the hint can be
+  // coerced onto the worker roster at spawn, and it is frequently unset, which
+  // used to drop the model from this line entirely.
+  const meta = [
+    attempt?.model ?? task.modelHint,
+    task.effortHint,
+    task.taskClass,
+    attempt ? `attempt ${attemptOrdinal}` : null,
+  ]
     .filter(Boolean)
     .join(" · ");
   const tone = statusColor(status);
@@ -1169,7 +1193,10 @@ function WorkerDetail({
       <Section title="Worker" first meta={<StatusWord label={attempt?.status ?? task.status} tone={tone} />}>
         <SnapshotCard title={task.title} subtitle={friendlyWorkerLine(task, attempt, status, report)} tone={tone}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <RuntimeTag runtime={attempt?.runtime ?? task.runtimePreference} />
+            <ModelTag
+              runtime={attempt?.runtime ?? task.runtimePreference}
+              model={attempt?.model ?? task.modelHint}
+            />
             <ElapsedChip
               startedAt={attempt?.startedAt}
               finishedAt={attempt?.finishedAt}

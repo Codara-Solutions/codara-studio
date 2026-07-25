@@ -128,7 +128,18 @@ export function trimTerminalScrollbackLines(value: string, maxLines: number): st
 export interface AppSettings {
   defaultShellId: string | null;
   terminalScrollbackLineLimit: number;
+  // OpenRouter credentials for Codara's two small LLM utilities: git
+  // commit-message drafting (git-commit-message.ts) and the code editor's
+  // inline AI, ghost-text autocomplete + inline edit (inline-ai.ts). Cora's
+  // orchestration NEVER reads these: the manager and its workers run on the
+  // pinned Pi runtime / CLI backends, on subscription auth that lives outside
+  // AppSettings entirely. An empty key just disables those two conveniences.
   openRouterApiKey: string;
+  // OpenRouter model id for commit-message drafting: git-commit-message.ts
+  // tries AppPreferences.inlineAutocompleteModelId first and uses this as the
+  // second route (either one alone is enough; with neither set the button
+  // falls back to a deterministic non-LLM draft). Same scope caveat as the key
+  // above: this is not a Cora manager model.
   openRouterModel: string;
   agentMcpSyncEnabled: boolean;
   agentSkillSyncEnabled: boolean;
@@ -1223,7 +1234,7 @@ export interface RunBlocker {
   resumeStatus: RunStatus;
   source: RunQuestionSource;
   resumeStrategy: RunQuestionResumeStrategy;
-  /** The OpenRouter manager stage to re-run after a scheduled-manager answer. */
+  /** The manager stage to re-run after a scheduled-manager answer. */
   managerMode?: SparkCall["mode"];
   blockedAt: string;
 }
@@ -1274,13 +1285,14 @@ export interface RunAssumption {
 }
 
 // Which Cora manager backend drives this chat's manager decisions and (in Talk
-// mode) chat replies. Today this is OpenRouter via fetch() to an LLM API; the
-// two CLI options spawn a real `claude` or `codex` process under node-pty and
-// drive it for the chat surface (uses the user's paid Claude/Codex
-// subscription instead of API credits). When the chat-level field is unset on
-// a RunState, callers fall back to OpenRouter for backwards compatibility with
-// pre-feature runs.
-export type ChatBackendKind = "openrouter" | "claude" | "codex" | "pi";
+// mode) chat replies. Every member runs a real agent process on the user's own
+// subscription auth, never a metered API key: "pi" is the pinned Pi runtime
+// (driven over RPC, no terminal), while "claude"/"codex" spawn a real `claude`
+// or `codex` process under node-pty and drive it for the chat surface. "pi" is
+// the default, when the chat-level field is unset on a RunState, callers treat
+// it as "pi", and a persisted legacy "openrouter" value (from when Cora could
+// be routed through an OpenRouter API key) migrates to "pi" on read.
+export type ChatBackendKind = "claude" | "codex" | "pi";
 
 // Cora's Pi execution depth is a first-class, per-chat policy rather than a
 // model alias. Fast minimizes coordination overhead; Deep adds explicit
@@ -1529,16 +1541,17 @@ export interface RunState {
   verificationRounds?: number;
   /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
-   * treated as "openrouter" by the dispatch layer — keeps pre-feature chats
-   * working unchanged.
+   * treated as "pi" by the dispatch layer. A run persisted with the retired
+   * "openrouter" backend is rewritten to "pi" by normalizeRun on read (its
+   * chatModel is dropped with it, that slug meant nothing to any surviving
+   * backend), so pre-feature chats keep working.
    */
   chatBackend?: ChatBackendKind;
   /**
-   * Model id passed to the chosen backend. For OpenRouter this is a free-form
-   * provider/model slug (e.g. "google/gemini-flash-latest"); for Claude one of
-   * "claude-opus-4-8" / "claude-sonnet-5"; for Codex one of the GPT-5.6
-   * Sol/Terra/Luna model ids. When
-   * undefined the backend picks its registered default.
+   * Model id passed to the chosen backend, in that backend's own naming: for
+   * Pi a runtime-catalog model id; for Claude one of "claude-opus-5" /
+   * "claude-sonnet-5"; for Codex one of the GPT-5.6 Sol/Terra/Luna model ids.
+   * When undefined the backend picks its registered default.
    */
   chatModel?: string;
   /** Execute = Codara spawns workers; Talk = pure conversational backend chat. */
@@ -1554,8 +1567,8 @@ export interface RunState {
    * Provider-side session UUID for the CC/Codex CLI backing this chat. Stored
    * so the next spawn can `claude -r <uuid>` or `codex resume <uuid>` and
    * pick the conversation back up after the app closes. Stays undefined until
-   * the first CC/Codex spawn for this chat. Irrelevant for the OpenRouter
-   * backend (no equivalent session-id concept).
+   * the first CC/Codex spawn for this chat. Irrelevant for the Pi backend (it
+   * has no equivalent CLI-resume session-id concept).
    */
   chatSessionUuid?: string;
   /**
@@ -1571,12 +1584,12 @@ export interface RunState {
   /**
    * Fast-mode toggle for the chat backend. Codex-only: passed as
    * `--enable fast_mode` (true) or `--disable fast_mode` (false) at spawn
-   * time. Claude Code and OpenRouter ignore it. Default false (unset).
+   * time. Claude Code and Pi ignore it. Default false (unset).
    */
   chatFastMode?: boolean;
   /**
-   * 1M-context toggle. Claude Code is normalized to true. Codex and
-   * OpenRouter normalize it to false because they do not use this toggle.
+   * 1M-context toggle. Claude Code is normalized to true. Codex and Pi
+   * normalize it to false because they do not use this toggle.
    */
   chat1mContext?: boolean;
   /**
@@ -2006,7 +2019,7 @@ export interface StepState {
    * Per-step roll-up of manager-call USD cost. Computed from the SparkCall
    * records that name this step (via the next-active-step pointer at call
    * time). Worker-side LLM cost is not yet tracked — Codara only sees the
-   * manager's OpenRouter usage today.
+   * manager's own token usage today.
    */
   totalCostUsd?: number;
   createdAt: string;
@@ -2223,6 +2236,16 @@ export interface WorkerAttempt {
   workerTaskId: string;
   attemptNumber: number;
   runtime: WorkerRuntime;
+  /**
+   * The model this attempt actually launched on, resolved through the worker
+   * roster at spawn time. `runtime` names the provider Pi authenticates as , 
+   * it is NOT the harness (everything runs under Pi) and it is NOT specific
+   * enough to show a human. Persisted structurally because the same value was
+   * previously only reachable by parsing it back out of the `command` display
+   * string. Undefined for runtimes with no model (shell) and for attempts
+   * recorded before this field existed.
+   */
+  model?: string;
   command?: string;
   cwd: string;
   status: WorkerAttemptStatus;
@@ -2374,7 +2397,7 @@ export interface SparkCall {
   contextWindowSource?: "known" | "default";
   /**
    * Cost / token-split fields populated after a successful manager call via
-   * `priceCall(...)` in `src/main/openrouter-prices.ts`. `costUsd` is zero when
+   * `priceCall(...)` in `src/main/model-prices.ts`. `costUsd` is zero when
    * the model isn't in the price table or the response carried no usage block;
    * the token counts still populate so the Costs tab can show usage even when
    * the dollar number is unknown.
@@ -2425,8 +2448,8 @@ export interface CreateRunInput {
   cwd: string;
   title?: string;
   // Per-chat backend selections forwarded from the composer's chip when
-  // creating a fresh chat. Optional — when omitted, the run defaults to
-  // OpenRouter + the global manager model and the chip starts on its
+  // creating a fresh chat. Optional, when omitted, the run defaults to the
+  // Pi backend on its registered default model and the chip starts on its
   // defaults. ChatPanel reads the draft chip values and threads them
   // through onStartChat → createRunInput so the chip's selection survives
   // the draft→live transition.
@@ -2973,8 +2996,9 @@ export interface AutomationPrompt {
 // Automations no longer launch manager-orchestrated runs. Each iteration runs
 // ONE claude/codex CLI worker directly (RunState.executionMode === "direct").
 
-/** Engines an automation may run. OpenRouter is intentionally NOT a member —
- *  the API backend is for utilities (commit messages, inline edit), not looms. */
+/** Engines an automation may run: the CLI workers, and only those. Cora's Pi
+ *  manager runtime is intentionally NOT a member, looms bypass the manager
+ *  and drive one worker directly. */
 export type LoomEngine = "claude" | "codex";
 
 /** Per-loom worker configuration (the Worker node in the flow editor). */
@@ -3318,8 +3342,10 @@ export interface ScheduledJob {
   input: StartAutopilotInput; // pinned workspace/cwd payload (legacy chat* fields unread)
   loop: AutomationLoop; // backfilled to {kind:"once",stop:{}} on read
   prompt?: AutomationPrompt; // template overrides input.initialUserNote per iter
-  /** Looms v2 worker config. Backfilled by scheduler.normalizeJob (legacy
-   *  chatBackend claude/codex carries over; openrouter/undefined → "auto").
+  /** Looms v2 worker config. Backfilled by scheduler.normalizeJob (a legacy
+   *  chatBackend of claude/codex carries over; anything else, pi, the retired
+   *  "openrouter", or undefined, becomes "auto", which resolveWorker maps to
+   *  claude-if-installed else codex).
    *  Required post-normalize, like loop/state/history. */
   worker: LoomWorkerConfig;
   /** Looms v2.5 node graph. Backfilled by scheduler.normalizeJob from the flat

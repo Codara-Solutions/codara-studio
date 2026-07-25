@@ -39,7 +39,7 @@ import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry } from "./agent-session-registry";
 import { activeTerminalAgentPaneIds } from "./terminal-agent-notify";
 
-// run-store is heavy (loads openrouter and agent-sync transitively).
+// run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
 // deferring the resolve until a hook actually fires. The async import is
 // cached after the first call.
@@ -998,6 +998,17 @@ app.whenReady().then(async () => {
       await runStore.recoverOrphanedManagerTurns();
       await runStore.recoverPendingManagerResumes();
       await runStore.recoverQueuedManagerInputs();
+      // Managed runs' workers die with this process and nothing re-arms their
+      // exit detection, so an attempt left "running" by the previous session
+      // would otherwise stay "running" forever AND wedge the run shut (see
+      // startAutopilot's attemptInFlight guard). Must run before the scheduler
+      // and the queue below, so both see a coherent world.
+      await runStore.recoverOrphanedManagedWorkerAttempts();
+      // ...then park what the restart interrupted. Nothing above re-drives a
+      // run any more: relaunching the app never resumes Cora on its own, so
+      // every recovery step is repair-only and the user's Resume is the sole
+      // way work restarts.
+      await runStore.pauseManagedRunsAfterRestart();
     } catch (err) {
       console.warn("[main] pending manager-resume recovery failed:", err);
     }
@@ -1018,8 +1029,11 @@ app.whenReady().then(async () => {
       console.warn("[main] scheduler failed to start:", err);
     }
     try {
-      const { resumeQueue } = await import("./orchestration/run-queue");
-      await resumeQueue();
+      // Repair stranded queue items without draining them. Draining here used
+      // to start Cora at boot with no user action, which is the one thing the
+      // restart path must not do.
+      const { reconcileQueueAfterRestart } = await import("./orchestration/run-queue");
+      await reconcileQueueAfterRestart();
     } catch (err) {
       console.warn("[main] queue resume failed:", err);
     }

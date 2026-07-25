@@ -198,9 +198,8 @@ async function main() {
   };
   check(
     "pre-submission retry retains canonical replay ownership",
-    backendContract.shouldIncludeCanonicalReplay(preSubmissionRetryRun, "codex", 1) &&
-      !backendContract.shouldIncludeCanonicalReplay(preSubmissionRetryRun, "openrouter", 1) &&
-      !backendContract.shouldIncludeCanonicalReplay(acceptedTurnRun, "codex", 1),
+    backendContract.shouldIncludeCanonicalReplay(preSubmissionRetryRun, 1) &&
+      !backendContract.shouldIncludeCanonicalReplay(acceptedTurnRun, 1),
   );
   check(
     "old-epoch manager completion is rejected",

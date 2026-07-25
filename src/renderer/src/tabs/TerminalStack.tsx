@@ -26,6 +26,7 @@ import type {
   TerminalTab,
 } from "./types";
 import { BackIcon, CloseIcon, DragHandleIcon, LockIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
+import { workerModelLabel } from "../components/runs/run-format";
 import {
   TERMINAL_PANE_DRAG_MIME,
   beginTerminalPaneDrag,
@@ -2569,10 +2570,13 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
     };
   }
   if (runtime === "error") {
-    // Non-zero pty exit / spawn failure — the agent crashed. Red danger frame
+    // Non-zero pty exit / spawn failure: the agent CRASHED. Red danger frame
     // with a steady dot; the chip stays visible until the pane is closed.
+    // Labelled "crashed", not "exited": only Cora is allowed to end a worker,
+    // so "exited" read as a routine, sanctioned shutdown and hid the fact that
+    // this pane died on its own. The word has to name the fault.
     return {
-      status: "exited",
+      status: "crashed",
       dot: "var(--danger)",
       dotGlow: "0 0 9px color-mix(in oklch, var(--danger) 45%, transparent)",
       pulse: false,
@@ -2580,6 +2584,8 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
     };
   }
   if (runtime === "done") {
+    // Clean finish: the worker's foreground TUI ended after reporting. This is
+    // the sanctioned end of a session, so it stays calm and grey.
     return {
       status: "done",
       dot: "var(--muted-2)",
@@ -2675,8 +2681,24 @@ function WorkerPaneHeader({
         : worker.runtime === "opencode"
           ? "OpenCode"
           : null;
-  const engine =
+  const harnessLabel =
     worker.harness === "pi" ? (runtimeLabel ? `Pi · ${runtimeLabel}` : "Pi") : runtimeLabel;
+  // Name the MODEL, not the harness. Under Pi every worker runs the same
+  // harness, so "Pi · Claude" told the user only which subscription was
+  // authenticated, never which model was doing the work. The harness/provider
+  // detail moves into the tooltip, and remains the label for older attempts
+  // that predate the persisted model field.
+  // Trim before testing: a whitespace-only model is the same "no model" state
+  // as an absent one, and treating it as truthy would fall through to a
+  // different fallback (the bare runtime) than the absent case (the harness
+  // label) for what the user experiences as one situation.
+  const paneModel = worker.model?.trim() || undefined;
+  const engine = paneModel
+    ? workerModelLabel(paneModel, worker.runtime ?? "claude")
+    : harnessLabel;
+  const engineTitle = paneModel
+    ? `${paneModel}${harnessLabel ? `: ${harnessLabel}` : ""}`
+    : undefined;
   const statusColor =
     tone.frame === "accent"
       ? "var(--accent)"
@@ -2735,7 +2757,11 @@ function WorkerPaneHeader({
         <span style={{ flex: "0 0 auto" }}>attempt {worker.attemptOrdinal}</span>
       ) : null}
       <span style={{ flex: 1 }} aria-hidden />
-      {engine ? <span style={{ flex: "0 0 auto" }}>{engine}</span> : null}
+      {engine ? (
+        <span style={{ flex: "0 0 auto" }} title={engineTitle}>
+          {engine}
+        </span>
+      ) : null}
       {elapsed ? (
         <span style={{ flex: "0 0 auto", fontVariantNumeric: "tabular-nums" }}>{elapsed}</span>
       ) : null}

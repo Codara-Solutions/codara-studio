@@ -10,6 +10,7 @@ import type {
   SparkEvent,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import AnchoredMenu from "./composer/AnchoredMenu";
 import { contextWindowForModel } from "@shared/context-window";
 import {
   chatBackendSupportsFastMode,
@@ -28,12 +29,12 @@ import PlanModeToggle from "./composer/PlanModeToggle";
 import ThinkingControl from "./composer/ThinkingControl";
 import ExecutionPolicyPicker from "./composer/ExecutionPolicyPicker";
 import {
-  ALL_EFFORTS,
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
   DEFAULT_CHAT_MODE,
   DEFAULT_CHAT_MODEL,
   buildVisibleGroups,
+  defaultChatModel,
   clampEffort,
   decomposeModelId,
   effortsFor,
@@ -184,6 +185,8 @@ export default function ChatComposer({
     restoredDraft?.fileReferences ? [...restoredDraft.fileReferences] : [],
   );
   const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
+  // Anchor for the portalled @-mention panel (see AnchoredMenu).
+  const composerShellRef = useRef<HTMLDivElement>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -210,7 +213,7 @@ export default function ChatComposer({
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
   // IPC round-trip returns we replace them with the actual first visible
   // model so the bar doesn't open on a model the user can't see in the
-  // dropdown (e.g. the legacy Gemini default when no OpenRouter is configured).
+  // dropdown (e.g. a CLI default when that runtime isn't installed).
   const draftDefaultsResolved = useRef(Boolean(restoredDraft || run));
   const [draftFastMode, setDraftFastMode] = useState<boolean>(
     run?.chatFastMode ?? restoredDraft?.fastMode ?? false,
@@ -303,28 +306,24 @@ export default function ChatComposer({
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, [suspendGlobalEvents]);
 
-  // Resolve the draft default from settings + runtimes. The hardcoded
+  // Resolve the draft default from the runtime diagnostics. The hardcoded
   // fallback above (Pi + GPT-5.6 Sol/high) only matters before this
   // resolves: once we know what's actually available we land on the first
-  // visible model (Claude Opus 4.8 in the common case), so the bar never
-  // opens on a model the user can't see in the dropdown. Runs once per
-  // mount; an active run uses run.chatBackend/run.chatModel and is unaffected.
+  // visible model, so the bar never opens on a model the user can't see in
+  // the dropdown. Runs once per mount; an active run uses
+  // run.chatBackend/run.chatModel and is unaffected.
   useEffect(() => {
     if (draftDefaultsResolved.current) return;
     let cancelled = false;
-    void Promise.all([
-      window.spark.agents.runtimes(),
-      window.spark.settings.load(),
-    ])
-      .then(([diagnostics, settings]) => {
+    void window.spark.agents
+      .runtimes()
+      .then((diagnostics) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
-        const orModel = (settings.openRouterModel ?? "").trim();
-        const groups = buildVisibleGroups({
-          diagnostics: diagnostics ?? [],
-          openRouterModel: orModel,
-        });
-        const first = groups[0]?.models[0];
+        const groups = buildVisibleGroups({});
+        // Not groups[0].models[0]: that would open a new chat on the premium
+        // tier whenever premium happens to lead the first group.
+        const first = defaultChatModel(groups);
         if (!first) return;
         const { baseId, oneMillion } = decomposeModelId(first.id);
         const normalizedFlags = normalizeChatFeatureFlags(first.backend, {
@@ -345,7 +344,7 @@ export default function ChatComposer({
     return () => {
       cancelled = true;
     };
-    // intentionally one-shot: subsequent settings changes don't override the
+    // intentionally one-shot: a later runtime change doesn't override the
     // draft, since by that point the user has typically committed a choice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -861,11 +860,11 @@ export default function ChatComposer({
   const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
   const activeFastMode: boolean = effectiveChatFastMode(activeChatBackend, rawFastMode);
   const activeOneMillionContext: boolean = effectiveChatOneMillionContext(activeChatBackend);
-  // The active model's option pulled from the STATIC catalog (Claude/Codex);
-  // null for OpenRouter (its catalog is dynamic — the configured model
-  // lives in settings). Used only to derive the available effort cycle for
-  // the thinking pill; rendering of the model name happens inside the
-  // ModelPicker which reads from the dynamic visible groups.
+  // The active model's option pulled from the STATIC catalog; null for a model
+  // discovered from the live catalog, which has no curated row (effortsFor
+  // then yields the full ladder). Used only to derive the available effort
+  // cycle for the thinking pill; rendering of the model name happens inside
+  // the ModelPicker, which reads from the dynamic visible groups.
   const activeChatModelOption = findOptionInCatalog(
     activeChatBackend,
     activeChatModelId,
@@ -934,12 +933,9 @@ export default function ChatComposer({
     // chat1mContext in the same payload the legacy 1M pill used to write.
     const { baseId, oneMillion } = decomposeModelId(model.id);
     const backendChanged = model.backend !== activeChatBackend;
-    const nextEffortLevels =
-      model.backend === "openrouter"
-        ? ALL_EFFORTS
-        : model.effortLevels && model.effortLevels.length > 0
-          ? model.effortLevels
-          : ALL_EFFORTS;
+    // The row's own ladder when it pins one, else the full list, exactly what
+    // the thinking pill will offer for this model once the pick lands.
+    const nextEffortLevels = effortsFor(model);
     const nextEffort: AgentEffortLevel = nextEffortLevels.includes(activeChatEffort)
       ? activeChatEffort
       : (nextEffortLevels.includes(DEFAULT_CHAT_EFFORT)
@@ -1029,20 +1025,34 @@ export default function ChatComposer({
           </div>
         )}
         <div
+          ref={composerShellRef}
           className={`composer-shell spark-glass--strong${activeChatMode === "execute" ? " is-execute-mode" : ""}`}
           onMouseDown={focusComposerShell}
           onDragOver={onComposerDragOver}
           onDrop={onComposerDrop}
         >
-        {mentionQuery && (
-          <MentionPopover
-            query={mentionQuery.query}
-            loading={filesLoading}
-            suggestions={mentionSuggestions}
-            activeIndex={mentionIndex}
-            onPick={insertFileMention}
-          />
-        )}
+        {/* Portalled for the same reason as the composer's pill menus: this
+            shell carries spark-glass--strong, so it is a backdrop root and any
+            .spark-menu inside it renders flat instead of frosted. Anchored to
+            the shell itself, matching its width, so it lands where the old
+            absolutely-positioned version did. */}
+        <AnchoredMenu
+          anchorRef={composerShellRef}
+          open={Boolean(mentionQuery)}
+          onClose={() => setMentionQuery(null)}
+          matchAnchorWidth
+          inset={8}
+        >
+          {mentionQuery && (
+            <MentionPopover
+              query={mentionQuery.query}
+              loading={filesLoading}
+              suggestions={mentionSuggestions}
+              activeIndex={mentionIndex}
+              onPick={insertFileMention}
+            />
+          )}
+        </AnchoredMenu>
         {(images.length > 0 || fileReferences.length > 0) && (
           <div
             style={{
@@ -1113,23 +1123,12 @@ export default function ChatComposer({
             maxHeight: MAX_TEXTAREA_H,
           }}
         />
-        <div
-          style={{
-            flex: "0 0 auto",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            marginTop: 5,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              flex: "0 0 auto",
-            }}
-          >
+        {/* Class-driven rather than inline-styled: this row is a size
+            container, and the pills below collapse progressively as it
+            narrows (see .composer-toolbar in styles.css). Container queries
+            cannot reach inline styles. */}
+        <div className="composer-toolbar">
+          <div className="composer-toolbar__left">
             <ModelPicker
               activeBackend={activeChatBackend}
               activeModelId={activeChatModelId}
@@ -1172,18 +1171,7 @@ export default function ChatComposer({
               title={primaryActiveWorker?.title ?? null}
             />
           ) : (
-            <span
-              style={{
-                flex: 1,
-                minWidth: 0,
-                fontSize: 10,
-                color: "var(--muted)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                textAlign: "center",
-              }}
-            >
+            <span className="composer-toolbar__hint">
               {busy
                 ? "Working..."
                 : pastingImages
@@ -1197,14 +1185,7 @@ export default function ChatComposer({
               as one group, so the bottom row resolves to [pills · status ·
               actions] instead of a scatter. Layout grouping only — every
               handler and ref is unchanged. */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              flex: "0 0 auto",
-            }}
-          >
+          <div className="composer-toolbar__right">
             <ContextPill
               used={tokensUsed}
               budget={
@@ -1264,20 +1245,7 @@ function WorkerActivityStatus({
   const countLabel = count > 1 ? `${count} workers` : "worker";
   return (
     <span
-      style={{
-        flex: 1,
-        minWidth: 0,
-        fontSize: 10,
-        color: "var(--muted)",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-        textAlign: "center",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 6,
-      }}
+      className="composer-toolbar__hint composer-toolbar__hint--worker"
       title={title ?? undefined}
     >
       <span
@@ -1294,17 +1262,11 @@ function WorkerActivityStatus({
       <span style={{ color: "var(--accent)", fontWeight: 600 }}>
         {runtimeLabel} {countLabel} running
       </span>
-      {title && (
-        <span
-          style={{
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            minWidth: 0,
-          }}
-        >
-          · {title}
-        </span>
-      )}
+      {/* The only elastic child: when the row runs out of room the task title
+          ellipsises, rather than every child being cut mid-glyph. Sizing lives
+          in .composer-toolbar__hint--worker so the rule sits with the rest of
+          the row's collapse behaviour. */}
+      {title && <span className="composer-toolbar__hint-title">· {title}</span>}
       <span style={{ flex: "0 0 auto" }}>· steering queues</span>
     </span>
   );
@@ -1543,11 +1505,8 @@ function MentionPopover({
     <div
       className="spark-menu"
       style={{
-        position: "absolute",
-        left: 8,
-        right: 8,
-        bottom: "calc(100% + 6px)",
-        zIndex: 50,
+        // Positioning belongs to the AnchoredMenu portal that wraps this;
+        // keeping `position: absolute` here would fight it.
         padding: 5,
         borderRadius: "var(--radius-popover, 12px)",
       }}

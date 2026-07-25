@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from "react";
 import type { RunState, Workspace } from "@shared/types";
 import { isRunningStatus, runStatusColor } from "../lib/run-status";
 import { logicalWorkers } from "../lib/worker-identity";
-import { sortSteps } from "./runs/run-format";
+import { sortSteps, workerModelLabel } from "./runs/run-format";
 import { StatusDot } from "./runs/GraphNodes";
 import { ElapsedTime } from "./runs/elapsed";
 import RunCanvas from "./runs/RunCanvas";
@@ -193,8 +193,16 @@ function RunHeader({ run }: { run: RunState }) {
   const latestTask = latestAttempt
     ? run.workerTasks.find((task) => task.id === latestAttempt.workerTaskId)
     : undefined;
-  const engine = latestAttempt?.runtime ?? run.chatBackend ?? "cora";
-  const model = latestTask?.modelHint ?? run.chatModel;
+  // Lead with the model and keep the provider as the supporting detail: under
+  // Pi the provider only names the subscription, so it is the less informative
+  // of the two. "default model" is gone, the attempt now persists what it
+  // actually launched on, and where nothing has launched yet we say so.
+  const engineRuntime = latestAttempt?.runtime ?? run.chatBackend ?? "cora";
+  const engineModel = latestAttempt?.model ?? latestTask?.modelHint ?? run.chatModel;
+  const engine = engineModel
+    ? workerModelLabel(engineModel, latestAttempt?.runtime ?? "claude")
+    : engineRuntime;
+  const model = engineModel ? engineRuntime : "no worker yet";
   const manifest = run.resultManifest;
   const passedChecks = manifest?.checks.filter((check) => check.result === "passed").length ?? 0;
   const evidenceDetail = manifest
@@ -371,12 +379,7 @@ function RunHeader({ run }: { run: RunState }) {
             live={liveWorkers.length > 0}
           />
         )}
-        <StatMetric
-          label="Engine"
-          value={engine}
-          detail={model ?? "default model"}
-          text
-        />
+        <StatMetric label="Model" value={engine} detail={model} text />
         <StatMetric
           label="Elapsed"
           value={<ElapsedTime startedAt={run.createdAt} finishedAt={run.completedAt} />}
@@ -653,7 +656,11 @@ function StatMetric({
           lineHeight: 1,
           fontWeight: text ? 650 : 720,
           fontVariantNumeric: "tabular-nums",
-          textTransform: typeof value === "string" && label === "Engine" ? "uppercase" : undefined,
+          // The old "Engine" metric was uppercased because a bare runtime name
+          // ("claude") reads as a label, not a word. This slot now carries a
+          // model name, "Opus 4.8", "Sol", which is a proper noun with a
+          // version in it, so uppercasing it would only hurt legibility.
+          textTransform: undefined,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",

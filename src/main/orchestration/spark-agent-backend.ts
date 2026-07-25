@@ -1,13 +1,12 @@
 // Cora manager backend abstraction.
 //
-// One TypeScript interface per "manager" the chat composer can target. Today
-// there are three implementations:
+// One TypeScript interface per "manager" the chat composer can target. Every
+// implementation drives an agent CLI, Cora has no hosted-API manager, so a
+// backend is always a local process the user is already licensed for:
 //
-//   - OpenRouter   (src/main/orchestration/openrouter-backend.ts)
-//       The original built-in manager. Calls an LLM over HTTPS with a strict
-//       json_schema response_format and produces a SparkManagerDecision the
-//       run-store consumes directly. Execute and Talk modes are both
-//       structured-output calls.
+//   - Pi           (src/main/orchestration/pi-backend.ts)
+//       The bundled, subscription-only Cora harness and the default backend
+//       for a new chat.
 //
 //   - Claude Code  (src/main/orchestration/claude-backend.ts)
 //       Runs Anthropic's Claude Agent SDK and turns its partial-message deltas,
@@ -37,10 +36,10 @@ import type {
 } from "@shared/types";
 import { DEFAULT_CODEX_CHAT_MODEL } from "@shared/model-catalog";
 import type {
-  OpenRouterManagerMode,
+  ManagerMode,
   SparkManagerDecision,
   SparkManagerWorkerReportContext,
-} from "./openrouter-manager";
+} from "./manager-protocol";
 import {
   effectiveChatFastMode,
   effectiveChatOneMillionContext,
@@ -54,8 +53,8 @@ import { effectiveCoraExecutionPolicy } from "@shared/cora-execution-policy";
  */
 export interface ChatBackendConfig {
   backend: ChatBackendKind;
-  /** Backend-specific model id. Free-form for OpenRouter; one of the enum
-   *  values for Claude/Codex. */
+  /** Backend-specific model id, one of the enum values for the backend's
+   *  runtime. */
   model: string;
   mode: ChatMode;
   effort: AgentEffortLevel;
@@ -71,7 +70,7 @@ export interface ChatBackendConfig {
    *  assistant replies from the OLD mode's persona, and CC/Codex anchor on
    *  that when they resume. */
   sessionMode?: ChatMode;
-  /** Fast-mode toggle. Codex-only; Claude Code and OpenRouter ignore it. */
+  /** Fast-mode toggle. Codex-only; Claude Code ignores it. */
   fastMode: boolean;
   /** 1M-context toggle. Claude Code is normalized to true. */
   oneMillionContext: boolean;
@@ -79,13 +78,13 @@ export interface ChatBackendConfig {
 
 /**
  * Inputs the manager pipeline hands to a backend's `requestManagerDecision`.
- * Mirrors the existing OpenRouter call site so the dispatch is a 1:1
- * structural translation, not a redesign.
+ * Mirrors manager-protocol's `buildManagerRequest` inputs so the dispatch is a
+ * 1:1 structural translation, not a redesign.
  */
 export interface ManagerRequestInput {
   run: RunState;
   cwd: string;
-  mode: OpenRouterManagerMode;
+  mode: ManagerMode;
   workerReports?: SparkManagerWorkerReportContext[];
   availableRuntimes?: AgentRuntimeDiagnostic[];
   agentSyncContext?: string;
@@ -104,12 +103,11 @@ export interface ManagerRequestInput {
 }
 
 /**
- * Result shape every backend returns from `requestManagerDecision`. Identical
- * to the OpenRouter manager's existing OpenRouterManagerResult so run-store
- * doesn't need to branch on backend after the call. The `decision` is the
- * canonical Codara structured output; non-OpenRouter backends synthesize a
- * decision (typically status=complete + chatReply for Talk mode, or a parsed
- * MCP-tool-call payload for Execute mode).
+ * Result shape every backend returns from `requestManagerDecision`. Uniform
+ * across backends so run-store doesn't need to branch on backend after the
+ * call. The `decision` is the canonical Codara structured output, which every
+ * CLI backend synthesizes (typically status=complete + chatReply for Talk
+ * mode, or a parsed MCP-tool-call payload for Execute mode).
  */
 export interface ManagerCallResult {
   decision: SparkManagerDecision;
@@ -118,9 +116,9 @@ export interface ManagerCallResult {
   decisionAlreadyApplied?: boolean;
   durationMs: number;
   model: string;
-  /** Optional usage metadata. Populated for OpenRouter (priced) and for
-   *  Claude/Codex when their JSONL transcript carries token counts; left
-   *  undefined otherwise so the costs UI shows "—" instead of $0.00. */
+  /** Optional usage metadata. Populated when the backend's JSONL transcript
+   *  carries token counts; left undefined otherwise so the costs UI shows
+   *  ", " instead of $0.00. */
   costUsd?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -135,8 +133,8 @@ export interface ManagerCallResult {
    */
   newSessionUuid?: string;
   /** Free-form non-fatal status — surfaced as a system event in the run log
-   *  but doesn't block the decision. Used by the stub backends to tell the
-   *  user "claude backend is not yet wired; falling back to OpenRouter". */
+   *  but doesn't block the decision. Used by a backend to tell the user
+   *  something about the turn without failing it. */
   notice?: string;
   /**
    * The backend could NOT complete this turn (turn timeout, CLI crash,
@@ -240,13 +238,16 @@ export function isCheckpointJobCurrent(
  * manager turn in the new epoch was actually accepted by the provider. Failed
  * pre-submission attempts do not consume replay ownership, so an idempotent
  * retry still receives the retained conversation.
+ *
+ * Epoch 0 is the original conversation, no rewind happened, so the live CLI
+ * session still holds the whole dialogue and replaying it would double it up.
+ * Every backend drives a CLI session, so this applies to all of them.
  */
 export function shouldIncludeCanonicalReplay(
   run: RunState,
-  backend: ChatBackendKind,
   epoch: number,
 ): boolean {
-  if (backend === "openrouter" || epoch <= 0) return false;
+  if (epoch <= 0) return false;
   const currentCallIds = new Set(
     run.sparkCalls
       .filter((call) => (call.conversationEpoch ?? 0) === epoch)
@@ -312,29 +313,18 @@ export interface SparkAgentBackend {
  * Defaults:
  *   - backend: Pi (the bundled, subscription-only Cora harness)
  *   - model:   backend-specific default (Pi/Codex=GPT-5.6 Sol,
- *              OpenRouter from settings, Claude=opus-4-8)
+ *              Claude=opus-4-8)
  *   - mode:    execute (the original behaviour)
  *   - effort:  high for Pi, medium for explicitly selected legacy backends
  */
-export function resolveChatBackendConfig(
-  run: RunState,
-  settings: AppSettings,
-): ChatBackendConfig {
+export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
   const backend: ChatBackendKind = run.chatBackend ?? "pi";
   const mode: ChatMode = run.chatMode ?? "execute";
   const effort: AgentEffortLevel = run.chatEffort ?? (backend === "pi" ? "high" : "medium");
-  let model = run.chatModel?.trim();
-  if (!model) {
-    if (backend === "openrouter") {
-      model = settings.openRouterModel || "google/gemini-flash-latest";
-    } else if (backend === "claude") {
-      model = "claude-opus-4-8";
-    } else if (backend === "pi") {
-      model = DEFAULT_CODEX_CHAT_MODEL;
-    } else {
-      model = DEFAULT_CODEX_CHAT_MODEL;
-    }
-  }
+  // Pi and Codex both drive the Codex runtime, so they share its default model.
+  const model =
+    run.chatModel?.trim() ||
+    (backend === "claude" ? "claude-opus-5" : DEFAULT_CODEX_CHAT_MODEL);
   return {
     backend,
     model,

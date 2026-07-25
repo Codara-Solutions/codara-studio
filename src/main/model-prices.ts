@@ -1,19 +1,24 @@
-// Hardcoded OpenRouter model price table.
+// Codara's hardcoded model price reference.
 //
-// USD cost per 1,000,000 tokens for each pricing dimension. Numbers reflect
-// OpenRouter's published listed prices for the manager-model roster Codara
-// actually uses today (see `manager-profile.json` + `openrouter-manager.ts`).
-// They drift; treat this table as a starting estimate, not a billing source
-// of truth. To update:
-//   1. Visit https://openrouter.ai/models and find the model slug.
+// USD cost per 1,000,000 tokens for each pricing dimension, covering the
+// manager + worker model roster Codara actually runs today (see
+// `manager-profile.json` and the Pi/CLI runtime catalogs). This is a local
+// lookup table: no network call, no API key, no provider account — it exists
+// so the Costs tab can put a number next to a call. Vendor prices drift;
+// treat this table as a starting estimate, not a billing source of truth.
+// To update:
+//   1. Look the model up on its vendor's pricing page, or on the public
+//      aggregator at https://openrouter.ai/models (a convenient cross-vendor
+//      citation — Codara does not call it).
 //   2. Replace the {input,output,cacheRead} values below.
 //   3. Add new entries when a worker/manager model is introduced.
 // Unknown models default to zero cost — the call is still tracked (token
 // counts populate the SparkCall record) so we never silently lose data.
 //
-// `cacheRead` covers Anthropic-style prompt-cache hits. OpenRouter normalizes
-// the field name; we read it as `cache_read_input_tokens` (the Anthropic
-// shape) and `cache_discount` (their summarized rebate field) when present.
+// `cacheRead` covers Anthropic-style prompt-cache hits, reported as
+// `cache_read_input_tokens` (the Anthropic shape) or
+// `prompt_tokens_details.cached_tokens` (the OpenAI shape) depending on which
+// provider produced the usage block.
 
 import type { WorkerRuntime } from "@shared/types";
 
@@ -31,10 +36,16 @@ export interface ModelPrice {
   cacheRead?: number;
 }
 
-// Source: https://openrouter.ai/models (snapshotted 2026-07). Update when a
-// vendor changes prices or Codara starts using a new model.
+// Keyed on `provider/model` slugs (the vendor-prefixed form every runtime in
+// Codara can be normalized to). Snapshotted 2026-07 against vendor list prices
+// — update when a vendor changes prices or Codara starts using a new model.
 export const MODEL_PRICES: Record<string, ModelPrice> = {
   // Anthropic — Claude 4.x family.
+  // Opus 5 is the current standard-tier Claude worker. Priced at the Opus list
+  // rate; refresh from the vendor if that changes.
+  "anthropic/claude-opus-5": { input: 15, output: 75, cacheRead: 1.5 },
+  // Retained so historical runs on the older id still price instead of
+  // silently costing zero.
   "anthropic/claude-opus-4-8": { input: 15, output: 75, cacheRead: 1.5 },
   "anthropic/claude-opus-4-7": { input: 15, output: 75, cacheRead: 1.5 },
   "anthropic/claude-opus-4": { input: 15, output: 75, cacheRead: 1.5 },
@@ -72,10 +83,11 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "z-ai/glm-4.7:nitro": { input: 0.5, output: 1.5 },
 };
 
-// Shape of the OpenRouter `response.usage` object — we accept several common
-// field names because OpenRouter normalizes upstream provider keys at the
-// router and the exact spelling drifts (input_tokens vs prompt_tokens, etc.).
-export interface OpenRouterUsage {
+// Shape of a provider `response.usage` block. We accept several common field
+// names because every provider spells them differently (input_tokens vs
+// prompt_tokens, cache_read_input_tokens vs prompt_tokens_details.cached_tokens)
+// and callers hand us whatever their transport produced.
+export interface ModelUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   input_tokens?: number;
@@ -96,21 +108,21 @@ export interface PricedCallOutcome {
 }
 
 /**
- * Price a single OpenRouter completion. Returns zeroed cost (but valid token
+ * Price a single model completion. Returns zeroed cost (but valid token
  * counts) when the model isn't in the table or the response carried no usage
  * block. Never throws — pricing must not break a working manager call.
  */
 export function priceCall(input: {
   model: string;
-  usage: OpenRouterUsage | null | undefined;
+  usage: ModelUsage | null | undefined;
 }): PricedCallOutcome {
   const usage = input.usage ?? {};
   const inputTokens = numberOr(usage.input_tokens, numberOr(usage.prompt_tokens, 0));
   const outputTokens = numberOr(usage.output_tokens, numberOr(usage.completion_tokens, 0));
-  // OpenRouter exposes Anthropic's cache-read counter directly when available,
-  // and OpenAI's `prompt_tokens_details.cached_tokens` for OpenAI-family
-  // models. Prefer whichever the response actually carried; default undefined
-  // so we don't fabricate a zero on providers that don't bill caching.
+  // Anthropic-family responses carry the cache-read counter directly;
+  // OpenAI-family ones report `prompt_tokens_details.cached_tokens`. Prefer
+  // whichever the response actually carried; default undefined so we don't
+  // fabricate a zero on providers that don't bill caching.
   const cacheReadTokens = pickCacheReadTokens(usage);
 
   const price = MODEL_PRICES[normalizeModelKey(input.model)];
@@ -154,18 +166,18 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function pickCacheReadTokens(usage: OpenRouterUsage): number | undefined {
+function pickCacheReadTokens(usage: ModelUsage): number | undefined {
   if (typeof usage.cache_read_input_tokens === "number") return usage.cache_read_input_tokens;
   const cached = usage.prompt_tokens_details?.cached_tokens;
   if (typeof cached === "number") return cached;
   return undefined;
 }
 
-// OpenRouter accepts model ids with optional variant suffixes (`:nitro`,
-// `:floor`, `@max`, etc.). The price is keyed off the base slug for most
-// variants — strip `@<effort>` first because that's a Codara-internal marker.
-// `:nitro` is route-specific and we *do* want to look it up specifically when
-// listed in the table, so try the exact id first before falling back.
+// Model ids reach us with optional variant suffixes (`:nitro`, `:floor`,
+// `@max`, etc.). The price is keyed off the base slug for most variants —
+// strip `@<effort>` first because that's a Codara-internal marker. `:nitro`
+// and friends are route-specific and we *do* want to look them up specifically
+// when listed in the table, so try the exact id first before falling back.
 function normalizeModelKey(model: string): string {
   const trimmed = model.trim();
   if (MODEL_PRICES[trimmed]) return trimmed;
@@ -176,10 +188,10 @@ function normalizeModelKey(model: string): string {
 }
 
 // Map a worker runtime (+ optional model hint) to a MODEL_PRICES key. Workers
-// run inside the Claude Code / Codex CLIs, so we never see a clean OpenRouter
-// slug for them — only a runtime tag and, sometimes, a Codara-internal model
-// hint like `claude-sonnet-4-6@medium`. This bridges that gap by reconstructing
-// the provider-prefixed slug the price table is keyed on.
+// run inside the Claude Code / Codex CLIs, so we never see a clean
+// vendor-prefixed slug for them — only a runtime tag and, sometimes, a
+// Codara-internal model hint like `claude-sonnet-4-6@medium`. This bridges that
+// gap by reconstructing the provider-prefixed slug the price table is keyed on.
 //
 //   claude -> `anthropic/<base>` (base defaults to 'claude-opus-4-8')
 //   codex  -> `openai/<base>`    (base defaults to 'gpt-5.6-sol')
@@ -197,7 +209,7 @@ export function priceKeyForWorker(
   let defaultBase: string;
   if (runtime === "claude") {
     provider = "anthropic";
-    defaultBase = "claude-opus-4-8";
+    defaultBase = "claude-opus-5";
   } else if (runtime === "codex") {
     provider = "openai";
     defaultBase = "gpt-5.6-sol";
@@ -207,7 +219,7 @@ export function priceKeyForWorker(
   }
 
   // run-store stores hints like 'claude-sonnet-4-6@medium'; the `@effort`
-  // suffix is a Codara-internal marker, not part of any OpenRouter slug.
+  // suffix is a Codara-internal marker, not part of any vendor model id.
   const base = (modelHint ?? "").trim().replace(/@.+$/, "") || defaultBase;
 
   const key = `${provider}/${base}`;
@@ -223,8 +235,8 @@ export function priceKeyForWorker(
 //
 // COARSE ESTIMATE — NOT A BILLING SOURCE. Worker token usage isn't captured
 // live (the work happens inside the Claude Code / Codex CLIs, out of band of
-// the OpenRouter manager loop), so unless a `usage` block is handed in we can
-// only multiply the table rate by caller-supplied token *guesses*. Treat the
+// the manager loop), so unless a `usage` block is handed in we can only
+// multiply the table rate by caller-supplied token *guesses*. Treat the
 // result the same way the rest of this file treats its prices: a directional
 // number for the UI, drifting and approximate, never a ledger entry.
 //
@@ -236,7 +248,7 @@ export function priceKeyForWorker(
 export function estimateWorkerCostUsd(input: {
   runtime: WorkerRuntime;
   modelHint?: string;
-  usage?: OpenRouterUsage | null;
+  usage?: ModelUsage | null;
   estimatedInputTokens?: number;
   estimatedOutputTokens?: number;
 }): number {

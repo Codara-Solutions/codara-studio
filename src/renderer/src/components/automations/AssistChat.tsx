@@ -277,7 +277,7 @@ export default function AssistChat({
   }, [selectRun]);
 
   // The architect drives the spark_*_automation MCP tools, which only the
-  // Claude Code / Codex CLI backends carry. OpenRouter-only setups get a
+  // Claude Code / Codex CLI backends carry. Setups without either CLI get a
   // heads-up here (the backend itself also short-circuits with a chat note).
   // Empty diagnostics = not loaded yet — stay quiet rather than flash a
   // false warning.
@@ -394,7 +394,7 @@ export default function AssistChat({
         >
           <span className="spark-badge is-danger">CLI needed</span>
           <span>
-            The loom architect needs Claude Code or Codex — the OpenRouter backend can't manage
+            The loom architect needs Claude Code or Codex, no other backend can manage
             automations. Install one, then pick it in the model chip below.
           </span>
         </div>

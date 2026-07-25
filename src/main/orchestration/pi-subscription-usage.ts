@@ -21,6 +21,11 @@
 // Shapes are those of the vendor endpoints as of 2026-07:
 //   Anthropic  GET https://api.anthropic.com/api/oauth/usage
 //              -> { five_hour, seven_day, seven_day_opus } each { utilization, resets_at }
+//                 plus limits: [{ kind, percent, resets_at, scope: { model } }]
+//, the per-model weekly caps (Fable, Sonnet, …). These
+//                 supersede seven_day_opus; the response also carries
+//                 cinder_cove and extra_usage, which are CREDIT balances, not
+//                 rate limits, and are deliberately not shown as windows.
 //   OpenAI     GET https://chatgpt.com/backend-api/wham/usage
 //              -> { plan_type, limit_reached, rate_limit: { primary_window, secondary_window },
 //                   code_review_rate_limit: { primary_window } }
@@ -210,6 +215,56 @@ async function fetchJsonRecord(
   return { ok: true, data: record };
 }
 
+/**
+ * Per-model weekly windows from the Anthropic usage endpoint's `limits[]`.
+ *
+ * This is where a Pro/Max plan reports its Fable cap, the limit that actually
+ * binds first when Cora routes premium work, and the one the title-bar pill
+ * should reflect once it is the tightest window.
+ *
+ * Only `weekly_scoped` entries that name a model are taken: the same array also
+ * carries surface-scoped entries, which are a different thing entirely.
+ */
+export function modelScopedWindows(value: unknown): PiUsageWindow[] {
+  if (!Array.isArray(value)) return [];
+  const windows: PiUsageWindow[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const record = recordValue(entry);
+    if (!record || stringValue(record.kind) !== "weekly_scoped") continue;
+    const scope = recordValue(record.scope);
+    const model = recordValue(scope?.model);
+    const name = stringValue(model?.display_name)?.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const usedPercent = percentValue(record.percent);
+    const resetsAt = resetsAtValue(record.resets_at);
+    windows.push({
+      id: `limit_${key}`,
+      label: `${name} 7-day`,
+      usedPercent,
+      remainingPercent: remainingPercent(usedPercent),
+      ...(resetsAt ? { resetsAt } : {}),
+      ...(formatResetTime(resetsAt) ? { resetsIn: formatResetTime(resetsAt) } : {}),
+    });
+  }
+  return windows;
+}
+
+/**
+ * `resets_at` is an ISO string on the top-level windows but can arrive as epoch
+ * SECONDS inside limits[]. Reading it as a string only would silently drop the
+ * countdown, the row would render with no reset time and look broken.
+ */
+export function resetsAtValue(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value * 1000).toISOString();
+  }
+  return stringValue(value);
+}
+
 function anthropicWindow(id: string, label: string, value: unknown): PiUsageWindow | null {
   const record = recordValue(value);
   if (!record) return null;
@@ -304,10 +359,27 @@ async function anthropicUsage(checkedAt: string): Promise<PiUsageProvider> {
     }
     return problem("anthropic", checkedAt, "error", `Claude usage check failed (HTTP ${result.status}).`);
   }
+  // Per-model weekly caps (Fable, Sonnet, …) arrive in a `limits[]` array
+  // rather than as top-level keys, which is why they were invisible here: the
+  // parser only ever read three fixed fields. Each entry carries its own
+  // percent, reset time, and the model's display name straight from the
+  // server, so a new tier appears without a code change.
+  const modelWindows = modelScopedWindows(result.data.limits);
   const windows = [
     anthropicWindow("five_hour", "5-hour", result.data.five_hour),
     anthropicWindow("seven_day", "7-day", result.data.seven_day),
-    anthropicWindow("seven_day_opus", "Opus 7-day", result.data.seven_day_opus),
+    // Legacy premium-tier key, superseded by the limits[] entries above. Kept
+    // only when the server sends no model-scoped windows, so a plan that still
+    // reports the old shape keeps its premium row, and one that reports both
+    // never renders two bars for the same quota.
+    ...(modelWindows.length === 0
+      ? [anthropicWindow("seven_day_opus", "Opus 7-day", result.data.seven_day_opus)]
+      : []),
+    ...modelWindows,
+    // Deliberately NOT mapped: `cinder_cove` is a one-off credit grant and
+    // `extra_usage` is a credit balance. Both carry a `utilization` and would
+    // pass a naive "looks like a window" test, but neither is a rate limit and
+    // showing them as one would misreport how much headroom is left.
   ].filter((window): window is PiUsageWindow => window !== null);
   return {
     provider: "anthropic",

@@ -1,22 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AgentRuntimeDiagnostic, ChatBackendKind } from "@shared/types";
 
-// One pickable engine for the "Run plan" / "Smart Merge" pickers. `backend`
-// is explicit for Pi/CLI routes and undefined only for the legacy API entry.
-// A glyph keeps the rows recognizable at a glance,
-// matching the composer's model picker vocabulary.
+// One pickable engine for the "Run plan" / "Smart Merge" pickers. Every row
+// names the backend it dispatches to. A glyph keeps the rows recognizable at
+// a glance, matching the composer's model picker vocabulary.
 export interface EngineOption {
-  key: "spark" | ChatBackendKind;
-  backend?: ChatBackendKind;
+  key: ChatBackendKind;
+  backend: ChatBackendKind;
   label: string;
   glyph: string;
 }
 
-// The built-in OpenRouter manager. Demoted to LAST and labeled "API": Pi is
-// the primary Cora engine; the API manager remains for
-// users who explicitly want it (its key stays "spark" so existing callers and
-// persisted picks keep working).
-const SPARK_OPTION: EngineOption = { key: "spark", label: "API", glyph: "✦" };
 const PI_OPTION: EngineOption = { key: "pi", backend: "pi", label: "Cora · Pi", glyph: "✦" };
 
 function isAvailable(
@@ -37,8 +31,8 @@ function labelFor(
   return diagnostics.find((d) => d.kind === kind)?.label ?? fallback;
 }
 
-// Build the visible engine list from runtime diagnostics. Pi always leads,
-// native Claude/Codex follow when installed, and the API manager stays last.
+// Build the visible engine list from runtime diagnostics. Pi always leads and
+// native Claude/Codex follow when their CLI is installed.
 export function buildEngineOptions(diagnostics: AgentRuntimeDiagnostic[]): EngineOption[] {
   const options: EngineOption[] = [PI_OPTION];
   if (isAvailable(diagnostics, "claude")) {
@@ -57,7 +51,6 @@ export function buildEngineOptions(diagnostics: AgentRuntimeDiagnostic[]): Engin
       glyph: "◆",
     });
   }
-  options.push(SPARK_OPTION);
   return options;
 }
 
@@ -65,8 +58,8 @@ export function buildEngineOptions(diagnostics: AgentRuntimeDiagnostic[]): Engin
 // no runtimes-changed event to subscribe to, so a single fetch matches the
 // composer's approach; agents.runtimes() is cached in the main process, so the
 // duplicate fetch from FileTree + CommitComposer is cheap. Before the fetch
-// resolves, Pi and API are already available, then the native CLI engines fill
-// in — which is fine since menus open well after app start.
+// resolves, Pi is already available, then the native CLI engines fill in , 
+// which is fine since menus open well after app start.
 export function useEngineOptions(): EngineOption[] {
   const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[]>([]);
   useEffect(() => {

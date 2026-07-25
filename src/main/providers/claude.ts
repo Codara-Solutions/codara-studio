@@ -46,8 +46,8 @@ const CLAUDE_MODELS: AgentRuntimeModel[] = [
     tier: "top",
   },
   {
-    id: "claude-opus-4-8",
-    label: "Opus 4.8",
+    id: "claude-opus-5",
+    label: "Opus 5",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isDefault: true,
     tier: "top",

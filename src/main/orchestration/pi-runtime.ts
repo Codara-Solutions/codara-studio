@@ -80,7 +80,7 @@ const DEFAULT_MODELS: Record<PiSubscriptionProvider, string> = {
   // Never make the premium tier an implicit fallback. Callers that passed the
   // user's explicit Fable selection keep it; missing model choices land on
   // Opus so the Settings gate cannot be bypassed by a provider default.
-  anthropic: "claude-opus-4-8",
+  anthropic: "claude-opus-5",
   "openai-codex": "gpt-5.6-sol",
 };
 

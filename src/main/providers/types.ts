@@ -84,7 +84,7 @@ export interface CliProvider {
   /**
    * Build the CLI argv for a brand-new session. Returns the argv tail to
    * pass after the resolved binary path — e.g. for Claude:
-   *   ["--dangerously-skip-permissions", "--model", "claude-opus-4-8", "--effort", "high"]
+   *   ["--dangerously-skip-permissions", "--model", "claude-opus-5", "--effort", "high"]
    * The caller is responsible for choosing how to dispatch the binary
    * (direct spawn, pwsh, etc.).
    */

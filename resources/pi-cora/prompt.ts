@@ -58,7 +58,12 @@ Shared operating contract:
   left-to-right in stages, cluster related cards inside group nodes instead of
   wiring everything with edges, keep titles and bodies terse, and label only
   the edges whose meaning is not obvious.
-- Be explicit about what was actually inspected, changed, delegated, and verified.`;
+- Be explicit about what was actually inspected, changed, delegated, and verified.
+- PUNCTUATION: never write an em dash or an en dash. Not in your replies to the
+  user, not in worker briefs, not in whiteboard cards, not in code comments or
+  file contents. Use a comma, a colon, parentheses, or a second sentence
+  instead. This is absolute: do not emit the character even when the text you
+  were given uses it.`;
 
   if (mode === "talk") {
     return `${shared}

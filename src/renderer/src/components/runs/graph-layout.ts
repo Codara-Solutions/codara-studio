@@ -3,14 +3,15 @@
  *
  * One pure function turns a run's ordered steps + worker rows into absolute
  * box geometry: the SPARK origin and a straight left-to-right spine running
- * SPARK → step → step → COMPLETE, with each step's parallel workers orbiting
- * it as satellites — alternating above and below the spine to the step's
- * right, outer lanes eased back so the fan wraps the step like a bracket.
- * A worker connects only to its own step (one branch per agent); the spine
- * itself always links a step to its left and right neighbours, threading the
- * clear channel the orbit leaves around the centreline. Nodes are placed
- * absolutely and the wire layer draws from these same boxes, so the graph
- * reads as one connected object.
+ * SPARK → step → step → COMPLETE, with each step's workers hanging *beneath*
+ * it like tentacles, a rank centred under the step, the outermost drooping
+ * furthest so the fan curves instead of sitting as a flat row. The shape is
+ * the org chart: Cora orchestrates along the spine, and the teammates it
+ * delegates to hang off the step they belong to. A worker connects only to
+ * its own step (one branch per agent, leaving the step's bottom edge and
+ * entering the worker's top edge); the spine runs clear above the whole fan.
+ * Nodes are placed absolutely and the wire layer draws from these same boxes,
+ * so the graph reads as one connected object.
  */
 import type { StepState } from "@shared/types";
 import type { AgentRow } from "./run-format";
@@ -53,13 +54,16 @@ export interface SpineWire {
   targetStepId: string | null;
 }
 
-// One branch of a step's parallel fan: it leaves the step for a worker and
-// ends there — a worker is a satellite of its step, not a stop on the spine.
-// Wire state is derived per-worker so each parallel lane lights independently.
+// One branch of a step's parallel fan: it leaves the step's bottom edge for a
+// worker's top edge and ends there, a worker is a satellite of its step, not
+// a stop on the spine. Wire state is derived per-worker so each parallel lane
+// lights independently. `axis: "v"` tells the wire layer to curve with
+// vertical tangents; the spine's horizontal wires leave it unset.
 export interface FanWire {
   id: string;
   from: Point;
   to: Point;
+  axis: "v";
   stepId: string;
   rowKey: string;
   taskId?: string;
@@ -87,22 +91,18 @@ export const END_H = 86;
 
 // ── Spacing ─────────────────────────────────────────────────────────────────
 const COL_GAP = 134; // horizontal wire run between spine columns
-const FAN_GAP = 96; // horizontal wire run for a fan-out / fan-in sweep
 const PAD_X = 56; // canvas padding before SPARK / after COMPLETE
-const WORKER_GAP = 18; // vertical gap between parallel worker lanes
 const TOP_PAD = 70;
 const BOTTOM_PAD = 80;
-// One orbit lane's vertical pitch — a worker card plus its gap.
-const LANE_UNIT = WORKER_H + WORKER_GAP;
-// How far the outermost orbit lanes pull back toward their step, and the
-// shortest horizontal wire run they may leave. Together these bend a fan of
-// 3+ workers into a bracket wrapping the step instead of a flat column.
-const ORBIT_INSET = 56;
-const MIN_FAN_RUN = 44;
-// Clear vertical corridor the orbit leaves around the spine centreline so the
-// step-to-step wire threads between the upper and lower worker cards instead
-// of clipping their edges.
-const SPINE_CHANNEL = 48;
+// The tentacle drop, clear vertical wire run from a step's bottom edge to
+// the top of its worker cards.
+const WORKER_DROP = 74;
+// Extra droop taken by the outermost tentacles, eased quadratically from the
+// centre of the fan. This is what bends a rank of workers into a curve, so a
+// batch reads as a fan hanging off the step rather than a flat table row.
+const WORKER_ARC = 30;
+// Horizontal gap between sibling worker cards in one step's fan.
+const WORKER_GAP = 26;
 
 export function boxCenter(box: Box): Point {
   return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
@@ -116,46 +116,45 @@ function leftPort(box: Box): Point {
   return { x: box.x, y: box.y + box.h / 2 };
 }
 
-// The y-offset of each worker lane's centre from the spine. Lanes alternate
-// above/below in half-lane steps offset past the spine channel: the first
-// pair straddles the corridor, later pairs orbit further out, and a lone
-// worker sits above the spine so even a single-agent step reads as
-// delegation off the line, not a widening of it.
-function laneOffsets(count: number): number[] {
-  const offsets: number[] = [];
-  for (let j = 0; j < count; j++) {
-    const magnitude = (Math.floor(j / 2) + 0.5) * LANE_UNIT + SPINE_CHANNEL / 2;
-    offsets.push(j % 2 === 0 ? -magnitude : magnitude);
-  }
-  return offsets;
+function bottomPort(box: Box): Point {
+  return { x: box.x + box.w / 2, y: box.y + box.h };
 }
 
-// How far a step's orbit rises above the spine (to the top edge of its
-// highest worker card). Above always leads below by one lane for odd counts.
-function orbitRise(count: number): number {
+function topPort(box: Box): Point {
+  return { x: box.x + box.w / 2, y: box.y };
+}
+
+// Total width a step's fan of workers occupies. A fan wider than the step
+// overhangs it evenly on both sides, which the column cursor pays for.
+function fanSpan(count: number): number {
   if (count === 0) return 0;
-  return (Math.ceil(count / 2) - 0.5) * LANE_UNIT + SPINE_CHANNEL / 2 + WORKER_H / 2;
+  return count * WORKER_W + (count - 1) * WORKER_GAP;
+}
+
+// How far the j-th tentacle of a fan of `count` droops below the shortest
+// one, 0 at the centre, WORKER_ARC at the outermost edge.
+function tentacleDroop(index: number, count: number): number {
+  const last = count - 1;
+  if (last <= 0) return 0;
+  const spread = Math.abs(index - last / 2) / (last / 2);
+  return WORKER_ARC * spread * spread;
 }
 
 /**
  * Lay the whole graph out. Steps run left to right on a straight spine; each
- * step's workers orbit it — alternating above and below the spine to the
- * step's right, outer lanes eased back toward the step — and every lane fans
- * back in to the next spine node, so a batch of three agents reads as three
- * simultaneous branches bracketing their step. The orchestration is the
- * picture. A step with no workers connects straight through.
+ * step's workers hang beneath it as a centred fan, the outermost drooping
+ * furthest, so a batch of three agents reads as three tentacles off the step
+ * they belong to. The orchestration is the picture: the spine is Cora's line
+ * of control, everything below it is delegated work. A step with no workers
+ * connects straight through.
  */
 export function computeRunGraphLayout(
   steps: StepState[],
   rowsByStep: ReadonlyMap<string, readonly AgentRow[]>,
 ): RunGraphLayout {
-  // Spine centreline — deep enough that the tallest orbit's upper lanes
-  // still clear the top padding.
-  const maxRise = steps.reduce(
-    (max, step) => Math.max(max, orbitRise((rowsByStep.get(step.id) ?? []).length)),
-    0,
-  );
-  const spineY = TOP_PAD + Math.max(STEP_H / 2, maxRise);
+  // Spine centreline. Workers hang below it now, so nothing above the steps
+  // competes for room, the fan's depth is paid for in `height` instead.
+  const spineY = TOP_PAD + STEP_H / 2;
 
   const sparkBox: Box = {
     x: PAD_X,
@@ -168,37 +167,31 @@ export function computeRunGraphLayout(
   let cursorX = sparkBox.x + sparkBox.w + COL_GAP;
 
   steps.forEach((step, i) => {
+    const rows = rowsByStep.get(step.id) ?? [];
+    // A fan wider than its step overhangs both sides evenly. Push the step in
+    // by the overhang so the leftmost worker still clears the previous
+    // column, and pay for the right overhang when advancing the cursor.
+    const overhang = Math.max(0, (fanSpan(rows.length) - STEP_W) / 2);
     const box: Box = {
-      x: cursorX,
+      x: cursorX + overhang,
       y: spineY - STEP_H / 2,
       w: STEP_W,
       h: STEP_H,
     };
-    const rows = rowsByStep.get(step.id) ?? [];
-    const offsets = laneOffsets(rows.length);
-    const maxOffset = offsets.reduce((max, offset) => Math.max(max, Math.abs(offset)), 0);
-    const lanesX = box.x + box.w + FAN_GAP;
-    const workers: WorkerLayout[] = rows.map((row, j) => {
-      const offsetY = offsets[j];
-      // Elliptical inset: the further a lane orbits from the spine, the more
-      // it eases back toward the step — the fan wraps rather than towers.
-      const ratio = maxOffset > 0 ? Math.abs(offsetY) / maxOffset : 0;
-      const laneX = Math.max(box.x + box.w + MIN_FAN_RUN, lanesX - ORBIT_INSET * ratio * ratio);
-      return {
-        rowKey: row.task?.id ?? `${step.id}:agent:${j}`,
-        taskId: row.task?.id,
-        agentIndex: j,
-        box: {
-          x: laneX,
-          y: spineY + offsetY - WORKER_H / 2,
-          w: WORKER_W,
-          h: WORKER_H,
-        },
-      };
-    });
+    const fanLeft = box.x + box.w / 2 - fanSpan(rows.length) / 2;
+    const workers: WorkerLayout[] = rows.map((row, j) => ({
+      rowKey: row.task?.id ?? `${step.id}:agent:${j}`,
+      taskId: row.task?.id,
+      agentIndex: j,
+      box: {
+        x: fanLeft + j * (WORKER_W + WORKER_GAP),
+        y: box.y + box.h + WORKER_DROP + tentacleDroop(j, rows.length),
+        w: WORKER_W,
+        h: WORKER_H,
+      },
+    }));
     stepLayouts.push({ stepId: step.id, index: i + 1, box, workers });
-    const fanRight = workers.reduce((max, worker) => Math.max(max, worker.box.x + worker.box.w), 0);
-    cursorX = rows.length > 0 ? fanRight + FAN_GAP : box.x + box.w + COL_GAP;
+    cursorX = box.x + box.w + overhang + COL_GAP;
   });
 
   const endBox: Box = {
@@ -245,8 +238,9 @@ export function computeRunGraphLayout(
       for (const worker of layout.workers) {
         fanWires.push({
           id: `out:${layout.stepId}:${worker.rowKey}`,
-          from: rightPort(layout.box),
-          to: leftPort(worker.box),
+          from: bottomPort(layout.box),
+          to: topPort(worker.box),
+          axis: "v",
           stepId: layout.stepId,
           rowKey: worker.rowKey,
           taskId: worker.taskId,
@@ -255,14 +249,18 @@ export function computeRunGraphLayout(
     });
   }
 
-  // Content extent — the lowest point is whichever orbit's below-spine lane
-  // (or the bare step / terminal) reaches deepest. Lanes alternate sides, so
-  // every worker box is checked, not just the last one.
+  // Content extent. The deepest point is whichever tentacle droops furthest
+  // (outer ones hang lower, so every worker box is checked, not just the
+  // last). The rightmost is normally COMPLETE, but a wide fan under the final
+  // step can reach past it, the canvas fits to these numbers, so anything
+  // missed here would be silently cropped out of the view.
   let maxBottom = Math.max(sparkBox.y + sparkBox.h, endBox.y + endBox.h);
+  let maxRight = endBox.x + endBox.w;
   for (const layout of stepLayouts) {
     let bottom = layout.box.y + layout.box.h;
     for (const worker of layout.workers) {
       bottom = Math.max(bottom, worker.box.y + worker.box.h);
+      maxRight = Math.max(maxRight, worker.box.x + worker.box.w);
     }
     if (bottom > maxBottom) maxBottom = bottom;
   }
@@ -273,7 +271,7 @@ export function computeRunGraphLayout(
     endBox,
     spineWires,
     fanWires,
-    width: endBox.x + endBox.w + PAD_X,
+    width: maxRight + PAD_X,
     height: maxBottom + BOTTOM_PAD,
   };
 }
