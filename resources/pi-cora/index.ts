@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import {
   buildCoraPiSystemPrompt,
   type CoraPiExecutionPolicy,
@@ -57,12 +58,13 @@ function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string 
 
 export default function codaraPiExtension(pi: ExtensionAPI) {
   const bridge = loadBridge();
+  let mcp: McpBridgeHandle | null = null;
 
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}
 
 ${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy())}
-`,
+${mcp?.promptSuffix() ?? ""}`,
   }));
 
   for (const tool of bridge.listTools()) {
@@ -88,5 +90,17 @@ ${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy())}
         };
       },
     });
+  }
+
+  // An unreachable or misconfigured MCP roster must never cost Cora her studio
+  // tools or her system contract, so registration is isolated from the rest of
+  // the extension.
+  const mcpConfig = activeMcpBridgeConfig();
+  if (mcpConfig) {
+    try {
+      mcp = registerMcpBridge(pi, mcpConfig);
+    } catch {
+      mcp = null;
+    }
   }
 }

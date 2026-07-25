@@ -7,6 +7,7 @@ import {
 } from "./claude-backend";
 import {
   archiveCodaraPiFrontierRevision,
+  cleanupPiMcpBridgeConfig,
   createCodaraPiLaunchPlan,
   promoteCodaraPiFrontierAdmission,
 } from "./pi-runtime-electron";
@@ -143,6 +144,7 @@ async function stopSession(runId: string, expected?: PiBackendSession): Promise<
   session.settleActiveTurn?.();
   session.settleActiveTurn = null;
   await session.client.stop().catch(() => undefined);
+  await cleanupPiMcpBridgeConfig(session.plan).catch(() => undefined);
 }
 
 async function ensureSession(

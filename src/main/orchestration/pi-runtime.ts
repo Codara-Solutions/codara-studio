@@ -49,6 +49,13 @@ export interface PiManagerLaunchOptions {
   cwd: string;
   bridgePath: string;
   extensionPaths: readonly string[];
+  /** Mode-600 JSON roster of user MCP servers assigned to this session's scope.
+   * Both this and mcpSdkDir must be present or the bridge stays dormant. */
+  mcpConfigPath?: string;
+  /** Directory holding the MCP SDK's CJS client build. The extension requires
+   * it by absolute path because a packaged extension cannot resolve bare
+   * specifiers from inside app.asar. */
+  mcpSdkDir?: string;
   frontierManifestPath?: string;
   frontierManifestSha256?: string;
   frontierAdmissionArtifactPath?: string;
@@ -74,6 +81,9 @@ export interface PiManagerLaunchPlan {
   frontierManifestPath: string | null;
   frontierManifestSha256: string | null;
   frontierAdmissionArtifactSha256: string | null;
+  /** Set only when a roster was handed over, so the caller can delete the file
+   * when the session ends. */
+  mcpConfigPath: string | null;
 }
 
 const DEFAULT_MODELS: Record<PiSubscriptionProvider, string> = {
@@ -274,6 +284,13 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   env.CODARA_PI_CHAT_MODE = options.chatMode ?? options.mode;
   env.CODARA_PI_EXECUTION_POLICY = executionPolicy;
   env.CODARA_PI_BRIDGE_PATH = resolve(options.bridgePath);
+  // Both names or neither: a half-configured bridge would leave the extension
+  // unable to load the SDK and would surface as a session-start failure.
+  const mcpEnabled = Boolean(options.mcpConfigPath && options.mcpSdkDir);
+  if (mcpEnabled) {
+    env.CODARA_PI_MCP_CONFIG = resolve(options.mcpConfigPath!);
+    env.CODARA_PI_MCP_SDK_DIR = resolve(options.mcpSdkDir!);
+  }
   if (frontierGateEnabled) {
     env.CODARA_PI_FRONTIER_MANIFEST = resolve(options.frontierManifestPath!);
     env.CODARA_PI_FRONTIER_MANIFEST_SHA256 = options.frontierManifestSha256!;
@@ -299,5 +316,6 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     frontierAdmissionArtifactSha256: frontierGateEnabled
       ? options.frontierAdmissionArtifactSha256 ?? null
       : null,
+    mcpConfigPath: mcpEnabled ? resolve(options.mcpConfigPath!) : null,
   };
 }

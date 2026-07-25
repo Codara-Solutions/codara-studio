@@ -2,7 +2,9 @@
 // fatal-error detection.
 //
 // waitForAgentTui watches the pty for the CLI's TUI banner (or a hard launch
-// failure) after the launch command fires. waitForCodexInputReady holds until
+// failure) after the launch command fires. watchAgentCliExit watches the same
+// stream for the shell-integration marker that says the launched CLI exited
+// while its host shell stayed alive. waitForCodexInputReady holds until
 // Codex has finished MCP-server startup so a bracketed paste is not dropped.
 // pasteAndSubmit sends the prompt as one bracketed paste and confirms the turn
 // started. detectFatalWorkerRuntimeError scans a pty ring buffer for runtime
@@ -128,6 +130,57 @@ export async function waitForAgentTui(
       finish({ ok: false, reason: "no TUI banner observed", timeoutMs });
     }, timeoutMs);
   });
+}
+
+// A CLI worker's pty is a plain interactive shell and the agent CLI is a CHILD
+// of it, so when claude/codex dies the shell survives at its prompt and
+// pty-manager emits no exit at all. The only main-process evidence that the
+// launched CLI is gone is the shell integration's command-done marker
+// (resources/shell-integration: OSC 133;D on bash/zsh, OSC 133 + 633;D from
+// spark.ps1). Arm this BEFORE the launch command is typed and require the
+// matching pre-exec marker first, because the shell also emits a D for the
+// prompt it painted at spawn.
+//
+// Shells that never load the integration (a pane spawned with
+// SPARK_NO_SHELL_INTEGRATION=1, an unsupported shell family) emit no markers,
+// so this watcher stays silent and the 90-minute run watchdog remains the only
+// backstop for them.
+export function watchAgentCliExit(
+  attemptId: string,
+  onExit: (exitCode: number | null) => void,
+): () => void {
+  // Terminator is required so a marker split mid-chunk is carried over rather
+  // than read as a code-less exit: zsh/bash close with ST, spark.ps1 with BEL.
+  const MARKER = /\x1b\](?:133|633);([CD])(?:;(-?\d+))?(?:\x1b\\|\x07)/g;
+  let carry = "";
+  let sawStart = false;
+  let fired = false;
+  const offTap = pty.tap(attemptId, (chunk) => {
+    if (fired) return;
+    const text = carry + chunk.toString("utf8");
+    let consumed = 0;
+    MARKER.lastIndex = 0;
+    for (let m = MARKER.exec(text); m; m = MARKER.exec(text)) {
+      consumed = m.index + m[0].length;
+      if (m[1] === "C") {
+        sawStart = true;
+        continue;
+      }
+      if (!sawStart) continue;
+      fired = true;
+      offTap();
+      onExit(m[2] === undefined ? null : Number(m[2]));
+      return;
+    }
+    // Keep only the unconsumed tail so a marker split across chunks still
+    // matches and an already-handled one is never rescanned. 32 bytes covers
+    // the longest partial marker (`\x1b]633;D;<exit code>`).
+    carry = text.slice(Math.max(consumed, text.length - 32));
+  });
+  return () => {
+    fired = true;
+    offTap();
+  };
 }
 
 export async function waitForCodexInputReady(attemptId: string): Promise<void> {

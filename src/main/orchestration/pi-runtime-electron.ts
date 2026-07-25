@@ -1,14 +1,21 @@
 import { app } from "electron";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, readFile, readdir } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
 
 import { resolveBundledResourcePath } from "../bundled-resources";
 import { sparkHome } from "../spark-home";
+import { loadSettings } from "../storage";
 import { managedPiRuntimeNodeModules } from "./pi-runtime-install";
 import { writeFileAtomic } from "../fs-atomic";
+import {
+  buildPiMcpBridgeConfig,
+  normalizePiMcpServers,
+  type PiMcpAudience,
+  type PiMcpServerConfig,
+} from "./pi-mcp-config";
 import {
   admissionArtifactSha256,
   artifactFromPiFrontierAdmission,
@@ -45,6 +52,7 @@ export interface CodaraPiPaths {
   frontierExtensionPath: string;
   frontierManifestDir: string;
   frontierAdmissionCachePath: string;
+  mcpConfigDir: string;
   managedAgentDir: string;
   managedAgentSources: string[];
 }
@@ -88,6 +96,7 @@ export function codaraPiPaths(): CodaraPiPaths {
     frontierExtensionPath: resolveBundledResourcePath("pi-cora", "frontier-gate.ts"),
     frontierManifestDir: join(configDir, "frontier", "manifests"),
     frontierAdmissionCachePath: join(configDir, "frontier", "admission-cache.json"),
+    mcpConfigDir: join(configDir, "mcp"),
     managedAgentDir: join(configDir, "agents"),
     managedAgentSources: [
       resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-contract-tracer.md"),
@@ -97,6 +106,72 @@ export function codaraPiPaths(): CodaraPiPaths {
       resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-integration-auditor.md"),
     ],
   };
+}
+
+// The extension requires the SDK's CJS client build by absolute path: Pi loads
+// extensions with a jiti instance rooted at its own package, so a bare
+// specifier from a bundled extension file never reaches Codara's node_modules.
+function codaraPiMcpSdkDir(): string | null {
+  try {
+    return dirname(require.resolve("@modelcontextprotocol/sdk/client/index.js"));
+  } catch {
+    return null;
+  }
+}
+
+const MCP_CONFIG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// Sessions that were SIGKILLed never reach their cleanup, so sweep on write.
+async function sweepStalePiMcpConfigs(directory: string): Promise<void> {
+  const entries = await readdir(directory).catch(() => [] as string[]);
+  const cutoff = Date.now() - MCP_CONFIG_MAX_AGE_MS;
+  await Promise.all(entries.filter((name) => name.endsWith(".json")).map(async (name) => {
+    const file = join(directory, name);
+    const info = await stat(file).catch(() => null);
+    if (info && info.mtimeMs < cutoff) await rm(file, { force: true }).catch(() => undefined);
+  }));
+}
+
+/**
+ * Write the per-session MCP roster for one Pi scope. Returns null whenever no
+ * server is assigned, keeping the no-MCP launch byte-identical to before: the
+ * env vars stay unset and the bridge never loads the SDK.
+ */
+async function writePiMcpBridgeConfig(input: {
+  audience: PiMcpAudience;
+  sessionId: string;
+  cwd: string;
+  mcpConfigDir: string;
+}): Promise<{ mcpConfigPath: string; mcpSdkDir: string } | null> {
+  const sdkDir = codaraPiMcpSdkDir();
+  if (!sdkDir) return null;
+  let servers: PiMcpServerConfig[];
+  try {
+    const [{ listPiMcpServers }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    servers = normalizePiMcpServers(
+      listPiMcpServers({ cwd: input.cwd, scope: input.audience, settings }),
+      { cwd: input.cwd },
+    );
+  } catch {
+    // A discovery failure must never block a Pi launch; the session simply
+    // starts without third-party MCP tools.
+    return null;
+  }
+  if (servers.length === 0) return null;
+  await mkdir(input.mcpConfigDir, { recursive: true, mode: 0o700 });
+  void sweepStalePiMcpConfigs(input.mcpConfigDir);
+  const mcpConfigPath = join(input.mcpConfigDir, `${input.sessionId}.json`);
+  // Credentials live in this file because Pi's environment is stripped of every
+  // API key before launch; keep it owner-only like auth.json.
+  await writeFileAtomic(mcpConfigPath, JSON.stringify(buildPiMcpBridgeConfig(servers, { audience: input.audience })));
+  if (process.platform !== "win32") await chmod(mcpConfigPath, 0o600);
+  return { mcpConfigPath, mcpSdkDir: sdkDir };
+}
+
+/** Remove a session's roster file once its Pi process is gone. */
+export async function cleanupPiMcpBridgeConfig(plan: { mcpConfigPath: string | null }): Promise<void> {
+  if (!plan.mcpConfigPath) return;
+  await rm(plan.mcpConfigPath, { force: true }).catch(() => undefined);
 }
 
 function developmentNodeModulesRoots(): string[] {
@@ -137,10 +212,16 @@ export async function createCodaraPiLaunchPlan(
 ): Promise<PiManagerLaunchPlan> {
   const paths = codaraPiPaths();
   const frontierEnabled = options.mode === "execute" && options.executionPolicy === "frontier";
-  const [runtime, auth, frontierManifest] = await Promise.all([
+  const [runtime, auth, frontierManifest, mcp] = await Promise.all([
     resolveCodaraPiRuntime(),
     inspectPiSubscriptionAuth(paths.authFile, options.provider),
     frontierEnabled ? discoverPiFrontierVerification(options.cwd, options.contractPrompt) : Promise.resolve(null),
+    writePiMcpBridgeConfig({
+      audience: "cora",
+      sessionId: options.sessionId,
+      cwd: options.cwd,
+      mcpConfigDir: paths.mcpConfigDir,
+    }),
   ]);
   if (auth.expired && !auth.canRefresh) {
     throw new Error(`Pi provider ${options.provider} OAuth session expired and cannot refresh`);
@@ -210,6 +291,8 @@ export async function createCodaraPiLaunchPlan(
     frontierManifestSha256,
     frontierAdmissionArtifactPath,
     frontierAdmissionArtifactSha256,
+    mcpConfigPath: mcp?.mcpConfigPath,
+    mcpSdkDir: mcp?.mcpSdkDir,
     model: options.model,
     thinking: options.thinking ?? "high",
     sessionName: options.sessionName,
@@ -263,6 +346,14 @@ export async function createCodaraPiWorkerLaunchPlan(
     .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "")
     .slice(0, 200)
     .replace(/[^A-Za-z0-9]+$/g, "");
+  // Per session, not per run: parallel workers of one run must not share a
+  // roster file that another attempt is rewriting.
+  const mcp = await writePiMcpBridgeConfig({
+    audience: "worker",
+    sessionId,
+    cwd: options.cwd,
+    mcpConfigDir: paths.mcpConfigDir,
+  });
   const plan = buildPiManagerLaunchPlan({
     runtime,
     provider: options.provider,
@@ -275,6 +366,8 @@ export async function createCodaraPiWorkerLaunchPlan(
     cwd: options.cwd,
     bridgePath: paths.bridgePath,
     extensionPaths: [paths.workerExtensionPath],
+    mcpConfigPath: mcp?.mcpConfigPath,
+    mcpSdkDir: mcp?.mcpSdkDir,
     model: options.model,
     thinking: options.thinking ?? "high",
     sessionName: options.sessionName,

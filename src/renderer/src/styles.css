@@ -3013,21 +3013,15 @@ a { color: inherit; }
 }
 .agent-capability-row {
   content-visibility: auto;
-  contain-intrinsic-size: auto 62px;
-  contain: layout paint style;
-}
-.agent-capability-card,
-.agent-capability-panel {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 180px;
+  contain-intrinsic-size: auto 76px;
   contain: layout paint style;
 }
 
 /* ── Capability Center ──────────────────────────────────────────────────────
-   The Center is a small app, not a settings dump: persistent navigation at
-   left, one focused inventory at a time, and a lightweight glass overview.
-   The outer surface intentionally stays pre-blended (see the performance gate
-   above) so scrolling never re-rasterizes the entire workbench on Wayland. */
+   Two flat inventories (MCP servers, then skills) over one scroller, with the
+   session policy group closing the page. The outer surface stays pre-blended
+   (see the performance gate above) so scrolling never re-rasterizes the entire
+   workbench on Wayland. */
 .agent-capabilities-surface {
   position: relative;
 }
@@ -3038,11 +3032,8 @@ a { color: inherit; }
   z-index: 0;
   pointer-events: none;
   border-radius: inherit;
-  background:
-    linear-gradient(135deg, color-mix(in oklab, white 8%, transparent), transparent 22%),
-    radial-gradient(75% 55% at 7% 0%, color-mix(in oklab, var(--accent) 9%, transparent), transparent 72%);
   box-shadow:
-    inset 0 1px 0 color-mix(in oklab, white 17%, transparent),
+    inset 0 1px 0 color-mix(in oklab, white 15%, transparent),
     inset 0 -1px 0 color-mix(in oklab, var(--ink) 6%, transparent);
 }
 .agent-capabilities-surface > * {
@@ -3057,375 +3048,22 @@ a { color: inherit; }
   -webkit-backdrop-filter: blur(10px) saturate(1.15);
   backdrop-filter: blur(10px) saturate(1.15);
 }
-.agent-capabilities-layout {
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 222px minmax(0, 1fr);
-}
-.agent-capabilities-rail {
-  min-height: 0;
-  padding: 18px 12px 14px;
-  border-right: 1px solid var(--rule-soft);
-  background:
-    linear-gradient(180deg, color-mix(in oklab, var(--accent) 5%, transparent), transparent 38%),
-    color-mix(in oklab, var(--panel-2) 34%, transparent);
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-.agent-capabilities-rail__summary {
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  padding: 4px 7px 10px;
-}
-.agent-capabilities-rail__summary > div:last-child {
-  display: grid;
-  gap: 1px;
-}
-.agent-capabilities-rail__summary strong {
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 18px;
-  font-variant-numeric: tabular-nums;
-}
-.agent-capabilities-rail__summary span {
-  color: var(--muted);
-  font-size: 10px;
-}
-.agent-capabilities-orbit {
-  position: relative;
-  width: 38px;
-  height: 38px;
-  border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--rule-soft));
-  border-radius: 50%;
-  background: color-mix(in oklab, var(--accent) 7%, transparent);
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, white 14%, transparent),
-    0 0 24px color-mix(in oklab, var(--accent) 9%, transparent);
-}
-.agent-capabilities-orbit > span {
-  position: absolute;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--accent) 58%, transparent);
-}
-.agent-capabilities-orbit > span:nth-child(1) {
-  width: 7px;
-  height: 7px;
-  left: 15px;
-  top: 15px;
-}
-.agent-capabilities-orbit > span:nth-child(2) {
-  width: 4px;
-  height: 4px;
-  left: 7px;
-  top: 8px;
-  opacity: 0.68;
-}
-.agent-capabilities-orbit > span:nth-child(3) {
-  width: 4px;
-  height: 4px;
-  right: 6px;
-  bottom: 8px;
-  opacity: 0.46;
-}
-.agent-capabilities-nav {
-  display: grid;
-  gap: 4px;
-}
-.agent-capabilities-nav__item {
-  width: 100%;
-  min-height: 52px;
-  padding: 8px 9px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  background: transparent;
-  color: var(--muted);
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  text-align: left;
-  font: inherit;
-  cursor: default;
-  transition:
-    color var(--motion-fast) var(--ease-out),
-    background var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out),
-    transform var(--motion-fast) var(--ease-out);
-}
-.agent-capabilities-nav__item:hover {
-  color: var(--ink);
-  background: color-mix(in oklab, var(--ink) 7%, transparent);
-}
-.agent-capabilities-nav__item:active {
-  transform: translateY(1px);
-}
-.agent-capabilities-nav__item.is-active {
-  color: var(--ink);
-  border-color: color-mix(in oklab, var(--accent) 25%, var(--rule-soft));
-  background:
-    linear-gradient(105deg, color-mix(in oklab, var(--accent) 13%, transparent), transparent 80%),
-    color-mix(in oklab, var(--panel-2) 52%, transparent);
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, white 10%, transparent),
-    0 8px 24px color-mix(in oklab, var(--bg) 16%, transparent);
-}
-.agent-capabilities-nav__item > svg {
-  color: var(--accent);
-}
-.agent-capabilities-nav__copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-.agent-capabilities-nav__copy strong {
-  color: inherit;
-  font-size: 12px;
-  font-weight: 650;
-}
-.agent-capabilities-nav__copy > span {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agent-capabilities-nav__count {
-  min-width: 21px;
-  padding: 2px 5px;
-  border: 1px solid var(--rule-soft);
-  border-radius: 999px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  text-align: center;
-}
-.agent-capabilities-nav__item.is-active .agent-capabilities-nav__count {
-  border-color: color-mix(in oklab, var(--accent) 24%, var(--rule-soft));
-  color: var(--accent);
-}
-.agent-capabilities-rail__footer {
-  margin-top: auto;
-  padding: 10px 9px 2px;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.45;
-}
-.agent-capabilities-rail__pulse {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 6px;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--ok) 45%, transparent);
-}
-.agent-capabilities-view-heading {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 18px;
-}
-.agent-capabilities-view-heading h2 {
-  margin: 5px 0 0;
-  color: var(--ink);
-  font-size: 19px;
-  font-weight: 630;
-  letter-spacing: -0.015em;
-}
-.agent-capabilities-view-heading p {
-  max-width: 680px;
-  margin: 5px 0 0;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.agent-capabilities-view-heading__count {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding-bottom: 2px;
-}
-.agent-capabilities-view-heading__count strong {
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 19px;
-}
-.agent-capabilities-view-heading__count span {
-  color: var(--muted);
-  font-size: 10px;
-}
-.agent-capabilities-hero {
-  min-height: 124px;
-  padding: 18px 20px;
-  border-radius: 14px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 24px;
-  overflow: hidden;
-  background-image:
-    radial-gradient(90% 160% at 100% 0%, color-mix(in oklab, var(--accent) 15%, transparent), transparent 64%),
-    linear-gradient(120deg, color-mix(in oklab, white 5%, transparent), transparent 40%);
-}
-.agent-capabilities-hero__copy {
-  display: grid;
-  gap: 5px;
-}
-.agent-capabilities-hero__copy > strong {
-  color: var(--ink);
-  font-size: 17px;
-  font-weight: 620;
-}
-.agent-capabilities-hero__copy p {
-  max-width: 600px;
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.agent-capabilities-hero__metrics {
-  display: flex;
-  gap: 8px;
-}
-.agent-capabilities-hero__metrics > div {
-  min-width: 80px;
-  padding: 11px 12px;
-  border: 1px solid color-mix(in oklab, var(--glass-border) 72%, var(--rule-soft));
-  border-radius: 11px;
-  background: color-mix(in oklab, var(--bg) 26%, transparent);
-  box-shadow: inset 0 1px 0 color-mix(in oklab, white 9%, transparent);
-  display: grid;
-  gap: 4px;
-}
-.agent-capabilities-hero__metrics span {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.agent-capabilities-hero__metrics strong {
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 20px;
-  font-variant-numeric: tabular-nums;
-}
-.agent-capabilities-browse-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-.agent-capabilities-browse-card {
-  min-width: 0;
-  padding: 13px 14px;
-  border-radius: 12px;
-  color: var(--ink);
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  text-align: left;
-  font: inherit;
-  cursor: default;
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out),
-    transform var(--motion-fast) var(--ease-out);
-}
-.agent-capabilities-browse-card:hover {
-  border-color: color-mix(in oklab, var(--accent) 28%, var(--rule-soft));
-  background-color: color-mix(in oklab, var(--accent) 7%, var(--panel-2));
-}
-.agent-capabilities-browse-card:active {
-  transform: translateY(1px);
-}
-.agent-capabilities-browse-card__glyph {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  color: var(--accent);
-  background: color-mix(in oklab, var(--accent) 10%, transparent);
-  display: grid;
-  place-items: center;
-}
-.agent-capabilities-browse-card__copy {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-.agent-capabilities-browse-card__copy strong {
-  font-size: 12px;
-}
-.agent-capabilities-browse-card__copy span {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agent-capabilities-browse-card__meta {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
-}
-.agent-capabilities-browse-card__meta strong {
-  color: var(--ink);
-  font-size: 14px;
-}
-.agent-capabilities-browse-card__meta > span:last-child {
-  margin-left: 5px;
-  color: var(--accent);
-  font-family: var(--font-sans);
-  font-size: 14px;
-}
-.agent-capability-overview-card,
-.agent-capabilities-builtins .agent-capability-card,
-.agent-capability-panel {
-  border-radius: 12px !important;
-}
-.agent-capabilities-filter-bar {
-  position: sticky;
-  top: -20px;
-  z-index: 4;
-  margin: 0 -4px;
-  padding: 10px 4px;
-  background: color-mix(in oklab, var(--panel) 88%, transparent);
-  -webkit-backdrop-filter: blur(10px) saturate(1.12);
-  backdrop-filter: blur(10px) saturate(1.12);
+/* The list draws its own outline, so the last child never doubles it up. This
+   covers the pager and the empty state as well as a trailing row. */
+.agent-capability-list > *:last-child {
+  border-bottom: none !important;
 }
 
-@media (max-width: 900px) {
-  .agent-capabilities-layout {
-    grid-template-columns: 76px minmax(0, 1fr);
+@media (max-width: 720px) {
+  /* Row internals are inline-styled, so the stacked layout has to outrank them. */
+  .agent-capability-row {
+    grid-template-columns: minmax(0, 1fr) !important;
+    align-items: start !important;
+    gap: 10px !important;
   }
-  .agent-capabilities-rail {
-    padding-inline: 8px;
-  }
-  .agent-capabilities-rail__summary {
-    display: flex;
-    justify-content: center;
-    padding-inline: 0;
-  }
-  .agent-capabilities-rail__summary > div:last-child,
-  .agent-capabilities-nav__copy,
-  .agent-capabilities-nav__count,
-  .agent-capabilities-rail__footer {
-    display: none;
-  }
-  .agent-capabilities-nav__item {
-    min-height: 46px;
-    grid-template-columns: 1fr;
-    justify-items: center;
-  }
-  .agent-capabilities-browse-grid {
-    grid-template-columns: 1fr;
+  .agent-capability-row > *:last-child {
+    justify-content: flex-start !important;
+    flex-wrap: wrap;
   }
 }
 

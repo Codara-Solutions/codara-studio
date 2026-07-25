@@ -992,7 +992,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_spawn_workers",
     description:
-      "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via codara_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn.",
+      "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via codara_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn. Workers that produce something (including read-only research) are taskClass skeleton/feature/leaf; taskClass 'verifier' is only for a read-only re-check of an artifact an implementation worker already produced.",
     inputSchema: {
       type: "object",
       required: ["workers"],
@@ -1049,7 +1049,8 @@ const EXECUTE_TOOLS = [
               taskClass: {
                 type: "string",
                 enum: ["skeleton", "feature", "leaf", "verifier"],
-                description: "Optional task class to drive tier/pricing selection.",
+                description:
+                  "Worker role, which also drives model tier and effort. 'skeleton' = rare foundational slice later workers build on (strongest model, highest effort). 'feature' = standard implementation slice. 'leaf' = research, recon, one-shot or mechanical work against an existing contract (standard model, low effort). 'verifier' = READ-ONLY follow-up that re-checks an artifact an implementation worker already produced; it gets read-only tools and a prompt asserting an implementation just finished, so it can never research or produce a deliverable. Never use 'verifier' for first-pass work and never for every worker in a batch: an all-verifier batch with no implementation worker to check is rejected. A read-only research or investigation task is 'leaf' or 'feature', not 'verifier'.",
               },
             },
             additionalProperties: false,

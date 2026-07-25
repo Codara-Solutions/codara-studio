@@ -215,6 +215,7 @@ import type {
   AnswerRunQuestionInput,
   AppPreferences,
   AppSettings,
+  AgentMcpServerDraft,
   AppState,
   CreateEntryInput,
   AutomationDetail,
@@ -429,6 +430,40 @@ export function registerIpc(): void {
     async (_e, input: { id: string; target: "claude" | "codex" }) => {
       const { installAgentAssetToRuntime } = await getAgentSync();
       return installAgentAssetToRuntime({ id: input.id, target: input.target });
+    },
+  );
+  ipcMain.handle(
+    "agents:mcpTargets",
+    async (_e, input?: { cwd?: string | null }) => {
+      const { listMcpWriteTargets } = await getAgentSync();
+      return listMcpWriteTargets({ cwd: input?.cwd ?? null });
+    },
+  );
+  ipcMain.handle(
+    "agents:mcpDetail",
+    async (_e, input: { id: string }) => {
+      const { readMcpServerDetail } = await getAgentSync();
+      return readMcpServerDetail({ id: input.id });
+    },
+  );
+  ipcMain.handle(
+    "agents:saveMcpServer",
+    async (
+      _e,
+      input: {
+        cwd?: string | null;
+        targetId: string;
+        server: AgentMcpServerDraft;
+        replaceId?: string | null;
+      },
+    ) => {
+      const { saveMcpServer } = await getAgentSync();
+      return saveMcpServer({
+        cwd: input.cwd ?? null,
+        targetId: input.targetId,
+        server: input.server,
+        replaceId: input.replaceId ?? null,
+      });
     },
   );
   ipcMain.handle("agents:builtins", async () => {

@@ -36,6 +36,24 @@ function executionPolicyContract(policy: CoraPiExecutionPolicy): string {
   only when evidence reveals cross-cutting risk or an ambiguous contract.`;
 }
 
+// taskClass is a ROLE, not a price tier. The MCP schema is the only other place
+// this is stated to a pi manager, and reading it as a cost dial produced a
+// five-worker all-verifier research batch that could not write anything.
+const WORKER_TASK_CLASS_CONTRACT = `Worker taskClass contract:
+- skeleton: rare foundational slice that later workers build on. Strongest model,
+  highest effort, at most one per run.
+- feature: standard implementation slice. This is the default.
+- leaf: research, recon, one-shot or mechanical work against an existing
+  contract. Standard model, low effort. A read-only investigation that must
+  REPORT something is leaf, never verifier.
+- verifier: read-only follow-up that re-checks an artifact an implementation
+  worker already produced. It runs with read-only tools and a prompt that
+  asserts an implementation just finished, so it cannot research, write, or
+  deliver. Spawn one only after an implementation worker has produced the thing
+  it should check, never in the first batch of a run, and never as every worker
+  in a batch. An all-verifier batch with no implementation worker to check is
+  rejected by Codara.`;
+
 export function buildCoraPiSystemPrompt(
   mode: CoraPiMode,
   policy: CoraPiExecutionPolicy = "fast",
@@ -108,6 +126,8 @@ using orchestration tools:
 - If intent is ambiguous but a reversible read-only investigation can resolve it,
   investigate first. Ask the user only for a consequential unresolved choice.
 
+${WORKER_TASK_CLASS_CONTRACT}
+
 ${executionPolicyContract(policy)}`;
   }
 
@@ -123,6 +143,8 @@ This is Execute mode:
   before accepting them, and use a complementary verifier for high-risk changes.
 - Call codara_complete only after the requested outcome and verification evidence
   are real. Report remaining uncertainty explicitly.
+
+${WORKER_TASK_CLASS_CONTRACT}
 
 ${executionPolicyContract(policy)}`;
 }

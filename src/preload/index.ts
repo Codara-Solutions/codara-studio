@@ -12,6 +12,10 @@ import type {
   AgentAssetDeleteResult,
   AgentAssetInstallResult,
   AgentAssetInventory,
+  AgentMcpSaveResult,
+  AgentMcpServerDetail,
+  AgentMcpServerDraft,
+  AgentMcpTarget,
   AgentRuntimeDiagnostic,
   AgentSyncResult,
   SparkBuiltinActionResult,
@@ -75,6 +79,7 @@ import type {
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
+  PtyExitInfo,
   QueuedRun,
   RenameRunInput,
   ResumeRunInput,
@@ -105,7 +110,7 @@ import type {
 } from "@shared/types";
 
 type PtyDataHandler = (data: Uint8Array | string) => void;
-type PtyExitHandler = (info: { exitCode: number; signal?: number }) => void;
+type PtyExitHandler = (info: PtyExitInfo) => void;
 type HostResumeHandler = (info: {
   reason: "resume" | "unlock-screen";
   at: number;
@@ -253,6 +258,28 @@ const api = {
       ipcRenderer.invoke("agents:installAsset", { id, target }).catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:installAsset")) {
           return { ok: false, installed: [], error: "Restart Codara to enable installing to another runtime." };
+        }
+        throw err;
+      }),
+    mcpTargets: (input?: { cwd?: string | null }): Promise<AgentMcpTarget[]> =>
+      ipcRenderer.invoke("agents:mcpTargets", input ?? {}).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:mcpTargets")) return [];
+        throw err;
+      }),
+    mcpDetail: (id: string): Promise<AgentMcpServerDetail | null> =>
+      ipcRenderer.invoke("agents:mcpDetail", { id }).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:mcpDetail")) return null;
+        throw err;
+      }),
+    saveMcpServer: (input: {
+      cwd?: string | null;
+      targetId: string;
+      server: AgentMcpServerDraft;
+      replaceId?: string | null;
+    }): Promise<AgentMcpSaveResult> =>
+      ipcRenderer.invoke("agents:saveMcpServer", input).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:saveMcpServer")) {
+          return { ok: false, error: "Restart Codara to enable adding MCP servers." };
         }
         throw err;
       }),
@@ -720,8 +747,7 @@ const api = {
     },
     onExit: (id: string, handler: PtyExitHandler): (() => void) => {
       const channel = `pty:exit:${id}`;
-      const listener = (_e: Electron.IpcRendererEvent, info: { exitCode: number; signal?: number }) =>
-        handler(info);
+      const listener = (_e: Electron.IpcRendererEvent, info: PtyExitInfo) => handler(info);
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },

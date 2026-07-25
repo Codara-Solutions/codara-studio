@@ -1565,14 +1565,30 @@ async function handleOrchestratorSpawnWorkers(
     }
   }
 
-  // Hard verification-round cap: past the policy's budget, refuse to mint
-  // another verification step. The manager must either accept the work (it
-  // lands via the completed_unverified path with the existing caveats) or ask
-  // the user — more verifier rounds cannot produce new evidence.
   const workerEntries = rawWorkers.filter(
     (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
       Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
   );
+
+  // Structural shape guard, before anything is created and before the round cap
+  // can spend budget on it: an all-verifier batch on a run with no
+  // implementation worker has nothing to verify and, being read-only, cannot
+  // produce the deliverable either. Rejected rather than coerced so the manager
+  // reclassifies and rewrites the briefs (a brief written as an audit is wrong
+  // even once the class is fixed).
+  const batchRejection = runStore.evaluateSpawnBatchShape(run, workerEntries);
+  if (batchRejection) {
+    console.warn(
+      `[agent-socket] rejected ${batchRejection.verifierCount}-worker all-verifier batch on run ${runId}: ` +
+        "no implementation worker exists to verify",
+    );
+    return errorResponse(id, ERR_INVALID_PARAMS, batchRejection.message);
+  }
+
+  // Hard verification-round cap: past the policy's budget, refuse to mint
+  // another verification step. The manager must either accept the work (it
+  // lands via the completed_unverified path with the existing caveats) or ask
+  // the user, more verifier rounds cannot produce new evidence.
   let workersToCreate = workerEntries;
   const guardrailNotes: string[] = [];
   const requestedVerifiers = workerEntries.filter((worker) => worker.taskClass === "verifier");

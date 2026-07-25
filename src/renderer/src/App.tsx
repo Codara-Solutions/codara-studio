@@ -7,6 +7,7 @@ import type {
   GitFileChange,
   GitStatus,
   InAppNotificationKind,
+  PtyExitInfo,
   RunState,
   RuntimeState,
   ShellInfo,
@@ -135,6 +136,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
   agentDisabledSkillIds: [],
+  agentMcpCoraManagerIds: [],
+  agentMcpPiWorkerIds: [],
   playwrightMcpAutoInstall: true,
   autopilotSandbox: false,
 };
@@ -1754,6 +1757,14 @@ export default function App() {
             title: prior?.title,
             attemptOrdinal: prior?.attemptOrdinal,
             harness: prior?.harness,
+            // The header names the MODEL and falls back to the harness only
+            // when it has none; rebuilding the worker without it renamed every
+            // finished pane back to "Pi · Claude". runtimeState carries the
+            // finish through as well: an attempt that reached here without
+            // error ended cleanly, and "done" is what keeps a late pty exit
+            // from finding an unsettled worker to brand.
+            model: prior?.model,
+            runtimeState: "done",
             startedAt: prior?.startedAt,
           });
           return;
@@ -1781,6 +1792,10 @@ export default function App() {
         title: prior?.title,
         attemptOrdinal: prior?.attemptOrdinal,
         harness: prior?.harness,
+        // Same identity + settled-state carry as the active-workspace branch
+        // above: a hidden pane must come back named and calm, not crashed.
+        model: prior?.model,
+        runtimeState: "done",
         startedAt: prior?.startedAt,
       }));
     };
@@ -3618,7 +3633,7 @@ export default function App() {
   // a no-op for unmount cases — but we keep the seam so future "exited
   // pane → auto-close" UX can hook in here without touching every call site.
   const onTerminalPaneExit = useCallback(
-    (tabId: string, paneId: string, info?: { exitCode: number; signal?: number }) => {
+    (tabId: string, paneId: string, info?: PtyExitInfo) => {
       paneRuntimeRef.current.delete(paneId);
       if (!isAppTearingDown()) confirmedAgentExitAtRef.current.set(paneId, Date.now());
       const t = tabsRef.current;
@@ -3642,14 +3657,22 @@ export default function App() {
         t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, active: false });
       }
       if (!leaf.worker) return;
-      // D5 (error). A non-zero pty exit is a crash, not a clean finish. Keep
-      // the chip visible so the user sees "exited(N)" in red rather than the
-      // pane silently dropping its badge. Applies to manual chips (a Codara-owned
-      // attempt that crashed is surfaced through the run-store lifecycle, so we
-      // only flip its agentRunning bit below as before). Treat a non-zero code
-      // OR a terminating signal as a crash; exit code 0 is a normal teardown.
-      const crashed =
+      // Only Cora ends a worker, so a teardown Codara itself performed is never
+      // a crash: main flags those with PtyExitInfo.sanctioned (orchestration
+      // disposing a finished worker's host shell, the app-quit sweep), and app
+      // teardown is double-covered by the renderer's own flag. pty.kill() is a
+      // SIGHUP, reported as exitCode 0 + signal 1, so exit status cannot make
+      // this distinction: reading it as one is what repainted every accepted
+      // worker "crashed" the moment Cora disposed its pane.
+      const sanctioned = info?.sanctioned === true || isAppTearingDown();
+      // D5 (error). An unsanctioned non-zero pty exit is a crash, not a clean
+      // finish. Keep the chip visible so the user sees the failure in red rather
+      // than the pane silently dropping its badge. Manual chips keep the exit
+      // status heuristic: a user typing `exit` in their own agent pane is a
+      // normal quit, and only an abnormal status makes it a crash.
+      const abnormal =
         !!info && (info.exitCode !== 0 || (typeof info.signal === "number" && info.signal !== 0));
+      const crashed = abnormal && !sanctioned;
       // Manual chips (user-typed claude/codex, or AddPane menu launches) and
       // legacy chips without an explicit source have no lifecycle outside the
       // pane. Clear them outright when the PTY dies so an idle shell never keeps
@@ -3668,12 +3691,25 @@ export default function App() {
         return;
       }
       // A PTY exit is not the worker completion signal. Codara-owned panes move
-      // to "done" only when orchestration emits worker_attempt.finished. A crash
-      // still surfaces "error" on the chip so the pane doesn't read as healthy.
+      // to "done" only when orchestration emits worker_attempt.finished.
+      //
+      // A worker that already reached "done" is settled: its outcome is the run
+      // record's, and no later pty exit may repaint it, whatever the exit status
+      // says. (Cora disposes the idle host shell right after acceptance, and
+      // sweepDeadSessions synthesizes exitCode -1 for every dead shell after a
+      // wake-from-sleep: both used to land on a finished pane as "crashed".)
+      // The inverse holds too: a worker pane whose pty dies with no "done"
+      // behind it died on its own, so the chip says crashed no matter how clean
+      // the exit status looked. Only Cora ends a worker.
+      const settled =
+        leaf.worker.state === "done" ||
+        leaf.worker.runtimeState === "done" ||
+        finishedWorkerAttemptsRef.current.has(paneId);
+      const workerCrashed = !sanctioned && !settled;
       t.setLeafWorker(tabId, paneId, {
         ...leaf.worker,
         agentRunning: false,
-        ...(crashed ? { runtimeState: "error" as const } : {}),
+        ...(workerCrashed ? { runtimeState: "error" as const } : {}),
       });
     },
     [],
@@ -4806,7 +4842,7 @@ interface WorkspaceProps {
   onTerminalPaneExit: (
     tabId: string,
     paneId: string,
-    info?: { exitCode: number; signal?: number },
+    info?: PtyExitInfo,
   ) => void;
   onPreviewUrlChange: (id: string, url: string) => void;
   onPaneCwd: (tabId: string, paneId: string, cwd: string) => void;
@@ -5217,7 +5253,7 @@ const Workspace = React.memo(function Workspace({
     [onSparkOpenFile],
   );
   const handlePaneExit = useCallback(
-    (tabId: string, paneId: string, info: { exitCode: number; signal?: number }) =>
+    (tabId: string, paneId: string, info: PtyExitInfo) =>
       onTerminalPaneExit(tabId, paneId, info),
     [onTerminalPaneExit],
   );

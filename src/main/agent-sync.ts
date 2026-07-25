@@ -13,6 +13,11 @@ import type {
   AgentAssetInstallResult,
   AgentAssetInventory,
   AgentAssetInventoryItem,
+  AgentMcpSaveResult,
+  AgentMcpServerDetail,
+  AgentMcpServerDraft,
+  AgentMcpTarget,
+  AgentMcpTransport,
 } from "@shared/types";
 
 type SyncKind = "mcp" | "skill";
@@ -25,21 +30,32 @@ interface SyncSource {
   scope: SyncScope;
   path: string;
   names: string[];
+  // MCP only, and best effort: a name is discovered even when its definition
+  // cannot be parsed, so a name may be missing from this map.
+  configs?: Map<string, McpServerConfig>;
 }
 
-interface McpServerConfig {
+export interface McpServerConfig {
   name: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   url?: string;
   type?: string;
+  // Read for remote servers only. Claude/Codex sync never writes it back, it
+  // exists so the Pi bridge can authenticate a streamable-http endpoint.
+  headers?: Record<string, string>;
   enabled?: boolean;
 }
+
+/** Which Pi session role a discovered MCP server was assigned to. */
+export type PiMcpScope = "cora" | "worker";
 
 const MAX_CONFIG_BYTES = 512 * 1024;
 const MAX_SKILL_DOC_BYTES = 16 * 1024;
 const MAX_NAMES_PER_LINE = 12;
+// Keys that hold an MCP server map in a JSON config, at any nesting level.
+const MCP_MAP_KEYS = ["mcpServers", "mcp_servers"];
 const MAX_SOURCE_LINES = 8;
 const MCP_SYNC_START = "# >>> SPARK_AGENT_MCP_SYNC";
 const MCP_SYNC_END = "# <<< SPARK_AGENT_MCP_SYNC";
@@ -103,19 +119,160 @@ export function renderAgentSyncManagerContext(input: {
 
 export function listAgentAssets(input: {
   cwd?: string | null;
-  settings: Pick<AppSettings, "agentDisabledMcpIds" | "agentDisabledSkillIds">;
+  settings: Pick<
+    AppSettings,
+    "agentDisabledMcpIds" | "agentDisabledSkillIds" | "agentMcpCoraManagerIds" | "agentMcpPiWorkerIds"
+  >;
 }): AgentAssetInventory {
   const cwd = input.cwd ?? "";
+  const piScopes = {
+    cora: input.settings.agentMcpCoraManagerIds ?? [],
+    worker: input.settings.agentMcpPiWorkerIds ?? [],
+  };
   return {
     mcp: cwd
-      ? sourcesToInventory(discoverMcpSources(cwd), input.settings.agentDisabledMcpIds)
-      : sourcesToInventory(discoverMcpSources(homedir()), input.settings.agentDisabledMcpIds)
+      ? sourcesToInventory(discoverMcpSources(cwd), input.settings.agentDisabledMcpIds, piScopes)
+      : sourcesToInventory(discoverMcpSources(homedir()), input.settings.agentDisabledMcpIds, piScopes)
         .filter((item) => item.scope === "user"),
     skills: cwd
       ? sourcesToInventory(discoverSkillSources(cwd), input.settings.agentDisabledSkillIds)
       : sourcesToInventory(discoverSkillSources(homedir()), input.settings.agentDisabledSkillIds)
         .filter((item) => item.scope === "user"),
   };
+}
+
+/**
+ * Resolve the MCP servers a Pi session of the given role should connect to.
+ * Assignment is opt-in per scope (AppSettings.agentMcpCoraManagerIds /
+ * agentMcpPiWorkerIds) and still honors the session-wide disable list, so a
+ * server disabled in the Capability Center never reaches Pi even if it was
+ * assigned earlier. Discovery reuses the same config candidates Claude/Codex
+ * sync reads; nothing is written.
+ */
+export function listPiMcpServers(input: {
+  cwd?: string | null;
+  scope: PiMcpScope;
+  settings: Pick<AppSettings, "agentDisabledMcpIds" | "agentMcpCoraManagerIds" | "agentMcpPiWorkerIds">;
+}): McpServerConfig[] {
+  const assigned = new Set(
+    input.scope === "cora"
+      ? input.settings.agentMcpCoraManagerIds ?? []
+      : input.settings.agentMcpPiWorkerIds ?? [],
+  );
+  if (assigned.size === 0) return [];
+  const disabled = new Set(input.settings.agentDisabledMcpIds ?? []);
+  const sources = discoverMcpSources(input.cwd?.trim() || homedir());
+  const servers: McpServerConfig[] = [];
+  const seen = new Set<string>();
+  for (const source of sources) {
+    for (const name of source.names) {
+      const key = sessionKey("mcp", name);
+      if (!assigned.has(key) || disabled.has(key) || seen.has(key)) continue;
+      const server = readMcpServerByName(source.path, name);
+      // First readable definition wins: workspace candidates are listed before
+      // user-scope ones, matching how the runtimes themselves resolve a name.
+      if (!server || server.enabled === false) continue;
+      seen.add(key);
+      servers.push(server);
+    }
+  }
+  return servers;
+}
+
+/**
+ * Config files the Capability Center is allowed to write a user-authored MCP
+ * server into. Workspace entries come first so the add form defaults to the
+ * project, and every path is one discoverMcpSources already reads back.
+ */
+export function listMcpWriteTargets(input: { cwd?: string | null }): AgentMcpTarget[] {
+  const cwd = input.cwd?.trim() ?? "";
+  const home = homedir();
+  const targets: AgentMcpTarget[] = [];
+  if (cwd) {
+    targets.push(mcpTarget("shared", "workspace", join(cwd, ".mcp.json"), "This workspace, all agents"));
+    targets.push(mcpTarget("claude", "workspace", join(cwd, ".claude", "settings.json"), "This workspace, Claude"));
+    targets.push(mcpTarget("codex", "workspace", join(cwd, ".codex", "config.toml"), "This workspace, Codex"));
+  }
+  targets.push(mcpTarget("shared", "user", join(home, ".mcp.json"), "Every workspace, all agents"));
+  targets.push(mcpTarget("claude", "user", join(home, ".claude.json"), "Every workspace, Claude"));
+  targets.push(mcpTarget("codex", "user", join(home, ".codex", "config.toml"), "Every workspace, Codex"));
+  return targets;
+}
+
+/** Full definition behind one discovered MCP entry, for the edit form. */
+export function readMcpServerDetail(input: { id: string }): AgentMcpServerDetail | null {
+  const parsed = parseAssetId(input.id);
+  if (!parsed || parsed.kind !== "mcp") return null;
+  const server = readMcpServerByName(parsed.path, parsed.name);
+  if (!server) return null;
+  return {
+    id: input.id,
+    targetId: mcpTargetId(parsed.runtime, parsed.scope, parsed.path),
+    name: server.name,
+    // An SSE entry edits as HTTP: the form keeps the url and the save migrates
+    // it to streamable-http, which is what both runtimes read today.
+    transport: server.url ? "http" : "stdio",
+    command: server.command,
+    args: server.args,
+    env: server.env,
+    url: server.url,
+    headers: server.headers,
+  };
+}
+
+/**
+ * Create or update a user-authored MCP server. Unlike writeClaudeMcpServers,
+ * which is additive and skips an existing name, this overwrites in place so an
+ * edit sticks. When `replaceId` names an entry in a different file or under a
+ * different name, that entry is removed after the new one is written, so an
+ * edit that changes location moves rather than forks.
+ */
+export async function saveMcpServer(input: {
+  cwd?: string | null;
+  targetId: string;
+  server: AgentMcpServerDraft;
+  replaceId?: string | null;
+}): Promise<AgentMcpSaveResult> {
+  const previous = input.replaceId ? parseAssetId(input.replaceId) : null;
+  let target = listMcpWriteTargets({ cwd: input.cwd ?? null }).find((item) => item.id === input.targetId);
+  // Editing in place: an entry's own file is always a legal destination, even
+  // when discovery reads it but the add form does not offer it as a location.
+  if (!target && previous && previous.kind === "mcp") {
+    const own = mcpTargetId(previous.runtime, previous.scope, previous.path);
+    if (own === input.targetId) {
+      target = mcpTarget(previous.runtime, previous.scope, previous.path, "Current location");
+    }
+  }
+  if (!target) return { ok: false, error: "Unknown config location." };
+  const validated = validateMcpDraft(input.server);
+  if ("error" in validated) return { ok: false, error: validated.error };
+  const server = validated.server;
+  if (target.format === "toml" && server.headers) {
+    return { ok: false, error: "Codex config.toml cannot carry request headers. Save this server to a JSON config instead." };
+  }
+
+  // Editing an entry that already lives in this file: the write rewrites it
+  // where it sits, so a rename inside the file is not a move either.
+  const editingHere = Boolean(previous && previous.kind === "mcp" && previous.path === target.path);
+  const replaceName = editingHere ? previous!.name : null;
+  const replacingHere = editingHere && previous!.name === server.name;
+  if (!replacingHere && mcpNameTaken(target, server.name, replaceName)) {
+    return { ok: false, error: `'${server.name}' already exists in ${target.path}.` };
+  }
+
+  try {
+    if (target.format === "json") await upsertClaudeMcpServer(target.path, server, { replaceName });
+    else await upsertCodexMcpServer(target.path, server);
+    // A JSON rename in place already removed the old key; anything else that
+    // changed file or name still needs the old entry taken out.
+    const renamedInPlace = editingHere && target.format === "json";
+    if (previous && previous.kind === "mcp" && !replacingHere && !renamedInPlace) {
+      await deleteMcpAsset(previous);
+    }
+    return { ok: true, name: server.name, path: target.path };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 export async function deleteAgentAsset(input: { id: string }): Promise<AgentAssetDeleteResult> {
@@ -253,6 +410,35 @@ function deriveSkillDestRoot(sourceRoot: string, target: "claude" | "codex"): st
   return join(homedir(), `.${target}`, "skills");
 }
 
+/**
+ * Whether saving `name` into `target` would collide. Only the map the write
+ * lands in counts: for a JSON add that is the top-level mcpServers map, so a
+ * per-project entry nested deeper in the same file (a different scope the
+ * writer never touches) does not block the add. `replaceName` names the entry
+ * being edited in this same file, whose own map is the destination.
+ */
+function mcpNameTaken(target: AgentMcpTarget, name: string, replaceName: string | null): boolean {
+  if (target.format !== "json") return readMcpServerByName(target.path, name) !== null;
+  const text = readSmallText(target.path, MAX_CONFIG_BYTES);
+  if (!text) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Unparseable configs are refused by the writer, not here.
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const record = parsed as Record<string, unknown>;
+  const located = replaceName ? locateJsonMcpServer(record, replaceName, 0) : null;
+  const container =
+    located?.container ??
+    (record.mcpServers && typeof record.mcpServers === "object" && !Array.isArray(record.mcpServers)
+      ? record.mcpServers as Record<string, unknown>
+      : null);
+  return Boolean(container && Object.prototype.hasOwnProperty.call(container, name));
+}
+
 function readMcpServerByName(path: string, name: string): McpServerConfig | null {
   const text = readSmallText(path, MAX_CONFIG_BYTES);
   if (!text) return null;
@@ -270,28 +456,42 @@ function findJsonMcpServer(text: string, name: string): McpServerConfig | null {
   } catch {
     return null;
   }
-  const raw = findJsonMcpServerValue(parsed, name, 0);
-  if (raw === undefined) return null;
-  return normalizeMcpServer(name, raw);
+  const located = locateJsonMcpServer(parsed, name, 0);
+  if (!located) return null;
+  return normalizeMcpServer(name, located.value);
 }
 
-function findJsonMcpServerValue(value: unknown, name: string, depth: number): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 5) return undefined;
+/**
+ * The map that actually holds `name` in a JSON config, plus its value. A map on
+ * the record itself wins over one nested deeper (the per-project maps inside
+ * ~/.claude.json), so reads, edits and deletes all agree on which definition a
+ * single inventory row stands for.
+ */
+function locateJsonMcpServer(
+  value: unknown,
+  name: string,
+  depth: number,
+): { container: Record<string, unknown>; value: unknown } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 5) return null;
   const record = value as Record<string, unknown>;
-  for (const [key, child] of Object.entries(record)) {
+  for (const key of MCP_MAP_KEYS) {
+    const child = record[key];
     if (
-      (key === "mcpServers" || key === "mcp_servers") &&
       child &&
       typeof child === "object" &&
       !Array.isArray(child) &&
       Object.prototype.hasOwnProperty.call(child, name)
     ) {
-      return (child as Record<string, unknown>)[name];
+      const container = child as Record<string, unknown>;
+      return { container, value: container[name] };
     }
-    const nested = findJsonMcpServerValue(child, name, depth + 1);
-    if (nested !== undefined) return nested;
   }
-  return undefined;
+  for (const [key, child] of Object.entries(record)) {
+    if (MCP_MAP_KEYS.includes(key)) continue;
+    const nested = locateJsonMcpServer(child, name, depth + 1);
+    if (nested) return nested;
+  }
+  return null;
 }
 
 function discoverMcpSources(cwd: string): SyncSource[] {
@@ -299,16 +499,23 @@ function discoverMcpSources(cwd: string): SyncSource[] {
   for (const candidate of mcpConfigCandidates(cwd)) {
     const text = readSmallText(candidate.path, MAX_CONFIG_BYTES);
     if (!text) continue;
-    const names = candidate.path.toLowerCase().endsWith(".json")
-      ? extractJsonMcpNames(text)
-      : extractTomlMcpNames(text);
+    // Names and definitions come out of one pass: ~/.claude.json can hold
+    // hundreds of entries and a second parse per read stalls the inventory.
+    const json = candidate.path.toLowerCase().endsWith(".json") ? collectJsonMcpEntries(text) : null;
+    const names = json ? json.names : extractTomlMcpNames(text);
     if (names.length === 0) continue;
+    const configs =
+      json?.configs ??
+      new Map(
+        parseCodexTomlMcpServers(stripManagedMcpBlock(text).text).map((server) => [server.name, server]),
+      );
     sources.push({
       kind: "mcp",
       runtime: candidate.runtime,
       scope: candidate.scope,
       path: candidate.path,
       names,
+      configs,
     });
   }
   return dedupeSources(sources);
@@ -343,8 +550,11 @@ function filterSourcesForSessions(sources: SyncSource[], disabledSessionKeys: st
 function sourcesToInventory(
   sources: SyncSource[],
   disabledSessionKeys: string[],
+  piScopes?: { cora: string[]; worker: string[] },
 ): AgentAssetInventoryItem[] {
   const disabled = new Set(disabledSessionKeys);
+  const coraAssigned = new Set(piScopes?.cora ?? []);
+  const workerAssigned = new Set(piScopes?.worker ?? []);
   const items: AgentAssetInventoryItem[] = [];
   for (const source of sources) {
     // Skill compatibility/protection used to call findSkillDirs twice for
@@ -356,6 +566,7 @@ function sourcesToInventory(
       const key = sessionKey(source.kind, name);
       const skillDir = skillDirs?.get(name) ?? null;
       const compatibility = describeAssetCompatibility(source, skillDir);
+      const config = source.kind === "mcp" ? source.configs?.get(name) ?? null : null;
       items.push({
         id: assetId({ kind: source.kind, runtime: source.runtime, scope: source.scope, name, path: source.path }),
         sessionKey: key,
@@ -365,11 +576,15 @@ function sourcesToInventory(
         name,
         path: source.path,
         enabledForSessions: !disabled.has(key),
+        enabledForCoraManager: source.kind === "mcp" && coraAssigned.has(key),
+        enabledForPiWorkers: source.kind === "mcp" && workerAssigned.has(key),
         detail: source.path,
         canDelete: !isProtectedSkillSource(source, skillDir),
         compatibility: compatibility.compatibility,
         compatibilityReason: compatibility.reason,
         syncable: compatibility.syncable,
+        mcpTransport: config ? mcpTransportOf(config) : undefined,
+        mcpSummary: config ? describeMcpServer(config) : undefined,
       });
     }
   }
@@ -560,6 +775,13 @@ function normalizeMcpServer(name: string, value: unknown): McpServerConfig | nul
         .map(([k, v]) => [k, String(v)]),
     )
     : undefined;
+  const headers = record.headers && typeof record.headers === "object" && !Array.isArray(record.headers)
+    ? Object.fromEntries(
+      Object.entries(record.headers as Record<string, unknown>)
+        .filter(([, v]) => typeof v === "string")
+        .map(([k, v]) => [k, String(v)]),
+    )
+    : undefined;
   const server: McpServerConfig = {
     name: name.trim(),
     command: typeof record.command === "string" ? record.command : undefined,
@@ -567,6 +789,7 @@ function normalizeMcpServer(name: string, value: unknown): McpServerConfig | nul
     env,
     url: typeof record.url === "string" ? record.url : undefined,
     type: typeof record.type === "string" ? record.type : undefined,
+    headers,
     enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
   };
   if (!server.command && !server.url) return null;
@@ -678,6 +901,156 @@ async function writeClaudeMcpServers(
   return added;
 }
 
+function mcpTarget(
+  runtime: SyncSourceRuntime,
+  scope: SyncScope,
+  path: string,
+  label: string,
+): AgentMcpTarget {
+  return {
+    id: mcpTargetId(runtime, scope, path),
+    runtime,
+    scope,
+    path,
+    label,
+    format: path.toLowerCase().endsWith(".json") ? "json" : "toml",
+  };
+}
+
+function mcpTargetId(runtime: SyncSourceRuntime, scope: SyncScope, path: string): string {
+  return `${runtime}:${scope}:${path}`;
+}
+
+// Names are used as TOML bare-or-quoted keys, JSON object keys, and Pi tool
+// prefixes, so keep them to the charset every one of those accepts.
+const MCP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function validateMcpDraft(draft: AgentMcpServerDraft): { server: McpServerConfig } | { error: string } {
+  const name = draft.name.trim();
+  if (!name) return { error: "Name is required." };
+  if (!MCP_NAME_PATTERN.test(name)) {
+    return { error: "Name may use letters, digits, dot, underscore and hyphen, and must start with a letter or digit." };
+  }
+  if (draft.transport === "http") {
+    const url = (draft.url ?? "").trim();
+    if (!url) return { error: "URL is required for an HTTP server." };
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return { error: "URL is not a valid address." };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { error: "URL must start with http:// or https://." };
+    }
+    const headers = normalizeMcpPairs(draft.headers);
+    if ("error" in headers) return { error: `Header ${headers.error}` };
+    return { server: { name, url, type: "streamable-http", headers: headers.value } };
+  }
+  const command = (draft.command ?? "").trim();
+  if (!command) return { error: "Command is required for a stdio server." };
+  const args = (draft.args ?? []).map((arg) => arg.trim()).filter(Boolean);
+  const env = normalizeMcpPairs(draft.env);
+  if ("error" in env) return { error: `Environment variable ${env.error}` };
+  return {
+    server: { name, command, args: args.length > 0 ? args : undefined, env: env.value },
+  };
+}
+
+function normalizeMcpPairs(
+  input?: Record<string, string>,
+): { value?: Record<string, string> } | { error: string } {
+  if (!input) return { value: undefined };
+  const out: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    const key = rawKey.trim();
+    if (!key) continue;
+    if (/[\s=:]/.test(key)) return { error: `name '${key}' cannot contain spaces, '=' or ':'.` };
+    out[key] = String(rawValue ?? "").trim();
+  }
+  return { value: Object.keys(out).length > 0 ? out : undefined };
+}
+
+// Upsert, unlike writeClaudeMcpServers: an existing name is overwritten so an
+// edit takes effect. A file that exists but does not parse throws rather than
+// being replaced, so a hand-written config is never silently clobbered.
+// `replaceName` is the name being edited in this same file: its entry is
+// rewritten where it lives, including a per-project map nested inside
+// ~/.claude.json, so an edit never forks into a second top-level copy that
+// would apply to every workspace. New entries always land on the top-level map.
+async function upsertClaudeMcpServer(
+  path: string,
+  server: McpServerConfig,
+  options?: { replaceName?: string | null },
+): Promise<void> {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const value = JSON.parse(await fs.readFile(path, "utf8")) as unknown;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      parsed = value as Record<string, unknown>;
+    }
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Could not read ${path}: ${(err as Error).message}`);
+    }
+  }
+  const replaceName = options?.replaceName ?? null;
+  const located = replaceName ? locateJsonMcpServer(parsed, replaceName, 0) : null;
+  const container = located?.container ?? ensureTopLevelJsonMcpMap(parsed);
+  if (located && replaceName && replaceName !== server.name) delete located.container[replaceName];
+  container[server.name] = renderUserMcpServer(server);
+  await fs.mkdir(dirname(path), { recursive: true });
+  await fs.writeFile(path, JSON.stringify(parsed, null, 2) + "\n", "utf8");
+}
+
+function ensureTopLevelJsonMcpMap(parsed: Record<string, unknown>): Record<string, unknown> {
+  const existing =
+    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
+      ? parsed.mcpServers as Record<string, unknown>
+      : {};
+  parsed.mcpServers = existing;
+  return existing;
+}
+
+async function upsertCodexMcpServer(path: string, server: McpServerConfig): Promise<void> {
+  let existing = "";
+  try {
+    existing = await fs.readFile(path, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  const base = removeCodexMcpServerBlock(existing, server.name).trimEnd();
+  const block = renderCodexMcpServer(server).join("\n").trimStart();
+  await fs.mkdir(dirname(path), { recursive: true });
+  await fs.writeFile(path, [base, block].filter(Boolean).join("\n\n") + "\n", "utf8");
+}
+
+// renderClaudeMcpServer is shared with sync, which deliberately never copies
+// headers between runtimes. A user-authored remote server keeps them.
+function renderUserMcpServer(server: McpServerConfig): Record<string, unknown> {
+  const rendered = renderClaudeMcpServer(server);
+  if (server.url && server.headers) rendered.headers = server.headers;
+  return rendered;
+}
+
+function mcpTransportOf(server: McpServerConfig): AgentMcpTransport {
+  if (!server.url) return "stdio";
+  return server.type === "sse" ? "sse" : "http";
+}
+
+function describeMcpServer(server: McpServerConfig): string {
+  if (server.url) {
+    try {
+      const url = new URL(server.url);
+      return `${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    } catch {
+      return server.url;
+    }
+  }
+  const text = [server.command ?? "", ...(server.args ?? [])].filter(Boolean).join(" ");
+  return text.length > 72 ? `${text.slice(0, 71)}…` : text;
+}
+
 async function deleteClaudeMcpServer(path: string, name: string): Promise<void> {
   let parsed: Record<string, unknown>;
   try {
@@ -685,10 +1058,12 @@ async function deleteClaudeMcpServer(path: string, name: string): Promise<void> 
   } catch {
     return;
   }
-  if (!parsed.mcpServers || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers)) return;
-  const servers = parsed.mcpServers as Record<string, unknown>;
-  delete servers[name];
-  parsed.mcpServers = servers;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  // Removes the entry where discovery found it, which for ~/.claude.json can be
+  // a per-project map rather than the top-level one.
+  const located = locateJsonMcpServer(parsed, name, 0);
+  if (!located) return;
+  delete located.container[name];
   await fs.writeFile(path, JSON.stringify(parsed, null, 2) + "\n", "utf8");
 }
 
@@ -951,29 +1326,50 @@ function quoteTomlBareOrString(value: string): string {
   return /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
 }
 
-function extractJsonMcpNames(text: string): string[] {
+// One walk over a JSON config: the names discovery needs plus the definitions
+// the inventory row and the edit form need. An entry with neither command nor
+// url normalizes to null, so it still counts as a discovered name while
+// carrying no definition, which is why callers treat the map as best effort.
+function collectJsonMcpEntries(text: string): {
+  names: string[];
+  configs: Map<string, McpServerConfig>;
+} {
   let parsed: unknown;
+  const configs = new Map<string, McpServerConfig>();
   try {
     parsed = JSON.parse(text);
   } catch {
-    return [];
+    return { names: [], configs };
   }
   const names = new Set<string>();
-  collectJsonMcpNames(parsed, names, 0);
-  return [...names].sort((a, b) => a.localeCompare(b));
+  walkJsonMcpEntries(parsed, names, configs, 0);
+  return { names: [...names].sort((a, b) => a.localeCompare(b)), configs };
 }
 
-function collectJsonMcpNames(value: unknown, names: Set<string>, depth: number): void {
+function walkJsonMcpEntries(
+  value: unknown,
+  names: Set<string>,
+  configs: Map<string, McpServerConfig>,
+  depth: number,
+): void {
   if (!value || typeof value !== "object" || Array.isArray(value) || depth > 5) return;
   const record = value as Record<string, unknown>;
-  for (const [key, child] of Object.entries(record)) {
-    if ((key === "mcpServers" || key === "mcp_servers") && child && typeof child === "object" && !Array.isArray(child)) {
-      for (const name of Object.keys(child as Record<string, unknown>)) {
-        if (name.trim()) names.add(name.trim());
-      }
-      continue;
+  // Own maps before nested ones so a top-level definition wins over a
+  // per-project copy of the same name, matching locateJsonMcpServer.
+  for (const key of MCP_MAP_KEYS) {
+    const child = record[key];
+    if (!child || typeof child !== "object" || Array.isArray(child)) continue;
+    for (const [rawName, raw] of Object.entries(child as Record<string, unknown>)) {
+      const name = rawName.trim();
+      if (!name) continue;
+      names.add(name);
+      const server = normalizeMcpServer(name, raw);
+      if (server && !configs.has(server.name)) configs.set(server.name, server);
     }
-    collectJsonMcpNames(child, names, depth + 1);
+  }
+  for (const [key, child] of Object.entries(record)) {
+    if (MCP_MAP_KEYS.includes(key)) continue;
+    walkJsonMcpEntries(child, names, configs, depth + 1);
   }
 }
 

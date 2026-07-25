@@ -35,6 +35,8 @@ const EMPTY_SETTINGS: AppSettings = {
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
   agentDisabledSkillIds: [],
+  agentMcpCoraManagerIds: [],
+  agentMcpPiWorkerIds: [],
   playwrightMcpAutoInstall: true,
   autopilotSandbox: false,
 };
@@ -202,6 +204,11 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled !== false,
     agentDisabledMcpIds: normalizeStringArray(settings.agentDisabledMcpIds),
     agentDisabledSkillIds: normalizeStringArray(settings.agentDisabledSkillIds),
+    // Opt-in lists: a settings file written before Pi MCP delivery existed
+    // migrates to "no server assigned to either Pi scope", which is exactly the
+    // pre-existing behaviour.
+    agentMcpCoraManagerIds: normalizeStringArray(settings.agentMcpCoraManagerIds),
+    agentMcpPiWorkerIds: normalizeStringArray(settings.agentMcpPiWorkerIds),
     playwrightMcpAutoInstall: settings.playwrightMcpAutoInstall !== false,
     autopilotSandbox: settings.autopilotSandbox === true,
   };

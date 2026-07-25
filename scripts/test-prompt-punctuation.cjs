@@ -36,6 +36,7 @@ const PROMPT_SURFACES = [
   "resources/codara-studio-mcp/server.js",
   "resources/pi-cora/prompt.ts",
   "resources/pi-cora/worker.ts",
+  "resources/pi-cora/mcp-bridge.ts",
 ];
 
 const EM_DASH = "—";

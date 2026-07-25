@@ -37,6 +37,7 @@ import type {
   CouncilDirective,
   PlannedStepAgent,
   PrepareWorkerTaskInput,
+  PtyExitInfo,
   RunArtifactPaths,
   RunAssumption,
   RunBlocker,
@@ -103,6 +104,15 @@ import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
 export { readWorkerReport } from "./worker-report";
+// Spawn-time batch shape guard. agent-socket's codara_spawn_workers handler is
+// the single choke point every MCP-driven spawn passes through and reaches it
+// through getRunStore(), so the run store owns this policy alongside the rest
+// of the worker-task contract.
+export {
+  evaluateSpawnBatchShape,
+  runHasImplementationTask,
+  VERIFIER_BATCH_REJECTION_MESSAGE,
+} from "./spawn-batch-guard";
 import {
   COMPLETION_SUMMARY_PREFIX,
   buildCompletionSummaryMessage,
@@ -123,6 +133,7 @@ import {
   pasteAndSubmit,
   waitForAgentTui,
   waitForCodexInputReady,
+  watchAgentCliExit,
   writeAutoFailureReport,
 } from "./worker-launch";
 import {
@@ -193,7 +204,7 @@ import {
   type ChatStreamEvent,
 } from "./spark-agent-backend";
 import { getBackend } from "./backend-registry";
-import { createCodaraPiWorkerLaunchPlan } from "./pi-runtime-electron";
+import { cleanupPiMcpBridgeConfig, createCodaraPiWorkerLaunchPlan } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
 import type { PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
@@ -1554,7 +1565,7 @@ export async function failWorkerAttempt(
       activeWorkerProcesses.delete(attemptId);
     }
     try {
-      pty.dispose(attemptId);
+      pty.dispose(attemptId, { sanctioned: true });
     } catch {
       /* already gone */
     }
@@ -8629,7 +8640,7 @@ export async function interruptRunWithMessage(
   if (mode === "hard" && activeWorkers.length > 0) {
     for (const worker of activeWorkers) {
       try {
-        pty.dispose(worker.attemptId);
+        pty.dispose(worker.attemptId, { sanctioned: true });
       } catch {
         /* the session may have already exited between sendPauseSignals and
            here — disposing twice is a no-op in pty-manager. */
@@ -12845,6 +12856,142 @@ function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
 }
 
+// Write a runtime state onto the WorkerAttempt behind a pane and tell the
+// renderer about it. Shared by the hook RPC (applyHookStateReport) and the
+// unsanctioned-pty-death path, which must produce the identical attempt-side
+// write so the run graph, chat timeline and pane never disagree about whether
+// a worker is alive.
+//
+// `source` records the writer: "hook" gives reportTerminalState its
+// HOOK_TRUST_MS deference window, "exit" is terminal (the process behind every
+// other report is gone).
+function bridgeRuntimeStateToAttempt(
+  paneId: string,
+  state: WorkerRuntimeState,
+  note: string | undefined,
+  timestamp: string,
+  source: "hook" | "exit",
+): void {
+  const match = findAttemptByPaneId(paneId);
+  if (!match) return;
+  const { run: targetRun, attempt: targetAttempt } = match;
+  const attemptStateChanged =
+    targetAttempt.runtimeState !== state || targetAttempt.runtimeStateSource !== source;
+  if (!attemptStateChanged) {
+    // No attempt-side change but still refresh the timestamp so the
+    // HOOK_TRUST_MS window in reportTerminalState slides forward, which is
+    // the whole point of receiving repeat hook reports. No save / no
+    // event: nothing observable changed for the renderer.
+    targetAttempt.runtimeStateUpdatedAt = timestamp;
+    return;
+  }
+  const attemptPrevious = targetAttempt.runtimeState ?? null;
+  targetAttempt.runtimeState = state;
+  targetAttempt.runtimeStateUpdatedAt = timestamp;
+  targetAttempt.runtimeStateSource = source;
+  targetRun.updatedAt = timestamp;
+  // Same fire-and-forget save pattern reportTerminalState uses: the
+  // event below is the authoritative UI trigger, the run.json rewrite
+  // is bookkeeping that mustn't block the hook RPC reply.
+  void saveRun(targetRun).catch(() => undefined);
+  void appendEvent({
+    timestamp,
+    workspaceId: targetRun.workspaceId,
+    runId: targetRun.id,
+    workerTaskId: targetAttempt.workerTaskId,
+    attemptId: targetAttempt.id,
+    type: "worker_attempt.runtime_state_changed",
+    message: `Worker attempt runtime state: ${attemptPrevious ?? "unknown"} -> ${state}`,
+    payload: {
+      previous: attemptPrevious,
+      state,
+      attemptId: targetAttempt.id,
+      source,
+      note,
+    },
+  }).catch((err) => {
+    console.warn("[run-store] appendEvent for attempt state failed:", err);
+  });
+}
+
+// A worker CLI can exit the same instant it writes final-report.json, so the
+// pty exit races the finish path that marks the attempt terminal. Let that
+// path win before calling anything a crash; 2.5s is well clear of the 750ms
+// report poll plus its 4-tick exit grace.
+const WORKER_PTY_CRASH_SETTLE_MS = 2_500;
+
+/**
+ * Only Cora ends a worker. A worker pty that dies WITHOUT Cora asking for it
+ * (sanctioned exits carry PtyExitInfo.sanctioned) and without the attempt ever
+ * reaching a terminal status is a crash, and the attempt has to say so while
+ * the app is open: every other writer that could notice is the dead process
+ * itself, so before this the stale "working" chip survived until the next boot,
+ * where recoverOrphanedManagedWorkerAttempts finally cleared it.
+ *
+ * Scope: this covers the pane itself going away (the user closes the worker
+ * pane, the shell dies, the host is swept after wake). It does NOT cover the
+ * agent CLI dying on its own, because a CLI worker's pty is an interactive
+ * shell and claude/codex is a child of it: `kill -9` on the CLI leaves the
+ * shell at its prompt and no pty exit is ever emitted. runWorkerSession watches
+ * that case separately via watchAgentCliExit (shell-integration command-done
+ * marker) and routes it to markWorkerProcessDeath below.
+ *
+ * A Pi worker's pty is a display shell in front of a main-process RPC child, so
+ * its death says nothing about the worker's health; that path reports its own
+ * state from the RPC client instead and is not watched here.
+ */
+function watchWorkerPtyForCrash(attemptId: string): void {
+  pty.onExit(attemptId, (info) => {
+    if (info.sanctioned) return;
+    // pty-manager drops its exit waiters after the emit, so the watch needs no
+    // teardown; the settle checks below decide whether the death was a crash.
+    const timer = setTimeout(() => {
+      void settleWorkerPtyCrash(attemptId, info);
+    }, WORKER_PTY_CRASH_SETTLE_MS);
+    timer.unref();
+  });
+}
+
+async function settleWorkerPtyCrash(attemptId: string, info: PtyExitInfo): Promise<void> {
+  // Respawned at the same session id (the claude-backend mode flip kills and
+  // re-spawns ~150ms apart): the worker is alive, nothing died.
+  if (pty.exists(attemptId)) return;
+  const note = info.signal
+    ? `Worker process died (signal ${info.signal})`
+    : `Worker process died (exit code ${info.exitCode})`;
+  await markWorkerProcessDeath(attemptId, note);
+}
+
+// Brand an attempt whose worker process died without Cora asking for it.
+// Shared by the pty-exit watcher and runWorkerSession's agent-CLI-exit watcher
+// so both deaths produce the same "exit"-sourced state.
+async function markWorkerProcessDeath(attemptId: string, note: string): Promise<void> {
+  const match = findAttemptByPaneId(attemptId);
+  if (!match) return;
+  const { attempt } = match;
+  // The finish path got there first. A settled attempt is Cora's own record of
+  // how the worker ended, and no process death may repaint it. "finishing"
+  // counts: the turn is over and Cora is grading the report.
+  if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) return;
+  if (attempt.status === "finishing") return;
+  // "preparing" / "prompt_ready" attempts have no process yet, so a death
+  // here is a launch shell closing, not a worker dying.
+  if (attempt.status === "preparing" || attempt.status === "prompt_ready") return;
+  if (attempt.runtimeState === "done" || attempt.runtimeState === "error") return;
+  // A worker that wrote its final report did its job, whatever its shell did
+  // on the way out. Same evidence-first test boot recovery applies.
+  if (attempt.finalReportPath && (await fileExists(attempt.finalReportPath))) return;
+
+  const timestamp = new Date().toISOString();
+  const worker = activeWorkerProcesses.get(attemptId);
+  if (worker) {
+    worker.runtimeState = "error";
+    worker.runtimeStateNote = note;
+    worker.runtimeStateAt = timestamp;
+  }
+  bridgeRuntimeStateToAttempt(attemptId, "error", note, timestamp, "exit");
+}
+
 // Hook RPC handoff (big-bet "Hook contract for sub-agents to self-report").
 // Called from hook-rpc.ts when a worker POSTs to /state. The paneId is the
 // PTY session id, which Codara uses interchangeably with attemptId for active
@@ -12900,48 +13047,7 @@ export function applyHookStateReport(report: {
   // detector may have stomped on a previous hook value between dedupes —
   // a fresh hook tick of the same "working" must still reclaim the
   // WorkerAttempt slot if regex flipped it to "blocked" in the meantime.
-  const match = findAttemptByPaneId(report.paneId);
-  if (match) {
-    const { run: targetRun, attempt: targetAttempt } = match;
-    const attemptStateChanged =
-      targetAttempt.runtimeState !== report.state ||
-      targetAttempt.runtimeStateSource !== "hook";
-    if (attemptStateChanged) {
-      const attemptPrevious = targetAttempt.runtimeState ?? null;
-      targetAttempt.runtimeState = report.state;
-      targetAttempt.runtimeStateUpdatedAt = timestamp;
-      targetAttempt.runtimeStateSource = "hook";
-      targetRun.updatedAt = timestamp;
-      // Same fire-and-forget save pattern reportTerminalState uses — the
-      // event below is the authoritative UI trigger, the run.json rewrite
-      // is bookkeeping that mustn't block the hook RPC reply.
-      void saveRun(targetRun).catch(() => undefined);
-      void appendEvent({
-        timestamp,
-        workspaceId: targetRun.workspaceId,
-        runId: targetRun.id,
-        workerTaskId: targetAttempt.workerTaskId,
-        attemptId: targetAttempt.id,
-        type: "worker_attempt.runtime_state_changed",
-        message: `Worker attempt runtime state: ${attemptPrevious ?? "unknown"} -> ${report.state}`,
-        payload: {
-          previous: attemptPrevious,
-          state: report.state,
-          attemptId: targetAttempt.id,
-          source: "hook",
-          note: report.note,
-        },
-      }).catch((err) => {
-        console.warn("[run-store] appendEvent for hook attempt state failed:", err);
-      });
-    } else {
-      // No attempt-side change but still refresh the timestamp so the
-      // HOOK_TRUST_MS window in reportTerminalState slides forward — that's
-      // the whole point of receiving repeat hook reports. No save / no
-      // event: nothing observable changed for the renderer.
-      targetAttempt.runtimeStateUpdatedAt = timestamp;
-    }
-  }
+  bridgeRuntimeStateToAttempt(report.paneId, report.state, report.note, timestamp, "hook");
 
   // Bail out of the ActiveWorkerProcess event emit when the hook just
   // re-stated the same value. The renderer-side update above already kept
@@ -13231,6 +13337,10 @@ export async function reportTerminalState(
   const match = findAttemptByPaneId(paneId);
   if (!match) return;
   const { run: targetRun, attempt: targetAttempt } = match;
+
+  // A recorded pty death outranks everything: the process whose tail this
+  // regex read is gone, so any state it reports now describes a corpse.
+  if (targetAttempt.runtimeStateSource === "exit") return;
 
   // Hook trumps regex while the hook stream is fresh. We compare against
   // Date.now() (not the new event's timestamp) because runtimeStateUpdatedAt
@@ -14124,6 +14234,8 @@ async function runPiWorkerSession({
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
+  // Mode-600 MCP roster written for this attempt; removed with the session.
+  let mcpConfigPath: string | null = null;
   let logQueue: Promise<void> = Promise.resolve();
   const appendWorkerLog = (text: string) => {
     logQueue = logQueue
@@ -14158,6 +14270,7 @@ async function runPiWorkerSession({
       peerCommsDir: peerCommsEnabled ? paths.peerCommsDir : undefined,
       peerSelfId: peerCommsEnabled ? task.id : undefined,
     });
+    mcpConfigPath = plan.mcpConfigPath;
     client = new PiRpcClient(plan, {
       requestTimeoutMs: 120_000,
       shutdownGraceMs: 2_000,
@@ -14284,6 +14397,7 @@ async function runPiWorkerSession({
     unsubscribe?.();
     activeWorkerProcesses.delete(attemptId);
     await client?.stop().catch(() => undefined);
+    await cleanupPiMcpBridgeConfig({ mcpConfigPath }).catch(() => undefined);
     // Keep the completed frame in xterm; disposing the idle host shell matches
     // the former CLI worker lifecycle and prevents one process per old worker.
     try { pty.killImmediate(attemptId); } catch { /* already closed */ }
@@ -14354,7 +14468,10 @@ async function runWorkerSession({
             `\n[spark] detected worker runtime failure: ${fatalReason}\n`,
           );
           await writeAutoFailureReport(paths, task, fatalReason);
-          pty.dispose(attemptId);
+          // Cora is ending this attempt, so the pane's death is sanctioned:
+          // the failure is already recorded on the attempt, and a second
+          // "crashed" brand from the pty exit would outlive it.
+          pty.dispose(attemptId, { sanctioned: true });
           failFast(fatalReason);
         })();
       }, 2500);
@@ -14363,7 +14480,7 @@ async function runWorkerSession({
 
   const handle = {
     write: (input: string) => pty.write(attemptId, input),
-    kill: () => pty.dispose(attemptId),
+    kill: () => pty.dispose(attemptId, { sanctioned: true }),
   };
 
   const runningTimestamp = new Date().toISOString();
@@ -14405,6 +14522,15 @@ async function runWorkerSession({
   //   * the user closes the pane (ptyExit), or
   //   * we hit the hard timeout (90 minutes).
   let failFast: (reason: string) => void = () => undefined;
+  // The agent CLI died but its host shell is still at a prompt, so no pty exit
+  // will ever fire. Assigned by the executor below, armed by the launch driver.
+  let onAgentCliExit: (exitCode: number | null) => void = () => undefined;
+  let offAgentCliExit: (() => void) | null = null;
+  // Backstop for a death Cora never asked for. exitPromise below settles the
+  // attempt whenever this orchestration loop is still watching, and the settle
+  // checks skip anything it settled; what survives is the case that used to
+  // leave a pane pulsing "working" until the next boot.
+  watchWorkerPtyForCrash(attemptId);
   const exitPromise = new Promise<{ exitCode: number; error?: string }>((resolve) => {
     let settled = false;
     // Separate guard for the kill so the funnel through finish() is idempotent
@@ -14427,6 +14553,7 @@ async function runWorkerSession({
       // nothing.
       killWorkerTree();
       offExit();
+      offAgentCliExit?.();
       offRawTap();
       rawStream.end();
       clearInterval(reportPoll);
@@ -14434,49 +14561,70 @@ async function runWorkerSession({
       if (fatalErrorTimer) clearTimeout(fatalErrorTimer);
       resolve(value);
     };
-    const offExit = pty.onExit(attemptId, (info) => {
-      // A CLI that exits the instant it writes final-report.json must not be
-      // failed just because the exit event beat the 750ms report poll. Give
-      // the report one last chance to parse (short grace covers a mid-write
-      // file) before declaring the pane closed. finish() is idempotent, so a
-      // poll tick landing during the grace resolves first and this no-ops.
-      void (async () => {
-        for (let i = 0; i < 4 && !settled; i++) {
-          try {
-            const located = await readWorkerReportWithWorkspaceShadowRecovery(
-              cwd,
-              paths.finalReportJson,
-            );
-            if (located.report) {
-              if (located.relocatedFrom) {
-                await appendEvent({
-                  workspaceId: run.workspaceId,
-                  runId: run.id,
-                  stepId: task.stepId,
-                  workerTaskId: task.id,
-                  attemptId,
-                  type: "worker_attempt.report_path_recovered",
-                  message: "Recovered a final report written to a workspace-relative .Codara path",
-                  payload: {
-                    relocatedFrom: located.relocatedFrom,
-                    finalReportPath: paths.finalReportJson,
-                  },
-                }).catch(() => undefined);
-              }
-              finish({ exitCode: 0 });
-              return;
+    // A CLI that exits the instant it writes final-report.json must not be
+    // failed just because the death beat the 750ms report poll. Give the report
+    // one last chance to parse (short grace covers a mid-write file) before
+    // declaring the worker gone. finish() is idempotent, so a poll tick landing
+    // during the grace resolves first and this no-ops. brandCrash runs only
+    // when no report showed up, and before finish() so the attempt is still
+    // non-terminal when markWorkerProcessDeath checks it.
+    const settleAfterWorkerGone = async (
+      fallback: { exitCode: number; error: string },
+      brandCrash?: () => Promise<void>,
+    ): Promise<void> => {
+      for (let i = 0; i < 4 && !settled; i++) {
+        try {
+          const located = await readWorkerReportWithWorkspaceShadowRecovery(
+            cwd,
+            paths.finalReportJson,
+          );
+          if (located.report) {
+            if (located.relocatedFrom) {
+              await appendEvent({
+                workspaceId: run.workspaceId,
+                runId: run.id,
+                stepId: task.stepId,
+                workerTaskId: task.id,
+                attemptId,
+                type: "worker_attempt.report_path_recovered",
+                message: "Recovered a final report written to a workspace-relative .Codara path",
+                payload: {
+                  relocatedFrom: located.relocatedFrom,
+                  finalReportPath: paths.finalReportJson,
+                },
+              }).catch(() => undefined);
             }
-          } catch {
-            /* absent or mid-write; retry below */
+            finish({ exitCode: 0 });
+            return;
           }
-          await new Promise((r) => setTimeout(r, 300));
+        } catch {
+          /* absent or mid-write; retry below */
         }
-        finish({
-          exitCode: info.exitCode ?? 1,
-          error: info.signal ? `Worker pane closed (signal ${info.signal})` : "Worker pane closed before final report",
-        });
-      })();
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      if (settled) return;
+      if (brandCrash) await brandCrash().catch(() => undefined);
+      finish(fallback);
+    };
+    const offExit = pty.onExit(attemptId, (info) => {
+      void settleAfterWorkerGone({
+        exitCode: info.exitCode ?? 1,
+        error: info.signal ? `Worker pane closed (signal ${info.signal})` : "Worker pane closed before final report",
+      });
     });
+    // The shell outlived its agent CLI: nothing else in the pipeline reports
+    // this death, so brand the attempt here and resolve the run loop instead of
+    // letting it wait out the 90-minute watchdog.
+    onAgentCliExit = (exitCode: number | null) => {
+      const reason =
+        exitCode === null || exitCode === 0
+          ? "Agent CLI exited before writing a final report"
+          : `Agent CLI exited with code ${exitCode} before writing a final report`;
+      void settleAfterWorkerGone(
+        { exitCode: exitCode && exitCode !== 0 ? exitCode : 1, error: reason },
+        () => markWorkerProcessDeath(attemptId, reason),
+      );
+    };
     const reportPoll = setInterval(() => {
       // Finish only once the report PARSES, not merely exists. The agent CLI
       // writes final-report.json non-atomically, and finish() kills the worker
@@ -14534,6 +14682,10 @@ async function runWorkerSession({
     try {
       await delay(1500);
       if (launchCommand) {
+        // Armed before the command is typed so the watcher sees that command's
+        // own pre-exec marker; without a pre-exec first it would fire on the
+        // marker the shell already emitted for its startup prompt.
+        offAgentCliExit = watchAgentCliExit(attemptId, (exitCode) => onAgentCliExit(exitCode));
         handle.write(`${launchCommand}\r`);
         const launched = await waitForAgentTui(attemptId, task.runtimePreference);
         if (!launched.ok) {

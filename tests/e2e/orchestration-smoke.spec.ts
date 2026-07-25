@@ -324,6 +324,9 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
     }));
     expect(capabilityOpenLatencyMs).toBeLessThan(250);
     await expect(page.getByRole("dialog", { name: "Capability Center" })).toBeVisible();
+    // The pinned codara-studio row arrives with the builtin status IPC, so the
+    // content-visibility gate below needs a row on screen first.
+    await expect(page.locator(".agent-capability-row").first()).toBeVisible();
     const capabilityGlass = await page.evaluate(() => {
       const surface = document.querySelector<HTMLElement>("[data-agent-capabilities-surface]");
       const scrim = document.querySelector<HTMLElement>(".agent-capabilities-scrim");
@@ -332,29 +335,30 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
         surfaceBackdrop: getComputedStyle(surface).backdropFilter,
         scrimBackdrop: getComputedStyle(scrim).backdropFilter,
         scrollContain: getComputedStyle(document.querySelector<HTMLElement>(".agent-capabilities-scroll")!).contain,
-        cardVisibility: getComputedStyle(document.querySelector<HTMLElement>(".agent-capability-card")!).contentVisibility,
+        rowVisibility: getComputedStyle(document.querySelector<HTMLElement>(".agent-capability-row")!).contentVisibility,
         width: surface.getBoundingClientRect().width,
         height: surface.getBoundingClientRect().height,
         borderRadius: getComputedStyle(surface).borderRadius,
-        expectedWidth: Math.min(860, window.innerWidth - 44),
+        expectedWidth: Math.min(880, window.innerWidth - 44),
         expectedHeight: Math.min(760, window.innerHeight - 44),
       };
     });
     expect(capabilityGlass).not.toBeNull();
-    expect(capabilityGlass!.surfaceBackdrop).toBe("none");
+    // Peer of the Settings panel: one composited blur layer, never the SVG
+    // refraction lens that made a viewport-sized surface re-rasterize.
+    expect(capabilityGlass!.surfaceBackdrop).not.toContain("url(");
     expect(capabilityGlass!.scrimBackdrop).toBe("none");
     expect(capabilityGlass!.scrollContain).toMatch(/content|paint/);
-    expect(capabilityGlass!.cardVisibility).toBe("auto");
+    expect(capabilityGlass!.rowVisibility).toBe("auto");
     expect(capabilityGlass!.width).toBe(capabilityGlass!.expectedWidth);
     expect(capabilityGlass!.height).toBe(capabilityGlass!.expectedHeight);
     expect(capabilityGlass!.borderRadius).toBe("12px");
     if (process.env.SPARK_CAPABILITY_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CAPABILITY_SCREENSHOT });
     }
-    const capabilityNavigation = page.getByRole("navigation", { name: "Capability Center navigation" });
-    await expect(capabilityNavigation.getByRole("button", { name: /Overview/ })).toHaveAttribute("aria-current", "page");
-    await capabilityNavigation.getByRole("button", { name: /MCP servers/ }).dispatchEvent("click");
-    const capabilitySearch = page.getByPlaceholder("Filter MCP servers by name or path");
+    // Two flat sections, no nav rail: the MCP inventory is the first heading.
+    await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
+    const capabilitySearch = page.getByPlaceholder("Filter servers");
     await capabilitySearch.fill("playwright");
     await expect(capabilitySearch).toHaveValue("playwright");
     await page.getByRole("button", { name: "Close", exact: true }).click();

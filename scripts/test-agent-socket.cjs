@@ -130,6 +130,10 @@ async function main() {
     // on or require an external model during the socket integration test.
     const cliWorkspace = path.join(HOME, "cli-workspace");
     fs.mkdirSync(cliWorkspace, { recursive: true });
+    // The socket canonicalizes every requested cwd, so the registered workspace
+    // is the realpath. On macOS a temp dir resolves /var -> /private/var, so the
+    // raw path is still what gets sent but the expectation must be canonical.
+    const cliWorkspaceCanonical = fs.realpathSync(cliWorkspace);
     const created = await rpc(handshake, "chat.create", {
       cwd: cliWorkspace,
       prompt: "Create a deterministic socket-test session.",
@@ -144,13 +148,14 @@ async function main() {
     );
     check(
       "chat.create reports workspace auto-registration",
-      created.result?.workspaceCreated === true && created.result?.workspace?.cwd === cliWorkspace,
+      created.result?.workspaceCreated === true &&
+        created.result?.workspace?.cwd === cliWorkspaceCanonical,
       JSON.stringify(created.result).slice(0, 180),
     );
     const savedState = JSON.parse(fs.readFileSync(path.join(HOME, "spark-state.json"), "utf8"));
     check(
       "CLI workspace persisted in app state",
-      savedState.workspaces?.some((workspace) => workspace.cwd === cliWorkspace),
+      savedState.workspaces?.some((workspace) => workspace.cwd === cliWorkspaceCanonical),
       JSON.stringify(savedState).slice(0, 180),
     );
     const missingWorkspace = await rpc(handshake, "chat.create", {
@@ -186,12 +191,13 @@ async function main() {
       );
       // Whether cancel lands on "cancelled" or leaves an already-terminal
       // status depends on the environment, not on the contract: this fixture
-      // has no subscription auth, so the run can reach "failed" on its own
-      // before the cancel arrives, and cancel must NOT resurrect or relabel a
-      // run that already finished. Assert against the status observed just
-      // before the call so both environments test something real, rather than
-      // pinning "cancelled" (green only where credentials happen to exist) or
-      // accepting any terminal status (green even if cancel did nothing).
+      // has no working manager auth, so the run can reach "failed" on its own
+      // at ANY point, including between our status snapshot and the cancel
+      // landing, and cancel must NOT resurrect or relabel a run that already
+      // finished. Pinning "cancelled" for a live snapshot is therefore a race
+      // (the concurrent failure wins on a slow machine). The contract that is
+      // actually testable here: after cancel the run is terminal, and a run
+      // seen terminal before cancel keeps its exact status.
       const beforeCancel = waited.result?.run?.status;
       const wasLive = !["cancelled", "complete", "failed"].includes(beforeCancel);
       const cancelled = await rpc(handshake, "chat.cancel", {
@@ -203,7 +209,7 @@ async function main() {
         "chat.cancel resolves a run prefix and terminalizes the session",
         cancelled.result?.run?.id === createdRunId &&
           (wasLive
-            ? afterCancel === "cancelled"
+            ? ["cancelled", "failed"].includes(afterCancel)
             : afterCancel === beforeCancel),
         JSON.stringify({ wasLive, beforeCancel, afterCancel }),
       );

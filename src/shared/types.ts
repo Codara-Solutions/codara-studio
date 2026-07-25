@@ -145,6 +145,13 @@ export interface AppSettings {
   agentSkillSyncEnabled: boolean;
   agentDisabledMcpIds: string[];
   agentDisabledSkillIds: string[];
+  // Per-scope MCP assignment for the Pi harness, keyed by the same
+  // `mcp:<lowercased name>` session key as agentDisabledMcpIds. These are
+  // opt-IN lists: a server absent from a list is not delivered to that scope,
+  // so an existing install (and any newly discovered server) starts off for
+  // both Cora and Pi workers. Claude/Codex delivery ignores them entirely.
+  agentMcpCoraManagerIds: string[];
+  agentMcpPiWorkerIds: string[];
   playwrightMcpAutoInstall: boolean;
   // When true, autopilot/unattended workers launch inside a throwaway git
   // worktree forked off the run checkpoint (refs/spark/runs/{runId}) and run
@@ -643,6 +650,19 @@ export interface TerminalAgentStatePayload {
   state: RuntimeState;
 }
 
+// A pty session's exit, as delivered to the renderer (`pty:exit:<id>`) and to
+// main-process exit waiters. `sanctioned` marks a teardown Codara itself asked
+// for: orchestration disposing a finished worker's host shell, or the app-quit
+// sweep. Only Cora ends a worker, so an UNSANCTIONED exit is the one and only
+// crash signal; a sanctioned exit is never a crash no matter what exit code or
+// signal the OS reported (pty.kill() delivers SIGHUP, i.e. exitCode 0 with
+// signal 1, which read as a crash before this bit existed).
+export interface PtyExitInfo {
+  exitCode: number;
+  signal?: number;
+  sanctioned?: boolean;
+}
+
 export type NotificationSoundKind = "needs-you" | "done";
 
 // ── Unified notifications pipeline (src/main/notify) ────────────────────────
@@ -847,11 +867,59 @@ export interface AgentAssetInventoryItem {
   name: string;
   path: string;
   enabledForSessions: boolean;
+  // MCP only: whether this server is handed to Cora's Pi manager session and to
+  // Pi implementation workers. Always false for skills.
+  enabledForCoraManager: boolean;
+  enabledForPiWorkers: boolean;
   detail?: string;
   canDelete: boolean;
   compatibility: AgentAssetCompatibility;
   compatibilityReason?: string;
   syncable: boolean;
+  // MCP only: how the server is reached, plus a one-line human summary of it
+  // (`npx -y pkg` for stdio, the origin for remote). Absent when the entry was
+  // discovered by name but its definition could not be parsed.
+  mcpTransport?: AgentMcpTransport;
+  mcpSummary?: string;
+}
+
+// stdio and streamable HTTP are the two shapes the add/edit form writes. "sse"
+// only ever arrives from a config the user wrote by hand; the form reads it as
+// HTTP and preserves the url, so a saved edit migrates it to streamable-http.
+export type AgentMcpTransport = "stdio" | "http" | "sse";
+
+// One config file the Capability Center is willing to write a user-authored
+// MCP server into. `format` decides the serializer: JSON files take the Claude
+// mcpServers shape, TOML files the Codex [mcp_servers.*] shape.
+export interface AgentMcpTarget {
+  id: string;
+  runtime: AgentAssetRuntime;
+  scope: AgentAssetScope;
+  path: string;
+  label: string;
+  format: "json" | "toml";
+}
+
+export interface AgentMcpServerDraft {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+export interface AgentMcpServerDetail extends AgentMcpServerDraft {
+  id: string;
+  targetId: string;
+}
+
+export interface AgentMcpSaveResult {
+  ok: boolean;
+  name?: string;
+  path?: string;
+  error?: string;
 }
 
 export interface AgentAssetInventory {
@@ -2294,10 +2362,12 @@ export interface WorkerAttempt {
    * Which writer last updated `runtimeState`. The doc rule is "hook wins
    * over regex" — `reportTerminalState` honours this by refusing to
    * overwrite a fresh hook report (see HOOK_TRUST_MS in run-store.ts).
-   * `undefined` means the field is unset or was written before this
-   * provenance bit existed.
+   * "exit" is the worker's own pty dying unsanctioned, which outranks both:
+   * the process that produced every other report is gone, so no later regex
+   * tick may overwrite it. `undefined` means the field is unset or was
+   * written before this provenance bit existed.
    */
-  runtimeStateSource?: "hook" | "regex";
+  runtimeStateSource?: "hook" | "regex" | "exit";
   /**
    * Git sha of the pre-worker checkpoint captured in launchWorkerAttempt just
    * before runWorkerSession (null when the workspace is not a git repo). The

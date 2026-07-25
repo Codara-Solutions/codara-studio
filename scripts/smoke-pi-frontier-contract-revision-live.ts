@@ -231,6 +231,8 @@ test("failed transitions are atomic", () => {
       agentSkillSyncEnabled: false,
       agentDisabledMcpIds: [],
       agentDisabledSkillIds: [],
+      agentMcpCoraManagerIds: [],
+      agentMcpPiWorkerIds: [],
       playwrightMcpAutoInstall: false,
       autopilotSandbox: false,
     },

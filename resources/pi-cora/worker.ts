@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
 
 interface BridgeTool {
@@ -60,6 +61,7 @@ function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string 
 export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   const bridge = loadBridge();
   const peerComms = activePeerCommsContext();
+  let mcp: McpBridgeHandle | null = null;
 
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}
@@ -91,7 +93,7 @@ Worker contract:
   from the report, not from an optimistic prose claim.
 - Keep prose concise while working; the live Workers surface already explains
   the lifecycle to the user.
-`,
+${mcp?.promptSuffix() ?? ""}`,
   }));
 
   for (const tool of bridge.listTools()) {
@@ -121,4 +123,16 @@ Worker contract:
   }
 
   if (peerComms) registerWorkerPeerComms(pi, peerComms);
+
+  // Worker MCP scoping is decided by the launcher, which writes a roster
+  // filtered to the servers the user assigned to Pi workers. isWorkerSafeBridgeTool
+  // above stays about Codara's own in-process studio roster.
+  const mcpConfig = activeMcpBridgeConfig();
+  if (mcpConfig) {
+    try {
+      mcp = registerMcpBridge(pi, mcpConfig);
+    } catch {
+      mcp = null;
+    }
+  }
 }

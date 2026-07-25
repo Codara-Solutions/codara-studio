@@ -7,6 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import {
   normalizeTerminalScrollbackLineLimit,
   trimTerminalScrollbackLines,
+  type PtyExitInfo,
   type RuntimeState,
   type ShellInfo,
   type TerminalAgentForegroundState,
@@ -333,7 +334,7 @@ interface Options {
   // background renderer work for instant, lossless tab/workspace returns.
   writeWhileHidden?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
-  onExit?: (info: { exitCode: number; signal?: number }) => void;
+  onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
   onDetectedLocalUrl?: (url: string) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;

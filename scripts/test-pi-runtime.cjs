@@ -157,6 +157,11 @@ async function main() {
   assert.equal(anthropicPlan.executionPolicy, "fast");
   assert.equal(anthropicPlan.env.CODARA_PI_EXECUTION_POLICY, "fast");
   assert.equal(anthropicPlan.env.CODARA_PI_BRIDGE_PATH, path.resolve("/bridge/server.js"));
+  // No assigned MCP servers: the bridge env stays unset so the launch is
+  // byte-identical to the pre-MCP behaviour.
+  assert.equal(anthropicPlan.env.CODARA_PI_MCP_CONFIG, undefined);
+  assert.equal(anthropicPlan.env.CODARA_PI_MCP_SDK_DIR, undefined);
+  assert.equal(anthropicPlan.mcpConfigPath, null);
   assert.ok(anthropicPlan.args.includes("rpc"));
   assert.ok(anthropicPlan.args.includes("claude-opus-5"));
   assert.ok(anthropicPlan.args.includes(runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT));
@@ -192,6 +197,41 @@ async function main() {
   assert.equal(codexPlan.frontierManifestSha256, "a".repeat(64));
   assert.equal(codexPlan.frontierAdmissionArtifactSha256, "b".repeat(64));
   assert.equal(codexPlan.args.includes(runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT), false);
+
+  const mcpPlan = runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "anthropic",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-mcp",
+    runId: "run-mcp",
+    mode: "talk",
+    cwd: "/workspace",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+    mcpConfigPath: "/config/mcp/session-mcp.json",
+    mcpSdkDir: "/modules/@modelcontextprotocol/sdk/dist/cjs/client",
+  });
+  assert.equal(mcpPlan.env.CODARA_PI_MCP_CONFIG, path.resolve("/config/mcp/session-mcp.json"));
+  assert.equal(mcpPlan.env.CODARA_PI_MCP_SDK_DIR, path.resolve("/modules/@modelcontextprotocol/sdk/dist/cjs/client"));
+  assert.equal(mcpPlan.mcpConfigPath, path.resolve("/config/mcp/session-mcp.json"));
+  // Half a configuration is no configuration: the extension needs both names.
+  const partialMcpPlan = runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "anthropic",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-mcp-partial",
+    runId: "run-mcp",
+    mode: "talk",
+    cwd: "/workspace",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+    mcpConfigPath: "/config/mcp/session-mcp.json",
+  });
+  assert.equal(partialMcpPlan.env.CODARA_PI_MCP_CONFIG, undefined);
+  assert.equal(partialMcpPlan.mcpConfigPath, null);
+
   assert.throws(() => runtime.buildPiManagerLaunchPlan({
     ...codexPlan,
     runtime: fakeRuntime,

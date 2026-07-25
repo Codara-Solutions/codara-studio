@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import type {
+  PtyExitInfo,
   RuntimeState,
   ShellInfo,
   TerminalAgentForegroundState,
@@ -81,7 +82,7 @@ interface Props {
   // terminal hosts omit it so worker/backend/mirror TUIs stay unobstructed.
   showCodaraIntro?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
-  onExit?: (info: { exitCode: number; signal?: number }) => void;
+  onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
   onDetectedLocalUrl?: (url: string) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;

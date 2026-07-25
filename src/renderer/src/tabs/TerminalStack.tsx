@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
 import type {
+  PtyExitInfo,
   RuntimeState,
   ShellInfo,
   TerminalAgentForegroundState,
@@ -75,7 +76,7 @@ interface Props {
   scrollbackLineLimit: number;
   onDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
   onSparkOpen: (input: SparkOpenInput) => void;
-  onPaneExit: (tabId: TabId, paneId: string, info: { exitCode: number; signal?: number }) => void;
+  onPaneExit: (tabId: TabId, paneId: string, info: PtyExitInfo) => void;
   onActivatePane: (tabId: TabId, paneId: string) => void;
   onSplitRatioChange: (tabId: TabId, path: PanePath, ratio: number) => void;
   onSplitPane: (
@@ -142,7 +143,7 @@ interface Props {
 type Bundle = {
   onDetectedUrl: (url: string) => void;
   onSparkOpen: (input: SparkOpenInput) => void;
-  onExit: (info: { exitCode: number; signal?: number }) => void;
+  onExit: (info: PtyExitInfo) => void;
   onActivate: () => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
@@ -2588,12 +2589,17 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
       frame: "success",
     };
   }
-  if (runtime === "error") {
-    // Non-zero pty exit / spawn failure: the agent CRASHED. Red danger frame
-    // with a steady dot; the chip stays visible until the pane is closed.
+  if (runtime === "error" && worker.state !== "done") {
+    // Unsanctioned pty death / spawn failure: the agent CRASHED. Red danger
+    // frame with a steady dot; the chip stays visible until the pane is closed.
     // Labelled "crashed", not "exited": only Cora is allowed to end a worker,
     // so "exited" read as a routine, sanctioned shutdown and hid the fact that
     // this pane died on its own. The word has to name the fault.
+    //
+    // Gated on the lifecycle: once the attempt reported done its outcome is
+    // settled, and a late error write (a stale notifier snapshot, a wake-from-
+    // sleep sweep of the already-disposed shell) must not rename a finished
+    // worker. Crashed is reserved for a worker that died before it finished.
     return {
       status: "crashed",
       dot: "var(--danger)",
