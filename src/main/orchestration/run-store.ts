@@ -86,8 +86,17 @@ import {
   CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
   whiteboardNodeSizeLimits,
 } from "@shared/cora-whiteboard-file";
-import { selectLargestCompatibleWave } from "@shared/parallel-wave";
 import { CODEX_MODEL_BY_TIER, normalizeCodexModelId } from "@shared/model-catalog";
+// Pure wave selection for pickAutopilotTasks, including manager-batch parallel
+// trust (tasks the execute-mode spawn RPC already launched simultaneously must
+// relaunch concurrently too) and the fan-out no-concrete-scope serial guard.
+import {
+  isBroadPathScope,
+  normalizeTaskPath,
+  pathScopesOverlap,
+  selectAutopilotWave,
+  taskWritesWorkspace,
+} from "./autopilot-wave";
 import {
   appendEvent as appendEventRaw,
   appendEvents as appendEventsRaw,
@@ -9518,6 +9527,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     conflictsWith: input.conflictsWith ?? [],
     taskClass: input.taskClass,
     writeScopeSource: input.writeScopeSource,
+    parallelTrust: input.parallelTrust,
     councilGroupId: input.councilGroupId,
     candidateIndex: input.candidateIndex,
     councilRole: input.councilRole,
@@ -11417,6 +11427,11 @@ async function maybeQueueCliLaunchFallback({
         canRunParallel: task.canRunParallel,
         conflictsWith: task.conflictsWith,
         taskClass: task.taskClass,
+        // Manager-batch parallel trust survives the runtime swap: the failed
+        // task's batch already launched simultaneously, so its replacement
+        // must be picked into the same relaunch wave as its sibling fallbacks
+        // instead of serializing behind them.
+        parallelTrust: task.parallelTrust,
         createdBy: "system",
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -12686,78 +12701,16 @@ function countWorkerAttempts(run: RunState, taskId: string): number {
   return run.workerAttempts.filter((attempt) => attempt.workerTaskId === taskId).length;
 }
 
-function normalizeTaskPath(path: string): string {
-  return path
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/\/\*\*?$/, "")
-    .replace(/\/+$/, "")
-    .toLowerCase();
-}
-
-function isBroadPathScope(path: string): boolean {
-  const normalized = normalizeTaskPath(path);
-  return (
-    normalized === "" ||
-    normalized === "." ||
-    normalized === "./" ||
-    normalized === "*" ||
-    normalized === "**" ||
-    normalized === "/"
-  );
-}
-
-function taskWritesWorkspace(task: WorkerTask): boolean {
-  return task.taskClass !== "verifier" && task.runtimePreference !== "manual";
-}
-
-function concreteAllowedPaths(task: WorkerTask): string[] {
-  return task.allowedPaths
-    .map(normalizeTaskPath)
-    .filter((path) => path.length > 0 && !isBroadPathScope(path));
-}
-
-function hasConcreteParallelScope(task: WorkerTask): boolean {
-  if (!taskWritesWorkspace(task)) return true;
-  return concreteAllowedPaths(task).length > 0;
-}
-
-function pathScopesOverlap(left: string, right: string): boolean {
-  if (left === right) return true;
-  return left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
-}
-
-function taskPathScopesConflict(left: WorkerTask, right: WorkerTask): boolean {
-  if (!taskWritesWorkspace(left) || !taskWritesWorkspace(right)) return false;
-  const leftPaths = concreteAllowedPaths(left);
-  const rightPaths = concreteAllowedPaths(right);
-  if (leftPaths.length === 0 || rightPaths.length === 0) return true;
-  return leftPaths.some((leftPath) =>
-    rightPaths.some((rightPath) => pathScopesOverlap(leftPath, rightPath)),
-  );
-}
-
-function tasksConflictForParallelLaunch(left: WorkerTask, right: WorkerTask): boolean {
-  if (left.conflictsWith.includes(right.id) || right.conflictsWith.includes(left.id)) {
-    return true;
-  }
-  return taskPathScopesConflict(left, right);
-}
-
-// Why pickAutopilotTasks collapsed a would-be parallel batch to a single serial
-// task. Only `no_concrete_scope` (a task that wants to run parallel but has no
-// concrete write scope — exactly the fan-out anti-pattern) is surfaced to the
-// launch site as a fanout.downgraded_to_serial event; `not_parallel` (the
-// manager deliberately marked the task serial) is normal and not reported.
-type SerialDowngradeReason = "no_concrete_scope" | "not_parallel";
-
 // Pure selector with the downgrade reason exposed. pickAutopilotTasks wraps this
 // and discards the reason so its existing call sites keep their WorkerTask[]
 // semantics; only the launch site reads `downgrade` to emit an observability
-// event. Selection behaviour is byte-for-byte identical to the prior body.
+// event. Run-state filtering (statuses, attempt cap, active step) lives here;
+// wave selection itself (manager-batch parallel trust, the fan-out
+// no-concrete-scope guard, and scope-conflict checks) is delegated to the
+// pure autopilot-wave module so it stays testable in isolation.
 function pickAutopilotTasksWithReason(run: RunState): {
   tasks: WorkerTask[];
-  downgrade: { task: WorkerTask; reason: SerialDowngradeReason } | null;
+  downgrade: { task: WorkerTask; reason: "no_concrete_scope" | "not_parallel" } | null;
 } {
   const activeStep = pickAutopilotStep(run);
   const candidates = run.workerTasks.filter((task) => {
@@ -12770,23 +12723,7 @@ function pickAutopilotTasksWithReason(run: RunState): {
     if (task.stepId === activeStep.id) return true;
     return false;
   });
-  if (candidates.length === 0) return { tasks: [], downgrade: null };
-
-  const cap = evalMaxParallelWorkers();
-  const first = candidates[0];
-  if (!first.canRunParallel) return { tasks: [first], downgrade: { task: first, reason: "not_parallel" } };
-  if (!hasConcreteParallelScope(first)) {
-    return { tasks: [first], downgrade: { task: first, reason: "no_concrete_scope" } };
-  }
-
-  const parallelCandidates = candidates.filter(
-    (task) => task.canRunParallel && hasConcreteParallelScope(task),
-  );
-  const selected = selectLargestCompatibleWave(parallelCandidates, {
-    cap,
-    conflicts: tasksConflictForParallelLaunch,
-  });
-  return selected.length > 0 ? { tasks: selected, downgrade: null } : { tasks: [first], downgrade: null };
+  return selectAutopilotWave(candidates, evalMaxParallelWorkers());
 }
 
 function pickAutopilotTasks(run: RunState): WorkerTask[] {

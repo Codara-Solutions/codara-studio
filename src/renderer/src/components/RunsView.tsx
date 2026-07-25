@@ -152,17 +152,26 @@ function RunHeader({ run }: { run: RunState }) {
   const tokensIn = turnCalls.reduce((sum, call) => sum + (call.promptTokens ?? 0), 0);
   const tokensOut = turnCalls.reduce((sum, call) => sum + (call.completionTokens ?? 0), 0);
 
-  const nowText = conversational
-    ? liveTurn
-      ? `Turn ${turnCalls.indexOf(liveTurn) + 1} — Cora is answering in chat`
-      : run.status === "complete"
-        ? "Conversation finished"
-        : "Waiting for your next message"
-    : activeStep
-      ? `Step ${activeStepNumber} — ${activeStep.title}`
-      : run.status === "complete"
-        ? "Run complete"
-        : "Waiting for Cora to plan the first step";
+  // The user stopped the run from the composer. Cora is not on a step, it is
+  // holding, so the glance line says so instead of naming work in flight.
+  const paused = run.status === "paused";
+  const pausedText = activeStep
+    ? `Paused at step ${activeStepNumber}: ${activeStep.title}`
+    : "Paused. Resume from the chat composer.";
+
+  const nowText = paused
+    ? pausedText
+    : conversational
+      ? liveTurn
+        ? `Turn ${turnCalls.indexOf(liveTurn) + 1}, Cora is answering in chat`
+        : run.status === "complete"
+          ? "Conversation finished"
+          : "Waiting for your next message"
+      : activeStep
+        ? `Step ${activeStepNumber}: ${activeStep.title}`
+        : run.status === "complete"
+          ? "Run complete"
+          : "Waiting for Cora to plan the first step";
 
   const completedSteps = orderedSteps.filter((step) =>
     ["complete", "completed_unverified", "skipped"].includes(step.status),
@@ -313,7 +322,9 @@ function RunHeader({ run }: { run: RunState }) {
                       ? "var(--danger)"
                       : terminal
                         ? "var(--ok)"
-                        : "var(--accent)",
+                        : paused
+                          ? "var(--info)"
+                          : "var(--accent)",
                   transition: "width var(--motion) var(--ease-out)",
                 }}
               />
@@ -346,9 +357,17 @@ function RunHeader({ run }: { run: RunState }) {
           <StatMetric
             label="Turns"
             value={turnCalls.length}
-            detail={liveTurn ? "Cora is answering" : "conversation"}
-            tone={liveTurn ? "var(--accent)" : terminal ? "var(--ok)" : "var(--ink)"}
-            live={Boolean(liveTurn)}
+            detail={paused ? "paused" : liveTurn ? "Cora is answering" : "conversation"}
+            tone={
+              paused
+                ? "var(--info)"
+                : liveTurn
+                  ? "var(--accent)"
+                  : terminal
+                    ? "var(--ok)"
+                    : "var(--ink)"
+            }
+            live={Boolean(liveTurn) && !paused}
           />
         ) : (
           <StatMetric
@@ -367,16 +386,23 @@ function RunHeader({ run }: { run: RunState }) {
         ) : (
           <StatMetric
             label="Live"
-            value={liveWorkers.length}
+            // While paused the count is whatever the stop left behind, so it is
+            // still shown, but nothing here may claim the work is running: no
+            // pulse, no accent, and the detail names the hold.
+            value={paused ? 0 : liveWorkers.length}
             detail={
-              liveWorkers.length === 0
-                ? "none active"
-                : `${liveWorkers.length === 1 ? "worker" : "workers"} active${
-                    liveRetryOrdinal > 1 ? ` · attempt ${liveRetryOrdinal} running` : ""
-                  }`
+              paused
+                ? liveWorkers.length > 0
+                  ? `${liveWorkers.length} held by the pause`
+                  : "paused"
+                : liveWorkers.length === 0
+                  ? "none active"
+                  : `${liveWorkers.length === 1 ? "worker" : "workers"} active${
+                      liveRetryOrdinal > 1 ? ` · attempt ${liveRetryOrdinal} running` : ""
+                    }`
             }
-            tone={liveWorkers.length > 0 ? "var(--accent)" : "var(--ink)"}
-            live={liveWorkers.length > 0}
+            tone={paused ? "var(--info)" : liveWorkers.length > 0 ? "var(--accent)" : "var(--ink)"}
+            live={liveWorkers.length > 0 && !paused}
           />
         )}
         <StatMetric label="Model" value={engine} detail={model} text />

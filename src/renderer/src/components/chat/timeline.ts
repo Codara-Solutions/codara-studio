@@ -6,11 +6,12 @@ import type {
   StepStatus,
   WorkerAttempt,
   WorkerRuntime,
+  WorkerTask,
   WorkerTaskStatus,
 } from "@shared/types";
 import { resolveOpenRunQuestion } from "@shared/run-questions";
 import { logicalWorkers, type LogicalWorker } from "../../lib/worker-identity";
-import { workerModelLabel } from "../runs/run-format";
+import { WORKER_ATTEMPT_CAP, workerModelLabel } from "../runs/run-format";
 
 // Timeline model for the chat conversation. A chat is a RunState: its
 // humanMessages are the back-and-forth, and its sparkCalls, worker attempts,
@@ -40,12 +41,133 @@ export interface ChatWorker {
    * under Pi, so the runtime only says which subscription Pi authenticates
    * against. Undefined for shell workers and for attempts that predate the
    * field, which fall back to the runtime label.
+   *
+   * Read from the SURVIVING task's own attempt first, then its modelHint, and
+   * only then the lineage's last attempt: after a runtime fallback the dead
+   * predecessor's model ("Opus 5") is the one thing the row must not claim.
    */
   model?: string;
+  /** Set while another attempt is still owed to this worker. */
+  pending?: ChatPendingAttempt;
+}
+
+// An attempt the run-store still owes a logical worker: the task is queued (or
+// claimed) and no attempt row has been written for it yet. This is what turns a
+// superseded failure from a dead end into "retrying on Sol": the replacement
+// task exists in the run long before its first attempt appears.
+export interface ChatPendingAttempt {
+  /**
+   * "queued" while the task waits for a slot; "starting" once orchestration has
+   * claimed it but its first attempt has not been recorded yet.
+   */
+  state: "queued" | "starting";
+  /** Display label of the model this attempt will run on ("Sol"). */
+  model: string;
+  /**
+   * Ordinal this attempt will take in the lineage: 1 for a worker that has
+   * never run, 2+ when earlier attempts already failed. Counted across the
+   * supersedes chain, so it matches the run inspector rather than the
+   * replacement task's own attemptNumber (which restarts at 1).
+   */
+  number: number;
+}
+
+// The denominator every "attempt N of M" in the chat uses. Mirrors the run
+// inspector: the main-process retry cap, widened if a lineage somehow ran past
+// it, so the chat and the graph can never print different maximums.
+export function workerAttemptDenominator(attemptCount: number): number {
+  return Math.max(WORKER_ATTEMPT_CAP, attemptCount);
+}
+
+// Task statuses that mean the run-store still intends to (re)launch this
+// worker. A lineage whose surviving task sits in one of these is never a dead
+// end, however badly its last attempt ended.
+const PENDING_TASK_STATUSES = new Set<WorkerTaskStatus>([
+  "created",
+  "queued",
+  "claimed",
+  "running",
+  "retry_queued",
+]);
+
+export function isPendingWorkerTask(status: WorkerTaskStatus): boolean {
+  return PENDING_TASK_STATUSES.has(status);
+}
+
+function isDeadAttempt(attempt: WorkerAttempt): boolean {
+  return (
+    attempt.status === "failed" ||
+    attempt.status === "timed_out" ||
+    attempt.status === "cancelled"
+  );
+}
+
+function pendingAttemptModel(task: WorkerTask): string {
+  return workerModelLabel(task.modelHint, runtimeLabel(task.runtimePreference));
+}
+
+// The model an attempt runs on. An attempt that has not launched yet
+// (prompt_ready) carries no model, so fall back to what its own task was
+// hinted to run rather than dropping to the bare runtime label: "Codex" is the
+// subscription, "Sol" is the thing doing the work.
+function attemptModel(attempt: WorkerAttempt, worker: LogicalWorker): string | undefined {
+  if (attempt.model) return attempt.model;
+  const owner = [...worker.supersededTasks, worker.task].find(
+    (task) => task.id === attempt.workerTaskId,
+  );
+  return owner?.modelHint;
+}
+
+// Worker errors arrive as provider output: multi-line, path-laden, occasionally
+// a whole help page. The row is one line, so it carries the first sentence and
+// the technical surfaces keep the rest.
+const ERROR_PREVIEW_LIMIT = 120;
+
+function compactWorkerError(error: string | undefined): string | null {
+  if (!error) return null;
+  const flat = error.replace(/\s+/g, " ").trim();
+  if (!flat) return null;
+  return flat.length <= ERROR_PREVIEW_LIMIT
+    ? flat
+    : `${flat.slice(0, ERROR_PREVIEW_LIMIT - 3)}...`;
+}
+
+// The attempt still owed to a logical worker, if any. Null while the surviving
+// task has a live attempt of its own: that attempt IS the retry, and the row
+// reports it directly instead of promising another one. A succeeded attempt
+// also settles the row, with one exception: retry_queued means the store owes
+// a corrective attempt (verifier feedback) even though the last one succeeded.
+function pendingAttemptFor(worker: LogicalWorker): ChatPendingAttempt | null {
+  const task = worker.task;
+  if (!isPendingWorkerTask(task.status)) return null;
+  const ownAttempts = worker.attempts.filter((attempt) => attempt.workerTaskId === task.id);
+  const hasLiveAttempt = ownAttempts.some(
+    (attempt) => !isDeadAttempt(attempt) && attempt.status !== "succeeded",
+  );
+  if (hasLiveAttempt) return null;
+  const hasSucceededAttempt = ownAttempts.some((attempt) => attempt.status === "succeeded");
+  if (hasSucceededAttempt && task.status !== "retry_queued") return null;
+  return {
+    state: task.status === "claimed" || task.status === "running" ? "starting" : "queued",
+    model: pendingAttemptModel(task),
+    number: worker.attempts.length + 1,
+  };
+}
+
+// The model a worker row should name: the surviving task's own attempt, then
+// what its replacement was hinted to run on, then the lineage's last attempt.
+function workerRowModel(worker: LogicalWorker): string | undefined {
+  const task = worker.task;
+  for (let index = worker.attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = worker.attempts[index];
+    if (attempt.workerTaskId === task.id && attempt.model) return attempt.model;
+  }
+  if (task.modelHint) return task.modelHint;
+  return worker.latestAttempt?.model;
 }
 
 // One beat of a logical worker's retry lineage, for the expanded worker row:
-// "Attempt 1 — feedback", "Attempt 2 — accepted". `number` is the ordinal in
+// "Attempt 1 · feedback", "Attempt 2 · accepted". `number` is the ordinal in
 // the collapsed supersedes chain, not the raw attemptNumber (a runtime
 // fallback restarts attemptNumber at 1 on the replacement task).
 export interface ChatToolAttempt {
@@ -53,6 +175,8 @@ export interface ChatToolAttempt {
   number: number;
   outcome: string;
   failed: boolean;
+  /** True for the synthetic trailing beat of an attempt that has not run yet. */
+  pending?: boolean;
 }
 
 export interface ChatToolFile {
@@ -92,14 +216,20 @@ export type ChatTimelineItem =
       activity: "context" | "manager" | "worker";
       title: string;
       detail: string;
-      status: "started" | "completed" | "failed";
-      tone: "live" | "done" | "failed";
+      // "queued" is a worker-only state: the lineage is between attempts, so
+      // the row must read as waiting rather than borrowing the tone of the
+      // attempt that just died.
+      status: "started" | "completed" | "failed" | "queued";
+      tone: "live" | "done" | "failed" | "queued";
       at: string;
       meta: ChatToolMeta[];
       files: ChatToolFile[];
       // Retry lineage for worker rows: one entry per attempt in the logical
-      // worker's chain, oldest first. Absent on context/manager rows.
+      // worker's chain, oldest first, plus a trailing pending beat when another
+      // attempt is still owed. Absent on context/manager rows.
       attempts?: ChatToolAttempt[];
+      // The attempt this worker is still owed, when it is between attempts.
+      pending?: ChatPendingAttempt;
       // Wall-clock anchors for a row whose elapsed time is still moving. The
       // Duration meta is a snapshot taken when the timeline was built, so a
       // running row would freeze between state updates; toolDurationLabel
@@ -176,11 +306,13 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
 
   // One row per logical worker (task collapsed over its supersedes chain),
   // never per attempt — retries surface as lineage inside the same row so the
-  // chat counts workers the same way the graph does. A worker with no attempt
-  // yet has nothing to show; its step chip already covers "queued".
+  // chat counts workers the same way the graph does. A worker that has not run
+  // yet still gets its row as long as the run-store owes it an attempt, so a
+  // spawned wave is visible in full instead of appearing one worker at a time
+  // as each attempt happens to start.
   const workers = logicalWorkers(run);
   for (const worker of workers) {
-    if (worker.attempts.length > 0) {
+    if (worker.attempts.length > 0 || isPendingWorkerTask(worker.task.status)) {
       items.push(logicalWorkerTimelineItem(worker, run.createdAt));
     }
   }
@@ -190,13 +322,16 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     const stepWorkers: ChatWorker[] = workers
       .filter((worker) => worker.task.stepId === step.id)
       .map((worker) => ({
-        id: worker.task.id,
+        // Keyed on the root of the supersedes chain so a runtime fallback
+        // updates the row in place instead of swapping one out for another.
+        id: logicalWorkerKey(worker),
         title: worker.task.title,
         runtime: worker.task.runtimePreference,
         status: worker.task.status,
         runtimeState: worker.latestAttempt?.runtimeState,
         attemptCount: worker.attempts.length,
-        model: worker.latestAttempt?.model,
+        model: workerRowModel(worker),
+        pending: pendingAttemptFor(worker) ?? undefined,
       }));
     items.push({
       kind: "step",
@@ -297,24 +432,100 @@ function sparkCallTimelineItem(call: SparkCall): Extract<ChatTimelineItem, { kin
   };
 }
 
+// Stable row identity for a logical worker: the root of the supersedes chain.
+// A runtime fallback replaces the surviving task, so keying on `task.id` would
+// churn the row's key mid-run and remount it in the virtualized list.
+function logicalWorkerKey(worker: LogicalWorker): string {
+  return worker.supersededTasks[0]?.id ?? worker.task.id;
+}
+
 function logicalWorkerTimelineItem(
   worker: LogicalWorker,
   fallbackAt: string,
 ): Extract<ChatTimelineItem, { kind: "tool" }> {
   const attempts = worker.attempts;
+  const pending = pendingAttemptFor(worker);
+  // The earliest task in the chain anchors the row where the worker first
+  // appeared in the conversation, even after a runtime fallback replaced it.
+  const firstTask = worker.supersededTasks[0] ?? worker.task;
+  // Anchored at the lineage root's creation, not the first attempt's launch:
+  // a pending row would otherwise jump past neighbours the moment its attempt
+  // starts, reshuffling the wave one row at a time.
+  const at = firstTask.createdAt ?? attempts[0]?.startedAt ?? fallbackAt;
+  const denominator = workerAttemptDenominator(
+    attempts.length + (pending ? 1 : 0),
+  );
+
+  // Every attempt this worker has run, plus the one it is still owed. The
+  // pending beat is what keeps a superseded failure from reading as terminal.
+  const lineage: ChatToolAttempt[] = attempts.map((attempt, index) => ({
+    id: attempt.id,
+    number: index + 1,
+    outcome: attemptOutcome(attempt, index === attempts.length - 1, worker.task.status),
+    failed: isDeadAttempt(attempt),
+  }));
+  if (pending) {
+    lineage.push({
+      id: `${worker.task.id}:pending`,
+      number: pending.number,
+      outcome: `${pending.state === "starting" ? "starting" : "queued"} on ${pending.model}`,
+      failed: false,
+      pending: true,
+    });
+  }
+
+  if (pending) {
+    // Between attempts: the row reports what is coming, not what just died.
+    // The previous failure is still on the line, but as history rather than
+    // as the row's verdict.
+    const previousError = compactWorkerError(attempts[attempts.length - 1]?.error);
+    const ordinal = `attempt ${pending.number} of ${denominator}`;
+    const detailParts: string[] =
+      pending.number > 1
+        ? [`retrying on ${pending.model} · ${ordinal}`]
+        : [`${pending.model} · ${pending.state === "starting" ? "starting" : "queued"}`];
+    if (previousError) detailParts.push(previousError);
+
+    const meta: ChatToolMeta[] = [{ label: "Model", value: pending.model }];
+    if (pending.number > 1) meta.push({ label: "Attempt", value: ordinal });
+    meta.push({
+      label: "Status",
+      value: pending.number > 1
+        ? `retry ${pending.state}`
+        : pending.state,
+    });
+    if (previousError) meta.push({ label: "Last error", value: previousError });
+
+    return {
+      kind: "tool",
+      id: `worker:${logicalWorkerKey(worker)}`,
+      activity: "worker",
+      title: worker.task.title,
+      detail: detailParts.join(" · "),
+      status: "queued",
+      tone: "queued",
+      at,
+      meta,
+      files: [],
+      pending,
+      attempts: lineage,
+    };
+  }
+
   const latest = attempts[attempts.length - 1];
   const status = workerAttemptToolStatus(latest);
   const live = status === "started";
   const failed = status === "failed";
   // The row is named by the model that did the work, with the runtime label
-  // as the fallback until the attempt reports one.
-  const engine = workerModelLabel(latest.model, runtimeLabel(latest.runtime));
-  // "of N" counts attempts that actually exist in the lineage, not the
-  // main-process retry cap — the renderer never learns that constant.
-  const ordinal = `attempt ${attempts.length} of ${attempts.length}`;
+  // as the fallback until the attempt or its task names one.
+  const engine = workerModelLabel(attemptModel(latest, worker), runtimeLabel(latest.runtime));
+  // The denominator is the main-process retry cap the run inspector prints, so
+  // the same worker never reads "2 of 2" here and "2 of 3" there.
+  const ordinal = `attempt ${attempts.length} of ${denominator}`;
   const detailParts: string[] = [];
   if (attempts.length > 1) detailParts.push(`${engine} · ${ordinal}`);
-  if (failed && latest.error) detailParts.push(latest.error);
+  const latestError = failed ? compactWorkerError(latest.error) : null;
+  if (latestError) detailParts.push(latestError);
 
   const meta: ChatToolMeta[] = [{ label: "Model", value: engine }];
   if (attempts.length > 1) meta.push({ label: "Attempt", value: ordinal });
@@ -323,31 +534,20 @@ function logicalWorkerTimelineItem(
   if (duration) meta.push({ label: "Duration", value: duration });
   if (typeof latest.exitCode === "number") meta.push({ label: "Exit", value: `exit ${latest.exitCode}` });
 
-  // The earliest task in the chain anchors the row where the worker first
-  // appeared in the conversation, even after a runtime fallback replaced it.
-  const firstTask = worker.supersededTasks[0] ?? worker.task;
   return {
     kind: "tool",
-    id: `worker:${worker.task.id}`,
+    id: `worker:${logicalWorkerKey(worker)}`,
     activity: "worker",
     title: worker.task.title,
     detail: detailParts.join(" · "),
     status,
     tone: failed ? "failed" : live ? "live" : "done",
-    at: attempts[0].startedAt ?? firstTask.createdAt ?? fallbackAt,
+    at,
     meta,
     files: [],
     startedAt: latest.startedAt,
     finishedAt: latest.finishedAt,
-    attempts: attempts.map((attempt, index) => ({
-      id: attempt.id,
-      number: index + 1,
-      outcome: attemptOutcome(attempt, index === attempts.length - 1, worker.task.status),
-      failed:
-        attempt.status === "failed" ||
-        attempt.status === "timed_out" ||
-        attempt.status === "cancelled",
-    })),
+    attempts: lineage,
   };
 }
 
@@ -367,6 +567,93 @@ function attemptOutcome(
   }
   if (attempt.status === "timed_out") return "timed out";
   return attempt.status.replace(/_/g, " ");
+}
+
+// Live composition of the workers a `wait_for_workers` call is blocked on.
+// Cora waits on the task ids it spawned, but a runtime fallback cancels those
+// and queues replacements, so every requested id is resolved forward through
+// its supersedes chain to the logical worker that actually carries the work.
+// Without that the row counts five dead tasks and reads as five failures.
+export interface WorkerWaitSummary {
+  total: number;
+  running: number;
+  /** Waiting on a first attempt. */
+  queued: number;
+  /** Waiting on a replacement attempt after an earlier one failed. */
+  retrying: number;
+  /** Finished and awaiting (or past) review. */
+  settled: number;
+  /** Waiting on a human answer, not dead. */
+  blocked: number;
+  failed: number;
+  /** One-line composition for the row, or "" when nothing resolved. */
+  label: string;
+}
+
+export function summarizeWorkerWait(
+  run: RunState,
+  taskIds: string[],
+): WorkerWaitSummary | null {
+  const workers = logicalWorkers(run);
+  const byTaskId = new Map<string, LogicalWorker>();
+  for (const worker of workers) {
+    byTaskId.set(worker.task.id, worker);
+    for (const superseded of worker.supersededTasks) byTaskId.set(superseded.id, worker);
+  }
+
+  const resolved = new Map<string, LogicalWorker>();
+  for (const taskId of taskIds) {
+    const worker = byTaskId.get(taskId);
+    if (worker) resolved.set(logicalWorkerKey(worker), worker);
+  }
+  if (resolved.size === 0) return null;
+
+  let running = 0;
+  let queued = 0;
+  let retrying = 0;
+  let settled = 0;
+  let blocked = 0;
+  let failed = 0;
+  for (const worker of resolved.values()) {
+    const status = worker.task.status;
+    if (status === "accepted" || status === "needs_review") {
+      settled += 1;
+      continue;
+    }
+    if (status === "failed" || status === "cancelled") {
+      failed += 1;
+      continue;
+    }
+    // Blocked is not failure: the worker is waiting on a human answer, and
+    // counting it red would tell the user work died when it is waiting on them.
+    if (status === "blocked") {
+      blocked += 1;
+      continue;
+    }
+    const pending = pendingAttemptFor(worker);
+    if (pending) {
+      if (pending.number > 1) retrying += 1;
+      else queued += 1;
+      continue;
+    }
+    // No attempt owed and not terminal: the surviving task's own attempt is in
+    // flight (or has just landed and the task status has yet to catch up).
+    if (worker.latestAttempt?.status === "succeeded") settled += 1;
+    else running += 1;
+  }
+
+  const label = [
+    running > 0 ? `${running} running` : null,
+    retrying > 0 ? `${retrying} queued for retry` : null,
+    queued > 0 ? `${queued} queued` : null,
+    settled > 0 ? `${settled} done` : null,
+    blocked > 0 ? `${blocked} waiting on you` : null,
+    failed > 0 ? `${failed} failed` : null,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
+
+  return { total: resolved.size, running, queued, retrying, settled, blocked, failed, label };
 }
 
 function workerAttemptToolStatus(attempt: WorkerAttempt): "started" | "completed" | "failed" {

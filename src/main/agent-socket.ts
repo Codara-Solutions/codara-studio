@@ -1792,6 +1792,12 @@ async function handleOrchestratorSpawnWorkers(
         : [],
       taskClass: w.taskClass,
       canRunParallel: isParallelBatch,
+      // Every attempt of a multi-worker spawn launches simultaneously below
+      // (scheduleAutopilotCycles), bypassing pickAutopilotTasks. Mark the
+      // tasks so retry/fallback waves keep that concurrency: without the
+      // marker the picker's fan-out guard reads their empty allowedPaths as
+      // "no concrete scope" and relaunches the batch one task at a time.
+      parallelTrust: isParallelBatch ? "manager_batch" : undefined,
       createdBy: "spark",
     });
     // The just-created task is the LAST entry on updated.workerTasks.

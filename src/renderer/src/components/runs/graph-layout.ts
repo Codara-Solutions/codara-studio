@@ -3,15 +3,23 @@
  *
  * One pure function turns a run's ordered steps + worker rows into absolute
  * box geometry: the SPARK origin and a straight left-to-right spine running
- * SPARK → step → step → COMPLETE, with each step's workers hanging *beneath*
- * it like tentacles, a rank centred under the step, the outermost drooping
- * furthest so the fan curves instead of sitting as a flat row. The shape is
- * the org chart: Cora orchestrates along the spine, and the teammates it
- * delegates to hang off the step they belong to. A worker connects only to
- * its own step (one branch per agent, leaving the step's bottom edge and
- * entering the worker's top edge); the spine runs clear above the whole fan.
- * Nodes are placed absolutely and the wire layer draws from these same boxes,
- * so the graph reads as one connected object.
+ * SPARK, step, step, COMPLETE, with each step's workers hanging *beneath* it
+ * as a vertical stack. The shape is the org chart: Cora orchestrates along the
+ * spine, and the teammates it delegates to hang off the step they belong to.
+ *
+ * Workers stack DOWNWARD, not sideways. A rank of five worker cards laid out
+ * in a row is ~1400px wide, which pushed every later step off screen and left
+ * the canvas' vertical space empty. Stacked, the same five cost 150px of extra
+ * width and spend the height the canvas already has. Each worker connects only
+ * to its own step: the branch leaves the step's bottom edge and enters the
+ * near vertical edge of the card, so the branches nest like a bracket instead
+ * of crossing the cards below them. Past COLUMN_SPLIT_AT workers the stack
+ * splits into two mirrored columns (left column first, reading top-down, then
+ * the right) so a very wide batch does not become a very tall one.
+ *
+ * The spine runs clear above the whole fan. Nodes are placed absolutely and
+ * the wire layer draws from these same boxes, so the graph reads as one
+ * connected object.
  */
 import type { StepState } from "@shared/types";
 import type { AgentRow } from "./run-format";
@@ -28,13 +36,23 @@ export interface Point {
   y: number;
 }
 
+// Which side of its step's centreline a worker card sits on. A one-column fan
+// is always "right"; a split fan mirrors, so both columns are entered from the
+// centre and neither branch crosses the other column's cards.
+export type FanSide = "left" | "right";
+
 export interface WorkerLayout {
-  // Stable key — the task id when the worker is queued, else an agent slot id.
+  // Stable key: the task id when the worker is queued, else an agent slot id.
   rowKey: string;
   // Present only once the worker has a task; absent workers are not selectable.
   taskId?: string;
   agentIndex: number;
   box: Box;
+  side: FanSide;
+  // Where this worker's branch lands: the midpoint of the card edge facing the
+  // step's centreline. The wire layer draws its port here too, so the wire and
+  // the port can never disagree about where the branch meets the card.
+  port: Point;
 }
 
 export interface StepLayout {
@@ -55,15 +73,16 @@ export interface SpineWire {
 }
 
 // One branch of a step's parallel fan: it leaves the step's bottom edge for a
-// worker's top edge and ends there, a worker is a satellite of its step, not
+// worker's near edge and ends there, a worker is a satellite of its step, not
 // a stop on the spine. Wire state is derived per-worker so each parallel lane
-// lights independently. `axis: "v"` tells the wire layer to curve with
-// vertical tangents; the spine's horizontal wires leave it unset.
+// lights independently. `enter` names the card edge the branch arrives at, so
+// the wire layer can leave the step vertically and turn into the card
+// horizontally; the spine's straight horizontal wires leave it unset.
 export interface FanWire {
   id: string;
   from: Point;
   to: Point;
-  axis: "v";
+  enter: FanSide;
   stepId: string;
   rowKey: string;
   taskId?: string;
@@ -94,15 +113,17 @@ const COL_GAP = 134; // horizontal wire run between spine columns
 const PAD_X = 56; // canvas padding before SPARK / after COMPLETE
 const TOP_PAD = 70;
 const BOTTOM_PAD = 80;
-// The tentacle drop, clear vertical wire run from a step's bottom edge to
-// the top of its worker cards.
-const WORKER_DROP = 74;
-// Extra droop taken by the outermost tentacles, eased quadratically from the
-// centre of the fan. This is what bends a rank of workers into a curve, so a
-// batch reads as a fan hanging off the step rather than a flat table row.
-const WORKER_ARC = 30;
-// Horizontal gap between sibling worker cards in one step's fan.
-const WORKER_GAP = 26;
+// Clear vertical wire run from a step's bottom edge to the top of the first
+// worker card in its stack, room for the branch to turn out of the step.
+const WORKER_DROP = 52;
+// Vertical gap between stacked sibling worker cards in one step's fan.
+const WORKER_V_GAP = 16;
+// Horizontal clearance from the step's centreline (where the branches leave)
+// to the near edge of a worker column. This is the bracket's elbow room.
+const FAN_INDENT = 46;
+// Past this many workers one column would out-run the canvas' height, so the
+// stack splits into two mirrored columns.
+const COLUMN_SPLIT_AT = 6;
 
 export function boxCenter(box: Box): Point {
   return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
@@ -120,33 +141,43 @@ function bottomPort(box: Box): Point {
   return { x: box.x + box.w / 2, y: box.y + box.h };
 }
 
-function topPort(box: Box): Point {
-  return { x: box.x + box.w / 2, y: box.y };
+// Where each worker of a fan of `count` sits: which column, and how far down
+// it. One column hangs to the right of the step's centreline; a fan past the
+// split threshold mirrors into two, filling the left column top-down first so
+// it reads like any two-column layout.
+function fanSlots(count: number): Array<{ side: FanSide; row: number }> {
+  if (count <= 0) return [];
+  if (count <= COLUMN_SPLIT_AT) {
+    return Array.from({ length: count }, (_, index) => ({ side: "right" as const, row: index }));
+  }
+  const leftCount = Math.ceil(count / 2);
+  return Array.from({ length: count }, (_, index) =>
+    index < leftCount
+      ? { side: "left" as const, row: index }
+      : { side: "right" as const, row: index - leftCount },
+  );
 }
 
-// Total width a step's fan of workers occupies. A fan wider than the step
-// overhangs it evenly on both sides, which the column cursor pays for.
-function fanSpan(count: number): number {
-  if (count === 0) return 0;
-  return count * WORKER_W + (count - 1) * WORKER_GAP;
-}
-
-// How far the j-th tentacle of a fan of `count` droops below the shortest
-// one, 0 at the centre, WORKER_ARC at the outermost edge.
-function tentacleDroop(index: number, count: number): number {
-  const last = count - 1;
-  if (last <= 0) return 0;
-  const spread = Math.abs(index - last / 2) / (last / 2);
-  return WORKER_ARC * spread * spread;
+// How far a step's fan reaches past the step box on either side. The column
+// cursor pays for both, so a stack can never sit on top of its neighbours.
+function fanOverhang(slots: ReadonlyArray<{ side: FanSide }>): {
+  left: number;
+  right: number;
+} {
+  const armReach = FAN_INDENT + WORKER_W - STEP_W / 2;
+  return {
+    left: slots.some((slot) => slot.side === "left") ? Math.max(0, armReach) : 0,
+    right: slots.some((slot) => slot.side === "right") ? Math.max(0, armReach) : 0,
+  };
 }
 
 /**
  * Lay the whole graph out. Steps run left to right on a straight spine; each
- * step's workers hang beneath it as a centred fan, the outermost drooping
- * furthest, so a batch of three agents reads as three tentacles off the step
- * they belong to. The orchestration is the picture: the spine is Cora's line
- * of control, everything below it is delegated work. A step with no workers
- * connects straight through.
+ * step's workers hang beneath it as a vertical stack, so a batch of five
+ * agents reads as five branches off the step they belong to rather than a
+ * flat row wider than the viewport. The orchestration is the picture: the
+ * spine is Cora's line of control, everything below it is delegated work. A
+ * step with no workers connects straight through.
  */
 export function computeRunGraphLayout(
   steps: StepState[],
@@ -168,30 +199,40 @@ export function computeRunGraphLayout(
 
   steps.forEach((step, i) => {
     const rows = rowsByStep.get(step.id) ?? [];
-    // A fan wider than its step overhangs both sides evenly. Push the step in
-    // by the overhang so the leftmost worker still clears the previous
-    // column, and pay for the right overhang when advancing the cursor.
-    const overhang = Math.max(0, (fanSpan(rows.length) - STEP_W) / 2);
+    const slots = fanSlots(rows.length);
+    const overhang = fanOverhang(slots);
+    // Push the step in by the left overhang so the outermost card still clears
+    // the previous column, and pay for the right one when advancing the cursor.
     const box: Box = {
-      x: cursorX + overhang,
+      x: cursorX + overhang.left,
       y: spineY - STEP_H / 2,
       w: STEP_W,
       h: STEP_H,
     };
-    const fanLeft = box.x + box.w / 2 - fanSpan(rows.length) / 2;
-    const workers: WorkerLayout[] = rows.map((row, j) => ({
-      rowKey: row.task?.id ?? `${step.id}:agent:${j}`,
-      taskId: row.task?.id,
-      agentIndex: j,
-      box: {
-        x: fanLeft + j * (WORKER_W + WORKER_GAP),
-        y: box.y + box.h + WORKER_DROP + tentacleDroop(j, rows.length),
+    const centreX = box.x + box.w / 2;
+    const stackTop = box.y + box.h + WORKER_DROP;
+    const workers: WorkerLayout[] = rows.map((row, j) => {
+      const slot = slots[j];
+      const workerBox: Box = {
+        x: slot.side === "right" ? centreX + FAN_INDENT : centreX - FAN_INDENT - WORKER_W,
+        y: stackTop + slot.row * (WORKER_H + WORKER_V_GAP),
         w: WORKER_W,
         h: WORKER_H,
-      },
-    }));
+      };
+      return {
+        rowKey: row.task?.id ?? `${step.id}:agent:${j}`,
+        taskId: row.task?.id,
+        agentIndex: j,
+        box: workerBox,
+        side: slot.side,
+        port: {
+          x: slot.side === "right" ? workerBox.x : workerBox.x + workerBox.w,
+          y: workerBox.y + workerBox.h / 2,
+        },
+      };
+    });
     stepLayouts.push({ stepId: step.id, index: i + 1, box, workers });
-    cursorX = box.x + box.w + overhang + COL_GAP;
+    cursorX = box.x + box.w + overhang.right + COL_GAP;
   });
 
   const endBox: Box = {
@@ -239,8 +280,8 @@ export function computeRunGraphLayout(
         fanWires.push({
           id: `out:${layout.stepId}:${worker.rowKey}`,
           from: bottomPort(layout.box),
-          to: topPort(worker.box),
-          axis: "v",
+          to: worker.port,
+          enter: worker.side,
           stepId: layout.stepId,
           rowKey: worker.rowKey,
           taskId: worker.taskId,
@@ -249,11 +290,10 @@ export function computeRunGraphLayout(
     });
   }
 
-  // Content extent. The deepest point is whichever tentacle droops furthest
-  // (outer ones hang lower, so every worker box is checked, not just the
-  // last). The rightmost is normally COMPLETE, but a wide fan under the final
-  // step can reach past it, the canvas fits to these numbers, so anything
-  // missed here would be silently cropped out of the view.
+  // Content extent. The deepest point is the bottom of the longest worker
+  // stack, and the rightmost is normally COMPLETE, but the right column under
+  // the final step can reach past it. The canvas fits to these numbers, so
+  // anything missed here would be silently cropped out of the view.
   let maxBottom = Math.max(sparkBox.y + sparkBox.h, endBox.y + endBox.h);
   let maxRight = endBox.x + endBox.w;
   for (const layout of stepLayouts) {

@@ -90,6 +90,10 @@ export default function RunGraph({
     [orderedSteps, rowsByStep],
   );
   const promptStepId = useMemo(() => promptGenerationTargetStepId(run), [run]);
+  // The user has stopped this run from the composer. Nothing below the spine
+  // may keep implying live work, so the paused truth is carried down to every
+  // node from the run record itself rather than guessed at per node.
+  const runPaused = run.status === "paused";
 
   if (orderedSteps.length === 0) {
     // A finished run with no steps did its work outside the worker pipeline
@@ -135,6 +139,7 @@ export default function RunGraph({
                 attemptByTask={maps.attemptByTask}
                 tasksById={maps.taskById}
                 active={step.id === run.currentStepId}
+                runPaused={runPaused}
                 selected={stepSelected}
                 onSelect={() => onSelectStep(step.id)}
               />
@@ -153,6 +158,7 @@ export default function RunGraph({
                   <WorkerNode
                     row={row}
                     stepStatus={step.status}
+                    runPaused={runPaused}
                     selected={workerSelected}
                     onSelect={() => {
                       if (workerLayout.taskId) onSelectWorker(workerLayout.taskId);

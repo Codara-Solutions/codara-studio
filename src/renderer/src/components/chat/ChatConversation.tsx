@@ -7,7 +7,9 @@ import {
   isToolRowTicking,
   runtimeLabel,
   stepStatusColor,
+  summarizeWorkerWait,
   toolDurationLabel,
+  workerAttemptDenominator,
   workerStatusColor,
   workerStatusLabel,
   type ChatTimelineItem,
@@ -16,7 +18,12 @@ import {
 import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
-import { compactPreview, formatToolPayload, toolCallHeadline } from "./tool-labels";
+import {
+  compactPreview,
+  formatToolPayload,
+  toolCallHeadline,
+  waitForWorkersTaskIds,
+} from "./tool-labels";
 import {
   useRunExecutionRecord,
   type ExecutionBlock,
@@ -55,6 +62,14 @@ interface ConversationMinimapEntry {
 type LiveToolCall = ExecutionToolCall;
 
 type SessionNote = { id: string; message: string; tone: "system" | "backend" };
+
+// Live worker composition for a `wait_for_workers` row, resolved against the
+// current run. A context rather than a prop: the row sits four components deep
+// inside the streamed execution trace, and a context read pierces the memo
+// boundaries that keep the rest of the conversation from re-rendering.
+const WorkerWaitContext = React.createContext<
+  ((taskIds: string[]) => string | null) | null
+>(null);
 
 export default function ChatConversation({ run }: { run: RunState }) {
   // One durable projection owns both history hydration and live frames. Build
@@ -162,113 +177,119 @@ export default function ChatConversation({ run }: { run: RunState }) {
   // "Result evidence" section and the RunsView header's checks count).
   const rowCount = items.length;
   const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
+  const summarizeWait = useMemo(
+    () => (taskIds: string[]) => summarizeWorkerWait(run, taskIds)?.label || null,
+    [run],
+  );
 
   return (
-    <div style={SCROLL_STYLE} data-testid="cora-conversation">
-      {rowCount === 0 ? (
-        <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
-      ) : (
-        <Virtuoso<unknown, ConversationRenderContext>
-          // A selected run can first arrive as the empty run.created snapshot
-          // and gain its first message a moment later. In an occluded Electron
-          // window Virtuoso's zero-item measurement probe may never receive a
-          // compositor frame, leaving the populated conversation blank. Remount
-          // only across that empty -> populated boundary and seed enough rows
-          // to paint without waiting for a probe.
-          key={`${run.id}:${rowCount === 0 ? "empty" : "populated"}`}
-          ref={virtuosoRef}
-          context={renderContext}
-          style={{ height: "100%", width: "100%" }}
-          totalCount={rowCount}
-          initialItemCount={Math.min(rowCount, 12)}
-          defaultItemHeight={96}
-          initialTopMostItemIndex={Math.max(0, rowCount - 1)}
-          // "auto" (instant) rather than "smooth": while a turn streams, a new
-          // frame lands several times a second, and queueing an animated
-          // scroll for each one is exactly the compounding jank a pinned
-          // reader feels as lag. An instant follow is imperceptible at the
-          // bottom edge and never falls behind.
-          followOutput={readerAtBottom ? "auto" : false}
-          atBottomStateChange={setReaderAtBottom}
-          rangeChanged={setVisibleRange}
-          increaseViewportBy={{ top: 600, bottom: 400 }}
-          computeItemKey={(index) =>
-            index < items.length ? timelineItemKey(items[index]) : "live"
-          }
-          itemContent={(index, _data, context) => {
-            const item = items[index];
-            const rowKind = item?.kind === "activity-group" ? "work" : item?.kind ?? "empty";
-            const compactRow = rowKind === "tool" || rowKind === "work" || rowKind === "step";
-            return (
-              <div
-                className="cora-conversation-column"
-                data-cora-conversation-column
-                style={{
-                  ...CONVERSATION_COLUMN_STYLE,
-                  padding: index === 0
-                    ? "20px clamp(12px, 2.4vw, 20px) 0"
-                    : "0 clamp(12px, 2.4vw, 20px)",
-                }}
-              >
+    <WorkerWaitContext.Provider value={summarizeWait}>
+      <div style={SCROLL_STYLE} data-testid="cora-conversation">
+        {rowCount === 0 ? (
+          <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
+        ) : (
+          <Virtuoso<unknown, ConversationRenderContext>
+            // A selected run can first arrive as the empty run.created snapshot
+            // and gain its first message a moment later. In an occluded Electron
+            // window Virtuoso's zero-item measurement probe may never receive a
+            // compositor frame, leaving the populated conversation blank. Remount
+            // only across that empty -> populated boundary and seed enough rows
+            // to paint without waiting for a probe.
+            key={`${run.id}:${rowCount === 0 ? "empty" : "populated"}`}
+            ref={virtuosoRef}
+            context={renderContext}
+            style={{ height: "100%", width: "100%" }}
+            totalCount={rowCount}
+            initialItemCount={Math.min(rowCount, 12)}
+            defaultItemHeight={96}
+            initialTopMostItemIndex={Math.max(0, rowCount - 1)}
+            // "auto" (instant) rather than "smooth": while a turn streams, a new
+            // frame lands several times a second, and queueing an animated
+            // scroll for each one is exactly the compounding jank a pinned
+            // reader feels as lag. An instant follow is imperceptible at the
+            // bottom edge and never falls behind.
+            followOutput={readerAtBottom ? "auto" : false}
+            atBottomStateChange={setReaderAtBottom}
+            rangeChanged={setVisibleRange}
+            increaseViewportBy={{ top: 600, bottom: 400 }}
+            computeItemKey={(index) =>
+              index < items.length ? timelineItemKey(items[index]) : "live"
+            }
+            itemContent={(index, _data, context) => {
+              const item = items[index];
+              const rowKind = item?.kind === "activity-group" ? "work" : item?.kind ?? "empty";
+              const compactRow = rowKind === "tool" || rowKind === "work" || rowKind === "step";
+              return (
                 <div
-                  className={`cora-timeline-row cora-timeline-row--${rowKind}`}
-                  data-timeline-kind={rowKind}
-                  style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
+                  className="cora-conversation-column"
+                  data-cora-conversation-column
+                  style={{
+                    ...CONVERSATION_COLUMN_STYLE,
+                    padding: index === 0
+                      ? "20px clamp(12px, 2.4vw, 20px) 0"
+                      : "0 clamp(12px, 2.4vw, 20px)",
+                  }}
                 >
-                  {item?.kind === "message" ? (
-                    <MessageTurn
-                      item={item}
-                      runId={run.id}
-                      openQuestionId={openQuestion?.id ?? null}
-                      checkpoint={latestUndoableCheckpoint?.messageId === item.id ? latestUndoableCheckpoint : null}
-                      showDoneMarker={doneMarkerSparkMessageId === item.id}
-                      completionVerdict={completionVerdict}
-                    />
-                  ) : item?.kind === "tool" ? (
-                    <ToolActivityRow
-                      item={item}
-                      executionTurn={item.activity === "manager" ? context.executionByCallId.get(item.id.slice("spark-call:".length)) : undefined}
-                      finalAnswer={item.activity === "manager" ? context.finalAnswerByCallId.get(item.id.slice("spark-call:".length)) : undefined}
-                    />
-                  ) : item?.kind === "activity-group" ? (
-                    <ActivityGroup item={item} />
-                  ) : (
-                    item ? <StepCard item={item} /> : null
-                  )}
+                  <div
+                    className={`cora-timeline-row cora-timeline-row--${rowKind}`}
+                    data-timeline-kind={rowKind}
+                    style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
+                  >
+                    {item?.kind === "message" ? (
+                      <MessageTurn
+                        item={item}
+                        runId={run.id}
+                        openQuestionId={openQuestion?.id ?? null}
+                        checkpoint={latestUndoableCheckpoint?.messageId === item.id ? latestUndoableCheckpoint : null}
+                        showDoneMarker={doneMarkerSparkMessageId === item.id}
+                        completionVerdict={completionVerdict}
+                      />
+                    ) : item?.kind === "tool" ? (
+                      <ToolActivityRow
+                        item={item}
+                        executionTurn={item.activity === "manager" ? context.executionByCallId.get(item.id.slice("spark-call:".length)) : undefined}
+                        finalAnswer={item.activity === "manager" ? context.finalAnswerByCallId.get(item.id.slice("spark-call:".length)) : undefined}
+                      />
+                    ) : item?.kind === "activity-group" ? (
+                      <ActivityGroup item={item} />
+                    ) : (
+                      item ? <StepCard item={item} /> : null
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
+              );
+            }}
+            // "At bottom" must mean "you can actually SEE the last row", not
+            // "the scroller is within 4px of its end" (Virtuoso's default). The
+            // floating "New activity" pill and the minimap are absolutely
+            // positioned over the list's bottom-right, so the final rows sit
+            // underneath them: with the tight default the reader would scroll
+            // down, still be told there was new activity, and never reach a
+            // resting position where the last response was fully visible.
+            atBottomThreshold={72}
+            // Tall enough to scroll the last row clear of that pill (bottom 18 +
+            // ~32 tall) instead of leaving it pinned under it.
+            components={{ Footer: () => <div style={{ height: 84 }} /> }}
+          />
+        )}
+        <ConversationMinimap
+          entries={minimapEntries}
+          visibleRange={visibleRange}
+          onSelect={(index) => {
+            virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" });
           }}
-          // "At bottom" must mean "you can actually SEE the last row", not
-          // "the scroller is within 4px of its end" (Virtuoso's default). The
-          // floating "New activity" pill and the minimap are absolutely
-          // positioned over the list's bottom-right, so the final rows sit
-          // underneath them: with the tight default the reader would scroll
-          // down, still be told there was new activity, and never reach a
-          // resting position where the last response was fully visible.
-          atBottomThreshold={72}
-          // Tall enough to scroll the last row clear of that pill (bottom 18 +
-          // ~32 tall) instead of leaving it pinned under it.
-          components={{ Footer: () => <div style={{ height: 84 }} /> }}
         />
-      )}
-      <ConversationMinimap
-        entries={minimapEntries}
-        visibleRange={visibleRange}
-        onSelect={(index) => {
-          virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" });
-        }}
-      />
-      {!readerAtBottom && rowCount > 0 && (
-        <button
-          type="button"
-          onClick={() => virtuosoRef.current?.scrollToIndex({ index: rowCount - 1, align: "end", behavior: "smooth" })}
-          style={NEW_ACTIVITY_BUTTON_STYLE}
-        >
-          New activity ↓
-        </button>
-      )}
-    </div>
+        {!readerAtBottom && rowCount > 0 && (
+          <button
+            type="button"
+            onClick={() => virtuosoRef.current?.scrollToIndex({ index: rowCount - 1, align: "end", behavior: "smooth" })}
+            style={NEW_ACTIVITY_BUTTON_STYLE}
+          >
+            New activity ↓
+          </button>
+        )}
+      </div>
+    </WorkerWaitContext.Provider>
   );
 }
 
@@ -750,7 +771,22 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
   const [open, setOpen] = useState(false);
   const headline = toolCallHeadline(call.toolName, call.input);
   const readableOutput = finished ? readableToolOutput(call.output ?? "") : "";
-  const inlineDetail = failed ? compactPreview(readableOutput) || "failed" : headline.detail;
+  // While a wait is still blocking, the static "all results" says nothing about
+  // where the wave actually stands. Swap in the live composition, which counts
+  // retry replacements as the workers they are rather than as dead tasks. A
+  // settled call keeps its original detail: recomputing from today's state
+  // would rewrite history.
+  const summarizeWait = React.useContext(WorkerWaitContext);
+  const waitTaskIds = useMemo(
+    () => waitForWorkersTaskIds(call.toolName, call.input),
+    [call.toolName, call.input],
+  );
+  const liveWait = !finished && waitTaskIds && summarizeWait
+    ? summarizeWait(waitTaskIds)
+    : null;
+  const inlineDetail = failed
+    ? compactPreview(readableOutput) || "failed"
+    : liveWait ?? headline.detail;
   const color = failed ? "var(--danger)" : finished ? "var(--muted-2)" : "var(--accent)";
 
   return (
@@ -1457,7 +1493,9 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         <span style={TOOL_TITLE_STYLE}>{item.title}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
         {stats && <span style={TOOL_STATS_STYLE}>{stats}</span>}
-        {item.status !== "started" && <ToolOutcomeGlyph failed={item.status === "failed"} />}
+        {(item.status === "completed" || item.status === "failed") && (
+          <ToolOutcomeGlyph failed={item.status === "failed"} />
+        )}
         {hasDetails && <Caret open={open} />}
       </DisclosureButton>
       {open && hasDetails && <ToolDetails item={item} />}
@@ -1770,12 +1808,14 @@ function ToolDetails({ item, compact = false }: { item: ToolItem; compact?: bool
                 ...TOOL_META_LINE_STYLE,
                 color: attempt.failed
                   ? "var(--danger)"
-                  : index === lineage.length - 1
-                    ? "var(--ink-dim)"
-                    : "var(--muted)",
+                  : attempt.pending
+                    ? "var(--warn)"
+                    : index === lineage.length - 1
+                      ? "var(--ink-dim)"
+                      : "var(--muted)",
               }}
             >
-              Attempt {attempt.number} — {attempt.outcome}
+              Attempt {attempt.number} · {attempt.outcome}
             </div>
           ))}
         </div>
@@ -1817,7 +1857,9 @@ function activityGroupSummary(items: ToolItem[]): { title: string; detail: strin
   for (const item of items) {
     if (item.activity === "worker") {
       workers += 1;
-      attempts += item.attempts?.length ?? 1;
+      // Only attempts that actually ran; the trailing pending beat is a
+      // promise, not a try.
+      attempts += item.attempts?.filter((attempt) => !attempt.pending).length ?? 1;
     } else if (item.activity === "manager") {
       model += 1;
     } else {
@@ -1858,6 +1900,11 @@ function toolMetaValue(item: ToolItem, label: string): string | null {
 function toolToneColor(item: ToolItem): string {
   if (item.tone === "failed") return "var(--danger)";
   if (item.tone === "live") return "var(--accent)";
+  // A worker between attempts: warn when it is a retry (something went wrong
+  // and is being redone), plain muted when it is simply waiting for its turn.
+  if (item.tone === "queued") {
+    return (item.pending?.number ?? 1) > 1 ? "var(--warn)" : "var(--muted)";
+  }
   if (item.activity === "context") return "var(--info)";
   return "var(--muted-2)";
 }
@@ -1883,19 +1930,29 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   // no live state has been reported yet. The text still uses the task
   // status so the orchestration lifecycle stays readable.
   const liveColor = runtimeStateColor(worker.runtimeState);
-  const color = liveColor ?? workerStatusColor(worker.status);
+  // A worker owed a retry has no live runtime state (its replacement has not
+  // launched), and its task status is a bland "queued". Warn is what says
+  // "this one already came back once".
+  const retryPending = (worker.pending?.number ?? 1) > 1;
+  const color = liveColor
+    ?? (retryPending ? "var(--warn)" : workerStatusColor(worker.status));
   // Only animate "working". The other live states (blocked / idle / done)
   // and any non-running task status stay static. Counter-intuitive but
   // herdr-validated: pulsing everything makes nothing read as urgent.
   const pulse = worker.runtimeState === "working";
   const titleSuffix = worker.runtimeState ? ` · ${worker.runtimeState}` : "";
+  const attemptCount = worker.attemptCount ?? 0;
   const detail = [
     // The model, not the runtime: "claude" only names the subscription Pi
     // authenticates against, and two workers wearing it can be very different
     // models. Falls back to the runtime label until an attempt reports one.
     workerModelLabel(worker.model, runtimeLabel(worker.runtime)),
     workerStatusLabel(worker.status),
-    (worker.attemptCount ?? 0) > 1 ? `attempt ${worker.attemptCount}` : null,
+    retryPending
+      ? `retry ${worker.pending?.number} of ${workerAttemptDenominator((worker.pending?.number ?? 1))}`
+      : attemptCount > 1
+        ? `attempt ${attemptCount} of ${workerAttemptDenominator(attemptCount)}`
+        : null,
   ].filter(Boolean).join(" · ");
   return (
     <div

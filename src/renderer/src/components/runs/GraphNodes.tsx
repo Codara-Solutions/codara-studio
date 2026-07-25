@@ -357,7 +357,13 @@ export const SparkNode = React.memo(function SparkNode({
 }) {
   const live = isLiveStatus(runStatus);
   const failed = runStatus === "failed" || runStatus === "blocked";
-  const tone = failed ? "var(--danger)" : live ? "var(--accent)" : "var(--ink-dim)";
+  const tone = failed
+    ? "var(--danger)"
+    : live
+      ? "var(--accent)"
+      : runStatus === "paused"
+        ? "var(--info)"
+        : "var(--ink-dim)";
   return (
     <div
       title="Cora — the orchestration manager"
@@ -438,6 +444,11 @@ interface StepNodeProps {
   fileCount: number;
   // The run's current / running step — earns the ambient accent treatment.
   active: boolean;
+  // True while the whole run is paused. A step's own status is not rewritten
+  // when the user stops a run, so the node has to be told: without this it
+  // would keep wearing the live accent and calling itself "Running" over work
+  // that is not moving.
+  runPaused?: boolean;
   selected: boolean;
   onSelect: () => void;
   // Optional verdict inputs — when present, WorkerBatchNode renders the shared
@@ -461,6 +472,7 @@ function WorkerBatchNode({
   rows,
   fileCount,
   active,
+  runPaused = false,
   selected,
   onSelect,
   reportByAttempt,
@@ -469,14 +481,16 @@ function WorkerBatchNode({
 }: StepNodeProps) {
   const [hover, setHover] = useState(false);
   const status = step.status;
-  const tone = stepStatusColor(status);
+  const inMotion = status === "running" || status === "reviewing";
+  const held = runPaused && (active || inMotion);
+  const tone = held ? statusColor("paused") : stepStatusColor(status);
   const verdict =
     reportByAttempt && attemptByTask && tasksById
       ? stepVerdict(step, attemptByTask, reportByAttempt, tasksById)
       : "none";
   const complete = status === "complete" || status === "skipped";
   const attention = status === "blocked" || status === "failed";
-  const live = active || status === "running" || status === "reviewing";
+  const live = !runPaused && (active || inMotion);
 
   const total = rows.length;
   const done = rows.filter(
@@ -512,14 +526,18 @@ function WorkerBatchNode({
       ? "var(--danger)"
       : live
         ? "var(--accent-edge)"
-        : hover
-          ? "var(--rule-strong)"
-          : "var(--rule)";
+        : held
+          ? "color-mix(in oklch, var(--info) 46%, var(--rule))"
+          : hover
+            ? "var(--rule-strong)"
+            : "var(--rule)";
   const background = attention
     ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
     : live
       ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
-      : "var(--panel)";
+      : held
+        ? "color-mix(in oklab, var(--info) 4%, var(--panel))"
+        : "var(--panel)";
   const shadow = [
     selected ? "0 0 0 1.5px var(--accent)" : null,
     "var(--lift-hi)",
@@ -558,7 +576,7 @@ function WorkerBatchNode({
       }}
     >
       <header style={{ display: "grid", gridTemplateColumns: "32px minmax(0,1fr) auto", gap: 11, alignItems: "start" }}>
-        <StepBadge index={index} status={status} />
+        <StepBadge index={index} status={status} tone={held ? tone : undefined} />
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
           <span
             style={{
@@ -588,7 +606,7 @@ function WorkerBatchNode({
           </span>
         </div>
         <div style={{ display: "inline-flex", alignItems: "center", gap: 6, flex: "0 0 auto" }}>
-          <StatusTag label={stepStatusLabel(status)} tone={tone} />
+          <StatusTag label={held ? "paused" : stepStatusLabel(status)} tone={tone} />
           <VerdictPill kind={verdict} compact />
         </div>
       </header>
@@ -688,19 +706,30 @@ function WorkerBatchNode({
 
 // Brake / checkpoint step: a manager replanning pause, no workers. Lighter and
 // dashed so it reads as a gate between worker batches rather than a work node.
-function CheckpointNode({ step, index, active, selected, onSelect }: StepNodeProps) {
+function CheckpointNode({
+  step,
+  index,
+  active,
+  runPaused = false,
+  selected,
+  onSelect,
+}: StepNodeProps) {
   const [hover, setHover] = useState(false);
   const status = step.status;
-  const tone = stepStatusColor(status);
+  const inMotion = status === "running" || status === "reviewing";
+  const held = runPaused && (active || inMotion);
+  const tone = held ? statusColor("paused") : stepStatusColor(status);
   const complete = status === "complete" || status === "skipped";
-  const live = active || status === "running" || status === "reviewing";
+  const live = !runPaused && (active || inMotion);
   const border = selected
     ? "var(--accent)"
     : live
       ? "var(--accent-edge)"
-      : hover
-        ? "var(--rule-strong)"
-        : "var(--rule)";
+      : held
+        ? "color-mix(in oklch, var(--info) 46%, var(--rule))"
+        : hover
+          ? "var(--rule-strong)"
+          : "var(--rule)";
   return (
     <article
       onClick={(event) => {
@@ -792,15 +821,25 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
         {step.goal || "Cora pauses here to replan downstream steps."}
       </p>
       <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 7 }}>
-        <StatusDot status={status} size={6} />
-        <StatusTag label={stepStatusLabel(status)} tone={tone} />
+        <StatusDot status={held ? "paused" : status} size={6} />
+        <StatusTag label={held ? "paused" : stepStatusLabel(status)} tone={tone} />
       </div>
     </article>
   );
 }
 
-function StepBadge({ index, status }: { index: number; status: StepState["status"] }) {
-  const tone = stepStatusColor(status);
+function StepBadge({
+  index,
+  status,
+  tone: toneOverride,
+}: {
+  index: number;
+  status: StepState["status"];
+  // Set when the node paints the step in a tone its own status cannot express
+  // (a running step held by a paused run), so the badge agrees with the chip.
+  tone?: string;
+}) {
+  const tone = toneOverride ?? stepStatusColor(status);
   const complete = status === "complete" || status === "skipped";
   const failed = status === "failed" || status === "blocked";
   return (
@@ -814,7 +853,9 @@ function StepBadge({ index, status }: { index: number; status: StepState["status
           ? "var(--ok-soft)"
           : failed
             ? "var(--danger-soft)"
-            : "color-mix(in oklch, var(--accent) 8%, transparent)",
+            : toneOverride
+              ? `color-mix(in oklch, ${toneOverride} 8%, transparent)`
+              : "color-mix(in oklch, var(--accent) 8%, transparent)",
         color: tone,
         display: "inline-flex",
         alignItems: "center",
@@ -875,6 +916,10 @@ function Stat({
 interface WorkerNodeProps {
   row: AgentRow;
   stepStatus: StepState["status"];
+  // True while the whole run is paused. A stop kills the worker's process but
+  // an attempt caught mid-launch can still read as running, so the card is told
+  // the run is held rather than inferring aliveness from a stale attempt.
+  runPaused?: boolean;
   selected: boolean;
   onSelect: () => void;
   onOpen: () => void;
@@ -883,6 +928,7 @@ interface WorkerNodeProps {
 export const WorkerNode = React.memo(function WorkerNode({
   row,
   stepStatus,
+  runPaused = false,
   selected,
   onSelect,
   onOpen,
@@ -899,27 +945,33 @@ export const WorkerNode = React.memo(function WorkerNode({
   // when nothing has spawned yet (queued).
   const liveRuntime = attempt?.runtime ?? task?.runtimePreference ?? agent.runtimePreference;
   const tone = runtimeTone(liveRuntime);
-  const running = status === "running";
+  // A paused run has no worker doing work, whatever the last persisted attempt
+  // status says, so the card drops every live affordance: no accent edge, no
+  // pulsing dot, no "Running" word over a process the stop already killed.
+  const held = runPaused && status === "running";
+  const running = status === "running" && !held;
   const blocked = status === "blocked";
   const runtimeState = attempt?.runtimeState;
-  const stateLabel = runtimeState
-    ? runtimeState === "idle"
-      ? "ready"
-      : runtimeState === "working"
-        ? "working"
-        : runtimeState === "error"
-          // Matches the terminal pane chip. The raw state name ("error") is
-          // vaguer than what happened: the worker's process died on its own,
-          // which is never a sanctioned end since only Cora may stop a worker.
-          ? "crashed"
-          : runtimeState
-    : queued
-      ? "queued"
-      : attempt?.status === "succeeded"
-        ? "complete"
-        : attempt?.status === "finishing"
-          ? "finishing"
-          : status;
+  const stateLabel = held
+    ? "paused"
+    : runtimeState
+      ? runtimeState === "idle"
+        ? "ready"
+        : runtimeState === "working"
+          ? "working"
+          : runtimeState === "error"
+            // Matches the terminal pane chip. The raw state name ("error") is
+            // vaguer than what happened: the worker's process died on its own,
+            // which is never a sanctioned end since only Cora may stop a worker.
+            ? "crashed"
+            : runtimeState
+      : queued
+        ? "queued"
+        : attempt?.status === "succeeded"
+          ? "complete"
+          : attempt?.status === "finishing"
+            ? "finishing"
+            : status;
 
   const border = selected
     ? "var(--accent)"
@@ -927,9 +979,11 @@ export const WorkerNode = React.memo(function WorkerNode({
       ? "var(--danger)"
       : running
         ? "var(--accent-edge)"
-        : hover && !queued
-          ? "var(--rule-strong)"
-          : "var(--rule)";
+        : held
+          ? "color-mix(in oklch, var(--info) 46%, var(--rule))"
+          : hover && !queued
+            ? "var(--rule-strong)"
+            : "var(--rule)";
 
   const label = task?.title || agent.label;
   const role = task?.taskClass ?? "worker";
@@ -944,7 +998,7 @@ export const WorkerNode = React.memo(function WorkerNode({
       ? `${liveModel} · ${effort}`
       : liveModel
     : "model pending";
-  const stateColor = statusColor(status);
+  const stateColor = held ? statusColor("paused") : statusColor(status);
 
   // Attempt lineage: ordinal counts every try across the task's supersedes
   // chain; the tooltip recounts the earlier tries so rework is inspectable
@@ -993,11 +1047,14 @@ export const WorkerNode = React.memo(function WorkerNode({
           ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
           : running
             ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
-            : "var(--panel)",
-        // The colored top edge is the worker card's silhouette cue, set where
-        // its tentacle enters from the step above. While the worker runs the
-        // edge turns accent and the card lifts a level: the working lane must
-        // be structural, not just a tint. Model identity stays on the chip.
+            : held
+              ? "color-mix(in oklab, var(--info) 4%, var(--panel))"
+              : "var(--panel)",
+        // The colored top edge is the worker card's silhouette cue, the band
+        // that separates one card from the one stacked above it. While the
+        // worker runs the edge turns accent and the card lifts a level: the
+        // working lane must be structural, not just a tint. Model identity
+        // stays on the chip.
         boxShadow: `${
           running
             ? "inset 0 2px 0 var(--accent)"
@@ -1072,7 +1129,13 @@ export const WorkerNode = React.memo(function WorkerNode({
             display: "inline-flex",
             alignItems: "center",
             gap: 4,
-            color: runtimeState === "error" || blocked ? "var(--danger)" : runtimeState === "idle" || runtimeState === "done" ? "var(--ok)" : stateColor,
+            color: held
+              ? stateColor
+              : runtimeState === "error" || blocked
+                ? "var(--danger)"
+                : runtimeState === "idle" || runtimeState === "done"
+                  ? "var(--ok)"
+                  : stateColor,
             fontFamily: "var(--font-sans)",
             fontSize: 9.5,
             fontWeight: 600,
@@ -1080,7 +1143,7 @@ export const WorkerNode = React.memo(function WorkerNode({
             whiteSpace: "nowrap",
           }}
         >
-          <StatusDot status={mapAgentToStepStatus(status)} size={5} />
+          <StatusDot status={held ? "paused" : mapAgentToStepStatus(status)} size={5} />
           {sentenceCase(stateLabel)}
         </span>
         <span

@@ -2239,6 +2239,17 @@ export interface WorkerTask {
   // overwritten from real filesChanged and "fan-out" when forced by a
   // FanOutDirective.
   writeScopeSource?: WriteScopeSource;
+  // Parallel-launch provenance. "manager_batch" marks a task minted by an
+  // execute-mode manager spawn batch of two or more workers (agent-socket's
+  // codara_spawn_workers handler). That path launches every attempt of the
+  // batch simultaneously without consulting pickAutopilotTasks, so the system
+  // already accepted these tasks running concurrently even with empty
+  // allowedPaths (research/leaf workers legitimately declare none). Retry and
+  // runtime-fallback replacements inherit the marker so a relaunch wave keeps
+  // the concurrency the first launch granted instead of collapsing into a
+  // serial chain. Undefined on planner/autopilot-created tasks, which stay
+  // subject to the fan-out no-concrete-scope serial downgrade.
+  parallelTrust?: "manager_batch";
   // Plan-mode council: candidates of the same council share this id and each
   // carries its 0-based candidateIndex. Undefined for normal tasks. Lets same-
   // scope council candidates run in parallel and groups them in the run graph.
@@ -2710,6 +2721,9 @@ export interface CreateWorkerTaskInput {
   // so existing createWorkerTask call sites keep compiling (undefined =
   // manager-provided scopes).
   writeScopeSource?: WriteScopeSource;
+  // Parallel-launch provenance; threads onto the created WorkerTask. Set only
+  // by the execute-mode spawn handler for batches of two or more workers.
+  parallelTrust?: WorkerTask["parallelTrust"];
   // Plan-mode council grouping; threads onto the created WorkerTask.
   councilGroupId?: string;
   candidateIndex?: number;

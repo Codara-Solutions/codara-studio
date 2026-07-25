@@ -142,6 +142,21 @@ export function toolCallHeadline(toolName: string, input: unknown): { title: str
   return { title: toolDisplayName(toolName), detail: toolInputSummary(toolName, input) };
 }
 
+// The worker task ids a `wait_for_workers` call is blocked on, or null for any
+// other tool. Lets the chat replace the static "all results" detail with the
+// live composition of that wait (see summarizeWorkerWait).
+export function waitForWorkersTaskIds(toolName: string, input: unknown): string[] | null {
+  const normalized = toolName.replace(/^mcp__codara-studio__/, "").toLowerCase();
+  if (normalized !== "codara_wait_for_workers") return null;
+  const value = input && typeof input === "object" && !Array.isArray(input)
+    ? (input as Record<string, unknown>)
+    : null;
+  const ids = value?.worker_task_ids;
+  if (!Array.isArray(ids)) return null;
+  const taskIds = ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+  return taskIds.length > 0 ? taskIds : null;
+}
+
 function firstString(value: Record<string, unknown> | null, keys: string[]): string | null {
   if (!value) return null;
   for (const key of keys) {

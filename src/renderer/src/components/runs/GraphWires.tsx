@@ -4,18 +4,23 @@ import type { FanWire, RunGraphLayout, SpineWire } from "./graph-layout";
 import { deriveAgentStatus, type RunMaps } from "./run-format";
 
 // The wire layer. One SVG sized to the whole graph, drawn beneath the nodes:
-// curved bezier spine wires running SPARK → step → … → COMPLETE, and one fan
-// wire per worker dropping out of its step, each parallel agent's tentacle
-// lights up independently, so a running batch reads as simultaneous live
-// lanes hanging under the line. Every wire carries one of four states; the
-// live path animates a flowing dash.
-type WireState = "pending" | "done" | "active" | "blocked";
+// curved bezier spine wires running SPARK to step to COMPLETE, and one fan
+// wire per worker branching out of its step into the near edge of the card,
+// each parallel agent's branch lighting up independently, so a running batch
+// reads as simultaneous live lanes hanging under the line. Every wire carries
+// one of five states; only the live path animates a flowing dash.
+//
+// `paused` is what an otherwise-active wire becomes while the user has the run
+// paused: the lane keeps its place in the picture, but nothing about it may
+// suggest work is still travelling along it.
+type WireState = "pending" | "done" | "active" | "blocked" | "paused";
 
 const WIRE_COLOR: Record<WireState, string> = {
   pending: "var(--rule)",
   done: "color-mix(in oklch, var(--ok) 58%, var(--rule-strong))",
   active: "var(--accent)",
   blocked: "var(--danger)",
+  paused: "color-mix(in oklch, var(--info) 60%, var(--rule-strong))",
 };
 
 // The dash flow collapses via CSS for prefers-reduced-motion; the travelling
@@ -36,20 +41,29 @@ interface Props {
 
 // Cubic bezier between two ports. The spine flows horizontally, handles
 // pulled along x so the wire leaves and enters flat. A fan wire drops out of
-// a step's bottom edge into a worker's top edge, so its handles pull along y
-// instead; without that the tentacles would leave sideways and kink.
+// a step's bottom edge and turns into the side of a worker card, so it leaves
+// along y and arrives along x: the branch reads as a bracket down the stack
+// rather than a diagonal across it.
 function flowPath(wire: {
   from: { x: number; y: number };
   to: { x: number; y: number };
-  axis?: "v";
+  enter?: "left" | "right";
 }): string {
   const { from, to } = wire;
-  if (wire.axis === "v") {
-    const dy = Math.max(34, Math.abs(to.y - from.y) * 0.55);
-    return `M ${from.x},${from.y} C ${from.x},${from.y + dy} ${to.x},${to.y - dy} ${to.x},${to.y}`;
+  if (wire.enter) {
+    const dy = Math.max(30, (to.y - from.y) * 0.55);
+    const reach = Math.max(34, Math.abs(to.x - from.x) * 0.55);
+    const dx = wire.enter === "right" ? -reach : reach;
+    return `M ${from.x},${from.y} C ${from.x},${from.y + dy} ${to.x + dx},${to.y} ${to.x},${to.y}`;
   }
   const dx = Math.max(46, Math.abs(to.x - from.x) * 0.5);
   return `M ${from.x},${from.y} C ${from.x + dx},${from.y} ${to.x - dx},${to.y} ${to.x},${to.y}`;
+}
+
+// A paused run has no travelling work, so no wire may animate. Everything that
+// would have read as live settles into the quiet paused tone instead.
+function settleWhilePaused(state: WireState, runPaused: boolean): WireState {
+  return runPaused && state === "active" ? "paused" : state;
 }
 
 function spineWireState(
@@ -159,6 +173,7 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
     for (const step of steps) map.set(step.id, step);
     return map;
   }, [steps]);
+  const runPaused = runStatus === "paused";
 
   return (
     <svg
@@ -176,18 +191,23 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
     >
       {/* Spine wires — links with no fan between them. */}
       {layout.spineWires.map((wire) => {
-        const state = spineWireState(wire, stepById, runStatus, promptStepId);
+        const state = settleWhilePaused(
+          spineWireState(wire, stepById, runStatus, promptStepId),
+          runPaused,
+        );
         return <Wire key={wire.id} d={flowPath(wire)} state={state} />;
       })}
 
-      {/* Fan wires — one out-and-back branch per parallel worker lane. The
-          working lanes render last in their own group so they paint on top of
-          idle siblings; pending lanes of a running step recede. */}
+      {/* Fan wires: one branch per parallel worker lane, dropping out of the
+          step into the near edge of its card. The working lanes render last in
+          their own group so they paint on top of idle siblings; pending lanes
+          of a running step recede. */}
       {layout.fanWires.map((wire) => {
         const step = stepById.get(wire.stepId);
-        const state = fanWireState(wire, step, maps);
+        const state = settleWhilePaused(fanWireState(wire, step, maps), runPaused);
         if (state === "active") return null;
-        const stepLive = step?.status === "running" || step?.status === "reviewing";
+        const stepLive =
+          !runPaused && (step?.status === "running" || step?.status === "reviewing");
         return (
           <Wire
             key={wire.id}
@@ -199,7 +219,10 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
       })}
       <g>
         {layout.fanWires.map((wire) => {
-          const state = fanWireState(wire, stepById.get(wire.stepId), maps);
+          const state = settleWhilePaused(
+            fanWireState(wire, stepById.get(wire.stepId), maps),
+            runPaused,
+          );
           if (state !== "active") return null;
           return <Wire key={wire.id} d={flowPath(wire)} state="active" emphasis />;
         })}
@@ -215,7 +238,10 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
       )}
       {layout.steps.map((stepLayout) => {
         const step = stepById.get(stepLayout.stepId);
-        const state = step ? stepWireState(step.status) : "pending";
+        const state = settleWhilePaused(
+          step ? stepWireState(step.status) : "pending",
+          runPaused,
+        );
         return (
           <g key={`ports-${stepLayout.stepId}`}>
             <Port x={stepLayout.box.x} y={stepLayout.box.y + stepLayout.box.h / 2} state={state} />
@@ -224,7 +250,7 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
               y={stepLayout.box.y + stepLayout.box.h / 2}
               state={step?.status === "complete" ? "done" : state}
             />
-            {/* The delegation port: where every tentacle leaves the step.
+            {/* The delegation port: where every branch leaves the step.
                 Only drawn when the step actually has workers hanging off it. */}
             {stepLayout.workers.length > 0 && (
               <Port
@@ -245,12 +271,14 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
                     : agentStatus === "blocked"
                       ? "blocked"
                       : "pending";
+              // The port rides the layout's own entry point, so it lands on the
+              // card edge the branch actually arrives at on either side.
               return (
                 <Port
                   key={`wports-${worker.rowKey}`}
-                  x={worker.box.x + worker.box.w / 2}
-                  y={worker.box.y}
-                  state={laneState}
+                  x={worker.port.x}
+                  y={worker.port.y}
+                  state={settleWhilePaused(laneState, runPaused)}
                 />
               );
             })}
