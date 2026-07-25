@@ -507,24 +507,22 @@ export default function ChatComposer({
     return Boolean(attempt);
   }) ?? [];
   const hasActiveWorker = activeWorkers.length > 0;
-  // Pick the first active task for the status pill — multi-worker shows the
-  // count and one representative title to keep the line short.
-  const primaryActiveWorker = activeWorkers[0] ?? null;
-  const activeWorkerAttempt = primaryActiveWorker
-    ? run?.workerAttempts?.find(
-        (a) =>
-          a.workerTaskId === primaryActiveWorker.id &&
-          a.status !== "succeeded" &&
-          a.status !== "failed" &&
-          a.status !== "cancelled",
-      ) ?? null
-    : null;
-  const activeWorkerRuntime = primaryActiveWorker
-    ? activeWorkerAttempt?.runtime ?? primaryActiveWorker.runtimePreference
-    : null;
-  // The pill names the model the attempt actually launched on; the runtime is
-  // only the fallback, since it names the subscription, not the agent.
-  const activeWorkerModel = activeWorkerAttempt?.model;
+  // One engine label per active worker so the status line can state the real
+  // mix ("3 Opus 5 + 2 Sol") instead of stamping the first worker's model on
+  // the whole fleet, which read as the nonsense "Opus 5 5 workers running".
+  const activeWorkerEngines = activeWorkers.map((task) => {
+    const attempt = run?.workerAttempts?.find(
+      (a) =>
+        a.workerTaskId === task.id &&
+        a.status !== "succeeded" &&
+        a.status !== "failed" &&
+        a.status !== "cancelled",
+    );
+    const runtime = attempt?.runtime ?? task.runtimePreference;
+    const runtimeLabel =
+      runtime === "claude" ? "claude" : runtime === "codex" ? "codex" : runtime ?? "worker";
+    return workerModelLabel(attempt?.model ?? task.modelHint, runtimeLabel);
+  });
   const filesForSend = collectFileReferencesForSend(draft, fileReferences, fileMentions).slice(
     0,
     Math.max(0, MAX_ATTACHMENTS - images.length),
@@ -1128,10 +1126,8 @@ export default function ChatComposer({
           </div>
           {hasActiveWorker ? (
             <WorkerActivityStatus
-              count={activeWorkers.length}
-              runtime={activeWorkerRuntime}
-              model={activeWorkerModel}
-              title={primaryActiveWorker?.title ?? null}
+              engines={activeWorkerEngines}
+              titles={activeWorkers.map((task) => task.title)}
             />
           ) : (
             <span className="composer-toolbar__hint">
@@ -1190,29 +1186,30 @@ function messageForSend(draft: string, attachmentCount: number): string {
 }
 
 // Replaces the static "Queued for next manager decision" status line whenever
-// at least one worker_task is in `running` or `claimed`. Shows: a pulsing
-// accent dot, the worker count + runtime, the task title (truncated), and an
-// explicit note that the user's next message will queue. The visual goal is
-// to let the user tell at a glance whether they're waiting on the LLM
-// manager's next decision or on a worker that's actively editing files.
+// at least one worker_task is in `running` or `claimed`. A solo worker shows
+// its engine and its task title; a fleet shows the count and the real model
+// mix ("3 Opus 5 + 2 Sol"), with every task title in the tooltip. The old
+// shape prefixed the first worker's model onto the fleet count ("Opus 5 5
+// workers running") and truncated one arbitrary title, which carried no
+// information at a glance.
 function WorkerActivityStatus({
-  count,
-  runtime,
-  model,
-  title,
+  engines,
+  titles,
 }: {
-  count: number;
-  runtime: string | null;
-  model?: string;
-  title: string | null;
+  engines: string[];
+  titles: string[];
 }): JSX.Element {
-  const runtimeLabel = runtime === "claude" ? "claude" : runtime === "codex" ? "codex" : runtime ?? "worker";
-  const engineLabel = workerModelLabel(model, runtimeLabel);
-  const countLabel = count > 1 ? `${count} workers` : "worker";
+  const count = engines.length;
+  const mix = new Map<string, number>();
+  for (const engine of engines) mix.set(engine, (mix.get(engine) ?? 0) + 1);
+  const mixLabel = [...mix.entries()]
+    .map(([label, n]) => (mix.size > 1 ? `${n} ${label}` : label))
+    .join(" + ");
+  const solo = count === 1;
   return (
     <span
       className="composer-toolbar__hint composer-toolbar__hint--worker"
-      title={title ?? undefined}
+      title={titles.join("\n") || undefined}
     >
       <span
         aria-hidden
@@ -1226,13 +1223,16 @@ function WorkerActivityStatus({
         }}
       />
       <span style={{ color: "var(--accent)", fontWeight: 600 }}>
-        {engineLabel} {countLabel} running
+        {solo ? `${mixLabel} working` : `${count} workers running`}
       </span>
-      {/* The only elastic child: when the row runs out of room the task title
+      {/* The only elastic child: when the row runs out of room this segment
           ellipsises, rather than every child being cut mid-glyph. Sizing lives
           in .composer-toolbar__hint--worker so the rule sits with the rest of
-          the row's collapse behaviour. */}
-      {title && <span className="composer-toolbar__hint-title">· {title}</span>}
+          the row's collapse behaviour. Solo shows the task title; a fleet
+          shows the model mix, which says more than one truncated title. */}
+      {solo
+        ? titles[0] && <span className="composer-toolbar__hint-title">· {titles[0]}</span>
+        : mixLabel && <span className="composer-toolbar__hint-title">· {mixLabel}</span>}
       <span style={{ flex: "0 0 auto" }}>· steering queues</span>
     </span>
   );
