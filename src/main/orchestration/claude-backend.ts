@@ -63,8 +63,11 @@ import { buildClaudeMcpToolAliases } from "./claude-mcp-tool-aliases";
 import { resolveLaunchTarget, startCliSession, type CliSession } from "./cli-session";
 import { buildSpawnTerminalsDecisionFromToolCalls } from "./cli-terminal-decision";
 import {
+  buildManagerStablePrefix,
   buildSparkRunContextBlock,
   buildTalkReplyDecision,
+  forgetRunManagerGuidance,
+  loadRunManagerGuidance,
   runDidPlanCouncil,
   type ChatStreamHandler,
   type ManagerCallResult,
@@ -708,6 +711,7 @@ export const claudeBackend: SparkAgentBackend = {
     const chat = sessions.get(runId);
     sessions.delete(runId);
     contextInjectedRuns.delete(runId);
+    forgetRunManagerGuidance(runId);
     if (chat) {
       await disposeChatSessionInternal(chat);
     }
@@ -1035,16 +1039,21 @@ async function buildClaudeAgentSdkOptions(input: {
   let systemPrompt: ClaudeAgentSdkOptions["systemPrompt"];
   let tools: ClaudeAgentSdkOptions["tools"];
   const disallowedTools: string[] = [];
+  // The shipped guidance is pinned for the life of the run (and re-used across
+  // this turn's protocol retries) so the cached prefix cannot change between
+  // turn N and turn N+1. See loadRunManagerGuidance.
+  const guidance = (): Promise<string> =>
+    loadRunManagerGuidance(input.runId, `${input.mode}:${input.systemPromptPath}`, () =>
+      fs.readFile(input.systemPromptPath, "utf8"),
+    );
   if (input.mode === "execute") {
     systemPrompt = buildExecuteSystemPrompt(input.cwd);
     tools = [];
   } else if (input.mode === "auto") {
-    const autoPrompt = await fs.readFile(input.systemPromptPath, "utf8");
-    systemPrompt = `${autoPrompt}\n\nWorkspace cwd: ${input.cwd}\n`;
+    systemPrompt = buildManagerStablePrefix({ guidance: await guidance(), cwd: input.cwd });
     tools = ["Read", "Glob", "Grep"];
   } else {
-    const appendedPrompt = await fs.readFile(input.systemPromptPath, "utf8");
-    systemPrompt = { type: "preset", preset: "claude_code", append: appendedPrompt };
+    systemPrompt = { type: "preset", preset: "claude_code", append: await guidance() };
     tools = { type: "preset", preset: "claude_code" };
     disallowedTools.push("Edit", "Write", "Bash", "NotebookEdit", "MultiEdit");
   }

@@ -2337,6 +2337,34 @@ export interface WorkerTask {
   collabMailDirHint?: string;
 }
 
+/**
+ * Classified cause of a worker attempt failure. Free-form error text stays the
+ * human record; this is the small closed set retry policy is allowed to branch
+ * on (see src/main/orchestration/failure-taxonomy.ts).
+ *   - transport: the pipe/socket/network under the provider call broke.
+ *   - provider: the model provider answered with a transient server-side error
+ *     (5xx, overloaded).
+ *   - rate_limit: the provider refused for quota (429, rate limit). Never
+ *     fast-retried on the same runtime; the window outlives any quick retry,
+ *     while the other provider's quota is independent.
+ *   - auth: credentials are missing, expired, or rejected.
+ *   - launch: the runtime binary never came up (missing, bad flag, no TUI).
+ *   - tool: a tool, MCP bridge, or extension inside the harness failed.
+ *   - timeout: the attempt outlived its budget without finishing.
+ *   - cancelled: a user stop, pause, or interrupt ended the attempt.
+ * Undefined on attempts recorded before this field existed and on failures no
+ * pattern claims, which keep the pre-taxonomy behaviour.
+ */
+export type WorkerFailureKind =
+  | "transport"
+  | "provider"
+  | "rate_limit"
+  | "auth"
+  | "launch"
+  | "tool"
+  | "timeout"
+  | "cancelled";
+
 export interface WorkerAttempt {
   id: string;
   runId: string;
@@ -2385,6 +2413,12 @@ export interface WorkerAttempt {
    *  boot recovery checks it to avoid double-applying the patch. */
   sandboxMergedBack?: boolean;
   error?: string;
+  /**
+   * Classification of `error`, written whenever an attempt is recorded as
+   * failed. Purely additive: absent for successful attempts, for runs written
+   * before the taxonomy existed, and for error text no pattern claims.
+   */
+  failureKind?: WorkerFailureKind;
   /**
    * Latest agent state for this attempt. Two writers feed this field:
    *   - the renderer-side terminal poller (big bet A) via `terminalState:report`

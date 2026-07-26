@@ -260,6 +260,16 @@ export function detectFatalWorkerRuntimeError(
   const visible = stripAnsiWorkerTap(buffer);
   const checks: Array<[RegExp, string]> = [
     [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
+    // Auth rejections must not collapse into the generic "runtime API error"
+    // reason: the taxonomy classifies that as a transient provider failure and
+    // buys a doomed same-runtime retry on an expired credential. The reason
+    // wording here deliberately matches the taxonomy's auth pattern so the
+    // retry plan goes straight to the opposite runtime.
+    [
+      /API Error:.{0,160}?(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication|invalid api key|no api key|missing api key|oauth|token (?:has )?expired|please (?:run )?\/?login)/i,
+      "runtime authentication failed before final report",
+    ],
+    [/API Error:.{0,160}?(?:\b429\b|rate ?limit|too many requests)/i, "runtime rate limit before final report"],
     [/API Error:/i, "runtime API error before final report"],
     [/socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
     [/fetch\(\)/i, "runtime network fetch failure before final report"],

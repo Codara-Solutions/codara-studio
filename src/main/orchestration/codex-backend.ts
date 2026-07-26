@@ -24,6 +24,8 @@ import type {
 import {
   buildSparkRunContextBlock,
   buildTalkReplyDecision,
+  forgetRunManagerGuidance,
+  loadRunManagerGuidance,
   runDidPlanCouncil,
 } from "./spark-agent-backend";
 import { logConfigShieldOnce } from "./agent-config-shield";
@@ -713,7 +715,12 @@ async function codexManagerInstructions(input: ManagerRequestInput): Promise<str
         : input.chat.mode === "automation"
           ? resolveOrchestrationPromptPath(AUTOMATION_PROMPT_RESOURCE_FILENAME)
           : await ensureTalkPromptFile();
-  return fs.readFile(promptPath, "utf8");
+  // Pinned per run: these bytes are the cacheable prefix of every turn, so
+  // re-reading the file mid-conversation is the one thing here that could split
+  // a live prompt cache. See loadRunManagerGuidance.
+  return loadRunManagerGuidance(input.run.id, `${input.chat.mode}:${promptPath}`, () =>
+    fs.readFile(promptPath, "utf8"),
+  );
 }
 
 function appServerTool(item: Record<string, unknown>): {
@@ -1418,6 +1425,7 @@ export const codexBackend: SparkAgentBackend = {
   async disposeChat(runId: string): Promise<void> {
     SESSION_GENERATIONS.set(runId, (SESSION_GENERATIONS.get(runId) ?? 0) + 1);
     contextInjectedRuns.delete(runId);
+    forgetRunManagerGuidance(runId);
     const appServerTurn = ACTIVE_APP_SERVER_TURNS.get(runId);
     if (appServerTurn) {
       appServerTurn.interrupted = true;

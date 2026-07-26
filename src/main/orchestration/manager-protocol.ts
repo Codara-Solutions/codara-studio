@@ -2,8 +2,15 @@
 // orchestrator and whichever manager backend is driving a run.
 //
 // Two halves live here:
-//   - Request side: `buildManagerRequest` assembles the system prompt, the run
-//     context, and the strict `spark_manager_decision` JSON schema.
+//   - Request side: `buildManagerRequest` assembles a hosted-API style
+//     system+user message pair and the strict `spark_manager_decision` JSON
+//     schema. NOTE: no live backend calls it. Every shipping backend drives a
+//     CLI session whose system prompt is a resource file under
+//     resources/orchestration (claude-backend `buildClaudeAgentSdkOptions`,
+//     codex-backend `codexManagerInstructions`) and whose per-turn user text is
+//     spark-agent-backend's `buildManagerTurnPrompt`. Keep that split in mind
+//     before reasoning about "how the manager prompt is assembled" from here:
+//     the cacheable-prefix contract lives in spark-agent-backend, not this file.
 //   - Response side: `parseManagerDecisionJson` + `normalizeManagerDecision`
 //     turn a model's raw structured output into a validated
 //     SparkManagerDecision, applying the invariants the prompt asks for
@@ -35,6 +42,7 @@ import {
   type ManagerPromptProfile,
 } from "./prompt-profile";
 import { formatPriorRunsSection } from "./run-memory";
+import { formatWorkspaceLessonsSection } from "./workspace-lessons";
 
 export interface SparkManagerStepDecision {
   kind: StepKind;
@@ -656,6 +664,20 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
       ...attachmentSummary,
       "",
     );
+  }
+
+  // Per-workspace lessons learned from earlier completed runs (search rate
+  // limits, runtime fallbacks). Placed here, in the per-turn user message: this
+  // is the dynamic tail, so lessons never invalidate the cacheable system-prompt
+  // prefix. Costs nothing when the workspace has no lessons yet.
+  //
+  // This is the hosted-API mirror, which nothing dispatches today. The LIVE
+  // replay for every shipping CLI backend is run-store's prepareManagerTurn,
+  // which passes the same rendered section into buildManagerTurnPrompt. Keep the
+  // two in step if the request side is ever wired up.
+  const workspaceLessons = formatWorkspaceLessonsSection(run.workspaceId);
+  if (workspaceLessons) {
+    lines.push(workspaceLessons, "");
   }
 
   // When a per-mode system prompt override is set we treat that as the

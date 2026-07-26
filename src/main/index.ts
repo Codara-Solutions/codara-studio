@@ -1064,7 +1064,16 @@ app.whenReady().then(async () => {
 // its own independent async write-queue that nothing else flushes — without
 // this await a quit can drop the last preference toggle.
 async function flushAllStores(): Promise<void> {
-  await Promise.all([flush(), flushPreferences(), flushNotificationCenter()]);
+  await Promise.all([
+    flush(),
+    flushPreferences(),
+    flushNotificationCenter(),
+    // Post-completion bookkeeping (result manifest, memory + lessons ledgers)
+    // runs detached from the manager turn that completed the run, so a quit can
+    // land while it is still in flight. Only when run-store was already loaded:
+    // quitting must not pull the heavy module in just to flush nothing.
+    runStoreMod?.flushRunCompletionTails().catch(() => undefined) ?? Promise.resolve(),
+  ]);
 }
 
 app.on("window-all-closed", async () => {

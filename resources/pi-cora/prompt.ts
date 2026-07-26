@@ -73,6 +73,46 @@ const TASK_COMPLEXITY_CONTRACT = `Task complexity contract:
   survive a happy-path test, or a cross-module refactor where at least 3 files
   change semantics. Bias toward standard when genuinely uncertain.`;
 
+// Three run shapes that cover most of what Cora is asked to do. Naming the
+// shape up front is what makes a run read as deliberate instead of improvised.
+// This is one of six copies that must stay in sync: the four
+// resources/orchestration/*-{auto,execute}-prompt.md files and the
+// MANAGER_RUN_PLAYBOOKS block in src/main/orchestration/prompt-profile.ts.
+// scripts/test-manager-playbooks.cjs pins all six together.
+const RUN_PLAYBOOKS_CONTRACT = `Run playbooks:
+- Three shapes cover most runs. Pick the closest one, adapt it to the actual
+  work, and do not add ceremony it does not call for. Name the shape you picked
+  in your first line of commentary for the turn (research brief, feature build,
+  audit, or one clause describing the custom shape) so the run reads as
+  deliberate rather than improvised.
+- Research brief: the deliverable is an answer, a comparison, or a written
+  brief, and no source file changes. Mix: 2-4 leaf researchers in ONE
+  codara_spawn_workers call, each owning one distinct notes file in its
+  allowedPaths so their write scopes stay disjoint. Researchers write their own
+  notes; do not add a separate writer worker for a short brief, add one leaf
+  editor only when the deliverable is long-form. You synthesize the final answer
+  from their reports yourself, there is no synthesis worker. Verification: once
+  the notes land, one verifier on the runtime the researchers did NOT use,
+  re-checking the synthesized claims against the cited files and command output.
+- Feature build: the work changes code across more than one file or surface.
+  Mix: at most one skeleton worker for the shared contracts, types, and file
+  layout, then codara_wait_for_workers on it, then feature and leaf implementers
+  in ONE batch, each owning concrete disjoint allowedPaths. Name a worker's
+  peers and their shared contract only where two workers really do share an
+  interface. Verification: once the implementers land, one verifier per
+  implementer on the other installed runtime, with typecheck and the repo's own
+  tests as the oracle.
+- Audit: the ask is to review, audit, or find defects in code that already
+  exists, with no source changes. Mix: 2-4 leaf reviewers in ONE batch over
+  disjoint review areas. A reviewer reads the code but is NOT a verifier, so it
+  still needs a concrete write scope: give each one allowedPaths holding just
+  its own findings file. Each reviewer reports findings as discrete claims
+  carrying file and line evidence plus a severity, never a prose essay.
+  Verification: once the reviewers land, one verifier over the merged findings
+  rather than over the files, confirming or refuting each claim and dropping any
+  claim with no evidence. Fixes are a separate feature build run, planned only
+  after the user has seen the findings.`;
+
 export function buildCoraPiSystemPrompt(
   mode: CoraPiMode,
   policy: CoraPiExecutionPolicy = "fast",
@@ -165,6 +205,8 @@ ${WORKER_TASK_CLASS_CONTRACT}
 
 ${TASK_COMPLEXITY_CONTRACT}
 
+${RUN_PLAYBOOKS_CONTRACT}
+
 ${executionPolicyContract(policy)}`;
   }
 
@@ -184,6 +226,8 @@ This is Execute mode:
 ${WORKER_TASK_CLASS_CONTRACT}
 
 ${TASK_COMPLEXITY_CONTRACT}
+
+${RUN_PLAYBOOKS_CONTRACT}
 
 ${executionPolicyContract(policy)}`;
 }

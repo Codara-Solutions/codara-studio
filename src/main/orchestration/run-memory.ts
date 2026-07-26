@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { sparkHome } from "../spark-home";
+import { writeFileAtomic } from "../fs-atomic";
 import type {
   RunState,
   WorkerReport,
@@ -16,7 +18,7 @@ import { classifyOutcomeMemory } from "@shared/outcome-memory";
 // reader (formatPriorRunsSection) is folded into the manager's plan_analysis
 // prompt so it can learn this repo's task shapes, which runtimes survived
 // verification, and which build/test commands actually worked. This module
-// imports only spark-home + shared types, never run-store or manager-protocol
+// imports only spark-home, fs-atomic + shared types, never run-store or manager-protocol
 // — so there is no import cycle.
 
 const LEDGER_VERSION = 2;
@@ -431,8 +433,12 @@ export async function recordRunMemory(
     ledger.workspaceId = run.workspaceId;
     ledger.version = LEDGER_VERSION;
 
-    mkdirSync(memoryRoot(), { recursive: true });
-    writeFileSync(ledgerPath(run.workspaceId), JSON.stringify(ledger), "utf8");
+    // Async + atomic. The old writeFileSync blocked the event loop for the size
+    // of the whole ledger, and a plain async write would let this module's
+    // synchronous reader observe a half-written file; the tmp+rename in
+    // fs-atomic hands the reader the old ledger or the new one, never a torn one.
+    await mkdir(memoryRoot(), { recursive: true });
+    await writeFileAtomic(ledgerPath(run.workspaceId), JSON.stringify(ledger));
   } catch (err) {
     console.warn("[run-memory] failed to record run memory:", err);
   }

@@ -392,13 +392,60 @@ const MANAGER_PUNCTUATION_RULE =
 const MANAGER_COMPLEXITY_HONESTY_RULE =
   "COMPLEXITY IS A MEASUREMENT, NOT A BUDGET REQUEST: taskComplexity is the only signal Codara has for how much scrutiny to spend. The user cannot choose a depth; your classification alone decides the run's execution tier, the verifier-round budget, and whether a worker gets more than one corrective rework. Classify what the work actually is. Calling easy work complex spends the user's wall-clock and money on ceremony it does not need; calling subtle work standard strands it with one verification round and no rework. Never inflate it to look thorough and never deflate it to look fast.";
 
+/**
+ * Three run shapes that cover most of what Cora is asked to do. Naming the
+ * shape up front is what makes a run feel deliberate instead of improvised.
+ *
+ * THIS COPY IS NOT THE LIVE ONE. It covers the structured-decision manager
+ * protocol (manager-protocol's `buildManagerRequest`), which no shipping
+ * backend calls today. Every shipping backend drives a CLI session whose system
+ * prompt is a resource file, so the playbooks the user's manager actually reads
+ * live in, and must stay in sync with:
+ *   resources/orchestration/cc-auto-prompt.md
+ *   resources/orchestration/cc-execute-prompt.md
+ *   resources/orchestration/codex-auto-prompt.md
+ *   resources/orchestration/codex-execute-prompt.md
+ *   resources/pi-cora/prompt.ts  (auto + execute modes)
+ * scripts/test-manager-playbooks.cjs pins all six surfaces together so an edit
+ * here that skips them fails the build.
+ *
+ * Placed in code rather than in the profile data for the same structural reason
+ * as the two rules above: a per-mode `systemPromptOverrides` entry replaces
+ * identity + coreOperatingModel + worker rules wholesale, so playbooks written
+ * into the profile data would reach no mode that defines an override, and the
+ * shipped manager-profile.json defines one for plan_analysis, step_planning,
+ * and worker_result_review (chat falls back to the TypeScript default). This
+ * text is byte-identical on every turn, so it rides the cacheable system prefix
+ * and is never rebuilt per turn like the user-message sections are.
+ */
+const MANAGER_RUN_PLAYBOOKS = [
+  "RUN PLAYBOOKS: three shapes that cover most runs. Pick the closest one, adapt it to the actual work, and do not add ceremony it does not call for.",
+  "- research brief. Applies when the deliverable is an answer, a comparison, or a written brief, and no source file changes.",
+  "  Mix: 2-4 leaf researchers in ONE worker_batch, each owning one distinct note file under artifactDir/staging so their write scopes stay disjoint.",
+  "  Researchers write their own notes. Do not add a separate writer worker for a short brief; add one editor leaf only when the deliverable is long-form (multi-section document, report with a required structure).",
+  "  You synthesize the final answer from the researcher reports yourself. There is no synthesis worker.",
+  "  Verification: after the notes land, worker_result_review spawns one cross-provider verifier (the installed runtime the researchers did not use) to re-check the synthesized claims against the cited files and command output.",
+  "- feature build. Applies when the plan changes code across more than one file or surface.",
+  "  Mix: at most one skeleton worker for shared contracts, types, and file layout, followed immediately by a brake.",
+  "  After the brake, feature and leaf implementers in ONE worker_batch, each owning concrete disjoint allowedPaths. Give peers a mailbox only where they share an interface.",
+  "  Verification: worker_result_review spawns a verifier on the other installed runtime per implementer, with typecheck and the repo's own tests as the oracle.",
+  "- audit. Applies when the ask is to review, audit, or find defects in code that already exists, with no source changes.",
+  "  Mix: 2-4 leaf reviewers in ONE worker_batch over disjoint review areas, canRunParallel=true. A reviewer reads the code but is NOT a verifier, so it still needs a concrete write scope: give each one allowedPaths holding exactly its own findings file under artifactDir/staging. allowedPaths=[] here is the fan-out anti-pattern and Cora serializes the batch.",
+  "  Each reviewer reports findings as discrete claims carrying file and line evidence plus a severity, never a prose essay.",
+  "  Verification: after the reviewers land, worker_result_review spawns one verifier over the merged findings rather than over the files. It confirms or refutes each claim and drops any claim with no evidence.",
+  "  Fixes are a separate feature build run, planned only after the human has seen the findings.",
+  "In your first decision of a run, name the playbook you picked in the summary field (research brief, feature build, audit, or a one-clause description of the custom shape when none fits) so the run reads as deliberate rather than improvised.",
+].join("\n");
+
 /** Append the always-on rules to a prompt built by any path. */
 function withGlobalManagerRules(prompt: string): string {
   // Cheap idempotence guard: a profile that already carries a rule inline
   // must not get it twice.
-  const rules = [MANAGER_PUNCTUATION_RULE, MANAGER_COMPLEXITY_HONESTY_RULE].filter(
-    (rule) => !prompt.includes(rule.slice(0, 40)),
-  );
+  const rules = [
+    MANAGER_PUNCTUATION_RULE,
+    MANAGER_COMPLEXITY_HONESTY_RULE,
+    MANAGER_RUN_PLAYBOOKS,
+  ].filter((rule) => !prompt.includes(rule.slice(0, 40)));
   if (rules.length === 0) return prompt;
   return `${prompt}\n\n${rules.join("\n\n")}`;
 }

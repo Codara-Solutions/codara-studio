@@ -181,11 +181,23 @@ function sparkPreviewToolsAvailable(
 
 // Only the Pi harness loads the vendored pi-web-search extension, so only
 // those workers are told the tool exists.
-function renderWebResearchGuidance(run: RunState, task: WorkerTask): string[] {
+function renderWebResearchGuidance(
+  run: RunState,
+  task: WorkerTask,
+  // Search quota is shared across the whole parallel batch, so the 429 heads-up
+  // below only makes sense when the mailbox actually exists.
+  peerCommsAvailable: boolean,
+): string[] {
   if (!usesPiWorkerHarness(run, task)) return [];
   return [
     "- Use the `web_search` tool for anything you need from the open web instead of fetching pages with curl or driving the preview browser, and cite the sources it returns in `proof[]`.",
-    "- If `web_search` fails or rate-limits, or the task needs page-level depth, use the bundled `deep_search` tool: free, no API key, backed by DuckDuckGo's public endpoint (mode \"deep\" also fetches and digests the top result pages). For structured data, fetch public endpoints (RSS feeds, published APIs) directly rather than waiting for a limit to clear. Never sleep longer than 60 seconds in one command; the wall clock is user-visible.",
+    "- If `web_search` fails or rate-limits, or the task needs page-level depth, use the bundled `deep_search` tool: free, no API key, backed by DuckDuckGo's public endpoints with a Bing HTML fallback (mode \"deep\" also fetches and digests the top result pages). For structured data, fetch public endpoints (RSS feeds, published APIs) directly rather than waiting for a limit to clear. Never sleep longer than 60 seconds in one command; the wall clock is user-visible.",
+    "- If `deep_search` reports that the backends are bot-challenging rather than empty, free scraping is walled for now: do not rephrase and retry it, go straight to `web_search` or a named public feed or API endpoint.",
+    ...(peerCommsAvailable
+      ? [
+          "- `web_search` quota is shared by every worker in this batch, not per worker. The moment you hit a 429 or a rate-limit error on it, `peer_send` a one-line heads-up to `all` (subject like \"web_search 429\") before you do anything else, so peers switch to feeds and `deep_search` instead of each burning their own attempts discovering the same limit. If a peer sends you that heads-up, skip `web_search` and start from feeds or `deep_search`; retry it later only if you have no other source.",
+        ]
+      : []),
     "- Never open the user's system browser or GUI applications (no `open`, `xdg-open`, `osascript`, `start`). All web access goes through `web_search`, `deep_search`, or direct HTTP fetches.",
   ];
 }
@@ -512,7 +524,11 @@ function renderImplementationWorkerPrompt({
     lines.push("", "## ORIGINAL IMAGE ASSETS", ...imageGenerationGuidance);
   }
 
-  const webResearchGuidance = renderWebResearchGuidance(run, task);
+  const webResearchGuidance = renderWebResearchGuidance(
+    run,
+    task,
+    shouldUsePeerComms(run, step, task) && Boolean(paths.peerCommsDir && paths.peerCommsScript),
+  );
   if (webResearchGuidance.length) {
     lines.push("", "## WEB RESEARCH", ...webResearchGuidance);
   }
@@ -684,7 +700,11 @@ function renderVerifierWorkerPrompt({
     lines.push("", ...uiVerifierGuidance);
   }
 
-  const webResearchGuidance = renderWebResearchGuidance(run, task);
+  const webResearchGuidance = renderWebResearchGuidance(
+    run,
+    task,
+    shouldUsePeerComms(run, step, task) && Boolean(paths.peerCommsDir && paths.peerCommsScript),
+  );
   if (webResearchGuidance.length) {
     lines.push("", "## WEB RESEARCH", ...webResearchGuidance);
   }

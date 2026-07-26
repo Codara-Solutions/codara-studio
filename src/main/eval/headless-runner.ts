@@ -32,7 +32,7 @@ import * as pty from "../pty-manager";
 import { defaultShell } from "../shells";
 import { flush as flushStorage } from "../storage";
 import { detectAgentRuntimes } from "../agent-runtimes";
-import { startAutopilot, getRun, cancelRun } from "../orchestration/run-store";
+import { startAutopilot, getRun, cancelRun, flushRunCompletionTails } from "../orchestration/run-store";
 import { sanitizeWorkspace } from "../workspace-sanitize";
 import { runDir } from "../orchestration/event-log";
 import { subscribeToEvents } from "../orchestration/event-log";
@@ -228,6 +228,12 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
   } catch (err) {
     emitEvent("eval.sanitize_failed", { cwd, error: (err as Error).message });
   }
+
+  // Run completion detaches its bookkeeping tail (result manifest, summary
+  // message, memory/lessons ledgers) off the critical path; the mirror below
+  // must not copy the run dir before that tail lands, and process exit must
+  // not kill the ledger writes mid-flight.
+  await flushRunCompletionTails(run.id);
 
   // Persist any pending settings/state writes to disk before the process
   // exits — the run-store has its own write queues but this picks up any

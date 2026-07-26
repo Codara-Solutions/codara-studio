@@ -3,11 +3,15 @@
 
 // Unit tests for the bundled free deep_search tool
 // (resources/pi-cora/deep-search.ts): DDG SERP parsing including uddg redirect
-// decoding and ad filtering, the lite endpoint's single-quoted markup, result
-// capping, readable-text extraction, digest capping, endpoint fallback,
-// same-origin redirect policy, and the guarantee that a failing page fetch
-// degrades to the search snippet instead of failing the call. Every fetch is
-// injected; nothing here touches the network.
+// decoding and ad filtering, the lite endpoint's single-quoted markup, the Bing
+// HTML fallback backend with its ck/a redirect unwrapping and nested deep-link
+// rows, bot-challenge vs genuinely-empty classification (a 202 wall, marker
+// pages, container-less bodies, 429/403 status walls), the mixed verdict when
+// one backend walls and another answers with zero results, result capping,
+// readable-text extraction, digest capping, endpoint fallback, same-origin
+// redirect policy, and the guarantee that a failing page fetch degrades to the
+// search snippet instead of failing the call. Every fetch is injected; nothing
+// here touches the network.
 //
 //   node scripts/test-deep-search.cjs
 //
@@ -42,7 +46,12 @@ const deepSearch = loadTypeScriptModule(
 
 const {
   decodeDuckDuckGoRedirect,
+  decodeBingRedirect,
   parseDuckDuckGoSerp,
+  parseBingSerp,
+  classifySerpBody,
+  DDG_CONTAINER_PATTERN,
+  BING_CONTAINER_PATTERN,
   extractReadableText,
   buildPageDigest,
   normalizeMaxResults,
@@ -134,6 +143,183 @@ assert.deepEqual(liteParsed[0], {
   snippet: "Lite snippet text",
 });
 
+// ── challenge and empty-SERP fixtures ──
+
+// DDG's anomaly wall: no result rows, an anomaly script, and a human check.
+// Served as HTTP 202 in the wild, which response.ok reports as success.
+const ddgChallengePage = `
+  <html><head><title>DuckDuckGo</title><script src="/dist/anomaly.js"></script></head>
+  <body><div id="anomaly-modal"><p>Please verify you are human to continue.</p></div></body></html>`;
+assert.equal(parseDuckDuckGoSerp(ddgChallengePage, 5).length, 0, "the wall page parses to zero rows");
+
+// A real SERP that simply matched nothing: the results container is present and
+// DDG says so in words.
+const emptyDdgSerp = `
+  <html><body><div class="results">
+    <div class="no-results">No results found for that query.</div>
+  </div></body></html>`;
+assert.equal(parseDuckDuckGoSerp(emptyDdgSerp, 5).length, 0);
+
+// ── SERP parsing: Bing HTML fallback backend ──
+
+function base64Url(value) {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+assert.equal(
+  decodeBingRedirect(`https://www.bing.com/ck/a?!&amp;&amp;p=1&amp;u=a1${base64Url("https://wrapped.example.org/b?x=1")}&amp;ntb=1`),
+  "https://wrapped.example.org/b?x=1",
+);
+assert.equal(decodeBingRedirect("https://direct.example.com/page"), "https://direct.example.com/page");
+// A ck/a wrapper whose payload does not decode to an http(s) URL keeps the raw
+// href rather than inventing one.
+assert.equal(
+  decodeBingRedirect("https://www.bing.com/ck/a?u=a1bm90YXVybA"),
+  "https://www.bing.com/ck/a?u=a1bm90YXVybA",
+);
+
+function bingRow(target, title, snippet) {
+  return `<li class="b_algo b_algoBorder"><h2><a href="${target}" h="ID=SERP,5000.1">${title}</a></h2><div class="b_caption"><p>${snippet}</p></div></li>`;
+}
+
+const bingSerp = `
+  <html><body><ol id="b_results">
+    <li class="b_ad"><h2><a href="https://ads.example.com/buy">Sponsored</a></h2></li>
+    ${bingRow("https://bing-target.example.com/a", "Bing <strong>First</strong>", "Bing snippet one &amp; more")}
+    ${bingRow(`https://www.bing.com/ck/a?!&amp;&amp;p=2&amp;u=a1${base64Url("https://wrapped.example.org/b")}`, "Bing Second", "Bing snippet two")}
+    ${bingRow("https://bing-target.example.com/a", "Duplicate row", "dupe")}
+    ${bingRow("https://www.bing.com/search?q=related", "Related searches", "internal")}
+    ${bingRow("https://bing-target.example.net/c", "Bing Third", "Bing snippet three")}
+  </ol></body></html>`;
+
+const bingParsed = parseBingSerp(bingSerp, 8);
+assert.equal(bingParsed.length, 3, "ad rows, duplicates, and bing-internal links are dropped");
+assert.deepEqual(bingParsed[0], {
+  title: "Bing First",
+  url: "https://bing-target.example.com/a",
+  snippet: "Bing snippet one & more",
+});
+assert.equal(bingParsed[1].url, "https://wrapped.example.org/b", "ck/a wrappers are unwrapped");
+assert.equal(bingParsed[2].url, "https://bing-target.example.net/c");
+assert.equal(parseBingSerp(bingSerp, 2).length, 2, "the cap is respected");
+assert.deepEqual(parseBingSerp("<html><body>nothing here</body></html>", 5), []);
+
+// A row whose attribution or deep-link list nests <li> elements before the
+// <h2> must not be truncated at that nested </li>: the row is sliced between
+// b_algo openings, so title, url, and snippet all survive.
+const bingNestedSerp = `
+  <html><body><ol id="b_results">
+    <li class="b_algo"><div class="b_attribution"><ul><li>example.com</li><li>Cached</li></ul></div><h2><a href="https://nested.example.com/p">Nested Title</a></h2><div class="b_caption"><p>Nested snippet</p></div></li>
+    ${bingRow("https://after.example.com/z", "Row After", "Snippet after")}
+  </ol></body></html>`;
+const bingNested = parseBingSerp(bingNestedSerp, 5);
+assert.equal(bingNested.length, 2, "a nested deep-link list does not swallow its row");
+assert.deepEqual(bingNested[0], {
+  title: "Nested Title",
+  url: "https://nested.example.com/p",
+  snippet: "Nested snippet",
+});
+assert.deepEqual(bingNested[1], {
+  title: "Row After",
+  url: "https://after.example.com/z",
+  snippet: "Snippet after",
+});
+
+// The last row stops at its own </li> and at the list close, so page chrome
+// after the results list is never mistaken for that row's snippet.
+const bingTrailingChrome = `
+  <ol id="b_results"><li class="b_algo"><h2><a href="https://nosnippet.example.com/a">No Snippet Row</a></h2></li></ol>
+  <div class="b_footer"><p>Footer paragraph</p></div>`;
+assert.deepEqual(parseBingSerp(bingTrailingChrome, 5), [
+  { title: "No Snippet Row", url: "https://nosnippet.example.com/a", snippet: "" },
+]);
+
+// ── challenge vs empty classification ──
+
+const ddgContainer = DDG_CONTAINER_PATTERN;
+assert.ok(ddgContainer instanceof RegExp, "the module exports the container pattern it classifies with");
+
+// Parsed rows always win: a SERP whose snippets happen to discuss captchas is
+// not a challenge page.
+assert.equal(classifySerpBody(200, "<html>captcha anomaly</html>", 3, ddgContainer), "results");
+// DDG serves its wall as 202, which response.ok reports as success.
+assert.equal(classifySerpBody(202, htmlSerp, 0, ddgContainer), "challenge");
+assert.equal(
+  classifySerpBody(202, '<div class="no-results">No results found.</div>', 0, ddgContainer),
+  "challenge",
+  "202 outranks a no-results marker",
+);
+// A 200 wall page is caught by its markers.
+assert.equal(
+  classifySerpBody(200, '<html><head><script src="/dist/anomaly.js"></script></head><body></body></html>', 0, ddgContainer),
+  "challenge",
+);
+assert.equal(
+  classifySerpBody(200, "<html><body><p>Verifying you are human before continuing.</p></body></html>", 0, ddgContainer),
+  "challenge",
+);
+// A genuine zero-result SERP says so, and is not a challenge.
+assert.equal(
+  classifySerpBody(200, '<div class="results"><div class="no-results">No results found for that.</div></div>', 0, ddgContainer),
+  "empty",
+);
+// Ordinary SERP chrome may reference the same anomaly or captcha scripts a wall
+// page does. A body that says it found nothing is a real answer, so the
+// explicit statement outranks the generic marker.
+assert.equal(
+  classifySerpBody(
+    200,
+    '<html><head><script src="/dist/anomaly.js"></script></head><body><div class="results_links"></div><div class="no-results">No results found.</div></body></html>',
+    0,
+    ddgContainer,
+  ),
+  "empty",
+);
+// The bare phrasing counts too: a table-only lite SERP that just says "No
+// results." must not be reported as a wall.
+assert.equal(
+  classifySerpBody(200, "<html><body><table><tr><td>No results.</td></tr></table></body></html>", 0, ddgContainer),
+  "empty",
+);
+// The result container present with zero usable rows means every row was an ad
+// or a duplicate: empty, not walled.
+assert.equal(
+  classifySerpBody(200, '<a class="result__a" href="https://duckduckgo.com/y.js?ad_provider=x">Ad</a>', 0, ddgContainer),
+  "empty",
+);
+// Same, with a marker word in the page: result-row markup outranks the generic
+// markers, so an ad row about captchas plus an anomaly script stays empty.
+assert.equal(
+  classifySerpBody(
+    200,
+    '<html><head><script src="/dist/anomaly.js"></script></head><body><a class="result__a" href="https://duckduckgo.com/y.js?ad_provider=x">Ad about captcha</a></body></html>',
+    0,
+    ddgContainer,
+  ),
+  "empty",
+);
+// The container check is markup, not a mention: a wall page that merely ships
+// the SERP stylesheet is still a wall.
+assert.equal(
+  classifySerpBody(
+    200,
+    '<html><head><style>.result__a { color: #333; }</style></head><body><p>Please verify you are human.</p></body></html>',
+    0,
+    ddgContainer,
+  ),
+  "challenge",
+);
+// No container, no markers, nothing: an interstitial, not a search answer.
+assert.equal(classifySerpBody(200, "<html><body><div id=\"pane\"></div></body></html>", 0, ddgContainer), "challenge");
+
+// The Bing backend is classified with its own container pattern.
+assert.equal(classifySerpBody(200, bingSerp, 0, BING_CONTAINER_PATTERN), "empty");
+assert.equal(
+  classifySerpBody(200, '<html><body><div id="b_content">loading</div></body></html>', 0, BING_CONTAINER_PATTERN),
+  "challenge",
+  "a JS-only Bing shell has no result rows and no answer: a wall",
+);
+
 // ── readable-text extraction ──
 
 const pageHtml = `
@@ -222,18 +408,169 @@ async function main() {
     assert.match(text, /Lite Title/);
   }
 
-  // Both endpoints failing raises one actionable error, with no retries.
+  // Every backend failing raises one actionable error, with no retries.
   {
-    let calls = 0;
-    const fetchImpl = async () => {
-      calls += 1;
+    const calls = [];
+    const fetchImpl = async (url) => {
+      calls.push(url);
       throw new Error("network unreachable");
     };
     await assert.rejects(
       executeDeepSearch({ query: "offline" }, { fetchImpl }),
-      /DuckDuckGo search failed .*network unreachable/,
+      /Free web search failed .*network unreachable/,
     );
-    assert.equal(calls, 2, "one attempt per endpoint, no retry loop");
+    assert.equal(calls.length, 3, "one attempt per backend, no retry loop");
+    assert.match(calls[2], /^https:\/\/www\.bing\.com\/search\?q=offline$/);
+  }
+
+  // Both DDG endpoints walled: the Bing fallback answers and the header names
+  // the backend that actually served the results.
+  {
+    const calls = [];
+    const fetchImpl = async (url) => {
+      calls.push(url);
+      if (url.includes("duckduckgo.com")) {
+        return response({ status: 202, text: async () => ddgChallengePage });
+      }
+      return response({ text: async () => bingSerp });
+    };
+    const text = await executeDeepSearch({ query: "walled", max_results: 2 }, { fetchImpl });
+    assert.equal(calls.length, 3, "the alternate backend is tried after both DDG endpoints");
+    assert.match(text, /^Bing quick results for "walled" \(2 results, public endpoint\):/);
+    assert.match(text, /1\. Bing First/);
+    assert.match(text, /https:\/\/wrapped\.example\.org\/b/);
+  }
+
+  // Every backend challenging: the error must say "challenge", must NOT reuse
+  // the generic empty/parse wording, and must NOT tell the agent to rephrase
+  // and retry, which cannot clear a bot wall.
+  {
+    const seen = [];
+    const fetchImpl = async (url) => {
+      seen.push(url);
+      // 202 wall on html, marker wall on lite, status wall on the fallback.
+      if (url.includes("html.duckduckgo.com")) {
+        return response({ status: 202, text: async () => ddgChallengePage });
+      }
+      if (url.includes("lite.duckduckgo.com")) {
+        return response({ text: async () => ddgChallengePage });
+      }
+      return response({ ok: false, status: 429 });
+    };
+    let thrown;
+    try {
+      await executeDeepSearch({ query: "pi harness release notes" }, { fetchImpl });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, "a fully challenged search still throws");
+    const message = thrown.message;
+    assert.equal(seen.length, 3);
+    assert.match(message, /bot-challenged, not merely empty/);
+    assert.match(message, /html\.duckduckgo\.com: bot challenge page \(HTTP 202, no result rows\)/);
+    assert.match(message, /lite\.duckduckgo\.com: bot challenge page \(HTTP 200, no result rows\)/);
+    assert.match(message, /bing\.com: HTTP 429 \(blocked or rate limited\)/);
+    assert.match(message, /use the provider web_search tool/);
+    assert.match(message, /RSS or Atom feeds/);
+    assert.doesNotMatch(message, /no parseable results/);
+    assert.doesNotMatch(message, /Try again with different terms/);
+  }
+
+  // A challenge on one endpoint does not poison a later endpoint that answers.
+  {
+    const fetchImpl = async (url) => {
+      if (url.includes("html.duckduckgo.com")) {
+        return response({ status: 202, text: async () => ddgChallengePage });
+      }
+      return response({ text: async () => liteSerp });
+    };
+    const text = await executeDeepSearch({ query: "recovers" }, { fetchImpl });
+    assert.match(text, /^DuckDuckGo quick results for "recovers"/);
+    assert.match(text, /Lite Title/);
+  }
+
+  // Genuinely empty SERPs keep the old, rephrase-friendly wording and must not
+  // be reported as a challenge.
+  {
+    const fetchImpl = async (url) =>
+      url.includes("bing.com")
+        ? response({ text: async () => '<ol id="b_results"><li class="b_no">There are no results for this.</li></ol>' })
+        : response({ text: async () => emptyDdgSerp });
+    let thrown;
+    try {
+      await executeDeepSearch({ query: "zqxjklw nonexistent term" }, { fetchImpl });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown);
+    assert.match(thrown.message, /Free web search failed/);
+    assert.match(thrown.message, /html\.duckduckgo\.com: zero results for this query/);
+    assert.match(thrown.message, /bing\.com: zero results for this query/);
+    assert.match(thrown.message, /Try again with different terms/);
+    assert.doesNotMatch(thrown.message, /challenge/i);
+  }
+
+  // Mixed chain: DDG answers with a genuinely empty SERP while the alternate
+  // backend serves a JS-only shell. One walled backend must not turn the whole
+  // verdict into "bot-challenged", because a backend did answer and rephrasing
+  // is still the right next move.
+  {
+    const fetchImpl = async (url) =>
+      url.includes("bing.com")
+        ? response({ text: async () => '<html><body><div id="b_content">loading</div></body></html>' })
+        : response({ text: async () => emptyDdgSerp });
+    let thrown;
+    try {
+      await executeDeepSearch({ query: "zqxjklw" }, { fetchImpl });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown);
+    assert.match(thrown.message, /html\.duckduckgo\.com: zero results for this query/);
+    assert.match(thrown.message, /lite\.duckduckgo\.com: zero results for this query/);
+    assert.match(thrown.message, /bing\.com: bot challenge page \(HTTP 200, no result rows\)/);
+    assert.match(thrown.message, /Some backends were walled .* while others answered with zero results/);
+    assert.match(thrown.message, /one rephrase is worth trying/);
+    assert.doesNotMatch(thrown.message, /not merely empty/);
+    assert.doesNotMatch(thrown.message, /will not clear it/);
+  }
+
+  // Same rule for a status wall: a 429 on the first backend while the others
+  // answer with zero results is a mixed verdict, not a full bot wall.
+  {
+    const fetchImpl = async (url) =>
+      url.includes("html.duckduckgo.com")
+        ? response({ ok: false, status: 429 })
+        : response({ text: async () => emptyDdgSerp });
+    let thrown;
+    try {
+      await executeDeepSearch({ query: "rate limited then empty" }, { fetchImpl });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown);
+    assert.match(thrown.message, /html\.duckduckgo\.com: HTTP 429 \(blocked or rate limited\)/);
+    assert.match(thrown.message, /lite\.duckduckgo\.com: zero results for this query/);
+    assert.doesNotMatch(thrown.message, /not merely empty/);
+    assert.doesNotMatch(thrown.message, /will not clear it/);
+  }
+
+  // A 403 status wall is a challenge too, even with no body to inspect.
+  {
+    const fetchImpl = async () => response({ ok: false, status: 403 });
+    await assert.rejects(
+      executeDeepSearch({ query: "forbidden" }, { fetchImpl }),
+      /bot-challenged.*HTTP 403 \(blocked or rate limited\)/s,
+    );
+  }
+
+  // A plain server error stays a plain server error: not every failure is a wall.
+  {
+    const fetchImpl = async () => response({ ok: false, status: 503 });
+    await assert.rejects(
+      executeDeepSearch({ query: "down" }, { fetchImpl }),
+      /Free web search failed .*HTTP 503/,
+    );
   }
 
   // deep mode: pages are fetched, digested, and a failing page degrades to its
@@ -323,7 +660,10 @@ async function main() {
   // fallback order, and must obey the punctuation rule like every prompt
   // surface (test-prompt-punctuation.cjs guards the whole file too).
   assert.match(tool.description, /DuckDuckGo/);
+  assert.match(tool.description, /Bing/);
   assert.match(tool.description, /web_search/);
+  // The challenge verdict is only useful if the model is told what it means.
+  assert.match(tool.description, /bot-challeng/i);
   assert.doesNotMatch(tool.description, /[\u2013\u2014]/);
 
   // Both Pi entrypoints must actually register the tool.

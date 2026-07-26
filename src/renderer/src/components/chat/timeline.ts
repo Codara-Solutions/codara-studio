@@ -348,7 +348,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   items.sort((a, b) => {
     const byTime = a.at.localeCompare(b.at);
     if (byTime !== 0) return byTime;
-    const byKind = timelineKindOrder(a.kind) - timelineKindOrder(b.kind);
+    const byKind = timelineItemOrder(a) - timelineItemOrder(b);
     if (byKind !== 0) return byKind;
     return a.id.localeCompare(b.id);
   });
@@ -382,9 +382,14 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   return merged;
 }
 
-function timelineKindOrder(kind: ChatTimelineItem["kind"]): number {
-  if (kind === "message") return 0;
-  if (kind === "tool") return 1;
+// Tie-break for items sharing one timestamp. Worker rows sort AFTER steps:
+// the first worker task of a spawn batch is created in the same millisecond
+// as its synthetic step, and since worker rows anchor at task creation (not
+// first attempt launch), the old kind order rendered that worker above the
+// step header it belongs to.
+function timelineItemOrder(item: ChatTimelineItem): number {
+  if (item.kind === "message") return 0;
+  if (item.kind === "tool") return item.activity === "worker" ? 3 : 1;
   return 2;
 }
 

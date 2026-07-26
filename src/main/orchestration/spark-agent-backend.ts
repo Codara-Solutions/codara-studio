@@ -389,11 +389,53 @@ function renderBundledManagerInput(messages: HumanRunMessage[]): string {
  * Build the one immutable prompt a manager turn owns. On the first CLI turn
  * after a rewind, prepend a capped replay of retained canonical user/Cora
  * dialogue only; provider transcripts and tool/activity noise never participate.
+ *
+ * This is the DYNAMIC half of a turn (everything after
+ * MANAGER_PROMPT_DYNAMIC_MARKER). New per-turn context belongs here, never in
+ * the stable prefix: this text is appended to the conversation, so changing it
+ * costs no cached tokens, while a byte moved into the prefix invalidates the
+ * whole cached conversation for the rest of the run.
  */
 export function buildManagerTurnPrompt(
   run: RunState,
   inputMessages: HumanRunMessage[],
-  opts?: { includeCanonicalReplay?: boolean },
+  opts?: ManagerTurnPromptOptions,
+): string {
+  return appendWorkspaceLessons(
+    buildManagerTurnInput(run, inputMessages, opts),
+    opts?.workspaceLessons,
+  );
+}
+
+export interface ManagerTurnPromptOptions {
+  includeCanonicalReplay?: boolean;
+  /**
+   * Rendered per-workspace lessons section (workspace-lessons.ts), or null when
+   * the workspace has no lessons yet. The caller reads it rather than this
+   * module: the lessons store reaches the user's Codara home, and this file is
+   * deliberately a pure prompt builder with no disk or Electron dependency (see
+   * scripts/test-manager-prompt-cache.cjs, which bundles it standalone).
+   */
+  workspaceLessons?: string | null;
+}
+
+/**
+ * Lessons distilled from earlier completed runs of this workspace (search
+ * throttling, runtime fallbacks) ride at the tail of the dynamic half. Two
+ * reasons they cannot move into the stable prefix: the section changes as the
+ * ledger grows, so it would invalidate the cached prefix for every later turn,
+ * and it is evidence about this workspace rather than standing guidance. An
+ * empty ledger appends nothing, so it costs zero tokens.
+ */
+function appendWorkspaceLessons(prompt: string, lessons: string | null | undefined): string {
+  if (!lessons || !lessons.trim()) return prompt;
+  return [prompt, "", lessons.trim(), "[END WORKSPACE LESSONS]"].join("\n");
+}
+
+function buildManagerTurnInput(
+  run: RunState,
+  inputMessages: HumanRunMessage[],
+  opts?: ManagerTurnPromptOptions,
 ): string {
   const bundledInput = renderBundledManagerInput(inputMessages);
   const recentAssumptions = (run.assumptions ?? []).slice(-8);
@@ -448,6 +490,106 @@ export function buildManagerTurnPrompt(
     "[NEW USER INPUT FOR THIS TURN]",
     promptInput,
   ].join("\n\n");
+}
+
+/**
+ * The seam every manager turn is assembled around:
+ *
+ *   <stable prefix>  MANAGER_PROMPT_DYNAMIC_MARKER  <per-turn dynamic suffix>
+ *
+ * The stable prefix is what the provider caches. It is the mode's shipped
+ * guidance plus the run's workspace cwd, and NOTHING else: no clock, no run
+ * state, no worker digests, no message counts. Every one of those belongs after
+ * the marker, where a changed byte costs nothing because the suffix was never
+ * cacheable to begin with.
+ *
+ * Backends send the two halves on different wires (system prompt vs user
+ * message), so the marker never travels to the provider verbatim. It exists so
+ * the property can be asserted on one concatenated string, in the order the
+ * model actually reads it. See scripts/test-manager-prompt-cache.cjs.
+ */
+export const MANAGER_PROMPT_DYNAMIC_MARKER = "[CORA TURN INPUT]";
+
+export interface ManagerPromptParts {
+  /** Byte-identical across every turn of one run. Sent as the system prompt. */
+  stablePrefix: string;
+  /** Everything that changes turn to turn. Sent as the user message. */
+  dynamic: string;
+  /** The two halves in wire order, separated by the dynamic marker. */
+  text: string;
+}
+
+/**
+ * Build the cacheable half of a manager turn. Deliberately takes primitives
+ * rather than a RunState: a function that cannot see the run cannot leak a
+ * timestamp or a worker digest into the cached prefix.
+ */
+export function buildManagerStablePrefix(input: {
+  guidance: string;
+  cwd: string;
+}): string {
+  return `${input.guidance}\n\nWorkspace cwd: ${input.cwd}\n`;
+}
+
+/** Join the two halves for auditing. `turnPrompt` is buildManagerTurnPrompt's output. */
+export function assembleManagerPrompt(input: {
+  guidance: string;
+  cwd: string;
+  turnPrompt: string;
+}): ManagerPromptParts {
+  const stablePrefix = buildManagerStablePrefix(input);
+  return {
+    stablePrefix,
+    dynamic: input.turnPrompt,
+    text: `${stablePrefix}\n${MANAGER_PROMPT_DYNAMIC_MARKER}\n${input.turnPrompt}`,
+  };
+}
+
+const runManagerGuidance = new Map<string, { key: string; guidance: string }>();
+// Bounded so a long-lived app with many chats cannot hold every prompt file it
+// ever pinned. Eviction is least-recently-USED (each hit reinserts), so the
+// entry that gets dropped belongs to a run that is not taking turns; an evicted
+// run simply re-reads on its next turn, which is the pre-pin behavior.
+const RUN_MANAGER_GUIDANCE_LIMIT = 64;
+
+/**
+ * Read a run's manager guidance ONCE per run instead of once per turn.
+ *
+ * Those bytes are the cacheable prefix of every turn in the run, so re-reading
+ * them mid-conversation is the one way this file could split a live prompt
+ * cache: a dev editing resources/orchestration/*.md, or an installer swapping
+ * the bundle under a running app, would change the prefix between turn N and
+ * turn N+1 and throw away every cached token. Pinning per run also drops one
+ * disk read per manager turn. A new run reads the file again, so an edit still
+ * takes effect without restarting the app.
+ *
+ * `cacheKey` identifies which guidance was pinned (mode + resolved path), so a
+ * mode flip, which already forces a fresh provider session, re-reads.
+ */
+export async function loadRunManagerGuidance(
+  runId: string,
+  cacheKey: string,
+  read: () => Promise<string>,
+): Promise<string> {
+  const cached = runManagerGuidance.get(runId);
+  if (cached && cached.key === cacheKey) {
+    runManagerGuidance.delete(runId);
+    runManagerGuidance.set(runId, cached);
+    return cached.guidance;
+  }
+  const guidance = await read();
+  runManagerGuidance.set(runId, { key: cacheKey, guidance });
+  while (runManagerGuidance.size > RUN_MANAGER_GUIDANCE_LIMIT) {
+    const oldest = runManagerGuidance.keys().next();
+    if (oldest.done) break;
+    runManagerGuidance.delete(oldest.value);
+  }
+  return guidance;
+}
+
+/** Drop a run's pinned guidance when its chat session is torn down. */
+export function forgetRunManagerGuidance(runId: string): void {
+  runManagerGuidance.delete(runId);
 }
 
 /** @deprecated Manager turns must use the frozen `ManagerRequestInput.prompt`. */

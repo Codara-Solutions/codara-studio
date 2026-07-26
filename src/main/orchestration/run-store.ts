@@ -79,6 +79,19 @@ import {
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
+import {
+  formatPaneCollapsedBlock,
+  paneDim,
+  paneRetryMarker,
+  paneStreamAdd,
+  paneStreamBudget,
+  paneStreamExceeded,
+  paneToolFailMarker,
+  paneToolOkMarker,
+  paneToolStartMarker,
+  PANE_RED,
+  PANE_STREAM_CUT_NOTE,
+} from "@shared/pane-format";
 import { effectiveChatMode, normalizeChatFeatureFlags } from "@shared/chat-policy";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
@@ -114,6 +127,7 @@ import { reconcileAcceptedVerifierOnlySteps } from "./step-lifecycle";
 import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
+import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
 export { readWorkerReport } from "./worker-report";
 // Spawn-time batch shape guard. agent-socket's codara_spawn_workers handler is
@@ -183,6 +197,7 @@ import { evaluateGuardPredicate } from "./loom-predicates";
 import { ensureCodexProjectTrust } from "./codex-trust";
 import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { recordRunMemory } from "./run-memory";
+import { formatWorkspaceLessonsSection, recordRunLessons } from "./workspace-lessons";
 import {
   createCheckpoint,
   deleteRunCheckpoints,
@@ -1571,6 +1586,7 @@ export async function failWorkerAttempt(
         if (!a || DIRECT_ATTEMPT_TERMINAL.has(a.status)) return false;
         a.status = "failed";
         a.error = error;
+        a.failureKind = classifyWorkerFailure(error);
         a.finishedAt = a.finishedAt ?? timestamp;
         const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
         if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
@@ -3852,8 +3868,50 @@ async function runAutopilotManagerReview(
   // is idempotent (it skips steps that already have a live verifier or a
   // terminal verdict), so enforcing it each review hop just closes any hole the
   // manager opened by accepting without spawning one.
+  const verifierTaskIdsBeforeCoverage = new Set(
+    run.workerTasks.filter((task) => task.taskClass === "verifier").map((task) => task.id),
+  );
+  const stepsWithPriorVerifier = new Set(
+    run.workerTasks
+      .filter((task) => task.taskClass === "verifier")
+      .map((task) => task.stepId)
+      .filter((stepId): stepId is string => Boolean(stepId)),
+  );
   run = await ensureVerifierCoverage(run, cwd);
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
+  // Coverage just synthesized a verifier that has not run yet. Reviewing now
+  // costs a full manager turn (a fresh CLI spawn/resume, minutes of wall clock)
+  // to judge evidence that is about to change, and it parks the verifier behind
+  // that turn. Launch the queued work instead and let its completion re-drive
+  // this review with the verdict in hand, the same deferral the pending-launch
+  // branch above already takes. The review is not skipped, only paid once.
+  //
+  // Strictly the FIRST coverage pass for a step: a verifier that lands without
+  // a terminal-OK confidence leaves the step uncovered again, and deferring a
+  // second time would spawn verifiers forever with no manager ever looking. A
+  // re-synthesis falls through to the review, exactly as before.
+  const freshVerifiers = run.workerTasks.filter(
+    (task) => task.taskClass === "verifier" && !verifierTaskIdsBeforeCoverage.has(task.id),
+  );
+  const firstCoverageForEveryStep =
+    freshVerifiers.length > 0 &&
+    freshVerifiers.every((task) => !task.stepId || !stepsWithPriorVerifier.has(task.stepId));
+  const coverageTasks = firstCoverageForEveryStep ? pickAutopilotTasks(run) : [];
+  if (coverageTasks.length > 0) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "autopilot.manager_review_deferred_for_verifier_coverage",
+      message: `Manager review deferred while ${coverageTasks.length} synthesized verifier task(s) run`,
+      payload: {
+        taskIds: coverageTasks.map((task) => task.id),
+        taskTitles: coverageTasks.map((task) => task.title),
+      },
+    });
+    const input = autopilotInputFromRun(run);
+    await startAutopilot({ ...input, cwd: cwd || input.cwd, runId: run.id });
+    return;
+  }
   const REVIEW_REPROMPT_CAP = 3;
   for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
     run = await askManagerBackend(
@@ -4184,7 +4242,14 @@ async function prepareManagerTurn(
   return {
     run: prepared,
     call: persistedCall,
-    prompt: buildManagerTurnPrompt(prepared, inputMessages, { includeCanonicalReplay }),
+    // Every backend's per-turn user text comes from this one call, so the
+    // workspace lessons ledger is replayed here, in the dynamic half, and never
+    // in the cacheable system prompt. Read at turn time so a lesson written by
+    // a run that finished a minute ago is already live for the next turn.
+    prompt: buildManagerTurnPrompt(prepared, inputMessages, {
+      includeCanonicalReplay,
+      workspaceLessons: formatWorkspaceLessonsSection(prepared.workspaceId),
+    }),
     inputMessages,
     conversationEpoch: epoch,
   };
@@ -9890,6 +9955,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   attempt.finishedAt = undefined;
   attempt.exitCode = undefined;
   attempt.error = undefined;
+  attempt.failureKind = undefined;
   attempt.command = command;
   attempt.model = piWorkerModel ?? sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
   attempt.promptPath = paths.promptMd;
@@ -10019,6 +10085,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   finishedAttempt.finishedAt = finishedAt;
   finishedAttempt.exitCode = result.exitCode;
   finishedAttempt.error = result.error;
+  // Classify the failure at the one point every worker session funnels through,
+  // so the retry path can branch on a kind instead of re-reading error prose.
+  finishedAttempt.failureKind = result.exitCode === 0 ? undefined : classifyWorkerFailure(result.error);
   finishedAttempt.command = command;
   finishedAttempt.stdoutLogPath = paths.stdoutLog;
   finishedAttempt.stderrLogPath = paths.stderrLog;
@@ -11338,9 +11407,12 @@ async function completeAcceptedReviewingSteps(
 // Detects the synthetic report written by writeAutoFailureReport when the
 // agent CLI failed environmentally (launch failure, auth/API/socket failure),
 // and if we haven't already exhausted runtimes, queues a fresh task on the
-// same step with the opposite runtime. Returns the updated run when a fallback
-// was queued (so the caller can short-circuit the normal review path), or null
-// when no fallback applies.
+// same step. The failure taxonomy picks WHICH runtime that replacement gets:
+// a transient transport/provider failure earns one fast retry on the same
+// runtime first (the runtime is not what broke), while auth and launch
+// failures go straight to the opposite runtime exactly as before. Returns the
+// updated run when a replacement was queued (so the caller can short-circuit
+// the normal review path), or null when no retry applies.
 async function maybeQueueCliLaunchFallback({
   run,
   task,
@@ -11384,32 +11456,47 @@ async function maybeQueueCliLaunchFallback({
   const opposite: WorkerRuntime | null = preferenceOrder
     .filter((kind) => kind !== task.runtimePreference)
     .find((kind) => availableRuntimes.some((runtime) => runtime.kind === kind && runtime.installed)) ?? null;
-  if (!opposite) return null;
   // Only fall back once per (step, title) lineage. If a sibling with the
   // opposite runtime already exists (failed, cancelled, or pending), both
   // runtimes have been tried — let the manager handle it.
-  const triedRuntimes = new Set(
-    run.workerTasks
-      .filter((t) => t.stepId === task.stepId && t.title === task.title)
-      .map((t) => t.runtimePreference),
-  );
-  if (triedRuntimes.has(opposite)) return null;
+  const lineage = run.workerTasks.filter((t) => t.stepId === task.stepId && t.title === task.title);
+  const triedRuntimes = new Set(lineage.map((t) => t.runtimePreference));
+  const oppositeAvailable = opposite !== null && !triedRuntimes.has(opposite);
+  // Classify from the attempt's own error first (the raw runtime message) and
+  // only then from the synthetic report text, which wraps every reason in the
+  // same boilerplate. The plan is what decides same-runtime vs cross-runtime.
+  const failureKind =
+    attempt.failureKind ?? classifyWorkerFailure(attempt.error) ?? classifyWorkerFailure(failureContext);
+  const retryPlan = planWorkerFailureRetry({
+    kind: failureKind,
+    sameRuntimeAttempts: lineage.filter((t) => t.runtimePreference === task.runtimePreference).length,
+    oppositeRuntimeAvailable: oppositeAvailable,
+  });
+  if (retryPlan.action === "no_auto_retry") return null;
+  const retriesSameRuntime = retryPlan.action === "retry_same_runtime";
+  const nextRuntime: WorkerRuntime | null = retriesSameRuntime ? task.runtimePreference : opposite;
+  if (!nextRuntime) return null;
 
   const fallbackId = makeId("task");
   return commitRunChange(run, {
     type: "autopilot.cli_launch_fallback",
-    message: `Auto-falling back from ${task.runtimePreference} to ${opposite} after CLI/runtime failure`,
+    message: retriesSameRuntime
+      ? `Fast-retrying ${task.runtimePreference} after a transient ${failureKind ?? "runtime"} failure`
+      : `Auto-falling back from ${task.runtimePreference} to ${nextRuntime} after CLI/runtime failure`,
     stepId: task.stepId,
     workerTaskId: fallbackId,
     payload: {
       previousTaskId: task.id,
       previousAttemptId: attempt.id,
       previousRuntime: task.runtimePreference,
-      nextRuntime: opposite,
+      nextRuntime,
+      failureKind,
+      retryAction: retryPlan.action,
+      retryReason: retryPlan.reason,
     },
     mutate: (draft, timestamp) => {
-      // Cancel the failed task so pickAutopilotTasks won't re-launch it with
-      // the same runtime that just failed environmentally.
+      // Cancel the failed task so pickAutopilotTasks re-launches the queued
+      // replacement below rather than the task that just failed.
       const failedTask = draft.workerTasks.find((t) => t.id === task.id);
       if (failedTask) {
         failedTask.status = "cancelled";
@@ -11422,9 +11509,11 @@ async function maybeQueueCliLaunchFallback({
         stepId: task.stepId,
         title: task.title,
         description: task.description,
-        runtimePreference: opposite,
-        modelHint: fallbackModelHintForRuntime(opposite, task.modelHint),
-        effortHint: fallbackEffortHintForRuntime(opposite, task.effortHint),
+        runtimePreference: nextRuntime,
+        // A same-runtime fast retry keeps the original model and effort: only
+        // a runtime swap needs the hints translated to the other provider.
+        modelHint: retriesSameRuntime ? task.modelHint : fallbackModelHintForRuntime(nextRuntime, task.modelHint),
+        effortHint: retriesSameRuntime ? task.effortHint : fallbackEffortHintForRuntime(nextRuntime, task.effortHint),
         status: "queued",
         allowedPaths: task.allowedPaths,
         forbiddenPaths: task.forbiddenPaths,
@@ -12573,52 +12662,129 @@ async function commitRunChange(
     if (runMutationQueues.get(run.id) === next) runMutationQueues.delete(run.id);
   }
   if (persisted && prevStatus !== "complete" && nextStatus === "complete") {
-    try {
-      const completedRun = result ?? (await requireRun(run.id));
-      const manifest = await collectRunResultManifest(completedRun, workerArtifactPaths);
-      await fs.mkdir(completedRun.artifactDir, { recursive: true });
-      await writeFileAtomic(
-        join(completedRun.artifactDir, "result-manifest.json"),
-        `${JSON.stringify(manifest, null, 2)}\n`,
-      );
-      result = await commitRunChange(completedRun, {
-        type: "run.result_manifest_persisted",
-        message: "Persisted evidence-backed run result manifest",
-        payload: {
-          files: manifest.workspaceDelta.length,
-          checks: manifest.checks.length,
-          evidence: manifest.evidence.length,
-          workspaceMode: manifest.workspace.mode,
-        },
-        mutate: (draft, timestamp) => {
-          draft.resultManifest = manifest;
-          draft.updatedAt = timestamp;
-        },
-      });
-    } catch (err) {
-      console.error("[run-store] failed to collect result manifest", err);
-    }
-    try {
-      result = await appendCompletionSummaryMessage(run.id);
-    } catch (err) {
-      console.error("[run-store] failed to append completion summary", err);
-    }
-    // Distill + persist this freshly-completed run into the per-workspace
-    // orchestration memory ledger. Best-effort: recordRunMemory is itself
-    // non-throwing, but a stray write failure must never break the completion
-    // path, so it stays wrapped. Pass readWorkerReport so run-memory.ts can
-    // resolve worker reports without importing run-store (no cycle).
-    try {
-      const completedRun = result ?? (await requireRun(run.id));
-      await recordRunMemory(completedRun, readWorkerReport);
-    } catch (err) {
-      console.error("[run-store] failed to record run memory", err);
-    }
+    scheduleRunCompletionTail(run.id, result ?? undefined);
   }
   return result ?? (await requireRun(run.id));
 }
 
-async function appendCompletionSummaryMessage(runId: string): Promise<RunState> {
+// Post-completion bookkeeping, detached from the turn that completed the run.
+//
+// Nothing in here is needed for anything the user can already see: BOTH
+// completion paths post the user-visible bubble strictly before the run flips
+// to `complete` (the MCP path in agent-socket's codara_complete handler, the
+// structured-decision path in applySparkManagerDecision's chatReply note).
+// Awaiting it inline kept the live codara_complete MCP call open, and with it
+// the model's whole turn, for two git subprocesses, one report read per worker
+// attempt, three extra full run serializations, and the ledger writes.
+//
+// Chained per run so two completions of the same run cannot interleave their
+// writes, and awaited by flushRunCompletionTails for tests and shutdown.
+const runCompletionTails = new Map<string, Promise<void>>();
+
+/** The last chat bubble as it stood the instant the run completed. */
+type CompletionTimeMessage = Pick<HumanRunMessage, "author" | "kind" | "createdAt">;
+
+function scheduleRunCompletionTail(runId: string, completedRun?: RunState): void {
+  // Copied by value now, because getRun hands out the live cached RunState:
+  // holding the object itself would let a message the user sends while the tail
+  // runs rewrite the suppression decision this completion already earned.
+  const last = completedRun?.humanMessages[completedRun.humanMessages.length - 1];
+  const lastAtCompletion: CompletionTimeMessage | undefined = last
+    ? { author: last.author, kind: last.kind, createdAt: last.createdAt }
+    : undefined;
+  const previous = runCompletionTails.get(runId) ?? Promise.resolve();
+  const tail: Promise<void> = previous
+    .catch(() => {
+      /* keep later completions moving after an earlier tail failure */
+    })
+    .then(() => runCompletionTail(runId, lastAtCompletion))
+    .finally(() => {
+      if (runCompletionTails.get(runId) === tail) runCompletionTails.delete(runId);
+    });
+  runCompletionTails.set(runId, tail);
+  void tail;
+}
+
+/**
+ * Await the detached completion bookkeeping. Tests that assert on
+ * result-manifest.json, the completion-summary message, or the memory/lessons
+ * ledgers must call this after the completing mutation; app shutdown calls it
+ * so a quit cannot drop a half-written ledger.
+ */
+export async function flushRunCompletionTails(runId?: string): Promise<void> {
+  const pending = runId
+    ? [runCompletionTails.get(runId)].filter(Boolean)
+    : [...runCompletionTails.values()];
+  await Promise.all(pending.map((tail) => tail!.catch(() => undefined)));
+}
+
+async function runCompletionTail(
+  runId: string,
+  lastAtCompletion?: CompletionTimeMessage,
+): Promise<void> {
+  try {
+    const run = await requireRun(runId);
+    const manifest = await collectRunResultManifest(run, workerArtifactPaths);
+    await fs.mkdir(run.artifactDir, { recursive: true });
+    await writeFileAtomic(
+      join(run.artifactDir, "result-manifest.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+    );
+    await commitRunChange(run, {
+      type: "run.result_manifest_persisted",
+      message: "Persisted evidence-backed run result manifest",
+      payload: {
+        files: manifest.workspaceDelta.length,
+        checks: manifest.checks.length,
+        evidence: manifest.evidence.length,
+        workspaceMode: manifest.workspace.mode,
+      },
+      mutate: (draft, timestamp) => {
+        draft.resultManifest = manifest;
+        draft.updatedAt = timestamp;
+      },
+    });
+  } catch (err) {
+    console.error("[run-store] failed to collect result manifest", err);
+  }
+  try {
+    await appendCompletionSummaryMessage(runId, lastAtCompletion);
+  } catch (err) {
+    console.error("[run-store] failed to append completion summary", err);
+  }
+  // Distill + persist this freshly-completed run into the per-workspace
+  // orchestration memory ledger. Best-effort: recordRunMemory is itself
+  // non-throwing, but a stray write failure must never break the completion
+  // path, so it stays wrapped. Pass readWorkerReport so run-memory.ts can
+  // resolve worker reports without importing run-store (no cycle).
+  try {
+    const completed = await requireRun(runId);
+    // Both distillers walk every finished attempt's final report, and
+    // readWorkerReport is an uncached fs.readFile + JSON.parse per call. Share
+    // one memo for this completion so a 60-attempt run does 60 reads, not 120.
+    // Scoped to this call, so it can never serve a stale report to a later one.
+    const reportCache = new Map<string, Promise<WorkerReport | null>>();
+    const readReportOnce = (path: string): Promise<WorkerReport | null> => {
+      const cached = reportCache.get(path);
+      if (cached) return cached;
+      const pending = readWorkerReport(path);
+      reportCache.set(path, pending);
+      return pending;
+    };
+    await recordRunMemory(completed, readReportOnce);
+    // Same seam, same contract: distill this run's operational lessons
+    // (search rate limits, runtime fallbacks) into the per-workspace lessons
+    // ledger that later manager turns replay. Also non-throwing.
+    await recordRunLessons(completed, readReportOnce);
+  } catch (err) {
+    console.error("[run-store] failed to record run memory", err);
+  }
+}
+
+async function appendCompletionSummaryMessage(
+  runId: string,
+  lastAtCompletion?: CompletionTimeMessage,
+): Promise<RunState> {
   const run = await requireRun(runId);
   if (run.status !== "complete") return run;
   // Chat-only runs (no steps, no worker tasks) already showed their answer in
@@ -12633,8 +12799,11 @@ async function appendCompletionSummaryMessage(runId: string): Promise<RunState> 
   // goal. The chatReply is emitted as spark/note by applySparkManagerDecision
   // just before the run flips to complete, so a spark/note whose createdAt is
   // at-or-after completedAt (with a small grace window for clock skew) is the
-  // user-facing answer; the auto-summary would just duplicate it.
-  const lastMessage = run.humanMessages[run.humanMessages.length - 1];
+  // user-facing answer; the auto-summary would just duplicate it. Judged
+  // against the completion-time copy when one is available, so a user message
+  // that lands while the detached tail runs cannot un-suppress it.
+  const lastMessage =
+    lastAtCompletion ?? run.humanMessages[run.humanMessages.length - 1];
   if (lastMessage && lastMessage.author === "spark" && lastMessage.kind === "note") {
     const lastMs = Date.parse(lastMessage.createdAt);
     if (
@@ -14268,8 +14437,14 @@ function piWorkerToolDetail(event: PiRpcEvent): string {
   return piWorkerSafeText(event.args, 220);
 }
 
-function piWorkerResultText(result: unknown): string {
-  if (typeof result === "string") return piWorkerSafeText(result, 700);
+// Tool-result text with its ORIGINAL line structure intact. The pane folds it
+// by line (formatPaneCollapsedBlock) instead of the former flatten-to-one-line
+// then cut-at-700-characters, which squashed a failed command's usage dump
+// into a single giant wrapped line and threw away the tail, where the actual
+// error usually is. Callers that want a one-line preview still use
+// piWorkerSafeText.
+function piWorkerResultRaw(result: unknown): string {
+  if (typeof result === "string") return result;
   if (!result || typeof result !== "object") return "";
   const record = result as Record<string, unknown>;
   if (Array.isArray(record.content)) {
@@ -14280,10 +14455,14 @@ function piWorkerResultText(result: unknown): string {
         return typeof candidate === "string" ? candidate : "";
       })
       .filter(Boolean)
-      .join(" ");
-    if (text) return piWorkerSafeText(text, 700);
+      .join("\n");
+    if (text) return text;
   }
-  return piWorkerSafeText(result, 700);
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return String(result);
+  }
 }
 
 // Terminal frame painted after final-report.json lands: the report facts plus
@@ -14488,9 +14667,17 @@ async function runPiWorkerSession({
         ]);
       });
   };
+  const stripPaneSgr = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
   const paint = (text: string) => {
     pty.publishOutput(attemptId, text);
-    appendWorkerLog(text.replace(/\x1b\[[0-9;]*m/g, ""));
+    appendWorkerLog(stripPaneSgr(text));
+  };
+  // Pane and log get different text. Used where the pane shows a folded view:
+  // paint() logs exactly what it paints, so anything the pane hides has to be
+  // handed to the log separately or it is gone for good.
+  const paintFolded = (paneText: string, logText: string) => {
+    pty.publishOutput(attemptId, paneText);
+    appendWorkerLog(stripPaneSgr(logText));
   };
 
   try {
@@ -14567,39 +14754,68 @@ async function runPiWorkerSession({
     applyHookStateReport({ paneId: attemptId, state: "working", note: "Pi harness" });
 
     let assistantLineOpen = false;
+    // Pane budget for ONE streamed assistant message. Prose arrives delta by
+    // delta so its length is unknown until it ends and it cannot be head/tail
+    // folded like a tool result; past the budget (lines OR characters, since a
+    // stream can run on without a single newline) the pane stops repainting
+    // and says where the rest is, while appendWorkerLog still gets every byte.
+    let assistantBudget = paneStreamBudget();
+    let assistantPaneCut = false;
     unsubscribe = client.onEvent((event: PiRpcEvent) => {
       if (event.type === "tool_execution_start") {
         assistantLineOpen = false;
+        assistantBudget = paneStreamBudget();
+        assistantPaneCut = false;
         const detail = piWorkerToolDetail(event);
         paint(
-          `\r\n  \x1b[38;2;74;222;208m◇\x1b[0m ${piWorkerToolLabel(event.toolName)}` +
-          `${detail ? `\r\n    \x1b[2m${detail}\x1b[0m` : ""}\r\n`,
+          `\r\n  ${paneToolStartMarker(piWorkerToolLabel(event.toolName))}` +
+          `${detail ? `\r\n    ${paneDim(detail)}` : ""}\r\n`,
         );
       } else if (event.type === "tool_execution_end") {
         const failed = event.isError === true;
-        const detail = failed ? piWorkerResultText(event.result) : "";
-        paint(
-          `  ${failed ? "\x1b[31m× failed\x1b[0m" : "\x1b[32m✓ done\x1b[0m"}` +
-          `${detail ? `\r\n    \x1b[31m${detail}\x1b[0m` : ""}\r\n`,
-        );
+        const marker = `  ${failed ? paneToolFailMarker() : paneToolOkMarker()}`;
+        // Failure output keeps its line structure and is folded head + tail in
+        // the PANE with a dim marker. The folded middle would otherwise be lost
+        // for good, since paint() logs what it paints, so the log is written
+        // from the untouched text instead. That is what the marker's "full
+        // output in the run log" promises.
+        const raw = failed ? piWorkerResultRaw(event.result) : "";
+        if (raw) {
+          const detail = formatPaneCollapsedBlock(raw, { indent: "    ", color: PANE_RED });
+          paintFolded(`${marker}${detail}\r\n`, `${marker}\r\n${raw}\r\n`);
+        } else {
+          paint(`${marker}\r\n`);
+        }
       } else if (event.type === "message_update") {
         const delta = event.assistantMessageEvent as Record<string, unknown> | undefined;
         if (delta?.type === "text_delta" && typeof delta.delta === "string" && delta.delta) {
-          if (!assistantLineOpen) {
-            paint("\r\n  ");
-            assistantLineOpen = true;
+          if (assistantPaneCut) {
+            appendWorkerLog(delta.delta);
+          } else {
+            if (!assistantLineOpen) {
+              paint("\r\n  ");
+              assistantLineOpen = true;
+            }
+            paint(delta.delta.replace(/\n/g, "\r\n  "));
+            assistantBudget = paneStreamAdd(assistantBudget, delta.delta);
+            if (paneStreamExceeded(assistantBudget)) {
+              assistantPaneCut = true;
+              assistantLineOpen = false;
+              paint(`\r\n  ${paneDim(`… ${PANE_STREAM_CUT_NOTE}`)}\r\n`);
+            }
           }
-          paint(delta.delta.replace(/\n/g, "\r\n  "));
         }
       } else if (event.type === "message_end") {
         if (assistantLineOpen) {
           paint("\r\n");
           assistantLineOpen = false;
         }
+        assistantBudget = paneStreamBudget();
+        assistantPaneCut = false;
         const failure = piWorkerEventFailure(event);
         if (failure) paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
       } else if (event.type === "auto_retry_start") {
-        paint("\r\n  \x1b[33m↻ Provider retry…\x1b[0m\r\n");
+        paint(`\r\n  ${paneRetryMarker("Provider retry…")}\r\n`);
       } else if (event.type === "auto_retry_end" && event.success === false) {
         paint(`\r\n  \x1b[31mProvider retry failed: ${piWorkerSafeText(event.finalError, 700)}\x1b[0m\r\n`);
       } else if (event.type === "extension_error") {

@@ -29,6 +29,7 @@ import {
   type AgentRuntime,
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
+import { formatPaneExitLine } from "@shared/pane-format";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
@@ -2447,7 +2448,14 @@ export function useTerminalSession({
       };
 
       const offExit = window.spark.pty.onExit(sessionId, (info) => {
-        term.write(`\r\n\x1b[2m[process exited (${info.exitCode})]\x1b[0m\r\n`);
+        // `info.sanctioned` is set by pty-manager for teardowns Codara asked
+        // for (a finished worker's host shell, the app-quit sweep), and the
+        // status chip already renders those calm-grey "done" vs red "crashed".
+        // The pane text now says the same thing instead of showing every exit
+        // as the same bare "[process exited (N)]": sanctioned reads as a
+        // sentence, an unexpected death keeps the raw banner so a real crash
+        // still looks like one. See formatPaneExitLine.
+        term.write(formatPaneExitLine(info));
         term.options.disableStdin = true;
         onExitRef.current?.(info);
         // In-place auto-resume: if an agent TUI was live in this pane when its

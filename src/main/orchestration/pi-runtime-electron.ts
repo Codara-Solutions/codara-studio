@@ -187,6 +187,30 @@ function developmentNodeModulesRoots(): string[] {
   return roots;
 }
 
+/**
+ * Node interpreter for background agent processes. On macOS the main Electron
+ * binary registers a Dock tile per process, so every Pi agent (Cora plus each
+ * worker) showed up as its own "exec" icon in the Dock while a run was live.
+ * The bundled Electron Helper.app is the same executable surface with
+ * LSUIElement set, so as-node children launched through it stay out of the
+ * Dock (the same pattern VS Code uses for its helper processes). Falls back
+ * to the main binary off macOS or when the bundle layout is unexpected.
+ */
+export function electronAsNodeInterpreter(): string {
+  if (process.platform !== "darwin") return process.execPath;
+  const helperName = `${basename(process.execPath)} Helper`;
+  const helper = join(
+    dirname(process.execPath),
+    "..",
+    "Frameworks",
+    `${helperName}.app`,
+    "Contents",
+    "MacOS",
+    helperName,
+  );
+  return existsSync(helper) ? helper : process.execPath;
+}
+
 export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
   const roots = app.isPackaged
     ? [
@@ -319,6 +343,7 @@ export async function createCodaraPiLaunchPlan(
     thinking: options.thinking ?? "high",
     sessionName: options.sessionName,
     codaraHomeDir: sparkHome(),
+    processExecutable: electronAsNodeInterpreter(),
   });
 }
 
@@ -400,6 +425,7 @@ export async function createCodaraPiWorkerLaunchPlan(
     thinking: options.thinking ?? "high",
     sessionName: options.sessionName,
     codaraHomeDir: sparkHome(),
+    processExecutable: electronAsNodeInterpreter(),
   });
   // Frozen contract with resources/pi-cora/worker.ts: parallel-batch workers
   // read exactly these two env names to reach the run's peer-comms mailbox

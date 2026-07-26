@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
+import { createRepeatedCallGuard } from "./repeat-guard";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
 
 interface BridgeTool {
@@ -82,9 +83,16 @@ Worker contract:
 - For web research, use the web_search tool rather than fetching pages with
   curl or driving the preview browser, and cite the sources it returns. If
   web_search fails or rate-limits, or the task needs page-level depth, use the
-  bundled deep_search tool (free, no API key, DuckDuckGo backed); for
-  structured data, fetch public endpoints (RSS feeds, published APIs)
-  directly instead of waiting for the limit to clear.
+  bundled deep_search tool (free, no API key, DuckDuckGo backed with a Bing
+  HTML fallback); for structured data, fetch public endpoints (RSS feeds,
+  published APIs) directly instead of waiting for the limit to clear. If
+  deep_search reports the backends are bot-challenging rather than empty, do
+  not rephrase and retry it: switch to web_search or a named public feed.${peerComms ? `
+- web_search quota is shared by the whole worker batch, not per worker. The
+  moment web_search returns a 429 or a rate-limit error, peer_send a one-line
+  heads-up to all (subject like "web_search 429") before anything else, so
+  peers switch to feeds and deep_search instead of each burning their own
+  attempts on the same limit. Honor the same heads-up from a peer.` : ""}
 - Never open the user's system browser or GUI applications (no open,
   xdg-open, osascript, start). All web access goes through web_search,
   deep_search, or direct HTTP fetches.
@@ -93,7 +101,10 @@ Worker contract:
 - Preserve existing user changes and obey every allowedPaths, forbiddenPaths,
   access, and verification constraint in the task prompt.
 - Inspect evidence before editing, run the requested verification, and inspect
-  the final diff. Never weaken tests to manufacture success.${peerComms ? `
+  the final diff. Never weaken tests to manufacture success.
+- Repeating one tool call with identical arguments and an identical result is a
+  loop, not persistence. Cora warns you on the third such call and refuses the
+  fifth, so change the arguments, change tool, or report the blocker instead.${peerComms ? `
 - Peer workers on this step are teammates, not competitors: use peer_list,
   peer_send, peer_inbox, and peer_await to share findings early, claim a scope
   before editing shared territory, and ask before duplicating work. Cora, the
@@ -133,6 +144,32 @@ ${mcp?.promptSuffix() ?? ""}`,
       },
     });
   }
+
+  // Loop guard. `tool_call` fires before every tool (native and registered)
+  // and is the only hook that can veto one, so the counter lives there and the
+  // change-approach note rides back on the tool's own result, where the model
+  // reads it immediately instead of a turn later.
+  const repeatGuard = createRepeatedCallGuard();
+
+  pi.on("tool_call", (event) => {
+    const decision = repeatGuard.observeCall({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input,
+    });
+    if (decision.action === "block") return { block: true, reason: decision.message };
+    return undefined;
+  });
+
+  pi.on("tool_result", (event) => {
+    const outcome = repeatGuard.observeResult({
+      toolCallId: event.toolCallId,
+      content: event.content,
+      isError: event.isError,
+    });
+    if (!outcome?.note) return undefined;
+    return { content: [...event.content, { type: "text" as const, text: outcome.note }] };
+  });
 
   registerDeepSearch(pi);
 

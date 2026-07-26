@@ -4,11 +4,15 @@
 // rides the user's subscription OAuth. This module is the resilient no-key
 // fallback and the page-depth option: it queries DuckDuckGo's public HTML
 // endpoints (html.duckduckgo.com, then lite.duckduckgo.com) and, in deep mode,
-// fetches the winning pages and returns readable-text digests. Everything is
-// parsed with defensive regexes and string ops because Pi loads this file via
-// jiti inside the bundled runtime, where bare npm specifiers do not resolve;
-// Node >= 18 guarantees global fetch. A malformed SERP or a dead page degrades
-// to fewer or snippet-only results, never to a thrown turn.
+// fetches the winning pages and returns readable-text digests. When both DDG
+// endpoints come back empty or walled it falls through to one alternate no-key
+// HTML backend (Bing). Everything is parsed with defensive regexes and string ops
+// because Pi loads this file via jiti inside the bundled runtime, where bare
+// npm specifiers do not resolve; Node >= 18 guarantees global fetch. A
+// malformed SERP or a dead page degrades to fewer or snippet-only results,
+// never to a thrown turn. A bot-challenge response is classified as such and
+// reported distinctly from a genuinely empty SERP, because only one of the two
+// is worth rephrasing the query for.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -51,14 +55,11 @@ export interface DeepSearchOptions {
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-const SERP_ENDPOINTS = [
-  "https://html.duckduckgo.com/html/?q=",
-  "https://lite.duckduckgo.com/lite/?q=",
-];
-
-// Worst case stays under the 45s budget: two sequential SERP attempts plus one
-// concurrent page wave (12 + 12 + 10 = 34s).
+// Worst case stays under the 45s budget: two sequential DuckDuckGo attempts,
+// one shorter alternate-backend attempt, plus one concurrent page wave
+// (12 + 12 + 8 + 10 = 42s).
 const SERP_TIMEOUT_MS = 12_000;
+const ALT_SERP_TIMEOUT_MS = 8_000;
 const PAGE_TIMEOUT_MS = 10_000;
 const PAGE_BODY_LIMIT_BYTES = 200 * 1024;
 const PAGE_DIGEST_LIMIT_CHARS = 2_000;
@@ -157,6 +158,167 @@ export function parseDuckDuckGoSerp(html: string, maxResults: number): SerpResul
   return results;
 }
 
+/** Bing sometimes wraps a result link in /ck/a?...&u=a1<base64url of the
+ * target>. Unwrap that form; pass anything else through, upgrading
+ * protocol-relative hrefs to https like the DDG decoder does. */
+export function decodeBingRedirect(href: string): string {
+  const raw = decodeEntities(href).trim();
+  if (!raw) return "";
+  const wrapped = /[?&]u=a1([A-Za-z0-9_-]+)/.exec(raw);
+  if (wrapped) {
+    const decoded = decodeBase64Url(wrapped[1]);
+    if (/^https?:\/\//i.test(decoded)) return decoded;
+  }
+  if (raw.startsWith("//")) return `https:${raw}`;
+  return raw;
+}
+
+// Buffer under the bundled Node runtime, atob in any leaner host. Result URLs
+// are ASCII (percent-encoded bytes stay ASCII), so atob's byte string is
+// already the URL. A malformed payload degrades to "", never throws.
+function decodeBase64Url(value: string): string {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  const host = globalThis as {
+    Buffer?: { from(input: string, encoding: string): { toString(encoding: string): string } };
+    atob?: (input: string) => string;
+  };
+  try {
+    if (host.Buffer) return host.Buffer.from(padded, "base64").toString("utf8");
+    if (host.atob) return host.atob(padded);
+  } catch {
+    // Fall through to the empty string; the caller keeps the raw href.
+  }
+  return "";
+}
+
+function isBingInternalUrl(url: string): boolean {
+  return /^https?:\/\/(?:[a-z0-9-]+\.)*(?:bing\.com|microsofttranslator\.com|go\.microsoft\.com)\//i.test(url);
+}
+
+// Bing's no-JS HTML rows: <li class="b_algo"> holding the title in an
+// <h2><a href> and the snippet in a <p>. Rows are sliced between consecutive
+// b_algo openings rather than at the first </li>, because a row's own deep-link
+// or attribution list nests <li> elements that would otherwise close the row
+// before its <h2> and lose the whole result.
+const BING_ROW_OPEN_PATTERN = /<li\b[^>]*class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>/gi;
+const BING_ROW_CLOSE_PATTERN = /<\/li\s*>/gi;
+const BING_LIST_CLOSE_PATTERN = /<\/ol\s*>/i;
+const BING_TITLE_PATTERN = /<h2\b[^>]*>\s*<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i;
+const BING_SNIPPET_PATTERN = /<p\b[^>]*>([\s\S]*?)<\/p>/i;
+
+/** Slice each b_algo row body: from the end of its opening tag to the last
+ * </li> before the next row starts (or before the list closes), so nested
+ * lists inside the row cannot truncate it. */
+export function extractBingRows(html: string): string[] {
+  const openings: Array<{ start: number; bodyStart: number }> = [];
+  BING_ROW_OPEN_PATTERN.lastIndex = 0;
+  for (let match = BING_ROW_OPEN_PATTERN.exec(html); match; match = BING_ROW_OPEN_PATTERN.exec(html)) {
+    openings.push({ start: match.index, bodyStart: match.index + match[0].length });
+  }
+  return openings.map((opening, position) => {
+    const limit = position + 1 < openings.length ? openings[position + 1].start : html.length;
+    const segment = html.slice(opening.bodyStart, limit);
+    const listClose = segment.search(BING_LIST_CLOSE_PATTERN);
+    const bounded = listClose >= 0 ? segment.slice(0, listClose) : segment;
+    let rowClose = -1;
+    BING_ROW_CLOSE_PATTERN.lastIndex = 0;
+    for (
+      let match = BING_ROW_CLOSE_PATTERN.exec(bounded);
+      match;
+      match = BING_ROW_CLOSE_PATTERN.exec(bounded)
+    ) {
+      rowClose = match.index;
+    }
+    return rowClose >= 0 ? bounded.slice(0, rowClose) : bounded;
+  });
+}
+
+export function parseBingSerp(html: string, maxResults: number): SerpResult[] {
+  const results: SerpResult[] = [];
+  const seen = new Set<string>();
+  for (const row of extractBingRows(html)) {
+    if (results.length >= maxResults) break;
+    const titleMatch = BING_TITLE_PATTERN.exec(row);
+    if (!titleMatch) continue;
+    const url = decodeBingRedirect(titleMatch[1]);
+    if (!url || !/^https?:\/\//i.test(url) || isBingInternalUrl(url) || seen.has(url)) continue;
+    const title = stripTags(titleMatch[2]);
+    if (!title) continue;
+    const snippetMatch = BING_SNIPPET_PATTERN.exec(row);
+    seen.add(url);
+    results.push({ title, url, snippet: snippetMatch ? stripTags(snippetMatch[1]) : "" });
+  }
+  return results;
+}
+
+/** Why a zero-row response has zero rows. "challenge" means a bot wall was
+ * served instead of a SERP, which no amount of rephrasing fixes; "empty" means
+ * the backend answered and simply had nothing to list. */
+export type SerpVerdict = "results" | "challenge" | "empty";
+
+// Markers of a bot wall (DDG's anomaly page, a Cloudflare interstitial, a
+// captcha). Consulted last, and only once zero rows parsed: a body that states
+// it found nothing, or that still ships result-row markup, is treated as an
+// answer even when the page chrome happens to load an anomaly or captcha
+// script, so a genuine SERP is not misread as a wall.
+const CHALLENGE_MARKERS = [
+  "anomaly",
+  "unusual traffic",
+  "unusual activity",
+  "automated queries",
+  "are you a robot",
+  "are you human",
+  "verify you are human",
+  "verifying you are human",
+  "captcha",
+  "challenge-platform",
+  "cf-challenge",
+  "just a moment",
+  "enable javascript and cookies",
+];
+
+// The phrasings these backends use for a genuinely empty SERP. "no results"
+// stays unqualified on purpose so the bare "No results." that lite.duckduckgo
+// .com can emit counts too; a wall page announces a challenge, not a count.
+const NO_RESULTS_MARKERS = ["no results", "no-results", "did not match any documents"];
+
+// Result-row markup, not a bare mention: the class attribute has to be there,
+// so a wall page that merely ships the SERP stylesheet does not read as a
+// container.
+export const DDG_CONTAINER_PATTERN =
+  /class=["'][^"']*(?:result__a|result__snippet|results_links|result-link|result-snippet)/i;
+export const BING_CONTAINER_PATTERN = /class=["'][^"']*\bb_algo\b|id=["']b_results["']/i;
+
+/** A bot challenge and an empty SERP are byte-for-byte different but produce
+ * the same zero rows, so the two must be told apart here rather than collapsed
+ * into one useless "no parseable results" string. */
+export function classifySerpBody(
+  status: number,
+  html: string,
+  resultCount: number,
+  containerPattern: RegExp,
+): SerpVerdict {
+  if (resultCount > 0) return "results";
+  // DDG answers a challenged request with 202 and a wall page. fetch's `ok` is
+  // true across the whole 2xx range, so 202 must be checked explicitly.
+  if (status === 202) return "challenge";
+  const probe = html.toLowerCase();
+  // A page that states it found nothing answered the query, even when the page
+  // bundle happens to reference anomaly or captcha scripts the way ordinary
+  // SERP chrome does. Wall pages announce a challenge, never a result count.
+  if (NO_RESULTS_MARKERS.some((marker) => probe.includes(marker))) return "empty";
+  // Result-row markup with zero usable rows means every row was an ad or a
+  // duplicate we filtered: an answer we could not use, not a wall. This has to
+  // outrank the generic markers, or one ad row mentioning a captcha would turn
+  // a real SERP into a challenge verdict.
+  if (containerPattern.test(html)) return "empty";
+  if (CHALLENGE_MARKERS.some((marker) => probe.includes(marker))) return "challenge";
+  // No rows, no container, no statement: a wall or an interstitial, not a
+  // search answer.
+  return "challenge";
+}
+
 /** Best-effort readable text: drop non-content blocks, keep block boundaries
  * as newlines, strip the remaining tags, and collapse whitespace. */
 export function extractReadableText(html: string): string {
@@ -235,37 +397,117 @@ function errorText(error: unknown): string {
   return message.replace(/\s+/g, " ").trim().slice(0, 200) || "unknown error";
 }
 
+interface SerpBackend {
+  /** Short host label used in error strings. */
+  label: string;
+  /** Display name of whoever answered, used in the result header. */
+  provider: string;
+  endpoint: string;
+  timeoutMs: number;
+  parse(html: string, maxResults: number): SerpResult[];
+  containerPattern: RegExp;
+}
+
+// DuckDuckGo first (both public endpoints), then one alternate no-key HTML
+// backend so a DDG-wide bot wall is not the end of the fallback chain. Bing is
+// the only one whose no-JS markup maps as cleanly as DDG's, and it is held to
+// the same discipline: defensive regexes, redirect unwrapping, and the same
+// challenge classification.
+const SERP_BACKENDS: SerpBackend[] = [
+  {
+    label: "html.duckduckgo.com",
+    provider: "DuckDuckGo",
+    endpoint: "https://html.duckduckgo.com/html/?q=",
+    timeoutMs: SERP_TIMEOUT_MS,
+    parse: parseDuckDuckGoSerp,
+    containerPattern: DDG_CONTAINER_PATTERN,
+  },
+  {
+    label: "lite.duckduckgo.com",
+    provider: "DuckDuckGo",
+    endpoint: "https://lite.duckduckgo.com/lite/?q=",
+    timeoutMs: SERP_TIMEOUT_MS,
+    parse: parseDuckDuckGoSerp,
+    containerPattern: DDG_CONTAINER_PATTERN,
+  },
+  {
+    label: "bing.com",
+    provider: "Bing",
+    endpoint: "https://www.bing.com/search?q=",
+    timeoutMs: ALT_SERP_TIMEOUT_MS,
+    parse: parseBingSerp,
+    containerPattern: BING_CONTAINER_PATTERN,
+  },
+];
+
+interface SerpAnswer {
+  results: SerpResult[];
+  provider: string;
+}
+
 async function fetchSerp(
   query: string,
   maxResults: number,
   fetchImpl: FetchLike,
   outer?: AbortSignal,
-): Promise<SerpResult[]> {
+): Promise<SerpAnswer> {
   const errors: string[] = [];
-  for (const endpoint of SERP_ENDPOINTS) {
-    const timeout = withTimeout(SERP_TIMEOUT_MS, outer);
+  // Counted, not a single sticky flag: one walled backend must not make the
+  // terminal error claim the whole chain was walled when another backend
+  // actually answered "zero results", which is the one case rephrasing helps.
+  let walled = 0;
+  let answeredEmpty = 0;
+  for (const backend of SERP_BACKENDS) {
+    const timeout = withTimeout(backend.timeoutMs, outer);
     try {
-      const response = await fetchImpl(`${endpoint}${encodeURIComponent(query)}`, {
+      const response = await fetchImpl(`${backend.endpoint}${encodeURIComponent(query)}`, {
         headers: { "User-Agent": USER_AGENT, Accept: "text/html" },
         redirect: "follow",
         signal: timeout.signal,
       });
       if (!response.ok) {
-        errors.push(`${endpoint}: HTTP ${response.status}`);
+        // 403 and 429 from a free SERP endpoint are the same wall as a
+        // challenge page, just expressed in the status line.
+        if (response.status === 403 || response.status === 429) {
+          walled += 1;
+          errors.push(`${backend.label}: HTTP ${response.status} (blocked or rate limited)`);
+        } else {
+          errors.push(`${backend.label}: HTTP ${response.status}`);
+        }
         continue;
       }
       const html = await readBodyCapped(response, PAGE_BODY_LIMIT_BYTES * 2);
-      const results = parseDuckDuckGoSerp(html, maxResults);
-      if (results.length > 0) return results;
-      errors.push(`${endpoint}: no parseable results`);
+      const results = backend.parse(html, maxResults);
+      const verdict = classifySerpBody(response.status, html, results.length, backend.containerPattern);
+      if (verdict === "results") return { results, provider: backend.provider };
+      if (verdict === "challenge") {
+        walled += 1;
+        errors.push(`${backend.label}: bot challenge page (HTTP ${response.status}, no result rows)`);
+      } else {
+        answeredEmpty += 1;
+        errors.push(`${backend.label}: zero results for this query`);
+      }
     } catch (error) {
-      errors.push(`${endpoint}: ${errorText(error)}`);
+      errors.push(`${backend.label}: ${errorText(error)}`);
     } finally {
       timeout.release();
     }
   }
+  if (walled > 0 && answeredEmpty === 0) {
+    throw new Error(
+      `Free web search is being bot-challenged, not merely empty, for "${query}". ${errors.join("; ")}. The public HTML endpoints served challenge pages instead of results, so retrying deep_search with different terms will not clear it: use the provider web_search tool, or fetch a known public endpoint directly (RSS or Atom feeds, published JSON APIs, documentation pages you can name).`,
+    );
+  }
+  if (walled > 0) {
+    // Mixed chain: some backends walled, at least one answered and had nothing.
+    // Rephrasing can still help here, so say both things instead of pretending
+    // the whole chain was walled.
+    throw new Error(
+      `Free web search returned nothing for "${query}". ${errors.join("; ")}. Some backends were walled (a challenge page or a blocking status) while others answered with zero results, so the query itself may be too narrow: one rephrase is worth trying, and if that also comes back empty use the provider web_search tool or fetch a known public endpoint directly (RSS or Atom feeds, published JSON APIs, documentation pages you can name).`,
+    );
+  }
   throw new Error(
-    `DuckDuckGo search failed for "${query}". ${errors.join("; ")}. Try again with different terms, use web_search, or fetch a known public endpoint directly.`,
+    `Free web search failed for "${query}". ${errors.join("; ")}. Try again with different terms, use web_search, or fetch a known public endpoint directly.`,
   );
 }
 
@@ -330,8 +572,8 @@ export async function executeDeepSearch(
   const maxResults = normalizeMaxResults(params.max_results);
   const fetchImpl = options.fetchImpl ?? (fetch as unknown as FetchLike);
 
-  const results = await fetchSerp(query, maxResults, fetchImpl, options.signal);
-  const header = `DuckDuckGo ${mode} results for "${query}" (${results.length} result${results.length === 1 ? "" : "s"}, public endpoint):`;
+  const { results, provider } = await fetchSerp(query, maxResults, fetchImpl, options.signal);
+  const header = `${provider} ${mode} results for "${query}" (${results.length} result${results.length === 1 ? "" : "s"}, public endpoint):`;
 
   if (mode === "quick") {
     const blocks = results.map((result, index) =>
@@ -360,14 +602,14 @@ export async function executeDeepSearch(
 }
 
 export const DEEP_SEARCH_DESCRIPTION =
-  "Free web search over DuckDuckGo's public HTML endpoint. No API key and no subscription quota, but result quality is below the provider web_search tool, so prefer web_search first and use deep_search when web_search fails, rate limits, or the task needs page-level depth. mode \"quick\" returns the top results as title, url, and snippet. mode \"deep\" also fetches the top pages concurrently and returns a readable-text digest per page; a page that cannot be fetched degrades to its search snippet.";
+  "Free web search over DuckDuckGo's public HTML endpoints, falling through to Bing's HTML endpoint when both come back empty or bot-walled. No API key and no subscription quota, but result quality is below the provider web_search tool, so prefer web_search first and use deep_search when web_search fails, rate limits, or the task needs page-level depth. mode \"quick\" returns the top results as title, url, and snippet. mode \"deep\" also fetches the top pages concurrently and returns a readable-text digest per page; a page that cannot be fetched degrades to its search snippet. If the error says the backends are bot-challenging, free scraping is walled for now: do not rephrase and retry, switch to web_search or fetch a public feed or API endpoint directly.";
 
 export function registerDeepSearch(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "deep_search",
     label: "Deep search",
     description: DEEP_SEARCH_DESCRIPTION,
-    promptSnippet: "Free DuckDuckGo search fallback; deep mode digests the top pages",
+    promptSnippet: "Free DuckDuckGo then Bing search fallback; deep mode digests the top pages",
     parameters: {
       type: "object",
       properties: {
