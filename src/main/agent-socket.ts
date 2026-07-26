@@ -23,6 +23,12 @@ import {
   normalizeCodexModelId,
 } from "@shared/model-catalog";
 import { ALLOWED_WORKER_MODELS, rosterModelFor } from "./orchestration/worker-model-hint";
+import {
+  headroomForRuntime,
+  preferredRuntimeForHeadroom,
+  readSubscriptionHeadroomSummary,
+  runtimeLimitReached,
+} from "./orchestration/subscription-headroom";
 import type {
   AppPreferences,
   AppState,
@@ -1643,6 +1649,16 @@ async function handleOrchestratorSpawnWorkers(
     }
   }
 
+  // Subscription-quota headroom, read once per spawn batch, after the
+  // early-return reuse guards above so their fast paths never wait on it (the
+  // read hits pi-subscription-usage's 60s cache, usually warmed by the manager
+  // turn that issued this RPC). Consulted by the cross-provider verifier
+  // reroute below (never send the verifier into a provider that already hit
+  // its limit) and by the headroom reroute at task creation. A failed read
+  // degrades to null, which every consumer treats as "no signal", so a usage
+  // hiccup can never fail a spawn.
+  const headroomSummary = await readSubscriptionHeadroomSummary();
+
   // Cross-provider verification is a control-plane invariant, not merely a
   // prompt suggestion. For the common single-verifier follow-up, reroute a
   // same-provider request to the installed/enabled peer and translate the
@@ -1675,9 +1691,14 @@ async function handleOrchestratorSpawnWorkers(
       // deliberately NOT consulted: `authenticated === false` is advisory (the
       // probe misses env/helper credentials), and an actual sign-out shows up
       // as an environmental failure on first use anyway.
+      // A limit-reached subscription is the quota flavor of the same problem:
+      // the reroute would send the verifier into a provider guaranteed to
+      // refuse it. Only the explicit limitReached flag blocks the reroute; a
+      // failed or missing usage read stays permissive.
       const oppositeAvailable =
         runtimes.some((runtime) => runtime.kind === opposite && runtime.installed) &&
-        !runtimeHadEnvironmentalFailure(run, opposite);
+        !runtimeHadEnvironmentalFailure(run, opposite) &&
+        !runtimeLimitReached(headroomSummary, opposite);
       if (oppositeAvailable) {
         verifierPeerOverride = {
           runtime: opposite,
@@ -1686,6 +1707,38 @@ async function handleOrchestratorSpawnWorkers(
             `Rerouted the verifier from ${latestImplementation.runtimePreference} to ${opposite} so the ` +
             "implementation is checked by an independent provider family.",
         };
+      }
+    }
+  }
+
+  // Quota-aware routing enforcement. When one subscription is nearly exhausted
+  // while the other has clear room (thresholds in subscription-headroom.ts:
+  // tight means limitReached or under 10% left, comfortable means at least 35%
+  // left), workers the manager pointed at the constrained provider are
+  // rerouted to the roomy one at the equivalent roster tier. Two deliberate
+  // exemptions: an explicit claude-fable-5 hint is a premium pin and is never
+  // rerouted, and the single-verifier cross-provider override above always
+  // wins, since that reroute is an independence invariant rather than a
+  // load-balancing choice. The reroute only arms when the preferred runtime is
+  // actually usable here: installed, and without an environmental failure this
+  // run (mirroring the verifier reroute's health check).
+  const headroomPreferredRuntime = preferredRuntimeForHeadroom(headroomSummary);
+  let headroomReroute: { from: "claude" | "codex"; to: "claude" | "codex" } | null = null;
+  if (headroomPreferredRuntime) {
+    const constrainedRuntime = headroomPreferredRuntime === "claude" ? "codex" : "claude";
+    const anyReroutableWorker = workersToCreate.some(
+      (worker) =>
+        (worker.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) === constrainedRuntime &&
+        !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : ""),
+    );
+    if (anyReroutableWorker) {
+      const { detectAgentRuntimes } = await import("./agent-runtimes");
+      const detected = await detectAgentRuntimes();
+      const preferredUsable =
+        detected.some((runtime) => runtime.kind === headroomPreferredRuntime && runtime.installed) &&
+        !runtimeHadEnvironmentalFailure(run, headroomPreferredRuntime);
+      if (preferredUsable) {
+        headroomReroute = { from: constrainedRuntime, to: headroomPreferredRuntime };
       }
     }
   }
@@ -1760,6 +1813,8 @@ async function handleOrchestratorSpawnWorkers(
   // (raw entries with empty titles are dropped, so rawWorkers can't be used to
   // find the surviving worker's class for the solo-spawn advisory below).
   const createdTaskClasses: (string | undefined)[] = [];
+  // Titles of workers the headroom reroute actually moved, for the note below.
+  const headroomReroutedTitles: string[] = [];
   const attemptIdsToLaunch: string[] = [];
   // Create every task BEFORE preparing any: prepareWorkerTask renders the
   // worker prompt and evaluates shouldUsePeerComms against the run snapshot at
@@ -1771,9 +1826,22 @@ async function handleOrchestratorSpawnWorkers(
     const title = typeof w.title === "string" ? w.title.trim() : "";
     if (!title) continue;
     const description = typeof w.description === "string" ? w.description : "";
-    const effectiveRuntime = verifierPeerOverride?.runtime ?? w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
-    const effectiveModelHint = verifierPeerOverride?.modelHint ??
+    let effectiveRuntime = verifierPeerOverride?.runtime ?? w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
+    let effectiveModelHint = verifierPeerOverride?.modelHint ??
       (typeof w.modelHint === "string" ? w.modelHint : undefined);
+    // Headroom reroute, per worker: skipped for the verifier peer override
+    // (independence invariant) and for an explicit fable pin (deliberate
+    // premium ask, honored even while the Claude quota is tight).
+    if (
+      headroomReroute &&
+      !verifierPeerOverride &&
+      effectiveRuntime === headroomReroute.from &&
+      !/fable/i.test(effectiveModelHint ?? "")
+    ) {
+      effectiveRuntime = headroomReroute.to;
+      effectiveModelHint = crossProviderPeerModel(headroomReroute.to, effectiveModelHint);
+      headroomReroutedTitles.push(title);
+    }
     const sanitizedModel = runStore.sanitizeWorkerModelHint(effectiveModelHint);
     const updated = await runStore.createWorkerTask({
       runId,
@@ -1838,6 +1906,29 @@ async function handleOrchestratorSpawnWorkers(
   // runs when fleet/model policy evolves underneath them.
   const notes: string[] = [...guardrailNotes];
   if (verifierPeerOverride) notes.push(verifierPeerOverride.note);
+  if (headroomReroute && headroomReroutedTitles.length > 0) {
+    const constrainedInfo = headroomForRuntime(headroomSummary, headroomReroute.from);
+    const preferredInfo = headroomForRuntime(headroomSummary, headroomReroute.to);
+    const constrainedLabel = constrainedInfo?.label ?? headroomReroute.from;
+    const constrainedState = constrainedInfo?.limitReached
+      ? "has hit its subscription limit"
+      : `has only ${constrainedInfo?.headroomPercent ?? 0}% of its ${
+          constrainedInfo?.tightestWindowLabel ?? "quota"
+        } window left`;
+    const constrainedReset = constrainedInfo?.tightestWindowResetsIn
+      ? ` (resets in ${constrainedInfo.tightestWindowResetsIn})`
+      : "";
+    notes.push(
+      `Subscription headroom reroute: moved ${headroomReroutedTitles.length} worker(s) ` +
+        `(${headroomReroutedTitles.join(", ")}) from ${headroomReroute.from} to ${headroomReroute.to} ` +
+        `at the equivalent model tier. The ${constrainedLabel} subscription ${constrainedState}` +
+        `${constrainedReset}, while ${preferredInfo?.label ?? headroomReroute.to} has ` +
+        `${preferredInfo?.headroomPercent != null ? `${preferredInfo.headroomPercent}% left` : "more headroom"}. ` +
+        "Route follow-up workers to " +
+        `${headroomReroute.to} until the quota resets; an explicit claude-fable-5 modelHint is treated ` +
+        "as a deliberate premium pin and is never rerouted.",
+    );
+  }
   // Solo-spawn advisory. Legitimate solo spawns exist — a lone verifier or
   // leaf, a skeleton before a fan-out (the prompts' own endorsed pattern), a
   // targeted corrective fix after a failed verify — so the note names them as

@@ -199,6 +199,10 @@ import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { recordRunMemory } from "./run-memory";
 import { formatWorkspaceLessonsSection, recordRunLessons } from "./workspace-lessons";
 import {
+  describeHeadroomForPrompt,
+  readSubscriptionHeadroomSummary,
+} from "./subscription-headroom";
+import {
   createCheckpoint,
   deleteRunCheckpoints,
   restoreCheckpointCode,
@@ -4239,6 +4243,15 @@ async function prepareManagerTurn(
   const inputMessages = selectedIds
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
+  // Subscription headroom rides the same dynamic tail as the lessons. The read
+  // hits pi-subscription-usage's 60s cache (never forced), and any failure
+  // degrades to "no section": a quota-endpoint hiccup must never cost a turn.
+  let subscriptionHeadroom: string | null = null;
+  try {
+    subscriptionHeadroom = describeHeadroomForPrompt(await readSubscriptionHeadroomSummary());
+  } catch {
+    subscriptionHeadroom = null;
+  }
   return {
     run: prepared,
     call: persistedCall,
@@ -4249,6 +4262,7 @@ async function prepareManagerTurn(
     prompt: buildManagerTurnPrompt(prepared, inputMessages, {
       includeCanonicalReplay,
       workspaceLessons: formatWorkspaceLessonsSection(prepared.workspaceId),
+      subscriptionHeadroom,
     }),
     inputMessages,
     conversationEpoch: epoch,

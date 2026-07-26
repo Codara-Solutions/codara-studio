@@ -401,9 +401,12 @@ export function buildManagerTurnPrompt(
   inputMessages: HumanRunMessage[],
   opts?: ManagerTurnPromptOptions,
 ): string {
-  return appendWorkspaceLessons(
-    buildManagerTurnInput(run, inputMessages, opts),
-    opts?.workspaceLessons,
+  return appendSubscriptionHeadroom(
+    appendWorkspaceLessons(
+      buildManagerTurnInput(run, inputMessages, opts),
+      opts?.workspaceLessons,
+    ),
+    opts?.subscriptionHeadroom,
   );
 }
 
@@ -417,6 +420,14 @@ export interface ManagerTurnPromptOptions {
    * scripts/test-manager-prompt-cache.cjs, which bundles it standalone).
    */
   workspaceLessons?: string | null;
+  /**
+   * Rendered subscription-headroom section (subscription-headroom.ts), or null
+   * when no provider reported usable quota data. Same contract as
+   * workspaceLessons: the caller reads it (the usage cache lives Electron-side)
+   * and it rides the dynamic tail only, its numbers change every turn, so a
+   * byte of it in the stable prefix would kill the prompt cache for the run.
+   */
+  subscriptionHeadroom?: string | null;
 }
 
 /**
@@ -430,6 +441,17 @@ export interface ManagerTurnPromptOptions {
 function appendWorkspaceLessons(prompt: string, lessons: string | null | undefined): string {
   if (!lessons || !lessons.trim()) return prompt;
   return [prompt, "", lessons.trim(), "[END WORKSPACE LESSONS]"].join("\n");
+}
+
+/**
+ * Subscription-quota headroom rides the dynamic tail for the same reasons the
+ * lessons do: it changes turn to turn (a cached-prefix byte it touched would be
+ * invalidated every turn), and it is live evidence, not standing guidance. A
+ * turn where no provider reported usable data appends nothing.
+ */
+function appendSubscriptionHeadroom(prompt: string, headroom: string | null | undefined): string {
+  if (!headroom || !headroom.trim()) return prompt;
+  return [prompt, "", headroom.trim()].join("\n");
 }
 
 function buildManagerTurnInput(
