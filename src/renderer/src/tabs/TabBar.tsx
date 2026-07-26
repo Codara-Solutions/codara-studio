@@ -104,6 +104,14 @@ function TabBar({
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const [terminalDropActive, setTerminalDropActive] = useState(false);
+  // Right-click context menu on a file-backed tab (editor). Stored by tab id
+  // rather than the tab object so a stale menu over a just-closed tab simply
+  // renders nothing instead of acting on a dead reference.
+  const [tabMenu, setTabMenu] = useState<{ id: TabId; x: number; y: number } | null>(null);
+  // Stable identity so the memoized TabItem rows never re-render because of it.
+  const onTabContextMenu = useRef((id: TabId, x: number, y: number) => {
+    setTabMenu({ id, x, y });
+  }).current;
 
   // Close the new-tab picker on outside click / Escape.
   useEffect(() => {
@@ -127,6 +135,24 @@ function TabBar({
       document.removeEventListener("keydown", onKey);
     };
   }, [pickerOpen]);
+  // Close the tab context menu on any outside click, Escape, or a second
+  // right-click elsewhere (the new contextmenu event replaces the state).
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = () => setTabMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("blur", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", close);
+    };
+  }, [tabMenu]);
+
   // Tab id that a pointer-based pane drag is currently hovering over — drives
   // hover-activate (open the tab so the user can see where they're aiming)
   // and the drop-target outline on that TabItem.
@@ -393,12 +419,25 @@ function TabBar({
               onTerminalPaneDrop={onTerminalPaneDrop}
               onReorderTab={onReorderTab}
               onPinEditorTab={onPinEditorTab}
+              onContextMenu={onTabContextMenu}
               closeOnMiddleClick={closeOnMiddleClick}
             />
           ),
         )}
         {newTabDropActive && <NewTabDropZone />}
       </div>
+      {tabMenu && (() => {
+        const menuTab = tabs.find((t) => t.id === tabMenu.id);
+        if (!menuTab || menuTab.kind !== "editor") return null;
+        return (
+          <TabContextMenu
+            path={menuTab.path}
+            x={tabMenu.x}
+            y={tabMenu.y}
+            onDismiss={() => setTabMenu(null)}
+          />
+        );
+      })()}
       <div ref={pickerRef} style={{ position: "relative" }}>
         <button
           type="button"
@@ -490,6 +529,9 @@ interface TabItemProps {
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
+  // Right-click. Only file-backed tab kinds report it (currently editors);
+  // the parent owns the menu state so one menu serves the whole strip.
+  onContextMenu: (id: TabId, x: number, y: number) => void;
   closeOnMiddleClick: boolean;
 }
 
@@ -506,6 +548,7 @@ const TabItem = React.memo(function TabItem({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
+  onContextMenu,
   closeOnMiddleClick,
 }: TabItemProps) {
   const [closeHover, setCloseHover] = useState(false);
@@ -667,6 +710,12 @@ const TabItem = React.memo(function TabItem({
           e.stopPropagation();
           onClose(tab.id);
         }
+      }}
+      onContextMenu={(e) => {
+        if (tab.kind !== "editor") return;
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(tab.id, e.clientX, e.clientY);
       }}
       title={titleFor(tab)}
     >
@@ -1088,6 +1137,55 @@ function PickerItem({
         </span>
       )}
     </button>
+  );
+}
+
+// Right-click menu for a file-backed tab. Fixed-position glass panel at the
+// cursor, clamped to the viewport's right edge (the strip sits at the top, so
+// vertical clamping is moot). The parent closes it on outside mousedown /
+// Escape / window blur; mousedown inside is stopped so a row click survives
+// long enough to fire.
+function TabContextMenu({
+  path,
+  x,
+  y,
+  onDismiss,
+}: {
+  path: string;
+  x: number;
+  y: number;
+  onDismiss: () => void;
+}) {
+  const width = 200;
+  return (
+    <div
+      className="spark-tabbar-picker spark-glass"
+      role="menu"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: "fixed",
+        zIndex: 100,
+        left: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+        top: y,
+        width,
+      }}
+    >
+      <PickerItem
+        label="Reveal in OS"
+        onClick={() => {
+          onDismiss();
+          void window.spark.fs.revealInOS(path).catch(() => {});
+        }}
+      />
+      <PickerItem
+        label="Copy Path"
+        onClick={() => {
+          onDismiss();
+          void navigator.clipboard.writeText(path).catch(() => {});
+        }}
+      />
+    </div>
   );
 }
 
