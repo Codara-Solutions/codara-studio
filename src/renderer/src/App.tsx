@@ -4506,6 +4506,7 @@ export default function App() {
             <AgentCapabilitiesDialog
               settings={settings}
               workspaceCwd={activeWorkspace?.cwd ?? null}
+              workspaceId={activeWorkspace?.id ?? null}
               onClose={closeCapabilities}
               onSave={handleSaveSettings}
             />

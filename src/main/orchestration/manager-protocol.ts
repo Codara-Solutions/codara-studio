@@ -42,7 +42,6 @@ import {
   type ManagerPromptProfile,
 } from "./prompt-profile";
 import { formatPriorRunsSection } from "./run-memory";
-import { formatWorkspaceLessonsSection } from "./workspace-lessons";
 
 export interface SparkManagerStepDecision {
   kind: StepKind;
@@ -666,19 +665,12 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     );
   }
 
-  // Per-workspace lessons learned from earlier completed runs (search rate
-  // limits, runtime fallbacks). Placed here, in the per-turn user message: this
-  // is the dynamic tail, so lessons never invalidate the cacheable system-prompt
-  // prefix. Costs nothing when the workspace has no lessons yet.
-  //
-  // This is the hosted-API mirror, which nothing dispatches today. The LIVE
-  // replay for every shipping CLI backend is run-store's prepareManagerTurn,
-  // which passes the same rendered section into buildManagerTurnPrompt. Keep the
-  // two in step if the request side is ever wired up.
-  const workspaceLessons = formatWorkspaceLessonsSection(run.workspaceId);
-  if (workspaceLessons) {
-    lines.push(workspaceLessons, "");
-  }
+  // Cora memory (cora-memory.ts) deliberately has no hosted-API mirror here.
+  // The LIVE injection for every shipping CLI backend is run-store's
+  // prepareManagerTurn, which is also where the once-per-run hash gating
+  // lives; a second render on this never-dispatched path would bypass that
+  // gate. If the hosted request side is ever wired up, inject through the same
+  // formatCoraMemoryForTurn seam.
 
   // When a per-mode system prompt override is set we treat that as the
   // canonical instruction for the stage and skip the generic MODE-SPECIFIC

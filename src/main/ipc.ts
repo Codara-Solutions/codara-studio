@@ -153,6 +153,12 @@ async function getPiSubscriptionAuth(): Promise<typeof import("./orchestration/p
   return piSubscriptionAuthMod;
 }
 
+let coraMemoryMod: typeof import("./orchestration/cora-memory") | undefined;
+async function getCoraMemory(): Promise<typeof import("./orchestration/cora-memory")> {
+  coraMemoryMod ??= await import("./orchestration/cora-memory");
+  return coraMemoryMod;
+}
+
 let runStoreMod: typeof import("./orchestration/run-store") | undefined;
 async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
   runStoreMod ??= await import("./orchestration/run-store");
@@ -245,6 +251,11 @@ import type {
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
+  CoraMemoryScope,
+  CoraMemoryStatus,
+  MemoryClearInput,
+  MemorySetEnabledInput,
+  MemoryStatusInput,
   UpdateChatBackendInput,
   UpdateCoraWhiteboardInput,
   ExportCoraWhiteboardFileInput,
@@ -538,6 +549,39 @@ export function registerIpc(): void {
         }
       }
       return next;
+    },
+  );
+
+  // Cora's writable memory. The markdown files are the source of truth and the
+  // user edits them in the editor, so these three channels only report on them
+  // and toggle/clear a whole tier. Every one resolves to the fresh status PAIR,
+  // including the mutations, so the Capability Center never has to re-read.
+  ipcMain.handle(
+    "memory:get",
+    async (_e, input?: MemoryStatusInput): Promise<CoraMemoryStatus> => {
+      return readMemoryStatus(input?.workspaceId ?? null);
+    },
+  );
+
+  ipcMain.handle(
+    "memory:setEnabled",
+    async (_e, input: MemorySetEnabledInput): Promise<CoraMemoryStatus> => {
+      const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
+      const { setMemoryEnabled } = await getCoraMemory();
+      await setMemoryEnabled(input.scope, workspaceId, input.enabled);
+      return readMemoryStatus(input.workspaceId ?? null);
+    },
+  );
+
+  ipcMain.handle(
+    "memory:clear",
+    async (_e, input: MemoryClearInput): Promise<CoraMemoryStatus> => {
+      const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
+      const { clearMemory } = await getCoraMemory();
+      // The user's own lines survive unless the caller opted in explicitly:
+      // a missing flag must never be read as permission to delete them.
+      await clearMemory(input.scope, workspaceId, input.includeUserLines === true);
+      return readMemoryStatus(input.workspaceId ?? null);
     },
   );
 
@@ -2148,6 +2192,35 @@ export function registerIpc(): void {
     const { quitAndInstall } = await import("./auto-updater");
     quitAndInstall();
   });
+}
+
+// cora-memory keys the workspace tier by workspaceId and sanitizes whatever it
+// is given, so an empty id would silently resolve to a real "_unknown.md" file
+// the user could then toggle and clear. With no workspace open there is no
+// workspace tier to report, so say so instead of inventing one.
+async function readMemoryStatus(workspaceId: string | null): Promise<CoraMemoryStatus> {
+  const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = await getCoraMemory();
+  const status = await getMemoryStatus(workspaceId ?? "");
+  if (workspaceId) return status;
+  return {
+    global: status.global,
+    workspace: {
+      enabled: false,
+      path: "",
+      bytesUsed: 0,
+      bytesCap: MEMORY_FILE_MAX_BYTES,
+      overCap: false,
+      counts: { user: 0, cora: 0, auto: 0 },
+    },
+  };
+}
+
+// The renderer disables the workspace controls when no workspace is open; this
+// is the boundary check that makes that a guarantee rather than a UI habit.
+function requireMemoryWorkspace(scope: CoraMemoryScope, workspaceId: string | null): string {
+  if (scope !== "workspace") return workspaceId ?? "";
+  if (!workspaceId) throw new Error("Open a workspace before changing its memory.");
+  return workspaceId;
 }
 
 function parsePastedImageDataUrl(value: unknown): { mimeType: string; buffer: Buffer } {

@@ -15,6 +15,13 @@ import { loadState, saveState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
 import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
+import {
+  MAX_BULLETS_ADDED_PER_RUN,
+  MAX_REMEMBER_CALLS_PER_RUN,
+  rememberAdd,
+  rememberReplace,
+  type MemoryScope,
+} from "./orchestration/cora-memory";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
@@ -442,6 +449,8 @@ async function dispatch(
         return await handleOrchestratorWhiteboardGet(params, id);
       case "orchestrator.whiteboard_update":
         return await handleOrchestratorWhiteboardUpdate(params, id);
+      case "orchestrator.remember":
+        return await handleOrchestratorRemember(params, id);
       case "automation.list":
         return await handleAutomationList(params, id);
       case "automation.get":
@@ -3804,6 +3813,107 @@ async function handleOrchestratorWhiteboardUpdate(
       ok: true,
       run_id: updated.id,
       whiteboard: updated.whiteboard ?? null,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// orchestrator.remember, the codara_remember tool's RPC (the MCP server maps
+// the tool name onto this method). Only Cora, the Execute/Auto manager, holds
+// this tool; workers never write memory. The heavy lifting (tag grammar,
+// dedup, TTL, byte caps, the user-line preservation guardrail) lives in
+// cora-memory.ts; this handler owns the per-run write budget, an in-memory
+// map that resets on app restart by design.
+const rememberBudgetByRun = new Map<string, { calls: number; bulletsAdded: number }>();
+const REMEMBER_BUDGET_RUN_LIMIT = 256;
+
+function rememberBudgetFor(runId: string): { calls: number; bulletsAdded: number } {
+  let budget = rememberBudgetByRun.get(runId);
+  if (!budget) {
+    budget = { calls: 0, bulletsAdded: 0 };
+    rememberBudgetByRun.set(runId, budget);
+    while (rememberBudgetByRun.size > REMEMBER_BUDGET_RUN_LIMIT) {
+      const oldest = rememberBudgetByRun.keys().next();
+      if (oldest.done) break;
+      rememberBudgetByRun.delete(oldest.value);
+    }
+  }
+  return budget;
+}
+
+async function handleOrchestratorRemember(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const scope = stringParam(params, "scope");
+  if (scope !== "workspace" && scope !== "global") {
+    return errorResponse(id, ERR_INVALID_PARAMS, 'scope must be "workspace" or "global"');
+  }
+  const action = stringParam(params, "action");
+  if (action !== "add" && action !== "replace") {
+    return errorResponse(id, ERR_INVALID_PARAMS, 'action must be "add" or "replace"');
+  }
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+
+  const budget = rememberBudgetFor(runId);
+  if (budget.calls >= MAX_REMEMBER_CALLS_PER_RUN) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `memory write limit reached for this run (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
+    );
+  }
+
+  let bullets: string[] = [];
+  if (action === "add") {
+    const raw = Array.isArray(params.bullets) ? params.bullets : null;
+    bullets = (raw ?? []).filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    if (!raw || bullets.length === 0 || bullets.length > 5) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        'action "add" requires bullets: 1-5 plain strings (no tags; the tag is stamped for you)',
+      );
+    }
+    if (budget.bulletsAdded + bullets.length > MAX_BULLETS_ADDED_PER_RUN) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `memory bullet limit reached for this run (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
+      );
+    }
+  }
+  const body = stringParam(params, "body");
+  if (action === "replace" && body === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, 'action "replace" requires body: the full new file content');
+  }
+
+  // The call consumes budget once it reaches the memory API, whether or not
+  // the API accepts it: the budget exists to stop runaway write loops, and a
+  // loop of rejected calls is still a loop.
+  budget.calls += 1;
+  try {
+    const result =
+      action === "add"
+        ? await rememberAdd(scope as MemoryScope, run.workspaceId, bullets, runId)
+        : await rememberReplace(
+            scope as MemoryScope,
+            run.workspaceId,
+            body as string,
+            params.confirm_drop_user_lines === true,
+            runId,
+          );
+    if (action === "add") budget.bulletsAdded += bullets.length;
+    return successResponse(id, {
+      ok: true,
+      bytes_used: result.bytesUsed,
+      bytes_cap: result.bytesCap,
+      message: result.message,
     });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);

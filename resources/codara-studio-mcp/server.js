@@ -1173,6 +1173,52 @@ const EXECUTE_TOOLS = [
     },
   },
   {
+    name: "codara_remember",
+    description:
+      "Write a durable fact to Cora's memory so a LATER session starts already knowing it. Two tiers, each a plain markdown file the user can open and edit: `global` for facts about the user and this machine (preferences, how they want you to work, installed tooling), `workspace` for facts about this repository (a verified command, an environment gotcha, a convention the repo does not state). " +
+      "Remember only when one of three things happened: the user corrected you or stated a durable preference, an environmental fact cost a worker an attempt or a retry, or a repo-specific command or gotcha was verified to work. Never remember task status, one-off details, or anything a later session could read out of the repo itself. One plain sentence per memory, no provenance tags, at most a couple of memories per run. " +
+      "Each file is capped at 4096 bytes and starts warning near 3277. When the result reports the file is full, do NOT skip the write: re-read the file, merge and shorten the existing lines, and call this tool again with action `replace` and the complete new body. `replace` rewrites the whole file, so it must carry forward every line still worth keeping; lines the user wrote by hand are preserved unless you pass confirm_drop_user_lines. " +
+      "Workers do NOT see memory. When a remembered fact matters for a task you are delegating, copy that line into the worker's description.",
+    inputSchema: {
+      type: "object",
+      required: ["scope", "action"],
+      properties: {
+        ...runIdProp,
+        scope: {
+          type: "string",
+          enum: ["workspace", "global"],
+          description:
+            "`workspace` for facts about this repository, `global` for facts about the user or this machine. A fact that would be wrong in another repo is never global.",
+        },
+        action: {
+          type: "string",
+          enum: ["add", "replace"],
+          description:
+            "`add` appends the `bullets` to the file and is the normal path. `replace` overwrites the file with `body` and is the consolidation path used when the file is full.",
+        },
+        bullets: {
+          type: "array",
+          minItems: 1,
+          maxItems: 5,
+          items: { type: "string" },
+          description:
+            "Required for `add`: 1-5 memories, one plain sentence each, written so they still make sense months later with no conversation around them. No provenance tags, no dates, no task status.",
+        },
+        body: {
+          type: "string",
+          description:
+            "Required for `replace`: the complete new file body, already consolidated and under the cap. Everything you omit is gone.",
+        },
+        confirm_drop_user_lines: {
+          type: "boolean",
+          description:
+            "`replace` only. Lines the user wrote by hand are preserved by default and the call is refused if `body` drops one. Set true only when the user explicitly asked for that line to go.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "codara_request_next_iteration",
     description:
       "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort, honored for the next pass regardless of the loom's pinned engine, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
@@ -1326,6 +1372,7 @@ const EXECUTE_TOOL_TO_RPC = {
   codara_ask_user: "orchestrator.ask_user",
   codara_complete: "orchestrator.complete",
   codara_name_chat: "orchestrator.name_chat",
+  codara_remember: "orchestrator.remember",
   codara_request_next_iteration: "orchestrator.request_next_iteration",
   codara_get_worker_status: "orchestrator.get_worker_status",
   codara_wait_for_workers: "orchestrator.wait_for_workers",

@@ -402,9 +402,9 @@ export function buildManagerTurnPrompt(
   opts?: ManagerTurnPromptOptions,
 ): string {
   return appendSubscriptionHeadroom(
-    appendWorkspaceLessons(
+    appendCoraMemory(
       buildManagerTurnInput(run, inputMessages, opts),
-      opts?.workspaceLessons,
+      opts?.coraMemory,
     ),
     opts?.subscriptionHeadroom,
   );
@@ -413,17 +413,18 @@ export function buildManagerTurnPrompt(
 export interface ManagerTurnPromptOptions {
   includeCanonicalReplay?: boolean;
   /**
-   * Rendered per-workspace lessons section (workspace-lessons.ts), or null when
-   * the workspace has no lessons yet. The caller reads it rather than this
-   * module: the lessons store reaches the user's Codara home, and this file is
+   * Rendered Cora memory sections (cora-memory.ts formatCoraMemoryForTurn), or
+   * null when there is nothing to inject or the unchanged content was already
+   * injected earlier in this run. The caller reads it rather than this module:
+   * the memory files live in the user's Codara home, and this file is
    * deliberately a pure prompt builder with no disk or Electron dependency (see
    * scripts/test-manager-prompt-cache.cjs, which bundles it standalone).
    */
-  workspaceLessons?: string | null;
+  coraMemory?: string | null;
   /**
    * Rendered subscription-headroom section (subscription-headroom.ts), or null
    * when no provider reported usable quota data. Same contract as
-   * workspaceLessons: the caller reads it (the usage cache lives Electron-side)
+   * coraMemory: the caller reads it (the usage cache lives Electron-side)
    * and it rides the dynamic tail only, its numbers change every turn, so a
    * byte of it in the stable prefix would kill the prompt cache for the run.
    */
@@ -431,16 +432,17 @@ export interface ManagerTurnPromptOptions {
 }
 
 /**
- * Lessons distilled from earlier completed runs of this workspace (search
- * throttling, runtime fallbacks) ride at the tail of the dynamic half. Two
- * reasons they cannot move into the stable prefix: the section changes as the
- * ledger grows, so it would invalidate the cached prefix for every later turn,
- * and it is evidence about this workspace rather than standing guidance. An
- * empty ledger appends nothing, so it costs zero tokens.
+ * Cora memory (the user-editable global + workspace markdown files) rides at
+ * the tail of the dynamic half, after the turn input and before the headroom
+ * section. Two reasons it cannot move into the stable prefix: the content
+ * changes as memory is written or edited, so it would invalidate the cached
+ * prefix for every later turn, and injection is hash-gated per run (usually
+ * only the first turn carries it), so most turns append nothing. The rendered
+ * text carries its own section markers ([END CORA MEMORY ...]).
  */
-function appendWorkspaceLessons(prompt: string, lessons: string | null | undefined): string {
-  if (!lessons || !lessons.trim()) return prompt;
-  return [prompt, "", lessons.trim(), "[END WORKSPACE LESSONS]"].join("\n");
+function appendCoraMemory(prompt: string, memory: string | null | undefined): string {
+  if (!memory || !memory.trim()) return prompt;
+  return [prompt, "", memory.trim()].join("\n");
 }
 
 /**

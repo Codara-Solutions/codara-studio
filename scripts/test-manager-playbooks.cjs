@@ -62,13 +62,18 @@ const PI_SECTION_HEADER = "Run playbooks:";
 const PI_PLAYBOOK_MODES = ["auto", "execute"];
 const PI_NON_PLAYBOOK_MODES = ["talk", "automation"];
 
-/** Slice a "## Run playbooks" section out of a markdown prompt file. */
-function markdownSection(text) {
-  const at = text.indexOf(MARKDOWN_SECTION_HEADER);
+// The memory guidance shares the "one text, four files" contract with the
+// playbooks: it is the only place a manager learns WHEN to write to Cora's
+// memory, so a fix applied to one prompt must not skip the other three.
+const MEMORY_SECTION_HEADER = "## Memory";
+
+/** Slice a "## <header>" section out of a markdown prompt file. */
+function markdownSection(text, header = MARKDOWN_SECTION_HEADER) {
+  const at = text.indexOf(header);
   if (at < 0) return null;
-  const rest = text.slice(at + MARKDOWN_SECTION_HEADER.length);
+  const rest = text.slice(at + header.length);
   const end = rest.indexOf("\n## ");
-  return (MARKDOWN_SECTION_HEADER + (end < 0 ? rest : rest.slice(0, end))).trim();
+  return (header + (end < 0 ? rest : rest.slice(0, end))).trim();
 }
 
 const harness = {
@@ -313,6 +318,55 @@ async function main() {
     check(
       `${rel} playbooks section is byte-identical to ${sections[0][0]}`,
       section === sections[0][1],
+    );
+  }
+
+  // 8. THE MEMORY GUIDANCE, on the same four live surfaces. Cora's memory files
+  // are written by the model, so what it is told about them IS the policy: the
+  // three triggers, the two tiers, the consolidate-do-not-skip rule for a full
+  // file, and the fact that workers never see any of it.
+  const memorySections = [];
+  for (const rel of LIVE_MARKDOWN_SURFACES) {
+    const text = fs.readFileSync(path.join(ROOT, rel), "utf8");
+    const section = markdownSection(text, MEMORY_SECTION_HEADER);
+    check(`${rel} carries a "${MEMORY_SECTION_HEADER}" section`, Boolean(section));
+    if (!section) continue;
+    memorySections.push([rel, section]);
+    check(`${rel} memory section names codara_remember`, section.includes("codara_remember"));
+    // Both tiers, by the exact scope value the tool takes. Naming only the
+    // concept leaves the manager guessing at the argument.
+    check(`${rel} memory section names the global scope`, /scope: "global"/.test(section));
+    check(`${rel} memory section names the workspace scope`, /scope: "workspace"/.test(section));
+    // The three triggers, as a numbered list. Without them "remember durable
+    // facts" collapses into remembering task status.
+    for (const n of [1, 2, 3]) {
+      check(`${rel} memory section states trigger ${n}`, section.includes(`\n${n}. `));
+    }
+    check(
+      `${rel} memory section forbids remembering task status`,
+      /never remember task status/i.test(section),
+    );
+    // The failure this exists to prevent: a full file silently ending the
+    // write instead of triggering a consolidating rewrite.
+    check(
+      `${rel} memory section says to consolidate rather than skip when the file is full`,
+      /action: "replace"/.test(section) && /do NOT skip the write/i.test(section),
+    );
+    // Workers get no memory, so a fact that matters downstream has to be
+    // copied into the task description by hand.
+    check(
+      `${rel} memory section says workers never see memory`,
+      /workers never see memory/i.test(section),
+    );
+    check(
+      `${rel} memory section contains no em or en dash`,
+      !section.includes(EM_DASH) && !section.includes(EN_DASH),
+    );
+  }
+  for (const [rel, section] of memorySections) {
+    check(
+      `${rel} memory section is byte-identical to ${memorySections[0][0]}`,
+      section === memorySections[0][1],
     );
   }
 

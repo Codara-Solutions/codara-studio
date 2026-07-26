@@ -15,6 +15,7 @@ export function toolDisplayName(toolName: string): string {
     codara_check_messages: "Check worker messages",
     codara_complete: "Complete run",
     codara_ask_user: "Ask for a decision",
+    codara_remember: "Save to memory",
     codara_whiteboard_get: "Read whiteboard",
     codara_whiteboard_update: "Update whiteboard",
   };
@@ -49,6 +50,14 @@ export function toolInputSummary(toolName: string, input: unknown): string {
     return `${value.worker_task_ids.length} ${value.worker_task_ids.length === 1 ? "worker" : "workers"} · ${value.mode === "any" ? "first result" : "all results"}`;
   }
   if (normalized === "codara_get_worker_status") return "Refresh execution state";
+  if (normalized === "codara_remember") {
+    const scope = value.scope === "global" ? "Global memory" : "Workspace memory";
+    // A `replace` rewrites the whole file, so a bullet count would misdescribe
+    // it; say what happened instead.
+    if (value.action === "replace") return `${scope} · consolidated`;
+    const notes = Array.isArray(value.bullets) ? value.bullets.length : 0;
+    return `${scope}${notes ? ` · ${notes} ${notes === 1 ? "note" : "notes"}` : ""}`;
+  }
   if (normalized === "codara_whiteboard_get") return "Read the current visual explanation";
   if (normalized === "codara_whiteboard_update") {
     const nodes = Array.isArray(value.nodes) ? value.nodes.length : 0;

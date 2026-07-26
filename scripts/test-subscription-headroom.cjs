@@ -377,12 +377,12 @@ async function main() {
     withSection.slice(-200),
   );
   const withBoth = backend.buildManagerTurnPrompt(runFixture, [message], {
-    workspaceLessons: "WORKSPACE LESSONS\n- stagger searches",
+    coraMemory: "CORA MEMORY, THIS WORKSPACE (fixture)\n- [cora 2026-07-01] stagger searches\n[END CORA MEMORY WORKSPACE]",
     subscriptionHeadroom: decisive,
   });
   check(
-    "headroom follows the workspace lessons block",
-    withBoth.indexOf("[END WORKSPACE LESSONS]") < withBoth.indexOf("Subscription headroom:"),
+    "headroom follows the cora memory block",
+    withBoth.indexOf("[END CORA MEMORY WORKSPACE]") < withBoth.indexOf("Subscription headroom:"),
     withBoth.slice(-300),
   );
   const withoutSection = backend.buildManagerTurnPrompt(runFixture, [message], {
@@ -401,13 +401,11 @@ async function main() {
     "utf8",
   );
   check(
-    "run-store feeds the section into buildManagerTurnPrompt beside the lessons",
+    "run-store feeds the section into buildManagerTurnPrompt beside the memory",
     /subscriptionHeadroom = describeHeadroomForPrompt\(await readSubscriptionHeadroomSummary\(\)\)/.test(
       runStoreSource,
     ) &&
-      /workspaceLessons: formatWorkspaceLessonsSection\(prepared\.workspaceId\),\s*\n\s*subscriptionHeadroom,/.test(
-        runStoreSource,
-      ),
+      /coraMemory,\s*\n\s*subscriptionHeadroom,/.test(runStoreSource),
   );
   const socketSource = fs.readFileSync(path.join(ROOT, "src", "main", "agent-socket.ts"), "utf8");
   check(

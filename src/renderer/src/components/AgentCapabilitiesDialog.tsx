@@ -5,6 +5,9 @@ import type {
   AgentMcpServerDetail,
   AgentMcpTarget,
   AppSettings,
+  CoraMemoryScope,
+  CoraMemoryStatus,
+  MemoryTierStatus,
   SparkBuiltinInstallState,
   SparkBuiltinMcpId,
   SparkBuiltinMcpStatus,
@@ -30,6 +33,9 @@ const RESERVED_MCP_NAMES = new Set([
 interface Props {
   settings: AppSettings;
   workspaceCwd: string | null;
+  /** Identifies the workspace memory tier. Null when no workspace is active,
+   *  which leaves that tier reported as unavailable rather than guessed. */
+  workspaceId: string | null;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
 }
@@ -161,6 +167,7 @@ function withFocusRing(base: string | undefined, focus: boolean): string | undef
 export default function AgentCapabilitiesDialog({
   settings,
   workspaceCwd,
+  workspaceId,
   onClose,
   onSave,
 }: Props) {
@@ -182,6 +189,11 @@ export default function AgentCapabilitiesDialog({
   const [editorBusy, setEditorBusy] = useState(false);
   const [mcpLimit, setMcpLimit] = useState(PAGE_SIZE);
   const [skillLimit, setSkillLimit] = useState(PAGE_SIZE);
+  // Both memory tiers, or null while the first read is in flight. Every memory
+  // IPC resolves to the fresh pair, so a toggle or a clear replaces this whole
+  // object and no follow-up read is needed.
+  const [memory, setMemory] = useState<CoraMemoryStatus | null>(null);
+  const [memoryBusy, setMemoryBusy] = useState<CoraMemoryScope | null>(null);
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
 
@@ -214,6 +226,21 @@ export default function AgentCapabilitiesDialog({
       .then(setTargets)
       .catch(() => setTargets([]));
   }, [workspaceCwd]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.spark.memory
+      .get(workspaceId)
+      .then((next) => {
+        if (!cancelled) setMemory(next);
+      })
+      .catch((err) => {
+        if (!cancelled) setStatus((err as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -290,6 +317,37 @@ export default function AgentCapabilitiesDialog({
       })
       .catch((err) => setStatus((err as Error).message))
       .finally(() => setSyncing(false));
+  };
+
+  // Memory mutations land on disk immediately (they are not part of the Save
+  // draft), so each one adopts the status pair the main process returns.
+  const runMemoryAction = (
+    scope: CoraMemoryScope,
+    action: () => Promise<CoraMemoryStatus>,
+  ) => {
+    setMemoryBusy(scope);
+    setStatus(null);
+    void action()
+      .then(setMemory)
+      .catch((err) => setStatus((err as Error).message))
+      .finally(() => setMemoryBusy(null));
+  };
+
+  const toggleMemory = (scope: CoraMemoryScope, enabled: boolean) => {
+    runMemoryAction(scope, () => window.spark.memory.setEnabled(scope, workspaceId, enabled));
+  };
+
+  const clearMemory = (scope: CoraMemoryScope, includeUserLines: boolean) => {
+    runMemoryAction(scope, () => window.spark.memory.clear(scope, workspaceId, includeUserLines));
+  };
+
+  // The listener lives in App.tsx and owns the editor tabs, so opening a file
+  // from a modal is a window event rather than a threaded-through callback.
+  // The dialog deliberately stays up: closing it here would discard whatever
+  // unsaved MCP and skill changes the draft is holding.
+  const openMemoryFile = (path: string) => {
+    window.dispatchEvent(new CustomEvent("spark:open-file", { detail: { path } }));
+    setStatus(`Opened ${path} in the editor. Close this dialog to see it.`);
   };
 
   const togglePiScope = (group: NameGroup, scope: "cora" | "worker", assigned: boolean) => {
@@ -642,6 +700,44 @@ export default function AgentCapabilitiesDialog({
             <section style={policySectionStyle}>
               <div style={sectionHeadStyle}>
                 <div style={{ minWidth: 0 }}>
+                  <h2 style={sectionTitleStyle}>Cora memory</h2>
+                  <p style={sectionDetailStyle}>
+                    Two plain markdown files Cora reads at the start of every session and
+                    appends to when it learns something durable. Edit them like any other
+                    file; this only reports on them.
+                  </p>
+                </div>
+              </div>
+
+              <div className="agent-capability-list" style={listStyle}>
+                <MemoryRow
+                  scope="workspace"
+                  title="Workspace memory"
+                  detail="Facts about this repository: the command that really runs the tests, a build step with a gotcha, a convention the code does not state."
+                  status={memory?.workspace ?? null}
+                  busy={memoryBusy === "workspace"}
+                  unavailable={workspaceId === null ? "No workspace is open." : null}
+                  onToggle={toggleMemory}
+                  onOpen={openMemoryFile}
+                  onClear={clearMemory}
+                />
+                <MemoryRow
+                  scope="global"
+                  title="Global memory"
+                  detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
+                  status={memory?.global ?? null}
+                  busy={memoryBusy === "global"}
+                  unavailable={null}
+                  onToggle={toggleMemory}
+                  onOpen={openMemoryFile}
+                  onClear={clearMemory}
+                />
+              </div>
+            </section>
+
+            <section style={policySectionStyle}>
+              <div style={sectionHeadStyle}>
+                <div style={{ minWidth: 0 }}>
                   <h2 style={sectionTitleStyle}>Session policy</h2>
                   <p style={sectionDetailStyle}>Applies to every agent session in this workspace.</p>
                 </div>
@@ -860,6 +956,199 @@ function SkillRow({
           protectedTitle="Protected skill"
           onRemove={onRemove}
         />
+      </div>
+    </div>
+  );
+}
+
+// One memory tier: what it holds, how full its file is, and the three actions
+// on it. There is deliberately no content editing here; the file is markdown
+// and the editor is the editor, so the row hands the path to a tab instead of
+// growing a second, worse text box.
+function MemoryRow({
+  scope,
+  title,
+  detail,
+  status,
+  busy,
+  unavailable,
+  onToggle,
+  onOpen,
+  onClear,
+}: {
+  scope: CoraMemoryScope;
+  title: string;
+  detail: string;
+  status: MemoryTierStatus | null;
+  busy: boolean;
+  /** Why this tier cannot be used right now, or null when it can. */
+  unavailable: string | null;
+  onToggle: (scope: CoraMemoryScope, enabled: boolean) => void;
+  onOpen: (path: string) => void;
+  onClear: (scope: CoraMemoryScope, includeUserLines: boolean) => void;
+}) {
+  const enabled = status?.enabled ?? false;
+  const blocked = unavailable !== null || status === null;
+  const lines = status ? status.counts.user + status.counts.cora + status.counts.auto : 0;
+  return (
+    <div
+      className="agent-capability-row"
+      style={{ ...rowStyle, opacity: blocked || !enabled ? 0.55 : 1 }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={rowNameStyle} title={title}>
+          {title}
+        </div>
+        <div style={memoryDetailStyle}>{detail}</div>
+        {status && status.path ? (
+          <div style={rowMetaStyle}>
+            <span style={rowSummaryStyle} title={status.path}>
+              {status.path}
+            </span>
+          </div>
+        ) : null}
+        <div style={rowMetaStyle}>
+          {unavailable ? (
+            <span style={memoryNoteStyle}>{unavailable}</span>
+          ) : status === null ? (
+            <span style={memoryNoteStyle}>Reading the file</span>
+          ) : status.bytesUsed === 0 ? (
+            <span style={memoryNoteStyle}>Nothing remembered yet.</span>
+          ) : (
+            <MemoryMeter status={status} lines={lines} />
+          )}
+        </div>
+      </div>
+      <div style={rowControlsStyle}>
+        <SwitchCell
+          label="Enabled"
+          checked={enabled}
+          disabled={blocked || busy}
+          onChange={(next) => onToggle(scope, next)}
+          title={
+            unavailable ??
+            `Load ${title.toLowerCase()} into Cora's sessions and let it write there`
+          }
+        />
+        <button
+          type="button"
+          className="spark-btn"
+          style={smallBtnStyle}
+          disabled={blocked || !status?.path}
+          onClick={() => status?.path && onOpen(status.path)}
+          title={status?.path ?? "This file has no resolved location yet"}
+        >
+          Open in editor
+        </button>
+        <MemoryClearControl
+          busy={busy}
+          disabled={blocked || (status?.bytesUsed ?? 0) === 0}
+          userLineCount={status?.counts.user ?? 0}
+          onClear={(includeUserLines) => onClear(scope, includeUserLines)}
+        />
+      </div>
+    </div>
+  );
+}
+
+// How full the file is, in the two units that matter: a bar against the hard
+// cap, and the line provenance underneath. The warning tint arrives at the same
+// 80% soft cap the writer uses to start asking Cora to consolidate, so the UI
+// turns amber on exactly the runs where the tool starts pushing back.
+function MemoryMeter({ status, lines }: { status: MemoryTierStatus; lines: number }) {
+  const tone = memoryTone(status);
+  const color = tone === "over" ? "var(--danger)" : tone === "warn" ? "var(--warn)" : "var(--accent)";
+  const filled = status.bytesCap > 0 ? Math.min(1, status.bytesUsed / status.bytesCap) : 0;
+  return (
+    <div style={memoryMeterStyle}>
+      <div style={memoryTrackStyle}>
+        <div style={{ ...memoryFillStyle, width: `${Math.round(filled * 100)}%`, background: color }} />
+      </div>
+      <span style={{ ...memoryNoteStyle, color: tone === "ok" ? "var(--muted)" : color }}>
+        {formatMemoryBytes(status.bytesUsed)} of {formatMemoryBytes(status.bytesCap)}
+        {tone === "over" ? " · full, Cora must consolidate before it can add more" : ""}
+        {tone === "warn" ? " · nearly full" : ""}
+      </span>
+      <span style={memoryNoteStyle}>
+        {lines} {lines === 1 ? "line" : "lines"}
+        {status.counts.user > 0 ? ` · ${status.counts.user} yours` : ""}
+      </span>
+    </div>
+  );
+}
+
+// Clearing is two steps because it deletes a file the user may have written in
+// by hand. The default drops only the agent-written lines; taking the user's
+// own notes too is a separate, explicit tick.
+function MemoryClearControl({
+  busy,
+  disabled,
+  userLineCount,
+  onClear,
+}: {
+  busy: boolean;
+  disabled: boolean;
+  userLineCount: number;
+  onClear: (includeUserLines: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [includeUserLines, setIncludeUserLines] = useState(false);
+
+  const close = () => {
+    setOpen(false);
+    setIncludeUserLines(false);
+  };
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="spark-btn"
+        style={smallBtnStyle}
+        disabled={busy || disabled}
+        onClick={() => setOpen(true)}
+        title="Delete what Cora remembered here"
+      >
+        {busy ? "Working" : "Clear"}
+      </button>
+    );
+  }
+
+  return (
+    <div style={removeChoiceStyle}>
+      <span style={cellLabelStyle}>Clear memory</span>
+      {userLineCount > 0 ? (
+        <label style={{ ...memoryCheckStyle, color: includeUserLines ? "var(--danger)" : "var(--muted)" }}>
+          <input
+            type="checkbox"
+            checked={includeUserLines}
+            onChange={(event) => setIncludeUserLines(event.currentTarget.checked)}
+          />
+          <span>
+            Also delete my own notes ({userLineCount} {userLineCount === 1 ? "line" : "lines"})
+          </span>
+        </label>
+      ) : null}
+      <div style={removeChoiceRowStyle}>
+        <button
+          type="button"
+          className="spark-btn is-danger"
+          style={microBtnStyle}
+          onClick={() => {
+            close();
+            onClear(includeUserLines);
+          }}
+          title={
+            includeUserLines
+              ? "Delete every line in this file"
+              : "Delete the lines Cora wrote and keep yours"
+          }
+        >
+          {includeUserLines ? "Delete all" : "Clear Cora's lines"}
+        </button>
+        <button type="button" className="spark-btn" style={microBtnStyle} onClick={close}>
+          Keep
+        </button>
       </div>
     </div>
   );
@@ -1516,16 +1805,18 @@ function SwitchCell({
   checked,
   onChange,
   title,
+  disabled,
 }: {
   label: string;
   checked: boolean;
   onChange: (next: boolean) => void;
   title: string;
+  disabled?: boolean;
 }) {
   return (
     <div style={switchCellStyle} title={title}>
       <span style={cellLabelStyle}>{label}</span>
-      <Switch checked={checked} onChange={onChange} ariaLabel={title} />
+      <Switch checked={checked} onChange={onChange} ariaLabel={title} disabled={disabled} />
     </div>
   );
 }
@@ -1619,10 +1910,12 @@ function Switch({
   checked,
   onChange,
   ariaLabel,
+  disabled,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   ariaLabel?: string;
+  disabled?: boolean;
 }) {
   const { focus, pressed, handlers } = useInteractive();
   return (
@@ -1631,6 +1924,7 @@ function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       {...handlers}
       style={{
@@ -1642,12 +1936,12 @@ function Switch({
         borderRadius: 999,
         background: "transparent",
         cursor: "default",
-        transform: pressed ? "translateY(0.5px)" : "none",
+        transform: pressed && !disabled ? "translateY(0.5px)" : "none",
         boxShadow: withFocusRing(undefined, focus),
         transition: "transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      <SwitchTrack checked={checked} />
+      <SwitchTrack checked={checked} disabled={disabled} />
     </button>
   );
 }
@@ -1823,6 +2117,25 @@ function formatSyncSummary(result: {
   }
   if (mcpCount === 0 && skillCount === 0) return "Nothing copied. Compatible entries are already available.";
   return `Synced ${mcpCount} MCP and ${skillCount} skill item(s).`;
+}
+
+// The fraction of the hard cap at which the writer starts asking Cora to
+// consolidate instead of append (MEMORY_FILE_SOFT_BYTES / MEMORY_FILE_MAX_BYTES
+// in src/main/orchestration/cora-memory.ts). Derived from the reported cap
+// rather than hard-coded, so the renderer cannot drift from a cap change.
+const MEMORY_SOFT_RATIO = 0.8;
+
+function memoryTone(status: MemoryTierStatus): "ok" | "warn" | "over" {
+  if (status.overCap || status.bytesUsed > status.bytesCap) return "over";
+  return status.bytesUsed >= Math.ceil(status.bytesCap * MEMORY_SOFT_RATIO) ? "warn" : "ok";
+}
+
+// Bytes at the scale these files live at: a few KB, where "3.2 KB" is the
+// readable unit and a decimal past 10 KB is noise.
+function formatMemoryBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  return `${kb >= 10 ? Math.round(kb) : Math.round(kb * 10) / 10} KB`;
 }
 
 // Per-runtime accent on the runtime badges: Claude rides the brand accent,
@@ -2025,6 +2338,52 @@ const removeChoiceRowStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 4,
+};
+
+const memoryDetailStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 11,
+  lineHeight: 1.45,
+  marginTop: 3,
+};
+
+const memoryMeterStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  flexWrap: "wrap",
+  minWidth: 0,
+  width: "100%",
+};
+
+const memoryTrackStyle: React.CSSProperties = {
+  flex: "0 0 120px",
+  height: 4,
+  borderRadius: 999,
+  overflow: "hidden",
+  background: "color-mix(in oklab, var(--ink) 8%, transparent)",
+};
+
+const memoryFillStyle: React.CSSProperties = {
+  height: "100%",
+  borderRadius: 999,
+  transition: "width var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
+};
+
+const memoryNoteStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 10.5,
+  lineHeight: 1.45,
+};
+
+const memoryCheckStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 6,
+  fontSize: 10,
+  lineHeight: 1.4,
+  maxWidth: 220,
+  textAlign: "left",
 };
 
 const cellLabelStyle: React.CSSProperties = {

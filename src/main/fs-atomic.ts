@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -9,7 +10,13 @@ import { dirname, join } from "node:path";
 export async function writeFileAtomic(path: string, content: string): Promise<void> {
   const dir = dirname(path);
   // sibling tmp keeps the rename within the same volume so it stays atomic.
-  const tmp = join(dir, `.${baseName(path)}.${process.pid}.${Date.now()}.tmp`);
+  // pid + clock alone is not unique: two same-process writers in the same
+  // millisecond would share a temp file and rename torn content over the
+  // target, so a random suffix disambiguates them.
+  const tmp = join(
+    dir,
+    `.${baseName(path)}.${process.pid}.${Date.now()}.${randomBytes(6).toString("hex")}.tmp`,
+  );
   let handle: import("node:fs").promises.FileHandle | null = null;
   try {
     handle = await fs.open(tmp, "w");

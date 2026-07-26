@@ -27,6 +27,8 @@ import type {
   AppState,
   AutomationDetail,
   AutomationWorkerInfo,
+  CoraMemoryScope,
+  CoraMemoryStatus,
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
@@ -308,6 +310,25 @@ const api = {
         }
         throw err;
       }),
+  },
+  // Cora's writable memory files. Reads and mutations both resolve to the
+  // fresh status pair for both tiers, so a toggle or a clear needs no follow-up
+  // read. Content is edited in the editor, not through this bridge.
+  memory: {
+    get: (workspaceId: string | null): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:get", { workspaceId }),
+    setEnabled: (
+      scope: CoraMemoryScope,
+      workspaceId: string | null,
+      enabled: boolean,
+    ): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:setEnabled", { scope, workspaceId, enabled }),
+    clear: (
+      scope: CoraMemoryScope,
+      workspaceId: string | null,
+      includeUserLines: boolean,
+    ): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines }),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),

@@ -1862,6 +1862,64 @@ export interface WorkspaceMemoryLedger {
   records: WorkspaceRunMemoryRecord[];
 }
 
+/**
+ * Cora's writable memory (distinct from the run ledger above, which Cora never
+ * edits). Two tiers of one plain-markdown file each: `global` holds facts about
+ * the user and this machine, `workspace` holds facts about one repository. Cora
+ * appends to them through the `codara_remember` tool and the user edits them in
+ * the normal editor, so the file is the source of truth and the app only
+ * reports on it.
+ */
+export type CoraMemoryScope = "global" | "workspace";
+
+/** One memory file's live state, as reported to the renderer. */
+export interface MemoryTierStatus {
+  /** Whether this tier is read into prompts and writable by `codara_remember`. */
+  enabled: boolean;
+  /** Absolute path of the backing markdown file, resolved by the main process.
+   *  The UI opens exactly this, it never recomputes the location. */
+  path: string;
+  /** Size of the file on disk; 0 when it does not exist yet. */
+  bytesUsed: number;
+  /** Hard ceiling for this tier (MEMORY_FILE_MAX_BYTES). */
+  bytesCap: number;
+  /** bytesUsed has passed bytesCap, so further `add` calls are refused and Cora
+   *  is told to consolidate with `replace` instead. */
+  overCap: boolean;
+  /** Line provenance: `user` lines were written by hand and survive an
+   *  agent-lines-only clear; `cora` lines came from `codara_remember`; `auto`
+   *  lines were distilled by Codara itself. */
+  counts: { user: number; cora: number; auto: number };
+}
+
+/** Both tiers at once: every memory IPC resolves to this pair, including the
+ *  mutations, so the renderer never has to re-read after a change. */
+export interface CoraMemoryStatus {
+  global: MemoryTierStatus;
+  workspace: MemoryTierStatus;
+}
+
+/** `memory:get` payload. `workspaceId` may be null when no workspace is active;
+ *  the workspace tier then reports disabled with an empty path. */
+export interface MemoryStatusInput {
+  workspaceId: string | null;
+}
+
+/** `memory:setEnabled` payload. */
+export interface MemorySetEnabledInput {
+  scope: CoraMemoryScope;
+  workspaceId: string | null;
+  enabled: boolean;
+}
+
+/** `memory:clear` payload. `includeUserLines` defaults to false at the handler,
+ *  so the destructive half of the clear is always an explicit opt-in. */
+export interface MemoryClearInput {
+  scope: CoraMemoryScope;
+  workspaceId: string | null;
+  includeUserLines?: boolean;
+}
+
 export interface Checkpoint {
   id: string;
   /**

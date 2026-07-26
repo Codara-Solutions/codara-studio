@@ -38,11 +38,20 @@ async function main() {
   );
 
   const execute = buildClaudeMcpToolAliases("execute");
-  assert.strictEqual(Object.keys(execute).length, 33, "execute aliases must cover its full MCP roster");
+  assert.strictEqual(Object.keys(execute).length, 34, "execute aliases must cover its full MCP roster");
   assert.strictEqual(
     execute.codara_spawn_workers,
     "mcp__codara-studio__codara_spawn_workers",
   );
+  // A bare `codara_remember` emitted from a resumed transcript has to resolve,
+  // or the manager's memory write turns into a visible tool_use_error loop.
+  assert.strictEqual(
+    execute.codara_remember,
+    "mcp__codara-studio__codara_remember",
+  );
+  // Memory is an execute/auto concept only; the automation roster has no
+  // codara_remember to alias, so aliasing one there would point at nothing.
+  assert.strictEqual(automation.codara_remember, undefined);
   assert.deepStrictEqual(buildClaudeMcpToolAliases("chat"), {});
 
   console.log("PASS: Claude MCP tool aliases cover automation and execute rosters");

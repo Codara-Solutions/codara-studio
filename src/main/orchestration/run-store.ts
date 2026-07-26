@@ -197,7 +197,8 @@ import { evaluateGuardPredicate } from "./loom-predicates";
 import { ensureCodexProjectTrust } from "./codex-trust";
 import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { recordRunMemory } from "./run-memory";
-import { formatWorkspaceLessonsSection, recordRunLessons } from "./workspace-lessons";
+import { recordRunLessons } from "./workspace-lessons";
+import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
 import {
   describeHeadroomForPrompt,
   readSubscriptionHeadroomSummary,
@@ -4243,7 +4244,7 @@ async function prepareManagerTurn(
   const inputMessages = selectedIds
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
-  // Subscription headroom rides the same dynamic tail as the lessons. The read
+  // Subscription headroom rides the same dynamic tail as the memory. The read
   // hits pi-subscription-usage's 60s cache (never forced), and any failure
   // degrades to "no section": a quota-endpoint hiccup must never cost a turn.
   let subscriptionHeadroom: string | null = null;
@@ -4252,16 +4253,29 @@ async function prepareManagerTurn(
   } catch {
     subscriptionHeadroom = null;
   }
+  // Cora memory rides the same dynamic tail. formatCoraMemoryForTurn is
+  // hash-gated per run (null when this run already carries the unchanged
+  // content) and forced on canonical replay, which rebuilds the CLI session
+  // that held the earlier injection. Best-effort: a memory read failure must
+  // never cost a turn.
+  let coraMemory: string | null = null;
+  try {
+    coraMemory = await formatCoraMemoryForTurn(prepared.workspaceId, prepared.id, {
+      force: includeCanonicalReplay,
+    });
+  } catch {
+    coraMemory = null;
+  }
   return {
     run: prepared,
     call: persistedCall,
-    // Every backend's per-turn user text comes from this one call, so the
-    // workspace lessons ledger is replayed here, in the dynamic half, and never
-    // in the cacheable system prompt. Read at turn time so a lesson written by
-    // a run that finished a minute ago is already live for the next turn.
+    // Every backend's per-turn user text comes from this one call, so the Cora
+    // memory sections are replayed here, in the dynamic half, and never in the
+    // cacheable system prompt. Read at turn time so a memory written a minute
+    // ago is already live for the next turn.
     prompt: buildManagerTurnPrompt(prepared, inputMessages, {
       includeCanonicalReplay,
-      workspaceLessons: formatWorkspaceLessonsSection(prepared.workspaceId),
+      coraMemory,
       subscriptionHeadroom,
     }),
     inputMessages,
@@ -4281,6 +4295,13 @@ async function releaseUnsubmittedManagerInput(
   callId: string,
   epoch: number,
 ): Promise<void> {
+  // The failed turn's prompt never reached the provider, so any Cora memory it
+  // carried was never seen either: roll the injection gate back so the retry
+  // renders it again. Same ownership rule as canonical replay (a failed
+  // pre-submission attempt consumes nothing). Unconditional on purpose; the
+  // worst case of a spurious release is one duplicate injection, while a
+  // missed release silently costs the run its memory.
+  releaseCoraMemoryInjection(runId);
   const run = await getRun(runId);
   if (!run || !isManagerTurnCurrent(run, callId, epoch)) return;
   await commitRunChange(run, {
@@ -12787,8 +12808,9 @@ async function runCompletionTail(
     };
     await recordRunMemory(completed, readReportOnce);
     // Same seam, same contract: distill this run's operational lessons
-    // (search rate limits, runtime fallbacks) into the per-workspace lessons
-    // ledger that later manager turns replay. Also non-throwing.
+    // (search rate limits, runtime fallbacks) into the workspace's Cora
+    // memory file as [auto] bullets that later manager turns replay. Also
+    // non-throwing.
     await recordRunLessons(completed, readReportOnce);
   } catch (err) {
     console.error("[run-store] failed to record run memory", err);

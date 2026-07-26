@@ -257,6 +257,50 @@ async function main() {
     );
   }
 
+  // Cora memory rides the dynamic half only. The rendered sections change as
+  // memory files are written or edited, so a single byte of them in the stable
+  // prefix would split the prompt cache on every memory write; and they must
+  // sit after the turn's user input, before the subscription-headroom tail.
+  const memoryNeedle = [
+    "CORA MEMORY, THIS WORKSPACE (user-editable file: /tmp/mem.md; overrides the global section on conflict)",
+    "- [cora 2026-07-01] The user prefers tabs over spaces.",
+    "[END CORA MEMORY WORKSPACE]",
+  ].join("\n");
+  const headroomNeedle = "SUBSCRIPTION HEADROOM fixture for ordering";
+  const promptWithMemory = assembleManagerPrompt({
+    guidance,
+    cwd,
+    turnPrompt: buildManagerTurnPrompt(turnN, [turnN.humanMessages[2]], {
+      coraMemory: memoryNeedle,
+      subscriptionHeadroom: headroomNeedle,
+    }),
+  });
+  check(
+    "cora memory lands in the dynamic half, never the stable prefix",
+    promptWithMemory.dynamic.includes("CORA MEMORY, THIS WORKSPACE") &&
+      promptWithMemory.dynamic.includes("The user prefers tabs over spaces.") &&
+      !promptWithMemory.stablePrefix.includes("CORA MEMORY") &&
+      !promptWithMemory.stablePrefix.includes("prefers tabs"),
+    promptWithMemory.stablePrefix.slice(-200),
+  );
+  check(
+    "cora memory sits after the turn input and before the headroom tail",
+    promptWithMemory.dynamic.indexOf("CORA MEMORY, THIS WORKSPACE") >
+      promptWithMemory.dynamic.indexOf("Also add a test") &&
+      promptWithMemory.dynamic.indexOf("CORA MEMORY, THIS WORKSPACE") <
+        promptWithMemory.dynamic.indexOf(headroomNeedle),
+    promptWithMemory.dynamic,
+  );
+  check(
+    "a memory-carrying turn leaves the cacheable prefix byte-identical",
+    prefixOf(promptWithMemory) === prefixOf(promptOne),
+  );
+  check(
+    "a turn with no memory to inject leaves the prompt untouched",
+    buildManagerTurnPrompt(turnN, [turnN.humanMessages[2]], { coraMemory: null }) ===
+      buildManagerTurnPrompt(turnN, [turnN.humanMessages[2]]),
+  );
+
   // buildManagerStablePrefix takes primitives on purpose: a builder that cannot
   // see the RunState cannot leak a timestamp into the cached half.
   check(
