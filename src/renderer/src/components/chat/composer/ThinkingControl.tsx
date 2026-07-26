@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { AgentEffortLevel } from "@shared/types";
 import {
   EFFORT_LABELS,
   THINKING_BAR_COUNT,
   barsForEffort,
 } from "./types";
+import AnchoredMenu from "./AnchoredMenu";
 
 interface Props {
   effort: AgentEffortLevel;
@@ -26,34 +27,17 @@ const EFFORT_DESCRIPTIONS: Record<AgentEffortLevel, string> = {
 // blind clicks. The bars still provide the glanceable depth cue.
 export default function ThinkingControl({ effort, availableEfforts, onCycle }: Props) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   if (availableEfforts.length === 0) return null;
   const label = EFFORT_LABELS[effort] ?? effort;
   const litBars = barsForEffort(effort);
 
   return (
-    <div className="composer-thinking-wrap" ref={rootRef}>
+    <div className="composer-thinking-wrap">
       <button
         type="button"
+        ref={triggerRef}
         className={`composer-thinking${open ? " is-active" : ""}`}
         title={`${label} reasoning — ${EFFORT_DESCRIPTIONS[effort]}`}
         aria-haspopup="listbox"
@@ -64,8 +48,14 @@ export default function ThinkingControl({ effort, availableEfforts, onCycle }: P
         <span className="composer-thinking-label">{label}</span>
         <span aria-hidden className="composer-chevron">⌄</span>
       </button>
-      {open && (
-        <div className="composer-thinking-menu spark-menu" role="listbox" aria-label="Reasoning effort">
+      <AnchoredMenu
+        anchorRef={triggerRef}
+        open={open}
+        onClose={() => setOpen(false)}
+        className="composer-thinking-menu spark-menu"
+        role="listbox"
+        ariaLabel="Reasoning effort"
+      >
           <div className="composer-menu-heading">Reasoning effort</div>
           {availableEfforts.map((option) => {
             const active = option === effort;
@@ -92,8 +82,7 @@ export default function ThinkingControl({ effort, availableEfforts, onCycle }: P
               </button>
             );
           })}
-        </div>
-      )}
+      </AnchoredMenu>
     </div>
   );
 }

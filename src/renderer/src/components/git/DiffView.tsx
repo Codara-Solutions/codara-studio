@@ -366,7 +366,7 @@ export default function DiffView({
               ? "var(--danger-soft)"
               : staged
                 ? "var(--ok-soft)"
-                : "color-mix(in oklch, var(--ink) 5%, transparent)",
+                : "color-mix(in oklab, var(--ink) 5%, transparent)",
             border: conflicted
               ? "1px solid color-mix(in oklch, var(--danger) 40%, transparent)"
               : staged
@@ -688,7 +688,7 @@ function FileActionBar({
         height: 28,
         padding: "0 8px",
         borderBottom: "1px solid var(--rule-soft)",
-        background: "color-mix(in oklch, var(--ink) 2.5%, transparent)",
+        background: "color-mix(in oklab, var(--ink) 2.5%, transparent)",
         boxShadow: "var(--lift-hi)",
       }}
     >

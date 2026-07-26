@@ -1,27 +1,19 @@
-// Worker model-hint sanitization + the Fable 5 explicit-request gate.
+// Worker model-hint sanitization.
 //
 // Split out of run-store.ts so the pure decision logic can be unit-tested
 // without dragging in run-store's electron/pty/git dependencies (see
 // scripts/test-worker-model-hint.cjs). This module imports ONLY types, so
 // esbuild erases every import and the bundle is dependency-free.
 
-import type { RunState } from "@shared/types";
 import { normalizeCodexModelId } from "@shared/model-catalog";
 
-// Fable 5 (`claude-fable-5`) is Anthropic's top, most expensive tier. Cora-
-// spawned workers (execute-mode codara_spawn_workers, plan-council judges,
-// autopilot worker tasks) default to Opus 4.8 for a fable hint; they may run
-// fable whenever the user explicitly asked for it in their own message this run
-// (see runUserRequestedFable / workerFableAllowed in run-store.ts, and the
-// `allowFable` option below). The "Allow Fable 5" setting does NOT gate this
-// worker path — an explicit user request is sufficient. A manager LLM may
-// nonetheless emit a fable modelHint; this helper downgrades any such hint to
-// Opus 4.8 unless the caller has cleared the gate. Case-insensitive substring
-// match on "fable" so
-// suffixed/aliased variants (e.g. "claude-fable-5@high", "Claude-Fable-5") are
-// caught too. The model id itself (`claude-fable-5`) is the canonical string
-// used everywhere else.
-export const SPARK_WORKER_FABLE_FALLBACK = "claude-opus-4-8" as const;
+// The model a Claude worker launches on when its task carries NO modelHint.
+// Any explicit hint — including Fable 5 (`claude-fable-5`), Anthropic's top,
+// most expensive tier — passes through as given, but an OMITTED hint must
+// never delegate the choice to the CLI/subscription default: that default can
+// be Fable 5, and a planner that didn't ask for the premium tier shouldn't
+// land on it silently. Opus 4.8 is the documented worker fallback.
+export const WORKER_DEFAULT_CLAUDE_MODEL = "claude-opus-5" as const;
 
 // Manager sessions keep the system prompt they were born with for the whole
 // run, so a run started before a model-roster update keeps emitting the old
@@ -35,46 +27,88 @@ export const SPARK_WORKER_FABLE_FALLBACK = "claude-opus-4-8" as const;
 const SUPERSEDED_SONNET_BASE = /^(claude-)?sonnet-4(-\d+)?$/i;
 const SPARK_WORKER_SONNET_CURRENT = "claude-sonnet-5" as const;
 
-export function sanitizeWorkerModelHint(
-  hint: string | undefined,
-  opts?: { allowFable?: boolean },
-): { hint: string | undefined; downgraded: boolean } {
-  if (hint && /fable/i.test(hint)) {
-    // Pass a fable hint through UNCHANGED only when the caller has cleared the
-    // explicit-request gate (workerFableAllowed): the user named Fable in their
-    // own message this run. Otherwise downgrade to Opus 4.8 and report it so the
-    // swap isn't silent.
-    if (opts?.allowFable) return { hint, downgraded: false };
-    return { hint: SPARK_WORKER_FABLE_FALLBACK, downgraded: true };
-  }
+export function sanitizeWorkerModelHint(hint: string | undefined): string | undefined {
   if (hint) {
     const at = hint.indexOf("@");
     const base = (at >= 0 ? hint.slice(0, at) : hint).trim();
     if (SUPERSEDED_SONNET_BASE.test(base)) {
       const suffix = at >= 0 ? hint.slice(at) : "";
-      return { hint: `${SPARK_WORKER_SONNET_CURRENT}${suffix}`, downgraded: false };
+      return `${SPARK_WORKER_SONNET_CURRENT}${suffix}`;
     }
     const normalizedCodex = normalizeCodexModelId(hint);
     if (normalizedCodex !== hint) {
-      return { hint: normalizedCodex, downgraded: false };
+      return normalizedCodex;
     }
   }
-  return { hint, downgraded: false };
+  return hint;
 }
 
-// Did the user explicitly ask for Fable 5 in their OWN message this run? We scan
-// only user-authored chat text — author "user" and the note/answer kinds a human
-// types — never manager or worker output, so a worker echoing "fable" in its
-// report cannot self-authorize the most expensive tier. Any user message that
-// mentions fable latches the allowance on for the rest of the run (matching
-// "use it only if I explicitly tell it"). For Cora-spawned workers this is the
-// whole gate (see workerFableAllowed in run-store.ts) — the "fableEnabled"
-// preference does not further restrict the worker path.
-export function runUserRequestedFable(run: RunState): boolean {
-  return run.humanMessages.some(
-    (m) =>
-      m.author === "user" &&
-      (m.kind === "note" || m.kind === "answer") &&
-      /fable/i.test(m.message),
-  );
+// ── The worker model roster ─────────────────────────────────────────────────
+//
+// Cora may route a worker to exactly three models:
+//
+//   claude-opus-5   standard   Anthropic's workhorse
+//   gpt-5.6-sol       standard   OpenAI's frontier
+//   claude-fable-5    premium    strongest, materially more expensive
+//
+// Excluded on purpose, and coerced away below rather than merely discouraged
+// in a prompt:
+//   gpt-5.6-terra, gpt-5.6-luna   below the bar for autonomous worker runs
+//   claude-sonnet-*               too token-hungry for what it returns
+//
+// TIERS ARE THE CONTRACT; IDS ARE A DETAIL. Nothing downstream should ever
+// hardcode "sol" or "opus", when a provider ships its next frontier model,
+// change the id in this one table and every prompt, tool schema, spawn path,
+// and fallback follows. That is the whole reason this indirection exists.
+export type WorkerModelTier = "standard" | "premium";
+
+export type RosterRuntime = "claude" | "codex";
+
+export const WORKER_MODEL_ROSTER: Record<RosterRuntime, Record<WorkerModelTier, string>> = {
+  claude: { standard: WORKER_DEFAULT_CLAUDE_MODEL, premium: "claude-fable-5" },
+  // OpenAI contributes a single allowed model, so both tiers resolve to it.
+  // Stated plainly rather than hidden: asking for the premium tier on the
+  // codex runtime gets the frontier model, not a more expensive one.
+  codex: { standard: "gpt-5.6-sol", premium: "gpt-5.6-sol" },
+};
+
+/** Every model id a worker is allowed to launch on, deduped. */
+export const ALLOWED_WORKER_MODELS: readonly string[] = [
+  ...new Set(
+    Object.values(WORKER_MODEL_ROSTER).flatMap((tiers) => Object.values(tiers)),
+  ),
+];
+
+export function rosterModelFor(runtime: RosterRuntime, tier: WorkerModelTier): string {
+  return WORKER_MODEL_ROSTER[runtime][tier];
+}
+
+/**
+ * Force a model hint onto the roster for its runtime.
+ *
+ * A planner can emit anything, a stale id from a long-lived session, a model
+ * the user disallowed, a typo, a bare alias. This is the chokepoint that makes
+ * the roster real: it never rejects, it always lands on the nearest allowed
+ * model, so a bad hint degrades to a good default instead of failing a spawn.
+ * An `@effort` suffix is preserved.
+ */
+export function coerceWorkerModelToRoster(
+  runtime: string,
+  hint: string | undefined,
+): string | undefined {
+  if (runtime !== "claude" && runtime !== "codex") return hint;
+  const tiers = WORKER_MODEL_ROSTER[runtime];
+
+  const raw = sanitizeWorkerModelHint(hint?.trim() || undefined);
+  if (!raw) return tiers.standard;
+  const at = raw.indexOf("@");
+  const base = (at >= 0 ? raw.slice(0, at) : raw).trim().toLowerCase();
+  const suffix = at >= 0 ? raw.slice(at) : "";
+
+  if (base === tiers.standard || base === tiers.premium) return `${base}${suffix}`;
+  // Fable is the only premium tier, and it is Anthropic-only. Honour an
+  // explicit ask for it on the claude runtime; on codex there is nothing to
+  // honour it with, so the frontier model stands in.
+  if (runtime === "claude" && /fable/.test(base)) return `${tiers.premium}${suffix}`;
+  return `${tiers.standard}${suffix}`;
 }

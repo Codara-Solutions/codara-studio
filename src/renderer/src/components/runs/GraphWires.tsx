@@ -1,21 +1,41 @@
 import React, { useMemo } from "react";
 import type { RunState, StepState } from "@shared/types";
-import type { RunGraphLayout, SpineWire, StepLayout } from "./graph-layout";
+import type { FanWire, PeerWire, Point, RunGraphLayout, SpineWire } from "./graph-layout";
 import { deriveAgentStatus, type RunMaps } from "./run-format";
 
 // The wire layer. One SVG sized to the whole graph, drawn beneath the nodes:
-// curved bezier spine wires between SPARK / steps / COMPLETE, and a trunk with
-// rounded-corner ribs hanging the workers under each step. Every wire carries
-// one of four states; the live path animates a flowing dash.
-
-type WireState = "pending" | "done" | "active" | "blocked";
+// curved bezier spine wires running SPARK to step to COMPLETE, and one fan
+// wire per worker branching out of its step into the near edge of the card,
+// each parallel agent's branch lighting up independently, so a running batch
+// reads as simultaneous live lanes hanging under the line. Every wire carries
+// one of five states; only the live path animates a flowing dash.
+//
+// `paused` is what an otherwise-active wire becomes while the user has the run
+// paused: the lane keeps its place in the picture, but nothing about it may
+// suggest work is still travelling along it.
+type WireState = "pending" | "done" | "active" | "blocked" | "paused";
 
 const WIRE_COLOR: Record<WireState, string> = {
   pending: "var(--rule)",
   done: "color-mix(in oklch, var(--ok) 58%, var(--rule-strong))",
   active: "var(--accent)",
   blocked: "var(--danger)",
+  paused: "color-mix(in oklch, var(--info) 60%, var(--rule-strong))",
 };
+
+// The peer thread is deliberately outside the WireState palette: it carries no
+// status at all. It says two worker cards share a mailbox, so it stays a quiet
+// neutral hairline that can never be mistaken for a lane doing work.
+const PEER_WIRE_COLOR = "color-mix(in oklab, var(--ink) 26%, transparent)";
+const PEER_TOOLTIP =
+  "Peer link: these workers share a mailbox and can message each other while they work.";
+
+// The dash flow collapses via CSS for prefers-reduced-motion; the travelling
+// dot is SMIL, so it needs an explicit gate. Snapshot at load — a live
+// listener is not worth the churn for an accessibility preference.
+const REDUCE_MOTION =
+  typeof window !== "undefined" &&
+  !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
 interface Props {
   layout: RunGraphLayout;
@@ -26,13 +46,59 @@ interface Props {
   runStatus: RunState["status"];
 }
 
-// Horizontal-flow cubic bezier: control handles pulled along x so the wire
-// leaves and enters its ports flat and curves smoothly through the middle
-// whenever the two ends sit at different heights (the spine's undulation).
-function spinePath(wire: SpineWire): string {
+// Cubic bezier between two ports. The spine flows horizontally, handles
+// pulled along x so the wire leaves and enters flat. A fan wire drops out of
+// a step's bottom edge and turns into the side of a worker card, so it leaves
+// along y and arrives along x: the branch reads as a bracket down the stack
+// rather than a diagonal across it.
+function flowPath(wire: {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  enter?: "left" | "right";
+}): string {
   const { from, to } = wire;
+  if (wire.enter) {
+    const dy = Math.max(30, (to.y - from.y) * 0.55);
+    const reach = Math.max(34, Math.abs(to.x - from.x) * 0.55);
+    const dx = wire.enter === "right" ? -reach : reach;
+    return `M ${from.x},${from.y} C ${from.x},${from.y + dy} ${to.x + dx},${to.y} ${to.x},${to.y}`;
+  }
   const dx = Math.max(46, Math.abs(to.x - from.x) * 0.5);
   return `M ${from.x},${from.y} C ${from.x + dx},${from.y} ${to.x - dx},${to.y} ${to.x},${to.y}`;
+}
+
+// The peer thread is an axis-aligned polyline, so it draws as straight runs
+// with softened corners rather than beziers: it must not mimic the flowing
+// shape of a branch wire. A hard right angle on a hairline dash reads as a
+// glitch, so each corner is eased with a short quadratic.
+function polylinePath(points: readonly Point[], radius = 12): string {
+  if (points.length < 2) return "";
+  let d = `M ${points[0].x},${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const corner = points[i];
+    const entry = pointToward(corner, points[i - 1], radius);
+    const exit = pointToward(corner, points[i + 1], radius);
+    d += ` L ${entry.x},${entry.y} Q ${corner.x},${corner.y} ${exit.x},${exit.y}`;
+  }
+  const last = points[points.length - 1];
+  return `${d} L ${last.x},${last.y}`;
+}
+
+// A point `radius` along the way from `from` to `towards`, never past the
+// halfway mark so two close corners cannot swallow each other's segment.
+function pointToward(from: Point, towards: Point, radius: number): Point {
+  const dx = towards.x - from.x;
+  const dy = towards.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return { x: from.x, y: from.y };
+  const scale = Math.min(radius, length / 2) / length;
+  return { x: from.x + dx * scale, y: from.y + dy * scale };
+}
+
+// A paused run has no travelling work, so no wire may animate. Everything that
+// would have read as live settles into the quiet paused tone instead.
+function settleWhilePaused(state: WireState, runPaused: boolean): WireState {
+  return runPaused && state === "active" ? "paused" : state;
 }
 
 function spineWireState(
@@ -63,8 +129,21 @@ function stepWireState(status: StepState["status"]): WireState {
 
 // A single wire. The live state lays a flowing dashed stroke over a dim base
 // so the spark reads as travelling along the path; the dash animation is a
-// CSS keyframe, so prefers-reduced-motion collapses it for free.
-function Wire({ d, state }: { d: string; state: WireState }) {
+// CSS keyframe, so prefers-reduced-motion collapses it for free. `emphasis`
+// (active worker lanes) widens the stroke and adds a travelling dot so the
+// working branch is unmistakable; `dimmed` recedes a running step's still-
+// pending sibling lanes so contrast, not just hue, carries the signal.
+function Wire({
+  d,
+  state,
+  emphasis = false,
+  dimmed = false,
+}: {
+  d: string;
+  state: WireState;
+  emphasis?: boolean;
+  dimmed?: boolean;
+}) {
   if (state === "active") {
     return (
       <g>
@@ -72,7 +151,7 @@ function Wire({ d, state }: { d: string; state: WireState }) {
           d={d}
           fill="none"
           stroke="color-mix(in oklch, var(--accent) 32%, transparent)"
-          strokeWidth={1.6}
+          strokeWidth={emphasis ? 2.5 : 1.6}
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
@@ -81,11 +160,15 @@ function Wire({ d, state }: { d: string; state: WireState }) {
           className="spark-wire-flow"
           fill="none"
           stroke="var(--accent)"
-          strokeWidth={1.9}
+          strokeWidth={emphasis ? 2.5 : 1.9}
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
-          style={{ filter: "drop-shadow(0 0 3px var(--accent-glow))" }}
         />
+        {emphasis && !REDUCE_MOTION && (
+          <circle r={2.4} fill="var(--accent)">
+            <animateMotion dur="2.6s" repeatCount="indefinite" path={d} />
+          </circle>
+        )}
       </g>
     );
   }
@@ -97,13 +180,7 @@ function Wire({ d, state }: { d: string; state: WireState }) {
       strokeWidth={state === "done" ? 1.7 : 1.5}
       strokeLinecap="round"
       vectorEffect="non-scaling-stroke"
-      style={
-        state === "blocked"
-          ? { filter: "drop-shadow(0 0 2px color-mix(in oklch, var(--danger) 38%, transparent))" }
-          : state === "done"
-            ? { opacity: 0.82 }
-            : undefined
-      }
+      style={dimmed ? { opacity: 0.55 } : state === "done" ? { opacity: 0.82 } : undefined}
     />
   );
 }
@@ -121,7 +198,6 @@ function Port({ x, y, state }: { x: number; y: number; state: WireState }) {
       stroke={color}
       strokeWidth={1.4}
       vectorEffect="non-scaling-stroke"
-      style={state === "active" ? { filter: "drop-shadow(0 0 3px var(--accent-glow))" } : undefined}
     />
   );
 }
@@ -132,6 +208,7 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
     for (const step of steps) map.set(step.id, step);
     return map;
   }, [steps]);
+  const runPaused = runStatus === "paused";
 
   return (
     <svg
@@ -147,24 +224,88 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
         pointerEvents: "none",
       }}
     >
-      {/* Spine wires — SPARK -> steps -> COMPLETE. */}
+      {/* Peer threads, painted first so every real wire crosses over them: the
+          dashed link between sibling workers that were given a shared mailbox.
+          It is a relationship, not a route, so it never lights up and never
+          animates. The group re-enables pointer events on its own strokes and
+          label so the tooltip explains itself on hover. */}
+      {layout.peerWires.length > 0 && (
+        <g style={{ pointerEvents: "visiblePainted" }}>
+          <title>{PEER_TOOLTIP}</title>
+          {layout.peerWires.map((wire) => (
+            <path
+              key={wire.id}
+              d={polylinePath(wire.points)}
+              fill="none"
+              stroke={PEER_WIRE_COLOR}
+              strokeWidth={1.1}
+              strokeDasharray="3 5"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+          {layout.peerWires.map((wire) => {
+            const anchor = peerLabelAnchor(wire);
+            if (!anchor) return null;
+            return (
+              <text
+                key={`${wire.id}:label`}
+                x={anchor.x}
+                y={anchor.y}
+                textAnchor="middle"
+                style={{
+                  fill: "var(--muted)",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 9,
+                  letterSpacing: "0.07em",
+                  opacity: 0.72,
+                }}
+              >
+                peers
+              </text>
+            );
+          })}
+        </g>
+      )}
+
+      {/* Spine wires — links with no fan between them. */}
       {layout.spineWires.map((wire) => {
-        const state = spineWireState(wire, stepById, runStatus, promptStepId);
-        return <Wire key={wire.id} d={spinePath(wire)} state={state} />;
+        const state = settleWhilePaused(
+          spineWireState(wire, stepById, runStatus, promptStepId),
+          runPaused,
+        );
+        return <Wire key={wire.id} d={flowPath(wire)} state={state} />;
       })}
 
-      {/* Worker trunks + ribs. */}
-      {layout.steps.map((stepLayout) => {
-        if (stepLayout.workers.length === 0) return null;
+      {/* Fan wires: one branch per parallel worker lane, dropping out of the
+          step into the near edge of its card. The working lanes render last in
+          their own group so they paint on top of idle siblings; pending lanes
+          of a running step recede. */}
+      {layout.fanWires.map((wire) => {
+        const step = stepById.get(wire.stepId);
+        const state = settleWhilePaused(fanWireState(wire, step, maps), runPaused);
+        if (state === "active") return null;
+        const stepLive =
+          !runPaused && (step?.status === "running" || step?.status === "reviewing");
         return (
-          <WorkerBranch
-            key={stepLayout.stepId}
-            stepLayout={stepLayout}
-            step={stepById.get(stepLayout.stepId)}
-            maps={maps}
+          <Wire
+            key={wire.id}
+            d={flowPath(wire)}
+            state={state}
+            dimmed={stepLive && state === "pending"}
           />
         );
       })}
+      <g>
+        {layout.fanWires.map((wire) => {
+          const state = settleWhilePaused(
+            fanWireState(wire, stepById.get(wire.stepId), maps),
+            runPaused,
+          );
+          if (state !== "active") return null;
+          return <Wire key={wire.id} d={flowPath(wire)} state="active" emphasis />;
+        })}
+      </g>
 
       {/* Ports — drawn last so they sit crisply on top of every wire end. */}
       {layout.spineWires.length > 0 && (
@@ -176,7 +317,10 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
       )}
       {layout.steps.map((stepLayout) => {
         const step = stepById.get(stepLayout.stepId);
-        const state = step ? stepWireState(step.status) : "pending";
+        const state = settleWhilePaused(
+          step ? stepWireState(step.status) : "pending",
+          runPaused,
+        );
         return (
           <g key={`ports-${stepLayout.stepId}`}>
             <Port x={stepLayout.box.x} y={stepLayout.box.y + stepLayout.box.h / 2} state={state} />
@@ -185,6 +329,38 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
               y={stepLayout.box.y + stepLayout.box.h / 2}
               state={step?.status === "complete" ? "done" : state}
             />
+            {/* The delegation port: where every branch leaves the step.
+                Only drawn when the step actually has workers hanging off it. */}
+            {stepLayout.workers.length > 0 && (
+              <Port
+                x={stepLayout.box.x + stepLayout.box.w / 2}
+                y={stepLayout.box.y + stepLayout.box.h}
+                state={state}
+              />
+            )}
+            {stepLayout.workers.map((worker) => {
+              const task = worker.taskId ? maps.taskById.get(worker.taskId) : undefined;
+              const attempt = worker.taskId ? maps.attemptByTask.get(worker.taskId) : undefined;
+              const agentStatus = deriveAgentStatus(task, attempt, step?.status ?? "queued");
+              const laneState: WireState =
+                agentStatus === "running"
+                  ? "active"
+                  : agentStatus === "done"
+                    ? "done"
+                    : agentStatus === "blocked"
+                      ? "blocked"
+                      : "pending";
+              // The port rides the layout's own entry point, so it lands on the
+              // card edge the branch actually arrives at on either side.
+              return (
+                <Port
+                  key={`wports-${worker.rowKey}`}
+                  x={worker.port.x}
+                  y={worker.port.y}
+                  state={settleWhilePaused(laneState, runPaused)}
+                />
+              );
+            })}
           </g>
         );
       })}
@@ -197,52 +373,28 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
   );
 }
 
-// The trunk + ribs for one step's worker column.
-function WorkerBranch({
-  stepLayout,
-  step,
-  maps,
-}: {
-  stepLayout: StepLayout;
-  step?: StepState;
-  maps: RunMaps;
-}) {
-  const { trunkX, box, workers } = stepLayout;
-  const stepStatus = step?.status ?? "queued";
-  const trunkState = stepWireState(stepStatus);
-  const lastWorker = workers[workers.length - 1];
-  const trunkTop = box.y + box.h;
-  const trunkBottom = lastWorker.box.y + lastWorker.box.h / 2;
-  const corner = 12;
+// Where the one-word legend for a peer thread sits: centred just under the
+// bridge that closes the team loop below the fan, the only stretch of the
+// thread with clear space around it. Chain segments run in the gap between two
+// cards and get no label, one legend per fan is the point.
+function peerLabelAnchor(wire: PeerWire): Point | null {
+  if (wire.kind !== "bridge" || wire.points.length < 4) return null;
+  const [, corner, nextCorner] = wire.points;
+  return { x: (corner.x + nextCorner.x) / 2, y: corner.y + 13 };
+}
 
-  return (
-    <g>
-      <Wire d={`M ${trunkX},${trunkTop} L ${trunkX},${trunkBottom}`} state={trunkState} />
-      {workers.map((worker) => {
-        const wcy = worker.box.y + worker.box.h / 2;
-        const task = worker.taskId ? maps.taskById.get(worker.taskId) : undefined;
-        const attempt = worker.taskId ? maps.attemptByTask.get(worker.taskId) : undefined;
-        const agentStatus = deriveAgentStatus(task, attempt, stepStatus);
-        const ribState: WireState =
-          agentStatus === "running"
-            ? "active"
-            : agentStatus === "done"
-              ? "done"
-              : agentStatus === "blocked"
-                ? "blocked"
-                : "pending";
-        return (
-          <g key={worker.rowKey}>
-            <Wire
-              d={`M ${trunkX},${wcy - corner} Q ${trunkX},${wcy} ${trunkX + corner},${wcy} L ${worker.box.x},${wcy}`}
-              state={ribState}
-            />
-            <Port x={worker.box.x} y={wcy} state={ribState} />
-          </g>
-        );
-      })}
-    </g>
-  );
+// State for one worker's branch: it mirrors the agent's live state, so a
+// running agent's branch flows, a finished one sits lit, a blocked one goes
+// red — each satellite independent of its siblings.
+function fanWireState(wire: FanWire, step: StepState | undefined, maps: RunMaps): WireState {
+  const stepStatus = step?.status ?? "queued";
+  const task = wire.taskId ? maps.taskById.get(wire.taskId) : undefined;
+  const attempt = wire.taskId ? maps.attemptByTask.get(wire.taskId) : undefined;
+  const agentStatus = deriveAgentStatus(task, attempt, stepStatus);
+  if (agentStatus === "running") return "active";
+  if (agentStatus === "done") return "done";
+  if (agentStatus === "blocked") return "blocked";
+  return "pending";
 }
 
 export const GraphWires = React.memo(GraphWiresImpl);

@@ -293,16 +293,6 @@ async function probeCommonDirs(name: string): Promise<string | null> {
     // nvm-windows installs Node under %APPDATA%\nvm\<version>\
     candidates.push(...(await nvmWindowsCandidates(home, name)));
 
-    // Cursor CLI ships through its own installer dirs
-    candidates.push(
-      join(localAppData, "Programs", "cursor-agent", `${name}.exe`),
-    );
-    candidates.push(
-      join(programFiles, "cursor-agent", `${name}.exe`),
-    );
-    candidates.push(
-      join(programFilesX86, "cursor-agent", `${name}.exe`),
-    );
   } else {
     // POSIX (macOS + Linux)
     candidates.push("/usr/local/bin/" + name);

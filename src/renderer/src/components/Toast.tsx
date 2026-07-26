@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { NotifyEvent, ResolvedRunQuestion, RunQuestionOption } from "@shared/types";
+import type { NotifyEvent, ResolvedRunQuestion } from "@shared/types";
 import { accentVar, isCompletionKind, kindMeta, type NotifyGlyph } from "../notifications/kinds";
-import { answerRunQuestion } from "../notifications/answers";
 import type { NavigateTo } from "../notifications/routing";
 
 // In-app toast manager + renderer for the unified notifications pipeline.
@@ -186,30 +185,11 @@ function ToastCard({
         : null;
   const resolvedQuestion =
     questionRunId && resolveQuestion ? resolveQuestion(questionRunId) : null;
-  const answerOptions: RunQuestionOption[] = resolvedQuestion
-    ? resolvedQuestion.options.slice(0, 3)
-    : [];
-
-  const answerWith = async (option: RunQuestionOption) => {
-    if (!questionRunId || answering.current) return;
-    answering.current = true;
-    try {
-      if (!resolvedQuestion) throw new Error("This question is no longer open.");
-      await answerRunQuestion(
-        questionRunId,
-        option,
-        resolvedQuestion.questionMessageId,
-      );
-      // Answering resolves the question in place — that's acting on it, so
-      // drop the center entry too (same rationale as the card click-through).
-      void window.spark.notifications.remove(toast.id).catch(() => undefined);
-      onClose();
-    } catch {
-      // Answering failed (run gone, IPC error) — release the guard so the
-      // user can retry or fall through to deep-linking into the chat.
-      answering.current = false;
-    }
-  };
+  // Still resolved, so an already-answered or expired question does not claim
+  // to be waiting — but the options themselves stay in the run. A toast is a
+  // summons, not a ballot: shown here the choices lose the reasoning that gives
+  // them meaning, and the fourth option was being dropped outright.
+  const waitingOnAnswer = resolvedQuestion !== null;
 
   // Three semantic treatments, driven by `tone`: an agent ASKING for input
   // (warning, amber) and a genuine FAILURE (danger, red) must not look
@@ -335,59 +315,16 @@ function ToastCard({
         >
           {toast.body}
         </div>
-        {answerOptions.length > 0 && (
+        {waitingOnAnswer && (
           <div
             style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 6,
               marginTop: 8,
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
             }}
           >
-            {answerOptions.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                onClick={(event) => {
-                  // Stop the card's onClick deep-link from firing too —
-                  // answering should resolve the question in place, not
-                  // also navigate the user into the chat.
-                  event.stopPropagation();
-                  void answerWith(option);
-                }}
-                style={{
-                  appearance: "none",
-                  cursor: "pointer",
-                  fontFamily: "var(--font-sans)",
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: "var(--ink)",
-                  background: "var(--hover)",
-                  border:
-                    "1px solid color-mix(in oklch, var(--accent) 40%, var(--rule-strong))",
-                  borderRadius: "var(--radius-control, 7px)",
-                  padding: "3px 8px",
-                  maxWidth: "100%",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  transition:
-                    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background =
-                    "color-mix(in oklch, var(--accent) 24%, var(--hover))";
-                  e.currentTarget.style.borderColor = "var(--accent)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--hover)";
-                  e.currentTarget.style.borderColor =
-                    "color-mix(in oklch, var(--accent) 40%, var(--rule-strong))";
-                }}
-              >
-                {option.label}
-              </button>
-            ))}
+            Open the run to answer
           </div>
         )}
       </div>

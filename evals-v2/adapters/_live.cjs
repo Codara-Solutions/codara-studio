@@ -253,11 +253,9 @@ function extractRouting(run) {
       effort: task.effortHint || null,
     };
   });
-  // Pre-allocate the known runtime buckets (claude, codex, cursor) so the
-  // breakdown is comparable across runs even when a runtime never fired on
-  // this particular task. A new "cursor" worker runtime was added alongside
-  // the original claude/codex pair, so it must appear here too.
-  const KNOWN_RUNTIMES = ["claude", "codex", "cursor"];
+  // Pre-allocate the known runtime buckets so the breakdown is comparable
+  // across runs even when a runtime never fired on this particular task.
+  const KNOWN_RUNTIMES = ["claude", "codex"];
   const runtimeBreakdown = {
     implementer: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),
     verifier: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),

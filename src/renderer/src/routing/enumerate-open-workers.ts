@@ -11,7 +11,7 @@ export interface OpenWorker {
   // (== pty session id); for manual panes it is the leaf paneId. Both are
   // registered with main as the same key, so the call site is uniform.
   injectId: string;
-  runtime: "claude" | "codex" | "cursor" | "opencode";
+  runtime: "claude" | "codex" | "opencode";
   source: "spark" | "manual";
   // chat title (for "Claude · Fix login form") or undefined for manual.
   runLabel?: string;
@@ -23,8 +23,6 @@ function runtimeName(runtime: OpenWorker["runtime"]): string {
       return "Claude";
     case "codex":
       return "Codex";
-    case "cursor":
-      return "Cursor";
     case "opencode":
       return "OpenCode";
   }
@@ -46,7 +44,7 @@ function walkLeaves(node: PaneNode, out: OpenWorker[], runs: RunState[]): void {
     // land at the shell, not the CLI agent, and quietly corrupt the line.
     if (worker.agentRunning === false) return;
     const runtime = worker.runtime;
-    if (runtime !== "claude" && runtime !== "codex" && runtime !== "cursor" && runtime !== "opencode") {
+    if (runtime !== "claude" && runtime !== "codex" && runtime !== "opencode") {
       return;
     }
     const runLabel =

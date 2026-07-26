@@ -64,7 +64,7 @@ export function SectionHeader({
         padding: "0 7px 0 5px",
         borderBottom: "1px solid var(--rule-soft)",
         background: hover
-          ? "color-mix(in oklch, var(--ink) 3%, var(--panel))"
+          ? "color-mix(in oklab, var(--ink) 3%, var(--panel))"
           : "var(--panel)",
         // 1px top highlight lifts the band; the soft recessed --well cue gives
         // the body its sunk-below depth without a hand-rolled ink cast (the old

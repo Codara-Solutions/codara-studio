@@ -51,7 +51,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { remoteStreamGrep } from "./remote/remote-search";
-import { listEvents } from "./orchestration/event-log";
+import { listEvents, subscribeToEvents } from "./orchestration/event-log";
 import {
   claudeSessionTranscriptPath,
   discoverClaudeSessionForCwd,
@@ -62,6 +62,11 @@ import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex
 import { latestSessionStart } from "./agent-session-registry";
 import { listAgentHistoryForCwd } from "./agent-history";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
+import {
+  deleteWorkerSession,
+  listAllWorkerSessions,
+  listWorkerSessions,
+} from "./worker-sessions";
 import {
   clearCenter,
   listCenterEntries,
@@ -74,6 +79,7 @@ import {
   noteTerminalWillDispose,
   noteTerminalUserInput,
   syncTerminalNotifyPanes,
+  terminalAgentStateSnapshot,
   type TerminalNotifyPaneEntry,
 } from "./terminal-agent-notify";
 import type {
@@ -142,6 +148,18 @@ async function getInlineAi(): Promise<typeof import("./inline-ai")> {
   return inlineAiMod;
 }
 
+let piSubscriptionAuthMod: typeof import("./orchestration/pi-subscription-auth") | undefined;
+async function getPiSubscriptionAuth(): Promise<typeof import("./orchestration/pi-subscription-auth")> {
+  piSubscriptionAuthMod ??= await import("./orchestration/pi-subscription-auth");
+  return piSubscriptionAuthMod;
+}
+
+let coraMemoryMod: typeof import("./orchestration/cora-memory") | undefined;
+async function getCoraMemory(): Promise<typeof import("./orchestration/cora-memory")> {
+  coraMemoryMod ??= await import("./orchestration/cora-memory");
+  return coraMemoryMod;
+}
+
 let runStoreMod: typeof import("./orchestration/run-store") | undefined;
 async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
   runStoreMod ??= await import("./orchestration/run-store");
@@ -159,11 +177,52 @@ async function getScheduler(): Promise<typeof import("./orchestration/scheduler"
   schedulerMod ??= await import("./orchestration/scheduler");
   return schedulerMod;
 }
+
+// ── Cora-only kill authority for worker ptys ────────────────────────────────
+// Worker panes use their attemptId as the pty session id, and every renderer
+// pane-close path funnels into "pty:dispose". Killing a live worker is the
+// orchestrator's decision alone (run-store's activeWorkerProcesses and its
+// cancel/fail paths call pty-manager directly and never cross this IPC
+// boundary), so the handler downgrades a renderer dispose of a still-live
+// attempt to a detach: the view lets go, the session survives for follow-ups.
+// The attempt→run map is fed from the durable event journal; attempts that
+// never launched (preparing/prompt_ready) are deliberately not protected —
+// their pty is an idle shell no worker owns yet.
+const workerAttemptRunIds = new Map<string, string>();
+subscribeToEvents((event) => {
+  if (!event.attemptId) return;
+  if (event.type === "worker_task.envelope_prepared" && event.runId) {
+    workerAttemptRunIds.set(event.attemptId, event.runId);
+  } else if (event.type === "worker_attempt.finished") {
+    workerAttemptRunIds.delete(event.attemptId);
+  }
+});
+
+const KILL_PROTECTED_ATTEMPT_STATUSES = new Set(["launching", "running", "finishing"]);
+
+async function isLiveWorkerAttemptPty(id: string): Promise<boolean> {
+  const runId = workerAttemptRunIds.get(id);
+  if (!runId) return false;
+  try {
+    const { getRun } = await getRunStore();
+    const run = await getRun(runId);
+    const attempt = run?.workerAttempts.find((item) => item.id === id);
+    if (attempt && KILL_PROTECTED_ATTEMPT_STATUSES.has(attempt.status)) return true;
+    // Terminal (or unknown) attempt: forget it so the map stays bounded and
+    // later disposes take the fast path.
+    workerAttemptRunIds.delete(id);
+    return false;
+  } catch {
+    // Fail closed: an unreadable run must not let the UI kill a worker.
+    return true;
+  }
+}
 import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
   AppPreferences,
   AppSettings,
+  AgentMcpServerDraft,
   AppState,
   CreateEntryInput,
   AutomationDetail,
@@ -193,7 +252,16 @@ import type {
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
+  CoraMemoryScope,
+  CoraMemoryStatus,
+  MemoryClearInput,
+  MemorySetEnabledInput,
+  MemoryStatusInput,
   UpdateChatBackendInput,
+  UpdateCoraWhiteboardInput,
+  ExportCoraWhiteboardFileInput,
+  ExportFileDialogInput,
+  ImportedCoraWhiteboardFile,
   PauseRunInput,
   PrefKey,
   PreferencesChange,
@@ -225,7 +293,17 @@ import type {
   UpdateScheduledJobInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
+  DeleteWorkerSessionInput,
+  DeleteWorkerSessionResult,
+  WorkerSessionRuntime,
+  WorkerSessionSummary,
 } from "@shared/types";
+import {
+  parseCoraWhiteboard,
+  parseCoraWhiteboardFile,
+  serializeCoraWhiteboardFile,
+  whiteboardFileName,
+} from "@shared/cora-whiteboard-file";
 
 // A small document glyph used as the drag image for `webContents.startDrag`.
 // Windows rejects an empty icon ("Must specify non-empty 'icon' option"), so
@@ -296,6 +374,42 @@ export function registerIpc(): void {
     return saveSettings(settings);
   });
 
+  ipcMain.handle("pi-subscriptions:status", async () => {
+    const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
+    return inspectPiSubscriptions();
+  });
+  ipcMain.handle("pi-subscriptions:connect", async (event, input?: { provider?: unknown }) => {
+    const { startPiSubscriptionLogin } = await getPiSubscriptionAuth();
+    return startPiSubscriptionLogin(input?.provider, event.sender);
+  });
+  ipcMain.handle(
+    "pi-subscriptions:respond",
+    async (event, input?: { requestId?: unknown; promptId?: unknown; value?: unknown }) => {
+      const { answerPiSubscriptionPrompt } = await getPiSubscriptionAuth();
+      answerPiSubscriptionPrompt(input ?? {}, event.sender);
+    },
+  );
+  ipcMain.handle("pi-subscriptions:cancel", async (event, input?: { requestId?: unknown }) => {
+    const { cancelPiSubscriptionLogin } = await getPiSubscriptionAuth();
+    cancelPiSubscriptionLogin(input?.requestId, event.sender);
+  });
+  ipcMain.handle("pi-subscriptions:disconnect", async (_event, input?: { provider?: unknown }) => {
+    const { disconnectPiSubscription } = await getPiSubscriptionAuth();
+    return disconnectPiSubscription(input?.provider);
+  });
+  ipcMain.handle("pi-runtime:install", async (event) => {
+    const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();
+    return installPiRuntimeForWindow(event.sender);
+  });
+  ipcMain.handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
+    const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
+    return inspectPiSubscriptionUsage(input?.force === true);
+  });
+  ipcMain.handle("pi-models:catalog", async (_event, input?: { force?: unknown }) => {
+    const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
+    return inspectPiModelCatalog(input?.force === true);
+  });
+
   ipcMain.handle(
     "agents:runtimes",
     async (_e, input?: { force?: boolean }) => {
@@ -306,7 +420,26 @@ export function registerIpc(): void {
     "agents:sync",
     async (_e, input?: { cwd?: string | null }) => {
       const { syncAgentAssets } = await getAgentSync();
-      return syncAgentAssets({ cwd: input?.cwd ?? null });
+      const result = await syncAgentAssets({ cwd: input?.cwd ?? null });
+      // Sync is also the manual repair path for the built-in: an entry stranded
+      // by a moved install (command path gone) is rewritten to the current app
+      // path here instead of waiting for the next launch. Repair only: a runtime
+      // the user removed the built-in from must not get it back from a sync
+      // click, so nothing is reported for it either.
+      const settings = await loadSettings();
+      if (settings.playwrightMcpAutoInstall !== false) {
+        try {
+          const { repairSparkBuiltinEntries, SPARK_BUILTIN_SERVER_NAME } = await getMcpInstaller();
+          const repaired = await repairSparkBuiltinEntries();
+          if (repaired.claude) result.mcp.toClaude.push(SPARK_BUILTIN_SERVER_NAME);
+          if (repaired.codex) result.mcp.toCodex.push(SPARK_BUILTIN_SERVER_NAME);
+        } catch (err) {
+          result.mcp.errors.push(
+            `Could not refresh the built-in MCP entry: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      return result;
     },
   );
   ipcMain.handle(
@@ -328,6 +461,40 @@ export function registerIpc(): void {
     async (_e, input: { id: string; target: "claude" | "codex" }) => {
       const { installAgentAssetToRuntime } = await getAgentSync();
       return installAgentAssetToRuntime({ id: input.id, target: input.target });
+    },
+  );
+  ipcMain.handle(
+    "agents:mcpTargets",
+    async (_e, input?: { cwd?: string | null }) => {
+      const { listMcpWriteTargets } = await getAgentSync();
+      return listMcpWriteTargets({ cwd: input?.cwd ?? null });
+    },
+  );
+  ipcMain.handle(
+    "agents:mcpDetail",
+    async (_e, input: { id: string }) => {
+      const { readMcpServerDetail } = await getAgentSync();
+      return readMcpServerDetail({ id: input.id });
+    },
+  );
+  ipcMain.handle(
+    "agents:saveMcpServer",
+    async (
+      _e,
+      input: {
+        cwd?: string | null;
+        targetId: string;
+        server: AgentMcpServerDraft;
+        replaceId?: string | null;
+      },
+    ) => {
+      const { saveMcpServer } = await getAgentSync();
+      return saveMcpServer({
+        cwd: input.cwd ?? null,
+        targetId: input.targetId,
+        server: input.server,
+        replaceId: input.replaceId ?? null,
+      });
     },
   );
   ipcMain.handle("agents:builtins", async () => {
@@ -383,6 +550,39 @@ export function registerIpc(): void {
         }
       }
       return next;
+    },
+  );
+
+  // Cora's writable memory. The markdown files are the source of truth and the
+  // user edits them in the editor, so these three channels only report on them
+  // and toggle/clear a whole tier. Every one resolves to the fresh status PAIR,
+  // including the mutations, so the Capability Center never has to re-read.
+  ipcMain.handle(
+    "memory:get",
+    async (_e, input?: MemoryStatusInput): Promise<CoraMemoryStatus> => {
+      return readMemoryStatus(input?.workspaceId ?? null);
+    },
+  );
+
+  ipcMain.handle(
+    "memory:setEnabled",
+    async (_e, input: MemorySetEnabledInput): Promise<CoraMemoryStatus> => {
+      const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
+      const { setMemoryEnabled } = await getCoraMemory();
+      await setMemoryEnabled(input.scope, workspaceId, input.enabled);
+      return readMemoryStatus(input.workspaceId ?? null);
+    },
+  );
+
+  ipcMain.handle(
+    "memory:clear",
+    async (_e, input: MemoryClearInput): Promise<CoraMemoryStatus> => {
+      const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
+      const { clearMemory } = await getCoraMemory();
+      // The user's own lines survive unless the caller opted in explicitly:
+      // a missing flag must never be read as permission to delete them.
+      await clearMemory(input.scope, workspaceId, input.includeUserLines === true);
+      return readMemoryStatus(input.workspaceId ?? null);
     },
   );
 
@@ -450,6 +650,89 @@ export function registerIpc(): void {
     if (result.canceled) return [];
     return result.filePaths;
   });
+
+  ipcMain.handle(
+    "dialog:exportWhiteboard",
+    async (e, input: ExportCoraWhiteboardFileInput): Promise<string | null> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const board = parseCoraWhiteboard(input?.board);
+      const suggestedName = whiteboardFileName(input?.suggestedName || board.title);
+      const result = await dialog.showSaveDialog(win!, {
+        title: "Export Cora whiteboard",
+        defaultPath: input?.defaultPath || join(app.getPath("documents"), suggestedName),
+        filters: [{ name: "Codara Whiteboard", extensions: ["coraboard"] }],
+      });
+      if (result.canceled || !result.filePath) return null;
+      const destination = result.filePath.toLowerCase().endsWith(".coraboard")
+        ? result.filePath
+        : `${result.filePath}.coraboard`;
+      await fs.writeFile(destination, serializeCoraWhiteboardFile(board), "utf8");
+      return destination;
+    },
+  );
+
+  ipcMain.handle(
+    "dialog:importWhiteboard",
+    async (e, defaultPath?: string): Promise<ImportedCoraWhiteboardFile | null> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const result = await dialog.showOpenDialog(win!, {
+        title: "Import Cora whiteboard",
+        properties: ["openFile"],
+        defaultPath: defaultPath || app.getPath("documents"),
+        filters: [
+          { name: "Codara Whiteboard", extensions: ["coraboard"] },
+          { name: "JSON", extensions: ["json"] },
+        ],
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      const path = result.filePaths[0];
+      const stat = await fs.stat(path);
+      if (stat.size > 4 * 1024 * 1024) throw new Error("Whiteboard files must be smaller than 4 MB.");
+      const board = parseCoraWhiteboardFile(await fs.readFile(path, "utf8"));
+      return { path, board };
+    },
+  );
+
+  // Generic dialog-based export: prompt for a destination and write a
+  // renderer-produced payload (board SVG/PNG images today). One narrow channel
+  // instead of one IPC surface per format; the extension is forced onto the
+  // chosen name exactly like dialog:exportWhiteboard does for .coraboard.
+  ipcMain.handle(
+    "dialog:exportFile",
+    async (e, input: ExportFileDialogInput): Promise<string | null> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (typeof input?.data !== "string") throw new Error("Export payload must be a string.");
+      if (input.data.length > 64 * 1024 * 1024) throw new Error("Export payload is too large.");
+      const filters = (Array.isArray(input.filters) ? input.filters : []).filter(
+        (filter) =>
+          filter &&
+          typeof filter.name === "string" &&
+          Array.isArray(filter.extensions) &&
+          filter.extensions.every((ext) => typeof ext === "string" && /^[a-z0-9]+$/i.test(ext)) &&
+          filter.extensions.length > 0,
+      );
+      if (filters.length === 0) throw new Error("Export requires at least one file filter.");
+      const extensions = filters.flatMap((filter) => filter.extensions.map((ext) => ext.toLowerCase()));
+      const result = await dialog.showSaveDialog(win!, {
+        title: input.title || "Export file",
+        defaultPath:
+          input.defaultPath ||
+          join(app.getPath("documents"), input.suggestedName || `export.${extensions[0]}`),
+        filters,
+      });
+      if (result.canceled || !result.filePath) return null;
+      const lower = result.filePath.toLowerCase();
+      const destination = extensions.some((ext) => lower.endsWith(`.${ext}`))
+        ? result.filePath
+        : `${result.filePath}.${extensions[0]}`;
+      if (input.encoding === "base64") {
+        await fs.writeFile(destination, Buffer.from(input.data, "base64"));
+      } else {
+        await fs.writeFile(destination, input.data, "utf8");
+      }
+      return destination;
+    },
+  );
 
   ipcMain.handle(
     "attachments:savePastedImage",
@@ -1042,6 +1325,17 @@ export function registerIpc(): void {
     return getRun(runId);
   });
 
+  ipcMain.handle(
+    "orchestration:readWorkerPrompt",
+    async (_e, input: { runId: string; attemptId: string }): Promise<string> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker prompt request.");
+      }
+      const { readWorkerAttemptPrompt } = await getRunStore();
+      return readWorkerAttemptPrompt(input.runId, input.attemptId);
+    },
+  );
+
   ipcMain.handle("orchestration:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
     const { listRuns } = await getRunStore();
     return listRuns(workspaceId);
@@ -1138,6 +1432,14 @@ export function registerIpc(): void {
     const { renameRun } = await getRunStore();
     return renameRun(input);
   });
+
+  ipcMain.handle(
+    "orchestration:updateWhiteboard",
+    async (_e, input: UpdateCoraWhiteboardInput): Promise<RunState> => {
+      const { updateCoraWhiteboard } = await getRunStore();
+      return updateCoraWhiteboard(input);
+    },
+  );
 
   ipcMain.handle(
     "orchestration:updateChatBackend",
@@ -1352,6 +1654,13 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
+    // Only Cora may kill a live worker attempt — downgrade to detach so the
+    // session keeps running headless (the workers-tab reconcile loop can
+    // re-attach it later). See workerAttemptRunIds above.
+    if (await isLiveWorkerAttemptPty(args.id)) {
+      pty.detach(args.id);
+      return;
+    }
     noteTerminalWillDispose(args.id);
     pty.dispose(args.id);
   });
@@ -1384,6 +1693,34 @@ export function registerIpc(): void {
   });
 
   // ── Agent session restore (manual Claude/Codex terminal panes) ──────────
+  ipcMain.handle(
+    "agentSession:list",
+    async (
+      _e,
+      args: { runtime: WorkerSessionRuntime; cwd: string },
+    ): Promise<WorkerSessionSummary[]> => {
+      if (!args || (args.runtime !== "claude" && args.runtime !== "codex")) return [];
+      if (typeof args.cwd !== "string" || !args.cwd.trim()) return [];
+      assertLocalWorkspace(args.cwd, "Worker session history");
+      return listWorkerSessions(args.runtime, args.cwd);
+    },
+  );
+
+  ipcMain.handle(
+    "agentSession:listAll",
+    async (): Promise<WorkerSessionSummary[]> => listAllWorkerSessions(),
+  );
+
+  ipcMain.handle(
+    "agentSession:delete",
+    async (_e, input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> => {
+      if (typeof input?.cwd === "string") {
+        assertLocalWorkspace(input.cwd, "Worker session deletion");
+      }
+      return deleteWorkerSession(input);
+    },
+  );
+
   // Capture: when the renderer detects a `claude`/`codex` agent running in a
   // pane, find the transcript it just started writing and return its session id
   // so a future reopen can `--resume` it. Neither CLI reports its id back over
@@ -1567,9 +1904,10 @@ export function registerIpc(): void {
       _e,
       input: { workspaceId: string; workspaceName?: string; panes: TerminalNotifyPaneEntry[] },
     ) => {
-      syncTerminalNotifyPanes(input);
+      return syncTerminalNotifyPanes(input);
     },
   );
+  ipcMain.handle("terminalNotify:snapshot", async () => terminalAgentStateSnapshot());
 
   // Renderer reports what the user is looking at (focus + active workspace/
   // tab/run/pane) in one snapshot; the notify policy suppresses alerts for
@@ -1880,6 +2218,35 @@ export function registerIpc(): void {
     const { quitAndInstall } = await import("./auto-updater");
     quitAndInstall();
   });
+}
+
+// cora-memory keys the workspace tier by workspaceId and sanitizes whatever it
+// is given, so an empty id would silently resolve to a real "_unknown.md" file
+// the user could then toggle and clear. With no workspace open there is no
+// workspace tier to report, so say so instead of inventing one.
+async function readMemoryStatus(workspaceId: string | null): Promise<CoraMemoryStatus> {
+  const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = await getCoraMemory();
+  const status = await getMemoryStatus(workspaceId ?? "");
+  if (workspaceId) return status;
+  return {
+    global: status.global,
+    workspace: {
+      enabled: false,
+      path: "",
+      bytesUsed: 0,
+      bytesCap: MEMORY_FILE_MAX_BYTES,
+      overCap: false,
+      counts: { user: 0, cora: 0, auto: 0 },
+    },
+  };
+}
+
+// The renderer disables the workspace controls when no workspace is open; this
+// is the boundary check that makes that a guarantee rather than a UI habit.
+function requireMemoryWorkspace(scope: CoraMemoryScope, workspaceId: string | null): string {
+  if (scope !== "workspace") return workspaceId ?? "";
+  if (!workspaceId) throw new Error("Open a workspace before changing its memory.");
+  return workspaceId;
 }
 
 function parsePastedImageDataUrl(value: unknown): { mimeType: string; buffer: Buffer } {

@@ -55,7 +55,7 @@ export function buildSharedExtensions(): Extension[] {
       },
       ".cm-activeLine": {
         backgroundColor:
-          "color-mix(in oklch, var(--ink) 4%, transparent)",
+          "color-mix(in oklab, var(--ink) 4%, transparent)",
       },
       ".cm-lineNumbers .cm-activeLineGutter": {
         userSelect: "none",
@@ -66,20 +66,20 @@ export function buildSharedExtensions(): Extension[] {
       // Vim normal-mode block cursor — translucent ink, no theme tint.
       ".cm-fat-cursor": {
         background:
-          "color-mix(in oklch, var(--ink) 35%, transparent) !important",
+          "color-mix(in oklab, var(--ink) 35%, transparent) !important",
         outline:
-          "1px solid color-mix(in oklch, var(--ink) 55%, transparent) !important",
+          "1px solid color-mix(in oklab, var(--ink) 55%, transparent) !important",
         color: "var(--ink) !important",
       },
       "&:not(.cm-focused) .cm-fat-cursor": {
         background: "transparent !important",
         outline:
-          "1px solid color-mix(in oklch, var(--ink) 35%, transparent) !important",
+          "1px solid color-mix(in oklab, var(--ink) 35%, transparent) !important",
       },
       ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection":
         {
           backgroundColor:
-            "color-mix(in oklch, var(--ink) 18%, transparent) !important",
+            "color-mix(in oklab, var(--ink) 18%, transparent) !important",
         },
       ".cm-panels": {
         backgroundColor: "var(--panel)",

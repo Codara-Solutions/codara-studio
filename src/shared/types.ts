@@ -62,6 +62,10 @@ export interface Workspace {
   cwd: string;
   color: string;
   workers: Worker[];
+  // Optional logical folder in the workspace rail. This never changes cwd or
+  // filesystem ownership; it is presentation-only organization persisted in
+  // AppState so local, remote, and copy-branch workspaces can be mixed.
+  groupId?: string;
   // Present only on workspaces created via "Create copy branch": this
   // workspace's cwd is a git worktree forked from `repoCwd`. Its presence is
   // what makes delete remove the worktree instead of just dropping the row.
@@ -82,8 +86,19 @@ export interface Workspace {
   };
 }
 
+export interface WorkspaceGroup {
+  id: string;
+  name: string;
+  collapsed: boolean;
+}
+
 export interface AppState {
   workspaces: Workspace[];
+  workspaceGroups: WorkspaceGroup[];
+  // Mixed top-level ordering for ungrouped workspaces and workspace folders.
+  // Missing/stale ids are normalized on load; grouped workspaces are ordered
+  // by the workspace array inside their folder and do not appear here.
+  workspaceRailOrder?: string[];
   activeWorkspaceId: string | null;
 }
 
@@ -114,17 +129,31 @@ export function trimTerminalScrollbackLines(value: string, maxLines: number): st
 export interface AppSettings {
   defaultShellId: string | null;
   terminalScrollbackLineLimit: number;
+  // OpenRouter credentials for Codara's two small LLM utilities: git
+  // commit-message drafting (git-commit-message.ts) and the code editor's
+  // inline AI, ghost-text autocomplete + inline edit (inline-ai.ts). Cora's
+  // orchestration NEVER reads these: the manager and its workers run on the
+  // pinned Pi runtime / CLI backends, on subscription auth that lives outside
+  // AppSettings entirely. An empty key just disables those two conveniences.
   openRouterApiKey: string;
+  // OpenRouter model id for commit-message drafting: git-commit-message.ts
+  // tries AppPreferences.inlineAutocompleteModelId first and uses this as the
+  // second route (either one alone is enough; with neither set the button
+  // falls back to a deterministic non-LLM draft). Same scope caveat as the key
+  // above: this is not a Cora manager model.
   openRouterModel: string;
-  agentRuntimeSelection: AgentRuntimeSelection;
   agentMcpSyncEnabled: boolean;
   agentSkillSyncEnabled: boolean;
   agentDisabledMcpIds: string[];
   agentDisabledSkillIds: string[];
+  // Per-scope MCP assignment for the Pi harness, keyed by the same
+  // `mcp:<lowercased name>` session key as agentDisabledMcpIds. These are
+  // opt-IN lists: a server absent from a list is not delivered to that scope,
+  // so an existing install (and any newly discovered server) starts off for
+  // both Cora and Pi workers. Claude/Codex delivery ignores them entirely.
+  agentMcpCoraManagerIds: string[];
+  agentMcpPiWorkerIds: string[];
   playwrightMcpAutoInstall: boolean;
-  workerStuckDetectEnabled: boolean;
-  workerStuckIdleSeconds: number;
-  workerStuckMaxAutoRetries: number;
   // When true, autopilot/unattended workers launch inside a throwaway git
   // worktree forked off the run checkpoint (refs/spark/runs/{runId}) and run
   // with worktree-scoped permissions instead of full skip-permissions —
@@ -134,6 +163,159 @@ export interface AppSettings {
   // unaffected and stay byte-identical regardless of this flag.
   autopilotSandbox: boolean;
 }
+
+// Cora runs its manager and implementation workers through one pinned Pi
+// runtime. Subscription credentials deliberately live outside AppSettings in
+// Pi's private auth.json; these shapes expose status and the interactive OAuth
+// ceremony without ever crossing IPC with access or refresh tokens.
+export type PiSubscriptionProvider = "anthropic" | "openai-codex";
+
+export interface PiSubscriptionConnection {
+  provider: PiSubscriptionProvider;
+  label: string;
+  model: string;
+  connected: boolean;
+  expired: boolean;
+  canRefresh: boolean;
+  expiresAt: number | null;
+  error?: string;
+}
+
+export interface PiSubscriptionOverview {
+  runtimeInstalled: boolean;
+  runtimeVersion: string | null;
+  runtimeError?: string;
+  /** The Pi build Codara is pinned to, present whether or not it is installed
+   * — Settings labels its install button with this. */
+  runtimeExpectedVersion: string;
+  /** True while Settings' managed install is running, so a reopened dialog
+   * shows the in-progress state instead of an idle Install button. */
+  runtimeInstalling?: boolean;
+  connections: PiSubscriptionConnection[];
+}
+
+/**
+ * A model Pi reports as usable by a connected subscription right now. This is
+ * what lets a newly released model appear in the picker with no code change;
+ * the renderer merges it under its curated rows rather than replacing them.
+ */
+export interface PiCatalogModel {
+  id: string;
+  /** Vendor display name, falling back to the id. */
+  label: string;
+  provider: PiSubscriptionProvider;
+  reasoning: boolean;
+  contextWindow?: number;
+  /** Pi thinking levels this model actually supports; empty when it has none. */
+  thinkingLevels: string[];
+}
+
+/** One quota window (Claude's 5-hour/7-day, Codex's primary/secondary). */
+export interface PiUsageWindow {
+  id: string;
+  /** Human window length — "5-hour", "7-day", "Opus 7-day", "Code review 7-day". */
+  label: string;
+  usedPercent: number;
+  remainingPercent: number;
+  /** Countdown to reset, pre-formatted ("3h 12m"). Absent when unknown. */
+  resetsIn?: string;
+  resetsAt?: string;
+}
+
+export interface PiUsageProvider {
+  provider: PiSubscriptionProvider;
+  label: string;
+  /** `not_connected` is reported rather than omitted, so the UI can say so
+   * instead of leaving a gap the user has to interpret. */
+  status: "ok" | "not_connected" | "expired" | "error";
+  windows: PiUsageWindow[];
+  checkedAt: string;
+  plan?: string;
+  limitReached?: boolean;
+  message?: string;
+}
+
+export interface PiUsageOverview {
+  checkedAt: string;
+  providers: PiUsageProvider[];
+}
+
+/** Progress for the managed install of Codara's pinned Pi runtime. */
+export type PiRuntimeInstallEvent =
+  | { type: "started" | "progress"; message: string }
+  | { type: "completed"; message: string; overview: PiSubscriptionOverview }
+  | { type: "failed"; message: string };
+
+export type PiSubscriptionPrompt =
+  | {
+      type: "text" | "secret" | "manual_code";
+      message: string;
+      placeholder?: string;
+    }
+  | {
+      type: "select";
+      message: string;
+      options: Array<{ id: string; label: string; description?: string }>;
+    };
+
+export type PiSubscriptionAuthEvent =
+  | {
+      type: "started";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+    }
+  | {
+      type: "auth_url";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      url: string;
+      instructions?: string;
+    }
+  | {
+      type: "device_code";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      userCode: string;
+      verificationUri: string;
+      expiresInSeconds?: number;
+    }
+  | {
+      type: "progress";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+    }
+  | {
+      type: "prompt";
+      requestId: string;
+      promptId: string;
+      provider: PiSubscriptionProvider;
+      prompt: PiSubscriptionPrompt;
+    }
+  | {
+      type: "completed";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+      overview: PiSubscriptionOverview;
+    }
+  | {
+      type: "cancelled" | "failed";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+    }
+  | {
+      // The auth store changed outside a login flow this window is watching:
+      // a credential was written (connect or refresh recovery) or deleted
+      // (disconnect). Broadcast to every window so always-on surfaces like the
+      // title-bar usage pills re-read immediately instead of waiting out their
+      // poll interval, which is why a reconnect used to need an app restart to
+      // show up.
+      type: "changed";
+      provider: PiSubscriptionProvider;
+    };
 
 // User-facing preferences (theme, editor flags, etc.) live in a separate
 // JSON file from AppSettings so the per-window settings UI can read/write
@@ -286,17 +468,12 @@ export interface AppPreferences {
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
   copyBranchSetupCommandByRepo: Record<string, string>;
-  // Gate for Fable 5 (`claude-fable-5`), Anthropic's top-tier and most
-  // expensive model. Default OFF: when false Fable is hidden from every model
-  // picker and automations that request it fall back to Opus 4.8. Flip on to
-  // opt into the extra cost. The Cora-spawned-worker downgrade is unconditional
-  // regardless of this flag — Fable is only ever available to the main chat
-  // and (when this is on) opt-in automations.
-  fableEnabled?: boolean;
   // Opt-in (default off): persist terminal agent-session pointers + scrollback
   // and resume Claude/Codex sessions after a full app relaunch (boot-once
   // restore, in-place auto-resume after an unexpected pty death, and the
-  // "previous session available" hint). Off = fresh shells on every relaunch.
+  // "previous session available" hint). Ordinary shell tabs and agent sessions
+  // that had already exited still open as fresh shells. Off = fresh shells on
+  // every relaunch.
   restoreAgentSessions?: boolean;
 }
 
@@ -431,7 +608,6 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
-  fableEnabled: false,
   restoreAgentSessions: false,
 };
 
@@ -483,8 +659,21 @@ export interface TerminalAgentStatePayload {
   workspaceId: string;
   tabId: string;
   paneId: string;
-  runtime: "claude" | "codex" | "cursor" | null;
+  runtime: "claude" | "codex" | null;
   state: RuntimeState;
+}
+
+// A pty session's exit, as delivered to the renderer (`pty:exit:<id>`) and to
+// main-process exit waiters. `sanctioned` marks a teardown Codara itself asked
+// for: orchestration disposing a finished worker's host shell, or the app-quit
+// sweep. Only Cora ends a worker, so an UNSANCTIONED exit is the one and only
+// crash signal; a sanctioned exit is never a crash no matter what exit code or
+// signal the OS reported (pty.kill() delivers SIGHUP, i.e. exitCode 0 with
+// signal 1, which read as a crash before this bit existed).
+export interface PtyExitInfo {
+  exitCode: number;
+  signal?: number;
+  sanctioned?: boolean;
 }
 
 export type NotificationSoundKind = "needs-you" | "done";
@@ -564,19 +753,36 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
 
 export type AgentRuntimeKind = "claude" | "codex";
 
-// "auto" means "use every installed runtime" (Codara detects what is on PATH).
-// An array enumerates the exact runtimes the user opted in to — deselecting a
-// runtime in Settings removes it from this array so Codara will not spawn
-// workers on it even if the CLI is installed. The legacy string variants
-// ("both", "claude", "codex", "cursor") are accepted on read for migration
-// from earlier settings files; writes always use the array form. "cursor"
-// is silently dropped on read — Codara only supports Claude + Codex now.
-export type AgentRuntimeSelection =
-  | "auto"
-  | "both"
-  | "claude"
-  | "codex"
-  | readonly AgentRuntimeKind[];
+export type WorkerSessionRuntime = "claude" | "codex";
+
+// Lightweight metadata read from the CLI-owned transcript stores for the
+// manual-worker session picker. The transcript itself never crosses IPC.
+export interface WorkerSessionSummary {
+  runtime: WorkerSessionRuntime;
+  sessionId: string;
+  title: string;
+  cwd: string;
+  cwdExists: boolean;
+  updatedAt: string;
+  transcriptPath: string;
+}
+
+export type WorkerSessionMemoryScope = "none" | "claude-project" | "codex-all";
+
+export interface DeleteWorkerSessionInput {
+  runtime: WorkerSessionRuntime;
+  sessionId: string;
+  cwd: string;
+  transcriptPath: string;
+  memoryScope: WorkerSessionMemoryScope;
+}
+
+export interface DeleteWorkerSessionResult {
+  deleted: boolean;
+  memoryDeleted: boolean;
+  memoryScope: WorkerSessionMemoryScope;
+  warnings: string[];
+}
 
 export type AgentEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -598,9 +804,8 @@ export interface AgentRuntimeModel {
   tier?: AgentModelTier;
 }
 
-// Per-runtime feature flags. Different CLIs expose different capabilities
-// (Codex doesn't surface cost or context-window data, Cursor doesn't support
-// hook status or planMode, etc.). Renderer code uses these flags via the
+// Per-runtime feature flags. Different CLIs expose different capabilities.
+// Renderer code uses these flags via the
 // <Capability /> wrapper to conditionally render runtime-specific UI.
 export interface AgentRuntimeCapabilities {
   sessionResume: boolean;
@@ -622,8 +827,18 @@ export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
   installed: boolean;
-  disabledBySettings?: boolean;
-  disabledReason?: string;
+  // Tri-state sign-in signal. `installed` only means the binary was found on
+  // PATH; a CLI can be present but signed out, which fails at launch time.
+  // true/false when detection could establish credential PRESENCE (never the
+  // secret itself); undefined when it could not determine either way — treat
+  // undefined as "assume usable". ADVISORY ONLY: detection cannot see the
+  // user's shell environment or every credential route, so `false` means "no
+  // credential detected", not "signed out" — warn on it, but never let it
+  // (rather than installed=false) refuse to run or assign work.
+  authenticated?: boolean;
+  // Short human-readable hint for the authenticated=false case
+  // (e.g. "run `claude` and sign in"). Never contains secret material.
+  authHint?: string;
   executablePath: string | null;
   version: string | null;
   versionError: string | null;
@@ -665,11 +880,59 @@ export interface AgentAssetInventoryItem {
   name: string;
   path: string;
   enabledForSessions: boolean;
+  // MCP only: whether this server is handed to Cora's Pi manager session and to
+  // Pi implementation workers. Always false for skills.
+  enabledForCoraManager: boolean;
+  enabledForPiWorkers: boolean;
   detail?: string;
   canDelete: boolean;
   compatibility: AgentAssetCompatibility;
   compatibilityReason?: string;
   syncable: boolean;
+  // MCP only: how the server is reached, plus a one-line human summary of it
+  // (`npx -y pkg` for stdio, the origin for remote). Absent when the entry was
+  // discovered by name but its definition could not be parsed.
+  mcpTransport?: AgentMcpTransport;
+  mcpSummary?: string;
+}
+
+// stdio and streamable HTTP are the two shapes the add/edit form writes. "sse"
+// only ever arrives from a config the user wrote by hand; the form reads it as
+// HTTP and preserves the url, so a saved edit migrates it to streamable-http.
+export type AgentMcpTransport = "stdio" | "http" | "sse";
+
+// One config file the Capability Center is willing to write a user-authored
+// MCP server into. `format` decides the serializer: JSON files take the Claude
+// mcpServers shape, TOML files the Codex [mcp_servers.*] shape.
+export interface AgentMcpTarget {
+  id: string;
+  runtime: AgentAssetRuntime;
+  scope: AgentAssetScope;
+  path: string;
+  label: string;
+  format: "json" | "toml";
+}
+
+export interface AgentMcpServerDraft {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+export interface AgentMcpServerDetail extends AgentMcpServerDraft {
+  id: string;
+  targetId: string;
+}
+
+export interface AgentMcpSaveResult {
+  ok: boolean;
+  name?: string;
+  path?: string;
+  error?: string;
 }
 
 export interface AgentAssetInventory {
@@ -1037,14 +1300,20 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
-// Human input is reserved for choices Cora cannot safely infer. These four
+// Human input is reserved for choices Cora cannot safely infer. These
 // categories are intentionally narrow; reversible engineering preferences are
 // recorded as assumptions instead of blockers.
+//
+// `plan_approval` is the one gate that is not about danger: Auto proposes a plan
+// for a large or risky request and blocks on accept / modify / reject. It must
+// stay a real category, because an uncategorized question is auto-assumed by
+// decideRunManagerQuestion, i.e. the manager would silently approve itself.
 export type RunQuestionCategory =
   | "credentials_access"
   | "destructive_irreversible"
   | "safety_policy"
-  | "irreducible_product_scope";
+  | "irreducible_product_scope"
+  | "plan_approval";
 
 export type RunQuestionSource =
   | "manager_decision"
@@ -1068,7 +1337,7 @@ export interface RunBlocker {
   resumeStatus: RunStatus;
   source: RunQuestionSource;
   resumeStrategy: RunQuestionResumeStrategy;
-  /** The OpenRouter manager stage to re-run after a scheduled-manager answer. */
+  /** The manager stage to re-run after a scheduled-manager answer. */
   managerMode?: SparkCall["mode"];
   blockedAt: string;
 }
@@ -1119,13 +1388,20 @@ export interface RunAssumption {
 }
 
 // Which Cora manager backend drives this chat's manager decisions and (in Talk
-// mode) chat replies. Today this is OpenRouter via fetch() to an LLM API; the
-// two CLI options spawn a real `claude` or `codex` process under node-pty and
-// drive it for the chat surface (uses the user's paid Claude/Codex
-// subscription instead of API credits). When the chat-level field is unset on
-// a RunState, callers fall back to OpenRouter for backwards compatibility with
-// pre-feature runs.
-export type ChatBackendKind = "openrouter" | "claude" | "codex";
+// mode) chat replies. Every member runs a real agent process on the user's own
+// subscription auth, never a metered API key: "pi" is the pinned Pi runtime
+// (driven over RPC, no terminal), while "claude"/"codex" spawn a real `claude`
+// or `codex` process under node-pty and drive it for the chat surface. "pi" is
+// the default, when the chat-level field is unset on a RunState, callers treat
+// it as "pi", and a persisted legacy "openrouter" value (from when Cora could
+// be routed through an OpenRouter API key) migrates to "pi" on read.
+export type ChatBackendKind = "claude" | "codex" | "pi";
+
+// Cora's Pi execution depth is a first-class, per-chat policy rather than a
+// model alias. Fast minimizes coordination overhead; Deep adds explicit
+// contract mapping and falsification; Frontier uses the strongest bounded
+// evidence contract and is the only route eligible for audited-state reuse.
+export type CoraExecutionPolicy = "fast" | "deep" | "frontier";
 
 // Manager behaviour mode chosen per chat:
 //   auto    — Cora routes each message herself: answer directly, spawn workers,
@@ -1223,6 +1499,17 @@ export type WorkerAttemptStatus =
 // null means "no detection has fired yet" — treat as unknown.
 export type RuntimeState = "launching" | "working" | "blocked" | "idle" | "done" | "error";
 
+// Binary foreground-agent lifecycle emitted by a terminal pane. A false state
+// can be heuristic (the visible UI disappeared briefly) or confirmed (the
+// shell prompt/alt-screen exit was positively observed). Durable session
+// pointers are deactivated only for confirmed exits; heuristic loss still
+// clears the cosmetic worker chip but must not disable restart restoration.
+export interface TerminalAgentForegroundState {
+  runtime: "claude" | "codex" | null;
+  running: boolean;
+  exitConfirmed?: boolean;
+}
+
 export type ReviewDecisionType =
   | "accept"
   | "retry_same_worker"
@@ -1276,6 +1563,12 @@ export interface RunState {
   workerAttempts: WorkerAttempt[];
   sparkCalls: SparkCall[];
   humanMessages: HumanRunMessage[];
+  /**
+   * Cora-owned visual explanation for this chat. The whiteboard is stored in
+   * run.json so it survives reloads and is shared by the renderer, Pi, Claude,
+   * and Codex rather than living in browser-only component state.
+   */
+  whiteboard?: CoraWhiteboard;
   /**
    * Monotonic Cora-owned conversation generation. Reliable rewind increments
    * this value before a fresh provider session is started; callbacks, stream
@@ -1339,17 +1632,29 @@ export interface RunState {
    */
   greenClaims?: Record<string, string>;
   /**
+   * Guardrail counter: how many CORRECTIVE verifier verdicts (FEEDBACK/FAILED
+   * — the ones that trigger rework) have been reviewed on this run since the
+   * last user turn. Clean terminal-OK passes (PERFECT/VERIFIED/PARTIAL) do
+   * not count, and every new user message (and user-driven resume) resets it,
+   * so the execute-mode ceiling only trips on a genuine runaway corrective
+   * loop. Persisted so the ceiling survives restarts regardless of which
+   * manager backend keeps requesting rounds. Undefined on legacy runs reads
+   * as 0.
+   */
+  verificationRounds?: number;
+  /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
-   * treated as "openrouter" by the dispatch layer — keeps pre-feature chats
-   * working unchanged.
+   * treated as "pi" by the dispatch layer. A run persisted with the retired
+   * "openrouter" backend is rewritten to "pi" by normalizeRun on read (its
+   * chatModel is dropped with it, that slug meant nothing to any surviving
+   * backend), so pre-feature chats keep working.
    */
   chatBackend?: ChatBackendKind;
   /**
-   * Model id passed to the chosen backend. For OpenRouter this is a free-form
-   * provider/model slug (e.g. "google/gemini-flash-latest"); for Claude one of
-   * "claude-opus-4-8" / "claude-sonnet-5"; for Codex one of the GPT-5.6
-   * Sol/Terra/Luna model ids. When
-   * undefined the backend picks its registered default.
+   * Model id passed to the chosen backend, in that backend's own naming: for
+   * Pi a runtime-catalog model id; for Claude one of "claude-opus-5" /
+   * "claude-sonnet-5"; for Codex one of the GPT-5.6 Sol/Terra/Luna model ids.
+   * When undefined the backend picks its registered default.
    */
   chatModel?: string;
   /** Execute = Codara spawns workers; Talk = pure conversational backend chat. */
@@ -1357,12 +1662,18 @@ export interface RunState {
   /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
    * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
   chatEffort?: AgentEffortLevel;
+  /** Pinned Pi orchestration depth. NOT user-selectable: the effective policy
+   * is derived from taskComplexity by effectiveRunExecutionPolicy in main.
+   * This field survives for pre-picker runs and for non-UI callers (frontier
+   * smoke scripts, automations) that pin a policy deliberately. Undefined
+   * migrates to Fast. Non-Pi backends persist it but ignore it. */
+  coraExecutionPolicy?: CoraExecutionPolicy;
   /**
    * Provider-side session UUID for the CC/Codex CLI backing this chat. Stored
    * so the next spawn can `claude -r <uuid>` or `codex resume <uuid>` and
    * pick the conversation back up after the app closes. Stays undefined until
-   * the first CC/Codex spawn for this chat. Irrelevant for the OpenRouter
-   * backend (no equivalent session-id concept).
+   * the first CC/Codex spawn for this chat. Irrelevant for the Pi backend (it
+   * has no equivalent CLI-resume session-id concept).
    */
   chatSessionUuid?: string;
   /**
@@ -1378,12 +1689,12 @@ export interface RunState {
   /**
    * Fast-mode toggle for the chat backend. Codex-only: passed as
    * `--enable fast_mode` (true) or `--disable fast_mode` (false) at spawn
-   * time. Claude Code and OpenRouter ignore it. Default false (unset).
+   * time. Claude Code and Pi ignore it. Default false (unset).
    */
   chatFastMode?: boolean;
   /**
-   * 1M-context toggle. Claude Code is normalized to true. Codex and
-   * OpenRouter normalize it to false because they do not use this toggle.
+   * 1M-context toggle. Claude Code is normalized to true. Codex and Pi
+   * normalize it to false because they do not use this toggle.
    */
   chat1mContext?: boolean;
   /**
@@ -1535,6 +1846,13 @@ export interface WorkspaceRunMemoryRecord {
    * Lets a later run weigh whether the chosen complexity actually held up.
    */
   verificationSurvived: boolean;
+  /** Outcome-conditioned proof state. Missing on v1 records and therefore
+   * treated as unverified by the reader rather than trusted optimistically. */
+  verificationStatus?: "verified" | "mixed" | "unverified";
+  /** Accepted verifier evidence retained without the surrounding transcript. */
+  verifiedClaimCount?: number;
+  failedClaimCount?: number;
+  oracleEvidence?: string[];
   /** Per-runtime implementation -> verifier outcomes distilled from attempts. */
   runtimeOutcomes: WorkspaceRunMemoryRuntimeOutcome[];
   /** Build/test commands distilled from reports that passed verification. */
@@ -1561,6 +1879,64 @@ export interface WorkspaceMemoryLedger {
   version: number;
   workspaceId: string;
   records: WorkspaceRunMemoryRecord[];
+}
+
+/**
+ * Cora's writable memory (distinct from the run ledger above, which Cora never
+ * edits). Two tiers of one plain-markdown file each: `global` holds facts about
+ * the user and this machine, `workspace` holds facts about one repository. Cora
+ * appends to them through the `codara_remember` tool and the user edits them in
+ * the normal editor, so the file is the source of truth and the app only
+ * reports on it.
+ */
+export type CoraMemoryScope = "global" | "workspace";
+
+/** One memory file's live state, as reported to the renderer. */
+export interface MemoryTierStatus {
+  /** Whether this tier is read into prompts and writable by `codara_remember`. */
+  enabled: boolean;
+  /** Absolute path of the backing markdown file, resolved by the main process.
+   *  The UI opens exactly this, it never recomputes the location. */
+  path: string;
+  /** Size of the file on disk; 0 when it does not exist yet. */
+  bytesUsed: number;
+  /** Hard ceiling for this tier (MEMORY_FILE_MAX_BYTES). */
+  bytesCap: number;
+  /** bytesUsed has passed bytesCap, so further `add` calls are refused and Cora
+   *  is told to consolidate with `replace` instead. */
+  overCap: boolean;
+  /** Line provenance: `user` lines were written by hand and survive an
+   *  agent-lines-only clear; `cora` lines came from `codara_remember`; `auto`
+   *  lines were distilled by Codara itself. */
+  counts: { user: number; cora: number; auto: number };
+}
+
+/** Both tiers at once: every memory IPC resolves to this pair, including the
+ *  mutations, so the renderer never has to re-read after a change. */
+export interface CoraMemoryStatus {
+  global: MemoryTierStatus;
+  workspace: MemoryTierStatus;
+}
+
+/** `memory:get` payload. `workspaceId` may be null when no workspace is active;
+ *  the workspace tier then reports disabled with an empty path. */
+export interface MemoryStatusInput {
+  workspaceId: string | null;
+}
+
+/** `memory:setEnabled` payload. */
+export interface MemorySetEnabledInput {
+  scope: CoraMemoryScope;
+  workspaceId: string | null;
+  enabled: boolean;
+}
+
+/** `memory:clear` payload. `includeUserLines` defaults to false at the handler,
+ *  so the destructive half of the clear is always an explicit opt-in. */
+export interface MemoryClearInput {
+  scope: CoraMemoryScope;
+  workspaceId: string | null;
+  includeUserLines?: boolean;
 }
 
 export interface Checkpoint {
@@ -1602,6 +1978,7 @@ export interface UpdateChatBackendInput {
   chatModel?: string;
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
+  coraExecutionPolicy?: CoraExecutionPolicy;
   chatFastMode?: boolean;
   chat1mContext?: boolean;
 }
@@ -1805,7 +2182,7 @@ export interface StepState {
    * Per-step roll-up of manager-call USD cost. Computed from the SparkCall
    * records that name this step (via the next-active-step pointer at call
    * time). Worker-side LLM cost is not yet tracked — Codara only sees the
-   * manager's OpenRouter usage today.
+   * manager's own token usage today.
    */
   totalCostUsd?: number;
   createdAt: string;
@@ -1833,6 +2210,9 @@ export type PlannedStepAgentTaskClass = "skeleton" | "feature" | "leaf" | "verif
 //              verifier follow-up (cross-provider, single peer).
 //   - complex: subtle/byte-level work where atomic claims compound. 2 peer
 //              verifiers in parallel (Claude + Codex) — the existing pattern.
+// It is ALSO the sole input to the run's execution policy now that the policy
+// picker is gone: complex derives deep (wider verification budget, no
+// one-rework cap), everything else derives fast. See effectiveRunExecutionPolicy.
 export type TaskComplexity = "trivial" | "standard" | "complex";
 
 export interface PlannedStepAgent {
@@ -1923,6 +2303,10 @@ export type WriteScopeSource = "manager" | "derived" | "fan-out";
 export interface WorkerTask {
   id: string;
   runId: string;
+  // Explicit retry/fallback lineage. When a task is replaced because its
+  // runtime failed environmentally, orchestration waits follow this pointer
+  // instead of treating the cancelled predecessor as the final result.
+  supersedesTaskId?: string;
   stepId?: string;
   title: string;
   description: string;
@@ -1942,6 +2326,24 @@ export interface WorkerTask {
   // overwritten from real filesChanged and "fan-out" when forced by a
   // FanOutDirective.
   writeScopeSource?: WriteScopeSource;
+  // Parallel-launch provenance. "manager_batch" marks a task minted by an
+  // execute-mode manager spawn batch of two or more workers (agent-socket's
+  // codara_spawn_workers handler). That path launches every attempt of the
+  // batch simultaneously without consulting pickAutopilotTasks, so the system
+  // already accepted these tasks running concurrently even with empty
+  // allowedPaths (research/leaf workers legitimately declare none). Retry and
+  // runtime-fallback replacements inherit the marker so a relaunch wave keeps
+  // the concurrency the first launch granted instead of collapsing into a
+  // serial chain. Undefined on planner/autopilot-created tasks, which stay
+  // subject to the fan-out no-concrete-scope serial downgrade.
+  parallelTrust?: "manager_batch";
+  // True when this task's attempt was wired for peer comms: the worker got the
+  // shared mailbox (peer_send / peer_inbox and the manager channel riding the
+  // same artifacts) because it runs alongside same-step siblings. Written by
+  // prepareWorkerTask from shouldUsePeerComms, so the renderer can draw the
+  // batch as a team instead of guessing at the gate. Undefined on tasks that
+  // predate the flag and on every solo worker, both of which render unchanged.
+  peerComms?: boolean;
   // Plan-mode council: candidates of the same council share this id and each
   // carries its 0-based candidateIndex. Undefined for normal tasks. Lets same-
   // scope council candidates run in parallel and groups them in the run graph.
@@ -1968,8 +2370,24 @@ export interface WorkerTask {
    *     verifier could judge, so acceptance was forced to avoid stalling.
    *   - corrective_rounds_capped: corrective re-attempts hit their cap without
    *     a passing verdict, so the latest attempt was accepted as-is.
+   *   - verification_rounds_capped: the run-level verification-round ceiling
+   *     fired, so pending work was landed instead of verifying again.
+   *   - synthetic_step_ceiling: an execute-mode manager hit the hard cap on
+   *     spawned worker-batch steps, so the run was landed with work so far.
    */
-  forceAcceptReason?: "completion_refused" | "corrective_rounds_capped";
+  forceAcceptReason?:
+    | "completion_refused"
+    | "corrective_rounds_capped"
+    | "verification_rounds_capped"
+    | "synthetic_step_ceiling";
+  /**
+   * How many verifier-FEEDBACK corrective requeues this task has consumed.
+   * Tracked separately from raw attempt counts, which also include
+   * environmental-fallback retries — the fast execution policy caps
+   * FEEDBACK rework at one round and must not miscount environmental
+   * retries as verification rework.
+   */
+  verifierFeedbackRounds?: number;
   /**
    * Looms v2.5: which graph node (LoomNodeDef.id) this task executes within a
    * loom pass. Stamped by run-store's node launcher; undefined on managed runs
@@ -1996,12 +2414,50 @@ export interface WorkerTask {
   collabMailDirHint?: string;
 }
 
+/**
+ * Classified cause of a worker attempt failure. Free-form error text stays the
+ * human record; this is the small closed set retry policy is allowed to branch
+ * on (see src/main/orchestration/failure-taxonomy.ts).
+ *   - transport: the pipe/socket/network under the provider call broke.
+ *   - provider: the model provider answered with a transient server-side error
+ *     (5xx, overloaded).
+ *   - rate_limit: the provider refused for quota (429, rate limit). Never
+ *     fast-retried on the same runtime; the window outlives any quick retry,
+ *     while the other provider's quota is independent.
+ *   - auth: credentials are missing, expired, or rejected.
+ *   - launch: the runtime binary never came up (missing, bad flag, no TUI).
+ *   - tool: a tool, MCP bridge, or extension inside the harness failed.
+ *   - timeout: the attempt outlived its budget without finishing.
+ *   - cancelled: a user stop, pause, or interrupt ended the attempt.
+ * Undefined on attempts recorded before this field existed and on failures no
+ * pattern claims, which keep the pre-taxonomy behaviour.
+ */
+export type WorkerFailureKind =
+  | "transport"
+  | "provider"
+  | "rate_limit"
+  | "auth"
+  | "launch"
+  | "tool"
+  | "timeout"
+  | "cancelled";
+
 export interface WorkerAttempt {
   id: string;
   runId: string;
   workerTaskId: string;
   attemptNumber: number;
   runtime: WorkerRuntime;
+  /**
+   * The model this attempt actually launched on, resolved through the worker
+   * roster at spawn time. `runtime` names the provider Pi authenticates as,
+   * it is NOT the harness (everything runs under Pi) and it is NOT specific
+   * enough to show a human. Persisted structurally because the same value was
+   * previously only reachable by parsing it back out of the `command` display
+   * string. Undefined for runtimes with no model (shell) and for attempts
+   * recorded before this field existed.
+   */
+  model?: string;
   command?: string;
   cwd: string;
   status: WorkerAttemptStatus;
@@ -2035,6 +2491,12 @@ export interface WorkerAttempt {
   sandboxMergedBack?: boolean;
   error?: string;
   /**
+   * Classification of `error`, written whenever an attempt is recorded as
+   * failed. Purely additive: absent for successful attempts, for runs written
+   * before the taxonomy existed, and for error text no pattern claims.
+   */
+  failureKind?: WorkerFailureKind;
+  /**
    * Latest agent state for this attempt. Two writers feed this field:
    *   - the renderer-side terminal poller (big bet A) via `terminalState:report`
    *     IPC → `reportTerminalState`. Source = "regex".
@@ -2050,10 +2512,12 @@ export interface WorkerAttempt {
    * Which writer last updated `runtimeState`. The doc rule is "hook wins
    * over regex" — `reportTerminalState` honours this by refusing to
    * overwrite a fresh hook report (see HOOK_TRUST_MS in run-store.ts).
-   * `undefined` means the field is unset or was written before this
-   * provenance bit existed.
+   * "exit" is the worker's own pty dying unsanctioned, which outranks both:
+   * the process that produced every other report is gone, so no later regex
+   * tick may overwrite it. `undefined` means the field is unset or was
+   * written before this provenance bit existed.
    */
-  runtimeStateSource?: "hook" | "regex";
+  runtimeStateSource?: "hook" | "regex" | "exit";
   /**
    * Git sha of the pre-worker checkpoint captured in launchWorkerAttempt just
    * before runWorkerSession (null when the workspace is not a git repo). The
@@ -2153,7 +2617,7 @@ export interface SparkCall {
   contextWindowSource?: "known" | "default";
   /**
    * Cost / token-split fields populated after a successful manager call via
-   * `priceCall(...)` in `src/main/openrouter-prices.ts`. `costUsd` is zero when
+   * `priceCall(...)` in `src/main/model-prices.ts`. `costUsd` is zero when
    * the model isn't in the price table or the response carried no usage block;
    * the token counts still populate so the Costs tab can show usage even when
    * the dollar number is unknown.
@@ -2204,8 +2668,8 @@ export interface CreateRunInput {
   cwd: string;
   title?: string;
   // Per-chat backend selections forwarded from the composer's chip when
-  // creating a fresh chat. Optional — when omitted, the run defaults to
-  // OpenRouter + the global manager model and the chip starts on its
+  // creating a fresh chat. Optional, when omitted, the run defaults to the
+  // Pi backend on its registered default model and the chip starts on its
   // defaults. ChatPanel reads the draft chip values and threads them
   // through onStartChat → createRunInput so the chip's selection survives
   // the draft→live transition.
@@ -2213,6 +2677,7 @@ export interface CreateRunInput {
   chatModel?: string;
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
+  coraExecutionPolicy?: CoraExecutionPolicy;
   chatFastMode?: boolean;
   chat1mContext?: boolean;
   // Looms v2: stamp automation ownership + direct execution at creation so
@@ -2234,6 +2699,109 @@ export interface MarkRunSeenInput {
 export interface RenameRunInput {
   runId: string;
   title: string;
+}
+
+export type CoraWhiteboardNodeKind =
+  | "topic"
+  | "group"
+  | "file"
+  | "symbol"
+  | "flow"
+  | "condition"
+  | "decision"
+  | "risk"
+  | "note";
+
+export type CoraWhiteboardEdgeTone = "default" | "accent" | "success" | "warning" | "danger";
+export type CoraWhiteboardEdgeStyle = "solid" | "dashed";
+export type CoraWhiteboardEditor = "cora" | "user" | "import";
+
+export interface CoraWhiteboardNode {
+  id: string;
+  kind: CoraWhiteboardNodeKind;
+  title: string;
+  body?: string;
+  /** Infinite-canvas coordinates in logical CSS pixels. */
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  /**
+   * Optional status accent overriding the kind's default color — e.g. a green
+   * "done" flow node or a red "broken" file node. Absent = kind color.
+   */
+  tone?: CoraWhiteboardEdgeTone;
+}
+
+export interface CoraWhiteboardEdge {
+  id: string;
+  from: string;
+  to: string;
+  label?: string;
+  tone?: CoraWhiteboardEdgeTone;
+  /** dashed marks soft/optional relations; absent renders solid. */
+  style?: CoraWhiteboardEdgeStyle;
+}
+
+export interface CoraWhiteboard {
+  version: 1;
+  /** Monotonic edit revision used to prevent Cora and a human overwriting each other. */
+  revision?: number;
+  lastEditedBy?: CoraWhiteboardEditor;
+  title: string;
+  summary?: string;
+  nodes: CoraWhiteboardNode[];
+  edges: CoraWhiteboardEdge[];
+  updatedAt: string;
+}
+
+export interface UpdateCoraWhiteboardInput {
+  runId: string;
+  action?: "replace" | "merge" | "clear";
+  /** Reject the update when the persisted board has changed since this revision. */
+  baseRevision?: number;
+  editor?: CoraWhiteboardEditor;
+  title?: string;
+  summary?: string;
+  nodes?: CoraWhiteboardNode[];
+  edges?: CoraWhiteboardEdge[];
+  removeNodeIds?: string[];
+  removeEdgeIds?: string[];
+}
+
+/** Portable, repository-friendly representation written to *.coraboard files. */
+export interface CoraWhiteboardFile {
+  format: "codara.whiteboard";
+  version: 1;
+  exportedAt: string;
+  board: CoraWhiteboard;
+}
+
+export interface ExportCoraWhiteboardFileInput {
+  board: CoraWhiteboard;
+  defaultPath?: string;
+  suggestedName?: string;
+}
+
+export interface ImportedCoraWhiteboardFile {
+  path: string;
+  board: CoraWhiteboard;
+}
+
+/**
+ * Generic dialog-based file export (dialog:exportFile): prompt for a
+ * destination and write a renderer-produced payload — board images today,
+ * any small artifact tomorrow. `data` is utf8 text or base64 bytes per
+ * `encoding`.
+ */
+export interface ExportFileDialogInput {
+  title?: string;
+  /** Full default path including file name; falls back to Documents + suggestedName. */
+  defaultPath?: string;
+  suggestedName?: string;
+  filters: { name: string; extensions: string[] }[];
+  data: string;
+  encoding?: "utf8" | "base64";
 }
 
 export interface CreateStepInput {
@@ -2281,6 +2849,9 @@ export interface CreateWorkerTaskInput {
   // so existing createWorkerTask call sites keep compiling (undefined =
   // manager-provided scopes).
   writeScopeSource?: WriteScopeSource;
+  // Parallel-launch provenance; threads onto the created WorkerTask. Set only
+  // by the execute-mode spawn handler for batches of two or more workers.
+  parallelTrust?: WorkerTask["parallelTrust"];
   // Plan-mode council grouping; threads onto the created WorkerTask.
   councilGroupId?: string;
   candidateIndex?: number;
@@ -2347,10 +2918,10 @@ export interface StartAutopilotInput {
   // Which Cora manager backend should drive this run. Set by the explorer's
   // "Run plan" engine flyout and the Source Control "Smart Merge" engine
   // picker. Only applied when startAutopilot creates the run itself (no
-  // runId) — it threads into createRun so the manager dispatches to Claude
-  // Code / Codex instead of the default OpenRouter manager. Undefined keeps
-  // the legacy OpenRouter behaviour.
+  // runId) — it threads into createRun so the manager dispatches to the
+  // selected route. Undefined selects the bundled Cora · Pi manager.
   chatBackend?: ChatBackendKind;
+  coraExecutionPolicy?: CoraExecutionPolicy;
   // Per-automation engine selection. An automation pins these so each iteration
   // (when it creates a fresh run via isolate / first launch) runs on the chosen
   // model / mode / effort. Forwarded into createRun, which already stamps them
@@ -2648,8 +3219,9 @@ export interface AutomationPrompt {
 // Automations no longer launch manager-orchestrated runs. Each iteration runs
 // ONE claude/codex CLI worker directly (RunState.executionMode === "direct").
 
-/** Engines an automation may run. OpenRouter is intentionally NOT a member —
- *  the API backend is for utilities (commit messages, inline edit), not looms. */
+/** Engines an automation may run: the CLI workers, and only those. Cora's Pi
+ *  manager runtime is intentionally NOT a member, looms bypass the manager
+ *  and drive one worker directly. */
 export type LoomEngine = "claude" | "codex";
 
 /** Per-loom worker configuration (the Worker node in the flow editor). */
@@ -2993,8 +3565,10 @@ export interface ScheduledJob {
   input: StartAutopilotInput; // pinned workspace/cwd payload (legacy chat* fields unread)
   loop: AutomationLoop; // backfilled to {kind:"once",stop:{}} on read
   prompt?: AutomationPrompt; // template overrides input.initialUserNote per iter
-  /** Looms v2 worker config. Backfilled by scheduler.normalizeJob (legacy
-   *  chatBackend claude/codex carries over; openrouter/undefined → "auto").
+  /** Looms v2 worker config. Backfilled by scheduler.normalizeJob (a legacy
+   *  chatBackend of claude/codex carries over; anything else, pi, the retired
+   *  "openrouter", or undefined, becomes "auto", which resolveWorker maps to
+   *  claude-if-installed else codex).
    *  Required post-normalize, like loop/state/history. */
   worker: LoomWorkerConfig;
   /** Looms v2.5 node graph. Backfilled by scheduler.normalizeJob from the flat

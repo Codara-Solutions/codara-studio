@@ -134,7 +134,11 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
             SPARK_HOME_DIR: sparkHome(),
             SPARK_RUN_ID: input.runId,
             SPARK_AUTOMATION_ID: input.automationId,
-            SPARK_MCP_MODE: "execute",
+            // Worker roster: studio tools plus codara_ask_user /
+            // codara_request_next_iteration for the automation-loop lifecycle.
+            // Never "execute" — that is the manager's orchestration roster
+            // (spawn/complete/message_workers), which must not reach a worker.
+            SPARK_MCP_MODE: "worker",
             ...(input.task.loomNodeId ? { SPARK_NODE_ID: input.task.loomNodeId } : {}),
           },
           alwaysLoad: true,
@@ -224,7 +228,9 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
       "-c",
       "project_doc_max_bytes=0",
       "-c",
-      'mcp_servers.codara-studio.env.SPARK_MCP_MODE="execute"',
+      // Worker roster (see the claude branch above): studio tools + the
+      // automation-loop lifecycle pair, never the manager's execute roster.
+      'mcp_servers.codara-studio.env.SPARK_MCP_MODE="worker"',
       "-c",
       `mcp_servers.codara-studio.env.SPARK_HOME_DIR="${escaped(sparkHome())}"`,
       "-c",

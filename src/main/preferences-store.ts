@@ -247,10 +247,6 @@ function normalize(
     copyBranchSetupCommandByRepo: normalizeCopyBranchSetupCommands(
       src.copyBranchSetupCommandByRepo,
     ),
-    fableEnabled:
-      typeof src.fableEnabled === "boolean"
-        ? src.fableEnabled
-        : DEFAULT_PREFERENCES.fableEnabled,
     // Opt-in: relaunches only resume agent sessions when the user enabled the
     // Settings toggle. Absent/invalid values fall back to the default (off),
     // which preserves the fresh-shell behavior for existing preference files.

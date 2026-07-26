@@ -90,11 +90,17 @@ export default function RunGraph({
     [orderedSteps, rowsByStep],
   );
   const promptStepId = useMemo(() => promptGenerationTargetStepId(run), [run]);
+  // The user has stopped this run from the composer. Nothing below the spine
+  // may keep implying live work, so the paused truth is carried down to every
+  // node from the run record itself rather than guessed at per node.
+  const runPaused = run.status === "paused";
 
   if (orderedSteps.length === 0) {
     // A finished run with no steps did its work outside the worker pipeline
     // (a spawn_terminals decision). Show that outcome rather than the planning
-    // skeletons, which would falsely imply work is still forming.
+    // skeletons, which would falsely imply work is still forming. (Pure
+    // conversations never reach this component — RunsView shows its quiet
+    // rest state instead of the canvas for those.)
     const settled =
       run.status === "complete" ||
       run.status === "failed" ||
@@ -133,6 +139,7 @@ export default function RunGraph({
                 attemptByTask={maps.attemptByTask}
                 tasksById={maps.taskById}
                 active={step.id === run.currentStepId}
+                runPaused={runPaused}
                 selected={stepSelected}
                 onSelect={() => onSelectStep(step.id)}
               />
@@ -151,6 +158,7 @@ export default function RunGraph({
                   <WorkerNode
                     row={row}
                     stepStatus={step.status}
+                    runPaused={runPaused}
                     selected={workerSelected}
                     onSelect={() => {
                       if (workerLayout.taskId) onSelectWorker(workerLayout.taskId);
@@ -262,7 +270,7 @@ function SkeletonStep({ index, dim }: { index: number; dim: boolean }) {
         boxSizing: "border-box",
         borderRadius: 12,
         border: "1px dashed var(--rule)",
-        background: "color-mix(in oklch, var(--panel) 64%, transparent)",
+        background: "color-mix(in oklab, var(--panel) 64%, transparent)",
         opacity: dim ? 0.5 : 0.85,
         padding: "13px 15px",
         display: "flex",
@@ -287,7 +295,7 @@ function SkeletonStep({ index, dim }: { index: number; dim: boolean }) {
             fontWeight: 700,
           }}
         >
-          {String(index).padStart(2, "0")}
+          {index}
         </span>
         <Shimmer width={150} height={9} />
       </div>
@@ -311,7 +319,7 @@ function Shimmer({ width, height }: { width: number | string; height: number }) 
         height,
         borderRadius: 999,
         background:
-          "linear-gradient(90deg, color-mix(in oklch, var(--ink) 5%, transparent) 0%, color-mix(in oklch, var(--ink) 13%, transparent) 50%, color-mix(in oklch, var(--ink) 5%, transparent) 100%)",
+          "linear-gradient(90deg, color-mix(in oklab, var(--ink) 5%, transparent) 0%, color-mix(in oklab, var(--ink) 13%, transparent) 50%, color-mix(in oklab, var(--ink) 5%, transparent) 100%)",
         backgroundSize: "220% 100%",
         animation: "spark-shimmer 2.1s ease-in-out infinite",
       }}
@@ -402,8 +410,8 @@ function OutcomeNode({ run }: { run: RunState }) {
   const title = spawned ? "Standing terminals" : failed ? "Run failed" : "No steps run";
   const detail = spawned
     ? count > 0
-      ? `Cora opened ${count} interactive ${count === 1 ? "terminal" : "terminals"} in the workbench for you to drive.`
-      : "Cora opened standing terminals in the workbench for you to drive."
+      ? `Cora opened ${count} ${count === 1 ? "terminal" : "terminals"} in the workbench.`
+      : "Cora opened standing terminals in the workbench."
     : failed
       ? "Cora stopped before running any worker steps."
       : "Cora finished this chat without running any worker steps.";
@@ -417,7 +425,7 @@ function OutcomeNode({ run }: { run: RunState }) {
         boxSizing: "border-box",
         borderRadius: 12,
         border: `1px solid ${tone}`,
-        background: `linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 86%, ${tone} 7%), color-mix(in oklch, var(--panel) 86%, transparent))`,
+        background: `color-mix(in oklab, ${tone} 5%, var(--panel))`,
         boxShadow: "var(--lift-hi), var(--shadow-2)",
         padding: "14px 16px",
         display: "flex",
@@ -447,11 +455,10 @@ function OutcomeNode({ run }: { run: RunState }) {
           <span
             style={{
               color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 9,
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
               fontWeight: 600,
-              letterSpacing: "0.13em",
-              textTransform: "uppercase",
+              letterSpacing: "0.04em",
             }}
           >
             Outcome

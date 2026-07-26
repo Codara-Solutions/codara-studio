@@ -73,7 +73,11 @@ test("branch picker refreshes refs changed outside Codara when opened", async ()
       cwd: workspaceDir,
     });
 
-    await trigger.click();
+    // This test exercises the freshness boundary in the click handler, not
+    // Chromium hit-testing. An occluded Electron window can stop producing
+    // compositor frames, leaving Playwright's geometry-stability gate waiting
+    // forever for an otherwise stationary button.
+    await trigger.dispatchEvent("click");
     const filter = page.getByPlaceholder("Filter branches…");
     await expect(filter).toBeVisible();
     const branchPopup = filter.locator("xpath=ancestor::div[contains(@class, 'spark-glass')]");

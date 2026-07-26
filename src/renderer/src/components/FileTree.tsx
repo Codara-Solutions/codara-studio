@@ -22,6 +22,11 @@ import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHea
 const INDENT_STEP = 8;
 const BASE_LEFT = 6;
 const ROW_HEIGHT = 22;
+// Small and medium trees are cheaper and more reliable as plain DOM: they
+// avoid a ResizeObserver/compositor turn entirely, which matters when an
+// Electron window is occluded during a workspace switch. Large expanded
+// trees still use Virtuoso so genuinely huge repositories stay bounded.
+const DIRECT_TREE_RENDER_LIMIT = 240;
 
 // Static parts of the row container `style`. The per-row bits that actually
 // change (padding-left from depth, background/color from active|hover) are
@@ -138,6 +143,53 @@ interface FileNode {
 
 type Node = (DirNode & { kind: "dir" }) | (FileNode & { kind: "file" });
 
+// Switching workspaces remounts FileTree to reset Virtuoso's DOM/scroll state,
+// but rebuilding the entire expanded tree made larger projects visibly lag
+// behind the workspace click. Retain a small LRU of the in-memory tree models:
+// returning to a recent workspace paints its files immediately, then the normal
+// async reload/watch path reconciles the snapshot with disk.
+const FILE_TREE_CACHE_LIMIT = 12;
+const fileTreeCache = new Map<string, DirNode & { kind: "dir" }>();
+const expandedPathsByWorkspace = new Map<string, Set<string>>();
+
+function restoreExpandedPaths(cwd: string, node: Node): void {
+  if (node.kind !== "dir") return;
+  if (node.entry.path !== cwd) {
+    node.open = expandedPathsByWorkspace.get(cwd)?.has(node.entry.path) ?? node.open;
+  }
+  for (const child of node.children) restoreExpandedPaths(cwd, child);
+}
+
+function rememberExpandedPath(cwd: string, path: string, expanded: boolean): void {
+  let paths = expandedPathsByWorkspace.get(cwd);
+  if (!paths) {
+    paths = new Set<string>();
+    expandedPathsByWorkspace.set(cwd, paths);
+  }
+  if (expanded) paths.add(path);
+  else paths.delete(path);
+}
+
+function cachedFileTree(cwd: string): (DirNode & { kind: "dir" }) | null {
+  const cached = fileTreeCache.get(cwd);
+  if (!cached) return null;
+  fileTreeCache.delete(cwd);
+  fileTreeCache.set(cwd, cached);
+  restoreExpandedPaths(cwd, cached);
+  return cached;
+}
+
+function rememberFileTree(cwd: string, root: DirNode & { kind: "dir" }): void {
+  fileTreeCache.delete(cwd);
+  fileTreeCache.set(cwd, root);
+  while (fileTreeCache.size > FILE_TREE_CACHE_LIMIT) {
+    const oldest = fileTreeCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    fileTreeCache.delete(oldest);
+    expandedPathsByWorkspace.delete(oldest);
+  }
+}
+
 interface Props {
   cwd: string;
   activePath?: string | null;
@@ -145,8 +197,8 @@ interface Props {
   onDeleteFile?: (path: string) => void;
   onRenameFile?: (oldPath: string, entry: FsEntry) => void;
   // Right-click a .md/.html file to hand it to the orchestrator as a plan.
-  // `backend` is the engine chosen from the Run plan flyout (undefined = the
-  // default Codara / OpenRouter manager; "claude" / "codex" route to that CLI).
+  // `backend` is the engine chosen from the Run plan flyout; Pi is the default
+  // and Claude/Codex/API remain explicit alternatives.
   onRunPlan?: (entry: FsEntry, backend?: ChatBackendKind) => void;
   // Shared git status (App-owned poll) — drives VS Code-style changed-file
   // decorations: colored filename + trailing status glyph on leaf rows.
@@ -199,7 +251,13 @@ export default function FileTree({
   onToggleCollapse,
   headerDrag,
 }: Props) {
-  const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
+  const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => {
+    const cached = cachedFileTree(cwd);
+    if (cached) return cached;
+    const initial = makeDir({ name: basename(cwd), path: cwd, isDir: true }, true);
+    rememberFileTree(cwd, initial);
+    return initial;
+  });
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
   // Minimal right-click menu for blank Explorer space (no row under the
   // pointer): a single Paste action. Row right-clicks use `contextMenu`
@@ -305,10 +363,13 @@ export default function FileTree({
   // Reload when cwd changes
   useEffect(() => {
     let cancelled = false;
-    const next: DirNode & { kind: "dir" } = makeDir(
-      { name: basename(cwd), path: cwd, isDir: true },
-      true,
-    );
+    const next =
+      cachedFileTree(cwd) ??
+      makeDir(
+        { name: basename(cwd), path: cwd, isDir: true },
+        true,
+      );
+    rememberFileTree(cwd, next);
     setRoot(next);
     setContextMenu(null);
     setRenamingPath(null);
@@ -318,7 +379,22 @@ export default function FileTree({
     setSelectionRect(null);
     marqueeSelectionRef.current = null;
     rowElementsRef.current.clear();
-    (async () => {
+    void (async () => {
+      if (next.loaded) {
+        // Paint the retained tree now; reconcile it in the background. The
+        // watcher effect below performs another safe reconciliation once the
+        // main-process watch root is armed, covering changes made while away.
+        try {
+          await reloadExpandedTreeInPlace(next);
+          if (!cancelled) {
+            restoreExpandedPaths(cwd, next);
+            force((n) => n + 1);
+          }
+        } catch {
+          // Keep the usable cached tree; the watcher/retry path can heal it.
+        }
+        return;
+      }
       // A freshly-created workspace can race the main-process read sandbox:
       // this effect runs before App finishes registering `cwd` as an allowed
       // root, so the first `fs:list` may reject with "Path not allowed". Retry
@@ -326,13 +402,26 @@ export default function FileTree({
       // lands in the allowlist a tick later, instead of sitting at "Loading…".
       const children = await loadDirWithRetry(cwd, () => cancelled);
       if (cancelled || children === null) return;
-      next.children = children;
+      // The watcher-arm reconciliation can finish before this initial read.
+      // Preserve any directory nodes it already installed (including a folder
+      // the user expanded meanwhile) instead of replacing them with closed
+      // nodes from the slower request.
+      const currentDirs = new Map(
+        next.children
+          .filter((child): child is DirNode & { kind: "dir" } => child.kind === "dir")
+          .map((child) => [child.entry.path, child]),
+      );
+      next.children = children.map((child) =>
+        child.kind === "dir" ? currentDirs.get(child.entry.path) ?? child : child,
+      );
+      restoreExpandedPaths(cwd, next);
       next.loaded = true;
       next.loading = false;
       force((n) => n + 1);
     })();
     return () => {
       cancelled = true;
+      rememberFileTree(cwd, next);
     };
   }, [cwd]);
 
@@ -350,8 +439,9 @@ export default function FileTree({
       node.loading = false;
     }
     node.open = !node.open;
+    rememberExpandedPath(cwd, node.entry.path, node.open);
     force((n) => n + 1);
-  }, []);
+  }, [cwd]);
 
   const expandDir = useCallback(async (node: DirNode & { kind: "dir" }) => {
     if (node.open && node.loaded) return;
@@ -410,8 +500,11 @@ export default function FileTree({
       );
       if (cancelled || armed === null) return;
       try {
-        await reloadDirInPlace(rootRef.current);
-        if (!cancelled) force((n) => n + 1);
+        await reloadExpandedTreeInPlace(rootRef.current);
+        if (!cancelled) {
+          restoreExpandedPaths(cwd, rootRef.current);
+          force((n) => n + 1);
+        }
       } catch {
         // Non-fatal: the watcher is armed, so subsequent changes still refresh.
       }
@@ -430,7 +523,10 @@ export default function FileTree({
       }
       if (matches.length === 0) return;
       void Promise.all(matches.map((d) => reloadDirInPlace(d))).then(() => {
-        if (!cancelled) force((n) => n + 1);
+        if (!cancelled) {
+          restoreExpandedPaths(cwd, rootRef.current);
+          force((n) => n + 1);
+        }
       });
     });
     return () => {
@@ -916,6 +1012,9 @@ export default function FileTree({
       // The one in-tree exception is the inline rename INPUT, which must keep
       // native text editing.
       const inTree = listViewportRef.current?.contains(document.activeElement) ?? false;
+      // A whiteboard canvas holding focus owns these chords (board-card
+      // clipboard) — a lingering tree selection must not also act on files.
+      if (!inTree && document.activeElement?.closest(".cora-board-editor")) return;
       const targetIsTreeInput =
         !!target &&
         target.tagName === "INPUT" &&
@@ -1195,12 +1294,55 @@ export default function FileTree({
       (r) => r.kind === "node" && r.node.entry.path === activePath,
     );
     if (index === -1) return;
+    const directRow = rowElementsRef.current.get(activePath);
+    if (directRow) {
+      directRow.scrollIntoView({ block: "nearest", behavior: "auto" });
+      return;
+    }
     virtuosoRef.current?.scrollIntoView({ index, behavior: "auto" });
     // `flat` is rebuilt every render; depending on `activePath` alone keeps
     // this from firing on unrelated re-renders while still re-running when
     // the selection changes (the only time we want to scroll).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePath]);
+
+  const renderFlatRow = (row: FlatRow): React.ReactNode => {
+    if (row.kind === "placeholder") {
+      return (
+        <PlaceholderRow
+          depth={row.depth}
+          kind={row.entryKind}
+          onCommit={commitCreate}
+          onCancel={cancelCreate}
+        />
+      );
+    }
+    const dirNode = row.node.kind === "dir" ? row.node : null;
+    return (
+      <Row
+        node={row.node}
+        depth={row.depth}
+        active={row.node.entry.path === activePath}
+        selected={!row.node.entry.isDir && selectedFilePaths.has(row.node.entry.path)}
+        dirOpen={Boolean(dirNode?.open)}
+        dirLoading={Boolean(dirNode?.loading)}
+        dirLoaded={Boolean(dirNode?.loaded)}
+        dirError={dirNode?.error}
+        renaming={renamingPath === row.node.entry.path}
+        isDropTarget={dirNode != null && externalDropDir === row.node.entry.path}
+        cut={cutSet?.has(row.node.entry.path) ?? false}
+        gitFileStatus={
+          row.node.entry.isDir ? undefined : statusByPath?.get(row.node.entry.path)
+        }
+        onRowClick={handleRowClick}
+        onRowElement={updateRowElement}
+        onContextMenu={handleContextMenu}
+        onCommitRename={handleCommitRename}
+        onCancelRename={cancelRename}
+        onRowDragStart={handleRowDragStart}
+      />
+    );
+  };
 
   return (
     <div
@@ -1321,6 +1463,7 @@ export default function FileTree({
       */}
       <div
         ref={listViewportRef}
+        data-fs-row-count={flat.length}
         // Programmatically focusable (not tab-reachable) so a tree press can
         // move keyboard focus here — that's what lets Cmd+C/X/V act on the
         // Explorer even when an editor/terminal had focus. `outline: none`
@@ -1351,54 +1494,40 @@ export default function FileTree({
           transition: "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
         }}
       >
-        <Virtuoso
-          ref={virtuosoRef}
-          style={{ height: "100%", width: "100%" }}
-          totalCount={flat.length}
-          overscan={400}
-          // Preserve the original 2px top / 8px bottom breathing room the
-          // plain scroll container had via padding.
-          components={LIST_COMPONENTS}
-          itemContent={(i) => {
-            const row = flat[i];
-            if (!row) return null;
-            if (row.kind === "placeholder") {
-              return (
-                <PlaceholderRow
-                  depth={row.depth}
-                  kind={row.entryKind}
-                  onCommit={commitCreate}
-                  onCancel={cancelCreate}
-                />
-              );
-            }
-            const dirNode = row.node.kind === "dir" ? row.node : null;
-            return (
-              <Row
-                node={row.node}
-                depth={row.depth}
-                active={row.node.entry.path === activePath}
-                selected={!row.node.entry.isDir && selectedFilePaths.has(row.node.entry.path)}
-                dirOpen={Boolean(dirNode?.open)}
-                dirLoading={Boolean(dirNode?.loading)}
-                dirLoaded={Boolean(dirNode?.loaded)}
-                dirError={dirNode?.error}
-                renaming={renamingPath === row.node.entry.path}
-                isDropTarget={dirNode != null && externalDropDir === row.node.entry.path}
-                cut={cutSet?.has(row.node.entry.path) ?? false}
-                gitFileStatus={
-                  row.node.entry.isDir ? undefined : statusByPath?.get(row.node.entry.path)
+        {flat.length <= DIRECT_TREE_RENDER_LIMIT ? (
+          <div style={{ height: "100%", width: "100%", overflow: "auto", padding: "2px 0 8px" }}>
+            {flat.map((row) => (
+              <React.Fragment
+                key={
+                  row.kind === "node"
+                    ? row.node.entry.path
+                    : `placeholder:${row.parentPath}:${row.entryKind}`
                 }
-                onRowClick={handleRowClick}
-                onRowElement={updateRowElement}
-                onContextMenu={handleContextMenu}
-                onCommitRename={handleCommitRename}
-                onCancelRename={cancelRename}
-                onRowDragStart={handleRowDragStart}
-              />
-            );
-          }}
-        />
+              >
+                {renderFlatRow(row)}
+              </React.Fragment>
+            ))}
+          </div>
+        ) : (
+          <Virtuoso<FlatRow>
+            ref={virtuosoRef}
+            style={{ height: "100%", width: "100%" }}
+            // Supplying the rows as data (instead of closing over `flat` plus
+            // totalCount) gives Virtuoso an explicit structural update when a
+            // folder expands or a watcher adds a file.
+            data={flat}
+            fixedItemHeight={ROW_HEIGHT}
+            initialItemCount={Math.min(flat.length, 24)}
+            overscan={400}
+            components={LIST_COMPONENTS}
+            computeItemKey={(_index, row) =>
+              row.kind === "node"
+                ? row.node.entry.path
+                : `placeholder:${row.parentPath}:${row.entryKind}`
+            }
+            itemContent={(_index, row) => renderFlatRow(row)}
+          />
+        )}
         {flat.length === 0 && (
           <div
             aria-hidden
@@ -1522,6 +1651,8 @@ export default function FileTree({
           openLabel={
             contextMenuEntries.length > 1
               ? `Open ${contextMenuEntries.length} files`
+              : contextMenu.entry.name.toLowerCase().endsWith(".coraboard")
+                ? "Open Whiteboard"
               : "Open"
           }
           onNewFile={() => {
@@ -1618,7 +1749,6 @@ export default function FileTree({
           }}
         >
           <MenuButton
-            icon="V"
             hint="Ctrl+V"
             onClick={() => {
               setBlankMenu(null);
@@ -1797,6 +1927,19 @@ async function reloadDirInPlace(dir: DirNode & { kind: "dir" }): Promise<void> {
   dir.error = undefined;
 }
 
+// Reconcile everything the user can currently see, not just the root. Cached
+// expanded folders may have changed while another workspace owned the single
+// filesystem watcher; refreshing the open subtree makes the instant cached
+// paint converge without forcing the user to collapse/reopen each directory.
+async function reloadExpandedTreeInPlace(dir: DirNode & { kind: "dir" }): Promise<void> {
+  await reloadDirInPlace(dir);
+  const visibleChildren = dir.children.filter(
+    (child): child is DirNode & { kind: "dir" } =>
+      child.kind === "dir" && child.open && child.loaded,
+  );
+  await Promise.all(visibleChildren.map((child) => reloadExpandedTreeInPlace(child)));
+}
+
 function collectMatchingDirs(
   node: Node,
   matches: Set<string>,
@@ -1944,16 +2087,16 @@ const Row = React.memo(function Row({
         ? "color-mix(in oklch, var(--accent) 18%, transparent)"
         : "color-mix(in oklch, var(--accent) 12%, transparent)"
       : active
-        ? "color-mix(in oklch, var(--ink) 9%, transparent)"
+        ? "color-mix(in oklab, var(--ink) 9%, transparent)"
         : hover
-          ? "color-mix(in oklch, var(--ink) 4%, transparent)"
+          ? "color-mix(in oklab, var(--ink) 4%, transparent)"
           : "transparent";
   const rowShadow = isDropTarget
     ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 55%, transparent)"
     : selected
       ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 38%, transparent)"
       : active
-        ? "inset 0 0 0 1px color-mix(in oklch, var(--ink) 10%, transparent)"
+        ? "inset 0 0 0 1px color-mix(in oklab, var(--ink) 10%, transparent)"
         : "none";
 
   // Stable wrappers so this row invokes the shared parent handlers with its
@@ -2194,29 +2337,28 @@ function FileMenu({
         </>
       )}
       {onOpen && (
-        <MenuButton icon="O" onClick={onOpen} hint={multiple ? undefined : "Enter"}>
+        <MenuButton onClick={onOpen} hint={multiple ? undefined : "Enter"}>
           {openLabel}
         </MenuButton>
       )}
       {onOpenChanges && (
-        <MenuButton icon="±" onClick={onOpenChanges}>
+        <MenuButton onClick={onOpenChanges}>
           Open Changes
         </MenuButton>
       )}
-      <MenuButton icon="N" onClick={onNewFile}>New File</MenuButton>
-      <MenuButton icon="F" onClick={onNewFolder}>New Folder</MenuButton>
+      <MenuButton onClick={onNewFile}>New File</MenuButton>
+      <MenuButton onClick={onNewFolder}>New Folder</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
-      <MenuButton icon="C" onClick={onCopy} hint="Ctrl+C">Copy</MenuButton>
-      <MenuButton icon="X" onClick={onCut} hint="Ctrl+X">Cut</MenuButton>
-      <MenuButton icon="V" onClick={onPaste} hint="Ctrl+V">Paste</MenuButton>
+      <MenuButton onClick={onCopy} hint="Ctrl+C">Copy</MenuButton>
+      <MenuButton onClick={onCut} hint="Ctrl+X">Cut</MenuButton>
+      <MenuButton onClick={onPaste} hint="Ctrl+V">Paste</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
-      {onRename && <MenuButton icon="R" onClick={onRename}>Rename</MenuButton>}
-      {onReveal && <MenuButton icon="V" onClick={onReveal}>{revealLabel}</MenuButton>}
-      <MenuButton icon="C" onClick={onCopyPath}>Copy Path</MenuButton>
-      <MenuButton icon="P" onClick={onCopyRelativePath}>Copy Relative Path</MenuButton>
+      {onRename && <MenuButton onClick={onRename}>Rename</MenuButton>}
+      {onReveal && <MenuButton onClick={onReveal}>{revealLabel}</MenuButton>}
+      <MenuButton onClick={onCopyPath}>Copy Path</MenuButton>
+      <MenuButton onClick={onCopyRelativePath}>Copy Relative Path</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
       <MenuButton
-        icon="D"
         danger
         onClick={() => {
           if (confirmDelete) onDelete();
@@ -2229,10 +2371,8 @@ function FileMenu({
   );
 }
 
-// The "Run plan" entry. With one engine (just API) it's a plain accent
-// MenuButton that runs it. With Claude / Codex installed they LEAD the list
-// and clicking the row itself runs the first (recommended) engine — the
-// demoted API manager only runs when picked explicitly from the flyout.
+// The "Run plan" entry. Cora · Pi leads the list and clicking the row itself
+// runs it; Claude and Codex remain explicit flyout choices.
 function RunPlanMenuItem({
   engines,
   onPick,
@@ -2247,7 +2387,7 @@ function RunPlanMenuItem({
 
   if (engines.length <= 1) {
     return (
-      <MenuButton icon="▶" accent onClick={() => onPick(undefined)}>
+      <MenuButton accent onClick={() => onPick(engines[0]?.backend)}>
         Run plan
       </MenuButton>
     );
@@ -2350,7 +2490,9 @@ function MenuButton({
   onClick,
 }: {
   children: React.ReactNode;
-  icon: string;
+  // Optional leading glyph. Only menus whose EVERY row carries one should use
+  // it (the engine picker) — a mixed menu would misalign its labels.
+  icon?: string;
   hint?: string;
   danger?: boolean;
   accent?: boolean;
@@ -2381,7 +2523,7 @@ function MenuButton({
         fontWeight: 700,
         cursor: "default",
         display: "grid",
-        gridTemplateColumns: "22px minmax(0, 1fr) auto",
+        gridTemplateColumns: icon ? "22px minmax(0, 1fr) auto" : "minmax(0, 1fr) auto",
         alignItems: "center",
         gap: 8,
         transition:
@@ -2390,22 +2532,24 @@ function MenuButton({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <span
-        style={{
-          width: 18,
-          height: 18,
-          border: "1px solid transparent",
-          borderRadius: 999,
-          color: danger ? "var(--danger)" : accent ? "var(--accent)" : "var(--muted)",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 9,
-          fontWeight: 900,
-        }}
-      >
-        {icon}
-      </span>
+      {icon && (
+        <span
+          style={{
+            width: 18,
+            height: 18,
+            border: "1px solid transparent",
+            borderRadius: 999,
+            color: danger ? "var(--danger)" : accent ? "var(--accent)" : "var(--muted)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 9,
+            fontWeight: 900,
+          }}
+        >
+          {icon}
+        </span>
+      )}
       <span>{children}</span>
       {hint && <span style={{ color: "var(--muted)", fontSize: 9 }}>{hint}</span>}
     </button>

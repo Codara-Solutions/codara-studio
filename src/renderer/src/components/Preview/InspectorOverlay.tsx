@@ -50,7 +50,7 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
         position: "absolute",
         inset: 0,
         zIndex: 60,
-        background: "color-mix(in oklch, var(--bg) 60%, transparent)",
+        background: "color-mix(in oklab, var(--bg) 60%, transparent)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

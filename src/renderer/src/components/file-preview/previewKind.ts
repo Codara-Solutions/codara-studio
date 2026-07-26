@@ -3,7 +3,7 @@
 // fs:readEx: SVG is text (would land in CodeMirror), and media over the 5MB
 // read cap never even reaches the binary check — the previewers bypass the
 // text-read IPC entirely and load via file:// URLs.
-export type PreviewKind = "image" | "svg" | "pdf" | "video" | "audio" | "docx";
+export type PreviewKind = "image" | "svg" | "pdf" | "video" | "audio" | "docx" | "whiteboard";
 
 // Image list mirrors PASTED_IMAGE_EXTENSIONS + the dialog:openImages filter
 // in src/main/ipc.ts, plus formats Chromium renders natively.
@@ -21,6 +21,7 @@ export function previewKindForPath(path: string): PreviewKind | null {
   const dot = name.lastIndexOf(".");
   if (dot <= 0) return null;
   const ext = name.slice(dot + 1).toLowerCase();
+  if (ext === "coraboard") return "whiteboard";
   if (ext === "svg") return "svg";
   if (ext === "pdf") return "pdf";
   if (IMAGE_EXTS.has(ext)) return "image";

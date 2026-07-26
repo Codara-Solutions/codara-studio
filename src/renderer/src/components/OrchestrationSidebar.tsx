@@ -3,18 +3,21 @@ import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/
 import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
 import type { ChatComposerStartConfig } from "./chat/ChatComposer";
+import type { CoraView } from "./chat/cora-view";
 
 interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRunId: string | null;
+  composerDraftKey?: string;
+  suspendGlobalEvents?: boolean;
   terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode — driven by the workspace's hoisted inner
   // tab strip so the toggle survives navigating from the chat tab to a worker
   // or back. Optional during the transition; ChatPanel falls back to its own
   // local state when this is not provided.
-  chatView?: "chat" | "terminal";
-  onChatViewChange?: (view: "chat" | "terminal") => void;
+  chatView?: CoraView;
+  onChatViewChange?: (view: CoraView) => void;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -35,6 +38,8 @@ export default function OrchestrationSidebar({
   workspace,
   runs,
   activeRunId,
+  composerDraftKey,
+  suspendGlobalEvents,
   terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
@@ -218,6 +223,8 @@ export default function OrchestrationSidebar({
       workspace={workspace}
       runs={chatHistoryRuns}
       activeRun={activeRun}
+      composerDraftKey={composerDraftKey}
+      suspendGlobalEvents={suspendGlobalEvents}
       terminalScrollbackLineLimit={terminalScrollbackLineLimit}
       error={error}
       collapsed={collapsed}

@@ -16,7 +16,7 @@ export function ElapsedTime({
   startedAt,
   finishedAt,
   since,
-  placeholder = "--:--:--",
+  placeholder = "—",
 }: ElapsedTimeProps) {
   const live = startedAt ? !finishedAt : Boolean(since);
   useNowTick(1000, live);
@@ -52,6 +52,9 @@ export function ElapsedChip({
         fontFamily: "var(--font-mono)",
         fontSize: 11,
         fontVariantNumeric: "tabular-nums",
+        // Keep the chip's footprint stable when the placeholder em dash swaps
+        // in for a running clock.
+        minWidth: 52,
       }}
     >
       <span
@@ -67,7 +70,7 @@ export function ElapsedChip({
       {hasValue ? (
         <ElapsedTime startedAt={startedAt} finishedAt={finishedAt} since={since} />
       ) : (
-        "--:--:--"
+        "—"
       )}
     </span>
   );

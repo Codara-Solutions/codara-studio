@@ -46,13 +46,15 @@ const PREVIEW_TOOLS = [
   "codara_preview_run",
 ];
 const TERMINAL_TOOLS = ["codara_terminal_create", "codara_terminal_write", "codara_terminal_read"];
-const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS];
+const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update"];
+const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS];
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
   "codara_ask_user",
   "codara_complete",
   "codara_name_chat",
+  "codara_remember",
   "codara_request_next_iteration",
   "codara_get_worker_status",
   "codara_wait_for_workers",
@@ -155,6 +157,7 @@ function sortedEqual(actual, expected, label) {
         "destructive_irreversible",
         "safety_policy",
         "irreducible_product_scope",
+        "plan_approval",
       ],
       "codara_ask_user category enum mismatch",
     );
@@ -162,15 +165,75 @@ function sortedEqual(actual, expected, label) {
       askUser.inputSchema.properties.recommendedOptionId,
       "codara_ask_user must expose recommendedOptionId",
     );
+    const complete = execute.definitions.find((tool) => tool.name === "codara_complete");
+    assert.match(
+      complete?.description ?? "",
+      /Never call it for greetings, conversation, explanations, advice, read-only questions/,
+      "codara_complete must not instruct Auto conversations to enter execution completion",
+    );
 
-    // Automation mode.
+    // codara_remember: the two axes a manager has to get right are which file it
+    // writes to and whether it is appending or rewriting, so both are required
+    // and both are closed enums. `bullets` is capped because a manager that
+    // dumps a whole turn into memory blows the file cap in one call.
+    const remember = execute.definitions.find((tool) => tool.name === "codara_remember");
+    assert.ok(remember, "execute roster must expose codara_remember");
+    sortedEqual(
+      remember.inputSchema.required,
+      ["scope", "action"],
+      "codara_remember required fields mismatch",
+    );
+    assert.deepStrictEqual(
+      remember.inputSchema.properties.scope.enum,
+      ["workspace", "global"],
+      "codara_remember scope enum mismatch",
+    );
+    assert.deepStrictEqual(
+      remember.inputSchema.properties.action.enum,
+      ["add", "replace"],
+      "codara_remember action enum mismatch",
+    );
+    assert.strictEqual(
+      remember.inputSchema.properties.bullets.maxItems,
+      5,
+      "codara_remember must cap bullets at 5 per call",
+    );
+    assert.ok(
+      remember.inputSchema.properties.confirm_drop_user_lines,
+      "codara_remember must expose confirm_drop_user_lines so a replace cannot silently eat the user's own lines",
+    );
+    // The description is the only place a manager learns what to do when the
+    // file is full. Without it, "memory is full" reads as "skip the write".
+    assert.match(
+      remember.description,
+      /action `replace`/,
+      "codara_remember must tell the manager to consolidate with replace when the file is full",
+    );
+    assert.match(
+      remember.description,
+      /Workers do NOT see memory/,
+      "codara_remember must tell the manager to copy relevant memory into worker descriptions",
+    );
+
+    // Automation mode: memory is a manager-of-a-coding-run concept, an
+    // automation loop has no user conversation to learn a durable fact from.
     const automation = await listTools("automation");
     sortedEqual(automation.tools, [...STUDIO_TOOLS, ...AUTOMATION_TOOLS], "automation roster mismatch");
+
+    // Worker mode: workers must NOT be able to write memory. The manager is the
+    // only writer, which is what makes "copy the line into the description"
+    // load-bearing rather than a convenience.
+    const worker = await listTools("worker");
+    assert.ok(
+      !worker.tools.includes("codara_remember"),
+      "worker roster must not expose codara_remember",
+    );
 
     console.log("PASS: codara-studio MCP roster matrix");
     console.log(`  studio:     ${studio.tools.length} tools`);
     console.log(`  execute:    ${execute.tools.length} tools`);
     console.log(`  automation: ${automation.tools.length} tools`);
+    console.log(`  worker:     ${worker.tools.length} tools`);
   } catch (err) {
     console.error("FAIL:", err.message);
     process.exitCode = 1;

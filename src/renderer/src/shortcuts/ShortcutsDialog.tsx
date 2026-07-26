@@ -41,7 +41,7 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 58%, transparent)",
+        background: "color-mix(in oklab, var(--bg) 58%, transparent)",
         backdropFilter: "blur(4px)",
         WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",

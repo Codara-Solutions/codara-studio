@@ -396,7 +396,7 @@ const FileEntry = React.memo(function FileEntry({
           padding: "0 10px 0 12px",
           cursor: "default",
           background: hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+            ? "color-mix(in oklab, var(--ink) 5%, transparent)"
             : "transparent",
           transition: "background var(--motion-fast) var(--ease-out)",
         }}
@@ -475,7 +475,7 @@ const FileEntry = React.memo(function FileEntry({
             margin: "2px 0 4px",
             maxHeight: 420,
             overflow: "auto",
-            background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+            background: "color-mix(in oklab, var(--ink) 2%, transparent)",
             boxShadow: "var(--well)",
           }}
         >

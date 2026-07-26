@@ -713,7 +713,7 @@ function Editor({
               pannable
               zoomable
               nodeColor={() => "color-mix(in oklch, var(--accent) 40%, var(--panel-3))"}
-              maskColor="color-mix(in oklch, var(--bg) 62%, transparent)"
+              maskColor="color-mix(in oklab, var(--bg) 62%, transparent)"
             />
           )}
         </ReactFlow>
@@ -739,7 +739,7 @@ function Editor({
               padding: "18px 16px",
               borderRadius: "var(--radius-surface)",
               border: "1.5px dashed var(--rule-strong)",
-              background: "color-mix(in oklch, var(--panel) 70%, transparent)",
+              background: "color-mix(in oklab, var(--panel) 70%, transparent)",
               color: "var(--muted)",
               cursor: "default",
             }}

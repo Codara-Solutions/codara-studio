@@ -214,7 +214,7 @@ const CommitRowView = React.memo(function CommitRowView({
         cursor: "default",
         background:
           isCommit && hover
-            ? "color-mix(in oklch, var(--ink) 4%, transparent)"
+            ? "color-mix(in oklab, var(--ink) 4%, transparent)"
             : "transparent",
         transition: "background var(--motion-fast) var(--ease-out)",
       }}

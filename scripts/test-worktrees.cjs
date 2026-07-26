@@ -1,8 +1,9 @@
 // Integration test for src/main/git-worktrees.ts. There is no unit runner in
 // this repo, so we bundle the TS module with esbuild (a vite dependency, so
 // already in node_modules) into a temp CJS file and exercise it against a
-// throwaway git repo. The module's only runtime import is ./git-exec (node
-// child_process); the @shared/types import is type-only and erased by esbuild.
+// throwaway git repo. git-exec also supports remote workspaces now, so keep
+// its optional Electron/SSH dependencies external and resolve the same
+// @shared alias as the production build.
 const assert = require("node:assert");
 const { execFileSync } = require("node:child_process");
 const { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } = require("node:fs");

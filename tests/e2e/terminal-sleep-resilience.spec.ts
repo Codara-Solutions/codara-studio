@@ -23,10 +23,13 @@ test("terminal output survives host suspend and resumes into the same xterm", as
     await page.waitForLoadState("domcontentloaded");
     await expect(page.getByText("workspace").first()).toBeVisible();
 
-    await page.getByRole("tab", { name: /terminals/i }).first().click();
+    await page.getByRole("tab", { name: /terminals/i }).first().dispatchEvent("click");
     const terminalInput = page.locator(".xterm-helper-textarea:visible").first();
     await expect(terminalInput).toBeVisible({ timeout: 15_000 });
-    await terminalInput.click();
+    await page.locator(".spark-terminal-pane:visible .xterm-host").first().dispatchEvent("mousedown", {
+      button: 0,
+    });
+    await expect(terminalInput).toBeFocused();
 
     await app.evaluate(({ powerMonitor }) => {
       powerMonitor.emit("suspend");
@@ -49,15 +52,20 @@ test("terminal output survives host suspend and resumes into the same xterm", as
     // SearchAddon selects a match inside xterm's real buffer even when WebGL
     // draws the cells on canvas. Copy that selection and assert the backlog
     // marker arrived after the host-resume handshake.
-    await terminalInput.press(process.platform === "darwin" ? "Meta+F" : "Control+F");
-    const findInput = page.getByPlaceholder("Find");
-    await expect(findInput).toBeVisible();
-    await findInput.fill(marker);
-    await findInput.press("Enter");
-    await findInput.press("Escape");
-    await terminalInput.press("Control+Shift+C");
     await expect.poll(
-      async () => page.evaluate(() => window.spark.clipboard.readText()),
+      async () => {
+        // Resume is intentionally asynchronous: xterm repairs on the next
+        // compositor frame, with a bounded timer fallback for occluded windows.
+        // Repeat the actual SearchAddon selection until the backlog is present
+        // instead of polling a clipboard value from one too-early search.
+        await terminalInput.press(process.platform === "darwin" ? "Meta+F" : "Control+F");
+        const findInput = page.getByPlaceholder("Find");
+        await findInput.fill(marker);
+        await findInput.press("Enter");
+        await findInput.press("Escape");
+        await terminalInput.press("Control+Shift+C");
+        return page.evaluate(() => window.spark.clipboard.readText());
+      },
       { timeout: 10_000 },
     ).toContain(marker);
   } finally {

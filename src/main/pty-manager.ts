@@ -4,7 +4,7 @@ import { promises as fsp, chmodSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { WebContents } from "electron";
-import type { ShellInfo } from "@shared/types";
+import type { PtyExitInfo, ShellInfo } from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
 import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
@@ -75,6 +75,13 @@ interface Session {
   // Guards against a double exit event when the OS severed the ConPTY (sweep
   // fires) and node-pty then fires its own onExit late for the same session.
   exitEmitted: boolean;
+  // Set true before the kill whenever CODARA asked for this teardown: an
+  // orchestration killImmediate/dispose, or the app-quit sweep. Carried out on
+  // the exit payload as PtyExitInfo.sanctioned so the branding layers can tell
+  // "Cora ended this pane" from "the process died on its own". pty.kill() is a
+  // SIGHUP, which surfaces as exitCode 0 + signal 1, so exit status alone can
+  // never make that distinction.
+  sanctioned: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -84,7 +91,7 @@ const sessions = new Map<string, Session>();
 const spawnWaiters = new Map<string, Array<() => void>>();
 // Listeners for pty exit — orchestration uses this to release the run loop
 // when the user closes the worker pane mid-task.
-const exitWaiters = new Map<string, Array<(info: { exitCode: number; signal?: number }) => void>>();
+const exitWaiters = new Map<string, Array<(info: PtyExitInfo) => void>>();
 // Main-process taps on a session's output stream. Orchestration uses this to
 // sniff for agent-TUI banners (so we know the launch command actually started
 // the agent rather than failing back to a pwsh prompt).
@@ -482,6 +489,7 @@ async function doSpawnRemote(
     detachedBacklogBytes: 0,
     disposed: false,
     exitEmitted: false,
+    sanctioned: false,
   };
 
   handle.onData((data: string | Buffer) => {
@@ -508,7 +516,7 @@ async function doSpawnRemote(
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
-        s.webContents.send(s.exitChannel, { exitCode, signal });
+        s.webContents.send(s.exitChannel, { exitCode, signal, sanctioned: s.sanctioned });
       }
       if (!strandedBindings.has(opts.id)) {
         stashWebContents(opts.id, s);
@@ -525,7 +533,7 @@ async function doSpawnRemote(
     exitWaiters.delete(opts.id);
     for (const w of waiters) {
       try {
-        w({ exitCode, signal });
+        w({ exitCode, signal, sanctioned: s.sanctioned });
       } catch {
         /* ignore */
       }
@@ -603,18 +611,27 @@ function withStartupCommand(
     // shell with a fresh interactive one so Ctrl+C from the TUI lands at
     // a prompt instead of exiting the pane.
     const exe = shell.family === "zsh" ? "zsh" : "bash";
+    const startupArgs =
+      noShellIntegration && shell.family === "bash"
+        ? ["--noprofile", "--norc", "-ic"]
+        : noShellIntegration
+          ? ["-f", "-ic"]
+          : ["-ic"];
     return {
-      shell: { ...shell, args: ["-ic", `${startup}; exec ${exe} -i`] },
+      shell: { ...shell, args: [...startupArgs, `${startup}; exec ${exe} -i`] },
       handled: true,
-      skipsProfile: false,
+      skipsProfile: noShellIntegration,
     };
   }
 
   if (shell.family === "sh") {
     return {
-      shell: { ...shell, args: ["-ic", `${startup}; exec sh -i`] },
+      shell: {
+        ...shell,
+        args: [noShellIntegration ? "-fic" : "-ic", `${startup}; exec sh -i`],
+      },
       handled: true,
-      skipsProfile: false,
+      skipsProfile: noShellIntegration,
     };
   }
 
@@ -771,6 +788,7 @@ function doSpawn(
     detachedBacklogBytes: 0,
     disposed: false,
     exitEmitted: false,
+    sanctioned: false,
   };
 
   // Capture the local session reference so we can identity-gate this closure.
@@ -837,7 +855,7 @@ function doSpawn(
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
-        s.webContents.send(s.exitChannel, { exitCode, signal });
+        s.webContents.send(s.exitChannel, { exitCode, signal, sanctioned: s.sanctioned });
       }
       // Stash for a potential same-id respawn (mode-flip flow). If the kill
       // path already stashed, that wins — overwriting with stale tail would
@@ -858,7 +876,7 @@ function doSpawn(
     exitWaiters.delete(opts.id);
     for (const w of waiters) {
       try {
-        w({ exitCode, signal });
+        w({ exitCode, signal, sanctioned: s.sanctioned });
       } catch {
         /* ignore */
       }
@@ -1162,6 +1180,17 @@ export function write(id: string, data: string): void {
   s.pty.write(data);
 }
 
+/**
+ * Paint process-owned status/output into an attached terminal without sending
+ * it to the shell as keyboard input. Cora's Pi workers run over structured RPC
+ * in main but retain the familiar live Workers terminal; this bridge lets that
+ * terminal display their human-readable activity while the idle shell remains
+ * only the renderer-owned PTY host.
+ */
+export function publishOutput(id: string, data: string | Buffer): void {
+  enqueueData(id, data);
+}
+
 // Inject text as a bracketed paste (CSI 200~ ... CSI 201~) followed by an
 // optional submit (CR). Every "write to a running CLI" feature needs this —
 // element inspector, drag-drop file paths, slash commands, persona
@@ -1265,6 +1294,34 @@ export function readTail(id: string, maxBytes: number): Buffer | null {
   return merged.subarray(merged.length - cap);
 }
 
+// Snapshot recent raw output while preserving the PTY's original chunk
+// boundaries. The terminal-agent monitor uses this when it attaches after a
+// restored pane has already started producing output: replaying the chunks in
+// order rebuilds the same runtime state it would have observed live. Returning
+// a copied array (rather than the Session's mutable ring) also makes it safe for
+// the caller to iterate while future onData callbacks append new chunks.
+export function readTailChunks(id: string, maxBytes: number): Buffer[] | null {
+  const s = sessions.get(id);
+  if (!s) return null;
+  const cap = Math.max(0, Math.min(maxBytes | 0, TAIL_BUFFER_BYTES));
+  if (cap === 0 || s.tail.length === 0) return [];
+
+  const out: Buffer[] = [];
+  let remaining = cap;
+  for (let index = s.tail.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const chunk = s.tail[index];
+    if (!chunk) continue;
+    if (chunk.length <= remaining) {
+      out.unshift(chunk);
+      remaining -= chunk.length;
+      continue;
+    }
+    out.unshift(chunk.subarray(chunk.length - remaining));
+    remaining = 0;
+  }
+  return out;
+}
+
 // Subscribe to the raw byte stream of a session. Returns an unsubscribe fn.
 // Used by orchestration to detect whether a launch command actually started
 // the agent TUI (vs falling back to a pwsh prompt because the binary errored).
@@ -1283,7 +1340,7 @@ export function tap(id: string, handler: (chunk: Buffer) => void): () => void {
 
 export function onExit(
   id: string,
-  handler: (info: { exitCode: number; signal?: number }) => void,
+  handler: (info: PtyExitInfo) => void,
 ): () => void {
   const list = exitWaiters.get(id) ?? [];
   list.push(handler);
@@ -1297,8 +1354,20 @@ export function onExit(
   };
 }
 
-export function dispose(id: string): void {
+// Flag a session's coming death as one Codara asked for, so its exit is not
+// read as a crash. Callers that tear a pane down on behalf of orchestration or
+// app quit set this; a pty that dies on its own never does.
+function markSanctioned(id: string): void {
+  const s = sessions.get(id);
+  if (s) s.sanctioned = true;
+}
+
+// `sanctioned` marks a Codara-initiated teardown (see PtyExitInfo). Renderer
+// pane closes leave it unset: closing a worker's pane kills a worker Cora did
+// not stop, which is exactly the unsanctioned death the chip must name.
+export function dispose(id: string, opts?: { sanctioned?: boolean }): void {
   if (!sessions.has(id) || pendingKills.has(id)) return;
+  if (opts?.sanctioned) markSanctioned(id);
   const timer = setTimeout(() => {
     pendingKills.delete(id);
     killNow(id);
@@ -1309,13 +1378,20 @@ export function dispose(id: string): void {
 // Hard, immediate kill — no GRACE_MS wait. Used by force-pause / delete-run
 // flows where lingering ConPTY descendants would hold file handles open
 // and cause Windows to refuse the directory delete with an "in use" prompt.
+// Every caller is orchestration or a session owner ending a pane deliberately,
+// so the exit is sanctioned: Cora disposing a finished worker's idle host shell
+// must never repaint that worker as crashed.
 export function killImmediate(id: string): void {
+  markSanctioned(id);
   killNow(id);
 }
 
 export function disposeForWebContents(wc: WebContents): void {
   for (const [id, s] of sessions) {
-    if (s.webContents === wc) killNow(id);
+    if (s.webContents === wc) {
+      markSanctioned(id);
+      killNow(id);
+    }
   }
 }
 
@@ -1340,6 +1416,9 @@ export function disposeUnderCwd(dir: string): number {
     if (!s) continue;
     const c = normalizeCwd(s.cwd);
     if (c === target || c.startsWith(`${target}/`)) {
+      // Reaping the shells that hold a deleted worktree open is Codara's own
+      // teardown, not a process dying on its own.
+      markSanctioned(id);
       killNow(id);
       killed += 1;
     }
@@ -1426,7 +1505,12 @@ export function sweepDeadSessions(): string[] {
 export function disposeAll(): void {
   for (const t of pendingKills.values()) clearTimeout(t);
   pendingKills.clear();
-  for (const id of [...sessions.keys()]) killNow(id);
+  for (const id of [...sessions.keys()]) {
+    // Process-wide teardown: every one of these deaths is ours, so none of
+    // them may brand an agent crashed.
+    markSanctioned(id);
+    killNow(id);
+  }
 }
 
 // Quit-path variant of disposeAll. killNow() taskkill /T /F's the process
@@ -1448,6 +1532,10 @@ export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
     if (!s) continue;
     // Same teardown bookkeeping as killNow, minus the immediate taskkill.
     s.disposed = true;
+    // App quit is the most sanctioned teardown there is: the exit events this
+    // loop produces reach a still-alive renderer, and before this flag they
+    // repainted every live agent pane as crashed on the way out.
+    s.sanctioned = true;
     stashWebContents(id, s);
     const pid = s.pty.pid;
     if (typeof pid === "number" && pid > 0) pids.push(pid);

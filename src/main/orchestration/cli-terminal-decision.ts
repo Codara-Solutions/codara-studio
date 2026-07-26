@@ -1,7 +1,7 @@
 import type {
   SparkManagerDecision,
   SparkManagerTerminalRequest,
-} from "./openrouter-manager";
+} from "./manager-protocol";
 
 interface CliManagerToolCall {
   toolName: string;
@@ -19,8 +19,8 @@ function matchesTool(call: CliManagerToolCall, name: string): boolean {
 }
 
 /**
- * Convert a CLI manager's `codara_spawn_terminals` call into the same
- * decision OpenRouter emits. The run-store already owns command construction,
+ * Convert a CLI manager's `codara_spawn_terminals` call into the canonical
+ * SparkManagerDecision. The run-store already owns command construction,
  * tab-grid creation, completion, and the user-facing confirmation.
  */
 export function buildSpawnTerminalsDecisionFromToolCalls(

@@ -140,7 +140,9 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
   } else {
     const before = pickPreviewTab(null);
-    tab = await ensurePreviewTab(url);
+    // runId is the calling run's identity, stamped by the MCP server; the
+    // auto-opened tab must belong to that run, not the selected one.
+    tab = await ensurePreviewTab(url, readString(params, "runId"));
     opened = !before;
   }
   // ensurePreviewTab created the tab with the target URL, so loadURL is a

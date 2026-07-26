@@ -41,9 +41,17 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
     // The default layout includes a retained terminal tab. Launch the fake
     // Codex process through the real xterm/PTY path so the renderer mints a
     // manual worker chip and the main notifier registers the pane naturally.
-    await page.getByRole("tab", { name: /terminals/i }).click();
+    // Electron's compact CI window intermittently reports this visible tab as
+    // having an unstable/zero action box. Dispatch the same DOM click without
+    // making terminal retention depend on Playwright's viewport heuristics.
+    await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => {
+      (tab as HTMLElement).click();
+    });
     const terminalInput = page.locator(".xterm-helper-textarea:visible").first();
-    await terminalInput.click();
+    // Focus directly: on compact Electron test windows the pane's drag handle
+    // can overlap the textarea's zero-width accessibility host even though the
+    // terminal itself is fully visible and interactive.
+    await terminalInput.focus();
     await terminalInput.pressSequentially(fixture.fakeCodex, { delay: 2 });
     await terminalInput.press("Enter");
     await expect(page.getByRole("status", { name: "CODEX working" })).toBeVisible({
@@ -54,10 +62,37 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
     const visiblePane = page.locator("[data-terminal-pane-id]:visible").first();
     const paneId = await visiblePane.getAttribute("data-terminal-pane-id");
     expect(paneId).toBeTruthy();
+    const terminalNode = visiblePane.locator(".xterm").first();
+    await expect(terminalNode).toBeAttached();
+    await terminalNode.evaluate((node) => {
+      (
+        window as unknown as {
+          __codaraKeptTerminalNode?: Element;
+        }
+      ).__codaraKeptTerminalNode = node;
+    });
 
     // Leave while Codex is working. Its script prints an approval prompt after
     // three seconds, when this workspace's TerminalStack is mounted but hidden.
-    await workspaceB.click();
+    // The xterm DOM node itself must remain the exact same object: keeping only
+    // the PTY alive and recreating xterm on return is the unload regression.
+    await workspaceB.evaluate((row) => {
+      (row as HTMLElement).click();
+    });
+    const hiddenTerminalNode = page.locator(
+      `[data-terminal-pane-id="${paneId}"] .xterm`,
+    );
+    await expect(hiddenTerminalNode).toBeAttached();
+    expect(
+      await hiddenTerminalNode.evaluate(
+        (node) =>
+          (
+            window as unknown as {
+              __codaraKeptTerminalNode?: Element;
+            }
+          ).__codaraKeptTerminalNode === node,
+      ),
+    ).toBe(true);
     const hiddenChip = page.locator(
       `[data-terminal-pane-id="${paneId}"] [role="status"]`,
     );
@@ -67,9 +102,100 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
     await expect(workspaceA).toHaveAttribute("aria-busy", "false");
 
     // Returning to the project must reveal the current state, not the stale
-    // pre-switch WORKING chip.
-    await workspaceA.click();
+    // pre-switch WORKING chip, and must still reveal the original xterm rather
+    // than a snapshot-backed replacement.
+    await workspaceA.evaluate((row) => {
+      (row as HTMLElement).click();
+    });
     await expect(page.getByRole("status", { name: "CODEX needs you" })).toBeVisible();
+    expect(
+      await page
+        .locator(`[data-terminal-pane-id="${paneId}"]:visible .xterm`)
+        .evaluate(
+          (node) =>
+            (
+              window as unknown as {
+                __codaraKeptTerminalNode?: Element;
+              }
+            ).__codaraKeptTerminalNode === node,
+        ),
+    ).toBe(true);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("cold-restored Claude is rehydrated as working even when output starts immediately", async () => {
+  test.setTimeout(90_000);
+  const fixture = await prepareFixture();
+
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        PATH: `${fixture.binDir}${delimiter}${process.env.PATH ?? ""}`,
+        CLAUDE_CONFIG_DIR: fixture.claudeConfigDir,
+        // Force PATH reconstruction to use the explicit test PATH instead of
+        // the developer machine's login-shell PATH (which contains real
+        // Claude ahead of this fixture binary).
+        ...(process.platform === "win32" ? {} : { SHELL: "/bin/false" }),
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+
+    // Install the exact cold-hydration shape: the durable pointer survives,
+    // while `worker` is absent. Reloading the renderer makes bootResume launch
+    // the fake Claude, which prints one busy frame immediately and then stays
+    // silent — there is no later repaint available to repair a missed edge.
+    // Install on the NEW document, before Codara hydrates. Writing this into
+    // the current document and then reloading races the outgoing page's
+    // beforeunload checkpoint, which legitimately persists its current blank
+    // terminal layout over the fixture.
+    await page.addInitScript(
+      ({ workspaceA, sessionId }) => {
+        localStorage.setItem(
+          "spark.tabs:ws-a",
+          JSON.stringify({
+            v: 6,
+            tabs: [
+              {
+                id: "restored-terminal",
+                kind: "terminal",
+                title: "terminals",
+                activePaneId: "restored-pane",
+                root: {
+                  kind: "leaf",
+                  paneId: "restored-pane",
+                  cwd: workspaceA,
+                  agentSession: {
+                    runtime: "claude",
+                    sessionId,
+                    cwd: workspaceA,
+                    capturedAt: "2026-07-18T00:00:00.000Z",
+                    active: true,
+                  },
+                },
+              },
+            ],
+            activeId: "restored-terminal",
+          }),
+        );
+      },
+      { workspaceA: fixture.workspaceA, sessionId: fixture.claudeSessionId },
+    );
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+
+    const workspaceA = page.locator('[data-workspace-id="ws-a"]');
+    await expect(page.getByRole("status", { name: "CLAUDE working" })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(workspaceA).toHaveAttribute("aria-busy", "true");
   } finally {
     await app?.close();
   }
@@ -79,17 +205,28 @@ async function prepareFixture(): Promise<{
   userDataDir: string;
   binDir: string;
   fakeCodex: string;
+  workspaceA: string;
+  claudeConfigDir: string;
+  claudeSessionId: string;
 }> {
   const root = await mkdtemp(join(tmpdir(), "codara-hidden-agent-e2e-"));
   const userDataDir = join(root, "user-data");
   const binDir = join(root, "bin");
   const workspaceA = join(root, "workspace-a");
   const workspaceB = join(root, "workspace-b");
+  const claudeConfigDir = join(root, "claude-config");
+  const claudeSessionId = "11111111-2222-4333-8444-555555555555";
+  const claudeProjectDir = join(
+    claudeConfigDir,
+    "projects",
+    workspaceA.replace(/[^a-zA-Z0-9]/g, "-"),
+  );
   await Promise.all([
     mkdir(userDataDir, { recursive: true }),
     mkdir(binDir, { recursive: true }),
     mkdir(workspaceA, { recursive: true }),
     mkdir(workspaceB, { recursive: true }),
+    mkdir(claudeProjectDir, { recursive: true }),
   ]);
   await Promise.all([
     writeFile(join(workspaceA, "README.md"), "# workspace-a\n", "utf8"),
@@ -97,6 +234,7 @@ async function prepareFixture(): Promise<{
   ]);
 
   const fakeCodex = join(binDir, process.platform === "win32" ? "codex.cmd" : "codex");
+  const fakeClaude = join(binDir, process.platform === "win32" ? "claude.cmd" : "claude");
   if (process.platform === "win32") {
     await writeFile(
       fakeCodex,
@@ -107,6 +245,16 @@ async function prepareFixture(): Promise<{
         "ping 127.0.0.1 -n 4 >nul",
         "echo Approve shell command?",
         "echo   echo hello",
+        "ping 127.0.0.1 -n 30 >nul",
+      ].join("\r\n"),
+      "utf8",
+    );
+    await writeFile(
+      fakeClaude,
+      [
+        "@echo off",
+        "echo Claude Code v2.1.216",
+        "echo Working... (esc to interrupt)",
         "ping 127.0.0.1 -n 30 >nul",
       ].join("\r\n"),
       "utf8",
@@ -125,7 +273,29 @@ async function prepareFixture(): Promise<{
       "utf8",
     );
     await chmod(fakeCodex, 0o755);
+    await writeFile(
+      fakeClaude,
+      [
+        "#!/bin/sh",
+        "printf 'Claude Code v2.1.216\\r\\n'",
+        "printf '✻ Restoring… (4s · ↓ 12 tokens)\\r\\n'",
+        "sleep 30",
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(fakeClaude, 0o755);
   }
+
+  await writeFile(
+    join(claudeProjectDir, `${claudeSessionId}.jsonl`),
+    '{"type":"user","message":{"role":"user","content":"hello"}}\n',
+    "utf8",
+  );
+  await writeFile(
+    join(userDataDir, "spark-preferences.json"),
+    JSON.stringify({ restoreAgentSessions: true }),
+    "utf8",
+  );
 
   await writeFile(
     join(userDataDir, "spark-state.json"),
@@ -142,5 +312,12 @@ async function prepareFixture(): Promise<{
     ),
     "utf8",
   );
-  return { userDataDir, binDir, fakeCodex };
+  return {
+    userDataDir,
+    binDir,
+    fakeCodex,
+    workspaceA,
+    claudeConfigDir,
+    claudeSessionId,
+  };
 }

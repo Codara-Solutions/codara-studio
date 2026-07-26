@@ -2,7 +2,9 @@
 // src/renderer/src/tabs/useTabs.ts. A relaunch always keeps layout and cwd;
 // whether terminal output and agent-session pointers survive persist is gated
 // on the restoreAgentSessions preference (stripTransientPaneState's second
-// argument). Worker chips / autorun / the boot-once marker never survive.
+// argument). Hydration re-validates pointers and mints a one-shot resume
+// marker for sessions that were active at quit. Worker chips / autorun / the
+// boot-once marker never survive.
 //
 //   node scripts/test-session-restore.cjs
 
@@ -26,6 +28,7 @@ const harnessPlugin = {
       contents:
         "export const useCallback = (fn) => fn;\n" +
         "export const useEffect = () => {};\n" +
+        "export const useLayoutEffect = () => {};\n" +
         "export const useMemo = (fn) => fn();\n" +
         "export const useRef = (v) => ({ current: v });\n" +
         "export const useState = (v) => [typeof v === 'function' ? v() : v, () => {}];\n",
@@ -52,7 +55,11 @@ async function main() {
     plugins: [harnessPlugin], logLevel: "silent",
   });
   delete require.cache[outfile];
-  const { cleanupTransientTerminalState, stripTransientPaneState } = require(outfile);
+  const {
+    cleanupTransientTerminalState,
+    markTerminalAgentSessionsActive,
+    stripTransientPaneState,
+  } = require(outfile);
 
   let failures = 0;
   const check = (name, cond) => {
@@ -77,20 +84,33 @@ async function main() {
   check("cold hydration mints bootResume for running-at-quit pointer", active.bootResume === true);
   check("cold hydration preserves cwd and pane id", active.cwd === "/tmp/kept" && active.paneId === "p1");
 
-  // Only a pointer whose agent was RUNNING at quit earns the boot-once marker.
-  for (const [name, pointer] of [
-    ["inactive Claude", session({ active: false })],
-    ["legacy Claude", session()],
-    ["pending Claude", session({ active: true, sessionId: "" })],
+  // Only a validated pointer whose agent was RUNNING at quit earns the
+  // boot-once marker; scrollback replays regardless (persist already gated it).
+  for (const [name, pointer, resumes] of [
+    ["inactive Claude", session({ active: false }), false],
+    ["legacy Claude", session(), false],
+    ["active Codex", session({ runtime: "codex", active: true }), true],
   ]) {
-    const item = leaf(name, { agentSession: pointer, bootResume: true, scrollback: name });
+    const item = leaf(name, { agentSession: pointer, bootResume: !resumes, scrollback: name });
     cleanupTransientTerminalState(item);
-    check(`${name} pointer keeps identity but never auto-resumes`, "agentSession" in item && !("bootResume" in item));
+    check(`${name} keeps its validated pointer`, item.agentSession === pointer);
+    check(`${name} resume eligibility follows active state`, (item.bootResume === true) === resumes);
     check(`${name} scrollback still replays`, item.scrollback === name);
   }
   const codexActive = leaf("cx", { agentSession: session({ runtime: "codex", active: true }) });
   cleanupTransientTerminalState(codexActive);
   check("active Codex pointer mints bootResume", codexActive.bootResume === true);
+
+  for (const [name, pointer] of [
+    ["pending session", session({ active: true, sessionId: "" })],
+    ["control-character id", session({ active: true, sessionId: "bad\ncommand" })],
+    ["unknown runtime", session({ runtime: "other", active: true })],
+    ["missing cwd", session({ active: true, cwd: "" })],
+  ]) {
+    const item = leaf(name, { agentSession: pointer, bootResume: true });
+    cleanupTransientTerminalState(item);
+    check(`${name} pointer is rejected`, !("agentSession" in item) && !("bootResume" in item));
+  }
 
   const tree = split(
     leaf("s1", { cwd: "/one", scrollback: "one", agentSession: session({ active: true }) }),
@@ -104,6 +124,7 @@ async function main() {
   cleanupTransientTerminalState(tree);
   check("nested hydration mints/clears bootResume per leaf", tree.a.bootResume === true && !("bootResume" in tree.b.b));
   check("nested hydration strips autorun everywhere", !("autorun" in tree.b.a));
+  check("nested hydration keeps scrollback and the active pointer", tree.a.scrollback === "one" && tree.a.agentSession?.active === true);
   check("nested hydration preserves split geometry", tree.ratio === 0.62 && tree.b.ratio === 0.35);
   check("nested hydration preserves pane ids and cwd", tree.a.paneId === "s1" && tree.b.a.cwd === "/two" && tree.b.b.cwd === "/three");
 
@@ -120,6 +141,20 @@ async function main() {
   const stripped = stripTransientPaneState(dirty);
   check("persist(off) strips every process-local field", ["scrollback", "worker", "autorun", "bootResume", "agentSession"].every((key) => !(key in stripped)));
   check("persist(off) preserves layout fields", stripped.paneId === "q1" && stripped.cwd === "/persisted");
+
+  const malformed = leaf("bad", { agentSession: session({ sessionId: "" }), bootResume: true });
+  const malformedStripped = stripTransientPaneState(malformed);
+  check("persist rejects malformed pointers", !("agentSession" in malformedStripped));
+  check("persist never writes boot resume", !("bootResume" in malformedStripped));
+
+  const quitTree = split(
+    leaf("running-pane", { agentSession: session({ active: false }) }),
+    leaf("idle-pane", { agentSession: session({ runtime: "codex", active: false }) }),
+  );
+  const quitMarked = markTerminalAgentSessionsActive(quitTree, new Set(["running-pane"]));
+  check("quit-time liveness promotes the reported pane", quitMarked.a.agentSession?.active === true);
+  check("quit-time liveness leaves other pointers inactive", quitMarked.b.agentSession?.active === false);
+  check("quit-time liveness preserves untouched leaf identity", quitMarked.b === quitTree.b);
 
   const clean = leaf("q2", { cwd: "/clean" });
   check("persist(off) preserves clean leaf identity", stripTransientPaneState(clean) === clean);

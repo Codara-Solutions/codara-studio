@@ -24,8 +24,13 @@ export function encodeCwdForClaudeProjects(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
+export function claudeConfigDir(): string {
+  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
+  return configured || join(homedir(), ".claude");
+}
+
 export function claudeProjectsDirForCwd(cwd: string): string {
-  return join(homedir(), ".claude", "projects", encodeCwdForClaudeProjects(cwd));
+  return join(claudeConfigDir(), "projects", encodeCwdForClaudeProjects(cwd));
 }
 
 // Deterministic path to a session's transcript. Because Codara forces the

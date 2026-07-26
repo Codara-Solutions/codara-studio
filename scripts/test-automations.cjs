@@ -210,7 +210,10 @@ async function main() {
     passed++;
   }
 
-  // 6) Omitted worker defaults from the legacy input mapping (openrouter → auto).
+  // 6) Omitted worker defaults from the legacy input mapping (removed API
+  //    backend → auto). The literal "openrouter" backend id is DEAD as a Cora
+  //    backend, but it is still sitting in scheduler.json files written by
+  //    older installs, so the migration must keep handling it.
   {
     const job = await sched.createJob({
       name: "worker-default",
@@ -218,7 +221,7 @@ async function main() {
       input: { ...fakeInput, chatBackend: "openrouter", chatModel: "x-ai/grok-4.3" },
     });
     const created = (await sched.listJobs()).find((j) => j.id === job.id);
-    assert.strictEqual(created.worker.engine, "auto", "openrouter-pinned input should default the worker to auto");
+    assert.strictEqual(created.worker.engine, "auto", "input pinned to the removed API backend should default the worker to auto");
     console.log("  PASS omitted worker defaults to auto (API never a loom engine)");
     passed++;
   }

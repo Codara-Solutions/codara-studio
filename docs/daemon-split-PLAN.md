@@ -185,9 +185,9 @@ behind a feature flag so interactive Spark can fall back to the in-process path.
     served by `daemon.streamEvents` + a `daemon.snapshot` verb instead of the
     `orchestration:getRun` IPC.
 - **Stays in `run-store.ts`:** the actual `RunState` mutation primitives
-  (`commitRunChange`, `addRunMessage`, `updateRunStatus`, step/worker CRUD), the
-  on-disk `run.json` / `events.jsonl` writers, and `worker-watchdog`
-  integration. Phase 1 is a **call-site move, not a file move** — keeps the diff
+  (`commitRunChange`, `addRunMessage`, `updateRunStatus`, step/worker CRUD), and
+  the on-disk `run.json` / `events.jsonl` writers.
+  Phase 1 is a **call-site move, not a file move** — keeps the diff
   reviewable and the rollback trivial.
 - **IPC verbs added (live):** `daemon.start` (→ `startAutopilot`),
   `daemon.snapshot` (→ `getRun` / `listRuns`), `daemon.streamEvents`

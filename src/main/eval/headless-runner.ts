@@ -4,10 +4,12 @@
 // an Electron BrowserWindow renderer that mounts a TerminalView per worker.
 // In headless mode there is no renderer, so this module:
 //
-//   1. Loads the variant config and pins it in-memory (manager model +
-//      effort + profile) without touching spark-settings.json.
+//   1. Loads the variant config and pins the parts that live in module state
+//      (the manager prompt profile, worker-pool knobs) in memory, without
+//      touching spark-settings.json.
 //   2. Calls `startAutopilot()` directly — the same internal entry point the
-//      renderer's start button uses via IPC.
+//      renderer's start button uses via IPC, passing the variant's manager
+//      backend/model/effort/mode as the run's chat* fields.
 //   3. Subscribes to the main-process event bus. When the run-store emits
 //      `worker_task.envelope_prepared`, we spawn a pty for the worker
 //      ourselves (no renderer means nothing else will). The run-store then
@@ -28,14 +30,22 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import * as pty from "../pty-manager";
 import { defaultShell } from "../shells";
-import { applyInMemorySettingsOverride, flush as flushStorage } from "../storage";
+import { flush as flushStorage } from "../storage";
 import { detectAgentRuntimes } from "../agent-runtimes";
-import { startAutopilot, getRun, cancelRun } from "../orchestration/run-store";
+import { startAutopilot, getRun, cancelRun, flushRunCompletionTails } from "../orchestration/run-store";
 import { sanitizeWorkspace } from "../workspace-sanitize";
 import { runDir } from "../orchestration/event-log";
 import { subscribeToEvents } from "../orchestration/event-log";
 import { loadManagerPromptProfileFromPath } from "../orchestration/prompt-profile";
-import type { RunState, RunStatus, ShellInfo, SparkEvent } from "@shared/types";
+import type {
+  AgentEffortLevel,
+  ChatBackendKind,
+  ChatMode,
+  RunState,
+  RunStatus,
+  ShellInfo,
+  SparkEvent,
+} from "@shared/types";
 import type { HeadlessEvalArgs } from "./headless-args";
 
 // Variant config schema mirrored loosely from evals/lib/variant-config.js.
@@ -46,8 +56,14 @@ interface VariantConfig {
   variantId?: string;
   agent?: string;
   manager?: {
+    // ChatBackendKind, or the retired "openrouter" on pre-Pi configs (read as
+    // "pi"). Anything unrecognized is dropped and the run takes the default.
+    backend?: string;
+    // Model id in the chosen backend's own naming, it is forwarded verbatim
+    // as the run's chatModel, not through AppSettings.
     model?: string;
     effort?: string;
+    mode?: string;
     profilePath?: string;
   };
   workerPolicy?: {
@@ -125,6 +141,17 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
 
   let run: RunState;
   try {
+    const managerBackend = normalizeManagerBackend(config?.manager?.backend);
+    const managerMode = normalizeManagerMode(config?.manager?.mode);
+    const managerEffort = normalizeManagerEffort(config?.manager?.effort);
+    // A config that named the retired "openrouter" API manager also carries an
+    // OpenRouter catalog slug as its model, which no surviving backend
+    // understands. Drop it and let the Pi backend apply its default, the same
+    // migration run-store's normalizeRun performs on persisted runs.
+    const managerModel =
+      config?.manager?.backend === "openrouter"
+        ? undefined
+        : config?.manager?.model?.trim() || undefined;
     run = await startAutopilot({
       workspaceId: `eval-${makeShortId()}`,
       workspaceName: `eval-${config?.variantId ?? "spark"}`,
@@ -132,6 +159,10 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
       planPath,
       planText,
       planTitle: deriveTitle(planText) || "Eval plan",
+      chatBackend: managerBackend,
+      chatModel: managerModel,
+      chatMode: managerMode,
+      chatEffort: managerEffort,
     });
   } catch (err) {
     stopEvents();
@@ -146,6 +177,15 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
   // updates (commitRunChange) which the event bus also signals — the polling
   // is just a safety net so a missed event still lets the runner exit.
   const finalStatus = await waitForTerminalStatus(run.id, budgetMs);
+
+  // A CLI manager's codara_complete MCP call flips the run terminal slightly
+  // before the provider stream returns its final usage/result frame. Give that
+  // already-finished turn a short grace to settle so the mirrored run contains
+  // truthful manager token telemetry and a completed SparkCall instead of
+  // exiting the Electron process with the call still marked started.
+  if (finalStatus.kind === "complete") {
+    await waitForManagerCallSettlement(run.id, 10_000);
+  }
 
   // If we exited because the budget elapsed (or the run paused indefinitely),
   // the run-store still thinks it is running. Mark it cancelled so run.json
@@ -188,6 +228,12 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
   } catch (err) {
     emitEvent("eval.sanitize_failed", { cwd, error: (err as Error).message });
   }
+
+  // Run completion detaches its bookkeeping tail (result manifest, summary
+  // message, memory/lessons ledgers) off the critical path; the mirror below
+  // must not copy the run dir before that tail lands, and process exit must
+  // not kill the ledger writes mid-flight.
+  await flushRunCompletionTails(run.id);
 
   // Persist any pending settings/state writes to disk before the process
   // exits — the run-store has its own write queues but this picks up any
@@ -255,6 +301,20 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
 // harness has no operator to answer questions.
 type TerminalKind = "complete" | "failed" | "cancelled" | "timed_out" | "paused_blocked";
 const PAUSED_GRACE_MS = 60_000;
+
+async function waitForManagerCallSettlement(runId: string, graceMs: number): Promise<void> {
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    const snapshot = await getRun(runId);
+    if (!snapshot) return;
+    const hasActiveCall = snapshot.sparkCalls.some(
+      (call) => call.status === "started" && !call.completedAt,
+    );
+    if (!hasActiveCall) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  emitEvent("eval.manager_settlement_timeout", { runId, graceMs });
+}
 
 async function waitForTerminalStatus(
   runId: string,
@@ -405,14 +465,13 @@ function installWorkerSpawnHandler(_planPath: string): () => void {
 // disk; affects only the running process. Returns nothing — the caches are
 // shared module state already inspected by orchestration call paths.
 async function applyVariantConfig(config: VariantConfig, configPath: string): Promise<void> {
-  // Manager model overrides remain on the AppSettings struct.
-  const settingsOverride: Record<string, unknown> = {};
-  if (config.manager?.model && config.manager.model.trim()) {
-    settingsOverride.openRouterModel = config.manager.model.trim();
-  }
-  if (Object.keys(settingsOverride).length > 0) {
-    await applyInMemorySettingsOverride(settingsOverride);
-  }
+  // NOTE: `manager.backend` / `manager.model` / `manager.effort` / `manager.mode`
+  // are NOT applied here. They ride on the startAutopilot() call as
+  // chatBackend/chatModel/chatEffort/chatMode, which is the only channel the
+  // manager reads. (They used to be mirrored into AppSettings.openRouterModel
+  // back when the manager could be routed through the OpenRouter API; that
+  // setting now only feeds commit-message drafting and the editor's inline AI,
+  // so writing it here would change nothing about the run.)
 
   // Manager profile path. The variant config records a path relative to
   // the repo root (the JSON lives under evals/configs/, the profile lives
@@ -466,6 +525,33 @@ async function applyVariantConfig(config: VariantConfig, configPath: string): Pr
   // an accurate INSTALLED list and the manager picks workers from the pool's
   // runtimes by capability rather than guessing.
   await detectAgentRuntimes(true).catch(() => undefined);
+}
+
+// Undefined means "let startAutopilot pick", which is the Pi backend. A
+// pre-Pi variant config that still names the retired "openrouter" API manager
+// is migrated to "pi" rather than rejected, matching how persisted runs read a
+// legacy chatBackend, so an old config still produces a usable run.
+function normalizeManagerBackend(value: string | undefined): ChatBackendKind | undefined {
+  if (value === "openrouter") return "pi";
+  return value === "claude" || value === "codex" || value === "pi" ? value : undefined;
+}
+
+// Auto is the only manager persona an eval run can select; a variant config
+// still naming a retired mode falls through to the same default rather than
+// stamping a chatMode the dispatcher would ignore.
+function normalizeManagerMode(value: string | undefined): ChatMode | undefined {
+  return value === "auto" ? value : undefined;
+}
+
+function normalizeManagerEffort(value: string | undefined): AgentEffortLevel | undefined {
+  return value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "max"
+    ? value
+    : undefined;
 }
 
 function deriveTitle(planText: string): string {
@@ -546,9 +632,9 @@ export function exitCodeFor(outcome: HeadlessOutcome): number {
 }
 
 // Surfaced separately so index.ts doesn't have to know the headless exit
-// codes — adapter errors are exit 2 (parsing, missing file, OpenRouter
-// misconfig). Logs to stderr, never to stdout (we don't want the harness to
-// confuse a bare error message for the JSON summary line).
+// codes, adapter errors are exit 2 (config parsing, missing file, a manager
+// backend that won't start). Logs to stderr, never to stdout (we don't want
+// the harness to confuse a bare error message for the JSON summary line).
 export function fail(code: number, reason: string): never {
   emitEvent("eval.fatal", { code, reason });
   process.stderr.write(`spark headless eval: ${reason}\n`);

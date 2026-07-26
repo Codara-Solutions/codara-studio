@@ -2,7 +2,9 @@
 // fatal-error detection.
 //
 // waitForAgentTui watches the pty for the CLI's TUI banner (or a hard launch
-// failure) after the launch command fires. waitForCodexInputReady holds until
+// failure) after the launch command fires. watchAgentCliExit watches the same
+// stream for the shell-integration marker that says the launched CLI exited
+// while its host shell stayed alive. waitForCodexInputReady holds until
 // Codex has finished MCP-server startup so a bracketed paste is not dropped.
 // pasteAndSubmit sends the prompt as one bracketed paste and confirms the turn
 // started. detectFatalWorkerRuntimeError scans a pty ring buffer for runtime
@@ -13,7 +15,7 @@
 
 import { promises as fs } from "node:fs";
 import type { WorkerArtifactPaths, WorkerReport, WorkerTask } from "@shared/types";
-import { stripAnsiWorkerTap } from "@shared/agent-patterns";
+import { stripAnsiWorkerTap, workerSubmitTurnStarted } from "@shared/agent-patterns";
 import * as pty from "../pty-manager";
 
 // Local copy of run-store's delay — replicated here rather than imported to
@@ -130,6 +132,57 @@ export async function waitForAgentTui(
   });
 }
 
+// A CLI worker's pty is a plain interactive shell and the agent CLI is a CHILD
+// of it, so when claude/codex dies the shell survives at its prompt and
+// pty-manager emits no exit at all. The only main-process evidence that the
+// launched CLI is gone is the shell integration's command-done marker
+// (resources/shell-integration: OSC 133;D on bash/zsh, OSC 133 + 633;D from
+// spark.ps1). Arm this BEFORE the launch command is typed and require the
+// matching pre-exec marker first, because the shell also emits a D for the
+// prompt it painted at spawn.
+//
+// Shells that never load the integration (a pane spawned with
+// SPARK_NO_SHELL_INTEGRATION=1, an unsupported shell family) emit no markers,
+// so this watcher stays silent and the 90-minute run watchdog remains the only
+// backstop for them.
+export function watchAgentCliExit(
+  attemptId: string,
+  onExit: (exitCode: number | null) => void,
+): () => void {
+  // Terminator is required so a marker split mid-chunk is carried over rather
+  // than read as a code-less exit: zsh/bash close with ST, spark.ps1 with BEL.
+  const MARKER = /\x1b\](?:133|633);([CD])(?:;(-?\d+))?(?:\x1b\\|\x07)/g;
+  let carry = "";
+  let sawStart = false;
+  let fired = false;
+  const offTap = pty.tap(attemptId, (chunk) => {
+    if (fired) return;
+    const text = carry + chunk.toString("utf8");
+    let consumed = 0;
+    MARKER.lastIndex = 0;
+    for (let m = MARKER.exec(text); m; m = MARKER.exec(text)) {
+      consumed = m.index + m[0].length;
+      if (m[1] === "C") {
+        sawStart = true;
+        continue;
+      }
+      if (!sawStart) continue;
+      fired = true;
+      offTap();
+      onExit(m[2] === undefined ? null : Number(m[2]));
+      return;
+    }
+    // Keep only the unconsumed tail so a marker split across chunks still
+    // matches and an already-handled one is never rescanned. 32 bytes covers
+    // the longest partial marker (`\x1b]633;D;<exit code>`).
+    carry = text.slice(Math.max(consumed, text.length - 32));
+  });
+  return () => {
+    fired = true;
+    offTap();
+  };
+}
+
 export async function waitForCodexInputReady(attemptId: string): Promise<void> {
   // Codex paints its model banner before it finishes MCP-server startup. If
   // Codara bracket-pastes the worker prompt during that startup window, some
@@ -207,6 +260,16 @@ export function detectFatalWorkerRuntimeError(
   const visible = stripAnsiWorkerTap(buffer);
   const checks: Array<[RegExp, string]> = [
     [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
+    // Auth rejections must not collapse into the generic "runtime API error"
+    // reason: the taxonomy classifies that as a transient provider failure and
+    // buys a doomed same-runtime retry on an expired credential. The reason
+    // wording here deliberately matches the taxonomy's auth pattern so the
+    // retry plan goes straight to the opposite runtime.
+    [
+      /API Error:.{0,160}?(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication|invalid api key|no api key|missing api key|oauth|token (?:has )?expired|please (?:run )?\/?login)/i,
+      "runtime authentication failed before final report",
+    ],
+    [/API Error:.{0,160}?(?:\b429\b|rate ?limit|too many requests)/i, "runtime rate limit before final report"],
     [/API Error:/i, "runtime API error before final report"],
     [/socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
     [/fetch\(\)/i, "runtime network fetch failure before final report"],
@@ -226,20 +289,26 @@ export async function writeAutoFailureReport(
   paths: WorkerArtifactPaths,
   task: WorkerTask,
   reason: string,
+  options?: { interrupted?: boolean },
 ): Promise<void> {
+  const interrupted = options?.interrupted === true;
   const report: WorkerReport = {
     status: "failed",
-    summary: `Cora could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
+    summary: interrupted
+      ? `The ${task.runtimePreference} worker was stopped before it could finish: ${reason}.`
+      : `Cora could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
     filesChanged: [],
     commandsRun: [],
     tests: [],
     proof: [],
-    risks: [
-      `${task.runtimePreference} CLI failed before producing a final report: ${reason}. Verify it is installed, logged in, reachable, and the model id is valid.`,
-    ],
-    followups: [
-      "Verify the CLI is installed, on PATH, and logged in, then re-run.",
-    ],
+    risks: interrupted
+      ? [`The worker was interrupted by a user stop or run pause before producing a final report: ${reason}.`]
+      : [
+          `${task.runtimePreference} CLI failed before producing a final report: ${reason}. Verify it is installed, logged in, reachable, and the model id is valid.`,
+        ],
+    followups: interrupted
+      ? ["Resume the run or retry the worker when you want it to continue."]
+      : ["Verify the CLI is installed, on PATH, and logged in, then re-run."],
   };
   try {
     await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
@@ -269,8 +338,7 @@ export async function pasteAndSubmit(
     // still settling, leaving the prompt visible-but-unsent — that hangs the
     // whole run until the 90-minute watchdog. The agent has started its turn
     // once it paints a working/interrupt indicator or its context usage
-    // moves off 0%. Cursor's working indicator is the "Composing" line plus
-    // "ctrl+c to stop" in the follow-up footer. The tap is installed now
+    // moves off 0%. The tap is installed now
     // (input is idle post-startup) so no stale "esc to interrupt" from the
     // startup phase is captured.
     let visible = "";
@@ -278,19 +346,7 @@ export async function pasteAndSubmit(
       visible = (visible + stripAnsiWorkerTap(chunk.toString("utf8"))).slice(-6000);
     });
     const startedTurn = (): boolean => {
-      // Codex's MCP-startup spinner prints "(Ns • esc to interrupt)" too, so
-      // "esc to interrupt" only means a real turn once that startup line is
-      // gone. Without this guard a paste dropped during startup is read as a
-      // started turn (false positive) and the run hangs at an empty prompt.
-      const mcpStarting = /Starting MCP servers/i.test(visible);
-      return (
-        (!mcpStarting && /esc to interrupt/i.test(visible)) ||
-        /Context\s+[1-9][0-9]?%\s+used/i.test(visible) ||
-        /\btokens used\b/i.test(visible) ||
-        /\bComposing\b/.test(visible) ||
-        /ctrl\+c to stop/i.test(visible) ||
-        /Composer\s+2\.5\s+Fast\s+·\s+[0-9]+(?:\.[0-9]+)?%/i.test(visible)
-      );
+      return workerSubmitTurnStarted(runtime, visible);
     };
 
     try {

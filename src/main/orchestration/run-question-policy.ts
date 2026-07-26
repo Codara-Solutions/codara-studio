@@ -21,6 +21,7 @@ const QUESTION_CATEGORIES = new Set<RunQuestionCategory>([
   "destructive_irreversible",
   "safety_policy",
   "irreducible_product_scope",
+  "plan_approval",
 ]);
 
 function isTerminalRunStatus(status: RunStatus): boolean {

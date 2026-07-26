@@ -1,4 +1,4 @@
-import { promises as fs, createWriteStream } from "node:fs";
+import { promises as fs, createWriteStream, watch, type FSWatcher } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
@@ -9,6 +9,9 @@ import type {
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
   Checkpoint,
+  CoraWhiteboard,
+  CoraWhiteboardEdge,
+  CoraWhiteboardNode,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   AgentRuntimeModel,
@@ -24,8 +27,8 @@ import type {
   PauseRunInput,
   RenameRunInput,
   UpdateChatBackendInput,
+  UpdateCoraWhiteboardInput,
   CancelRunInput,
-  ContextPacket,
   ResumeRunInput,
   CreateStepInput,
   CreateRunInput,
@@ -34,6 +37,7 @@ import type {
   CouncilDirective,
   PlannedStepAgent,
   PrepareWorkerTaskInput,
+  PtyExitInfo,
   RunArtifactPaths,
   RunAssumption,
   RunBlocker,
@@ -52,6 +56,7 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StepState,
+  TaskComplexity,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -75,12 +80,36 @@ import {
 import { makeId } from "@shared/ids";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
 import {
-  contextWindowForModel,
-  estimateImageTokens,
-  estimateTokensFromText,
-} from "@shared/context-window";
-import { normalizeChatFeatureFlags } from "@shared/chat-policy";
+  formatPaneCollapsedBlock,
+  paneDim,
+  paneRetryMarker,
+  paneStreamAdd,
+  paneStreamBudget,
+  paneStreamExceeded,
+  paneToolFailMarker,
+  paneToolOkMarker,
+  paneToolStartMarker,
+  PANE_RED,
+  PANE_STREAM_CUT_NOTE,
+} from "@shared/pane-format";
+import { effectiveChatMode, normalizeChatFeatureFlags } from "@shared/chat-policy";
+import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
+import { effectiveRunExecutionPolicy } from "./execution-policy";
+import {
+  CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
+  whiteboardNodeSizeLimits,
+} from "@shared/cora-whiteboard-file";
 import { CODEX_MODEL_BY_TIER, normalizeCodexModelId } from "@shared/model-catalog";
+// Pure wave selection for pickAutopilotTasks, including manager-batch parallel
+// trust (tasks the execute-mode spawn RPC already launched simultaneously must
+// relaunch concurrently too) and the fan-out no-concrete-scope serial guard.
+import {
+  isBroadPathScope,
+  normalizeTaskPath,
+  pathScopesOverlap,
+  selectAutopilotWave,
+  taskWritesWorkspace,
+} from "./autopilot-wave";
 import {
   appendEvent as appendEventRaw,
   appendEvents as appendEventsRaw,
@@ -94,10 +123,22 @@ import {
   runsRoot,
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
+import { reconcileAcceptedVerifierOnlySteps } from "./step-lifecycle";
+import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
+import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
 export { readWorkerReport } from "./worker-report";
+// Spawn-time batch shape guard. agent-socket's codara_spawn_workers handler is
+// the single choke point every MCP-driven spawn passes through and reaches it
+// through getRunStore(), so the run store owns this policy alongside the rest
+// of the worker-task contract.
+export {
+  evaluateSpawnBatchShape,
+  runHasImplementationTask,
+  VERIFIER_BATCH_REJECTION_MESSAGE,
+} from "./spawn-batch-guard";
 import {
   COMPLETION_SUMMARY_PREFIX,
   buildCompletionSummaryMessage,
@@ -118,6 +159,7 @@ import {
   pasteAndSubmit,
   waitForAgentTui,
   waitForCodexInputReady,
+  watchAgentCliExit,
   writeAutoFailureReport,
 } from "./worker-launch";
 import {
@@ -129,22 +171,14 @@ import {
 } from "./worker-access";
 import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
-import { estimateWorkerCostUsd } from "../openrouter-prices";
+import { estimateWorkerCostUsd } from "../model-prices";
 import {
-  buildOpenRouterManagerRequest,
-  isStructuredOutputUnsupportedError,
-  readOpenRouterConfig,
-  requestOpenRouterManagerDecision,
-  type OpenRouterConfig,
-  type OpenRouterManagerMode,
-  type OpenRouterManagerRequest,
-  type OpenRouterManagerResult,
+  type ManagerMode,
   type SparkManagerDecision,
   type SparkManagerQuestionOption,
   type SparkManagerStepDecision,
   type SparkManagerTaskDecision,
-  type SparkManagerWorkerReportContext,
-} from "./openrouter-manager";
+} from "./manager-protocol";
 import {
   backEdgesToFire,
   computeSkips,
@@ -163,6 +197,12 @@ import { evaluateGuardPredicate } from "./loom-predicates";
 import { ensureCodexProjectTrust } from "./codex-trust";
 import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { recordRunMemory } from "./run-memory";
+import { recordRunLessons } from "./workspace-lessons";
+import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
+import {
+  describeHeadroomForPrompt,
+  readSubscriptionHeadroomSummary,
+} from "./subscription-headroom";
 import {
   createCheckpoint,
   deleteRunCheckpoints,
@@ -175,22 +215,16 @@ import { createKeyedTaskQueue } from "./keyed-task-queue";
 import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
-import { getPreferenceCached } from "../preferences-store";
+import { defaultShell } from "../shells";
 import {
+  coerceWorkerModelToRoster,
+  rosterModelFor,
   sanitizeWorkerModelHint,
-  runUserRequestedFable,
-  SPARK_WORKER_FABLE_FALLBACK,
+  WORKER_DEFAULT_CLAUDE_MODEL,
 } from "./worker-model-hint";
 import * as pty from "../pty-manager";
-import {
-  formatStuckReason,
-  installStuckWatchdog,
-  STUCK_REASON_PREFIX,
-  type StuckWatchdog,
-} from "./worker-watchdog";
 import { runStructuredWorker } from "./structured-worker";
-import { applyAgentRuntimeSettings, detectAgentRuntimes } from "../agent-runtimes";
-import { renderAgentSyncManagerContext } from "../agent-sync";
+import { detectAgentRuntimes } from "../agent-runtimes";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
 import {
@@ -202,6 +236,9 @@ import {
   type ChatStreamEvent,
 } from "./spark-agent-backend";
 import { getBackend } from "./backend-registry";
+import { cleanupPiMcpBridgeConfig, createCodaraPiWorkerLaunchPlan } from "./pi-runtime-electron";
+import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
+import type { PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
   abandonRunQuestionOwnership,
   applyRunQuestionAnswer,
@@ -374,17 +411,14 @@ interface RuntimeReroute {
   reason: string;
 }
 
-async function detectConfiguredAgentRuntimes(
-  settings?: AppSettings,
-): Promise<AgentRuntimeDiagnostic[]> {
-  const liveSettings = settings ?? await loadSettings();
-  const runtimes = await detectAgentRuntimes().catch(() => []);
-  return applyAgentRuntimeSettings(runtimes, liveSettings);
+async function detectConfiguredAgentRuntimes(): Promise<AgentRuntimeDiagnostic[]> {
+  return detectAgentRuntimes().catch(() => []);
 }
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
-  const initialChatFlags = normalizeChatFeatureFlags(input.chatBackend ?? "openrouter", {
+  const initialBackend = input.chatBackend ?? "pi";
+  const initialChatFlags = normalizeChatFeatureFlags(initialBackend, {
     chatFastMode: input.chatFastMode,
     chat1mContext: input.chat1mContext,
   });
@@ -416,12 +450,16 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     // Stamp the chip's draft selections onto the fresh run so the chip's
     // backend/model/mode/effort survive the draft→live transition without an
     // extra updateChatBackend round-trip. Fields are individually optional
-    // because pre-feature callers pass none of them; resolveChatBackendConfig
-    // falls back to OpenRouter + the global default model in that case.
-    chatBackend: input.chatBackend,
-    chatModel: input.chatModel?.trim() || undefined,
+    // because pre-feature callers pass none of them. New runs stamp Pi so
+    // ordinary Cora sessions use the bundled subscription harness unless the
+    // caller explicitly selects a legacy backend.
+    chatBackend: initialBackend,
+    chatModel: input.chatModel?.trim() || (initialBackend === "pi" ? "gpt-5.6-sol" : undefined),
     chatMode: input.chatMode,
-    chatEffort: input.chatEffort,
+    chatEffort: input.chatEffort ?? (initialBackend === "pi" ? "high" : undefined),
+    coraExecutionPolicy: input.coraExecutionPolicy === undefined
+      ? undefined
+      : normalizeCoraExecutionPolicy(input.coraExecutionPolicy),
     chatFastMode: initialChatFlags.chatFastMode,
     chat1mContext: initialChatFlags.chat1mContext,
     // Looms v2: ownership + execution mode are stamped at creation (not
@@ -482,6 +520,33 @@ export async function getRun(runId: string): Promise<RunState | null> {
     }
     throw err;
   }
+}
+
+export async function readWorkerAttemptPrompt(
+  runId: string,
+  attemptId: string,
+): Promise<string> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId);
+  if (!attempt?.promptPath) {
+    throw new Error(`Worker prompt not found: ${attemptId}`);
+  }
+
+  // This API deliberately reads only the prompt recorded for this attempt.
+  // Resolve real paths as well as lexical paths so a symlink inside the run
+  // directory cannot turn this narrow reader into a general filesystem API.
+  const artifactRoot = await fs.realpath(runDir(run.id));
+  const promptPath = await fs.realpath(resolvePath(attempt.promptPath));
+  const relativePrompt = relative(artifactRoot, promptPath);
+  if (
+    relativePrompt === "" ||
+    relativePrompt.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    relativePrompt === ".." ||
+    isAbsolute(relativePrompt)
+  ) {
+    throw new Error("Worker prompt path is outside its run artifacts.");
+  }
+  return fs.readFile(promptPath, "utf8");
 }
 
 async function purgeTerminalRunForRetention(runId: string): Promise<void> {
@@ -667,13 +732,14 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       title: chatTitleFromInput(input),
       // Engine choice from the "Run plan" / "Smart Merge" pickers and from
       // per-automation loop config. Threading these through createRun stamps
-      // run.chatBackend/chatModel/chatMode/chatEffort so askOpenRouterManager
-      // dispatches to the Claude Code / Codex manager with the right model.
-      // Undefined → OpenRouter + backend defaults.
+      // run.chatBackend/chatModel/chatMode/chatEffort so askManagerBackend
+      // dispatches to the right manager backend with the right model.
+      // Undefined → Pi + backend defaults.
       chatBackend: input.chatBackend,
       chatModel: input.chatModel,
       chatMode: input.chatMode,
       chatEffort: input.chatEffort,
+      coraExecutionPolicy: input.coraExecutionPolicy,
     });
   }
 
@@ -741,11 +807,21 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   const fanOutDirective = resolveFanOutDirective(input);
   const councilDirective = resolveCouncilDirective(run, input);
 
-  const initialNote = input.initialUserNote?.trim();
+  // The manager transports intentionally consume only durable queued human
+  // messages. A "Run plan" invocation historically persisted planText in
+  // run.plans without queueing a turn, so the manager received "There is no
+  // new user message" and could mark untouched work complete. Mirror the plan
+  // into one stable user turn. A stable client id makes re-entered
+  // startAutopilot calls idempotent.
+  const cliManagerNeedsPlanTurn = Boolean(planText);
+  const initialNote = input.initialUserNote?.trim() ||
+    (cliManagerNeedsPlanTurn ? planText : undefined);
   if (initialNote) {
     run = await addRunMessage({
       runId: run.id,
-      clientMessageId: input.initialUserNoteClientMessageId,
+      clientMessageId:
+        input.initialUserNoteClientMessageId ??
+        (cliManagerNeedsPlanTurn ? `plan-turn-${run.planId ?? run.id}` : undefined),
       author: "user",
       kind: "note",
       message: initialNote,
@@ -802,20 +878,83 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   // already has the answer to.
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
-    run = fastPathPlan ?? ((await askOpenRouterManager(run, input.cwd, "step_planning")) ?? run);
+    run = fastPathPlan ?? ((await askManagerBackend(run, input.cwd, "step_planning")) ?? run);
     if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return run;
     tasks = pickAutopilotTasks(run);
   }
   if (tasks.length === 0) {
-    return askHumanQuestion(
-      run.id,
-      "I could not find a ready task to run. Please clarify the next goal.",
-      undefined,
-      {
-        reason: "No safe runnable task can be inferred from the current plan.",
-        managerMode: run.workerAttempts.length > 0 ? "worker_result_review" : "plan_analysis",
-      },
+    // A force-pause or a still-active worker can race this launch loop: the
+    // pause requeues the manager input, startAutopilot re-enters, and the sole
+    // non-terminal task is unqueueable because its attempt was just killed
+    // (observed in run-mrz25z39-9ffs4w). Asking "I could not find a ready
+    // task" then reads as model confusion — stay quiet and let the real
+    // driver (resume, worker finish, or review) pick the run back up.
+    run = await requireRun(run.id);
+    const attemptInFlight = run.workerAttempts.some(
+      (item) => !["succeeded", "failed", "timed_out", "cancelled"].includes(item.status),
     );
+    const forcePausedJustNow =
+      run.autopilot?.lastAction === "force_paused" &&
+      typeof run.autopilot.pausedAt === "string" &&
+      Date.now() - Date.parse(run.autopilot.pausedAt) < 30_000;
+    if (
+      ["paused", "blocked", "cancelled", "complete"].includes(run.status) ||
+      forcePausedJustNow ||
+      attemptInFlight ||
+      activeWorkersForRun(run.id).length > 0
+    ) {
+      return run;
+    }
+    // Say WHY there is nothing to run. "I could not find a ready task" reads as
+    // the model being confused, when the usual cause is concrete and visible in
+    // the plan, most often every step already failed. Naming the real state
+    // tells the user what decision is actually in front of them.
+    const failedSteps = run.steps.filter((step) => step.status === "failed");
+    const unfinishedSteps = run.steps.filter(
+      (step) => !["complete", "completed_unverified", "failed", "skipped"].includes(step.status),
+    );
+    // Every step complete, every worker task accepted, nothing in flight: the
+    // manager's own turn WAS the run, and it ended without codara_complete
+    // (execute/auto CLI managers reach here whenever that happens, since
+    // runAutopilotWorkerCycle deliberately skips scheduleAutopilotReview for
+    // them). Finish the run instead of asking the user about work that is
+    // already done. Reversible: a later user message reopens it through the
+    // steering-followup path. Completion still has to earn the same verifier
+    // freshness codara_complete demands: an execute/auto CLI manager
+    // auto-accepts a task on process exit without reading its report, so
+    // "everything accepted" is not evidence anything was verified.
+    if (isRunSettled(run)) {
+      const verification = await describeVerificationFreshness(run);
+      if (verification.ok) {
+        return completeRunFromOrchestrator(run.id);
+      }
+      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
+        managerMode: "worker_result_review",
+      });
+    }
+    // A step sitting in review is NOT blocked on the user, it is blocked on
+    // Cora. Boot recovery produces exactly this shape (a worker whose report
+    // was already on disk becomes needs_review), so asking the user to unblock
+    // it would be both wrong and the most likely message they ever see after a
+    // restart. Re-drive the review instead of asking.
+    const reviewPending = run.steps.some((step) => step.status === "reviewing");
+    if (reviewPending) {
+      scheduleAutopilotReview(run.id, input.cwd);
+      return run;
+    }
+    const question =
+      run.steps.length > 0 && failedSteps.length > 0 && unfinishedSteps.length === 0
+        ? failedSteps.length === run.steps.length
+          ? "Every step in this plan has failed, so there is nothing left to run. Tell me how you'd like to proceed, retry the work, change the approach, or start over."
+          : `${failedSteps.length} of ${run.steps.length} steps failed and the rest are finished, so there is nothing left to run. Tell me whether to retry the failed work or move on.`
+        : run.steps.length === 0
+          ? "I don't have a plan to run yet. Tell me what you'd like me to do."
+          : "None of the remaining steps has runnable work, they're waiting on something I can't resolve myself. Tell me how you'd like to proceed.";
+    return askHumanQuestion(run.id, question, undefined, {
+      reason: "No safe runnable task can be inferred from the current plan.",
+      managerMode: run.workerAttempts.length > 0 ? "worker_result_review" : "plan_analysis",
+    });
   }
 
   // Observability: if the next batch was collapsed to a single serial task only
@@ -891,6 +1030,23 @@ const DIRECT_ATTEMPT_TERMINAL = new Set<WorkerAttemptStatus>([
   "timed_out",
   "cancelled",
 ]);
+
+// The same set under a name that does not imply direct runs, managed-run boot
+// recovery needs it too, and "DIRECT_" reads as a scope restriction it never
+// had. Aliased rather than renamed so the direct-run call sites stay legible
+// against their own comments.
+const ATTEMPT_TERMINAL_STATUSES = DIRECT_ATTEMPT_TERMINAL;
+
+// Does this path exist? Boot recovery uses it to decide whether a worker that
+// vanished with the app had already written its final report.
+async function fileExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // LoomWorkerConfig and WorkerTask now share the full effort vocabulary,
 // including GPT-5.6's max setting, so automation workers preserve the user's
@@ -1180,7 +1336,7 @@ async function launchDirectNodeTasks(
     const runtimes = await detectAgentRuntimes();
     const installed = new Set(
       runtimes
-        .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed && !r.disabledBySettings)
+        .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed)
         .map((r) => r.kind),
     );
     resolveAuto = (engine) =>
@@ -1435,6 +1591,7 @@ export async function failWorkerAttempt(
         if (!a || DIRECT_ATTEMPT_TERMINAL.has(a.status)) return false;
         a.status = "failed";
         a.error = error;
+        a.failureKind = classifyWorkerFailure(error);
         a.finishedAt = a.finishedAt ?? timestamp;
         const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
         if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
@@ -1461,7 +1618,7 @@ export async function failWorkerAttempt(
       activeWorkerProcesses.delete(attemptId);
     }
     try {
-      pty.dispose(attemptId);
+      pty.dispose(attemptId, { sanctioned: true });
     } catch {
       /* already gone */
     }
@@ -2708,7 +2865,7 @@ async function runManagerStageAfterQuestion(
     return;
   }
 
-  const decided = await askOpenRouterManager(
+  const decided = await askManagerBackend(
     run,
     cwd,
     mode,
@@ -2818,6 +2975,12 @@ export async function recoverPendingConversationRewinds(): Promise<void> {
   }
 }
 
+/** Stamped on every manager turn this pass fails. It is the ONLY durable trace
+ * that a turn was cut off mid-work: once this pass has run, the call is
+ * "failed" like any other, so a later boot step cannot use "started with no
+ * completedAt" to recognize an interrupted turn (see interruptedManagerCall). */
+export const MANAGER_TURN_INTERRUPTED_ERROR = "Manager turn interrupted by application restart.";
+
 /** Repair manager turns that were durable but had no live driver after process
  * exit. Claimed queued/submitted input is released, the orphaned call is marked
  * failed, and answer-driven continuations are recreated from the exact linked
@@ -2845,7 +3008,7 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         for (const call of draft.sparkCalls) {
           if (!orphanedIds.has(call.id) || call.status !== "started") continue;
           call.status = "failed";
-          call.error = "Manager turn interrupted by application restart.";
+          call.error = MANAGER_TURN_INTERRUPTED_ERROR;
           call.completedAt = timestamp;
           changed = true;
         }
@@ -2889,46 +3052,346 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         draft.updatedAt = timestamp;
       },
     });
+    void recovered;
+    // Deliberately does NOT re-drive the run. Restarting the app is not consent
+    // to resume: this pass repairs the record (the interrupted turn is failed,
+    // its input returns to queued, an answered question's continuation returns
+    // to pending) and stops there. pauseManagedRunsAfterRestart then parks the
+    // run, and the user's Resume, which re-drives everything, including a
+    // queued input and a pending continuation, is what starts work again.
+  }
+}
 
-    if (recovered.pendingManagerResume) {
-      schedulePendingManagerResume(recovered);
-    } else if (
-      recovered.executionMode !== "direct" &&
-      queuedManagerInputMessages(recovered).length > 0 &&
-      recovered.status !== "paused" &&
-      recovered.status !== "blocked" &&
-      recovered.status !== "cancelled" &&
-      !isTerminalRunStatus(recovered.status)
-    ) {
-      scheduleInitialChatDecision(recovered.id, autopilotInputFromRun(recovered), {
-        afterCurrent: true,
-      });
+/**
+ * Boot recovery for MANAGED (non-direct) runs' worker attempts.
+ *
+ * Direct/loom runs get recoverDirectRuns (direct-worker.ts); orchestrated runs
+ * got nothing, so an attempt left non-terminal when the app died stayed
+ * "running" forever. Every mechanism that can end a worker attempt lives in
+ * memory, the Pi RPC client's child exit listeners, the final-report poll, the
+ * 90-minute cap, so all of them die with the process and none is re-armed at
+ * boot. The stale attempt then wedges the run shut: startAutopilot's
+ * attemptInFlight guard returns quietly while any attempt is non-terminal,
+ * deferring to "the real driver (resume, worker finish, or review)" that no
+ * longer exists. Observed on run-mrzgc7xm-u7ljcx.
+ *
+ * This is EXIT detection, not stuck detection. A worker is a child of the main
+ * process, so at boot the absence of its live handle IS proof that it died , 
+ * nothing here is time-based and nothing polls. (The deleted stuck-worker
+ * watchdog is unrelated: it only ever covered the legacy PTY path, never Pi
+ * workers, and being an in-process interval it died with the app too.)
+ *
+ * Report-first, mirroring recoverDirectRuns: a worker that finished before the
+ * app went away left final-report.json on disk, and that work is kept rather
+ * than discarded.
+ */
+export async function recoverOrphanedManagedWorkerAttempts(): Promise<void> {
+  let runs: RunState[];
+  try {
+    runs = await listRuns();
+  } catch {
+    return;
+  }
+  for (const run of runs) {
+    // Direct runs are recoverDirectRuns' job, it can relaunch them, which
+    // needs loom ownership checks this pass has no business making.
+    if (run.executionMode === "direct") continue;
+    if (isTerminalRunStatus(run.status)) continue;
+    // Paused and blocked runs are NOT skipped. Their status is user-owned and
+    // this pass never changes it, but their worker processes died with the
+    // app just the same, and leaving those attempts non-terminal reproduces
+    // the original bug precisely where a human is already waiting: the user
+    // answers the question, startAutopilot hits its attemptInFlight guard, and
+    // nothing happens. Settling the corpse is what makes their answer work.
+
+    const orphaned = run.workerAttempts.filter(
+      (attempt) =>
+        !ATTEMPT_TERMINAL_STATUSES.has(attempt.status) &&
+        // A "prompt_ready" attempt was PREPARED but never launched, it has no
+        // process because it never had one, not because it died. Failing it
+        // would be both a lie and destructive: the cascade marks its step
+        // failed, which is terminal, so the step's work would be skipped
+        // forever. startAutopilot deliberately REUSES a prompt_ready attempt on
+        // the next launch, so leaving it alone is what lets the run pick that
+        // work back up.
+        attempt.status !== "preparing" &&
+        attempt.status !== "prompt_ready" &&
+        // Guard against dev hot-reload re-entering recovery inside a process
+        // whose workers are genuinely still alive. In a real boot neither of
+        // these in-memory handles can exist.
+        !pty.exists(attempt.id) &&
+        !activeWorkerProcesses.has(attempt.id),
+    );
+    if (orphaned.length === 0) continue;
+
+    for (const attempt of orphaned) {
+      const reportOnDisk = attempt.finalReportPath
+        ? await fileExists(attempt.finalReportPath)
+        : false;
+      if (reportOnDisk) {
+        // The worker finished; only the bookkeeping was lost. Settle it exactly
+        // as the live finish path would (attempt succeeded -> task needs_review
+        // -> step reviewing) so the normal review funnel can pick it up instead
+        // of the work being thrown away.
+        await commitRunChange(run, {
+          type: "worker_attempt.recovered",
+          message: "Worker finished before the app closed; recovered its report after restart",
+          payload: { attemptId: attempt.id },
+          mutate: (draft, timestamp) => {
+            const a = draft.workerAttempts.find((x) => x.id === attempt.id);
+            if (!a || ATTEMPT_TERMINAL_STATUSES.has(a.status)) return false;
+            a.status = "succeeded";
+            a.finishedAt = a.finishedAt ?? timestamp;
+            a.runtimeState = "done";
+            a.runtimeStateUpdatedAt = timestamp;
+            const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
+            if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
+              t.status = "needs_review";
+              t.updatedAt = timestamp;
+            }
+            const s = t?.stepId ? draft.steps.find((x) => x.id === t.stepId) : undefined;
+            if (
+              s &&
+              !["complete", "completed_unverified", "failed", "skipped"].includes(s.status) &&
+              !hasActiveStepWorkers(draft, s.id, t?.id)
+            ) {
+              s.status = "reviewing";
+              s.updatedAt = timestamp;
+            }
+            draft.updatedAt = timestamp;
+          },
+        }).catch(() => undefined);
+        // A sandboxed worker ran in an isolated worktree, so its edits have not
+        // touched the workspace yet, the live finish path merges them back and
+        // the direct-run recovery does the same. Without this the run would
+        // record the work as done while the workspace contains none of it, and
+        // the worktree is later destroyed with the run: silent loss of a
+        // completed worker's entire diff. Best-effort, exactly as the other two
+        // call paths treat it; sandboxMergedBack keeps it from double-applying.
+        await mergeBackRecoveredSandbox(run.id, attempt.id).catch(() => undefined);
+        continue;
+      }
+      // No report: the worker died mid-turn. Say so plainly rather than
+      // leaving a phantom spinner. failWorkerAttempt cascades attempt -> task
+      // -> step, is idempotent, and its finalizeDirectRun tail is gated on
+      // executionMode === "direct", so it is safe here.
+      await failWorkerAttempt(
+        run.id,
+        attempt.id,
+        "the app closed while this worker was running; its process is gone",
+      ).catch(() => undefined);
+      // requireRun is awaited as an ARGUMENT, so its rejection would escape the
+      // trailing .catch and abort recovery for every remaining run. A run
+      // deleted between listRuns() and here is entirely possible, so resolve it
+      // defensively first.
+      const refreshed = await getRun(run.id).catch(() => undefined);
+      if (!refreshed) continue;
+      await commitRunChange(refreshed, {
+        type: "worker_attempt.runtime_state_changed",
+        message: "Worker runtime state cleared after restart",
+        payload: { attemptId: attempt.id, state: "error" },
+        mutate: (draft, timestamp) => {
+          const a = draft.workerAttempts.find((x) => x.id === attempt.id);
+          // The stale "working" chip must not outlive the process it described.
+          if (!a || a.runtimeState === "error") return false;
+          a.runtimeState = "error";
+          a.runtimeStateUpdatedAt = timestamp;
+          draft.updatedAt = timestamp;
+        },
+      }).catch(() => undefined);
     }
   }
 }
 
-/** Re-arm durable queued input whose in-memory follow-up scheduler disappeared
- * on process exit. Claimed orphaned input is released by
- * recoverOrphanedManagerTurns first; this pass covers messages that were saved
- * immediately before the process exited and were never claimed. */
-export async function recoverQueuedManagerInputs(): Promise<void> {
-  const runs = await listRuns();
-  for (const run of runs) {
-    if (
-      run.executionMode === "direct" ||
-      run.status === "paused" ||
-      run.status === "blocked" ||
-      run.status === "cancelled" ||
-      activeManagerCall(run)
-    ) continue;
-    const queued = queuedManagerInputMessages(run);
-    if (queued.length === 0) continue;
-    if (queued.some((message) => message.intent === "steer")) {
-      scheduleQueuedSteeringFollowup(run);
-    } else {
-      scheduleInitialChatDecision(run.id, autopilotInputFromRun(run), { afterCurrent: true });
+const PASSING_VERIFIER_CONFIDENCES = new Set(["PERFECT", "VERIFIED", "PARTIAL"]);
+
+export interface RunVerificationFreshness {
+  /** false when the latest files-changing report has no newer passing verdict. */
+  ok: boolean;
+  latestVerifierConfidence: string | null;
+  latestChangedImplementationAt: number;
+  latestPassingVerifierAt: number;
+}
+
+/**
+ * Verification freshness invariant: an earlier green verifier does not cover a
+ * later corrective edit, and a FEEDBACK report is evidence of a defect rather
+ * than permission to land, so every files-changing implementation needs a
+ * terminal-OK verifier verdict AFTER it before a run may be called done.
+ *
+ * Shared rule, one implementation. codara_complete rejects the manager on it
+ * (agent-socket handleOrchestratorComplete) and the orchestrator-side terminal
+ * hops gate on it too: an execute/auto CLI manager auto-accepts a worker task
+ * the moment the process exits, without reading the report, so "every task
+ * accepted" alone is not evidence that anything was verified.
+ */
+export async function describeVerificationFreshness(
+  run: RunState,
+): Promise<RunVerificationFreshness> {
+  let latestChangedImplementationAt = 0;
+  let latestPassingVerifierAt = 0;
+  let latestVerifierConfidence: string | null = null;
+  for (const attempt of run.workerAttempts ?? []) {
+    if (!attempt.finalReportPath) continue;
+    const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
+    if (!task) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (!report) continue;
+    const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
+    if (task.taskClass === "verifier" && report.verifier) {
+      latestVerifierConfidence = report.verifier.confidence;
+      if (PASSING_VERIFIER_CONFIDENCES.has(report.verifier.confidence)) {
+        latestPassingVerifierAt = Math.max(latestPassingVerifierAt, finishedAt);
+      }
+    } else if (report.filesChanged.length > 0) {
+      latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
     }
   }
+  return {
+    ok:
+      latestChangedImplementationAt === 0 ||
+      latestPassingVerifierAt >= latestChangedImplementationAt,
+    latestVerifierConfidence,
+    latestChangedImplementationAt,
+    latestPassingVerifierAt,
+  };
+}
+
+/** Asked instead of completing when the work is finished but unverified. The
+ * run stays reviewable and the user owns the call, rather than a cap-broken or
+ * never-verified run being reported as a clean green finish. */
+const UNVERIFIED_COMPLETION_QUESTION =
+  "Every worker finished, but the latest code changes never earned a passing verifier verdict, so I won't mark this done on my own. Tell me whether to run a verifier over the final state or accept the work as it stands.";
+
+/**
+ * Finish managed runs that a restart found already done.
+ *
+ * A run whose steps are all complete, whose worker tasks are all accepted and
+ * whose attempts are all terminal has nothing left to drive: the previous
+ * process died (or the manager turn ended) between the last acceptance and the
+ * terminal hop that codara_complete would have made. Parking that run as
+ * "Paused, press Resume" asks the user to restart work that is finished, and
+ * Resume would then spend a whole extra manager turn re-reviewing accepted
+ * reports.
+ *
+ * Ordering is load-bearing. This must run AFTER
+ * recoverOrphanedManagedWorkerAttempts, so attempts killed by the restart are
+ * already settled and a dead worker cannot read as "still in flight", and
+ * BEFORE pauseManagedRunsAfterRestart, which would otherwise claim the run
+ * first.
+ *
+ * This is not the app resuming work on its own: it starts nothing, it only
+ * records the terminal state the run already reached.
+ */
+export async function completeSettledManagedRunsAfterRestart(): Promise<void> {
+  let runs: RunState[];
+  try {
+    runs = await listRuns();
+  } catch {
+    return;
+  }
+  for (const run of runs) {
+    // Only live-looking managed runs. Paused/blocked status is user-owned, and
+    // a question the user never answered outranks a tidy ending: completing the
+    // run would bury it.
+    if (!["running", "reviewing"].includes(run.status)) continue;
+    if (run.blockedOn || unresolvedRunQuestions(run.humanMessages).length > 0) continue;
+    // An undelivered turn or a manager call the restart cut off is unfinished
+    // conversation, not finished work. Leave all of these to the user's Resume:
+    // a turn truncated mid-work (interruptedManagerCall, NOT activeManagerCall,
+    // the orphan pass above already failed every live call), a continuation
+    // whose lease was repaired to "pending", and an answer whose live RPC died
+    // with the process. Each is a piece of conversation the user is owed, and
+    // completing the run would bury it with no Resume left to reach it.
+    if (queuedManagerInputMessages(run).length > 0) continue;
+    if (interruptedManagerCall(run)) continue;
+    if (run.pendingManagerResume) continue;
+    if (unactedUserAnswer(run)) continue;
+    if (activeWorkersForRun(run.id).length > 0) continue;
+    const settlement = describeRunSettlement(run);
+    if (!settlement.settled) continue;
+    // Unverified work is never completed unattended, same rule codara_complete
+    // enforces. The pause pass below parks it instead, so Resume re-drives it
+    // into startAutopilot's question.
+    if (!(await describeVerificationFreshness(run)).ok) continue;
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "run.settled_after_restart",
+      message: "Every step finished before the app closed; marking the run complete",
+      payload: { priorStatus: run.status, steps: run.steps.length, workerTasks: run.workerTasks.length },
+    }).catch(() => undefined);
+    await completeRunFromOrchestrator(run.id).catch(() => undefined);
+  }
+}
+
+/**
+ * Park every managed run that a restart interrupted.
+ *
+ * Relaunching the app is not consent to resume. Whatever was mid-flight , 
+ * a manager turn, a worker, a queued message, died with the previous process,
+ * and silently picking it back up means work starts while the user is still
+ * looking at the window. So any run whose status implies live activity is
+ * moved to `paused` with an honest reason, and the user's Resume (which
+ * re-drives the manager, a queued input, and a pending continuation alike) is
+ * the only thing that restarts it.
+ *
+ * Runs already paused, blocked, or terminal are left exactly as they are:
+ * their status is already the truth, and a blocked run is waiting on an answer
+ * the user can still give.
+ *
+ * Must run AFTER the attempt-level recovery above, so a run is parked with its
+ * dead workers already settled rather than mid-repair.
+ */
+export async function pauseManagedRunsAfterRestart(): Promise<void> {
+  let runs: RunState[];
+  try {
+    runs = await listRuns();
+  } catch {
+    return;
+  }
+  const reason = "Paused because the app was restarted. Resume when you're ready.";
+  for (const run of runs) {
+    // Looms/automations are scheduled work the user set up to run on its own;
+    // their own recovery decides whether to continue. This is about Cora.
+    if (run.executionMode === "direct") continue;
+    if (!["planning", "running", "reviewing"].includes(run.status)) continue;
+    await commitRunChange(run, {
+      type: "run.paused_after_restart",
+      message: reason,
+      payload: { priorStatus: run.status },
+      mutate: (draft, timestamp) => {
+        if (!["planning", "running", "reviewing"].includes(draft.status)) return false;
+        draft.status = "paused";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "paused",
+          lastAction: "paused_after_restart",
+          stopReason: reason,
+          pausedAt: timestamp,
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    }).catch(() => undefined);
+  }
+}
+
+/**
+ * Queued manager input left by a prior process stays queued.
+ *
+ * This pass used to re-drive the run so the message wasn't stranded. It no
+ * longer does: relaunching the app must never start work on its own. The
+ * message is already durable on disk with deliveryState "queued", the composer
+ * shows it as QUEUED, and resumeRun consumes it, so nothing is lost by
+ * waiting for the user, and the alternative (Cora silently picking up a
+ * conversation the user walked away from) is exactly what we don't want.
+ *
+ * Kept as a no-op rather than deleted: the boot sequence documents its
+ * recovery steps in order, and a missing step reads as an oversight.
+ */
+export async function recoverQueuedManagerInputs(): Promise<void> {
+  /* intentionally empty, see the comment above */
 }
 
 /** Re-arm linked-answer manager continuations left by a prior process. Pending
@@ -2958,9 +3421,11 @@ export async function recoverPendingManagerResumes(): Promise<void> {
         draft.updatedAt = timestamp;
       },
     });
-    if (recovery.action === "pending" && recovered.pendingManagerResume) {
-      schedulePendingManagerResume(recovered);
-    }
+    // The lease is repaired (a launch that never completed returns to
+    // "pending") but the continuation is NOT scheduled: relaunching the app is
+    // not consent to resume. The record stays durable, so the user's Resume
+    // picks the continuation up exactly where it was left.
+    void recovered;
   }
 }
 
@@ -3009,8 +3474,8 @@ async function runInitialAutopilotPlanning(
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
 
   let managerPlannedRun = mode === "chat"
-    ? await askOpenRouterManager(run, input.cwd, "chat", managerResumeClaimId, autonomyRetryCount)
-    : await askOpenRouterManager(run, input.cwd, "plan_analysis", managerResumeClaimId, autonomyRetryCount);
+    ? await askManagerBackend(run, input.cwd, "chat", managerResumeClaimId, autonomyRetryCount)
+    : await askManagerBackend(run, input.cwd, "plan_analysis", managerResumeClaimId, autonomyRetryCount);
   if (
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
@@ -3034,19 +3499,22 @@ async function runInitialAutopilotPlanning(
   ) {
     const fastPath = await tryTrivialFastPathStepPlanning(managerPlannedRun);
     managerPlannedRun = fastPath
-      ?? (await askOpenRouterManager(managerPlannedRun, input.cwd, "step_planning"));
+      ?? (await askManagerBackend(managerPlannedRun, input.cwd, "step_planning"));
   }
 
+  // A null result means the manager backend threw before producing a decision
+  // (runtime missing, spawn failure, provider error), the failure itself is
+  // already journaled as spark_call.failed. Park the run on an accurate
+  // question instead of silently idling at status=running with no driver.
   if (!managerPlannedRun && (mode === "chat" || !manualFallbackEnabled())) {
     await askHumanQuestion(
       run.id,
       mode === "chat"
-        ? "OpenRouter is not configured, so Cora cannot think through this chat turn yet. Add the API key in Settings, then send the message again."
-        : "OpenRouter is not configured, so Cora cannot plan Claude/Codex/Cursor worker tasks yet. Add the API key in Settings, then run the plan again.",
+        ? "Cora's manager turn failed before it could answer this chat message. Check the run log for the backend error, then send the message again."
+        : "Cora's manager turn failed before it could plan worker tasks. Check the run log for the backend error, then run the plan again.",
       undefined,
       {
-        category: "credentials_access",
-        reason: "The configured manager backend has no API credentials.",
+        reason: "The Cora manager backend could not complete the turn.",
         managerMode: mode,
       },
     );
@@ -3066,7 +3534,22 @@ async function runInitialAutopilotPlanning(
   ) {
     return;
   }
-  await startAutopilot({ ...input, runId: run.id });
+  // This is the post-turn driver hop, not a fresh start: the initial note was
+  // already appended and already delivered to the manager. Re-feeding it makes
+  // startAutopilot take the initialNote branch again, which addRunMessage
+  // dedupes to nothing and then hands to scheduleInitialChatDecision, whose
+  // activeAutopilotPlans guard sees THIS cycle still in flight and returns. The
+  // hop then drives nothing at all, which is how a run whose workers all
+  // finished stays "running" with no timer, no worker and no pending call
+  // (run-ms0dijmk-54pw6g). Strip the initial-turn fields so the hop reaches the
+  // launch/finish decision below.
+  await startAutopilot({
+    ...input,
+    initialUserNote: undefined,
+    initialUserNoteClientMessageId: undefined,
+    initialAttachments: undefined,
+    runId: run.id,
+  });
 }
 
 async function markInitialAutopilotPlanningFailed(runId: string, err: unknown): Promise<void> {
@@ -3112,12 +3595,6 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     return;
   }
 
-  const retry = await maybeAutoRetryStuckAttempt(launched, attemptId);
-  if (retry) {
-    scheduleAutopilotCycles(runId, [retry.attemptId]);
-    return;
-  }
-
   const latest = await requireRun(launched.id);
   if (
     latest.status === "paused" ||
@@ -3135,13 +3612,11 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // codara_wait_for_workers and deciding codara_complete vs spawn correctives).
   // We need the worker_task to reach a TERMINAL status (accepted/failed/
   // cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
-  // is non-terminal in the WorkerTaskStatus enum, and the OpenRouter-driven
-  // review path that normally transitions needs_review → accepted via
+  // is non-terminal in the WorkerTaskStatus enum, and the manager-review
+  // path that normally transitions needs_review → accepted via
   // decideWorkerReport is explicitly skipped below. So auto-accept on
   // success here; the CC manager will inspect the report and judge quality.
-  const isExecuteModeCliManager =
-    (latest.chatBackend === "claude" || latest.chatBackend === "codex") &&
-    (latest.chatMode === "execute" || latest.chatMode === "auto");
+  const isExecuteModeCliManager = runHasMcpManager(latest);
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
   const shouldAutoAccept =
@@ -3191,6 +3666,33 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   });
 
   if (!hasOtherActiveCycles && !hasOtherActiveWorkers) {
+    // A completed worker can deterministically queue its own continuation:
+    // verifier FEEDBACK re-queues the matching implementation task, and an
+    // environmental CLI failure queues an opposite-runtime fallback. Those
+    // tasks previously remained parked forever for execute-mode CLI managers,
+    // because the code below intentionally skips a second manager prompt. Run
+    // the pending wave directly before deciding whether manager review is due.
+    const settled = await requireRun(runId);
+    const pendingContinuationTasks = pickAutopilotTasks(settled);
+    if (pendingContinuationTasks.length > 0) {
+      await appendEvent({
+        workspaceId: settled.workspaceId,
+        runId: settled.id,
+        type: "autopilot.worker_continuation_started",
+        message: `Launching ${pendingContinuationTasks.length} worker continuation task(s) queued by the completed cycle`,
+        payload: {
+          taskIds: pendingContinuationTasks.map((task) => task.id),
+          taskTitles: pendingContinuationTasks.map((task) => task.title),
+        },
+      });
+      const input = autopilotInputFromRun(settled);
+      await startAutopilot({
+        ...input,
+        cwd: cwd || input.cwd,
+        runId: settled.id,
+      });
+      return;
+    }
     // Skip the autopilot's worker_result_review re-prompt when the chat
     // backend is a long-lived CC/Codex execute session. In that flow the
     // manager is ALREADY waiting on codara_wait_for_workers in its current
@@ -3198,83 +3700,38 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // and the same CC/Codex session decides what to do next (read final
     // reports, then codara_complete or spawn correctives) — all inside its
     // active turn. Re-prompting it with latestUserPromptFromRun would be
-    // the SAME prompt as turn 1 (because askChatBackendNonOpenRouter has no
-    // mode-specific message builder), which is precisely how one user
-    // message produced multiple worker-spawn rounds in run-mpo92kqf-7eaym0.
-    // OpenRouter manager retains the review re-prompt because OpenRouter's
-    // openrouter-manager.ts:buildManagerUserMessage DOES vary by mode.
+    // the SAME prompt as turn 1 (askManagerBackend has no mode-specific
+    // message builder), which is precisely how one user message produced
+    // multiple worker-spawn rounds in run-mpo92kqf-7eaym0.
     if (!isExecuteModeCliManager) {
       scheduleAutopilotReview(runId, cwd);
+      return;
+    }
+    // ...but that only holds while the manager's turn is actually live. If its
+    // call already finished (the turn ended without codara_wait_for_workers, or
+    // the provider cut it short), no RPC will unblock and no re-entry is
+    // coming, so the run would sit at "reviewing" with every worker accepted
+    // and nothing driving it. When all the work is settled, take the terminal
+    // hop codara_complete would have taken. Deliberately narrow: an unsettled
+    // run still gets no re-prompt, that is the duplicate-spawn bug above.
+    //
+    // The manager never read the reports on this path (that is what "the turn
+    // ended early" means), so the verifier freshness invariant cannot be waived
+    // here: unverified work is handed to the user instead of being reported as
+    // a clean finish.
+    if (activeManagerCall(settled) || activeWorkersForRun(runId).length > 0) return;
+    if (isRunSettled(settled)) {
+      const verification = await describeVerificationFreshness(settled);
+      if (verification.ok) {
+        await completeRunFromOrchestrator(runId);
+        return;
+      }
+      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
+        managerMode: "worker_result_review",
+      });
     }
   }
-}
-
-// Auto-restart-from-disk for stuck workers. When the watchdog fails an attempt
-// with the STUCK_REASON_PREFIX, skip the manager replan: the workspace state
-// the worker was editing is still on disk, so we just prepare + launch a fresh
-// attempt for the same task. Capped by workerStuckMaxAutoRetries so a truly
-// broken model can't loop forever.
-async function maybeAutoRetryStuckAttempt(
-  run: RunState,
-  attemptId: string,
-): Promise<{ attemptId: string } | null> {
-  const failed = run.workerAttempts.find((a) => a.id === attemptId);
-  if (!failed || failed.status !== "failed") return null;
-  if (!failed.error?.startsWith(STUCK_REASON_PREFIX)) return null;
-
-  const settings = await loadSettings();
-  const max = settings.workerStuckMaxAutoRetries;
-  if (max <= 0) return null;
-
-  const task = run.workerTasks.find((t) => t.id === failed.workerTaskId);
-  if (!task) return null;
-  const stuckCount = run.workerAttempts.filter(
-    (a) => a.workerTaskId === task.id && a.error?.startsWith(STUCK_REASON_PREFIX),
-  ).length;
-  if (stuckCount > max) return null;
-
-  await appendEvent({
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    stepId: task.stepId,
-    workerTaskId: task.id,
-    attemptId,
-    type: "worker_attempt.auto_retry_stuck",
-    message: `Auto-retrying stuck worker (attempt ${stuckCount} of ${max})`,
-    payload: {
-      runtime: task.runtimePreference,
-      stuckAttemptId: attemptId,
-      stuckCount,
-      maxRetries: max,
-    },
-  });
-
-  await commitRunChange(run, {
-    type: "worker_attempt.auto_retry_reset",
-    message: `Resetting task + step state for stuck-retry: ${task.title}`,
-    payload: { workerTaskId: task.id, stepId: task.stepId },
-    mutate: (draft, timestamp) => {
-      const t = draft.workerTasks.find((x) => x.id === task.id);
-      if (t) {
-        t.status = "queued";
-        t.updatedAt = timestamp;
-      }
-      const s = task.stepId ? draft.steps.find((x) => x.id === task.stepId) : undefined;
-      if (s && s.status === "failed") {
-        s.status = "ready";
-        s.updatedAt = timestamp;
-      }
-      draft.updatedAt = timestamp;
-    },
-  });
-
-  const envelope = await prepareWorkerTask({
-    runId: run.id,
-    workerTaskId: task.id,
-    cwd: failed.cwd,
-    unattended: true,
-  });
-  return { attemptId: envelope.attemptId };
 }
 
 export function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
@@ -3375,43 +3832,12 @@ async function runAutopilotManagerReview(
   // no active workers). Synthesize the best merged PLAN.md + PRD.md and complete
   // the run — skip the verifier/manager review (planning docs aren't code).
   //
-  // Gate out chatMode "execute"/"auto": council tasks keep their councilGroupId
-  // forever, so isCouncilRun(run) stays true even after the plan is finalized.
-  // Once the user flips the SAME chat to Execute or Auto ("run the plan"),
-  // we must NOT re-route into council finalize — otherwise the flip would
-  // re-finalize the old plan instead of spawning execute workers. Any other
-  // mode (plan, or unset for a programmatic council) still advances/finalizes
-  // the council normally.
-  if (isCouncilRun(run) && run.chatMode !== "execute" && run.chatMode !== "auto") {
+  // Gate on the council's OWN state, not on chat mode: council tasks keep their
+  // councilGroupId forever, so isCouncilRun(run) stays true after the plan is
+  // finalized. The next round in the same chat ("run the plan") must review its
+  // own workers instead of re-finalizing the old plan.
+  if (isCouncilRun(run) && !councilAlreadyFinalized(run)) {
     await advanceCouncil(run, cwd);
-    return;
-  }
-
-  const settings = await loadSettings();
-  const config = readOpenRouterConfig(settings);
-  if (!config) {
-    if (manualFallbackEnabled()) {
-      await appendEvent({
-        workspaceId: run.workspaceId,
-        runId: run.id,
-        type: "autopilot.manager_review_skipped",
-        message: "Cora manager review skipped because OpenRouter is not configured",
-        payload: {
-          reason: "manual_fallback",
-        },
-      });
-      return;
-    }
-    await askHumanQuestion(
-      run.id,
-      "Worker results are ready, but OpenRouter is not configured for Cora manager review. Add the API key in Settings, then resume the run.",
-      undefined,
-      {
-        category: "credentials_access",
-        reason: "The manager review requires OpenRouter credentials.",
-        managerMode: "worker_result_review",
-      },
-    );
     return;
   }
 
@@ -3447,11 +3873,53 @@ async function runAutopilotManagerReview(
   // is idempotent (it skips steps that already have a live verifier or a
   // terminal verdict), so enforcing it each review hop just closes any hole the
   // manager opened by accepting without spawning one.
+  const verifierTaskIdsBeforeCoverage = new Set(
+    run.workerTasks.filter((task) => task.taskClass === "verifier").map((task) => task.id),
+  );
+  const stepsWithPriorVerifier = new Set(
+    run.workerTasks
+      .filter((task) => task.taskClass === "verifier")
+      .map((task) => task.stepId)
+      .filter((stepId): stepId is string => Boolean(stepId)),
+  );
   run = await ensureVerifierCoverage(run, cwd);
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
+  // Coverage just synthesized a verifier that has not run yet. Reviewing now
+  // costs a full manager turn (a fresh CLI spawn/resume, minutes of wall clock)
+  // to judge evidence that is about to change, and it parks the verifier behind
+  // that turn. Launch the queued work instead and let its completion re-drive
+  // this review with the verdict in hand, the same deferral the pending-launch
+  // branch above already takes. The review is not skipped, only paid once.
+  //
+  // Strictly the FIRST coverage pass for a step: a verifier that lands without
+  // a terminal-OK confidence leaves the step uncovered again, and deferring a
+  // second time would spawn verifiers forever with no manager ever looking. A
+  // re-synthesis falls through to the review, exactly as before.
+  const freshVerifiers = run.workerTasks.filter(
+    (task) => task.taskClass === "verifier" && !verifierTaskIdsBeforeCoverage.has(task.id),
+  );
+  const firstCoverageForEveryStep =
+    freshVerifiers.length > 0 &&
+    freshVerifiers.every((task) => !task.stepId || !stepsWithPriorVerifier.has(task.stepId));
+  const coverageTasks = firstCoverageForEveryStep ? pickAutopilotTasks(run) : [];
+  if (coverageTasks.length > 0) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "autopilot.manager_review_deferred_for_verifier_coverage",
+      message: `Manager review deferred while ${coverageTasks.length} synthesized verifier task(s) run`,
+      payload: {
+        taskIds: coverageTasks.map((task) => task.id),
+        taskTitles: coverageTasks.map((task) => task.title),
+      },
+    });
+    const input = autopilotInputFromRun(run);
+    await startAutopilot({ ...input, cwd: cwd || input.cwd, runId: run.id });
+    return;
+  }
   const REVIEW_REPROMPT_CAP = 3;
   for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
-    run = await askOpenRouterManager(
+    run = await askManagerBackend(
       run,
       cwd,
       "worker_result_review",
@@ -3486,7 +3954,7 @@ async function runAutopilotManagerReview(
   // context. Without this re-entry the run parks in reviewing/blocked forever.
   let tasks = pickAutopilotTasks(run);
   if (tasks.length === 0 && run.autopilot?.pendingPlanHint && !needsStepPlanning(run)) {
-    run = (await askOpenRouterManager(run, cwd, "plan_analysis")) ?? run;
+    run = (await askManagerBackend(run, cwd, "plan_analysis")) ?? run;
     if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
     tasks = pickAutopilotTasks(run);
   }
@@ -3496,7 +3964,7 @@ async function runAutopilotManagerReview(
   // task prompts before we try to launch.
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
-    run = fastPathPlan ?? ((await askOpenRouterManager(run, cwd, "step_planning")) ?? run);
+    run = fastPathPlan ?? ((await askManagerBackend(run, cwd, "step_planning")) ?? run);
     if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
     tasks = pickAutopilotTasks(run);
   }
@@ -3668,6 +4136,56 @@ function activeManagerCall(run: RunState): SparkCall | undefined {
   return undefined;
 }
 
+/**
+ * The manager's most recent turn in this epoch never reached an ending: it is
+ * either still live, or recoverOrphanedManagerTurns already failed it with the
+ * restart marker. Boot recovery MUST use this rather than activeManagerCall:
+ * the orphan pass runs first and clears every "started" call, so by the time
+ * later boot steps look, a turn cut off mid-work is indistinguishable from a
+ * turn that finished cleanly without the marker.
+ *
+ * Only the newest call in the epoch is consulted. An older interrupted turn the
+ * user already resumed past is history, not unfinished conversation.
+ */
+function interruptedManagerCall(run: RunState): SparkCall | undefined {
+  const epoch = conversationEpoch(run);
+  for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
+    const call = run.sparkCalls[index];
+    if ((call.conversationEpoch ?? 0) !== epoch) continue;
+    if (call.status === "started" && !call.completedAt) return call;
+    if (call.status === "failed" && call.error === MANAGER_TURN_INTERRUPTED_ERROR) return call;
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * A user answer no manager turn ever consumed.
+ *
+ * An `active_rpc` answer (codara_ask_user on a CLI manager) is delivered by the
+ * live RPC and marked `acknowledged` on the spot, so nothing durable records
+ * whether the manager acted on it: it is neither queued input nor an unresolved
+ * question. Only a manager turn that STARTED after the answer proves it landed.
+ * Without this, a restart between "user says yes" and Cora acting on it buries
+ * the answer under a tidy completion.
+ */
+function unactedUserAnswer(run: RunState): HumanRunMessage | undefined {
+  const epoch = conversationEpoch(run);
+  const answer = [...run.humanMessages]
+    .reverse()
+    .find(
+      (message) =>
+        message.author === "user" &&
+        message.kind === "answer" &&
+        (message.conversationEpoch ?? 0) === epoch,
+    );
+  if (!answer) return undefined;
+  const consumed = run.sparkCalls.some(
+    (call) => (call.conversationEpoch ?? 0) === epoch && call.createdAt > answer.createdAt,
+  );
+  return consumed ? undefined : answer;
+}
+
 function queuedManagerInputMessages(run: RunState): HumanRunMessage[] {
   const epoch = conversationEpoch(run);
   return run.humanMessages.filter(
@@ -3690,7 +4208,6 @@ interface PreparedManagerTurn {
 async function prepareManagerTurn(
   run: RunState,
   call: SparkCall,
-  backend: ReturnType<typeof resolveChatBackendConfig>["backend"],
 ): Promise<PreparedManagerTurn> {
   let selectedIds: string[] = [];
   let includeCanonicalReplay = false;
@@ -3706,11 +4223,7 @@ async function prepareManagerTurn(
     },
     mutate: (draft, timestamp) => {
       if (conversationEpoch(draft) !== epoch) return false;
-      includeCanonicalReplay = shouldIncludeCanonicalReplay(
-        draft,
-        backend,
-        epoch,
-      );
+      includeCanonicalReplay = shouldIncludeCanonicalReplay(draft, epoch);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
       call.inputMessageIds = selectedIds;
@@ -3731,10 +4244,40 @@ async function prepareManagerTurn(
   const inputMessages = selectedIds
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
+  // Subscription headroom rides the same dynamic tail as the memory. The read
+  // hits pi-subscription-usage's 60s cache (never forced), and any failure
+  // degrades to "no section": a quota-endpoint hiccup must never cost a turn.
+  let subscriptionHeadroom: string | null = null;
+  try {
+    subscriptionHeadroom = describeHeadroomForPrompt(await readSubscriptionHeadroomSummary());
+  } catch {
+    subscriptionHeadroom = null;
+  }
+  // Cora memory rides the same dynamic tail. formatCoraMemoryForTurn is
+  // hash-gated per run (null when this run already carries the unchanged
+  // content) and forced on canonical replay, which rebuilds the CLI session
+  // that held the earlier injection. Best-effort: a memory read failure must
+  // never cost a turn.
+  let coraMemory: string | null = null;
+  try {
+    coraMemory = await formatCoraMemoryForTurn(prepared.workspaceId, prepared.id, {
+      force: includeCanonicalReplay,
+    });
+  } catch {
+    coraMemory = null;
+  }
   return {
     run: prepared,
     call: persistedCall,
-    prompt: buildManagerTurnPrompt(prepared, inputMessages, { includeCanonicalReplay }),
+    // Every backend's per-turn user text comes from this one call, so the Cora
+    // memory sections are replayed here, in the dynamic half, and never in the
+    // cacheable system prompt. Read at turn time so a memory written a minute
+    // ago is already live for the next turn.
+    prompt: buildManagerTurnPrompt(prepared, inputMessages, {
+      includeCanonicalReplay,
+      coraMemory,
+      subscriptionHeadroom,
+    }),
     inputMessages,
     conversationEpoch: epoch,
   };
@@ -3752,6 +4295,13 @@ async function releaseUnsubmittedManagerInput(
   callId: string,
   epoch: number,
 ): Promise<void> {
+  // The failed turn's prompt never reached the provider, so any Cora memory it
+  // carried was never seen either: roll the injection gate back so the retry
+  // renders it again. Same ownership rule as canonical replay (a failed
+  // pre-submission attempt consumes nothing). Unconditional on purpose; the
+  // worst case of a spurious release is one duplicate injection, while a
+  // missed release silently costs the run its memory.
+  releaseCoraMemoryInjection(runId);
   const run = await getRun(runId);
   if (!run || !isManagerTurnCurrent(run, callId, epoch)) return;
   await commitRunChange(run, {
@@ -3807,9 +4357,7 @@ async function updateManagerInputDelivery(
   });
 }
 
-function normalizeOpenRouterManagerMode(
-  mode: SparkCall["mode"],
-): "plan_analysis" | "chat" | "step_planning" | "worker_result_review" {
+function normalizeManagerMode(mode: SparkCall["mode"]): ManagerMode {
   if (mode === "worker_result_review") return "worker_result_review";
   if (mode === "chat") return "chat";
   if (mode === "plan_analysis") return "plan_analysis";
@@ -3840,21 +4388,13 @@ async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotI
   });
 }
 
-async function askOpenRouterManagerForInitialTasks(
-  run: RunState,
-  cwd: string,
-  managerResumeClaimId?: string,
-): Promise<RunState | null> {
-  return askOpenRouterManager(run, cwd, "plan_analysis", managerResumeClaimId);
-}
-
-async function askOpenRouterManagerForChat(
+async function askManagerForChat(
   run: RunState,
   cwd: string,
   managerResumeClaimId?: string,
 ): Promise<RunState | null> {
   const enriched = await enrichLatestUserMessageWithMentionedFiles(run, cwd);
-  return askOpenRouterManager(enriched, cwd, "chat", managerResumeClaimId);
+  return askManagerBackend(enriched, cwd, "chat", managerResumeClaimId);
 }
 
 // Brake support: when the next active step has kind="brake", treat it as a
@@ -3887,48 +4427,14 @@ async function resolveActiveBrakeAndReplan(run: RunState, cwd: string): Promise<
     message: `Brake step "${next.title}" resolved; replanning with worker evidence`,
     payload: { stepId: next.id, stepIndex: next.index },
   });
-  return (await askOpenRouterManager(updated, cwd, "plan_analysis")) ?? updated;
+  return (await askManagerBackend(updated, cwd, "plan_analysis")) ?? updated;
 }
 
-// Retry the OpenRouter manager fetch on transient errors. Terminal failures
-// (auth, structured-output-unsupported, malformed config) re-throw immediately
-// so the outer catch in askOpenRouterManager handles them as before. Bounded
-// to 3 attempts with exponential backoff so a single provider outage costs
-// ~6s rather than hanging the autopilot loop for the rest of the budget.
-const MANAGER_REQUEST_MAX_ATTEMPTS = 3;
-const MANAGER_REQUEST_BACKOFF_BASE_MS = 1500;
+// Cap on the manager's autonomous question-retry loop; past this the pending
+// question escalates to the human instead of another silent self-answer.
 const MAX_MANAGER_QUESTION_REPROMPTS = 2;
 
-function isTerminalManagerError(message: string): boolean {
-  if (isStructuredOutputUnsupportedError(message)) return true;
-  if (/\b(401|403)\b/.test(message)) return true;
-  if (/invalid api key|unauthor[is]z/i.test(message)) return true;
-  if (/no api key|missing api key|not configured/i.test(message)) return true;
-  return false;
-}
-
-async function requestManagerWithRetries(
-  config: OpenRouterConfig,
-  requestBody: OpenRouterManagerRequest,
-  managerMode: OpenRouterManagerMode,
-): Promise<OpenRouterManagerResult> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= MANAGER_REQUEST_MAX_ATTEMPTS; attempt++) {
-    try {
-      return await requestOpenRouterManagerDecision(config, requestBody, managerMode);
-    } catch (err) {
-      lastErr = err;
-      const message = err instanceof Error ? err.message : String(err);
-      if (isTerminalManagerError(message)) throw err;
-      if (attempt >= MANAGER_REQUEST_MAX_ATTEMPTS) throw err;
-      const backoffMs = MANAGER_REQUEST_BACKOFF_BASE_MS * Math.pow(2, attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
-    }
-  }
-  throw lastErr ?? new Error("manager request failed without explicit error");
-}
-
-async function askOpenRouterManager(
+async function askManagerBackend(
   run: RunState,
   cwd: string,
   mode: SparkCall["mode"],
@@ -3949,342 +4455,16 @@ async function askOpenRouterManager(
     return null;
   }
   const settings = await loadSettings();
-  const chatConfig = resolveChatBackendConfig(run, settings);
+  const chatConfig = resolveChatBackendConfig(run);
 
-  // Non-OpenRouter backends own their own request lifecycle (spawn a real
-  // `claude` / `codex` CLI, tail its JSONL transcript, etc.). Dispatch and
-  // skip the OpenRouter-specific SparkCall and artifact pipeline
-  // below. Both backends still apply their resulting SparkManagerDecision
-  // through applySparkManagerDecision so downstream worker spawns + chat
-  // replies work identically.
-  if (chatConfig.backend !== "openrouter") {
-    return await askChatBackendNonOpenRouter(
-      run,
-      cwd,
-      mode,
-      chatConfig,
-      settings,
-      managerResumeClaimId,
-      autonomyRetryCount,
-    );
-  }
-
-  // Automation mode is a CLI-architect feature: it drives the spark_*_automation
-  // MCP tools, which only the Claude Code / Codex CLI backends can reach. The
-  // OpenRouter manager has no such tools — if we fell through here it would run
-  // the normal worker-spawning manager path and mutate the workspace, which is
-  // exactly what Automation mode must NOT do. Short-circuit with a conversational
-  // note telling the user to switch backends, and do nothing else.
-  if (run.chatMode === "automation") {
-    return await addRunMessage({
-      runId: run.id,
-      author: "spark",
-      kind: "note",
-      message:
-        "Automation mode requires the Claude Code or Codex CLI backend — the OpenRouter backend can't manage automations. Switch this chat's model to a Claude Code or Codex option to design, create, and run automations here.",
-    });
-  }
-
-  const baseConfig = readOpenRouterConfig(settings);
-  if (!baseConfig) return null;
-
-  // The composer chip's per-chat model override beats the global setting. We
-  // shadow `config` with the resolved version so the rest of the pipeline
-  // (request body, SparkCall record, artifacts) all see the chip's selected
-  // model without a per-call-site rewrite.
-  const config: OpenRouterConfig =
-    chatConfig.model && chatConfig.model !== baseConfig.model
-      ? { ...baseConfig, model: chatConfig.model }
-      : baseConfig;
-
-  const callId = makeId("spark");
-  const callDir = join(runDir(run.id), "spark-calls", callId);
-  const requestPath = join(callDir, "request.json");
-  const responsePath = join(callDir, "response.json");
-  const parsedJsonPath = join(callDir, "parsed-decision.json");
-  const contextPacketPath = join(callDir, "context-packet.json");
-  const sparkCall: SparkCall = {
-    id: callId,
-    runId: run.id,
-    stepId: run.currentStepId,
-    mode,
-    model: config.model,
-    status: "started",
-    managerResumeClaimId,
-    requestPath,
-    responsePath,
-    parsedJsonPath,
-    createdAt: new Date().toISOString(),
-  };
-  const preparedTurn = await prepareManagerTurn(run, sparkCall, "openrouter");
-  run = preparedTurn.run;
-  const startedAt = preparedTurn.call.createdAt;
-
-  // Build the stateless OpenRouter request once from the prepared run snapshot.
-  // Later steering remains queued for another SparkCall and cannot leak into it.
-  const frozenRun = structuredClone(run);
-  const managerMode = normalizeOpenRouterManagerMode(mode);
-  const workerReports = await collectWorkerReportContext(frozenRun, managerMode);
-  const availableRuntimes = await detectConfiguredAgentRuntimes(settings);
-  const agentSyncContext = renderAgentSyncManagerContext({ cwd, settings });
-  const requestBody = buildOpenRouterManagerRequest({
-    run: frozenRun,
-    cwd,
-    model: config.model,
-    mode: managerMode,
-    workerReports,
-    availableRuntimes,
-    agentSyncContext,
-  });
-  const requestUserMessage = [...requestBody.messages]
-    .reverse()
-    .find((message) => message.role === "user");
-  if (requestUserMessage && preparedTurn.inputMessages.length > 0) {
-    requestUserMessage.content += [
-      "",
-      "IMMUTABLE QUEUED TURN INPUT",
-      "The messages below are the exact FIFO bundle owned by this SparkCall. Process every entry exactly once; do not replace it with only the newest chat row.",
-      JSON.stringify(
-        preparedTurn.inputMessages.map((message) => ({
-          id: message.id,
-          kind: message.kind,
-          intent: message.intent,
-          message: message.message,
-          attachments: (message.attachments ?? []).map(
-            (attachment) =>
-              `${attachment.kind}:${attachment.name} (${attachment.path})`,
-          ),
-        })),
-        null,
-        2,
-      ),
-    ].join("\n");
-  }
-  const contextWindow = contextWindowForModel(config.model);
-  const contextPacket = buildContextPacket({
-    runId: run.id,
-    callId,
-    mode,
-    requestBody,
-    tokenBudget: contextWindow.tokens,
-  });
-  await fs.mkdir(callDir, { recursive: true });
-  await Promise.all([
-    fs.writeFile(requestPath, JSON.stringify(redactRequestBodyForArtifact(requestBody), null, 2), "utf8"),
-    fs.writeFile(contextPacketPath, JSON.stringify(contextPacket, null, 2), "utf8"),
-  ]);
-  const preparedCall = run.sparkCalls.find((call) => call.id === callId);
-  if (preparedCall) {
-    preparedCall.contextPacketId = contextPacket.id;
-    preparedCall.promptTokenEstimate = contextPacket.tokenEstimate;
-    preparedCall.contextWindowTokens = contextWindow.tokens;
-    preparedCall.contextWindowSource = contextWindow.source;
-  }
-  run.settingsSnapshot = {
-    ...(run.settingsSnapshot ?? {}),
-    openRouterModel: config.model,
-    openRouterBaseUrl: config.baseUrl,
-    openRouterStructuredOutputFallbackModel: config.structuredOutputFallbackModel,
-    agentRuntimeSelection: settings.agentRuntimeSelection,
-    agentMcpSyncEnabled: settings.agentMcpSyncEnabled,
-    agentSkillSyncEnabled: settings.agentSkillSyncEnabled,
-  };
-  await saveRun(run);
-
-  try {
-    // Transient OpenRouter / provider errors (network, 5xx, provider-routed
-    // backends crashing mid-request) used to bubble straight to the catch
-    // block, which returns null and exits the autopilot loop silently —
-    // observed in practice as multi-hour run hangs after a single fireworks
-    // outage. Retry the inner request a small number of times with backoff;
-    // re-throw structured-output-unsupported and other terminal errors
-    // unchanged so the outer catch still routes them to the operator.
-    await updateManagerInputDelivery(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-      "submitted",
-    );
-    const result = await requestManagerWithRetries(config, requestBody, managerMode);
-    await Promise.all([
-      fs.writeFile(responsePath, JSON.stringify(result.rawResponse, null, 2), "utf8"),
-      fs.writeFile(parsedJsonPath, JSON.stringify(result.decision, null, 2), "utf8"),
-    ]);
-
-    const latest = await requireRun(run.id);
-    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
-    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
-      return latest;
-    }
-    const completedAt = new Date().toISOString();
-    const completedContextWindow = contextWindowForModel(result.model);
-    if (targetCall) {
-      targetCall.model = result.model;
-      targetCall.durationMs = result.durationMs;
-      targetCall.promptTokens = result.promptTokens;
-      targetCall.completionTokens = result.completionTokens;
-      targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
-      targetCall.contextWindowTokens = completedContextWindow.tokens;
-      targetCall.contextWindowSource = completedContextWindow.source;
-      // Cost + token-split fields from the OpenRouter-prices layer. Optional —
-      // older runs and unknown models leave these undefined; the Costs tab and
-      // header pill handle that gracefully.
-      if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
-      if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
-      if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
-      if (typeof result.cacheReadTokens === "number") {
-        targetCall.cacheReadTokens = result.cacheReadTokens;
-      }
-    }
-    // Recompute the run-level rollup + per-step rollups now that we have a
-    // fresh call cost. Cheap (O(calls) per save) and keeps the pill reactive
-    // without a separate aggregator.
-    recomputeRunCostRollups(latest);
-    latest.updatedAt = completedAt;
-    await saveRun(latest);
-    if (result.fallbackFrom) {
-      await appendEvent({
-        timestamp: completedAt,
-        workspaceId: latest.workspaceId,
-        runId: latest.id,
-        sparkCallId: callId,
-        type: "spark_call.model_fallback",
-        message: `Cora manager retried with structured-output fallback model: ${result.model}`,
-        payload: {
-          mode,
-          requestedModel: result.fallbackFrom,
-          fallbackModel: result.model,
-          reason: "requested model did not support strict JSON Schema structured outputs",
-        },
-      });
-    }
-    await appendEvent({
-      timestamp: completedAt,
-      workspaceId: latest.workspaceId,
-      runId: latest.id,
-      sparkCallId: callId,
-        type: "spark_call.decision_received",
-        message: `Cora manager decision received: ${result.decision.status}`,
-      payload: {
-        mode,
-        model: result.model,
-        requestedModel: result.fallbackFrom ?? config.model,
-        fallbackFrom: result.fallbackFrom,
-        durationMs: result.durationMs,
-        promptTokens: result.promptTokens,
-        completionTokens: result.completionTokens,
-        promptTokenEstimate: contextPacket.tokenEstimate,
-        contextWindowTokens: completedContextWindow.tokens,
-        contextWindowSource: completedContextWindow.source,
-        // Cost / token-split fields from the price-table layer so the event
-        // log carries the same data the SparkCall record does. Lets the
-        // Session Inspector Costs tab and any external audit replay both.
-        costUsd: result.costUsd,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        cacheReadTokens: result.cacheReadTokens,
-        runTotalCostUsd: latest.totalCostUsd,
-        parsedJsonPath,
-        decision: result.decision,
-      },
-    });
-
-    const applied = await applySparkManagerDecision(
-      latest,
-      result.decision,
-      mode,
-      cwd,
-      callId,
-      preparedTurn.conversationEpoch,
-      autonomyRetryCount,
-    );
-    await updateManagerInputDelivery(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-      "acknowledged",
-    );
-    const finalized = await finalizeAppliedManagerCall(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-    );
-    if (managerResumeClaimId) {
-      await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
-    }
-    scheduleQueuedSteeringFollowup(finalized);
-    return finalized;
-  } catch (err) {
-    const latest = await requireRun(run.id);
-    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
-    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
-      return latest;
-    }
-    await releaseUnsubmittedManagerInput(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-    );
-    const completedAt = new Date().toISOString();
-    const error = err instanceof Error ? err.message : String(err);
-    if (targetCall) {
-      targetCall.status = "failed";
-      targetCall.error = error;
-      targetCall.completedAt = completedAt;
-      targetCall.durationMs = Date.now() - Date.parse(startedAt);
-      targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
-      targetCall.contextWindowTokens = contextWindow.tokens;
-      targetCall.contextWindowSource = contextWindow.source;
-    }
-    latest.updatedAt = completedAt;
-    await saveRun(latest);
-    await appendEvent({
-      timestamp: completedAt,
-      workspaceId: latest.workspaceId,
-      runId: latest.id,
-      sparkCallId: callId,
-      type: "spark_call.failed",
-      message: `Cora manager call failed: ${error}`,
-      payload: {
-        mode,
-        model: config.model,
-        error,
-      },
-    });
-    if (isStructuredOutputUnsupportedError(error)) {
-      return askHumanQuestion(
-        latest.id,
-        [
-          "The selected OpenRouter manager model does not support strict JSON Schema structured outputs.",
-          "Choose a manager model that supports `response_format: json_schema` in Settings, then resume the run.",
-        ].join(" "),
-        undefined,
-        {
-          reason: "The selected manager model cannot satisfy the required structured-output contract.",
-          managerMode: mode,
-        },
-      );
-    }
-    return null;
-  }
-}
-
-// Non-OpenRouter backend dispatch — see askOpenRouterManager's top branch.
-// Calls the chosen backend (Claude Code or Codex) via the backend registry,
-// forwards streaming chat events onto the orchestration event bus, persists
-// any new CLI-side session UUID returned by the backend onto the RunState,
-// records a minimal SparkCall for cost/audit consistency, and applies the
-// resulting SparkManagerDecision through the same downstream path the
-// OpenRouter pipeline uses.
-async function askChatBackendNonOpenRouter(
-  run: RunState,
-  cwd: string,
-  mode: SparkCall["mode"],
-  chatConfig: ReturnType<typeof resolveChatBackendConfig>,
-  settings: AppSettings,
-  managerResumeClaimId?: string,
-  autonomyRetryCount = 0,
-): Promise<RunState | null> {
+  // Every manager backend (Claude Code, Codex, Pi) owns its own request
+  // lifecycle, spawn/resume a real agent session, stream events, and return
+  // a SparkManagerDecision. Run-store forwards streaming chat events onto the
+  // orchestration event bus, persists any new CLI-side session UUID returned
+  // by the backend onto the RunState, records a SparkCall for cost/audit
+  // consistency, and applies the resulting SparkManagerDecision through
+  // applySparkManagerDecision so downstream worker spawns and chat replies
+  // work identically across backends.
   const backend = getBackend(chatConfig.backend);
   const callId = makeId("spark");
   const sparkCall: SparkCall = {
@@ -4297,9 +4477,8 @@ async function askChatBackendNonOpenRouter(
     managerResumeClaimId,
     createdAt: new Date().toISOString(),
   };
-  const preparedTurn = await prepareManagerTurn(run, sparkCall, chatConfig.backend);
+  const preparedTurn = await prepareManagerTurn(run, sparkCall);
   run = preparedTurn.run;
-  const startedAt = preparedTurn.call.createdAt;
   const frozenRun = structuredClone(run);
 
   // Once requestManagerDecision settles, that SparkCall owns no more stream
@@ -4347,7 +4526,7 @@ async function askChatBackendNonOpenRouter(
       {
         run: frozenRun,
         cwd,
-        mode: normalizeOpenRouterManagerMode(mode),
+        mode: normalizeManagerMode(mode),
         settings,
         chat: { ...chatConfig },
         prompt: preparedTurn.prompt,
@@ -4394,6 +4573,10 @@ async function askChatBackendNonOpenRouter(
       targetCall.durationMs = result.durationMs;
       if (typeof result.promptTokens === "number") targetCall.promptTokens = result.promptTokens;
       if (typeof result.completionTokens === "number") targetCall.completionTokens = result.completionTokens;
+      if (typeof result.contextWindowTokens === "number" && result.contextWindowTokens > 0) {
+        targetCall.contextWindowTokens = result.contextWindowTokens;
+        targetCall.contextWindowSource = "known";
+      }
       if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
       if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
       if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
@@ -4624,21 +4807,18 @@ async function askChatBackendNonOpenRouter(
 // runs, so the implementation worker is the only check on the work and must
 // have the stronger 'taste' that catches all distinct issues in one pass.
 const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHint: WorkerTask["effortHint"] }> = {
-  claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
+  claude: { modelHint: "claude-opus-5", effortHint: "high" },
   codex: { modelHint: CODEX_MODEL_BY_TIER.top, effortHint: "high" },
 };
 
 // Top-tier model identifiers (post-normalization). Anything else for a
 // claude/codex runtime is treated as mid-tier and gets promoted on trivial.
-// Cursor has a single model (composer-2.5-fast) with no effort levels, so it
-// is absent from this table on purpose — promoteForTrivial leaves cursor
-// agents alone.
 // We compare on the base model only — `@<effort>` suffixes are stripped first
 // because grok-4.3 has shipped both `"claude-sonnet-4-6"` and
 // `"claude-sonnet-4-6@medium"` as the modelHint string across runs, and an
 // allow-list keyed on raw strings silently misses the suffixed variant.
 const TOP_TIER_MODEL_BASES = new Set([
-  "claude-opus-4-8",
+  "claude-opus-5",
   "opus",
   CODEX_MODEL_BY_TIER.top,
   // Legacy persisted assignments remain top-tier semantically; the launch
@@ -4656,24 +4836,11 @@ function isTopTierModel(hint: string | undefined): boolean {
   return TOP_TIER_MODEL_BASES.has(normalizeModelHint(hint));
 }
 
-// sanitizeWorkerModelHint (the fable downgrade + superseded-Sonnet remap) lives
-// in worker-model-hint.ts so it can be unit-tested without run-store's deps.
-// Re-exported here because callers (e.g. agent-socket) reach it through the
-// run-store namespace.
+// sanitizeWorkerModelHint (the superseded-Sonnet remap + Codex id
+// normalization) lives in worker-model-hint.ts so it can be unit-tested
+// without run-store's deps. Re-exported here because callers (e.g.
+// agent-socket) reach it through the run-store namespace.
 export { sanitizeWorkerModelHint } from "./worker-model-hint";
-
-// A Cora-spawned worker may run Fable 5 whenever the user explicitly named Fable
-// in their OWN message this run. The "Allow Fable 5" setting does NOT gate this
-// worker path — an explicit user request is sufficient (the setting still governs
-// the main-chat model, standing terminals, and automation launches, which have
-// their own checks). The manager LLM cannot self-authorize the most expensive
-// tier — runUserRequestedFable scans user-authored chat only, never
-// manager/worker output. Callers pass the result as
-// `sanitizeWorkerModelHint(hint, { allowFable })` so a fable hint passes through
-// unchanged; otherwise it is downgraded to Opus 4.8 with a visible note.
-export function workerFableAllowed(run: RunState): boolean {
-  return runUserRequestedFable(run);
-}
 
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
   // Skeleton/verifier are exempt from the floor by design; leaf is mechanical
@@ -4957,7 +5124,7 @@ function shouldEnforceHybridParallelRuntimes(
   runtimes: { ui: WorkerRuntime; logic: WorkerRuntime; integrator: WorkerRuntime },
 ): boolean {
   if (runtimes.ui === runtimes.logic) return false;
-  if (!/\b(different agents?|claude|codex|cursor|hybrid)\b/i.test(intent)) return false;
+  if (!/\b(different agents?|claude|codex|hybrid)\b/i.test(intent)) return false;
   const parallelStep = decision.steps.find((step) => {
     const text = [
       step.title,
@@ -4998,8 +5165,8 @@ function latestUserRunMessageText(run: RunState): string {
 function hasExplicitParallelAgentIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksForAgents =
-    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude|cursor)s?\b/.test(lower) ||
-    /\b(agent|worker|codex|claude|cursor)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
+    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude)s?\b/.test(lower) ||
+    /\b(agent|worker|codex|claude)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
     /\bdifferent agent\b/.test(lower);
   const asksForParallel = /\b(simultaneous|parallel|at the same time)\b/.test(lower);
   const asksForCombine = /\b(combine|integrate|merge|assemble)\b/.test(lower);
@@ -5202,7 +5369,7 @@ async function forceFanOutBatch(
 // finish, runAutopilotManagerReview calls synthesizePlanCouncil to judge + merge.
 
 const COUNCIL_TOP_TIER_MODEL: Partial<Record<WorkerRuntime, string>> = {
-  claude: "claude-opus-4-8",
+  claude: "claude-opus-5",
   codex: CODEX_MODEL_BY_TIER.top,
 };
 
@@ -5240,6 +5407,16 @@ function isCouncilRun(run: RunState): boolean {
   return run.workerTasks.some((task) => task.councilGroupId !== undefined);
 }
 
+// Title finalizeCouncil stamps on the merged plan. Doubles as the durable
+// "this council already produced its plan" marker (see councilAlreadyFinalized).
+const COUNCIL_PLAN_TITLE = "Synthesized plan (council)";
+
+// True once a council run has written its synthesized plan, so a later round in
+// the same chat routes through the normal verifier/manager review.
+function councilAlreadyFinalized(run: RunState): boolean {
+  return run.plans.some((plan) => plan.title === COUNCIL_PLAN_TITLE);
+}
+
 // The original planning task for a council run (latest user message / note).
 function councilTaskFromRun(run: RunState): string {
   return (
@@ -5250,29 +5427,28 @@ function councilTaskFromRun(run: RunState): string {
   );
 }
 
-// Map the run's SELECTED chat backend to a council worker runtime. The user's
-// choice drives the synthesis engine — they explicitly don't want the judge on
-// OpenRouter — so synthesis runs on the same agent they picked. Returns null when
-// the selection isn't a CLI agent runtime (then we fall back to a deterministic
-// pick of the most complete candidate, still no OpenRouter).
+// Map the run's SELECTED chat backend to a council worker runtime, the user's
+// choice drives the synthesis engine, so synthesis runs on the same agent they
+// picked. Returns null when no backend is recorded on the run (a legacy chat);
+// then we fall back to a deterministic pick of the most complete candidate.
 function councilSynthesisRuntime(run: RunState): WorkerRuntime | null {
   if (run.chatBackend === "claude") return "claude";
   if (run.chatBackend === "codex") return "codex";
+  if (run.chatBackend === "pi") {
+    return run.chatModel?.startsWith("claude-") ? "claude" : "codex";
+  }
   return null;
 }
 
-// Resolve the council directive for this startAutopilot call: an explicit
-// input.council wins; otherwise a run in chatMode "plan" treats the user's note
-// (or latest user message) as the planning task.
+// Resolve the council directive for this startAutopilot call. Only an explicit
+// input.council triggers the Best-of-N council now: there is no "plan" chat mode
+// to infer it from, so the council is a programmatic capability the manager's
+// own plan gate does not use.
 function resolveCouncilDirective(
-  run: RunState,
+  _run: RunState,
   input: StartAutopilotInput,
 ): CouncilDirective | null {
   if (input.council && input.council.task.trim().length > 0) return input.council;
-  if (run.chatMode === "plan") {
-    const task = input.initialUserNote?.trim() || councilTaskFromRun(run);
-    if (task) return { task, origin: "composer" };
-  }
   return null;
 }
 
@@ -5428,8 +5604,8 @@ async function pickMostCompleteCandidate(
 }
 
 // Drive a council run forward at each review hop. Phase 1: the candidate planners
-// have finished — spawn ONE synthesis worker on the user's SELECTED backend (no
-// OpenRouter) that reads the drafts and writes the merged .spark/<runId>/spark-plan/ itself.
+// have finished, spawn ONE synthesis worker on the user's SELECTED backend
+// that reads the drafts and writes the merged .spark/<runId>/spark-plan/ itself.
 // Phase 2: the synthesis worker has finished — finalize the run from its files.
 async function advanceCouncil(run: RunState, cwd: string): Promise<void> {
   const synthesisTask = run.workerTasks.find((task) => task.councilRole === "synthesis");
@@ -5437,7 +5613,7 @@ async function advanceCouncil(run: RunState, cwd: string): Promise<void> {
     const prepared = await prepareCouncilSynthesis(run, cwd);
     if (!prepared) {
       // No CLI agent selected (or every candidate failed) — fall back to a
-      // deterministic pick of the most complete draft. No OpenRouter, no agent.
+      // deterministic pick of the most complete draft; no agent involved.
       await finalizeCouncilDeterministic(run, cwd);
       return;
     }
@@ -5531,22 +5707,9 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   // The "main AI" judge runs on the model + effort the user picked in the
   // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
   // from each candidate. Fall back to a top-tier default only if the run didn't
-  // record a selection. The judge is a Cora-spawned WORKER, so a fable pick is
-  // downgraded to Opus 4.8 UNLESS the user explicitly asked for Fable this run
-  // (workerFableAllowed; the setting doesn't gate this worker path). Sanitize the hint and surface any
-  // downgrade so it isn't a silent swap by the launch-command backstop.
-  const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime], {
-    allowFable: workerFableAllowed(run),
-  });
-  if (judgeModel.downgraded) {
-    updated = await addRunMessage({
-      runId: updated.id,
-      author: "spark",
-      kind: "note",
-      message:
-        "Fable is the premium tier and you didn't ask for it here, so the plan-council synthesis judge runs on Opus 4.8 instead.",
-    });
-  }
+  // record a selection. Sanitize the hint so a stale superseded-Sonnet or
+  // legacy Codex id from an old run is remapped to the current catalog.
+  const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime]);
 
   updated = await createWorkerTask({
     runId: updated.id,
@@ -5554,7 +5717,7 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
     title: "Synthesize best-of-all plan",
     description: synthPrompt,
     runtimePreference: runtime,
-    modelHint: judgeModel.hint,
+    modelHint: judgeModel,
     effortHint: run.chatEffort ?? "high",
     allowedPaths: [`${councilPlanDir(run.id)}/`],
     forbiddenPaths: [],
@@ -5610,7 +5773,7 @@ async function finalizeCouncilFromDisk(run: RunState, cwd: string): Promise<void
 }
 
 // Fallback when no CLI agent is available to synthesize: pick the most complete
-// candidate draft, write it to spark-plan/, complete the run. No OpenRouter.
+// candidate draft, write it to spark-plan/, complete the run. No agent involved.
 async function finalizeCouncilDeterministic(run: RunState, cwd: string): Promise<void> {
   const planDir = join(cwd, ".spark", run.id, "spark-plan");
   const planFilePath = join(planDir, "PLAN.md");
@@ -5669,7 +5832,7 @@ async function finalizeCouncil(
         const plan = {
           id: makeId("plan"),
           workspaceId: draft.workspaceId,
-          title: "Synthesized plan (council)",
+          title: COUNCIL_PLAN_TITLE,
           // Point at the on-disk file so switching to Execute / "Run plan"
           // targets it directly (the execute path keys off plan.sourceFile).
           sourceFile: planFilePath,
@@ -5775,17 +5938,17 @@ function detectPlanRuntimeMandate(run: RunState): WorkerRuntime | null {
   const runtimes: WorkerRuntime[] = ["claude", "codex"];
   for (const rt of runtimes) {
     const patterns = [
-      // "all/every/only the workers ... cursor"
+      // "all/every/only the workers ... <runtime>"
       new RegExp(`\\b(all|every|only|each)\\s+(the\\s+|of\\s+the\\s+)?(worker|workers|agent|agents)\\b[^.\\n]{0,80}\\b${rt}\\b`, "i"),
-      // "cursor only" / "cursor exclusively"
+      // "<runtime> only" / "<runtime> exclusively"
       new RegExp(`\\b${rt}\\s+(only|exclusively|throughout)\\b`, "i"),
-      // "only cursor" / "exclusively cursor"
+      // "only <runtime>" / "exclusively <runtime>"
       new RegExp(`\\b(only|exclusively)\\s+${rt}\\b`, "i"),
-      // "use (only) cursor for/workers/agents"
+      // "use (only) <runtime> for/workers/agents"
       new RegExp(`\\buse\\s+(only\\s+)?${rt}\\b`, "i"),
-      // "(workers|agents) (should|must|to) be cursor"
+      // "(workers|agents) (should|must|to) be <runtime>"
       new RegExp(`\\b(worker|workers|agent|agents)\\s+(should|must|need(s)?\\s+to|have\\s+to|to)\\s+be\\s+${rt}\\b`, "i"),
-      // "I want ... workers ... be cursor"
+      // "I want ... workers ... be <runtime>"
       new RegExp(`\\b(want|need|require)\\s+(all\\s+)?(the\\s+)?(worker|workers|agent|agents)\\s+(to\\s+)?be\\s+${rt}\\b`, "i"),
     ];
     for (const re of patterns) {
@@ -5816,7 +5979,7 @@ async function enforceUserRuntimeMandate(
     return { decision, overrides: [] };
   }
   const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
-    claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
+    claude: { modelHint: "claude-opus-5", effortHint: "high" },
     codex: { modelHint: CODEX_MODEL_BY_TIER.top, effortHint: "high" },
   };
   const defaults = modelDefaults[mandate] ?? { modelHint: undefined, effortHint: undefined };
@@ -6127,7 +6290,7 @@ function dropVerifierTasksWithExistingPeer(
 //   - run.taskComplexity === 'trivial'
 //   - active step has exactly 1 plannedAgent (parallel work goes through manager)
 //   - active step has no queueable worker tasks yet
-//   - the agent is non-verifier and runs on claude/codex/cursor
+//   - the agent is non-verifier and runs on claude/codex
 //
 // Saves ~3 minutes (manager call 2 was 2992 reasoning tokens / ~3 min on
 // bjgp3uso7).
@@ -6228,19 +6391,9 @@ function buildStandingTerminalCommand(
     effectiveEffort = effort as SpawnOpts["effort"];
   }
 
-  // Fable 5 gate (default off): a Cora-opened standing terminal must not launch
-  // on claude-fable-5 unless the user opted in via the Fable setting. Downgrade
-  // to Opus 4.8 when the pref is off, matching the worker/main-chat chokepoints.
   let effectiveModel = model?.trim() || undefined;
   if (runtime === "codex" && effectiveModel) {
     effectiveModel = normalizeCodexModelId(effectiveModel);
-  }
-  if (
-    effectiveModel &&
-    /fable/i.test(effectiveModel) &&
-    getPreferenceCached("fableEnabled") !== true
-  ) {
-    effectiveModel = SPARK_WORKER_FABLE_FALLBACK;
   }
 
   const provider = getProvider(runtime);
@@ -6449,6 +6602,41 @@ async function applySparkManagerDecisionCurrent(
       },
     });
     return run;
+  }
+  // Execute-mode planning must never turn a prose-only promise into a green
+  // run. CLI managers synthesize a status=complete talk decision when no Cora
+  // tool was called; with an empty run that used to produce "done" after zero
+  // workers, zero edits, and zero checks. Real codara_spawn_workers calls
+  // mutate the run live before this decision is applied, so an untouched
+  // plan_analysis completion is unambiguously a manager protocol failure.
+  if (
+    mode === "plan_analysis" &&
+    decision.status === "complete" &&
+    run.steps.length === 0 &&
+    run.workerTasks.length === 0
+  ) {
+    return commitRunChange(run, {
+      type: "spark_manager.empty_execution_refused",
+      message: "Cora refused an execute-mode completion with no worker activity",
+      payload: {
+        summary: decision.summary,
+        reply: decision.chatReply,
+        mode,
+        reason: "no_steps_or_workers",
+      },
+      mutate: (draft, timestamp) => {
+        draft.status = "failed";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          status: "failed",
+          lastAction: "empty_execution_refused",
+          stopReason:
+            "The manager finished without calling a Cora orchestration tool or creating any worker task.",
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
   }
   // Surface the manager's natural-language reply to the user as a Codara chat
   // bubble before applying the structural decision. Avoids dupes by skipping
@@ -7126,9 +7314,8 @@ async function applySparkManagerDecisionCurrent(
           .reverse()
           .find((t) => t.taskClass !== "verifier");
         const implRuntime = recentImpl?.runtimePreference;
-        // Prefer ANY verifier whose runtime differs from the impl's. With
-        // three runtimes (claude/codex/cursor) there are two valid
-        // cross-provider picks per impl; either is acceptable.
+        // Prefer any verifier whose runtime differs from the implementation
+        // worker's; either supported cross-provider direction is acceptable.
         const kept =
           (implRuntime && list.find((t) => t.runtimePreference && t.runtimePreference !== implRuntime)) ||
           list[0];
@@ -7499,7 +7686,7 @@ export async function resolveManagerQuestion(
 
   // The budget is reconstructed from persisted assumptions, not the current
   // JavaScript call stack. This covers restarts and live Claude/Codex MCP turns
-  // as well as OpenRouter recursion.
+  // as well as manager-loop recursion.
   const durableRetryCount = (run.assumptions ?? []).filter(
     (assumption) =>
       assumption.managerMode === input.managerMode &&
@@ -7925,7 +8112,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const resumeInput = autopilotInputFromRun(run);
   const shouldScheduleManagerAfterResume = shouldResumeManagerPlanning(run);
   if (activeWorkersForRun(run.id).length === 0 && shouldRoutePausedResumeToChat(run)) {
-    const chatDecision = await askOpenRouterManagerForChat(run, resumeInput.cwd);
+    const chatDecision = await askManagerForChat(run, resumeInput.cwd);
     if (chatDecision) {
       if (
         chatDecision.status === "paused" ||
@@ -7952,6 +8139,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     },
     mutate: (draft, timestamp) => {
       draft.status = "running";
+      // A user-driven resume is a fresh engagement: reset the verification
+      // budget so the run doesn't re-trip a saturated round ceiling on its
+      // first corrective verdict (mirrors the user-turn reset in addRunMessage).
+      draft.verificationRounds = 0;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -7972,11 +8163,19 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // they re-drive via the resume signals sent above, not the autopilot
   // scheduler (scheduleAutopilotReview is never used for them — see the worker
   // cycle path). The scheduler itself dedupes, so this can't double-drive.
-  const isExecuteModeCliManager =
-    (resumed.chatBackend === "claude" || resumed.chatBackend === "codex") &&
-    (resumed.chatMode === "execute" || resumed.chatMode === "auto");
+  const isExecuteModeCliManager = runHasMcpManager(resumed);
+  // ...but that exemption assumes the manager session is still ALIVE to receive
+  // those signals. A run parked by the restart pass has no live anything: its
+  // manager session and every worker process died with the previous app
+  // process, and the resume signals are written to in-memory worker handles
+  // that no longer exist. Without this the default configuration (pi + auto)
+  // took the exemption, so Resume flipped the run to "running" with no workers
+  // and no scheduled manager, and nothing ever drove it again. That merely
+  // moved the wedge from boot to the first Resume click.
+  const parkedByRestart = resumed.autopilot?.lastAction === "paused_after_restart";
   const shouldScheduleDriver =
-    !isExecuteModeCliManager && activeWorkersForRun(resumed.id).length === 0;
+    (parkedByRestart || !isExecuteModeCliManager) &&
+    activeWorkersForRun(resumed.id).length === 0;
   if (shouldScheduleManagerAfterResume || shouldScheduleDriver) {
     if (resumed.workerAttempts.length > 0) {
       scheduleAutopilotReview(resumed.id, resumeInput.cwd);
@@ -8262,6 +8461,11 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
         targetTurnId: authoritativeTargetTurnId,
         createdAt: timestamp,
       });
+      // A user turn opens a fresh verification budget. The round ceiling
+      // guards a single runaway corrective loop, not the whole conversation —
+      // without this reset a follow-up inherits a saturated counter and the
+      // first corrective verdict of the new turn instantly force-lands the run.
+      if (input.author === "user") draft.verificationRounds = 0;
       const draftWasTerminal =
         draft.status === "complete" || draft.status === "failed" || draft.status === "cancelled";
       // When the user chats into a finished run, transition it back into a
@@ -8790,7 +8994,7 @@ export async function interruptRunWithMessage(
   if (mode === "hard" && activeWorkers.length > 0) {
     for (const worker of activeWorkers) {
       try {
-        pty.dispose(worker.attemptId);
+        pty.dispose(worker.attemptId, { sanctioned: true });
       } catch {
         /* the session may have already exited between sendPauseSignals and
            here — disposing twice is a no-op in pty-manager. */
@@ -8872,6 +9076,255 @@ export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunS
   });
 }
 
+const WHITEBOARD_MAX_NODES = 500;
+const WHITEBOARD_MAX_EDGES = 1_000;
+const WHITEBOARD_COORDINATE_LIMIT = 100_000;
+
+/** Persist the visual model Cora and the renderer share for one chat. */
+export async function updateCoraWhiteboard(
+  input: UpdateCoraWhiteboardInput,
+): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const action = input.action ?? "replace";
+  if (action !== "replace" && action !== "merge" && action !== "clear") {
+    throw new Error(`Unsupported whiteboard action: ${String(action)}`);
+  }
+
+  return commitRunChange(run, {
+    type: "run.whiteboard_updated",
+    message: action === "clear" ? "Cleared Cora whiteboard" : "Updated Cora whiteboard",
+    payload: {
+      action,
+      editor: input.editor ?? "cora",
+      baseRevision: input.baseRevision,
+      nodeCount: input.nodes?.length ?? 0,
+      edgeCount: input.edges?.length ?? 0,
+    },
+    mutate: (draft, timestamp) => {
+      const currentRevision = draft.whiteboard?.revision ?? 0;
+      if (
+        input.baseRevision !== undefined &&
+        Math.max(0, Math.floor(input.baseRevision)) !== currentRevision
+      ) {
+        throw new Error(
+          `Whiteboard changed since revision ${input.baseRevision}. Read it again and apply the update to revision ${currentRevision}.`,
+        );
+      }
+      if (action === "clear") {
+        if (!draft.whiteboard) return false;
+        delete draft.whiteboard;
+        draft.updatedAt = timestamp;
+        return;
+      }
+
+      const prior = action === "merge" ? draft.whiteboard : undefined;
+      const removedNodes = new Set((input.removeNodeIds ?? []).map(sanitizeWhiteboardId).filter(Boolean));
+      const removedEdges = new Set((input.removeEdgeIds ?? []).map(sanitizeWhiteboardId).filter(Boolean));
+      const nodesById = new Map<string, CoraWhiteboardNode>();
+      const edgesById = new Map<string, CoraWhiteboardEdge>();
+      // Sanitization maps distinct raw ids like "step 1"/"step-1" to the same
+      // id; silently upserting one over the other would lose a card, so two
+      // different raw ids colliding is an input error.
+      const rawIdBySanitized = new Map<string, string>();
+      const guardIdCollision = (sanitized: string, raw: unknown, what: "node" | "edge") => {
+        const rawId = typeof raw === "string" ? raw.trim() : "";
+        const existing = rawIdBySanitized.get(`${what}:${sanitized}`);
+        if (existing !== undefined && existing !== rawId) {
+          throw new Error(
+            `Whiteboard ${what} ids "${existing}" and "${rawId}" both normalize to "${sanitized}". Use ids made of letters, digits, and . _ : - so they stay distinct.`,
+          );
+        }
+        rawIdBySanitized.set(`${what}:${sanitized}`, rawId);
+      };
+
+      for (const node of prior?.nodes ?? []) {
+        if (!removedNodes.has(node.id)) nodesById.set(node.id, node);
+      }
+      for (const node of input.nodes ?? []) {
+        // Merge upserts by id: fields omitted from the payload keep the prior
+        // node's values instead of silently resetting to defaults.
+        const priorNode = prior ? nodesById.get(sanitizeWhiteboardId(node?.id)) : undefined;
+        const normalized = normalizeWhiteboardNode(node, priorNode);
+        guardIdCollision(normalized.id, node?.id, "node");
+        if (removedNodes.has(normalized.id)) continue;
+        nodesById.set(normalized.id, normalized);
+      }
+      if (nodesById.size > WHITEBOARD_MAX_NODES) {
+        throw new Error(
+          `The whiteboard would hold ${nodesById.size} nodes; the limit is ${WHITEBOARD_MAX_NODES}. Remove nodes or rebuild a smaller board.`,
+        );
+      }
+      const nodes = Array.from(nodesById.values());
+      const validNodeIds = new Set(nodes.map((node) => node.id));
+
+      for (const edge of prior?.edges ?? []) {
+        if (!removedEdges.has(edge.id) && validNodeIds.has(edge.from) && validNodeIds.has(edge.to)) {
+          edgesById.set(edge.id, edge);
+        }
+      }
+      for (const edge of input.edges ?? []) {
+        const priorEdge = prior ? edgesById.get(sanitizeWhiteboardId(edge?.id)) : undefined;
+        const normalized = normalizeWhiteboardEdge(edge, priorEdge);
+        guardIdCollision(normalized.id, edge?.id, "edge");
+        if (removedEdges.has(normalized.id)) continue;
+        if (!validNodeIds.has(normalized.from) || !validNodeIds.has(normalized.to)) {
+          throw new Error(`Whiteboard edge ${normalized.id} references a missing node.`);
+        }
+        edgesById.set(normalized.id, normalized);
+      }
+      if (edgesById.size > WHITEBOARD_MAX_EDGES) {
+        throw new Error(
+          `The whiteboard would hold ${edgesById.size} edges; the limit is ${WHITEBOARD_MAX_EDGES}. Remove edges or rebuild a smaller board.`,
+        );
+      }
+
+      const title = sanitizeWhiteboardText(input.title ?? prior?.title ?? "Cora whiteboard", 100);
+      const summary = sanitizeWhiteboardText(input.summary ?? prior?.summary ?? "", 700) || undefined;
+      draft.whiteboard = {
+        version: 1,
+        revision: currentRevision + 1,
+        lastEditedBy: input.editor ?? "cora",
+        title: title || "Cora whiteboard",
+        summary,
+        nodes,
+        edges: Array.from(edgesById.values()),
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+function sanitizeWhiteboardId(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/[^a-zA-Z0-9._:-]+/g, "-").slice(0, 80);
+}
+
+function sanitizeWhiteboardText(value: unknown, maxLength: number): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/\r\n/g, "\n").trim().slice(0, maxLength);
+}
+
+function finiteWhiteboardNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const number = typeof value === "number" ? value : Number(value);
+  // The fallback is clamped too: a merge that changes a node's kind inherits
+  // the prior size, which may sit outside the new kind's limits.
+  const chosen = Number.isFinite(number) ? number : fallback;
+  return Math.max(min, Math.min(max, Math.round(chosen)));
+}
+
+const WHITEBOARD_TONES: readonly NonNullable<CoraWhiteboardEdge["tone"]>[] = [
+  "default", "accent", "success", "warning", "danger",
+];
+
+/**
+ * Sanitize one node. When `prior` is present (a merge upsert over an existing
+ * node), omitted fields inherit the prior value; explicitly provided empty
+ * strings still clear a field.
+ */
+function normalizeWhiteboardNode(
+  node: CoraWhiteboardNode,
+  prior?: CoraWhiteboardNode,
+): CoraWhiteboardNode {
+  const id = sanitizeWhiteboardId(node?.id);
+  const title = sanitizeWhiteboardText(node?.title, 120) || prior?.title || "";
+  if (!id || !title) throw new Error("Every whiteboard node needs a non-empty id and title.");
+  const allowedKinds: CoraWhiteboardNode["kind"][] = [
+    "topic", "group", "file", "symbol", "flow", "condition", "decision", "risk", "note",
+  ];
+  const kind = allowedKinds.includes(node.kind) ? node.kind : prior?.kind ?? "note";
+  const defaultSize = CORA_WHITEBOARD_NODE_DEFAULT_SIZES[kind];
+  const limits = whiteboardNodeSizeLimits(kind);
+  const body = node.body === undefined
+    ? prior?.body
+    : sanitizeWhiteboardText(node.body, 900) || undefined;
+  const tone = node.tone === undefined
+    ? prior?.tone
+    : WHITEBOARD_TONES.includes(node.tone) ? node.tone : undefined;
+  return {
+    id,
+    kind,
+    title,
+    body,
+    x: finiteWhiteboardNumber(
+      node.x,
+      prior?.x ?? 80,
+      -WHITEBOARD_COORDINATE_LIMIT,
+      WHITEBOARD_COORDINATE_LIMIT,
+    ),
+    y: finiteWhiteboardNumber(
+      node.y,
+      prior?.y ?? 80,
+      -WHITEBOARD_COORDINATE_LIMIT,
+      WHITEBOARD_COORDINATE_LIMIT,
+    ),
+    width: finiteWhiteboardNumber(
+      node.width,
+      prior?.width ?? defaultSize.width,
+      limits.minWidth,
+      limits.maxWidth,
+    ),
+    height: finiteWhiteboardNumber(
+      node.height,
+      prior?.height ?? defaultSize.height,
+      limits.minHeight,
+      limits.maxHeight,
+    ),
+    tone,
+  };
+}
+
+function normalizeWhiteboardEdge(
+  edge: CoraWhiteboardEdge,
+  prior?: CoraWhiteboardEdge,
+): CoraWhiteboardEdge {
+  const id = sanitizeWhiteboardId(edge?.id);
+  const from = sanitizeWhiteboardId(edge?.from);
+  const to = sanitizeWhiteboardId(edge?.to);
+  if (!id || !from || !to) throw new Error("Every whiteboard edge needs id, from, and to fields.");
+  const label = edge.label === undefined
+    ? prior?.label
+    : sanitizeWhiteboardText(edge.label, 100) || undefined;
+  const tone = edge.tone === undefined
+    ? prior?.tone
+    : WHITEBOARD_TONES.includes(edge.tone) ? edge.tone : undefined;
+  const style = edge.style === undefined
+    ? prior?.style
+    : edge.style === "dashed" ? "dashed" : undefined;
+  return { id, from, to, label, tone, style };
+}
+
+/**
+ * Terminalize a run after codara_complete has passed the socket's worker and
+ * verification invariants. Unlike the generic status editor, this keeps the
+ * autopilot projection and completed timestamp consistent with run.status.
+ */
+export async function completeRunFromOrchestrator(runId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  return commitRunChange(run, {
+    type: "run.status_change_requested",
+    message: "Cora marked the run complete",
+    payload: {
+      requestedStatus: "complete",
+      source: "codara_complete",
+      currentStepId: run.currentStepId,
+    },
+    mutate: (draft, timestamp) => {
+      delete draft.blockedOn;
+      abandonRunQuestionOwnership(draft);
+      draft.status = "complete";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "complete",
+        lastAction: "manager_marked_complete",
+        updatedAt: timestamp,
+      };
+      draft.completedAt = timestamp;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // Persist the composer chip's backend/model/mode/effort selection onto the
 // run. The fields are all optional on the input — passing only `chatMode`
 // toggles Execute<->Talk without touching the others. The mutator does
@@ -8885,14 +9338,18 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
     input.chatModel === undefined &&
     input.chatMode === undefined &&
     input.chatEffort === undefined &&
+    input.coraExecutionPolicy === undefined &&
     input.chatFastMode === undefined &&
     input.chat1mContext === undefined;
   if (noChange) return run;
-  const nextBackend = input.chatBackend ?? run.chatBackend ?? "openrouter";
+  const nextBackend = input.chatBackend ?? run.chatBackend ?? "pi";
   const nextFeatureFlags = normalizeChatFeatureFlags(nextBackend, {
     chatFastMode: input.chatFastMode ?? run.chatFastMode,
     chat1mContext: input.chat1mContext ?? run.chat1mContext,
   });
+  const nextExecutionPolicy = normalizeCoraExecutionPolicy(
+    input.coraExecutionPolicy ?? run.coraExecutionPolicy,
+  );
   return commitRunChange(run, {
     type: "run.chat_backend_updated",
     message: "Chat backend / model / mode / effort updated",
@@ -8902,6 +9359,7 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: run.chatModel,
         chatMode: run.chatMode,
         chatEffort: run.chatEffort,
+        coraExecutionPolicy: run.coraExecutionPolicy,
         chatFastMode: run.chatFastMode,
         chat1mContext: run.chat1mContext,
       },
@@ -8910,6 +9368,7 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: input.chatModel ?? run.chatModel,
         chatMode: input.chatMode ?? run.chatMode,
         chatEffort: input.chatEffort ?? run.chatEffort,
+        coraExecutionPolicy: nextExecutionPolicy,
         chatFastMode: nextFeatureFlags.chatFastMode,
         chat1mContext: nextFeatureFlags.chat1mContext,
       },
@@ -8919,12 +9378,30 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       if (input.chatModel !== undefined) draft.chatModel = input.chatModel.trim() || undefined;
       if (input.chatMode !== undefined) draft.chatMode = input.chatMode;
       if (input.chatEffort !== undefined) draft.chatEffort = input.chatEffort;
+      if (input.coraExecutionPolicy !== undefined) {
+        draft.coraExecutionPolicy = nextExecutionPolicy;
+      }
       draft.chatFastMode = nextFeatureFlags.chatFastMode;
       draft.chat1mContext = nextFeatureFlags.chat1mContext;
       // Switching backend invalidates the prior session UUID — the new
       // backend would mis-resume otherwise. Selected per the answers: no
       // cross-backend handoff; each backend gets its own fresh thread.
       if (input.chatBackend !== undefined && input.chatBackend !== run.chatBackend) {
+        draft.chatSessionUuid = undefined;
+        draft.chatSessionMode = undefined;
+      }
+      // A Pi policy change alters the active system contract and extension
+      // set. Rotate the provider session instead of letting Deep/Frontier
+      // inherit a transcript created under Fast (or vice versa). Reachable
+      // only when a caller PINS the policy explicitly (no UI does): a policy
+      // that moves because the manager reclassified complexity must NOT come
+      // through here, because dropping chatSessionUuid would drop the thread.
+      // Pi restarts its own runtime for that case via its session identity.
+      if (
+        nextBackend === "pi" &&
+        input.coraExecutionPolicy !== undefined &&
+        nextExecutionPolicy !== normalizeCoraExecutionPolicy(run.coraExecutionPolicy)
+      ) {
         draft.chatSessionUuid = undefined;
         draft.chatSessionMode = undefined;
       }
@@ -8977,6 +9454,34 @@ export async function markRunSeen(input: MarkRunSeenInput): Promise<RunState> {
     mutate: (draft, timestamp) => {
       if (draft.seen === true) return false;
       draft.seen = true;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Complexity classification arriving from an MCP orchestrator (Pi / CC /
+// Codex execute mode) rather than from a JSON manager decision. Those turns
+// mutate the run live through tool calls, so they never reach the
+// plan_analysis branch in applySparkManagerDecision that persists the same
+// field. Emits the identical event so both paths read alike in the timeline.
+// No-op when unchanged; the classification may legitimately move as a chat
+// run's scope grows.
+export async function recordTaskComplexity(
+  runId: string,
+  taskComplexity: TaskComplexity,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  if (run.taskComplexity === taskComplexity) return run;
+  return commitRunChange(run, {
+    type: "spark_manager.task_complexity_classified",
+    message: `Manager classified the run as taskComplexity=${taskComplexity}`,
+    payload: {
+      taskComplexity,
+      priorComplexity: run.taskComplexity,
+      source: "orchestrator_tool",
+    },
+    mutate: (draft, timestamp) => {
+      draft.taskComplexity = taskComplexity;
       draft.updatedAt = timestamp;
     },
   });
@@ -9122,6 +9627,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     conflictsWith: input.conflictsWith ?? [],
     taskClass: input.taskClass,
     writeScopeSource: input.writeScopeSource,
+    parallelTrust: input.parallelTrust,
     councilGroupId: input.councilGroupId,
     candidateIndex: input.candidateIndex,
     councilRole: input.councilRole,
@@ -9313,6 +9819,12 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     createdAt: timestamp,
   };
   const peerCommsEnabled = shouldUsePeerComms(run, step, task);
+  // Persist the gate's answer on the task itself. The renderer already receives
+  // workerTasks, so this is what lets the run graph draw the batch as a team
+  // that can message itself rather than as isolated satellites. `task` is the
+  // live run record, and both the envelope JSON below and saveRun pick it up.
+  if (peerCommsEnabled) task.peerComms = true;
+  else delete task.peerComms;
   if (peerCommsEnabled) {
     await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
   }
@@ -9438,15 +9950,18 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (task.runtimePreference === "codex") {
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
   }
-  // Automation (loom) workers are allowed fable ONLY when the user opted in
-  // via the Fable setting (default off); the fable backstop in
-  // buildLaunchCommandLine only fires for Cora-spawned workers. A direct run
-  // bound to an automationId is the automation worker path. With the pref off
-  // we leave isAutomationLaunch false so the backstop downgrades any fable hint
-  // to Opus 4.8, matching the Cora-spawned-worker chokepoint.
+  // A direct run bound to an automationId is the automation (loom) worker
+  // path: it launches on a pinned/handoff model the automation engine already
+  // validated, so buildLaunchCommandLine passes its hint verbatim instead of
+  // running the Cora-worker sanitize backstop.
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
-  const isAutomationLaunch =
-    getPreferenceCached("fableEnabled") === true && isAutomationRun;
+  const usePiWorkerHarness =
+    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
+    !isAutomationRun &&
+    (task.runtimePreference === "claude" || task.runtimePreference === "codex");
+  const piWorkerModel = usePiWorkerHarness
+    ? piModelForWorker(task)
+    : undefined;
   // Dirs a sandboxed codex worker must be able to WRITE despite them living
   // outside the workspace: the attempt dir (holds final-report.json + logs) and,
   // for a chat participant, the shared board. buildLaunchCommandLine --add-dir's
@@ -9457,16 +9972,12 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ];
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
-    isAutomation: isAutomationLaunch,
-    // Cora-spawned worker: honor a fable hint whenever the user explicitly asked
-    // for Fable this run (workerFableAllowed). Automation runs stay setting-gated
-    // via isAutomationLaunch — they must NOT inherit the request-only worker gate,
-    // so for an automation run allowFable follows the setting (isAutomationLaunch)
-    // rather than the user-request gate.
-    allowFable: isAutomationRun ? isAutomationLaunch : workerFableAllowed(run),
+    isAutomation: isAutomationRun,
     extraWritableDirs,
   });
-  const command = isAutomationRun && task.runtimePreference === "claude"
+  const command = usePiWorkerHarness
+    ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
+    : isAutomationRun && task.runtimePreference === "claude"
     ? "Claude Agent SDK (headless automation worker)"
     : isAutomationRun && task.runtimePreference === "codex"
       ? "Codex App Server (headless automation worker)"
@@ -9479,7 +9990,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   attempt.finishedAt = undefined;
   attempt.exitCode = undefined;
   attempt.error = undefined;
+  attempt.failureKind = undefined;
   attempt.command = command;
+  attempt.model = piWorkerModel ?? sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
   attempt.promptPath = paths.promptMd;
   attempt.stdoutLogPath = paths.stdoutLog;
   attempt.stderrLogPath = paths.stderrLog;
@@ -9549,28 +10062,52 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     }
   }
 
-  const result = isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
-    ? await runStructuredAutomationWorkerSession({
-        run,
-        task,
-        attemptId: attempt.id,
-        paths,
-        cwd: attempt.cwd,
-        promptText,
-        command,
-        sandboxed: Boolean(attempt.sandboxWorktreePath),
-        extraWritableDirs,
-      })
-    : await runWorkerSession({
-        run,
-        task,
-        attemptId: attempt.id,
-        paths,
-        cwd: attempt.cwd,
-        launchCommand,
-        promptText,
-        command,
-      });
+  // Peer-traffic observability rides the batch lifecycle: the first
+  // peer-comms worker to launch opens the run's mailbox watcher, the last one
+  // to finish closes it. Best-effort — traffic events must never block a run.
+  // Release is paired strictly with a successful acquire so a failed acquire
+  // can never decrement a sibling worker's refcount.
+  const watchPeerComms = shouldUsePeerComms(run, launchStep, task);
+  const peerCommsAcquired = watchPeerComms
+    ? await acquirePeerCommsWatcher(run).catch(() => false)
+    : false;
+  let result: { exitCode: number; error?: string };
+  try {
+    result = usePiWorkerHarness
+      ? await runPiWorkerSession({
+          run,
+          task,
+          attemptId: attempt.id,
+          paths,
+          cwd: attempt.cwd,
+          promptText,
+          command,
+        })
+      : isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+      ? await runStructuredAutomationWorkerSession({
+          run,
+          task,
+          attemptId: attempt.id,
+          paths,
+          cwd: attempt.cwd,
+          promptText,
+          command,
+          sandboxed: Boolean(attempt.sandboxWorktreePath),
+          extraWritableDirs,
+        })
+      : await runWorkerSession({
+          run,
+          task,
+          attemptId: attempt.id,
+          paths,
+          cwd: attempt.cwd,
+          launchCommand,
+          promptText,
+          command,
+        });
+  } finally {
+    if (peerCommsAcquired) releasePeerCommsWatcher(run.id);
+  }
 
   run = await requireRun(input.runId);
   const finishedAttempt = run.workerAttempts.find((item) => item.id === input.attemptId);
@@ -9583,6 +10120,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   finishedAttempt.finishedAt = finishedAt;
   finishedAttempt.exitCode = result.exitCode;
   finishedAttempt.error = result.error;
+  // Classify the failure at the one point every worker session funnels through,
+  // so the retry path can branch on a kind instead of re-reading error prose.
+  finishedAttempt.failureKind = result.exitCode === 0 ? undefined : classifyWorkerFailure(result.error);
   finishedAttempt.command = command;
   finishedAttempt.stdoutLogPath = paths.stdoutLog;
   finishedAttempt.stderrLogPath = paths.stderrLog;
@@ -9786,7 +10326,7 @@ interface ConversationRewindTarget {
 }
 
 function disposeManagerSessions(runId: string): Promise<void> {
-  for (const backendKind of ["claude", "codex"] as const) {
+  for (const backendKind of ["claude", "codex", "pi"] as const) {
     try {
       getBackend(backendKind).interruptChat?.(runId);
     } catch {
@@ -9794,7 +10334,7 @@ function disposeManagerSessions(runId: string): Promise<void> {
     }
   }
   return Promise.all(
-    (["claude", "codex"] as const).map(async (backendKind) => {
+    (["claude", "codex", "pi"] as const).map(async (backendKind) => {
       try {
         await getBackend(backendKind).disposeChat?.(runId);
       } catch {
@@ -10485,7 +11025,12 @@ async function reviewWorkerReportArtifact({
   //   2. Record this report's newly-verified claims as green — done BEFORE the
   //      FEEDBACK short-circuit so a partial pass isn't lost when the same report
   //      also re-enqueues the impl with corrective feedback.
-  //   3. FEEDBACK re-enqueue — deterministically re-run the impl worker with the
+  //   3. Round accounting + guardrails — bump the persisted verification-round
+  //      counter for CORRECTIVE verdicts only, short-circuit oracle-blocked
+  //      verdicts (re-running the impl cannot conjure missing tooling), and
+  //      force-land past the run-level verification ceiling instead of feeding
+  //      another corrective loop.
+  //   4. FEEDBACK re-enqueue — deterministically re-run the impl worker with the
   //      verifier's corrective prompt, skipping a full manager round-trip.
   if (report.verifier) {
     const regressionRestore = await maybeRestoreGreenClaimRegression({ run, task, attempt, report });
@@ -10494,6 +11039,20 @@ async function reviewWorkerReportArtifact({
       if (regressionRestore.restoreFailed) return run;
     }
     run = await recordGreenClaims({ run, attempt, report });
+    // Only corrective verdicts (FEEDBACK/FAILED — the ones that trigger rework)
+    // consume verification budget. Clean terminal-OK passes on distinct scopes
+    // are the healthy shape of a multi-feature run; counting them would let
+    // the runaway-loop ceiling guillotine a run that never looped.
+    const correctiveVerdict = !TERMINAL_OK_VERIFIER_CONFIDENCE.has(report.verifier.confidence);
+    if (correctiveVerdict) {
+      run = await recordVerificationRound({ run, task, attempt });
+    }
+    const oracleAccept = await maybeAcceptOracleBlockedVerifierVerdict({ run, task, attempt, report });
+    if (oracleAccept) return oracleAccept;
+    if (correctiveVerdict) {
+      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run);
+      if (ceilingLanded) return ceilingLanded;
+    }
     const feedbackRetry = await maybeQueueVerifierFeedbackRetry({
       run,
       task,
@@ -10559,6 +11118,12 @@ function canCompleteStepImmediatelyAfterLocalReview(
   run: RunState,
   task: WorkerTask,
 ): boolean {
+  // MCP-managed runs settle their synthetic worker_batch steps here and
+  // nowhere else: codara_complete only moves the RUN status, so holding one in
+  // `reviewing` would strand it in the graph forever. They were never affected
+  // by this rule (they carried no classification at all until the orchestrator
+  // gained a taskComplexity argument), so keep them out of it.
+  if (runHasMcpManager(run)) return true;
   // For standard/complex runs, an implementation worker's local "complete"
   // report is not the end of the step. The manager still has to accept,
   // queue verifier work, or produce a corrective task. Keeping the step in
@@ -10600,6 +11165,10 @@ const LIVE_VERIFIER_TASK_STATUSES = new Set<WorkerTaskStatus>([
 // by ensureVerifierCoverage (to decide whether to synthesize a verifier) and by
 // stepHasTerminalVerifierVerdict (to gate step->complete transitions).
 interface StepVerifierFacts {
+  // At least one of the step's attempts produced a parseable worker report.
+  // False means the step never executed (or nothing it ran reported back) —
+  // callers must not read changedFiles=false as "verified no-op" in that case.
+  hasAnyReport: boolean;
   // The step's non-verifier workers collectively reported >=1 filesChanged.
   changedFiles: boolean;
   // A verifier task is in flight / awaiting review on the step.
@@ -10629,6 +11198,7 @@ async function computeStepVerifierFacts(
     (task) => task.taskClass === "verifier" && LIVE_VERIFIER_TASK_STATUSES.has(task.status),
   );
 
+  let hasAnyReport = false;
   let changedFiles = false;
   let hasTerminalVerifierVerdict = false;
   let implementerRuntime: WorkerRuntime | undefined;
@@ -10639,6 +11209,7 @@ async function computeStepVerifierFacts(
     if (!attempt.finalReportPath) continue;
     const report = await readWorkerReport(attempt.finalReportPath);
     if (!report) continue;
+    hasAnyReport = true;
     if (verifierTaskIds.has(task.id)) {
       const confidence = report.verifier?.confidence;
       if (confidence && TERMINAL_OK_VERIFIER_CONFIDENCE.has(confidence)) {
@@ -10655,7 +11226,7 @@ async function computeStepVerifierFacts(
     }
   }
 
-  return { changedFiles, hasLiveVerifier, hasTerminalVerifierVerdict, implementerRuntime };
+  return { hasAnyReport, changedFiles, hasLiveVerifier, hasTerminalVerifierVerdict, implementerRuntime };
 }
 
 // Cross-provider verification as a code-level invariant. For each non-terminal
@@ -10871,9 +11442,12 @@ async function completeAcceptedReviewingSteps(
 // Detects the synthetic report written by writeAutoFailureReport when the
 // agent CLI failed environmentally (launch failure, auth/API/socket failure),
 // and if we haven't already exhausted runtimes, queues a fresh task on the
-// same step with the opposite runtime. Returns the updated run when a fallback
-// was queued (so the caller can short-circuit the normal review path), or null
-// when no fallback applies.
+// same step. The failure taxonomy picks WHICH runtime that replacement gets:
+// a transient transport/provider failure earns one fast retry on the same
+// runtime first (the runtime is not what broke), while auth and launch
+// failures go straight to the opposite runtime exactly as before. Returns the
+// updated run when a replacement was queued (so the caller can short-circuit
+// the normal review path), or null when no retry applies.
 async function maybeQueueCliLaunchFallback({
   run,
   task,
@@ -10886,6 +11460,20 @@ async function maybeQueueCliLaunchFallback({
   report: WorkerReport;
 }): Promise<RunState | null> {
   if (report.status !== "failed") return null;
+  const failureContext = [
+    attempt.error ?? "",
+    report.summary,
+    ...report.risks,
+  ].join("\n");
+  // A user stop/pause is control flow, not evidence that the provider or CLI
+  // is broken. Never turn it into an automatic cross-provider retry.
+  if (
+    /(?:worker (?:was )?interrupted|user (?:stop|pause)|force[- ]paused|run (?:was )?paused|stopped by (?:the )?user)/i.test(
+      failureContext,
+    )
+  ) {
+    return null;
+  }
   const isLaunchFailure = report.risks.some((risk) =>
     /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i.test(risk),
   );
@@ -10903,32 +11491,47 @@ async function maybeQueueCliLaunchFallback({
   const opposite: WorkerRuntime | null = preferenceOrder
     .filter((kind) => kind !== task.runtimePreference)
     .find((kind) => availableRuntimes.some((runtime) => runtime.kind === kind && runtime.installed)) ?? null;
-  if (!opposite) return null;
   // Only fall back once per (step, title) lineage. If a sibling with the
   // opposite runtime already exists (failed, cancelled, or pending), both
   // runtimes have been tried — let the manager handle it.
-  const triedRuntimes = new Set(
-    run.workerTasks
-      .filter((t) => t.stepId === task.stepId && t.title === task.title)
-      .map((t) => t.runtimePreference),
-  );
-  if (triedRuntimes.has(opposite)) return null;
+  const lineage = run.workerTasks.filter((t) => t.stepId === task.stepId && t.title === task.title);
+  const triedRuntimes = new Set(lineage.map((t) => t.runtimePreference));
+  const oppositeAvailable = opposite !== null && !triedRuntimes.has(opposite);
+  // Classify from the attempt's own error first (the raw runtime message) and
+  // only then from the synthetic report text, which wraps every reason in the
+  // same boilerplate. The plan is what decides same-runtime vs cross-runtime.
+  const failureKind =
+    attempt.failureKind ?? classifyWorkerFailure(attempt.error) ?? classifyWorkerFailure(failureContext);
+  const retryPlan = planWorkerFailureRetry({
+    kind: failureKind,
+    sameRuntimeAttempts: lineage.filter((t) => t.runtimePreference === task.runtimePreference).length,
+    oppositeRuntimeAvailable: oppositeAvailable,
+  });
+  if (retryPlan.action === "no_auto_retry") return null;
+  const retriesSameRuntime = retryPlan.action === "retry_same_runtime";
+  const nextRuntime: WorkerRuntime | null = retriesSameRuntime ? task.runtimePreference : opposite;
+  if (!nextRuntime) return null;
 
   const fallbackId = makeId("task");
   return commitRunChange(run, {
     type: "autopilot.cli_launch_fallback",
-    message: `Auto-falling back from ${task.runtimePreference} to ${opposite} after CLI/runtime failure`,
+    message: retriesSameRuntime
+      ? `Fast-retrying ${task.runtimePreference} after a transient ${failureKind ?? "runtime"} failure`
+      : `Auto-falling back from ${task.runtimePreference} to ${nextRuntime} after CLI/runtime failure`,
     stepId: task.stepId,
     workerTaskId: fallbackId,
     payload: {
       previousTaskId: task.id,
       previousAttemptId: attempt.id,
       previousRuntime: task.runtimePreference,
-      nextRuntime: opposite,
+      nextRuntime,
+      failureKind,
+      retryAction: retryPlan.action,
+      retryReason: retryPlan.reason,
     },
     mutate: (draft, timestamp) => {
-      // Cancel the failed task so pickAutopilotTasks won't re-launch it with
-      // the same runtime that just failed environmentally.
+      // Cancel the failed task so pickAutopilotTasks re-launches the queued
+      // replacement below rather than the task that just failed.
       const failedTask = draft.workerTasks.find((t) => t.id === task.id);
       if (failedTask) {
         failedTask.status = "cancelled";
@@ -10937,12 +11540,15 @@ async function maybeQueueCliLaunchFallback({
       const fallbackTask: WorkerTask = {
         id: fallbackId,
         runId: draft.id,
+        supersedesTaskId: task.id,
         stepId: task.stepId,
         title: task.title,
         description: task.description,
-        runtimePreference: opposite,
-        modelHint: fallbackModelHintForRuntime(opposite),
-        effortHint: fallbackEffortHintForRuntime(opposite, task.effortHint),
+        runtimePreference: nextRuntime,
+        // A same-runtime fast retry keeps the original model and effort: only
+        // a runtime swap needs the hints translated to the other provider.
+        modelHint: retriesSameRuntime ? task.modelHint : fallbackModelHintForRuntime(nextRuntime, task.modelHint),
+        effortHint: retriesSameRuntime ? task.effortHint : fallbackEffortHintForRuntime(nextRuntime, task.effortHint),
         status: "queued",
         allowedPaths: task.allowedPaths,
         forbiddenPaths: task.forbiddenPaths,
@@ -10951,6 +11557,14 @@ async function maybeQueueCliLaunchFallback({
         canRunParallel: task.canRunParallel,
         conflictsWith: task.conflictsWith,
         taskClass: task.taskClass,
+        // Manager-batch parallel trust survives the runtime swap: the failed
+        // task's batch already launched simultaneously, so its replacement
+        // must be picked into the same relaunch wave as its sibling fallbacks
+        // instead of serializing behind them.
+        parallelTrust: task.parallelTrust,
+        // The replacement joins the same batch, so it inherits the team marker
+        // and the graph keeps showing the peer link across the runtime swap.
+        peerComms: task.peerComms,
         createdBy: "system",
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -10980,6 +11594,328 @@ function normalizeClaimKey(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// One verification round = one reviewed worker report carrying a CORRECTIVE
+// verifier verdict (FEEDBACK/FAILED — the caller skips clean terminal-OK
+// passes). Persisted on the run so the ceiling survives restarts and can be
+// read from the spawn chokepoint as well as here; reset on every new user
+// turn so a follow-up never inherits a saturated counter.
+async function recordVerificationRound({
+  run,
+  task,
+  attempt,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+}): Promise<RunState> {
+  const nextRounds = (run.verificationRounds ?? 0) + 1;
+  return commitRunChange(run, {
+    type: "autopilot.verification_round_recorded",
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    message: `Verification round ${nextRounds} reviewed`,
+    payload: { attemptId: attempt.id, verificationRounds: nextRounds },
+    mutate: (draft, timestamp) => {
+      draft.verificationRounds = (draft.verificationRounds ?? 0) + 1;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Run-level verification-round ceiling for execute-mode CLI/Pi managers. The
+// per-spawn cap in agent-socket stops new verifier steps at the source; this
+// backstop bounds shapes it cannot see (multi-verifier batches, verifiers
+// minted before the cap existed). Deliberately generous — it exists to stop
+// runaway loops, not to police normal runs.
+const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6, frontier: 9 } as const;
+
+async function maybeForceLandAtVerificationCeiling(run: RunState): Promise<RunState | null> {
+  if (!runHasMcpManager(run)) return null;
+  const rounds = run.verificationRounds ?? 0;
+  const ceiling = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
+  if (rounds < ceiling) return null;
+  return forceLandRunUnverified(run.id, {
+    trigger: "verification_rounds_capped",
+    note:
+      `Verification hit its hard ceiling: ${rounds} rounds against a limit of ${ceiling} for this policy. ` +
+      "Codara accepted the remaining reviewed work and landed it as unverified — further rounds were repeating the same evidence.",
+  });
+}
+
+// Guardrail landing: accept everything still pending (except tasks with a
+// live worker process), cancel pending work that never even produced an
+// attempt, label steps that never earned a terminal verifier verdict as
+// completed_unverified, and land the run when that leaves every step
+// terminal. Mirrors the deadlock-break in applySparkManagerDecision —
+// this variant is callable from code-level caps (verification-round ceiling,
+// synthetic-step ceiling) where no manager decision object exists.
+export async function forceLandRunUnverified(
+  runId: string,
+  input: { trigger: "verification_rounds_capped" | "synthetic_step_ceiling"; note: string },
+): Promise<RunState> {
+  let run = await requireRun(runId);
+  const liveWorkerTaskIds = new Set(
+    activeWorkersForRun(run.id)
+      .map((worker) => worker.workerTaskId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const landableStatuses = new Set<WorkerTaskStatus>([
+    "created",
+    "queued",
+    "claimed",
+    "running",
+    "needs_review",
+    "retry_queued",
+  ]);
+  const pendingTasks = run.workerTasks.filter(
+    (task) => landableStatuses.has(task.status) && !liveWorkerTaskIds.has(task.id),
+  );
+  // Work that never produced an attempt cannot honestly be "accepted" —
+  // force-accepting it would report never-executed work as done. Cancel it
+  // instead so the landing is explicit about what was skipped.
+  const attemptedTaskIds = new Set(run.workerAttempts.map((attempt) => attempt.workerTaskId));
+  const cancelTaskIds = new Set(
+    pendingTasks
+      .filter(
+        (task) =>
+          (task.status === "created" || task.status === "queued") &&
+          !attemptedTaskIds.has(task.id),
+      )
+      .map((task) => task.id),
+  );
+  const landableTasks = pendingTasks.filter((task) => !cancelTaskIds.has(task.id));
+  // Precompute which affected steps may land as a clean `complete` (reads
+  // reports from disk) before the synchronous mutate. A step qualifies only
+  // when it actually reported back AND either changed no files or earned a
+  // terminal verifier verdict — a step with NO reports at all never executed,
+  // so the changedFiles=false shortcut must not mark it clean.
+  const openStepIds = run.steps
+    .filter((step) => !isTerminalStepStatus(step.status))
+    .map((step) => step.id);
+  const cleanCompleteStepIds = new Set<string>();
+  for (const stepId of openStepIds) {
+    const facts = await computeStepVerifierFacts(run, stepId);
+    if (facts.hasAnyReport && (!facts.changedFiles || facts.hasTerminalVerifierVerdict)) {
+      cleanCompleteStepIds.add(stepId);
+    }
+  }
+  run = await commitRunChange(run, {
+    type: "autopilot.guardrail_force_landed",
+    message: input.note,
+    payload: {
+      trigger: input.trigger,
+      acceptedTaskIds: landableTasks.map((task) => task.id),
+      cancelledTaskIds: [...cancelTaskIds],
+      verificationRounds: run.verificationRounds,
+    },
+    mutate: (draft, timestamp) => {
+      const acceptIds = new Set(landableTasks.map((task) => task.id));
+      for (const task of draft.workerTasks) {
+        if (cancelTaskIds.has(task.id)) {
+          task.status = "cancelled";
+          task.updatedAt = timestamp;
+          continue;
+        }
+        if (!acceptIds.has(task.id)) continue;
+        task.status = "accepted";
+        task.forceAccepted = true;
+        task.forceAcceptReason = input.trigger;
+        task.updatedAt = timestamp;
+      }
+      for (const step of draft.steps) {
+        if (isTerminalStepStatus(step.status)) continue;
+        const stepTasks = draft.workerTasks.filter((task) => task.stepId === step.id);
+        const allDone =
+          stepTasks.length > 0 &&
+          stepTasks.every((task) =>
+            ["accepted", "failed", "cancelled", "blocked"].includes(task.status),
+          );
+        if (!allDone) continue;
+        step.status = cleanCompleteStepIds.has(step.id) ? "complete" : "completed_unverified";
+        step.updatedAt = timestamp;
+        if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+      }
+      const allStepsTerminal =
+        draft.steps.length > 0 &&
+        draft.steps.every((step) => isTerminalStepStatus(step.status));
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        lastAction: "guardrail_force_landed",
+        stopReason: input.trigger,
+        updatedAt: timestamp,
+      };
+      if (allStepsTerminal) {
+        draft.status = "complete";
+        draft.autopilot.status = "complete";
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  await addRunMessage({
+    runId: run.id,
+    author: "system",
+    kind: "note",
+    message: input.note,
+  }).catch(() => undefined);
+  return requireRun(run.id);
+}
+
+// True when a FEEDBACK verdict is environmental rather than behavioral: the
+// verifier flagged an unavailable oracle (missing_oracle in its final report)
+// and none of its failed claims stand on independent evidence. Re-running the
+// implementation cannot conjure the missing tooling, so requeueing it just
+// burns attempts — the exact loop from run-mrz25z39-9ffs4w, where every
+// verifier hedged on absent codara-studio MCP tools and each hedge re-ran the
+// build. A failed claim with real evidence keeps the corrective path.
+//
+// Oracle-taint is an AVAILABILITY statement, never a topic match. The schema's
+// `unsure` claim verdict is the natural encoding for "couldn't verify", so a
+// verdict whose only non-verified claims are unsure ones is oracle-blocked. A
+// hard-`failed` claim is discounted only when its own evidence explicitly says
+// the tool/oracle could not be exercised — substring-matching topic words
+// ("mcp", "codara-studio") over claim text would swallow genuine failures in
+// any task whose subject matter IS the MCP/preview stack.
+function verifierVerdictIsOracleBlocked(verdict: VerifierVerdict): boolean {
+  const oracle = verdict.missingOracle?.trim().toLowerCase();
+  if (!oracle) return false;
+  const failed = (verdict.atomicClaims ?? []).filter((claim) => claim.verdict === "failed");
+  if (failed.length === 0) return true;
+  return failed.every((claim) => evidenceStatesOracleUnavailable(claim.evidence ?? "", oracle));
+}
+
+// Tight availability phrasings a verifier writes when it could not exercise a
+// tool. Deliberately narrow: these describe the oracle being ABSENT, not the
+// implementation failing. No /g flags — exec() must stay stateless.
+const ORACLE_UNAVAILABLE_PHRASES: RegExp[] = [
+  /\bnot\s+available\b/,
+  /\bunavailable\b/,
+  /\b(?:was|were|is|are)\s+not\s+(?:present|exposed|installed|loaded|accessible|reachable)\b/,
+  /\bcould\s+not\s+(?:be\s+)?(?:run|invoked?|reached|accessed|used|found)\b/,
+  /\bmissing\s+oracle\b/,
+  /\bno\s+such\s+tool\b/,
+  /\btools?\s+(?:was\s+|were\s+|is\s+|are\s+)?missing\b/,
+];
+
+// True when the evidence explicitly states the oracle/tool was unavailable:
+// an availability phrase must appear ADJACENT to a tool/oracle reference, so a
+// stray "not available" elsewhere in a long evidence blob — or a mere topic
+// mention of a tool name alongside real failure evidence (a stack trace, a
+// failing command) — never discounts the claim.
+function evidenceStatesOracleUnavailable(evidence: string, oracle: string): boolean {
+  const text = evidence.toLowerCase();
+  for (const phrase of ORACLE_UNAVAILABLE_PHRASES) {
+    const match = phrase.exec(text);
+    if (!match) continue;
+    const windowStart = Math.max(0, match.index - 100);
+    const window = text.slice(windowStart, match.index + match[0].length + 100);
+    if (window.includes(oracle) || /\b(?:tool|oracle|mcp)s?\b/.test(window)) return true;
+  }
+  return false;
+}
+
+// Accept a FEEDBACK verdict without re-running the implementation. Used when
+// the feedback cannot be acted on (missing oracle) or when the policy's
+// rework budget is spent. Terminalizes the verifier, leaves the
+// implementation as-is, and lands the settled steps this verdict covered as
+// completed_unverified — FEEDBACK is not a terminal-OK confidence, so a clean
+// `complete` would misrepresent the evidence.
+async function acceptVerifierFeedbackWithoutRetry({
+  run,
+  task,
+  attempt,
+  report,
+  targetStepId,
+  reason,
+  note,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+  targetStepId?: string;
+  reason: "missing_oracle" | "fast_policy_rework_cap";
+  note: string;
+}): Promise<RunState> {
+  const settleStepIds = new Set(
+    [task.stepId, targetStepId].filter((id): id is string => Boolean(id)),
+  );
+  const updated = await commitRunChange(run, {
+    type: "autopilot.verifier_feedback_accepted_with_caveat",
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    message: note,
+    payload: {
+      reason,
+      attemptId: attempt.id,
+      confidence: report.verifier?.confidence,
+      missingOracle: report.verifier?.missingOracle,
+    },
+    mutate: (draft, timestamp) => {
+      const verifierTask = draft.workerTasks.find((candidate) => candidate.id === task.id);
+      if (verifierTask) {
+        verifierTask.status = "accepted";
+        verifierTask.updatedAt = timestamp;
+      }
+      reconcileAcceptedVerifierOnlySteps(draft, timestamp);
+      // Land only the steps this verdict actually settles; any step whose
+      // tasks are all terminal but that lacks a terminal-OK confidence gets
+      // the honest completed_unverified label.
+      for (const step of draft.steps) {
+        if (!settleStepIds.has(step.id) || isTerminalStepStatus(step.status)) continue;
+        const stepTasks = draft.workerTasks.filter((candidate) => candidate.stepId === step.id);
+        const allDone =
+          stepTasks.length > 0 &&
+          stepTasks.every((candidate) =>
+            ["accepted", "failed", "cancelled", "blocked"].includes(candidate.status),
+          );
+        if (!allDone) continue;
+        step.status = "completed_unverified";
+        step.reviewSummary = note;
+        step.updatedAt = timestamp;
+        if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  await addRunMessage({
+    runId: updated.id,
+    author: "system",
+    kind: "note",
+    message: note,
+  }).catch(() => undefined);
+  return requireRun(updated.id);
+}
+
+// Short-circuits the corrective loop for verdicts that only hedge on missing
+// tooling. Runs before maybeQueueVerifierFeedbackRetry so an oracle-blocked
+// FEEDBACK never re-enqueues the implementation.
+async function maybeAcceptOracleBlockedVerifierVerdict({
+  run,
+  task,
+  attempt,
+  report,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+}): Promise<RunState | null> {
+  const verdict = report.verifier;
+  if (!verdict || verdict.confidence !== "FEEDBACK") return null;
+  if (!verifierVerdictIsOracleBlocked(verdict)) return null;
+  const oracle = verdict.missingOracle?.trim() || "required verification tooling";
+  return acceptVerifierFeedbackWithoutRetry({
+    run,
+    task,
+    attempt,
+    report,
+    reason: "missing_oracle",
+    note:
+      `The verifier could not run its required tooling (${oracle}) and had no independent failing evidence. ` +
+      "Accepted the implementation with that caveat — re-running the build cannot restore missing tools.",
+  });
+}
+
 const VERIFIER_FEEDBACK_HEADER = "## VERIFIER FEEDBACK";
 
 // Detects a verifier FEEDBACK verdict and deterministically re-enqueues the
@@ -11007,9 +11943,11 @@ async function maybeQueueVerifierFeedbackRetry({
   if (!correctivePrompt) return null;
 
   // Resolve the impl task to fix. Prefer a non-verifier, non-cancelled task in
-  // the same step (the impl the verifier was checking). If the reporting task is
-  // itself the impl (no separate verifier split), target it.
-  const target =
+  // the same step (the impl the verifier was checking). Managers may also put a
+  // verifier in its own follow-up step; in that shape, match the failed claims
+  // and corrective prompt against prior tasks' scoped paths/outputs instead of
+  // dropping a perfectly actionable verdict.
+  let target =
     task.taskClass !== "verifier" && task.status !== "cancelled"
       ? task
       : run.workerTasks.find(
@@ -11018,9 +11956,70 @@ async function maybeQueueVerifierFeedbackRetry({
             t.taskClass !== "verifier" &&
             t.status !== "cancelled",
         );
+  if (!target && task.taskClass === "verifier") {
+    const feedbackText = [
+      correctivePrompt,
+      ...(verdict.atomicClaims ?? [])
+        .filter((claim) => claim.verdict === "failed")
+        .flatMap((claim) => [claim.claim, claim.evidence]),
+    ].join("\n").toLowerCase();
+    const candidates = run.workerTasks.filter(
+      (candidate) =>
+        candidate.taskClass !== "verifier" &&
+        candidate.status !== "cancelled",
+    );
+    const scored = candidates
+      .map((candidate, index) => {
+        const scopedPaths = [
+          ...(candidate.allowedPaths ?? []),
+          ...(candidate.expectedOutputs ?? []),
+        ].filter((path) => path.trim().length > 0);
+        const pathScore = scopedPaths.reduce(
+          (score, path) => score + (feedbackText.includes(path.toLowerCase()) ? 10 : 0),
+          0,
+        );
+        const titleTokens = candidate.title
+          .toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .filter((token) => token.length >= 4);
+        const titleScore = titleTokens.reduce(
+          (score, token) => score + (feedbackText.includes(token) ? 1 : 0),
+          0,
+        );
+        return { candidate, index, score: pathScore + titleScore };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || right.index - left.index);
+    target = scored[0]?.candidate ?? (candidates.length === 1 ? candidates[0] : undefined);
+  }
   if (!target) return null;
   const retriesUsed = countWorkerAttempts(run, target.id);
   if (retriesUsed >= MAX_WORKER_ATTEMPTS) return null;
+  // "Fast" means at most one corrective rework in code, not just in prose.
+  // Count FEEDBACK-driven requeues specifically — countWorkerAttempts also
+  // includes non-verification retries (e.g. environmental relaunches). The
+  // policy is only honored by the Pi backend (other backends persist but
+  // ignore it), so the cap keys off chatBackend to avoid changing CC/Codex
+  // behavior via the fast default. A run the manager called complex derives
+  // deep and is therefore exempt.
+  const feedbackRoundsUsed = target.verifierFeedbackRounds ?? 0;
+  if (
+    run.chatBackend === "pi" &&
+    effectiveRunExecutionPolicy(run) === "fast" &&
+    feedbackRoundsUsed >= 1
+  ) {
+    return acceptVerifierFeedbackWithoutRetry({
+      run,
+      task,
+      attempt,
+      report,
+      targetStepId: target.stepId,
+      reason: "fast_policy_rework_cap",
+      note:
+        `The fast execution policy allows one verifier-feedback rework and "${target.title}" already used it. ` +
+        "Accepted the current implementation with the verifier's remaining caveats instead of another rework round.",
+    });
+  }
 
   const failedClaims = (verdict.atomicClaims ?? []).filter(
     (claim) => claim.verdict === "failed",
@@ -11069,7 +12068,25 @@ async function maybeQueueVerifierFeedbackRetry({
         targetTask.description = `${trimmed}\n\n${feedbackBlock}`;
       }
       targetTask.status = "retry_queued";
+      targetTask.verifierFeedbackRounds = (targetTask.verifierFeedbackRounds ?? 0) + 1;
       targetTask.updatedAt = timestamp;
+      // The verifier successfully completed its job even though the code did
+      // not pass. Terminalize that verifier so a live CLI manager waiting on
+      // codara_wait_for_workers can receive the verdict while the corrective
+      // implementation task is launched independently.
+      if (task.taskClass === "verifier" && task.id !== targetTask.id) {
+        const verifierTask = draft.workerTasks.find((candidate) => candidate.id === task.id);
+        if (verifierTask) {
+          verifierTask.status = "accepted";
+          verifierTask.updatedAt = timestamp;
+        }
+      }
+      // A manager may put verification in its own follow-up step. FEEDBACK
+      // means the implementation needs another pass, not that the verifier
+      // failed its job. Close a now-settled verifier-only step before reopening
+      // the implementation step, otherwise the graph permanently shows the
+      // old verification step as REVIEWING while later steps execute.
+      reconcileAcceptedVerifierOnlySteps(draft, timestamp);
       // Re-open the target's step so pickAutopilotTasks will relaunch it.
       const step = targetTask.stepId
         ? draft.steps.find((s) => s.id === targetTask.stepId)
@@ -11241,96 +12258,19 @@ async function maybeRestoreGreenClaimRegression({
   return { run: reverted, restoreFailed: false };
 }
 
-function buildContextPacket(input: {
-  runId: string;
-  callId: string;
-  mode: SparkCall["mode"];
-  requestBody: OpenRouterManagerRequest;
-  tokenBudget: number;
-}): ContextPacket {
-  const included = describeRequestContext(input.requestBody);
-  return {
-    id: `ctx-${input.callId}`,
-    runId: input.runId,
-    decisionType: input.mode,
-    included,
-    excluded: [
-      {
-        label: "older worker report detail",
-        reason: "kept as compact step review summaries and recent report excerpts",
-      },
-      {
-        label: "older image pixels",
-        reason: "stored as attachment artifacts; only the newest image turn is sent to planning/task-writing calls",
-      },
-    ],
-    tokenBudget: input.tokenBudget,
-    tokenEstimate: included.reduce((sum, item) => sum + (item.tokenEstimate ?? 0), 0),
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function describeRequestContext(
-  requestBody: OpenRouterManagerRequest,
-): ContextPacket["included"] {
-  const items: ContextPacket["included"] = [];
-  for (const message of requestBody.messages) {
-    if (typeof message.content === "string") {
-      items.push(...estimateTextSections(message.content, message.role));
-      continue;
-    }
-
-    for (const part of message.content) {
-      if (part.type === "text") {
-        for (const section of estimateTextSections(part.text, message.role)) {
-          items.push(section);
-        }
-      } else {
-        items.push({
-          label: "attached image",
-          reason: "latest user-provided visual context",
-          tokenEstimate: estimateImageTokens(),
-        });
-      }
-    }
-  }
-  return items;
-}
-
-function estimateTextSections(
-  text: string,
-  role: string,
-): ContextPacket["included"] {
-  if (role !== "user") {
-    return [{
-      label: `${role} message`,
-      reason: "manager instruction/context text",
-      tokenEstimate: estimateTokensFromText(text),
-    }];
-  }
-  const matches = [...text.matchAll(/^([A-Z][A-Z0-9 -]+)$/gm)];
-  if (matches.length === 0) {
-    return [{
-      label: "user message",
-      reason: "manager run context",
-      tokenEstimate: estimateTokensFromText(text),
-    }];
-  }
-  return matches.map((match, index) => {
-    const start = match.index ?? 0;
-    const end = matches[index + 1]?.index ?? text.length;
-    return {
-      label: match[1].toLowerCase(),
-      reason: "manager run context section",
-      tokenEstimate: estimateTokensFromText(text.slice(start, end)),
-    };
-  });
-}
-
-function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
-  if (runtime === "claude") return "claude-opus-4-8";
-  if (runtime === "codex") return CODEX_MODEL_BY_TIER.top;
-  return undefined;
+function fallbackModelHintForRuntime(
+  runtime: WorkerRuntime,
+  previousModelHint?: string,
+): string | undefined {
+  const prior = previousModelHint?.trim().toLowerCase() ?? "";
+  if (runtime !== "claude" && runtime !== "codex") return undefined;
+  // This used to preserve the manager's intended price/speed tier across
+  // providers (a Terra verifier falling back to Sonnet rather than jumping to
+  // Opus). The worker roster has a single standard tier per provider, so there
+  // are no longer intermediate tiers to preserve, the only distinction that
+  // survives a cross-provider fallback is premium vs standard, and premium
+  // exists on Anthropic alone.
+  return rosterModelFor(runtime, /fable/.test(prior) ? "premium" : "standard");
 }
 
 function fallbackEffortHintForRuntime(
@@ -11354,76 +12294,6 @@ function fallbackEffortHintForRuntime(
   return prior;
 }
 
-function redactRequestBodyForArtifact(requestBody: OpenRouterManagerRequest): OpenRouterManagerRequest {
-  return JSON.parse(JSON.stringify(requestBody, (_key, value) => {
-    if (typeof value === "string" && value.startsWith("data:image/")) {
-      const prefix = value.slice(0, Math.min(value.indexOf(";base64,"), 64));
-      return `${prefix};base64,[redacted image bytes]`;
-    }
-    return value;
-  })) as OpenRouterManagerRequest;
-}
-
-async function collectWorkerReportContext(
-  run: RunState,
-  mode: OpenRouterManagerMode,
-): Promise<SparkManagerWorkerReportContext[]> {
-  const contexts: SparkManagerWorkerReportContext[] = [];
-  const attemptLimit = mode === "worker_result_review" ? 6 : 4;
-  for (const attempt of run.workerAttempts.slice(-attemptLimit)) {
-    const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
-    if (!task) continue;
-    const reportPath =
-      attempt.finalReportPath ??
-      workerArtifactPaths(run.id, task.stepId, task.id, attempt.id).finalReportJson;
-    const report = await readWorkerReport(reportPath);
-    contexts.push({
-      taskTitle: task.title,
-      runtime: attempt.runtime,
-      taskStatus: task.status,
-      attemptStatus: attempt.status,
-      reportStatus: report?.status,
-      summary: truncateText(report?.summary, 700),
-      proof: compactStringList(report?.proof, 5, 280),
-      risks: compactStringList(report?.risks, 4, 260),
-      followups: compactStringList(report?.followups, 4, 260),
-      verifier: report?.verifier
-        ? {
-            status: report.verifier.status,
-            confidence: report.verifier.confidence,
-            atomicClaims: report.verifier.atomicClaims.map((claim) => ({
-              claim: truncateText(claim.claim, 260) ?? "",
-              verdict: claim.verdict,
-              evidence: truncateText(claim.evidence, 320) ?? "",
-            })),
-            correctivePrompt: truncateText(report.verifier.correctivePrompt, 1800),
-            missingOracle: truncateText(report.verifier.missingOracle, 600),
-          }
-        : undefined,
-      taskClass: task.taskClass,
-    });
-  }
-  return contexts;
-}
-
-function compactStringList(
-  value: string[] | undefined,
-  maxItems: number,
-  maxLength: number,
-): string[] {
-  const source = value ?? [];
-  const shown = source.slice(0, maxItems).map((item) => truncateText(item, maxLength) ?? "");
-  if (source.length > shown.length) {
-    shown.push(`[${source.length - shown.length} more item(s) omitted]`);
-  }
-  return shown.filter(Boolean);
-}
-
-function truncateText(value: string | undefined, maxLength: number): string | undefined {
-  if (!value) return value;
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength).trimEnd()}\n[truncated]`;
-}
 
 async function saveRun(run: RunState): Promise<void> {
   const previous = runWriteQueues.get(run.id) ?? Promise.resolve();
@@ -11490,6 +12360,51 @@ function normalizeRun(run: RunState): RunState {
   run.humanMessages ??= [];
   run.sparkCalls ??= [];
   run.conversationEpoch ??= 0;
+  // Chats persisted before the OpenRouter manager was removed can still carry
+  // chatBackend "openrouter" on disk. Migrate them to Pi (the bundled default)
+  // so the value stays inside the ChatBackendKind union. The stored chatModel
+  // was an OpenRouter catalog id that no surviving backend understands, so
+  // drop it and let resolveChatBackendConfig apply Pi's default model.
+  if ((run.chatBackend as string) === "openrouter") {
+    run.chatBackend = "pi";
+    run.chatModel = undefined;
+  }
+  if (run.whiteboard) {
+    const normalizedNodes: CoraWhiteboardNode[] = [];
+    for (const node of run.whiteboard.nodes ?? []) {
+      try {
+        normalizedNodes.push(normalizeWhiteboardNode(node));
+      } catch {
+        /* discard malformed legacy/external nodes instead of losing the run */
+      }
+    }
+    const nodes = normalizedNodes.slice(0, WHITEBOARD_MAX_NODES);
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const edges: CoraWhiteboardEdge[] = [];
+    for (const edge of run.whiteboard.edges ?? []) {
+      try {
+        const normalized = normalizeWhiteboardEdge(edge);
+        if (nodeIds.has(normalized.from) && nodeIds.has(normalized.to)) edges.push(normalized);
+      } catch {
+        /* discard malformed legacy/external edges */
+      }
+    }
+    run.whiteboard = {
+      version: 1,
+      revision: Math.max(0, Math.floor(run.whiteboard.revision ?? 0)),
+      lastEditedBy:
+        run.whiteboard.lastEditedBy === "user" ||
+        run.whiteboard.lastEditedBy === "import" ||
+        run.whiteboard.lastEditedBy === "cora"
+          ? run.whiteboard.lastEditedBy
+          : "cora",
+      title: sanitizeWhiteboardText(run.whiteboard.title, 100) || "Cora whiteboard",
+      summary: sanitizeWhiteboardText(run.whiteboard.summary, 700) || undefined,
+      nodes,
+      edges: edges.slice(0, WHITEBOARD_MAX_EDGES),
+      updatedAt: run.whiteboard.updatedAt || run.updatedAt,
+    };
+  }
   const seenAssumptionSignatures = new Set<string>();
   run.assumptions = (run.assumptions ?? []).filter((assumption) => {
     if (!assumption?.question?.trim() || !assumption.selectedAnswer?.trim()) return false;
@@ -11545,6 +12460,10 @@ function normalizeRun(run: RunState): RunState {
   for (const step of run.steps ?? []) {
     step.plannedAgents ??= [];
   }
+  // Repair runs written by the verifier-feedback fast path before it learned
+  // to close a standalone verifier step. The verifier did finish and its task
+  // was accepted; only the step status was stranded at `reviewing`.
+  reconcileAcceptedVerifierOnlySteps(run);
   run.autopilot ??= {
     status: run.status === "running" ? "running" : "idle",
     updatedAt: run.updatedAt,
@@ -11778,52 +12697,130 @@ async function commitRunChange(
     if (runMutationQueues.get(run.id) === next) runMutationQueues.delete(run.id);
   }
   if (persisted && prevStatus !== "complete" && nextStatus === "complete") {
-    try {
-      const completedRun = result ?? (await requireRun(run.id));
-      const manifest = await collectRunResultManifest(completedRun, workerArtifactPaths);
-      await fs.mkdir(completedRun.artifactDir, { recursive: true });
-      await writeFileAtomic(
-        join(completedRun.artifactDir, "result-manifest.json"),
-        `${JSON.stringify(manifest, null, 2)}\n`,
-      );
-      result = await commitRunChange(completedRun, {
-        type: "run.result_manifest_persisted",
-        message: "Persisted evidence-backed run result manifest",
-        payload: {
-          files: manifest.workspaceDelta.length,
-          checks: manifest.checks.length,
-          evidence: manifest.evidence.length,
-          workspaceMode: manifest.workspace.mode,
-        },
-        mutate: (draft, timestamp) => {
-          draft.resultManifest = manifest;
-          draft.updatedAt = timestamp;
-        },
-      });
-    } catch (err) {
-      console.error("[run-store] failed to collect result manifest", err);
-    }
-    try {
-      result = await appendCompletionSummaryMessage(run.id);
-    } catch (err) {
-      console.error("[run-store] failed to append completion summary", err);
-    }
-    // Distill + persist this freshly-completed run into the per-workspace
-    // orchestration memory ledger. Best-effort: recordRunMemory is itself
-    // non-throwing, but a stray write failure must never break the completion
-    // path, so it stays wrapped. Pass readWorkerReport so run-memory.ts can
-    // resolve worker reports without importing run-store (no cycle).
-    try {
-      const completedRun = result ?? (await requireRun(run.id));
-      await recordRunMemory(completedRun, readWorkerReport);
-    } catch (err) {
-      console.error("[run-store] failed to record run memory", err);
-    }
+    scheduleRunCompletionTail(run.id, result ?? undefined);
   }
   return result ?? (await requireRun(run.id));
 }
 
-async function appendCompletionSummaryMessage(runId: string): Promise<RunState> {
+// Post-completion bookkeeping, detached from the turn that completed the run.
+//
+// Nothing in here is needed for anything the user can already see: BOTH
+// completion paths post the user-visible bubble strictly before the run flips
+// to `complete` (the MCP path in agent-socket's codara_complete handler, the
+// structured-decision path in applySparkManagerDecision's chatReply note).
+// Awaiting it inline kept the live codara_complete MCP call open, and with it
+// the model's whole turn, for two git subprocesses, one report read per worker
+// attempt, three extra full run serializations, and the ledger writes.
+//
+// Chained per run so two completions of the same run cannot interleave their
+// writes, and awaited by flushRunCompletionTails for tests and shutdown.
+const runCompletionTails = new Map<string, Promise<void>>();
+
+/** The last chat bubble as it stood the instant the run completed. */
+type CompletionTimeMessage = Pick<HumanRunMessage, "author" | "kind" | "createdAt">;
+
+function scheduleRunCompletionTail(runId: string, completedRun?: RunState): void {
+  // Copied by value now, because getRun hands out the live cached RunState:
+  // holding the object itself would let a message the user sends while the tail
+  // runs rewrite the suppression decision this completion already earned.
+  const last = completedRun?.humanMessages[completedRun.humanMessages.length - 1];
+  const lastAtCompletion: CompletionTimeMessage | undefined = last
+    ? { author: last.author, kind: last.kind, createdAt: last.createdAt }
+    : undefined;
+  const previous = runCompletionTails.get(runId) ?? Promise.resolve();
+  const tail: Promise<void> = previous
+    .catch(() => {
+      /* keep later completions moving after an earlier tail failure */
+    })
+    .then(() => runCompletionTail(runId, lastAtCompletion))
+    .finally(() => {
+      if (runCompletionTails.get(runId) === tail) runCompletionTails.delete(runId);
+    });
+  runCompletionTails.set(runId, tail);
+  void tail;
+}
+
+/**
+ * Await the detached completion bookkeeping. Tests that assert on
+ * result-manifest.json, the completion-summary message, or the memory/lessons
+ * ledgers must call this after the completing mutation; app shutdown calls it
+ * so a quit cannot drop a half-written ledger.
+ */
+export async function flushRunCompletionTails(runId?: string): Promise<void> {
+  const pending = runId
+    ? [runCompletionTails.get(runId)].filter(Boolean)
+    : [...runCompletionTails.values()];
+  await Promise.all(pending.map((tail) => tail!.catch(() => undefined)));
+}
+
+async function runCompletionTail(
+  runId: string,
+  lastAtCompletion?: CompletionTimeMessage,
+): Promise<void> {
+  try {
+    const run = await requireRun(runId);
+    const manifest = await collectRunResultManifest(run, workerArtifactPaths);
+    await fs.mkdir(run.artifactDir, { recursive: true });
+    await writeFileAtomic(
+      join(run.artifactDir, "result-manifest.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+    );
+    await commitRunChange(run, {
+      type: "run.result_manifest_persisted",
+      message: "Persisted evidence-backed run result manifest",
+      payload: {
+        files: manifest.workspaceDelta.length,
+        checks: manifest.checks.length,
+        evidence: manifest.evidence.length,
+        workspaceMode: manifest.workspace.mode,
+      },
+      mutate: (draft, timestamp) => {
+        draft.resultManifest = manifest;
+        draft.updatedAt = timestamp;
+      },
+    });
+  } catch (err) {
+    console.error("[run-store] failed to collect result manifest", err);
+  }
+  try {
+    await appendCompletionSummaryMessage(runId, lastAtCompletion);
+  } catch (err) {
+    console.error("[run-store] failed to append completion summary", err);
+  }
+  // Distill + persist this freshly-completed run into the per-workspace
+  // orchestration memory ledger. Best-effort: recordRunMemory is itself
+  // non-throwing, but a stray write failure must never break the completion
+  // path, so it stays wrapped. Pass readWorkerReport so run-memory.ts can
+  // resolve worker reports without importing run-store (no cycle).
+  try {
+    const completed = await requireRun(runId);
+    // Both distillers walk every finished attempt's final report, and
+    // readWorkerReport is an uncached fs.readFile + JSON.parse per call. Share
+    // one memo for this completion so a 60-attempt run does 60 reads, not 120.
+    // Scoped to this call, so it can never serve a stale report to a later one.
+    const reportCache = new Map<string, Promise<WorkerReport | null>>();
+    const readReportOnce = (path: string): Promise<WorkerReport | null> => {
+      const cached = reportCache.get(path);
+      if (cached) return cached;
+      const pending = readWorkerReport(path);
+      reportCache.set(path, pending);
+      return pending;
+    };
+    await recordRunMemory(completed, readReportOnce);
+    // Same seam, same contract: distill this run's operational lessons
+    // (search rate limits, runtime fallbacks) into the workspace's Cora
+    // memory file as [auto] bullets that later manager turns replay. Also
+    // non-throwing.
+    await recordRunLessons(completed, readReportOnce);
+  } catch (err) {
+    console.error("[run-store] failed to record run memory", err);
+  }
+}
+
+async function appendCompletionSummaryMessage(
+  runId: string,
+  lastAtCompletion?: CompletionTimeMessage,
+): Promise<RunState> {
   const run = await requireRun(runId);
   if (run.status !== "complete") return run;
   // Chat-only runs (no steps, no worker tasks) already showed their answer in
@@ -11838,8 +12835,11 @@ async function appendCompletionSummaryMessage(runId: string): Promise<RunState> 
   // goal. The chatReply is emitted as spark/note by applySparkManagerDecision
   // just before the run flips to complete, so a spark/note whose createdAt is
   // at-or-after completedAt (with a small grace window for clock skew) is the
-  // user-facing answer; the auto-summary would just duplicate it.
-  const lastMessage = run.humanMessages[run.humanMessages.length - 1];
+  // user-facing answer; the auto-summary would just duplicate it. Judged
+  // against the completion-time copy when one is available, so a user message
+  // that lands while the detached tail runs cannot un-suppress it.
+  const lastMessage =
+    lastAtCompletion ?? run.humanMessages[run.humanMessages.length - 1];
   if (lastMessage && lastMessage.author === "spark" && lastMessage.kind === "note") {
     const lastMs = Date.parse(lastMessage.createdAt);
     if (
@@ -11915,78 +12915,16 @@ function countWorkerAttempts(run: RunState, taskId: string): number {
   return run.workerAttempts.filter((attempt) => attempt.workerTaskId === taskId).length;
 }
 
-function normalizeTaskPath(path: string): string {
-  return path
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/\/\*\*?$/, "")
-    .replace(/\/+$/, "")
-    .toLowerCase();
-}
-
-function isBroadPathScope(path: string): boolean {
-  const normalized = normalizeTaskPath(path);
-  return (
-    normalized === "" ||
-    normalized === "." ||
-    normalized === "./" ||
-    normalized === "*" ||
-    normalized === "**" ||
-    normalized === "/"
-  );
-}
-
-function taskWritesWorkspace(task: WorkerTask): boolean {
-  return task.taskClass !== "verifier" && task.runtimePreference !== "manual";
-}
-
-function concreteAllowedPaths(task: WorkerTask): string[] {
-  return task.allowedPaths
-    .map(normalizeTaskPath)
-    .filter((path) => path.length > 0 && !isBroadPathScope(path));
-}
-
-function hasConcreteParallelScope(task: WorkerTask): boolean {
-  if (!taskWritesWorkspace(task)) return true;
-  return concreteAllowedPaths(task).length > 0;
-}
-
-function pathScopesOverlap(left: string, right: string): boolean {
-  if (left === right) return true;
-  return left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
-}
-
-function taskPathScopesConflict(left: WorkerTask, right: WorkerTask): boolean {
-  if (!taskWritesWorkspace(left) || !taskWritesWorkspace(right)) return false;
-  const leftPaths = concreteAllowedPaths(left);
-  const rightPaths = concreteAllowedPaths(right);
-  if (leftPaths.length === 0 || rightPaths.length === 0) return true;
-  return leftPaths.some((leftPath) =>
-    rightPaths.some((rightPath) => pathScopesOverlap(leftPath, rightPath)),
-  );
-}
-
-function tasksConflictForParallelLaunch(left: WorkerTask, right: WorkerTask): boolean {
-  if (left.conflictsWith.includes(right.id) || right.conflictsWith.includes(left.id)) {
-    return true;
-  }
-  return taskPathScopesConflict(left, right);
-}
-
-// Why pickAutopilotTasks collapsed a would-be parallel batch to a single serial
-// task. Only `no_concrete_scope` (a task that wants to run parallel but has no
-// concrete write scope — exactly the fan-out anti-pattern) is surfaced to the
-// launch site as a fanout.downgraded_to_serial event; `not_parallel` (the
-// manager deliberately marked the task serial) is normal and not reported.
-type SerialDowngradeReason = "no_concrete_scope" | "not_parallel";
-
 // Pure selector with the downgrade reason exposed. pickAutopilotTasks wraps this
 // and discards the reason so its existing call sites keep their WorkerTask[]
 // semantics; only the launch site reads `downgrade` to emit an observability
-// event. Selection behaviour is byte-for-byte identical to the prior body.
+// event. Run-state filtering (statuses, attempt cap, active step) lives here;
+// wave selection itself (manager-batch parallel trust, the fan-out
+// no-concrete-scope guard, and scope-conflict checks) is delegated to the
+// pure autopilot-wave module so it stays testable in isolation.
 function pickAutopilotTasksWithReason(run: RunState): {
   tasks: WorkerTask[];
-  downgrade: { task: WorkerTask; reason: SerialDowngradeReason } | null;
+  downgrade: { task: WorkerTask; reason: "no_concrete_scope" | "not_parallel" } | null;
 } {
   const activeStep = pickAutopilotStep(run);
   const candidates = run.workerTasks.filter((task) => {
@@ -11999,26 +12937,7 @@ function pickAutopilotTasksWithReason(run: RunState): {
     if (task.stepId === activeStep.id) return true;
     return false;
   });
-  if (candidates.length === 0) return { tasks: [], downgrade: null };
-
-  const cap = evalMaxParallelWorkers();
-  const first = candidates[0];
-  if (!first.canRunParallel) return { tasks: [first], downgrade: { task: first, reason: "not_parallel" } };
-  if (!hasConcreteParallelScope(first)) {
-    return { tasks: [first], downgrade: { task: first, reason: "no_concrete_scope" } };
-  }
-
-  const selected: WorkerTask[] = [];
-  for (const task of candidates) {
-    if (!task.canRunParallel) continue;
-    if (!hasConcreteParallelScope(task)) continue;
-    if (selected.some((other) => tasksConflictForParallelLaunch(other, task))) {
-      continue;
-    }
-    selected.push(task);
-    if (cap && selected.length >= cap) break;
-  }
-  return selected.length > 0 ? { tasks: selected, downgrade: null } : { tasks: [first], downgrade: null };
+  return selectAutopilotWave(candidates, evalMaxParallelWorkers());
 }
 
 function pickAutopilotTasks(run: RunState): WorkerTask[] {
@@ -12372,6 +13291,142 @@ function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
 }
 
+// Write a runtime state onto the WorkerAttempt behind a pane and tell the
+// renderer about it. Shared by the hook RPC (applyHookStateReport) and the
+// unsanctioned-pty-death path, which must produce the identical attempt-side
+// write so the run graph, chat timeline and pane never disagree about whether
+// a worker is alive.
+//
+// `source` records the writer: "hook" gives reportTerminalState its
+// HOOK_TRUST_MS deference window, "exit" is terminal (the process behind every
+// other report is gone).
+function bridgeRuntimeStateToAttempt(
+  paneId: string,
+  state: WorkerRuntimeState,
+  note: string | undefined,
+  timestamp: string,
+  source: "hook" | "exit",
+): void {
+  const match = findAttemptByPaneId(paneId);
+  if (!match) return;
+  const { run: targetRun, attempt: targetAttempt } = match;
+  const attemptStateChanged =
+    targetAttempt.runtimeState !== state || targetAttempt.runtimeStateSource !== source;
+  if (!attemptStateChanged) {
+    // No attempt-side change but still refresh the timestamp so the
+    // HOOK_TRUST_MS window in reportTerminalState slides forward, which is
+    // the whole point of receiving repeat hook reports. No save / no
+    // event: nothing observable changed for the renderer.
+    targetAttempt.runtimeStateUpdatedAt = timestamp;
+    return;
+  }
+  const attemptPrevious = targetAttempt.runtimeState ?? null;
+  targetAttempt.runtimeState = state;
+  targetAttempt.runtimeStateUpdatedAt = timestamp;
+  targetAttempt.runtimeStateSource = source;
+  targetRun.updatedAt = timestamp;
+  // Same fire-and-forget save pattern reportTerminalState uses: the
+  // event below is the authoritative UI trigger, the run.json rewrite
+  // is bookkeeping that mustn't block the hook RPC reply.
+  void saveRun(targetRun).catch(() => undefined);
+  void appendEvent({
+    timestamp,
+    workspaceId: targetRun.workspaceId,
+    runId: targetRun.id,
+    workerTaskId: targetAttempt.workerTaskId,
+    attemptId: targetAttempt.id,
+    type: "worker_attempt.runtime_state_changed",
+    message: `Worker attempt runtime state: ${attemptPrevious ?? "unknown"} -> ${state}`,
+    payload: {
+      previous: attemptPrevious,
+      state,
+      attemptId: targetAttempt.id,
+      source,
+      note,
+    },
+  }).catch((err) => {
+    console.warn("[run-store] appendEvent for attempt state failed:", err);
+  });
+}
+
+// A worker CLI can exit the same instant it writes final-report.json, so the
+// pty exit races the finish path that marks the attempt terminal. Let that
+// path win before calling anything a crash; 2.5s is well clear of the 750ms
+// report poll plus its 4-tick exit grace.
+const WORKER_PTY_CRASH_SETTLE_MS = 2_500;
+
+/**
+ * Only Cora ends a worker. A worker pty that dies WITHOUT Cora asking for it
+ * (sanctioned exits carry PtyExitInfo.sanctioned) and without the attempt ever
+ * reaching a terminal status is a crash, and the attempt has to say so while
+ * the app is open: every other writer that could notice is the dead process
+ * itself, so before this the stale "working" chip survived until the next boot,
+ * where recoverOrphanedManagedWorkerAttempts finally cleared it.
+ *
+ * Scope: this covers the pane itself going away (the user closes the worker
+ * pane, the shell dies, the host is swept after wake). It does NOT cover the
+ * agent CLI dying on its own, because a CLI worker's pty is an interactive
+ * shell and claude/codex is a child of it: `kill -9` on the CLI leaves the
+ * shell at its prompt and no pty exit is ever emitted. runWorkerSession watches
+ * that case separately via watchAgentCliExit (shell-integration command-done
+ * marker) and routes it to markWorkerProcessDeath below.
+ *
+ * A Pi worker's pty is a display shell in front of a main-process RPC child, so
+ * its death says nothing about the worker's health; that path reports its own
+ * state from the RPC client instead and is not watched here.
+ */
+function watchWorkerPtyForCrash(attemptId: string): void {
+  pty.onExit(attemptId, (info) => {
+    if (info.sanctioned) return;
+    // pty-manager drops its exit waiters after the emit, so the watch needs no
+    // teardown; the settle checks below decide whether the death was a crash.
+    const timer = setTimeout(() => {
+      void settleWorkerPtyCrash(attemptId, info);
+    }, WORKER_PTY_CRASH_SETTLE_MS);
+    timer.unref();
+  });
+}
+
+async function settleWorkerPtyCrash(attemptId: string, info: PtyExitInfo): Promise<void> {
+  // Respawned at the same session id (the claude-backend mode flip kills and
+  // re-spawns ~150ms apart): the worker is alive, nothing died.
+  if (pty.exists(attemptId)) return;
+  const note = info.signal
+    ? `Worker process died (signal ${info.signal})`
+    : `Worker process died (exit code ${info.exitCode})`;
+  await markWorkerProcessDeath(attemptId, note);
+}
+
+// Brand an attempt whose worker process died without Cora asking for it.
+// Shared by the pty-exit watcher and runWorkerSession's agent-CLI-exit watcher
+// so both deaths produce the same "exit"-sourced state.
+async function markWorkerProcessDeath(attemptId: string, note: string): Promise<void> {
+  const match = findAttemptByPaneId(attemptId);
+  if (!match) return;
+  const { attempt } = match;
+  // The finish path got there first. A settled attempt is Cora's own record of
+  // how the worker ended, and no process death may repaint it. "finishing"
+  // counts: the turn is over and Cora is grading the report.
+  if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) return;
+  if (attempt.status === "finishing") return;
+  // "preparing" / "prompt_ready" attempts have no process yet, so a death
+  // here is a launch shell closing, not a worker dying.
+  if (attempt.status === "preparing" || attempt.status === "prompt_ready") return;
+  if (attempt.runtimeState === "done" || attempt.runtimeState === "error") return;
+  // A worker that wrote its final report did its job, whatever its shell did
+  // on the way out. Same evidence-first test boot recovery applies.
+  if (attempt.finalReportPath && (await fileExists(attempt.finalReportPath))) return;
+
+  const timestamp = new Date().toISOString();
+  const worker = activeWorkerProcesses.get(attemptId);
+  if (worker) {
+    worker.runtimeState = "error";
+    worker.runtimeStateNote = note;
+    worker.runtimeStateAt = timestamp;
+  }
+  bridgeRuntimeStateToAttempt(attemptId, "error", note, timestamp, "exit");
+}
+
 // Hook RPC handoff (big-bet "Hook contract for sub-agents to self-report").
 // Called from hook-rpc.ts when a worker POSTs to /state. The paneId is the
 // PTY session id, which Codara uses interchangeably with attemptId for active
@@ -12427,48 +13482,7 @@ export function applyHookStateReport(report: {
   // detector may have stomped on a previous hook value between dedupes —
   // a fresh hook tick of the same "working" must still reclaim the
   // WorkerAttempt slot if regex flipped it to "blocked" in the meantime.
-  const match = findAttemptByPaneId(report.paneId);
-  if (match) {
-    const { run: targetRun, attempt: targetAttempt } = match;
-    const attemptStateChanged =
-      targetAttempt.runtimeState !== report.state ||
-      targetAttempt.runtimeStateSource !== "hook";
-    if (attemptStateChanged) {
-      const attemptPrevious = targetAttempt.runtimeState ?? null;
-      targetAttempt.runtimeState = report.state;
-      targetAttempt.runtimeStateUpdatedAt = timestamp;
-      targetAttempt.runtimeStateSource = "hook";
-      targetRun.updatedAt = timestamp;
-      // Same fire-and-forget save pattern reportTerminalState uses — the
-      // event below is the authoritative UI trigger, the run.json rewrite
-      // is bookkeeping that mustn't block the hook RPC reply.
-      void saveRun(targetRun).catch(() => undefined);
-      void appendEvent({
-        timestamp,
-        workspaceId: targetRun.workspaceId,
-        runId: targetRun.id,
-        workerTaskId: targetAttempt.workerTaskId,
-        attemptId: targetAttempt.id,
-        type: "worker_attempt.runtime_state_changed",
-        message: `Worker attempt runtime state: ${attemptPrevious ?? "unknown"} -> ${report.state}`,
-        payload: {
-          previous: attemptPrevious,
-          state: report.state,
-          attemptId: targetAttempt.id,
-          source: "hook",
-          note: report.note,
-        },
-      }).catch((err) => {
-        console.warn("[run-store] appendEvent for hook attempt state failed:", err);
-      });
-    } else {
-      // No attempt-side change but still refresh the timestamp so the
-      // HOOK_TRUST_MS window in reportTerminalState slides forward — that's
-      // the whole point of receiving repeat hook reports. No save / no
-      // event: nothing observable changed for the renderer.
-      targetAttempt.runtimeStateUpdatedAt = timestamp;
-    }
-  }
+  bridgeRuntimeStateToAttempt(report.paneId, report.state, report.note, timestamp, "hook");
 
   // Bail out of the ActiveWorkerProcess event emit when the hook just
   // re-stated the same value. The renderer-side update above already kept
@@ -12759,6 +13773,10 @@ export async function reportTerminalState(
   if (!match) return;
   const { run: targetRun, attempt: targetAttempt } = match;
 
+  // A recorded pty death outranks everything: the process whose tail this
+  // regex read is gone, so any state it reports now describes a corpse.
+  if (targetAttempt.runtimeStateSource === "exit") return;
+
   // Hook trumps regex while the hook stream is fresh. We compare against
   // Date.now() (not the new event's timestamp) because runtimeStateUpdatedAt
   // is ISO-encoded; Date.parse round-trips that cleanly.
@@ -12926,14 +13944,25 @@ const MANAGER_PEER_ID = "manager";
 // True only when a live CC/Codex execute- or auto-mode manager drives this run
 // — the ONLY flows where anything ever READS the manager inbox (the
 // orchestrator.message_workers / check_messages RPCs and the wait_for_workers
-// drain). Fan-out, council, loom, and OpenRouter-autopilot parallel batches
+// drain). Fan-out, council, loom, and non-execute autopilot parallel batches
 // have no manager session, so advertising a `manager` mailbox participant
-// there would leave workers awaiting replies that can never come. Keep this
-// predicate in sync with isExecuteModeCliManager (worker auto-accept path).
+// there would leave workers awaiting replies that can never come.
+//
+// executionMode "direct" is the load-bearing exclusion. A loom/automation run
+// is created programmatically, so it carries chatBackend "pi" by default and no
+// chatMode at all, which effectiveChatMode collapses to "auto", so the backend
+// and mode fields alone can no longer tell a chat manager from a loom. Direct
+// runs are finalized by finalizeDirectRun via scheduleAutopilotReview, so
+// claiming a manager here would also strand every loom wave at "reviewing"
+// (the wave join, downstream layers and pass chaining all hang off it).
+// This is the single predicate for "a live CLI manager session drives this
+// run"; the worker auto-accept and resume paths call it rather than restating
+// it, and worker-prompt's managerInboxIsRead mirrors it.
 export function runHasMcpManager(run: RunState): boolean {
   return (
-    (run.chatBackend === "claude" || run.chatBackend === "codex") &&
-    (run.chatMode === "execute" || run.chatMode === "auto")
+    run.executionMode !== "direct" &&
+    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
+    effectiveChatMode(run.chatMode) === "auto"
   );
 }
 
@@ -13073,6 +14102,165 @@ export async function readManagerInbox(
   return inbox;
 }
 
+// ── Peer-traffic observability ──────────────────────────────────────────────
+// While a parallel batch is live, watch the run's peer-comms messages dir and
+// surface each new message file as a lightweight `peer_message.sent` event
+// (from/to/subject only) so Cora and the event log can see worker-to-worker
+// traffic that never crosses the manager inbox. Ref-counted per run: the
+// first peer-comms worker launch opens the watcher, the last active one
+// closes it. Everything here is best-effort — observability must never block
+// or fail a run.
+
+interface PeerCommsWatchState {
+  watcher: FSWatcher;
+  refs: number;
+  seen: Set<string>;
+  timer: NodeJS.Timeout | null;
+  scanning: boolean;
+  workspaceId: string;
+}
+
+const peerCommsWatchers = new Map<string, PeerCommsWatchState>();
+
+// In-flight watcher creations keyed by run id. Reserved SYNCHRONOUSLY before
+// the first await in acquirePeerCommsWatcher so concurrent worker launches of
+// the same batch share one creation instead of racing through the mkdir/readdir
+// window — the losing racer would leak an unclosed FSWatcher and leave refs=1
+// for two holders, closing the survivor when the first worker finished.
+const peerCommsWatcherCreations = new Map<string, Promise<boolean>>();
+
+// Returns true when a reference was actually taken. Callers must pair
+// releasePeerCommsWatcher ONLY with a `true` result — releasing after a failed
+// acquire would decrement a sibling's refcount and close the shared watcher
+// mid-batch. Deliberately not `async`: the refs fast path and the creation
+// reservation must both happen in the same synchronous tick.
+function acquirePeerCommsWatcher(run: RunState): Promise<boolean> {
+  const existing = peerCommsWatchers.get(run.id);
+  if (existing && existing.refs > 0) {
+    existing.refs += 1;
+    return Promise.resolve(true);
+  }
+  const inFlight = peerCommsWatcherCreations.get(run.id);
+  if (inFlight) {
+    return inFlight.then((created) => {
+      const state = peerCommsWatchers.get(run.id);
+      if (created && state && state.refs > 0) {
+        state.refs += 1;
+        return true;
+      }
+      // The shared creation failed or was fully released before we got our
+      // reference — retry from the top and create our own watcher.
+      return acquirePeerCommsWatcher(run);
+    });
+  }
+  const creation = createPeerCommsWatcher(run)
+    .then(() => true)
+    .catch(() => false);
+  peerCommsWatcherCreations.set(run.id, creation);
+  void creation.finally(() => {
+    peerCommsWatcherCreations.delete(run.id);
+  });
+  return creation;
+}
+
+// Builds and registers the watcher state with refs=1 for the reserving caller.
+// Only ever one in flight per run id (guarded by peerCommsWatcherCreations).
+async function createPeerCommsWatcher(run: RunState): Promise<void> {
+  const stale = peerCommsWatchers.get(run.id);
+  if (stale) {
+    // Stale entry from a release whose final sweep has not finished; its
+    // watcher is already closed, so replace it rather than reuse it.
+    try { stale.watcher.close(); } catch { /* already closed */ }
+    peerCommsWatchers.delete(run.id);
+  }
+  const { messagesDir } = peerCommsRunPaths(run.id);
+  await fs.mkdir(messagesDir, { recursive: true });
+  // The mailbox dir is per-run, so earlier batches' traffic is already on
+  // disk — prime `seen` so only new messages are announced.
+  const seen = new Set<string>(await fs.readdir(messagesDir).catch(() => [] as string[]));
+  const state: PeerCommsWatchState = {
+    watcher: watch(messagesDir, () => schedulePeerCommsScan(run.id)),
+    refs: 1,
+    seen,
+    timer: null,
+    scanning: false,
+    workspaceId: run.workspaceId,
+  };
+  state.watcher.on("error", () => {
+    try { state.watcher.close(); } catch { /* already closed */ }
+    peerCommsWatchers.delete(run.id);
+  });
+  peerCommsWatchers.set(run.id, state);
+}
+
+function releasePeerCommsWatcher(runId: string): void {
+  const state = peerCommsWatchers.get(runId);
+  if (!state) return;
+  state.refs -= 1;
+  if (state.refs > 0) return;
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = null;
+  try { state.watcher.close(); } catch { /* already closed */ }
+  // One last sweep so messages written inside the final debounce window still
+  // reach the event log, then drop the entry.
+  void scanPeerCommsMessages(runId)
+    .catch(() => undefined)
+    .finally(() => {
+      const current = peerCommsWatchers.get(runId);
+      if (current === state) peerCommsWatchers.delete(runId);
+    });
+}
+
+function schedulePeerCommsScan(runId: string): void {
+  const state = peerCommsWatchers.get(runId);
+  if (!state || state.timer) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    void scanPeerCommsMessages(runId).catch(() => undefined);
+  }, 300);
+  state.timer.unref();
+}
+
+async function scanPeerCommsMessages(runId: string): Promise<void> {
+  const state = peerCommsWatchers.get(runId);
+  if (!state || state.scanning) return;
+  state.scanning = true;
+  try {
+    const { messagesDir } = peerCommsRunPaths(runId);
+    const names = (await fs.readdir(messagesDir).catch(() => [] as string[])).filter((name) =>
+      name.endsWith(".json"),
+    );
+    for (const name of names) {
+      if (state.seen.has(name)) continue;
+      state.seen.add(name);
+      let message: PeerCommsMessage | null = null;
+      try {
+        message = JSON.parse(await fs.readFile(join(messagesDir, name), "utf8")) as PeerCommsMessage;
+      } catch {
+        // Partially-written file — retry on the next watch event.
+        state.seen.delete(name);
+        continue;
+      }
+      if (!message || typeof message.id !== "string" || typeof message.from !== "string") continue;
+      const to = Array.isArray(message.to) ? message.to.join(", ") : String(message.to ?? "");
+      await appendEvent({
+        workspaceId: state.workspaceId,
+        runId,
+        type: "peer_message.sent",
+        message: `Peer message: ${message.from} -> ${to}`,
+        payload: {
+          from: message.from,
+          to: message.to,
+          subject: piWorkerSafeText(message.subject, 160),
+          messageId: message.id,
+        },
+      }).catch(() => undefined);
+    }
+  } finally {
+    state.scanning = false;
+  }
+}
+
 // Loom iterations are unattended jobs, so they use the same structured
 // transports as Cora itself: Claude Agent SDK or Codex App Server. Ordinary
 // Cora implementation workers deliberately stay on the visible PTY path below
@@ -13160,6 +14348,555 @@ async function runStructuredAutomationWorkerSession({
   }
 }
 
+async function readWorkerReportWithWorkspaceShadowRecovery(
+  cwd: string,
+  expectedPath: string,
+): Promise<{ report: WorkerReport | null; relocatedFrom: string | null }> {
+  const expected = await readWorkerReport(expectedPath);
+  if (expected) return { report: expected, relocatedFrom: null };
+
+  // Claude occasionally abbreviates the absolute report target from the
+  // prompt to `.Codara/runs/...` and therefore writes it under the workspace
+  // instead of SPARK_HOME. Recover only the exact run-relative path; never
+  // scan or move arbitrary workspace JSON. The parsed report proves the file
+  // is complete before we copy it, and unlinking that exact shadow keeps the
+  // generated artifact out of the user's git status.
+  const home = sparkHome();
+  const reportRelative = relative(home, expectedPath);
+  if (
+    !reportRelative ||
+    reportRelative === ".." ||
+    reportRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    isAbsolute(reportRelative)
+  ) {
+    return { report: null, relocatedFrom: null };
+  }
+  const shadowPath = join(cwd, basename(home), reportRelative);
+  if (shadowPath === expectedPath) return { report: null, relocatedFrom: null };
+  const shadowReport = await readWorkerReport(shadowPath);
+  if (!shadowReport) return { report: null, relocatedFrom: null };
+
+  const raw = await fs.readFile(shadowPath, "utf8");
+  await fs.mkdir(dirname(expectedPath), { recursive: true });
+  await writeFileAtomic(expectedPath, raw);
+  await fs.unlink(shadowPath).catch(() => undefined);
+  return { report: shadowReport, relocatedFrom: shadowPath };
+}
+
+function piProviderForWorker(task: WorkerTask): PiSubscriptionProvider {
+  return task.runtimePreference === "claude" ? "anthropic" : "openai-codex";
+}
+
+function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
+  const effort = task.effortHint;
+  if (
+    effort === "minimal" || effort === "low" || effort === "medium" ||
+    effort === "high" || effort === "xhigh" || effort === "max"
+  ) return effort;
+  return "high";
+}
+
+function piModelForWorker(task: WorkerTask): string | undefined {
+  // The roster is enforced HERE, at the spawn chokepoint, not only in the
+  // planner's prompt. A manager session keeps the system prompt it was born
+  // with for the whole run, so a prompt-only rule cannot bind an in-flight
+  // run (and cannot bind a resumed one at all). Coercion never rejects: an
+  // off-roster hint lands on the nearest allowed model instead of failing the
+  // spawn, and an omitted one pins the standard tier rather than delegating
+  // the choice to the subscription default (which can be the premium tier).
+  return coerceWorkerModelToRoster(task.runtimePreference, task.modelHint);
+}
+
+function piWorkerToolLabel(value: unknown): string {
+  const name = typeof value === "string" ? value : "tool";
+  const normalized = name.replace(/^mcp__codara-studio__/, "");
+  const known: Record<string, string> = {
+    read: "Read context",
+    write: "Write file",
+    edit: "Edit file",
+    bash: "Run command",
+    grep: "Search code",
+    find: "Find files",
+    ls: "List files",
+    codara_preview_screenshot: "Inspect preview",
+    codara_preview_navigate: "Open preview",
+    codara_whiteboard_update: "Update whiteboard",
+  };
+  return known[normalized] ?? normalized
+    .replace(/^codara_/, "")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join(" ");
+}
+
+function piWorkerSafeText(value: unknown, maxLength = 260): string {
+  let text = "";
+  if (typeof value === "string") text = value;
+  else if (value !== undefined) {
+    try { text = JSON.stringify(value); } catch { text = String(value); }
+  }
+  text = text
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function piWorkerToolDetail(event: PiRpcEvent): string {
+  const args = event.args && typeof event.args === "object" && !Array.isArray(event.args)
+    ? event.args as Record<string, unknown>
+    : {};
+  const name = typeof event.toolName === "string"
+    ? event.toolName.replace(/^mcp__codara-studio__/, "").toLowerCase()
+    : "";
+  const keys = name === "bash"
+    ? ["command"]
+    : name === "grep" || name === "find" || name === "glob"
+      ? ["pattern", "path"]
+      : name === "read" || name === "write" || name === "edit" || name === "multi_edit"
+        ? ["path", "file_path", "filePath"]
+        : name === "ls"
+          ? ["path"]
+          : name === "fetch" || name === "web_fetch" || name === "webfetch"
+            ? ["url"]
+            : name.startsWith("codara_preview")
+              ? ["url", "selector", "key", "text", "code"]
+              : name.startsWith("codara_terminal")
+                ? ["command", "text"]
+                : ["path", "command", "query", "pattern", "url", "prompt", "description"];
+  const pieces = keys
+    .map((key) => piWorkerSafeText(args[key], name === "bash" ? 320 : 160))
+    .filter(Boolean);
+  if (pieces.length > 0) return pieces.join(" · ");
+  return piWorkerSafeText(event.args, 220);
+}
+
+// Tool-result text with its ORIGINAL line structure intact. The pane folds it
+// by line (formatPaneCollapsedBlock) instead of the former flatten-to-one-line
+// then cut-at-700-characters, which squashed a failed command's usage dump
+// into a single giant wrapped line and threw away the tail, where the actual
+// error usually is. Callers that want a one-line preview still use
+// piWorkerSafeText.
+function piWorkerResultRaw(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") return "";
+  const record = result as Record<string, unknown>;
+  if (Array.isArray(record.content)) {
+    const text = record.content
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const candidate = (item as Record<string, unknown>).text;
+        return typeof candidate === "string" ? candidate : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+    if (text) return text;
+  }
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return String(result);
+  }
+}
+
+// Terminal frame painted after final-report.json lands: the report facts plus
+// the deterministic review outcome, so the worker pane does not dead-end at
+// "Cora is reviewing the evidence" with the verdict visible only in the run
+// log. Facts first, one quiet line per item.
+function paintPiWorkerReportOutcome(
+  paint: (text: string) => void,
+  report: WorkerReport,
+): void {
+  const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
+  const lines: string[] = [`\r\n\x1b[32m  ✓  Report ready — ${report.status}\x1b[0m`];
+  const summary = piWorkerSafeText(report.summary, 220);
+  if (summary) lines.push(`     ${dim(summary)}`);
+  const counts: string[] = [];
+  if (report.filesChanged.length > 0) counts.push(`${report.filesChanged.length} file(s) changed`);
+  if (report.commandsRun.length > 0) counts.push(`${report.commandsRun.length} command(s) run`);
+  if (report.tests.length > 0) {
+    const passed = report.tests.filter((test) => test.result === "passed").length;
+    counts.push(`${passed}/${report.tests.length} test(s) passed`);
+  }
+  if (counts.length > 0) lines.push(`     ${dim(counts.join(" · "))}`);
+  const verdict = report.verifier;
+  if (verdict) {
+    lines.push(`     Verifier verdict: ${verdict.confidence} (${verdict.status})`);
+    if (verdict.missingOracle) {
+      lines.push(`     ${dim(`Missing oracle: ${piWorkerSafeText(verdict.missingOracle, 180)}`)}`);
+    }
+    if (verdict.atomicClaims.length > 0) {
+      const failed = verdict.atomicClaims.filter((claim) => claim.verdict === "failed").length;
+      const unsure = verdict.atomicClaims.filter((claim) => claim.verdict === "unsure").length;
+      const verified = verdict.atomicClaims.length - failed - unsure;
+      lines.push(`     ${dim(`Claims: ${verified} verified · ${failed} failed · ${unsure} unsure`)}`);
+    }
+  }
+  let review: string;
+  if (verdict && verdict.confidence === "FEEDBACK") {
+    review = verifierVerdictIsOracleBlocked(verdict)
+      ? "Verifier tooling was unavailable; Cora accepts with this caveat."
+      : "Cora is sending the corrective feedback back to the implementation.";
+  } else {
+    const decision = decideWorkerReport(report);
+    review = decision.decision === "accept"
+      ? "Cora accepted the report."
+      : decision.decision === "retry_same_worker"
+        ? "Cora is queuing a retry."
+        : "Cora is flagging this for your review.";
+  }
+  lines.push(`     ${review}`);
+  paint(lines.join("\r\n") + "\r\n");
+}
+
+function piWorkerEventFailure(event: PiRpcEvent): string | null {
+  if (event.type === "message_end") {
+    const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
+      ? event.message as Record<string, unknown>
+      : null;
+    if (message?.stopReason === "error") {
+      return typeof message.errorMessage === "string" && message.errorMessage.trim()
+        ? message.errorMessage.trim()
+        : "Pi provider turn failed.";
+    }
+  }
+  if (event.type === "auto_retry_end" && event.success === false) {
+    return typeof event.finalError === "string" && event.finalError.trim()
+      ? event.finalError.trim()
+      : "Pi exhausted its provider retries.";
+  }
+  if (event.type === "extension_error") {
+    return typeof event.error === "string" && event.error.trim()
+      ? event.error.trim()
+      : "Pi worker extension failed.";
+  }
+  return null;
+}
+
+async function waitForPiWorkerTurn(client: PiRpcClient, prompt: string): Promise<void> {
+  let timer: NodeJS.Timeout | null = null;
+  let poll: NodeJS.Timeout | null = null;
+  let unsubscribe: () => void = () => undefined;
+  try {
+    const settled = new Promise<void>((resolve, reject) => {
+      let providerFailure: string | null = null;
+      unsubscribe = client.onEvent((event) => {
+        providerFailure = piWorkerEventFailure(event) ?? providerFailure;
+        if (event.type === "agent_settled") {
+          if (providerFailure) reject(new Error(providerFailure));
+          else resolve();
+        }
+      });
+      poll = setInterval(() => {
+        const state = client.state();
+        if (state.phase === "failed" || state.phase === "stopped") {
+          reject(new Error(state.failure?.message || `Pi worker runtime ${state.phase}.`));
+        }
+      }, 500);
+      poll.unref();
+      timer = setTimeout(() => reject(new Error("Pi worker timed out after 90 minutes.")), 90 * 60 * 1000);
+      timer.unref();
+    });
+    await client.prompt(prompt);
+    await settled;
+  } finally {
+    unsubscribe();
+    if (poll) clearInterval(poll);
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const PI_WORKER_RENDERER_PTY_GRACE_MS = 1_500;
+const PI_WORKER_FALLBACK_COLS = 110;
+const PI_WORKER_FALLBACK_ROWS = 32;
+
+/**
+ * Pi runs in a main-process RPC client; its PTY is only a durable activity
+ * display. Give the renderer a short chance to create the normal visible
+ * pane, then create a headless display PTY ourselves. A later TerminalPane
+ * attaches to this same session and receives its tail, so background
+ * workspaces and missed envelope events keep running instead of failing a
+ * provider that was never launched.
+ */
+async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise<boolean> {
+  if (await pty.waitForSpawn(attemptId, PI_WORKER_RENDERER_PTY_GRACE_MS)) return false;
+  const shell = await defaultShell();
+  if (!shell) throw new Error("No default shell is available for the Cora worker display.");
+  await pty.spawn({
+    id: attemptId,
+    shell,
+    cwd,
+    cols: PI_WORKER_FALLBACK_COLS,
+    rows: PI_WORKER_FALLBACK_ROWS,
+    webContents: null,
+    env: { SPARK_NO_SHELL_INTEGRATION: "1" },
+  });
+  pty.resize(attemptId, PI_WORKER_FALLBACK_COLS, PI_WORKER_FALLBACK_ROWS);
+  return true;
+}
+
+/**
+ * Ordinary Cora workers now use Pi as their coding harness while retaining
+ * the existing WorkerTask/Attempt/report/review contract. The renderer-owned
+ * PTY becomes a live activity display; the actual model process is Pi RPC so
+ * provider subscriptions, native tools, and extension behavior are uniform
+ * with the Cora manager.
+ */
+async function runPiWorkerSession({
+  run,
+  task,
+  attemptId,
+  paths,
+  cwd,
+  promptText,
+  command,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  cwd: string;
+  promptText: string;
+  command: string;
+}): Promise<{ exitCode: number; error?: string }> {
+  const displayPtyRecovered = await ensurePiWorkerDisplayPty(attemptId, cwd);
+  if (displayPtyRecovered) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      type: "worker_attempt.display_pty_recovered",
+      message: "Cora created a main-owned worker display after the renderer missed the launch event",
+      payload: { cwd, graceMs: PI_WORKER_RENDERER_PTY_GRACE_MS },
+    });
+  }
+  await pty.waitForResize(attemptId, 5_000);
+
+  const provider = piProviderForWorker(task);
+  const model = piModelForWorker(task);
+  const thinking = piThinkingForWorker(task);
+  const modelLabel = model ?? (provider === "anthropic" ? "Claude subscription default" : "Codex subscription default");
+  pty.publishOutput(
+    attemptId,
+    `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
+      `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${modelLabel} · ${thinking}\x1b[0m\r\n\r\n` +
+      `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the pinned Pi harness…\r\n`,
+  );
+
+  let client: PiRpcClient | null = null;
+  let unsubscribe: (() => void) | null = null;
+  let interrupted = false;
+  // Mode-600 MCP roster written for this attempt; removed with the session.
+  let mcpConfigPath: string | null = null;
+  let logQueue: Promise<void> = Promise.resolve();
+  const appendWorkerLog = (text: string) => {
+    logQueue = logQueue
+      .catch(() => undefined)
+      .then(async () => {
+        await Promise.all([
+          fs.appendFile(paths.stdoutLog, text, "utf8"),
+          fs.appendFile(paths.rawLog, `[${new Date().toISOString()}] pi-rpc\n${text}\n`, "utf8"),
+        ]);
+      });
+  };
+  const stripPaneSgr = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+  const paint = (text: string) => {
+    pty.publishOutput(attemptId, text);
+    appendWorkerLog(stripPaneSgr(text));
+  };
+  // Pane and log get different text. Used where the pane shows a folded view:
+  // paint() logs exactly what it paints, so anything the pane hides has to be
+  // handed to the log separately or it is gone for good.
+  const paintFolded = (paneText: string, logText: string) => {
+    pty.publishOutput(attemptId, paneText);
+    appendWorkerLog(stripPaneSgr(logText));
+  };
+
+  try {
+    const step = run.steps.find((item) => item.id === task.stepId);
+    const peerCommsEnabled = shouldUsePeerComms(run, step, task);
+    const plan = await createCodaraPiWorkerLaunchPlan({
+      provider,
+      runId: run.id,
+      attemptId,
+      cwd,
+      model,
+      thinking,
+      sessionName: task.title,
+      executionPolicy: effectiveRunExecutionPolicy(run),
+      // Frozen contract with resources/pi-cora/worker.ts: parallel-batch
+      // workers get CODARA_PI_PEER_DIR + CODARA_PI_SELF_ID to reach the
+      // run's mailbox natively. Same gate as the prompt-side guidance.
+      peerCommsDir: peerCommsEnabled ? paths.peerCommsDir : undefined,
+      peerSelfId: peerCommsEnabled ? task.id : undefined,
+    });
+    mcpConfigPath = plan.mcpConfigPath;
+    client = new PiRpcClient(plan, {
+      requestTimeoutMs: 120_000,
+      shutdownGraceMs: 2_000,
+    });
+    await client.start();
+
+    const runningTimestamp = new Date().toISOString();
+    await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
+    await appendEvent({
+      timestamp: runningTimestamp,
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      type: "worker_attempt.running",
+      message: `Worker attempt running through Pi: ${task.title}`,
+      payload: {
+        command,
+        runtime: task.runtimePreference,
+        harness: "pi",
+        provider,
+        model: plan.model,
+        thinking: plan.thinking,
+        session: "pi-rpc",
+      },
+    });
+    if (peerCommsEnabled) {
+      await updatePeerCommsRegistry(run, step, task, attemptId, paths, "running").catch(() => undefined);
+    }
+
+    activeWorkerProcesses.set(attemptId, {
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      command,
+      write: (input) => {
+        if (!client) return;
+        if (input === ESC_KEY) {
+          void client.abort().catch(() => undefined);
+          return;
+        }
+        const steering = input.replace(/[\r\n]+$/g, "").trim();
+        if (steering) void client.prompt(steering, "steer").catch(() => undefined);
+      },
+      kill: () => {
+        interrupted = true;
+        void client?.abort().catch(() => undefined);
+        void client?.stop().catch(() => undefined);
+      },
+    });
+    applyHookStateReport({ paneId: attemptId, state: "working", note: "Pi harness" });
+
+    let assistantLineOpen = false;
+    // Pane budget for ONE streamed assistant message. Prose arrives delta by
+    // delta so its length is unknown until it ends and it cannot be head/tail
+    // folded like a tool result; past the budget (lines OR characters, since a
+    // stream can run on without a single newline) the pane stops repainting
+    // and says where the rest is, while appendWorkerLog still gets every byte.
+    let assistantBudget = paneStreamBudget();
+    let assistantPaneCut = false;
+    unsubscribe = client.onEvent((event: PiRpcEvent) => {
+      if (event.type === "tool_execution_start") {
+        assistantLineOpen = false;
+        assistantBudget = paneStreamBudget();
+        assistantPaneCut = false;
+        const detail = piWorkerToolDetail(event);
+        paint(
+          `\r\n  ${paneToolStartMarker(piWorkerToolLabel(event.toolName))}` +
+          `${detail ? `\r\n    ${paneDim(detail)}` : ""}\r\n`,
+        );
+      } else if (event.type === "tool_execution_end") {
+        const failed = event.isError === true;
+        const marker = `  ${failed ? paneToolFailMarker() : paneToolOkMarker()}`;
+        // Failure output keeps its line structure and is folded head + tail in
+        // the PANE with a dim marker. The folded middle would otherwise be lost
+        // for good, since paint() logs what it paints, so the log is written
+        // from the untouched text instead. That is what the marker's "full
+        // output in the run log" promises.
+        const raw = failed ? piWorkerResultRaw(event.result) : "";
+        if (raw) {
+          const detail = formatPaneCollapsedBlock(raw, { indent: "    ", color: PANE_RED });
+          paintFolded(`${marker}${detail}\r\n`, `${marker}\r\n${raw}\r\n`);
+        } else {
+          paint(`${marker}\r\n`);
+        }
+      } else if (event.type === "message_update") {
+        const delta = event.assistantMessageEvent as Record<string, unknown> | undefined;
+        if (delta?.type === "text_delta" && typeof delta.delta === "string" && delta.delta) {
+          if (assistantPaneCut) {
+            appendWorkerLog(delta.delta);
+          } else {
+            if (!assistantLineOpen) {
+              paint("\r\n  ");
+              assistantLineOpen = true;
+            }
+            paint(delta.delta.replace(/\n/g, "\r\n  "));
+            assistantBudget = paneStreamAdd(assistantBudget, delta.delta);
+            if (paneStreamExceeded(assistantBudget)) {
+              assistantPaneCut = true;
+              assistantLineOpen = false;
+              paint(`\r\n  ${paneDim(`… ${PANE_STREAM_CUT_NOTE}`)}\r\n`);
+            }
+          }
+        }
+      } else if (event.type === "message_end") {
+        if (assistantLineOpen) {
+          paint("\r\n");
+          assistantLineOpen = false;
+        }
+        assistantBudget = paneStreamBudget();
+        assistantPaneCut = false;
+        const failure = piWorkerEventFailure(event);
+        if (failure) paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
+      } else if (event.type === "auto_retry_start") {
+        paint(`\r\n  ${paneRetryMarker("Provider retry…")}\r\n`);
+      } else if (event.type === "auto_retry_end" && event.success === false) {
+        paint(`\r\n  \x1b[31mProvider retry failed: ${piWorkerSafeText(event.finalError, 700)}\x1b[0m\r\n`);
+      } else if (event.type === "extension_error") {
+        paint(`\r\n  \x1b[31mExtension error: ${String(event.error ?? "unknown")}\x1b[0m\r\n`);
+      }
+    });
+
+    paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
+    await waitForPiWorkerTurn(client, promptText);
+    if (interrupted) throw new Error("Pi worker was interrupted.");
+
+    let report = await readWorkerReport(paths.finalReportJson);
+    if (!report) {
+      paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n");
+      await waitForPiWorkerTurn(
+        client,
+        `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
+          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
+      );
+      report = await readWorkerReport(paths.finalReportJson);
+    }
+    if (!report) throw new Error("Pi worker completed without a parseable final-report.json.");
+
+    applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
+    paintPiWorkerReportOutcome(paint, report);
+    await logQueue.catch(() => undefined);
+    return { exitCode: 0 };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
+    paint(`\r\n\x1b[31m  ×  PI WORKER STOPPED\x1b[0m\r\n  ${message}\r\n`);
+    await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => undefined);
+    await logQueue.catch(() => undefined);
+    return { exitCode: 1, error: message };
+  } finally {
+    unsubscribe?.();
+    activeWorkerProcesses.delete(attemptId);
+    await client?.stop().catch(() => undefined);
+    await cleanupPiMcpBridgeConfig({ mcpConfigPath }).catch(() => undefined);
+    // Keep the completed frame in xterm; disposing the idle host shell matches
+    // the former CLI worker lifecycle and prevents one process per old worker.
+    try { pty.killImmediate(attemptId); } catch { /* already closed */ }
+  }
+}
+
 // The orchestration worker now uses the EXACT same pty path as a user-opened
 // terminal (and the TEST CLAUDE button): the renderer's TerminalView spawns
 // pwsh via pty-manager, sizes it to its real pane, and we just type into it
@@ -13193,7 +14930,7 @@ async function runWorkerSession({
   }
 
   // Hold off on typing until the renderer has reported a real pane size, so
-  // claude/codex/cursor paint at the correct width from the very first frame.
+  // claude/codex paint at the correct width from the very first frame.
   await pty.waitForResize(attemptId, 5_000);
 
   // Mirror the worker's pty byte stream to raw.log so a hung worker is
@@ -13204,10 +14941,7 @@ async function runWorkerSession({
   const rawStream = createWriteStream(paths.rawLog, { flags: "a" });
   let fatalErrorTimer: NodeJS.Timeout | undefined;
   let fatalErrorBuffer = "";
-  let stuckWatchdog: StuckWatchdog | null = null;
-  let sessionSettled = false;
   const offRawTap = pty.tap(attemptId, (chunk) => {
-    stuckWatchdog?.bumpPtyActivity();
     try {
       rawStream.write(chunk);
     } catch {
@@ -13227,7 +14961,10 @@ async function runWorkerSession({
             `\n[spark] detected worker runtime failure: ${fatalReason}\n`,
           );
           await writeAutoFailureReport(paths, task, fatalReason);
-          pty.dispose(attemptId);
+          // Cora is ending this attempt, so the pane's death is sanctioned:
+          // the failure is already recorded on the attempt, and a second
+          // "crashed" brand from the pty exit would outlive it.
+          pty.dispose(attemptId, { sanctioned: true });
           failFast(fatalReason);
         })();
       }, 2500);
@@ -13236,7 +14973,7 @@ async function runWorkerSession({
 
   const handle = {
     write: (input: string) => pty.write(attemptId, input),
-    kill: () => pty.dispose(attemptId),
+    kill: () => pty.dispose(attemptId, { sanctioned: true }),
   };
 
   const runningTimestamp = new Date().toISOString();
@@ -13278,6 +15015,15 @@ async function runWorkerSession({
   //   * the user closes the pane (ptyExit), or
   //   * we hit the hard timeout (90 minutes).
   let failFast: (reason: string) => void = () => undefined;
+  // The agent CLI died but its host shell is still at a prompt, so no pty exit
+  // will ever fire. Assigned by the executor below, armed by the launch driver.
+  let onAgentCliExit: (exitCode: number | null) => void = () => undefined;
+  let offAgentCliExit: (() => void) | null = null;
+  // Backstop for a death Cora never asked for. exitPromise below settles the
+  // attempt whenever this orchestration loop is still watching, and the settle
+  // checks skip anything it settled; what survives is the case that used to
+  // leave a pane pulsing "working" until the next boot.
+  watchWorkerPtyForCrash(attemptId);
   const exitPromise = new Promise<{ exitCode: number; error?: string }>((resolve) => {
     let settled = false;
     // Separate guard for the kill so the funnel through finish() is idempotent
@@ -13294,46 +15040,84 @@ async function runWorkerSession({
     const finish = (value: { exitCode: number; error?: string }) => {
       if (settled) return;
       settled = true;
-      sessionSettled = true;
       // Tear down the worker tree BEFORE resolving so callers awaiting
       // exitPromise observe a fully cleaned-up worker. killImmediate is a
       // no-op if the pty already exited via offExit, so success paths cost
       // nothing.
       killWorkerTree();
       offExit();
+      offAgentCliExit?.();
       offRawTap();
       rawStream.end();
       clearInterval(reportPoll);
       clearTimeout(hardTimeout);
       if (fatalErrorTimer) clearTimeout(fatalErrorTimer);
-      stuckWatchdog?.stop();
       resolve(value);
     };
-    const offExit = pty.onExit(attemptId, (info) => {
-      // A CLI that exits the instant it writes final-report.json must not be
-      // failed just because the exit event beat the 750ms report poll. Give
-      // the report one last chance to parse (short grace covers a mid-write
-      // file) before declaring the pane closed. finish() is idempotent, so a
-      // poll tick landing during the grace resolves first and this no-ops.
-      void (async () => {
-        for (let i = 0; i < 4 && !settled; i++) {
-          try {
-            const report = await readWorkerReport(paths.finalReportJson);
-            if (report) {
-              finish({ exitCode: 0 });
-              return;
+    // A CLI that exits the instant it writes final-report.json must not be
+    // failed just because the death beat the 750ms report poll. Give the report
+    // one last chance to parse (short grace covers a mid-write file) before
+    // declaring the worker gone. finish() is idempotent, so a poll tick landing
+    // during the grace resolves first and this no-ops. brandCrash runs only
+    // when no report showed up, and before finish() so the attempt is still
+    // non-terminal when markWorkerProcessDeath checks it.
+    const settleAfterWorkerGone = async (
+      fallback: { exitCode: number; error: string },
+      brandCrash?: () => Promise<void>,
+    ): Promise<void> => {
+      for (let i = 0; i < 4 && !settled; i++) {
+        try {
+          const located = await readWorkerReportWithWorkspaceShadowRecovery(
+            cwd,
+            paths.finalReportJson,
+          );
+          if (located.report) {
+            if (located.relocatedFrom) {
+              await appendEvent({
+                workspaceId: run.workspaceId,
+                runId: run.id,
+                stepId: task.stepId,
+                workerTaskId: task.id,
+                attemptId,
+                type: "worker_attempt.report_path_recovered",
+                message: "Recovered a final report written to a workspace-relative .Codara path",
+                payload: {
+                  relocatedFrom: located.relocatedFrom,
+                  finalReportPath: paths.finalReportJson,
+                },
+              }).catch(() => undefined);
             }
-          } catch {
-            /* absent or mid-write; retry below */
+            finish({ exitCode: 0 });
+            return;
           }
-          await new Promise((r) => setTimeout(r, 300));
+        } catch {
+          /* absent or mid-write; retry below */
         }
-        finish({
-          exitCode: info.exitCode ?? 1,
-          error: info.signal ? `Worker pane closed (signal ${info.signal})` : "Worker pane closed before final report",
-        });
-      })();
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      if (settled) return;
+      if (brandCrash) await brandCrash().catch(() => undefined);
+      finish(fallback);
+    };
+    const offExit = pty.onExit(attemptId, (info) => {
+      void settleAfterWorkerGone({
+        exitCode: info.exitCode ?? 1,
+        error: info.signal ? `Worker pane closed (signal ${info.signal})` : "Worker pane closed before final report",
+      });
     });
+    // The shell outlived its agent CLI: nothing else in the pipeline reports
+    // this death, so brand the attempt here and resolve the run loop instead of
+    // letting it wait out the 90-minute watchdog.
+    onAgentCliExit = (exitCode: number | null) => {
+      const reason =
+        exitCode === null || exitCode === 0
+          ? "Agent CLI exited before writing a final report"
+          : `Agent CLI exited with code ${exitCode} before writing a final report`;
+      void settleAfterWorkerGone(
+        { exitCode: exitCode && exitCode !== 0 ? exitCode : 1, error: reason },
+        () => markWorkerProcessDeath(attemptId, reason),
+      );
+    };
     const reportPoll = setInterval(() => {
       // Finish only once the report PARSES, not merely exists. The agent CLI
       // writes final-report.json non-atomically, and finish() kills the worker
@@ -13342,10 +15126,25 @@ async function runWorkerSession({
       // existence check first (the file is absent for most of the session), then
       // attempt the read+parse; a partially-written file fails JSON.parse and is
       // retried on the next tick.
-      void fs.access(paths.finalReportJson)
-        .then(() => readWorkerReport(paths.finalReportJson))
-        .then((report) => {
-          if (report) finish({ exitCode: 0 });
+      void readWorkerReportWithWorkspaceShadowRecovery(cwd, paths.finalReportJson)
+        .then(async ({ report, relocatedFrom }) => {
+          if (!report) return;
+          if (relocatedFrom) {
+            await appendEvent({
+              workspaceId: run.workspaceId,
+              runId: run.id,
+              stepId: task.stepId,
+              workerTaskId: task.id,
+              attemptId,
+              type: "worker_attempt.report_path_recovered",
+              message: "Recovered a final report written to a workspace-relative .Codara path",
+              payload: {
+                relocatedFrom,
+                finalReportPath: paths.finalReportJson,
+              },
+            }).catch(() => undefined);
+          }
+          finish({ exitCode: 0 });
         })
         .catch(() => {
           /* not yet written / not yet parseable */
@@ -13364,49 +15163,10 @@ async function runWorkerSession({
     };
   });
 
-  void (async () => {
-    const settings = await loadSettings();
-    if (!settings.workerStuckDetectEnabled) return;
-    stuckWatchdog = installStuckWatchdog({
-      task,
-      cwd,
-      launchTimestampMs: Date.now(),
-      idleThresholdMs: settings.workerStuckIdleSeconds * 1000,
-      onStuck: (info) => {
-        const reason = formatStuckReason(info);
-        void (async () => {
-          await recordWorkerOutput(run, task, attemptId, paths, "stderr", `\n[spark] ${reason}\n`);
-          await writeAutoFailureReport(paths, task, reason);
-          await appendEvent({
-            workspaceId: run.workspaceId,
-            runId: run.id,
-            stepId: task.stepId,
-            workerTaskId: task.id,
-            attemptId,
-            type: "worker_attempt.stuck",
-            message: `Worker stuck — auto-killed: ${reason}`,
-            payload: {
-              runtime: task.runtimePreference,
-              ptyIdleMs: info.ptyIdleMs,
-              sessionLogIdleMs: info.sessionLogIdleMs,
-              workspaceIdleMs: info.workspaceIdleMs,
-              sessionLogPath: info.sessionLogPath,
-            },
-          }).catch(() => undefined);
-          failFast(reason);
-        })();
-      },
-    });
-    if (sessionSettled) {
-      stuckWatchdog.stop();
-      stuckWatchdog = null;
-    }
-  })();
-
   // Stagger launch + prompt the same way the TEST CLAUDE button does:
   //  1. wait 1.5s for pwsh to render its prompt,
   //  2. type `claude --dangerously-skip-permissions ...\r`,
-  //  3. sniff pty output for the agent's TUI banner (claude/codex/cursor), with a
+  //  3. sniff pty output for the agent's TUI banner (claude/codex), with a
   //     hard timeout so a bad launch command (codex not installed, wrong
   //     model id, etc.) fails the worker fast instead of hanging the whole
   //     run waiting for a final report that will never come,
@@ -13415,6 +15175,10 @@ async function runWorkerSession({
     try {
       await delay(1500);
       if (launchCommand) {
+        // Armed before the command is typed so the watcher sees that command's
+        // own pre-exec marker; without a pre-exec first it would fire on the
+        // marker the shell already emitted for its startup prompt.
+        offAgentCliExit = watchAgentCliExit(attemptId, (exitCode) => onAgentCliExit(exitCode));
         handle.write(`${launchCommand}\r`);
         const launched = await waitForAgentTui(attemptId, task.runtimePreference);
         if (!launched.ok) {
@@ -13522,7 +15286,7 @@ async function recordWorkerOutput(
 function buildLaunchCommandLine(
   task: WorkerTask,
   cwd: string,
-  opts?: { sandboxDir?: string; isAutomation?: boolean; allowFable?: boolean; extraWritableDirs?: string[] },
+  opts?: { sandboxDir?: string; isAutomation?: boolean; extraWritableDirs?: string[] },
 ): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
   // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
@@ -13541,21 +15305,20 @@ function buildLaunchCommandLine(
     // Per-worker tool access is appended LAST (below), after model/effort, so the
     // variadic --disallowedTools <tools...> can't swallow a following flag.
     const disallowed = claudeDisallowedTools(task.accessHint, task.blockedToolsHint);
-    // Model-hint backstop: downgrades fable to Opus 4.8 and remaps superseded
-    // Sonnet ids to the current one. Automation (loom) workers are ALLOWED
-    // fable and get their hint verbatim, so skip the sanitize for
-    // automation-originated launches; for every other claude worker (the
-    // Cora-spawned execute/council/autopilot path) this is defence-in-depth —
-    // the visible fable note is emitted earlier at the spawn chokepoint
-    // (agent-socket), and tasks persisted by pre-remap builds still get their
-    // stale sonnet hint fixed here at launch. `allowFable` (the caller's
-    // opted-in + explicitly-requested gate) lets a fable hint pass the backstop
-    // unchanged, matching the decision made at the spawn chokepoint.
+    // Model-hint backstop: remaps superseded Sonnet ids to the current one.
+    // Automation (loom) workers launch on a pinned/handoff model the
+    // automation engine already validated, so their hint goes through
+    // verbatim; for every other claude worker (the Cora-spawned execute/
+    // council/autopilot path) this is defence-in-depth — tasks persisted by
+    // pre-remap builds still get their stale sonnet hint fixed here at launch.
     const rawModel = task.modelHint?.trim();
     const launchModel = opts?.isAutomation
       ? rawModel
-      : sanitizeWorkerModelHint(rawModel, { allowFable: opts?.allowFable }).hint;
-    if (launchModel) args.push("--model", quoteShellArg(launchModel));
+      : sanitizeWorkerModelHint(rawModel);
+    // A missing hint must not delegate model choice to Claude's current CLI
+    // default: that default may be Fable 5, the premium tier, which nobody
+    // chose on purpose here. Pin the documented worker fallback instead.
+    args.push("--model", quoteShellArg(launchModel || WORKER_DEFAULT_CLAUDE_MODEL));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
     // Tool fence LAST: --dangerously-skip-permissions suppresses the prompts, but
@@ -13632,13 +15395,6 @@ function buildLaunchCommandLine(
   return null;
 }
 
-// Cursor's interactive TUI rejects --trust (only valid with --print) and so
-// prompts for workspace trust on every fresh cwd. The CLI persists trust as
-// a sentinel file at ~/.cursor/projects/<encoded-cwd>/.workspace-trusted
-// where <encoded-cwd> replaces ':' and '\' and '/' with '-'. Codara writes
-// this file before spawning the worker so node-pty never sees the prompt.
-// Trust grants are per-cwd, so an eval that materializes 500 fresh repos
-// would otherwise need 500 human clicks; this writes them all in one place.
 // Translate Codara's internal effort scale to the values the claude CLI
 // actually accepts: low, medium, high, xhigh, max. Codara's manager profile
 // emits "minimal" for the cheapest/quickest leaf tasks, which the CLI

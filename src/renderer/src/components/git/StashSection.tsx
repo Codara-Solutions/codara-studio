@@ -274,7 +274,7 @@ function StashRow({
         fontSize: 12,
         color: "var(--ink-dim)",
         background: hover
-          ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+          ? "color-mix(in oklab, var(--ink) 5%, transparent)"
           : "transparent",
         overflow: "hidden",
         whiteSpace: "nowrap",

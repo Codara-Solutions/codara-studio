@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentRuntimeDiagnostic, ChatBackendKind } from "@shared/types";
-import { usePreferences } from "../../../preferences/usePreferences";
+import type { ChatBackendKind, PiCatalogModel } from "@shared/types";
 import {
   buildVisibleGroups,
   composeModelId,
+  findOptionInCatalog,
   type ChatBackendGroup,
   type ChatModelOption,
 } from "./types";
+import AnchoredMenu from "./AnchoredMenu";
 
 interface Props {
   activeBackend: ChatBackendKind;
@@ -15,11 +16,10 @@ interface Props {
   onPick: (model: ChatModelOption) => void;
 }
 
-// The model pill + grouped dropdown menu. Reads agents.runtimes() and
-// settings.openRouterModel to decide what to show: only enabled CLI
-// runtimes appear, and the "API" group surfaces just the single model
-// configured in settings (matching vienna's behavior). Claude rows are 1M-only
-// and carry a "1M" badge; selecting one sets chat1mContext=true.
+// The model pill + grouped dropdown menu. Reads agents.runtimes() to decide
+// what to show: Pi always, plus each CLI runtime that is installed and not
+// disabled in settings. Claude rows are 1M-only, so selecting one sets
+// chat1mContext=true.
 export default function ModelPicker({
   activeBackend,
   activeModelId,
@@ -27,54 +27,37 @@ export default function ModelPicker({
   onPick,
 }: Props) {
   const [open, setOpen] = useState(false);
-  const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[]>([]);
-  const [openRouterModel, setOpenRouterModel] = useState<string>("");
-  const { preferences } = usePreferences();
-  const rootRef = useRef<HTMLDivElement>(null);
+  const [piCatalog, setPiCatalog] = useState<PiCatalogModel[]>([]);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
-  // One-shot load of runtimes + the configured OpenRouter model. Settings
-  // can change while the user is in the bar (they hit Settings, change the
-  // OR model, come back), so we refresh on every open.
+  // Pi's live model catalog, refreshed on every open. The main process caches
+  // it, so reopening is cheap, and a model released after this build shows up
+  // on the next open rather than needing a restart. Runtime diagnostics are no
+  // longer read here: they gated the Claude Code / Codex CLI groups, and Cora
+  // runs only on Pi now.
   useEffect(() => {
-    void window.spark.agents.runtimes().then((rs) => setDiagnostics(rs ?? []));
-    void window.spark.settings
-      .load()
-      .then((s) => setOpenRouterModel((s.openRouterModel ?? "").trim()));
+    void window.spark.piSubscriptions.catalog().then((models) => setPiCatalog(models ?? []));
   }, []);
   useEffect(() => {
     if (!open) return;
-    void window.spark.agents.runtimes().then((rs) => setDiagnostics(rs ?? []));
-    void window.spark.settings
-      .load()
-      .then((s) => setOpenRouterModel((s.openRouterModel ?? "").trim()));
+    void window.spark.piSubscriptions.catalog().then((models) => setPiCatalog(models ?? []));
   }, [open]);
 
-  // Click-outside / Escape to close.
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // Dismissal lives in AnchoredMenu now, it owns the portal, so it is the only
+  // thing that can tell "outside" from "inside" once the menu is no longer a
+  // DOM descendant of this component.
 
-  const groups: ChatBackendGroup[] = buildVisibleGroups({
-    diagnostics,
-    openRouterModel,
-    fableEnabled: preferences.fableEnabled === true,
-  });
+  const groups: ChatBackendGroup[] = buildVisibleGroups({ piCatalog });
+  // Both groups are always pushed, so an empty menu means every group came
+  // back with no rows (no Pi subscription connected).
+  const hasModels = groups.some((group) => group.models.length > 0);
   const activeCompoundId = composeModelId(activeModelId, activeOneMillion);
-  const activeLabel = labelFor(groups, activeBackend, activeCompoundId, activeModelId);
+  // Claude/Codex labels come from the static catalog immediately. Waiting for
+  // runtime diagnostics made the pill first paint a raw/default id and then
+  // replace it with the friendly saved-model label a moment later.
+  const activeLabel =
+    findOptionInCatalog(activeBackend, activeModelId, activeOneMillion)?.label ??
+    labelFor(groups, activeBackend, activeCompoundId, activeModelId);
 
   const select = (model: ChatModelOption) => {
     onPick(model);
@@ -82,9 +65,10 @@ export default function ModelPicker({
   };
 
   return (
-    <div className="composer-model" ref={rootRef}>
+    <div className="composer-model">
       <button
         type="button"
+        ref={triggerRef}
         className={`composer-pill${open ? " is-active" : ""}`}
         onClick={() => setOpen((value) => !value)}
         title="Chat model"
@@ -104,56 +88,56 @@ export default function ModelPicker({
             />
           </svg>
         </span>
-        {activeLabel}
+        {/* Wrapped rather than left as a bare text node: a text node cannot be
+            ellipsized inside a flex container, and this is the only pill whose
+            text has no upper bound (model names come from the vendor). */}
+        <span className="composer-pill-label">{activeLabel}</span>
       </button>
-      {open && (
-        <div className="composer-model-menu" role="listbox">
-          {groups.length === 0 && (
-            <div className="composer-model-empty">
-              No models available — install Claude/Codex CLI or set an OpenRouter model in Settings.
-            </div>
-          )}
-          {groups.map((group) => (
-            <div key={group.backend} className="composer-model-group">
-              <div className="composer-model-group-label">{group.label}</div>
-              {group.models.map((model) => {
-                const active =
-                  model.id === activeCompoundId && model.backend === activeBackend;
-                return (
-                  <button
-                    key={`${model.backend}:${model.id}`}
-                    type="button"
-                    role="option"
-                    aria-selected={active}
-                    className={`composer-model-row${active ? " is-active" : ""}`}
-                    onClick={() => select(model)}
-                  >
-                    <span className="composer-model-row-copy">
-                      <span className="composer-model-row-label">{model.label}</span>
-                      {model.description && (
-                        <span className="composer-model-row-description">
-                          {model.description}
-                        </span>
-                      )}
-                    </span>
-                    <span className="composer-model-row-badges">
-                      {model.badge && (
-                        <span className="composer-badge is-family">{model.badge}</span>
-                      )}
-                      {model.isOneMillion && (
-                        <span className="composer-badge is-onem">1M</span>
-                      )}
-                      {group.backend === "openrouter" && (
-                        <span className="composer-badge">API</span>
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-      )}
+      <AnchoredMenu
+        anchorRef={triggerRef}
+        open={open}
+        onClose={() => setOpen(false)}
+        className="composer-model-menu spark-menu"
+        role="listbox"
+      >
+        {!hasModels && (
+          <div className="composer-model-empty">
+            No models available. Connect a Pi subscription in Settings.
+          </div>
+        )}
+        {groups.map((group, index) => (
+          <div key={group.key} className="composer-model-group">
+            {/* The harness heading prints once for the whole run of groups that
+                share it. Every row here runs on Pi, so repeating it per vendor
+                would read as two different backends, which is exactly the
+                confusion the vendor split is meant to remove. */}
+            {group.section !== groups[index - 1]?.section && (
+              <div className="composer-model-section-label">{group.section}</div>
+            )}
+            <div className="composer-model-group-label is-vendor">{group.label}</div>
+            {group.models.map((model) => {
+              const active =
+                model.id === activeCompoundId && model.backend === activeBackend;
+              return (
+                <button
+                  key={`${model.backend}:${model.id}`}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  className={`composer-model-row is-compact${active ? " is-active" : ""}`}
+                  onClick={() => select(model)}
+                >
+                  {/* The name, and nothing else. No tier cards, no blurb, no
+                      1M tag, the label already ends in "1M" where it applies.
+                      `isOneMillion` still drives chat1mContext on pick; it is
+                      only the visual tag that is gone. */}
+                  <span className="composer-model-row-label">{model.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </AnchoredMenu>
     </div>
   );
 }
@@ -170,7 +154,7 @@ function labelFor(
     if (hit) return hit.label;
   }
   // No match in the current visible groups — show the raw id so the pill is
-  // still informative (typical when the configured OpenRouter model was
-  // changed since the run was created).
+  // still informative (typical when the run's model has since dropped out of
+  // the live catalog, or its runtime was disabled).
   return rawModelId || "Pick a model";
 }

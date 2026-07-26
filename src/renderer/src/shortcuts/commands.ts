@@ -34,13 +34,13 @@ export type CommandId =
   | "tab.newTerminal"
   | "tab.newEditor"
   | "tab.newPreview"
+  | "tab.newWhiteboard"
   | "tab.close"
   | "tab.closeOthers"
   | "tab.cycleNext"
   | "tab.cyclePrev"
   | "worker.newClaude"
   | "worker.newCodex"
-  | "worker.newCursor"
   | "markdown.togglePreview";
 
 export type CommandGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal" | "Workers";
@@ -115,7 +115,7 @@ export const COMMANDS: Command[] = [
     id: "composer.focus",
     label: "Focus chat composer",
     group: "Navigation",
-    // Mod+L — the "focus AI chat" convention (Cursor, Windsurf). Frees Mod+/
+    // Mod+L — a familiar "focus AI chat" convention. Frees Mod+/
     // for the universal Toggle Line Comment chord that editors expect.
     defaultChords: [mod("l")],
   },
@@ -256,6 +256,15 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod("e")],
   },
   {
+    id: "tab.newWhiteboard",
+    label: "New whiteboard",
+    group: "Tabs",
+    // Mod+Shift+W — free chord: Mod+W is Close tab, and nothing binds the
+    // shifted variant by default (terminal.closePane ships unbound; no main-
+    // process accelerator claims it either).
+    defaultChords: [mod("w", { shift: true })],
+  },
+  {
     id: "tab.close",
     label: "Close active tab",
     group: "Tabs",
@@ -295,12 +304,6 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.newCodex",
     label: "New Codex worker pane",
-    group: "Workers",
-    defaultChords: [],
-  },
-  {
-    id: "worker.newCursor",
-    label: "New Cursor worker pane",
     group: "Workers",
     defaultChords: [],
   },

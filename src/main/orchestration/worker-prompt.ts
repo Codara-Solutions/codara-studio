@@ -16,6 +16,7 @@ import type {
   WorkerArtifactPaths,
   WorkerTask,
 } from "@shared/types";
+import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_MANAGER_PROMPT_PROFILE, loadManagerPromptProfile } from "./prompt-profile";
 import { isConfigShieldActive } from "./agent-config-shield";
 import { renderAgentSyncPromptLines } from "../agent-sync";
@@ -33,7 +34,7 @@ function personalConfigFallbackLines(): string[] {
   return [
     "",
     "## PERSONAL CONFIG NOT APPLICABLE",
-    "Any user-level `~/.claude/CLAUDE.md` policies you may have picked up (for example subagent model/effort routing policies that name custom agents like advisor, adversary, or fable-coder) — and likewise any global `~/.codex/AGENTS.md` personal instructions — are the machine owner's personal settings and DO NOT apply in this Cora-spawned session. Ignore them. Do not attempt to invoke personally-defined custom subagents — they do not exist here. Follow only this task prompt and the project's own committed configuration.",
+    "Any user-level `~/.claude/CLAUDE.md` policies you may have picked up (for example subagent model/effort routing policies that name custom agents like advisor, adversary, or fable-coder), and likewise any global `~/.codex/AGENTS.md` personal instructions, are the machine owner's personal settings and DO NOT apply in this Cora-spawned session. Ignore them. Do not attempt to invoke personally-defined custom subagents, they do not exist here. Follow only this task prompt and the project's own committed configuration.",
   ];
 }
 
@@ -83,6 +84,17 @@ function taskContextText(step: StepState | undefined, task: WorkerTask): string 
   ].join("\n");
 }
 
+const COORDINATOR_ONLY_ACCEPTANCE = new Set([
+  "all spawned worker tasks complete.",
+  "the selected worker tasks complete and report final evidence.",
+]);
+
+function workerAcceptanceCriteria(step: StepState | undefined): string[] {
+  return (step?.acceptanceCriteria ?? []).filter(
+    (criterion) => !COORDINATOR_ONLY_ACCEPTANCE.has(criterion.trim().toLowerCase()),
+  );
+}
+
 function shouldOfferRuntimeDelegation(step: StepState | undefined, task: WorkerTask): boolean {
   const text = taskContextText(step, task);
   if (/\b(subagent|sub-agent|delegate|delegation|agent team|worktree|parallel probes?|independent probes?)\b/i.test(text)) {
@@ -107,7 +119,7 @@ function shouldRenderAgentSyncPromptLines(step: StepState | undefined, task: Wor
 // for any parallel batch: a task that may run alongside same-step peers gets
 // the mailbox + guidance automatically. Every ≥2-worker spawn marks its tasks
 // canRunParallel, so manager-spawned fleets always coordinate. The earlier
-// keyword-regex gate is gone — a shared mailbox is cheap and the manager may
+// keyword-regex gate is gone, a shared mailbox is cheap and the manager may
 // need to steer any batch worker regardless of how its brief was phrased.
 export function shouldUsePeerComms(
   run: RunState,
@@ -115,13 +127,79 @@ export function shouldUsePeerComms(
   task: WorkerTask,
 ): boolean {
   if (!step || !task.canRunParallel) return false;
-  // Best-of-N plan-council candidates are DELIBERATELY independent — their
+  // Best-of-N plan-council candidates are DELIBERATELY independent, their
   // prompt promises N independent planners, so cross-candidate mailbox chatter
   // would converge the drafts and defeat the council. No peer comms for them.
   if (task.councilGroupId !== undefined) return false;
   const peerTasks = run.workerTasks.filter((item) => item.stepId === task.stepId && item.id !== task.id);
   const plannedPeerCount = Math.max(0, (step.plannedAgents?.length ?? 0) - 1);
   return peerTasks.length + plannedPeerCount > 0;
+}
+
+// Mirror of run-store's usePiWorkerHarness gate (kept local to avoid an import
+// cycle; keep the two predicates in sync). Pi-harness workers load
+// resources/pi-cora/worker.ts, which registers the codara-studio bridge tools
+// (preview/terminal/whiteboard-read) in-process, no CLI config file involved.
+function usesPiWorkerHarness(run: RunState, task: WorkerTask): boolean {
+  return (
+    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
+    !(run.executionMode === "direct" && Boolean(run.automationId)) &&
+    (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+  );
+}
+
+// Transport-aware availability of the codara-studio preview/terminal tools.
+// The config-file check only describes CLI transports that resolve MCP servers
+// from user-scope configs; Pi-harness workers register the tools in-process and
+// structured automation workers get the entry at launch, claude via the SDK's
+// mcpServers, codex via a forced config install (structured-worker.ts), so
+// all of them always have the tools. Promising tools a worker
+// does not have, or hiding tools it does, is what makes verifiers hedge.
+function sparkPreviewToolsAvailable(
+  run: RunState,
+  task: WorkerTask,
+  cwd: string,
+  settings: AppSettings,
+): boolean {
+  if (usesPiWorkerHarness(run, task)) return true;
+  // Structured automation workers always get the tools regardless of config
+  // files: claude via the SDK's injected mcpServers entry, codex because
+  // runCodexWorker force-installs the codara-studio entry and launches with
+  // SPARK_MCP_MODE=worker (structured-worker.ts).
+  if (
+    run.executionMode === "direct" &&
+    Boolean(run.automationId) &&
+    (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+  ) {
+    return true;
+  }
+  return isSparkPreviewMcpAvailable({
+    cwd,
+    autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+  });
+}
+
+// Only the Pi harness loads the vendored pi-web-search extension, so only
+// those workers are told the tool exists.
+function renderWebResearchGuidance(
+  run: RunState,
+  task: WorkerTask,
+  // Search quota is shared across the whole parallel batch, so the 429 heads-up
+  // below only makes sense when the mailbox actually exists.
+  peerCommsAvailable: boolean,
+): string[] {
+  if (!usesPiWorkerHarness(run, task)) return [];
+  return [
+    "- Use the `web_search` tool for anything you need from the open web instead of fetching pages with curl or driving the preview browser, and cite the sources it returns in `proof[]`.",
+    "- If `web_search` fails or rate-limits, or the task needs page-level depth, use the bundled `deep_search` tool: free, no API key, backed by DuckDuckGo's public endpoints with a Bing HTML fallback (mode \"deep\" also fetches and digests the top result pages). For structured data, fetch public endpoints (RSS feeds, published APIs) directly rather than waiting for a limit to clear. Never sleep longer than 60 seconds in one command; the wall clock is user-visible.",
+    "- If `deep_search` reports that the backends are bot-challenging rather than empty, free scraping is walled for now: do not rephrase and retry it, go straight to `web_search` or a named public feed or API endpoint.",
+    ...(peerCommsAvailable
+      ? [
+          "- `web_search` quota is shared by every worker in this batch, not per worker. The moment you hit a 429 or a rate-limit error on it, `peer_send` a one-line heads-up to `all` (subject like \"web_search 429\") before you do anything else, so peers switch to feeds and `deep_search` instead of each burning their own attempts discovering the same limit. If a peer sends you that heads-up, skip `web_search` and start from feeds or `deep_search`; retry it later only if you have no other source.",
+        ]
+      : []),
+    "- Never open the user's system browser or GUI applications (no `open`, `xdg-open`, `osascript`, `start`). All web access goes through `web_search`, `deep_search`, or direct HTTP fetches.",
+  ];
 }
 
 function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
@@ -169,22 +247,59 @@ function renderPeerCommsGuidance(
   task: WorkerTask,
   paths: WorkerArtifactPaths,
   // Only CC/Codex execute/auto-manager runs ever READ the manager inbox; in
-  // every other flow (fan-out, loom, OpenRouter autopilot) advertising a
+  // every other flow (fan-out, loom, Pi autopilot) advertising a
   // `manager` recipient would leave workers awaiting replies that never come,
   // so the manager mentions are dropped there. See runHasMcpManager.
   managerReachable: boolean,
+  // Pi-harness workers get first-class peer_list/peer_send/peer_inbox/
+  // peer_await tools (resources/pi-cora/worker-peer-comms.ts) over the same
+  // on-disk mailbox; CLI transports keep the node script incantation. The two
+  // interoperate file-for-file, so mixed batches still coordinate.
+  nativePeerTools: boolean,
 ): string[] {
   if (!paths.peerCommsDir || !paths.peerCommsScript) return [];
+  const opening = [
+    managerReachable
+      ? "Cora may be running several workers for this same step, plus the `manager` that spawned this batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
+      : "Cora may be running several workers for this same step. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, or ask a peer for a second opinion.",
+    "Peers are teammates, not competitors: share findings early, claim a scope before working in shared territory, and ask before duplicating work another peer may already own. Cora, the orchestrator that spawned this batch, oversees the fleet, and only Cora ends a worker session: finish your task and write your final report; never idle waiting for peers.",
+    "This is a run-artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
+  ];
+  const closing = [
+    ...(managerReachable
+      ? [
+          "- Message the `manager` when you are blocked on a peer or a contract question, or when a significant milestone lands. The manager may also message you mid-flight to steer or answer, you will see it next time you read your inbox.",
+        ]
+      : []),
+    "- When your inbox holds a peer question you can answer quickly, reply before resuming your own work, a peer stalled on your answer slows the whole fleet more than the minute your reply costs.",
+    "- If your task tells you to settle a contract with a peer before building on it, send the contract note first, then await their agreement briefly before you build on it.",
+    "- If your slice defines or consumes a shared interface/contract another peer depends on, send one short contract note to that peer (or `all`) before editing and read your inbox once before finalizing.",
+    "- Shared contracts come from the task spec, not from invention. If your note conflicts with a peer's, reconcile before finalizing or report `partial` with the exact conflict in `risks[]`.",
+    "- Do not wait indefinitely. If no reply arrives within about 2 minutes, continue with the safest explicit assumption and note it in `risks[]`.",
+    "- Summarize any material peer/manager input in `proof[]`, `risks[]`, or `followups[]`; do not paste long mailbox transcripts into the final report.",
+  ];
+
+  if (nativePeerTools) {
+    return [
+      ...opening,
+      "Native mailbox tools are registered in this session, use them directly (no shell script needed):",
+      "- `peer_list`: see every participant, their status, and path scopes.",
+      "- `peer_inbox`: read your messages (defaults to unread only and marks them read). Check at natural checkpoints: after finishing a phase, before starting integration.",
+      managerReachable
+        ? "- `peer_send`: send a short note (under ~300 words) to a peer task id, `all`, or `manager`; set `replyTo` when answering a specific message."
+        : "- `peer_send`: send a short note (under ~300 words) to a peer task id or `all`; set `replyTo` when answering a specific message.",
+      "- `peer_await`: block briefly for a specific reply (filter by `from`/`replyTo`; default 120s timeout).",
+      ...closing,
+    ];
+  }
+
   // Plain double-quoted args work in zsh/bash/pwsh alike; run-dir paths do not
   // contain quote metacharacters, so no shell-specific quoting helper is needed.
   const script = paths.peerCommsScript;
   const dir = paths.peerCommsDir;
   const self = task.id;
   return [
-    managerReachable
-      ? "Cora may be running several Claude/Codex/Cursor workers for this same step, plus the `manager` that spawned this batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
-      : "Cora may be running several Claude/Codex/Cursor workers for this same step. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, or ask a peer for a second opinion.",
-    "This is a run-artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
+    ...opening,
     managerReachable
       ? "Addressable recipients: any peer worker task id shown by `list`, `all` (every peer), or `manager` (the orchestrator that spawned you)."
       : "Addressable recipients: any peer worker task id shown by `list`, or `all` (every peer).",
@@ -195,27 +310,18 @@ function renderPeerCommsGuidance(
     "Reply to a message you received:",
     `  node "${script}" reply --dir "${dir}" --from ${self} --to "<sender_id>" --reply-to "<msg_id>" --subject "Re: <topic>" --body "Short answer with evidence or uncertainty."`,
     `Block briefly for a specific reply: node "${script}" await --dir "${dir}" --self ${self} --reply-to "<msg_id>" --timeout 120`,
-    ...(managerReachable
-      ? [
-          "- Message the `manager` (`--to manager`) when you are blocked on a peer or a contract question, or when a significant milestone lands. The manager may also message you mid-flight to steer or answer — you will see it next time you read your inbox.",
-        ]
-      : []),
-    "- When your inbox holds a peer question you can answer quickly, reply before resuming your own work — a peer stalled on your answer slows the whole fleet more than the minute your reply costs.",
-    "- If your task tells you to settle a contract with a peer before building on it, send the contract note first, then use `await` to block briefly for their agreement before you build on it.",
-    "- If your slice defines or consumes a shared interface/contract another peer depends on, send one short contract note to that peer (or `all`) before editing and read your inbox once with `--mark-read` before finalizing.",
-    "- Shared contracts come from the task spec, not from invention. If your note conflicts with a peer's, reconcile before finalizing or report `partial` with the exact conflict in `risks[]`.",
-    "- Do not wait indefinitely. If no reply arrives within about 2 minutes, continue with the safest explicit assumption and note it in `risks[]`.",
-    "- Summarize any material peer/manager input in `proof[]`, `risks[]`, or `followups[]`; do not paste long mailbox transcripts into the final report.",
+    ...closing,
   ];
 }
 
 // Mirror of run-store's runHasMcpManager (kept local to avoid an import cycle;
-// see that function's comment for WHY the manager is only reachable in CC/Codex
+// see that function's comment for WHY the manager is only reachable in CLI/Pi
 // execute/auto-manager runs). Keep the two predicates in sync.
 function managerInboxIsRead(run: RunState): boolean {
   return (
-    (run.chatBackend === "claude" || run.chatBackend === "codex") &&
-    (run.chatMode === "execute" || run.chatMode === "auto")
+    run.executionMode !== "direct" &&
+    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
+    effectiveChatMode(run.chatMode) === "auto"
   );
 }
 
@@ -294,12 +400,16 @@ function renderUiQualityGuidance(
   ];
   if (opts?.sparkPreviewMcpAvailable) {
     lines.push(
-      "- The `codara-studio` MCP server is available in this session. It drives the actual <preview> tab inside Codara — same DOM the user sees, no separate browser window. Call `codara_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Codara will open one automatically. Capture the final snapshot or `codara_preview_screenshot` evidence in `proof[]`.",
-      "- BATCH your interaction probes with `codara_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to drive a whole flow in ONE call. Each step fires the same real event as the single-shot tool, so you keep full fidelity but pay one round-trip instead of one per keystroke. Probe e.g. `7 / 2 =` plus a display read as a single `codara_preview_run`. A calculator should need only a handful of `codara_preview_run` calls total — NOT 50+ individual `codara_preview_press_key` calls.",
+      "- The `codara-studio` MCP server is available in this session. It drives the actual <preview> tab inside Codara, same DOM the user sees, no separate browser window. Call `codara_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Codara will open one automatically. Capture the final snapshot or `codara_preview_screenshot` evidence in `proof[]`.",
+      "- BATCH your interaction probes with `codara_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to drive a whole flow in ONE call. Each step fires the same real event as the single-shot tool, so you keep full fidelity but pay one round-trip instead of one per keystroke. Probe e.g. `7 / 2 =` plus a display read as a single `codara_preview_run`. A calculator should need only a handful of `codara_preview_run` calls total, NOT 50+ individual `codara_preview_press_key` calls.",
       "- Reserve the single-shot `codara_preview_click` / `codara_preview_type` / `codara_preview_press_key` tools only for probes that must isolate ONE real key/click event (e.g. the focus double-activation guard: focus equals, press Enter once, read the display).",
       "- Do NOT substitute an inline Node VM + JSDOM probe for the `codara_preview_run` batch. The whole point is that the verifier and the human see the same DOM/CSS the real browser produces.",
-      "- If `codara_preview_screenshot` returns an error or a 0-size/blank frame, this preview tab is not in the foreground — do NOT retry the screenshot in a loop. Treat the pixels as unavailable and immediately fall back to `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text content) for your evidence, noting the limitation in proof[]. A failed screenshot is a signal to switch tools, not to keep shooting.",
-      "- The same `codara-studio` server also gives you `codara_terminal_create` / `codara_terminal_write` / `codara_terminal_read`: open an agent-owned terminal tab (visually tinted so the user knows an agent is driving it) to run a command the user should SEE — a dev server, a build watcher, a long-running task — then drive it with `codara_terminal_write` and read output with `codara_terminal_read`. Pass an explicit valid `cwd` to `codara_terminal_create` (it defaults to the workspace root, and a non-existent cwd makes the terminal fail to spawn). Prefer your own Bash tool for quick one-shot commands; reach for a terminal tab when the user benefits from watching it run.",
+      "- If `codara_preview_screenshot` returns an error or a 0-size/blank frame, this preview tab is not in the foreground, do NOT retry the screenshot in a loop. Treat the pixels as unavailable and immediately fall back to `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text content) for your evidence, noting the limitation in proof[]. A failed screenshot is a signal to switch tools, not to keep shooting.",
+      "- The same `codara-studio` server also gives you `codara_terminal_create` / `codara_terminal_write` / `codara_terminal_read`: open an agent-owned terminal tab (visually tinted so the user knows an agent is driving it) to run a command the user should SEE, a dev server, a build watcher, a long-running task, then drive it with `codara_terminal_write` and read output with `codara_terminal_read`. Pass an explicit valid `cwd` to `codara_terminal_create` (it defaults to the workspace root, and a non-existent cwd makes the terminal fail to spawn). Prefer your own Bash tool for quick one-shot commands; reach for a terminal tab when the user benefits from watching it run.",
+    );
+  } else {
+    lines.push(
+      "- No browser/preview tooling is available in this session. Prove behavior with deterministic DOM/static probes (parse the final HTML, drive handlers in a runtime harness), note the limitation in `proof[]`, and do not claim visual verification you could not perform.",
     );
   }
   if (taskLooksLikeCalculator(step, task)) {
@@ -331,11 +441,15 @@ function renderUiVerifierGuidance(
   ];
   if (opts?.sparkPreviewMcpAvailable) {
     lines.push(
-      "- The `codara-studio` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Codara — the same pixels the user sees. Call `codara_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Codara will open one automatically. Take a `codara_preview_snapshot` for the accessibility-flavored outline.",
+      "- The `codara-studio` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Codara, the same pixels the user sees. Call `codara_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Codara will open one automatically. Take a `codara_preview_snapshot` for the accessibility-flavored outline.",
       "- BATCH verification with `codara_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to exercise a whole flow in ONE round-trip instead of dozens of single calls. Each step fires the identical real event. Reserve single-shot `codara_preview_click` / `codara_preview_press_key` only for probes that must isolate one real key/click (e.g. focus double-activation). Attach the snapshot or `codara_preview_screenshot` evidence in `proof[]` for each behavioral atomic claim.",
       "- Treat the absence of a `codara_preview_snapshot` for any behavioral UI claim as `unsure`, not `verified`. Static DOM grep alone cannot prove rendering, event wiring, or focus behavior.",
-      "- If `codara_preview_screenshot` errors or returns a 0-size/blank frame, the preview tab simply isn't foregrounded — do not retry it repeatedly. Base the visual verdict on `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text) and record that pixels were unavailable; do not mark a claim failed solely because a screenshot could not be captured.",
-      "- The same `codara-studio` server also exposes `codara_terminal_create` / `codara_terminal_write` / `codara_terminal_read` — open an agent-owned terminal tab (visually tinted) to start a dev server or run a check the user should watch, then read its output with `codara_terminal_read`. Pass an explicit valid `cwd` (a non-existent cwd makes the terminal fail to spawn). For quick one-shot verification commands your own Bash tool is simpler.",
+      "- If `codara_preview_screenshot` errors or returns a 0-size/blank frame, the preview tab simply isn't foregrounded, do not retry it repeatedly. Base the visual verdict on `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text) and record that pixels were unavailable; do not mark a claim failed solely because a screenshot could not be captured.",
+      "- The same `codara-studio` server also exposes `codara_terminal_create` / `codara_terminal_write` / `codara_terminal_read`: open an agent-owned terminal tab (visually tinted) to start a dev server or run a check the user should watch, then read its output with `codara_terminal_read`. Pass an explicit valid `cwd` (a non-existent cwd makes the terminal fail to spawn). For quick one-shot verification commands your own Bash tool is simpler.",
+    );
+  } else {
+    lines.push(
+      "- The codara-studio preview tools are NOT available in this session, the browser surface cannot be driven from here. Verify visual claims with static DOM analysis plus runtime probes, state that limitation explicitly, and do not downgrade the verdict to FEEDBACK or failed solely because pixels could not be captured.",
     );
   }
   if (taskLooksLikeCalculator(step, task)) {
@@ -387,8 +501,9 @@ function renderImplementationWorkerPrompt({
     );
   }
 
-  if (step?.acceptanceCriteria?.length) {
-    lines.push("", "## ACCEPTANCE", ...step.acceptanceCriteria.map((c) => `- ${c}`));
+  const acceptanceCriteria = workerAcceptanceCriteria(step);
+  if (acceptanceCriteria.length) {
+    lines.push("", "## ACCEPTANCE", ...acceptanceCriteria.map((c) => `- ${c}`));
   }
 
   lines.push(
@@ -398,10 +513,7 @@ function renderImplementationWorkerPrompt({
     "- Before reporting `complete`, run or construct a small probe that checks the exact public contract you implemented, and include the command/output in `proof[]`.",
   );
 
-  const sparkPreviewMcpAvailable = isSparkPreviewMcpAvailable({
-    cwd,
-    autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
-  });
+  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
   const uiQualityGuidance = renderUiQualityGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiQualityGuidance.length) {
     lines.push("", "## UI QUALITY BAR", ...uiQualityGuidance);
@@ -410,6 +522,15 @@ function renderImplementationWorkerPrompt({
   const imageGenerationGuidance = renderCodexImageGenerationGuidance(step, task);
   if (imageGenerationGuidance.length) {
     lines.push("", "## ORIGINAL IMAGE ASSETS", ...imageGenerationGuidance);
+  }
+
+  const webResearchGuidance = renderWebResearchGuidance(
+    run,
+    task,
+    shouldUsePeerComms(run, step, task) && Boolean(paths.peerCommsDir && paths.peerCommsScript),
+  );
+  if (webResearchGuidance.length) {
+    lines.push("", "## WEB RESEARCH", ...webResearchGuidance);
   }
 
   if (task.allowedPaths.length || task.forbiddenPaths.length || task.conflictsWith.length || task.canRunParallel) {
@@ -447,7 +568,7 @@ function renderImplementationWorkerPrompt({
   }
 
   const peerCommsGuidance = shouldUsePeerComms(run, step, task)
-    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run))
+    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run), usesPiWorkerHarness(run, task))
     : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
@@ -464,9 +585,9 @@ function renderImplementationWorkerPrompt({
       "  $ <command>",
       "  [exit=<code>]",
       "  <stdout truncated to 600 chars>",
-      "A `complete` status with empty `proof[]` will be treated as `partial` by the manager review and forced to retry — do not skip this step.",
+      "A `complete` status with empty `proof[]` will be treated as `partial` by the manager review and forced to retry, do not skip this step.",
       "If any verificationCommand fails (non-zero exit, error in output), set status=\"partial\" or \"failed\" and include the failure mode in `risks[]`. Do NOT paper over a failing check by reporting `complete`.",
-      "If your task description references atomic claims (sub-claims under acceptanceCriteria), enumerate them in `proof[]` — one entry per claim, citing the file:line or command output that demonstrates each one.",
+      "If your task description references atomic claims (sub-claims under acceptanceCriteria), enumerate them in `proof[]`: one entry per claim, citing the file:line or command output that demonstrates each one.",
     );
   }
 
@@ -483,7 +604,7 @@ function renderImplementationWorkerPrompt({
       {
         status: "complete | partial | blocked | failed",
         summary: "What changed and why.",
-        files_changed: [{ path: "path/to/file", reason: "Why it changed." }],
+        files_changed: [{ path: "path/to/file", reason: "Why it changed. Workspace files only: never list this report file or anything under the run's artifact directory." }],
         commands_run: [{ command: "npm run typecheck", exitCode: 0, summary: "What the command proved." }],
         tests: [{ command: "npm run typecheck", result: "passed | failed | not_run", details: "Optional detail." }],
         proof: ["Concrete evidence that the task is done."],
@@ -545,20 +666,21 @@ function renderVerifierWorkerPrompt({
     );
   }
 
-  if (step?.acceptanceCriteria?.length) {
+  const acceptanceCriteria = workerAcceptanceCriteria(step);
+  if (acceptanceCriteria.length) {
     lines.push(
       "",
-      "## ACCEPTANCE CRITERIA — your ground truth",
+      "## ACCEPTANCE CRITERIA, your ground truth",
       "These are the claims you must independently prove or disprove. Decompose each into atomic sub-claims and verify each one.",
-      ...step.acceptanceCriteria.map((c) => `- ${c}`),
+      ...acceptanceCriteria.map((c) => `- ${c}`),
     );
   }
 
   if (task.expectedOutputs.length) {
     lines.push(
       "",
-      "## IMPLEMENTATION WORKER'S EXPECTED OUTPUTS — orientation only",
-      "These are what the prior worker was supposed to produce. Use them to know WHERE to look — but do NOT trust them as evidence on their own.",
+      "## IMPLEMENTATION WORKER'S EXPECTED OUTPUTS, orientation only",
+      "These are what the prior worker was supposed to produce. Use them to know WHERE to look, but do NOT trust them as evidence on their own.",
       ...task.expectedOutputs.map((output) => `- ${output}`),
     );
   }
@@ -566,19 +688,25 @@ function renderVerifierWorkerPrompt({
   if (task.verificationCommands?.length) {
     lines.push(
       "",
-      "## VERIFICATION COMMANDS — run each one yourself in a fresh shell",
+      "## VERIFICATION COMMANDS, run each one yourself in a fresh shell",
       "Capture exit code + first 600 chars of stdout for each. These are the same commands the implementation worker was supposed to run; you re-run them with no caching, no shortcuts.",
       ...task.verificationCommands.map((c) => `- ${c}`),
     );
   }
 
-  const sparkPreviewMcpAvailable = isSparkPreviewMcpAvailable({
-    cwd,
-    autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
-  });
+  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
   const uiVerifierGuidance = renderUiVerifierGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiVerifierGuidance.length) {
     lines.push("", ...uiVerifierGuidance);
+  }
+
+  const webResearchGuidance = renderWebResearchGuidance(
+    run,
+    task,
+    shouldUsePeerComms(run, step, task) && Boolean(paths.peerCommsDir && paths.peerCommsScript),
+  );
+  if (webResearchGuidance.length) {
+    lines.push("", "## WEB RESEARCH", ...webResearchGuidance);
   }
 
   const delegationGuidance = shouldOfferRuntimeDelegation(step, task)
@@ -596,7 +724,7 @@ function renderVerifierWorkerPrompt({
   }
 
   const peerCommsGuidance = shouldUsePeerComms(run, step, task)
-    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run))
+    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run), usesPiWorkerHarness(run, task))
     : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
@@ -610,7 +738,7 @@ function renderVerifierWorkerPrompt({
     "",
     "## TOOL DISCIPLINE",
     peerCommsGuidance.length
-      ? "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL). The Cora peer mailbox commands above are the only allowed write outside the project tree."
+      ? "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL). The Cora peer mailbox above (the peer_* tools or the mailbox commands) is the only allowed write outside the project tree."
       : "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL).",
     "If you cannot verify a claim because the verification harness or fixture is missing, set verdict=unsure for that claim and explain WHAT is missing in `missing_oracle`. Do NOT create the fixture yourself.",
     "",
@@ -629,12 +757,12 @@ function renderVerifierWorkerPrompt({
             {
               claim: "function quoteForShell is exported from src/main/shell-utils.ts",
               verdict: "verified",
-              evidence: "src/main/shell-utils.ts:14 — `export function quoteForShell(value: string)`",
+              evidence: "src/main/shell-utils.ts:14, `export function quoteForShell(value: string)`",
             },
             {
               claim: "quoteForShell preserves spaces by quoting (input 'a b' → 'a b' wrapped)",
               verdict: "failed",
-              evidence: "$ node --eval ... [exit=0] returned 'a b' (unquoted) — strips spaces",
+              evidence: "$ node --eval ... [exit=0] returned 'a b' (unquoted), strips spaces",
             },
           ],
           corrective_prompt:

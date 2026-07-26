@@ -1,7 +1,7 @@
 // CLI provider abstraction.
 //
-// One TypeScript interface per coding CLI that Codara can spawn (Claude Code,
-// Codex CLI, Cursor Agent today; Aider, Amp, OpenCode, Grok CLI, Droid,
+// One TypeScript interface per coding CLI that Codara can spawn (Claude Code
+// and Codex CLI today; Aider, Amp, OpenCode, Grok CLI, Droid,
 // Hermes, Pi, Kimi, Kiro, Antigravity, Cline tomorrow). The contract bundles
 // everything callers need to launch the binary without baking CLI-specific
 // branches into run-store / agent-runtimes / etc:
@@ -28,8 +28,7 @@ import type {
 /**
  * Options every provider knows about when shaping a spawn. Fields are
  * optional so callers can pass only what they have — providers ignore
- * fields they don't understand (Cursor ignores `effort`, Codex ignores
- * `--planMode`, etc.).
+ * fields they don't understand (for example, Codex ignores `--planMode`).
  */
 export interface SpawnOpts {
   /** Workspace directory. Providers don't `cd` themselves; the spawn site does. */
@@ -42,8 +41,7 @@ export interface SpawnOpts {
   /**
    * Reasoning-effort level. Translated per-provider: Claude takes
    * `--effort <low|medium|high|xhigh|max>`, Codex takes
-   * `-c "model_reasoning_effort=<low|medium|high|xhigh|max>"`,
-   * Cursor ignores it (no effort flag).
+   * `-c "model_reasoning_effort=<low|medium|high|xhigh|max>"`.
    */
   effort?: AgentEffortLevel;
   /**
@@ -58,9 +56,8 @@ export interface SpawnOpts {
 /**
  * Options for resuming an existing CLI-side session. `sessionId` is the
  * provider-specific identifier the CLI hands out — Claude prints a uuid on
- * first launch (`claude -r <uuid>`), Codex stores transcripts under
- * `~/.codex/sessions/`, Cursor doesn't expose a stable id at all. Providers
- * that don't support resume return `null` from `buildResumeArgs`.
+ * first launch (`claude -r <uuid>`), while Codex stores transcripts under
+ * `~/.codex/sessions/`. Providers that don't support resume return `null`.
  */
 export interface ResumeOpts extends SpawnOpts {
   sessionId: string;
@@ -75,11 +72,7 @@ export interface CliProvider {
   id: AgentRuntimeKind;
   /** Human-readable label shown in UI ("Claude Code"). */
   displayName: string;
-  /**
-   * Name passed to `resolveBinary()` (typically the CLI's command name).
-   * Cursor's CLI is published as `agent`, not `cursor` — the binary name
-   * is what the user types, not the brand.
-   */
+  /** Name passed to `resolveBinary()` (typically the CLI's command name). */
   binaryName: string;
   /**
    * Resolve the absolute path to the binary on this machine, or null if
@@ -91,14 +84,14 @@ export interface CliProvider {
   /**
    * Build the CLI argv for a brand-new session. Returns the argv tail to
    * pass after the resolved binary path — e.g. for Claude:
-   *   ["--dangerously-skip-permissions", "--model", "claude-opus-4-8", "--effort", "high"]
+   *   ["--dangerously-skip-permissions", "--model", "claude-opus-5", "--effort", "high"]
    * The caller is responsible for choosing how to dispatch the binary
    * (direct spawn, pwsh, etc.).
    */
   buildArgs(opts: SpawnOpts): string[];
   /**
    * Build the CLI argv for resuming an existing session, or `null` if the
-   * provider doesn't expose a session-resume flag (Cursor today).
+   * provider doesn't expose a session-resume operation.
    */
   buildResumeArgs(opts: ResumeOpts): string[] | null;
   /**

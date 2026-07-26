@@ -13,14 +13,19 @@ import {
   attemptStatusColor,
   deriveAgentStatus,
   formatClock,
+  formatDuration,
   isRunStillTicking,
   type RunMaps,
   runtimeTone,
+  sentenceCase,
   sortSteps,
   statusColor,
   stepStatusColor,
   stepStatusLabel,
+  WORKER_ATTEMPT_CAP,
+  workerModelLabel,
 } from "./run-format";
+import { attemptsForTask, logicalWorkers, logicalWorkersForStep } from "../../lib/worker-identity";
 import { ElapsedChip, ElapsedTime } from "./elapsed";
 import { StatusDot } from "./GraphNodes";
 import type { RunExecutionProjection } from "../../lib/useRunExecutionRecord";
@@ -39,6 +44,7 @@ interface Props {
   selectedWorkerTaskId: string | null;
   onSelectStep: (id: string) => void;
   onSelectWorker: (id: string) => void;
+  onOpenWorkerTerminal?: (workerTaskId: string) => void;
   onClear: () => void;
 }
 
@@ -51,6 +57,7 @@ export default function Inspector({
   selectedWorkerTaskId,
   onSelectStep,
   onSelectWorker,
+  onOpenWorkerTerminal,
   onClear,
 }: Props) {
   const orderedSteps = useMemo(() => sortSteps(run.steps), [run.steps]);
@@ -60,13 +67,40 @@ export default function Inspector({
     return map;
   }, [orderedSteps]);
 
-  const selectedTask = selectedWorkerTaskId ? maps.taskById.get(selectedWorkerTaskId) ?? null : null;
+  // Resolve the selection through the supersedes chain: a selection made
+  // before a runtime-fallback clone points at the cancelled predecessor, which
+  // the collapsed graph no longer renders — follow it to the surviving task
+  // instead of opening a phantom worker.
+  const selectedWorker = useMemo(() => {
+    if (!selectedWorkerTaskId) return null;
+    return (
+      logicalWorkers(run).find(
+        (worker) =>
+          worker.task.id === selectedWorkerTaskId ||
+          worker.supersededTasks.some((superseded) => superseded.id === selectedWorkerTaskId),
+      ) ?? null
+    );
+  }, [run, selectedWorkerTaskId]);
+  const selectedTask =
+    selectedWorker?.task ??
+    (selectedWorkerTaskId ? maps.taskById.get(selectedWorkerTaskId) ?? null : null);
+  // Full attempt history for the selected worker — the detail pane shows every
+  // try across the supersedes chain (predecessor attempts included), not just
+  // the latest attempt the maps collapse to.
+  const selectedAttempts = useMemo(
+    () =>
+      selectedWorker
+        ? selectedWorker.attempts
+        : selectedTask
+          ? attemptsForTask(run, selectedTask.id)
+          : [],
+    [selectedWorker, run, selectedTask],
+  );
   const selectedStep = selectedTask?.stepId
     ? run.steps.find((step) => step.id === selectedTask.stepId) ?? null
     : selectedStepId
       ? run.steps.find((step) => step.id === selectedStepId) ?? null
       : null;
-
   const mode: "run" | "step" | "worker" = selectedTask ? "worker" : selectedStepId ? "step" : "run";
 
   return (
@@ -92,11 +126,16 @@ export default function Inspector({
           <WorkerDetail
             task={selectedTask}
             attempt={maps.attemptByTask.get(selectedTask.id) ?? null}
+            attempts={selectedAttempts}
             step={selectedStep}
             reportByAttempt={reportByAttempt}
+            onOpenTerminal={onOpenWorkerTerminal
+              ? () => onOpenWorkerTerminal(selectedTask.id)
+              : undefined}
           />
         ) : mode === "step" && selectedStep ? (
           <StepDetail
+            run={run}
             step={selectedStep}
             index={stepIndex.get(selectedStep.id) ?? 0}
             maps={maps}
@@ -151,8 +190,8 @@ function Header({
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.15em",
+          fontWeight: 600,
+          letterSpacing: "0.08em",
           textTransform: "uppercase",
         }}
       >
@@ -275,8 +314,8 @@ function Section({
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
             fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.14em",
+            fontWeight: 600,
+            letterSpacing: "0.06em",
             textTransform: "uppercase",
           }}
         >
@@ -306,8 +345,8 @@ function SnapshotCard({
       style={{
         border: `1px solid color-mix(in oklch, ${tone} 42%, var(--rule))`,
         borderRadius: 9,
-        background: `linear-gradient(150deg, color-mix(in oklch, ${tone} 9%, var(--panel-2)), color-mix(in oklch, var(--panel) 88%, transparent))`,
-        boxShadow: `var(--lift-hi), 0 10px 24px color-mix(in oklch, ${tone} 8%, transparent)`,
+        background: `color-mix(in oklch, ${tone} 6%, var(--panel))`,
+        boxShadow: "var(--shadow-1)",
         padding: "12px 13px",
         display: "flex",
         flexDirection: "column",
@@ -324,7 +363,6 @@ function SnapshotCard({
             flex: "0 0 auto",
             borderRadius: 999,
             background: tone,
-            boxShadow: `0 0 12px color-mix(in oklch, ${tone} 40%, transparent)`,
           }}
         />
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
@@ -452,7 +490,6 @@ function Mark({ kind }: { kind: "done" | "failed" | "running" | "pending" }) {
             height: 5,
             borderRadius: 999,
             background: color,
-            animation: "spark-pulse 1.4s ease-in-out infinite",
           }}
         />
       )}
@@ -460,10 +497,21 @@ function Mark({ kind }: { kind: "done" | "failed" | "running" | "pending" }) {
   );
 }
 
-function RuntimeTag({ runtime }: { runtime: WorkerTask["runtimePreference"] }) {
+// Names the MODEL; the runtime only picks the chip's colour. Under Pi the
+// provider is just which subscription was authenticated, so it belongs in the
+// tooltip, not in the chip the eye lands on. Falls back to the runtime name
+// for attempts recorded before the model was persisted.
+function ModelTag({
+  runtime,
+  model,
+}: {
+  runtime: WorkerTask["runtimePreference"];
+  model?: string;
+}) {
   const tone = runtimeTone(runtime);
   return (
     <span
+      title={model ? `${model}, Pi harness, authenticated as ${runtime}` : undefined}
       style={{
         flex: "0 0 auto",
         color: tone.label,
@@ -472,13 +520,16 @@ function RuntimeTag({ runtime }: { runtime: WorkerTask["runtimePreference"] }) {
         borderRadius: 4,
         padding: "2px 6px",
         fontFamily: "var(--font-mono)",
-        fontSize: 8.5,
-        fontWeight: 800,
-        letterSpacing: "0.06em",
-        textTransform: "uppercase",
+        fontSize: 9,
+        fontWeight: 650,
+        letterSpacing: "0.04em",
+        // No uppercase: this chip used to hold a bare runtime name ("claude"),
+        // which reads as a label, but now holds a model name with a version in
+        // it. "OPUS 4.8" is harder to read than "Opus 4.8", and the run header
+        // renders the same string, they must not disagree.
       }}
     >
-      {runtime}
+      {workerModelLabel(model, runtime)}
     </span>
   );
 }
@@ -610,7 +661,7 @@ function RunSummary({
               border: "1px solid var(--accent-edge)",
               borderRadius: 8,
               background: "color-mix(in oklch, var(--accent) 7%, var(--panel-2))",
-              boxShadow: "var(--shadow-glow)",
+              boxShadow: "var(--shadow-1)",
               padding: "11px 12px",
               display: "flex",
               flexDirection: "column",
@@ -630,14 +681,13 @@ function RunSummary({
               <span
                 style={{
                   color: "var(--accent)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 9.5,
-                  fontWeight: 700,
-                  letterSpacing: "0.1em",
-                  textTransform: "uppercase",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  letterSpacing: "0.03em",
                 }}
               >
-                Step {pad(steps.indexOf(liveStep) + 1)} · {stepStatusLabel(liveStep.status)}
+                Step {pad(steps.indexOf(liveStep) + 1)} · {sentenceCase(stepStatusLabel(liveStep.status))}
               </span>
             </div>
             <span style={{ color: "var(--ink)", fontSize: 12.5, fontWeight: 600, lineHeight: 1.35 }}>
@@ -680,10 +730,6 @@ function RunSummary({
                     step.status === "running" || step.status === "reviewing"
                       ? "var(--accent)"
                       : stepStatusColor(step.status),
-                  boxShadow:
-                    step.status === "running" || step.status === "reviewing"
-                      ? "0 0 8px var(--accent-glow)"
-                      : "none",
                   transition: "opacity var(--motion-fast) var(--ease-out)",
                 }}
                 onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.8")}
@@ -694,11 +740,11 @@ function RunSummary({
         )}
       </Section>
 
-      <Section title="Needs you" meta={attention.length > 0 ? <MetaCount value={attention.length} /> : undefined}>
+      <Section title="Needs attention" meta={attention.length > 0 ? <MetaCount value={attention.length} /> : undefined}>
         {attention.length === 0 ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Mark kind="done" />
-            <span style={{ color: "var(--ink-dim)", fontSize: 11.5 }}>Nothing needs you right now.</span>
+            <span style={{ color: "var(--ink-dim)", fontSize: 11.5 }}>Nothing needs attention.</span>
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -784,14 +830,13 @@ function RunSummary({
                 <span
                   style={{
                     color: item.tone,
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 9,
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.05em",
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: "0.02em",
                   }}
                 >
-                  {item.state}
+                  {sentenceCase(item.state)}
                 </span>
               </div>
             ))}
@@ -802,8 +847,18 @@ function RunSummary({
       <Section title="Run">
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 1, background: "var(--rule-soft)", border: "1px solid var(--rule-soft)", borderRadius: 7, overflow: "hidden" }}>
           <MetricCell label="Steps" value={String(run.steps.length)} />
-          <MetricCell label="Workers" value={String(run.workerTasks.length)} />
-          <MetricCell label="Attempts" value={String(run.workerAttempts.length)} />
+          {/* Workers counts logical workers (supersedes chains collapsed);
+              the attempts cell owns the raw try count, retries included. */}
+          <MetricCell
+            label="Workers"
+            value={String(logicalWorkers(run).length)}
+            title="Logical workers — a retried or replaced task still counts once"
+          />
+          <MetricCell
+            label="All attempts"
+            value={String(run.workerAttempts.length)}
+            title="Every attempt, retries included"
+          />
           <MetricCell label="Autopilot" value={run.autopilot?.status ?? "idle"} />
           <MetricCell label="Complexity" value={run.taskComplexity ?? "—"} />
           <MetricCell
@@ -826,14 +881,17 @@ function MetricCell({
   value,
   tone,
   compact,
+  title,
 }: {
   label: string;
   value: React.ReactNode;
   tone?: string;
   compact?: boolean;
+  title?: string;
 }) {
   return (
     <div
+      title={title}
       style={{
         background: "var(--panel)",
         padding: compact ? "8px 9px" : "9px 10px",
@@ -847,9 +905,9 @@ function MetricCell({
         style={{
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 8.5,
+          fontSize: 10,
           fontWeight: 600,
-          letterSpacing: "0.1em",
+          letterSpacing: "0.05em",
           textTransform: "uppercase",
         }}
       >
@@ -876,12 +934,14 @@ function MetricCell({
 // ── Step detail ──────────────────────────────────────────────────────────────
 
 function StepDetail({
+  run,
   step,
   index,
   maps,
   reportByAttempt,
   onSelectWorker,
 }: {
+  run: RunState;
   step: StepState;
   index: number;
   maps: RunMaps;
@@ -889,9 +949,10 @@ function StepDetail({
   onSelectWorker: (id: string) => void;
 }) {
   const tone = stepStatusColor(step.status);
-  const tasks = step.workerTaskIds
-    .map((id) => maps.taskById.get(id))
-    .filter((task): task is WorkerTask => Boolean(task));
+  // Logical workers only: a task superseded by a runtime-fallback clone folds
+  // into its replacement, matching the collapsed lanes the graph renders — the
+  // list, counts and progress must not resurrect phantom cancelled tasks.
+  const tasks = logicalWorkersForStep(run, step.id).map((worker) => worker.task);
   const done = tasks.filter(
     (task) => deriveAgentStatus(task, maps.attemptByTask.get(task.id), step.status) === "done",
   ).length;
@@ -953,7 +1014,7 @@ function StepDetail({
                 style={{
                   display: "block",
                   padding: "7px 9px",
-                  background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+                  background: "color-mix(in oklab, var(--bg) 70%, transparent)",
                   border: "1px solid var(--rule-soft)",
                   borderRadius: 6,
                   color: "var(--ink-dim)",
@@ -979,6 +1040,7 @@ function StepDetail({
               const attempt = maps.attemptByTask.get(task.id);
               const status = deriveAgentStatus(task, attempt, step.status);
               const liveRuntime = attempt?.runtime ?? task.runtimePreference;
+              const liveModel = attempt?.model ?? task.modelHint;
               return (
                 <button
                   type="button"
@@ -989,7 +1051,7 @@ function StepDetail({
                     textAlign: "left",
                     border: "1px solid var(--rule-soft)",
                     borderRadius: 7,
-                    background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+                    background: "color-mix(in oklab, var(--ink) 2%, transparent)",
                     padding: "8px 10px",
                     display: "flex",
                     flexDirection: "column",
@@ -1002,12 +1064,12 @@ function StepDetail({
                     e.currentTarget.style.borderColor = "var(--rule)";
                   }}
                   onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "color-mix(in oklch, var(--ink) 2%, transparent)";
+                    e.currentTarget.style.background = "color-mix(in oklab, var(--ink) 2%, transparent)";
                     e.currentTarget.style.borderColor = "var(--rule-soft)";
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-                    <RuntimeTag runtime={liveRuntime} />
+                    <ModelTag runtime={liveRuntime} model={liveModel} />
                     <span
                       style={{
                         flex: 1,
@@ -1025,14 +1087,23 @@ function StepDetail({
                     <StatusDot status={status === "done" ? "complete" : status === "blocked" ? "failed" : status === "running" ? "running" : "queued"} size={6} />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9.5 }}>
-                      {attempt?.status ?? task.status}
+                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 10 }}>
+                      {sentenceCase(attempt?.status ?? task.status)}
                     </span>
-                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9.5 }}>
+                    <span
+                      style={{
+                        color: "var(--muted)",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 10,
+                        fontVariantNumeric: "tabular-nums",
+                        minWidth: 34,
+                        textAlign: "right",
+                      }}
+                    >
                       {attempt ? (
-                        <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="--:--" />
+                        <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="—" />
                       ) : (
-                        "--:--"
+                        "—"
                       )}
                     </span>
                   </div>
@@ -1065,12 +1136,11 @@ function StatusWord({ label, tone }: { label: string; tone: string }) {
         color: tone,
         fontFamily: "var(--font-sans)",
         fontSize: 10,
-        fontWeight: 700,
-        letterSpacing: "0.1em",
-        textTransform: "uppercase",
+        fontWeight: 600,
+        letterSpacing: "0.02em",
       }}
     >
-      {label}
+      {sentenceCase(label)}
     </span>
   );
 }
@@ -1080,17 +1150,40 @@ function StatusWord({ label, tone }: { label: string; tone: string }) {
 function WorkerDetail({
   task,
   attempt,
+  attempts,
   step,
   reportByAttempt,
+  onOpenTerminal,
 }: {
   task: WorkerTask;
   attempt: WorkerAttempt | null;
+  // Every attempt across the worker's supersedes chain, oldest first — the
+  // full retry lineage, predecessor tasks included.
+  attempts: WorkerAttempt[];
   step: StepState | null;
   reportByAttempt: ReadonlyMap<string, WorkerReport>;
+  onOpenTerminal?: () => void;
 }) {
   const status = deriveAgentStatus(task, attempt ?? undefined, step?.status ?? "running");
   const report = attempt ? reportByAttempt.get(attempt.id) : undefined;
-  const meta = [task.modelHint, task.effortHint, task.taskClass, attempt ? `attempt ${attempt.attemptNumber}` : null]
+  // Ordinal of the current attempt within the chain-wide lineage. Attempt
+  // numbers restart at 1 on a fallback clone, so the raw attemptNumber would
+  // contradict the graph card's chain-summed count.
+  const attemptIndex = attempt ? attempts.findIndex((entry) => entry.id === attempt.id) : -1;
+  const attemptOrdinal = attempt
+    ? attemptIndex >= 0
+      ? attemptIndex + 1
+      : attempt.attemptNumber
+    : 0;
+  // The attempt's resolved model beats the task's hint, the hint can be
+  // coerced onto the worker roster at spawn, and it is frequently unset, which
+  // used to drop the model from this line entirely.
+  const meta = [
+    attempt?.model ?? task.modelHint,
+    task.effortHint,
+    task.taskClass,
+    attempt ? `attempt ${attemptOrdinal}` : null,
+  ]
     .filter(Boolean)
     .join(" · ");
   const tone = statusColor(status);
@@ -1100,17 +1193,60 @@ function WorkerDetail({
       <Section title="Worker" first meta={<StatusWord label={attempt?.status ?? task.status} tone={tone} />}>
         <SnapshotCard title={task.title} subtitle={friendlyWorkerLine(task, attempt, status, report)} tone={tone}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <RuntimeTag runtime={attempt?.runtime ?? task.runtimePreference} />
+            <ModelTag
+              runtime={attempt?.runtime ?? task.runtimePreference}
+              model={attempt?.model ?? task.modelHint}
+            />
             <ElapsedChip
               startedAt={attempt?.startedAt}
               finishedAt={attempt?.finishedAt}
               tone={status === "running" ? "var(--accent)" : "var(--ink-dim)"}
             />
+            {onOpenTerminal && (
+              <button
+                type="button"
+                aria-label="Open worker terminal"
+                title="Open this worker's terminal"
+                onClick={onOpenTerminal}
+                style={{
+                  marginLeft: "auto",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  padding: "4px 9px",
+                  border: "1px solid var(--rule)",
+                  borderRadius: 7,
+                  background: "var(--bg)",
+                  color: "var(--ink-dim)",
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Open terminal
+                <svg width={10} height={10} viewBox="0 0 12 12" fill="none" aria-hidden>
+                  <path
+                    d="M4 3h5v5M9 3 3 9"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
           </div>
           <QuickStats
             items={[
               { label: "Status", value: status, tone },
-              { label: "Attempt", value: attempt ? String(attempt.attemptNumber) : "none" },
+              {
+                label: "Attempt",
+                value: attempt
+                  ? attempts.length > 1
+                    ? `${attemptOrdinal} of ${Math.max(WORKER_ATTEMPT_CAP, attempts.length)}`
+                    : String(attemptOrdinal)
+                  : "none",
+              },
               {
                 label: "Report",
                 value: report?.status ?? (status === "running" || attempt?.finalReportPath ? "pending" : "none"),
@@ -1125,6 +1261,96 @@ function WorkerDetail({
           )}
         </SnapshotCard>
       </Section>
+
+      {attempts.length > 1 && (
+        <Section title="Attempts" meta={<MetaCount value={attempts.length} />}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {attempts.map((entry, i) => {
+              const verdict = reportByAttempt.get(entry.id)?.verifier?.confidence;
+              const current = entry.id === attempt?.id;
+              return (
+                <div
+                  key={entry.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    gap: 8,
+                    padding: "6px 9px",
+                    border: `1px solid ${current ? "var(--rule)" : "var(--rule-soft)"}`,
+                    borderRadius: 6,
+                    background: current
+                      ? "color-mix(in oklab, var(--ink) 3%, transparent)"
+                      : "transparent",
+                    minWidth: 0,
+                  }}
+                >
+                  <span
+                    style={{
+                      color: "var(--muted)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                      fontVariantNumeric: "tabular-nums",
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    {i + 1}
+                  </span>
+                  <span
+                    style={{
+                      color: "var(--ink-dim)",
+                      fontFamily: "var(--font-sans)",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    {entry.runtime}
+                  </span>
+                  <span
+                    style={{
+                      color: attemptStatusColor(entry.status),
+                      fontFamily: "var(--font-sans)",
+                      fontSize: 10.5,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      minWidth: 0,
+                    }}
+                  >
+                    {sentenceCase(entry.status)}
+                  </span>
+                  <span style={{ flex: 1 }} />
+                  {verdict && (
+                    <span
+                      title="Verifier verdict for this attempt"
+                      style={{
+                        color: "var(--muted)",
+                        fontFamily: "var(--font-sans)",
+                        fontSize: 10,
+                        flex: "0 0 auto",
+                      }}
+                    >
+                      {sentenceCase(verdict)}
+                    </span>
+                  )}
+                  <span
+                    style={{
+                      color: "var(--muted)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                      fontVariantNumeric: "tabular-nums",
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    {formatDuration(entry.startedAt, entry.finishedAt)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
 
       <Section title="Report">
         {report ? (
@@ -1190,7 +1416,11 @@ function WorkerDetail({
 
       {attempt?.promptPath && (
         <Section title="Prompt">
-          <PromptBlock path={attempt.promptPath} />
+          <PromptBlock
+            key={`${task.runId}:${attempt.id}`}
+            runId={task.runId}
+            attemptId={attempt.id}
+          />
         </Section>
       )}
     </>
@@ -1217,8 +1447,6 @@ function PendingReport({ attempt }: { attempt: WorkerAttempt | null }) {
           height: 7,
           borderRadius: 999,
           background: "var(--accent)",
-          boxShadow: "0 0 10px color-mix(in oklch, var(--accent) 65%, transparent)",
-          animation: "spark-pulse 1.3s ease-in-out infinite",
           flex: "0 0 7px",
         }}
       />
@@ -1313,7 +1541,7 @@ function AttemptCommand({ command }: { command: string }) {
           style={{
             display: "block",
             padding: "8px 10px",
-            background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+            background: "color-mix(in oklab, var(--bg) 70%, transparent)",
             border: "1px solid var(--rule-soft)",
             borderRadius: 6,
             color: "var(--ink-dim)",
@@ -1333,7 +1561,7 @@ function AttemptCommand({ command }: { command: string }) {
 function KeyVal({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
-      <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 8.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+      <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 10, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>
         {label}
       </span>
       <span style={{ color: tone ?? "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 11.5, fontVariantNumeric: "tabular-nums" }}>
@@ -1347,7 +1575,7 @@ function PathList({ label, tone, paths }: { label: string; tone: string; paths: 
   const shown = paths.slice(0, 8);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <span style={{ color: tone, fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+      <span style={{ color: tone, fontFamily: "var(--font-sans)", fontSize: 10, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>
         {label}
       </span>
       {shown.map((path, i) => (
@@ -1385,14 +1613,13 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
             border: `1px solid color-mix(in oklch, ${tone} 45%, var(--rule))`,
             borderRadius: 4,
             padding: "1px 6px",
-            fontFamily: "var(--font-mono)",
-            fontSize: 9,
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.02em",
           }}
         >
-          {report.status}
+          {sentenceCase(report.status)}
         </span>
         {report.verifier && <VerdictPill confidence={report.verifier.confidence} />}
       </div>
@@ -1422,14 +1649,13 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
                 style={{
                   color:
                     test.result === "passed" ? "var(--ok)" : test.result === "failed" ? "var(--danger)" : "var(--muted)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 10,
+                  fontWeight: 600,
                   flex: "0 0 auto",
                 }}
               >
-                {test.result}
+                {sentenceCase(test.result)}
               </span>
               <span style={{ color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 10.5, wordBreak: "break-word" }}>
                 {test.command}
@@ -1513,14 +1739,13 @@ function VerdictPill({ confidence }: { confidence: VerifierVerdict["confidence"]
         border: `1px solid color-mix(in oklch, ${tone} 45%, var(--rule))`,
         borderRadius: 4,
         padding: "1px 6px",
-        fontFamily: "var(--font-mono)",
-        fontSize: 9,
-        fontWeight: 700,
-        textTransform: "uppercase",
-        letterSpacing: "0.06em",
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: "0.02em",
       }}
     >
-      verifier · {confidence}
+      Verifier · {sentenceCase(confidence)}
     </span>
   );
 }
@@ -1532,9 +1757,9 @@ function ReportGroup({ label, children }: { label: string; children: React.React
         style={{
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 9,
-          fontWeight: 700,
-          letterSpacing: "0.12em",
+          fontSize: 10,
+          fontWeight: 600,
+          letterSpacing: "0.06em",
           textTransform: "uppercase",
         }}
       >
@@ -1557,7 +1782,7 @@ function ReportSkeleton() {
             height: 9,
             borderRadius: 999,
             background:
-              "linear-gradient(90deg, color-mix(in oklch, var(--ink) 5%, transparent), color-mix(in oklch, var(--ink) 12%, transparent), color-mix(in oklch, var(--ink) 5%, transparent))",
+              "linear-gradient(90deg, color-mix(in oklab, var(--ink) 5%, transparent), color-mix(in oklab, var(--ink) 12%, transparent), color-mix(in oklab, var(--ink) 5%, transparent))",
             backgroundSize: "220% 100%",
             animation: "spark-shimmer 2.1s ease-in-out infinite",
           }}
@@ -1569,7 +1794,7 @@ function ReportSkeleton() {
 
 // ── Prompt block ─────────────────────────────────────────────────────────────
 
-function PromptBlock({ path }: { path: string }) {
+function PromptBlock({ runId, attemptId }: { runId: string; attemptId: string }) {
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1580,10 +1805,10 @@ function PromptBlock({ path }: { path: string }) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void window.spark.fs
-      .readText(path)
-      .then((file) => {
-        if (!cancelled) setContent(file.content);
+    void window.spark.orchestration
+      .readWorkerPrompt(runId, attemptId)
+      .then((prompt) => {
+        if (!cancelled) setContent(prompt);
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -1594,7 +1819,7 @@ function PromptBlock({ path }: { path: string }) {
     return () => {
       cancelled = true;
     };
-  }, [open, path, content, loading]);
+  }, [open, runId, attemptId, content, loading]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1646,7 +1871,7 @@ function PromptBlock({ path }: { path: string }) {
           style={{
             margin: 0,
             padding: "11px 12px",
-            background: "color-mix(in oklch, var(--bg) 72%, transparent)",
+            background: "color-mix(in oklab, var(--bg) 72%, transparent)",
             border: "1px solid var(--rule-soft)",
             borderRadius: 7,
             color: "var(--ink-dim)",
@@ -1673,8 +1898,8 @@ type FriendlyWorkerStatus = "queued" | "running" | "done" | "blocked";
 function friendlyRunLine(run: RunState, liveStep: StepState | undefined, attentionCount: number): string {
   if (attentionCount > 0) {
     return attentionCount === 1
-      ? "One item needs attention before the run can move cleanly."
-      : `${attentionCount} items need attention before the run can move cleanly.`;
+      ? "One item needs attention before the run can continue."
+      : `${attentionCount} items need attention before the run can continue.`;
   }
   if (liveStep) {
     return `Working on ${liveStep.title}.`;
@@ -1719,8 +1944,10 @@ function friendlyWorkerLine(
   return "Queued and waiting for Cora to launch it.";
 }
 
+// Plain unpadded index — "Step 1", queue count "2". Zero-padding read as
+// cockpit decoration.
 function pad(value: number): string {
-  return String(Math.max(0, value)).padStart(2, "0");
+  return String(Math.max(0, value));
 }
 
 function stepMark(status: StepState["status"]): "done" | "failed" | "running" | "pending" {

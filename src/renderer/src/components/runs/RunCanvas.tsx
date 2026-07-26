@@ -223,8 +223,10 @@ export default function RunCanvas({
 
   useEffect(() => () => stopAnimation(), [stopAnimation]);
 
-  // Frame the graph the first time a given run is shown: 100% zoom, the start
-  // of the spine kept in view at the left, vertically centred.
+  // Frame the graph the first time a given run is shown: fit the whole
+  // orchestration so parallel branches read at a glance, but never below a
+  // legibility floor — a graph still wider than the floor allows stays
+  // left-anchored so the spine is entered from its start.
   useLayoutEffect(() => {
     if (centeredRunIdRef.current === run.id) return;
     const viewport = viewportRef.current;
@@ -237,7 +239,9 @@ export default function RunCanvas({
     const vh = viewport.clientHeight;
     if (naturalW <= 0 || naturalH <= 0 || vw <= 0 || vh <= 0) return;
     centeredRunIdRef.current = run.id;
-    const z = clampZoom(DEFAULT_ZOOM);
+    const FIT_FLOOR = 0.45;
+    const fit = Math.min(DEFAULT_ZOOM, (vw - 96) / naturalW, (vh - 96) / naturalH);
+    const z = clampZoom(Math.max(FIT_FLOOR, fit));
     stopAnimation();
     zRef.current = z;
     targetZRef.current = z;
@@ -343,7 +347,10 @@ export default function RunCanvas({
         return;
       }
       setSelectedStepId(null);
-      setSelectedWorkerTaskId((current) => (current === id ? null : id));
+      // Single click selects and opens the inspector only. The terminal is
+      // reached deliberately — the card's arrow, the inspector's "Open
+      // terminal" action, or a double click — never as a click side effect.
+      setSelectedWorkerTaskId(id);
       revealInspector();
     },
     [revealInspector],
@@ -355,8 +362,8 @@ export default function RunCanvas({
         suppressNextNodeClickRef.current = false;
         return;
       }
-      // Double-click is the explicit navigation gesture. Keep the worker
-      // selected so returning to Runs preserves its inspector context.
+      // Keep legacy double-click routing equivalent to the new single-click
+      // path. The selection survives so returning to Runs preserves context.
       setSelectedStepId(null);
       setSelectedWorkerTaskId(id);
       revealInspector();
@@ -400,6 +407,7 @@ export default function RunCanvas({
       >
         <div
           ref={viewportRef}
+          data-testid="run-canvas-viewport"
           onPointerDown={startPanning}
           onPointerMove={movePanning}
           onPointerUp={stopPanning}
@@ -483,6 +491,7 @@ export default function RunCanvas({
                 selectedWorkerTaskId={selectedWorkerTaskId}
                 onSelectStep={handleSelectStep}
                 onSelectWorker={handleSelectWorker}
+                onOpenWorkerTerminal={onOpenWorkerTerminal}
                 onClear={clearSelection}
               />
             </div>
@@ -665,7 +674,7 @@ function CollapsedRail({ onExpand }: { onExpand: () => void }) {
         gap: 12,
         paddingTop: 11,
         borderLeft: "1px solid var(--rule)",
-        background: hover ? "color-mix(in oklch, var(--ink) 3%, var(--panel))" : "var(--panel)",
+        background: hover ? "color-mix(in oklab, var(--ink) 3%, var(--panel))" : "var(--panel)",
         color: hover ? "var(--ink-dim)" : "var(--muted)",
         cursor: "default",
         transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
@@ -685,8 +694,8 @@ function CollapsedRail({ onExpand }: { onExpand: () => void }) {
           writingMode: "vertical-rl",
           fontFamily: "var(--font-sans)",
           fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.16em",
+          fontWeight: 600,
+          letterSpacing: "0.08em",
           textTransform: "uppercase",
         }}
       >

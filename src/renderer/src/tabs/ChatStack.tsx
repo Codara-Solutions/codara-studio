@@ -1,19 +1,26 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import type { RunState, Workspace } from "@shared/types";
 import OrchestrationSidebar from "../components/OrchestrationSidebar";
 import type { ChatTab, Tab, TabId } from "./types";
+import type { CoraView } from "../components/chat/cora-view";
 
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
   workspace: Workspace | null;
+  // Which workspace `tabs`/`activeId` belong to. During a workspace switch the
+  // tab store lags `workspace` by one render, so retention must not mix the
+  // entering workspace's id with the leaving workspace's tabs.
+  tabsWorkspaceId: string | null;
+  validWorkspaceIds: ReadonlySet<string>;
   runs: RunState[];
+  runsWorkspaceId: string | null;
   activeRunId: string | null;
   terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode, lifted into App so the inner tab strip can
   // drive it without ChatPanel keeping a duplicate state.
-  chatView: "chat" | "terminal";
-  onChatViewChange: (view: "chat" | "terminal") => void;
+  chatView: CoraView;
+  onChatViewChange: (view: CoraView) => void;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -25,7 +32,10 @@ function ChatStack({
   tabs,
   activeId,
   workspace,
+  tabsWorkspaceId,
+  validWorkspaceIds,
   runs,
+  runsWorkspaceId,
   activeRunId,
   terminalScrollbackLineLimit,
   chatView,
@@ -39,51 +49,81 @@ function ChatStack({
   );
   const noop = useCallback(() => undefined, []);
 
-  if (chatTabs.length === 0) return null;
-  // Render ONLY the active chat tab's panel. Every chat tab binds the same
-  // workspace-level runs/activeRunId (chat state lives in the run store, not
-  // per-tab), so a hidden chat tab holds no unique state worth keeping warm —
-  // unlike terminal panes, whose PTYs must stay alive. Mounting all N tabs
-  // multiplied the streaming hot path: each hidden ChatConversation/ChatComposer
-  // registered an orchestration.onEvent listener, ran collectWorkspaceFiles on
-  // mount, and (in terminal sub-view) started a 1s pty.exists poll — all for
-  // zero visible output. The ONE thing that must survive this unmount — the
-  // backend Terminal view's live Ink TUI xterm — is no longer mounted inside
-  // this panel: App hoists it into a persistent ChatBackendTerminalStack layer
-  // that outlives ChatStack tearing this panel down, so the xterm and its full
-  // scrollback stay alive across tab switches (replaying main's bounded raw pty
-  // tail into a fresh xterm only reproduces a live TUI while the whole session
-  // still fits the 64KB tail — after a few minutes it doesn't, and a remount
-  // renders blank). The active tab's wrapper keeps its DOM identity via the tab
-  // key so switching back is a clean remount of just one panel.
-  const activeTab = chatTabs.find((tab) => tab.id === activeId);
-  if (!activeTab) return null;
+  type RetainedChat = {
+    workspace: Workspace;
+    tab: ChatTab;
+    runs: RunState[];
+    activeRunId: string | null;
+  };
+  // Keep one Cora surface mounted per visited workspace. This preserves the
+  // conversation DOM, scroll position, composer state, and controller state
+  // while an editor/terminal or another workspace is in front. Only one panel
+  // per workspace is retained because chat tabs share the same run store.
+  const retainedByWorkspaceRef = useRef<Map<string, RetainedChat>>(new Map());
+  const retained = retainedByWorkspaceRef.current;
+  for (const workspaceId of Array.from(retained.keys())) {
+    if (!validWorkspaceIds.has(workspaceId)) retained.delete(workspaceId);
+  }
+
+  // Skip retention on the one flip render where `tabs` still belongs to the
+  // leaving workspace — writing then would point the entering workspace's
+  // retained entry at a tab id from another workspace (mirrors the
+  // runsWorkspaceId ownership gate below).
+  if (workspace && tabsWorkspaceId === workspace.id) {
+    const previous = retained.get(workspace.id);
+    const selectedTab =
+      chatTabs.find((tab) => tab.id === activeId) ??
+      chatTabs.find((tab) => tab.id === previous?.tab.id) ??
+      chatTabs[0];
+    if (!selectedTab) {
+      retained.delete(workspace.id);
+    } else {
+      const ownsRunPayload = runsWorkspaceId === workspace.id;
+      retained.set(workspace.id, {
+        workspace,
+        tab: selectedTab,
+        runs: ownsRunPayload ? runs : (previous?.runs ?? []),
+        activeRunId: ownsRunPayload ? activeRunId : (previous?.activeRunId ?? null),
+      });
+    }
+  }
+
+  if (retained.size === 0) return null;
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      <div
-        key={activeTab.id}
-        style={{
-          position: "absolute",
-          inset: 0,
-          display: "flex",
-          flexDirection: "column",
-          pointerEvents: "auto",
-        }}
-      >
-        <OrchestrationSidebar
-          workspace={workspace}
-          runs={runs}
-          activeRunId={activeRunId}
-          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
-          chatView={chatView}
-          onChatViewChange={onChatViewChange}
-          onSelectRun={onSelectRun}
-          onRunSnapshot={onRunSnapshot}
-          collapsed={false}
-          onToggleCollapse={noop}
-          collapsible={false}
-        />
-      </div>
+      {Array.from(retained.entries()).map(([workspaceId, entry]) => {
+        const visible = workspace?.id === workspaceId && activeId === entry.tab.id;
+        return (
+          <div
+            key={workspaceId}
+            aria-hidden={!visible}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              visibility: visible ? "visible" : "hidden",
+              pointerEvents: visible ? "auto" : "none",
+            }}
+          >
+            <OrchestrationSidebar
+              workspace={entry.workspace}
+              runs={entry.runs}
+              activeRunId={entry.activeRunId}
+              composerDraftKey={`${workspaceId}:${entry.tab.id}`}
+              suspendGlobalEvents={!visible}
+              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
+              chatView={chatView}
+              onChatViewChange={onChatViewChange}
+              onSelectRun={onSelectRun}
+              onRunSnapshot={onRunSnapshot}
+              collapsed={false}
+              onToggleCollapse={noop}
+              collapsible={false}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }

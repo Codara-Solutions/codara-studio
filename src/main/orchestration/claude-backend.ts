@@ -49,7 +49,6 @@ import { writeFileAtomic } from "../fs-atomic";
 import { resolvePythonBinary } from "../hook-installer";
 import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "../mcp-installer";
 import { claudeProvider } from "../providers/claude";
-import { getPreferenceCached } from "../preferences-store";
 import { sparkHome } from "../spark-home";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { sanitizeNestedAgentEnv } from "../env-sanitize";
@@ -58,14 +57,17 @@ import type {
   SparkManagerDecision,
   SparkManagerQuestionOption,
   SparkManagerTaskDecision,
-} from "./openrouter-manager";
+} from "./manager-protocol";
 import { buildClaudeSandboxArgv, logConfigShieldOnce } from "./agent-config-shield";
 import { buildClaudeMcpToolAliases } from "./claude-mcp-tool-aliases";
 import { resolveLaunchTarget, startCliSession, type CliSession } from "./cli-session";
 import { buildSpawnTerminalsDecisionFromToolCalls } from "./cli-terminal-decision";
 import {
+  buildManagerStablePrefix,
   buildSparkRunContextBlock,
   buildTalkReplyDecision,
+  forgetRunManagerGuidance,
+  loadRunManagerGuidance,
   runDidPlanCouncil,
   type ChatStreamHandler,
   type ManagerCallResult,
@@ -175,9 +177,6 @@ const ECHO_PREFIX_MAX_CHARS = 24;
 const ECHO_PREFIX_MIN_CHARS = 6;
 const PASTED_TEXT_PLACEHOLDER = "[Pasted text";
 const TALK_SYSTEM_PROMPT_FILENAME = "cc-talk.md";
-// Opus 4.8 is the fallback when a chat requests Fable 5 but the Fable setting
-// is off. Matches the Cora-spawned-worker downgrade target (run-store.ts).
-const FABLE_DISABLED_FALLBACK_MODEL = "claude-opus-4-8";
 const TALK_SYSTEM_PROMPT_DEFAULT = `You are a helpful coding assistant in a chat with the user. Stay concise.
 
 You are in **Talk mode**. You can read code, search files, and answer questions about the workspace, but you cannot modify anything. Edit, Write, Bash, and other mutating tools are disabled by Codara for this chat — if the user asks for changes, tell them to switch the chat to Execute mode (or open a fresh chat in Execute mode) and you'll route the work through Cora workers there.
@@ -238,7 +237,7 @@ interface ClaudeChatSession {
    *  translator when CC fires `mcp__codara-studio__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
    *  ends to convert codara_spawn_terminals / codara_spawn_workers calls into a SparkManagerDecision
-   *  that the run-store can act on, exactly like grok/OpenRouter does. */
+   *  that the run-store can act on, the shape manager-protocol defines. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
   /** Wall-clock ms of the most recent JSONL line observed from CC. The
    *  turn-end waiter uses it only to detect *silence* (no transcript
@@ -363,18 +362,6 @@ export const claudeBackend: SparkAgentBackend = {
       // gives us token deltas, ordered tool blocks, an explicit terminal
       // result, interruption, and resumable provider sessions. The old print
       // transport remains available only as a test/diagnostic escape hatch.
-      if (
-        /fable/i.test(input.chat.model.trim()) &&
-        getPreferenceCached("fableEnabled") !== true
-      ) {
-        input.chat.model = FABLE_DISABLED_FALLBACK_MODEL;
-        emit({
-          kind: "system_note",
-          message:
-            "Fable 5 is off in Codara Studio settings (it is Anthropic's top-tier, most expensive model). " +
-            "Using Opus 4.8 (claude-opus-4-8) for this chat instead. Enable “Allow Fable 5” in Settings → Agents to use it.",
-        });
-      }
       if (useClaudeAgentSdkTransport()) {
         return await runClaudeAgentSdkTurn({
           input,
@@ -438,22 +425,6 @@ export const claudeBackend: SparkAgentBackend = {
         input.chat.sessionUuid = resumeUuid ?? input.chat.sessionUuid;
       }
       if (!chat) {
-        // Fable 5 gate (default off): if this chat is about to spawn Claude on
-        // claude-fable-5 while the Fable setting is disabled, downgrade to Opus
-        // 4.8 and surface a visible note. Mirrors the worker-spawn chokepoint —
-        // fable stays reachable from the main chat only when opted in.
-        if (
-          /fable/i.test(input.chat.model.trim()) &&
-          getPreferenceCached("fableEnabled") !== true
-        ) {
-          input.chat.model = FABLE_DISABLED_FALLBACK_MODEL;
-          emit({
-            kind: "system_note",
-            message:
-              "Fable 5 is off in Codara Studio settings (it is Anthropic's top-tier, most expensive model). " +
-              "Using Opus 4.8 (claude-opus-4-8) for this chat instead. Enable “Allow Fable 5” in Settings → Agents to use it.",
-          });
-        }
         chat = await spawnChatSession({
           runId,
           cwd: input.cwd,
@@ -656,7 +627,7 @@ export const claudeBackend: SparkAgentBackend = {
 
       const replyText = finalAssistantMessageText(chat);
       // Execute/Auto mode: convert codara_spawn_workers tool calls into the
-      // same SparkManagerDecision shape grok/OpenRouter produces. The
+      // canonical SparkManagerDecision shape manager-protocol defines. The
       // run-store already knows how to apply that decision (spawn workers,
       // ask user, mark complete). This is what makes CC in execute mode
       // behave like the existing manager pattern instead of a chat
@@ -740,6 +711,7 @@ export const claudeBackend: SparkAgentBackend = {
     const chat = sessions.get(runId);
     sessions.delete(runId);
     contextInjectedRuns.delete(runId);
+    forgetRunManagerGuidance(runId);
     if (chat) {
       await disposeChatSessionInternal(chat);
     }
@@ -867,9 +839,14 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
     message: `Starting Claude stream (mode=${mode}, session=${sessionUuid}, transport=agent-sdk).`,
   });
 
-  const parser = createClaudePrintParser(emit);
+  let parser = createClaudePrintParser(emit);
   let acceptedPromise: Promise<void> | null = null;
   let stderrTail = "";
+  const accumulatedUsage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+  } = {};
   const markAccepted = () => {
     if (acceptedPromise) return;
     if (injectedPlanContext) contextInjectedRuns.add(runId);
@@ -878,27 +855,68 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
 
   try {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
-    const options = await buildClaudeAgentSdkOptions({
-      runId,
-      cwd: input.cwd,
-      mode,
-      model: input.chat.model,
-      effort: input.chat.effort,
-      sessionUuid,
-      resume: Boolean(resumeSessionUuid),
-      systemPromptPath: opts.systemPromptPath,
-      abortController,
-      onStderr(data) {
-        stderrTail = `${stderrTail}${data}`.slice(-8_000);
-      },
-    });
-    const stream = query({ prompt: prompt || ".", options });
-    for await (const message of stream) {
-      if (claudeSdkMessageAcceptedPrompt(message)) markAccepted();
-      parser.accept(message);
+    let turnPrompt = prompt || ".";
+    let turnSessionUuid = sessionUuid;
+    let shouldResume = Boolean(resumeSessionUuid);
+    const maxProtocolAttempts = 2;
+
+    for (let protocolAttempt = 0; protocolAttempt < maxProtocolAttempts; protocolAttempt += 1) {
+      parser = createClaudePrintParser(emit);
+      const options = await buildClaudeAgentSdkOptions({
+        runId,
+        cwd: input.cwd,
+        mode,
+        model: input.chat.model,
+        effort: input.chat.effort,
+        sessionUuid: turnSessionUuid,
+        resume: shouldResume,
+        systemPromptPath: opts.systemPromptPath,
+        abortController,
+        onStderr(data) {
+          stderrTail = `${stderrTail}${data}`.slice(-8_000);
+        },
+      });
+      const stream = query({ prompt: turnPrompt, options });
+      for await (const message of stream) {
+        if (claudeSdkMessageAcceptedPrompt(message)) markAccepted();
+        parser.accept(message);
+      }
+      parser.finish();
+      await acceptedPromise;
+      accumulateClaudeUsage(accumulatedUsage, parser.usage);
+
+      if (parser.error) break;
+      const replyText = parser.resultText || parser.finalAssistantText;
+      const protocolViolation = claudeExecuteTurnRequiresAction(input, mode, replyText) &&
+        !hasClaudeExecuteDecisionToolCall(parser.toolCalls);
+      if (!protocolViolation) break;
+
+      if (protocolAttempt + 1 >= maxProtocolAttempts) {
+        const message =
+          "Claude described execute-mode work but did not call a Cora orchestration tool after one automatic retry.";
+        emit({ kind: "error", message });
+        return {
+          decision: buildTalkReplyDecision(replyText || message, "Claude orchestration protocol error"),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          inputTokens: accumulatedUsage.inputTokens,
+          outputTokens: accumulatedUsage.outputTokens,
+          cacheReadTokens: accumulatedUsage.cacheReadTokens,
+          newSessionUuid: parser.sessionUuid ?? turnSessionUuid,
+          notice: message,
+          turnFailed: true,
+        };
+      }
+
+      emit({
+        kind: "system_note",
+        message:
+          "Claude described delegation without calling a Cora tool; retrying this turn with the orchestration contract enforced.",
+      });
+      turnSessionUuid = parser.sessionUuid ?? turnSessionUuid;
+      shouldResume = true;
+      turnPrompt = buildClaudeExecuteProtocolCorrection(input.mode);
     }
-    parser.finish();
-    await acceptedPromise;
 
     const stale = (sessionGenerations.get(runId) ?? 0) !== opts.requestGeneration;
     if (active.interrupted || stale) {
@@ -929,13 +947,17 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
       };
     }
 
-    return buildClaudeStreamResult({
+    const result = buildClaudeStreamResult({
       input,
       mode,
       startedAt,
       sessionUuid,
       parser,
     });
+    result.inputTokens = accumulatedUsage.inputTokens;
+    result.outputTokens = accumulatedUsage.outputTokens;
+    result.cacheReadTokens = accumulatedUsage.cacheReadTokens;
+    return result;
   } catch (error) {
     parser.finish();
     await acceptedPromise;
@@ -1017,16 +1039,21 @@ async function buildClaudeAgentSdkOptions(input: {
   let systemPrompt: ClaudeAgentSdkOptions["systemPrompt"];
   let tools: ClaudeAgentSdkOptions["tools"];
   const disallowedTools: string[] = [];
+  // The shipped guidance is pinned for the life of the run (and re-used across
+  // this turn's protocol retries) so the cached prefix cannot change between
+  // turn N and turn N+1. See loadRunManagerGuidance.
+  const guidance = (): Promise<string> =>
+    loadRunManagerGuidance(input.runId, `${input.mode}:${input.systemPromptPath}`, () =>
+      fs.readFile(input.systemPromptPath, "utf8"),
+    );
   if (input.mode === "execute") {
     systemPrompt = buildExecuteSystemPrompt(input.cwd);
     tools = [];
   } else if (input.mode === "auto") {
-    const autoPrompt = await fs.readFile(input.systemPromptPath, "utf8");
-    systemPrompt = `${autoPrompt}\n\nWorkspace cwd: ${input.cwd}\n`;
+    systemPrompt = buildManagerStablePrefix({ guidance: await guidance(), cwd: input.cwd });
     tools = ["Read", "Glob", "Grep"];
   } else {
-    const appendedPrompt = await fs.readFile(input.systemPromptPath, "utf8");
-    systemPrompt = { type: "preset", preset: "claude_code", append: appendedPrompt };
+    systemPrompt = { type: "preset", preset: "claude_code", append: await guidance() };
     tools = { type: "preset", preset: "claude_code" };
     disallowedTools.push("Edit", "Write", "Bash", "NotebookEdit", "MultiEdit");
   }
@@ -1074,6 +1101,66 @@ async function buildClaudeAgentSdkOptions(input: {
     ...(input.resume ? { resume: input.sessionUuid } : { sessionId: input.sessionUuid }),
     stderr: input.onStderr,
   };
+}
+
+function accumulateClaudeUsage(
+  target: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number },
+  current: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number },
+): void {
+  for (const key of ["inputTokens", "outputTokens", "cacheReadTokens"] as const) {
+    const value = current[key];
+    if (typeof value === "number") target[key] = (target[key] ?? 0) + value;
+  }
+}
+
+function hasClaudeExecuteDecisionToolCall(
+  toolCalls: Array<{ toolName: string }>,
+): boolean {
+  const decisions = [
+    "codara_spawn_terminals",
+    "codara_spawn_workers",
+    "codara_ask_user",
+    "codara_complete",
+  ];
+  return toolCalls.some((call) =>
+    decisions.some(
+      (name) =>
+        call.toolName === name ||
+        call.toolName === `mcp__codara-studio__${name}`,
+    ),
+  );
+}
+
+function claudeExecuteTurnRequiresAction(
+  input: ManagerRequestInput,
+  mode: ChatMode,
+  replyText: string,
+): boolean {
+  if (mode !== "execute") return false;
+  if (input.mode !== "chat") return true;
+  // Execute chat may legitimately answer a read-only question in prose. A
+  // promise that workers are being spawned/delegated is different: without a
+  // matching MCP call it is an observable protocol failure, not an answer.
+  return /\b(?:spawn(?:ing|ed)?|delegat(?:e|ed|ing)|launch(?:ing|ed)?)\b[^\n.]{0,100}\b(?:workers?|agents?)\b/i.test(
+    replyText,
+  );
+}
+
+function buildClaudeExecuteProtocolCorrection(
+  managerMode: ManagerRequestInput["mode"],
+): string {
+  if (managerMode === "worker_result_review") {
+    return [
+      "Protocol correction: your previous reply did not call a Cora orchestration tool.",
+      "Continue the existing execution now. Inspect the worker results available through the Cora tools, spawn a corrective worker if needed, or call codara_complete only after the work is verified.",
+      "Do not describe an action without making the matching tool call.",
+    ].join(" ");
+  }
+  return [
+    "Protocol correction: your previous reply described delegation but did not execute it.",
+    "The original user request remains active. Call codara_spawn_workers NOW with concrete worker specifications, then wait for and verify their results before completing.",
+    "Do not repeat a promise or plan in prose; make the tool call.",
+  ].join(" ");
 }
 
 function packagedClaudeAgentSdkExecutable(): string | undefined {
@@ -1635,7 +1722,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //   behavior. `--disallowed-tools` blocks edits but leaves Read/Glob/Grep
   //   available so the user can ask about the code.
   //
-  // - Execute: CC is a *manager*. Same pattern grok/OpenRouter uses — the
+  // - Execute: CC is a *manager*. Same pattern every manager backend uses, the
   //   user message goes in, a worker-spawn spec comes out. We use
   //   `--system-prompt` (FULL OVERRIDE, not append) so CC's default
   //   "be a helpful coder" personality is gone and our orchestrator prompt
@@ -2301,8 +2388,8 @@ function sleep(ms: number): Promise<void> {
  * Convert the spark_* tool calls CC made this turn into a SparkManagerDecision
  * — the shape the rest of the run-store pipeline already knows how to apply
  * (open standing terminals, spawn workers, ask user, mark complete). This is the bridge that makes
- * CC-in-execute-mode behave identically to grok/OpenRouter from the
- * run-store's perspective.
+ * CC-in-execute-mode indistinguishable from any other manager backend from
+ * the run-store's perspective.
  *
  * Lookup order: spawn_terminals > complete > spawn_workers > ask_user. Everything else is
  * treated as conversational and produces a chatReply (which usually means
@@ -2499,7 +2586,7 @@ function coerceQuestionOption(
  * Execute-mode system prompt — passed via `--system-prompt` as a FULL
  * override of CC's default. This is the only instruction CC sees in
  * execute mode; the chat conversation history is treated as context, not
- * as authority. Mirrors the role grok/OpenRouter plays: turn each user
+ * as authority. The manager's whole job in this mode: turn each user
  * message into a `codara_spawn_workers` call.
  *
  * We deliberately don't reference Talk mode, don't apologize for the
@@ -2518,7 +2605,8 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "",
     "For every user turn that asks for changes (edits, refactors, new features, fixes, redesigns, file moves, anything that touches the workspace), your FIRST action is a call to `codara_spawn_workers`. The worker spec is the entire output of your turn — no prose alternatives, no clarifying refusals, no \"here's what I'd do\" lists. Just spawn. A single-sentence orchestration comment alongside the call is fine (\"Spawning a Claude worker to redesign the calculator UI.\") but optional.",
     "The manager has no filesystem tools, so every implementation worker must begin by reading the nearest project guidance and relevant entry points, preserving existing user changes, and discovering the project's real files/scripts/patterns before editing. Never invent paths merely to make a plan look parallel.",
-    "Use the smallest effective team: one strong implementation worker plus an independent verifier for a cohesive same-file or sequential change; 2-4 implementation workers only when the work has genuinely independent, non-overlapping surfaces and explicit interface contracts.",
+    "Size the team to the work, and do not under-staff it: one strong implementation worker plus an independent verifier for a cohesive same-file or sequential change; 2-4 implementation workers whenever the work has genuinely independent, non-overlapping surfaces, that case is common, and running those slices together instead of back-to-back is the main thing that makes a long task finish. The first verifier uses the OTHER provider's standard model at high effort with compact table-driven probes. Escalate to claude-fable-5 only after PARTIAL/FEEDBACK/FAILED, a missing oracle, or for security/auth/cryptographic/destructive-migration risk.",
+    "After spawning, call codara_wait_for_workers. Its result includes each worker's normalized final_report, including verifier confidence, failed_claims, and corrective_prompt. A FEEDBACK or FAILED verifier verdict means the work is NOT complete: launch or wait for the narrow corrective implementation, then verify again. Never claim a defect was fixed merely because the verifier described the required fix.",
     "",
     "For genuinely ambiguous turns (the user wrote one vague word, or asked you to make a value judgment with no decision-relevant context), call `codara_ask_user` with 2-4 concrete options. Don't ask in prose.",
     "",
@@ -2537,7 +2625,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "    title: string,                       // 4-10 word chip label",
     "    description: string,                 // full prompt the worker sees — be specific",
     "    runtimePreference: 'claude' | 'codex',",
-    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-5' | 'gpt-5.6-sol' | 'gpt-5.6-terra' | 'gpt-5.6-luna' | 'claude-fable-5',",
+    "    modelHint?: 'claude-opus-5' | 'gpt-5.6-sol' | 'claude-fable-5',",
     "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max',",
     "    allowedPaths?: string[],             // cwd-relative; parallel workers must NOT overlap",
     "    forbiddenPaths?: string[],",
@@ -2548,13 +2636,22 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "]",
     "```",
     "",
+    "## The worker model roster",
+    "",
+    "Three models, and only these three. Anything else you name is coerced onto this roster at spawn time, so naming one is wasted precision.",
+    "- `claude-opus-5`: STANDARD tier. The default workhorse. Use it unless you have a reason not to.",
+    "- `gpt-5.6-sol`: STANDARD tier, other provider. Same weight class as Opus; reach for it when a second, independent model family genuinely helps (verification, a cross-check, a task that plays to it).",
+    "- `claude-fable-5`: PREMIUM tier. The strongest and materially the most expensive. Reserve it for genuinely hard work: subtle invariants, tricky concurrency, large refactors, algorithmic depth, or a bug that already defeated a standard-tier worker.",
+    "",
+    "Match the model to the difficulty, not to the importance. A mechanical rename in twelve files is an easy task even in a critical system, that is standard tier with low effort. Spending premium tokens on easy work is a real cost, and starving a hard task of capability wastes an entire worker run.",
+    "",
     "Rules of thumb:",
     "- Workers that can run in parallel MUST have non-overlapping `allowedPaths`. Same-file writes serialize.",
-    "- `skeleton` tasks (architectural decisions later workers inherit) → strongest model + high effort.",
-    "- `feature` tasks (standard implementation against an established skeleton) → mid model + medium effort.",
-    "- `leaf` tasks (mechanical, well-defined work) → cheapest model + low effort.",
-    "- `verifier` tasks (read-only follow-up that re-derives ground truth) → peer model + high effort, `allowedPaths: []`.",
-    "- `claude-fable-5` is Anthropic's premium, most expensive tier. Set it as a worker's modelHint ONLY when the user's own message explicitly asked for Fable 5 for this work; otherwise never — Codara downgrades an unrequested fable hint to claude-opus-4-8.",
+    "- PREFER PARALLEL. If the work splits into slices that touch different files, spawn them together in one batch rather than one after another, that is the single biggest lever you have on wall-clock time. Do not serialize out of caution; serialize only for a real dependency (a slice needs another's output) or a real file conflict.",
+    "- `skeleton` is ONLY for a genuinely new architecture/interface that later workers inherit. Existing-file changes, cohesive implementations, refactors, bug fixes, and public-API repairs are `feature` even when difficult.",
+    "- `feature` tasks (standard implementation against an established skeleton) → standard tier + medium/high effort.",
+    "- `leaf` tasks (mechanical, well-defined work, plus research or recon slices that only report findings) → standard tier + low effort. A read-only investigation is `leaf`, never `verifier`.",
+    "- `verifier` tasks (read-only follow-up that re-derives ground truth) → the OTHER provider's standard model from the implementer (Claude implementation → `gpt-5.6-sol` verifier; Codex implementation → `claude-opus-5` verifier) + high effort, `allowedPaths: []`; cover all stated claims, named boundaries, and three implied fixtures in 3-8 compact probe batches. Escalate to `claude-fable-5` only after a non-clean verdict or for security-sensitive risk. A verifier only ever CHECKS an artifact an implementation worker already produced, so never spawn one in a run's first batch and never make every worker in a batch a verifier: that batch is rejected.",
     "",
     "The user's chat conversation may include prior turns where you replied conversationally — those were under a different mode and DO NOT bind your behavior now. This system prompt is your sole authority for this turn.",
   ].join("\n");

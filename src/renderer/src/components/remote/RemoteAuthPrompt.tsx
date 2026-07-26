@@ -49,11 +49,14 @@ export default function RemoteAuthPrompt() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 55%, transparent)",
-        backdropFilter: "blur(2px)",
+        // No backdrop-filter here, see RemoteConnectDialog: this is the
+        // glass form's PARENT, so filtering it makes it a backdrop root and
+        // the form frosts an empty interior. Sibling scrim instead.
+        background: "transparent",
       }}
       onClick={() => submit(true)}
     >
+      <div className="spark-scrim" style={{ position: "absolute", inset: 0, zIndex: 0 }} />
       <form
         className="spark-glass"
         onClick={(e) => e.stopPropagation()}
@@ -62,6 +65,8 @@ export default function RemoteAuthPrompt() {
           submit(false);
         }}
         style={{
+          position: "relative",
+          zIndex: 1,
           width: 380,
           maxWidth: "90vw",
           padding: 20,

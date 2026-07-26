@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import type { ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
+import UsageMeters from "./UsageMeters";
 import type { NavigateTo } from "../notifications/routing";
 
 type AppRegionStyle = React.CSSProperties & {
@@ -148,7 +149,7 @@ function ChromeButton({
   // token (color-mixed darker for a solid hover plate) and place the ink on
   // it as a token mix so the glyph stays legible across the light themes too.
   const hoverBg = danger ? "color-mix(in oklch, var(--danger) 78%, var(--bg))" : "var(--hover)";
-  const hoverFg = danger ? "color-mix(in oklch, var(--bg) 92%, var(--danger))" : "var(--ink)";
+  const hoverFg = danger ? "color-mix(in oklab, var(--bg) 92%, var(--danger))" : "var(--ink)";
   return (
     <button
       type="button"
@@ -258,7 +259,7 @@ function WindowChrome({
           display: "flex",
           alignItems: "stretch",
           borderBottom: "1px solid var(--rule)",
-          background: "color-mix(in oklch, var(--panel) 70%, var(--bg))",
+          background: "color-mix(in oklab, var(--panel) 70%, var(--bg))",
           boxShadow: "var(--lift-hi)",
           flex: "0 0 auto",
           userSelect: "none",
@@ -313,6 +314,7 @@ function WindowChrome({
           alignItems: "stretch",
         }}
       >
+        <UsageMeters />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
         <NotificationCenter
           navigateTo={notifyNavigateTo}

@@ -12,6 +12,10 @@ import type {
   AgentAssetDeleteResult,
   AgentAssetInstallResult,
   AgentAssetInventory,
+  AgentMcpSaveResult,
+  AgentMcpServerDetail,
+  AgentMcpServerDraft,
+  AgentMcpTarget,
   AgentRuntimeDiagnostic,
   AgentSyncResult,
   SparkBuiltinActionResult,
@@ -23,11 +27,15 @@ import type {
   AppState,
   AutomationDetail,
   AutomationWorkerInfo,
+  CoraMemoryScope,
+  CoraMemoryStatus,
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
   CreateScheduledJobInput,
   CreateWorkerTaskInput,
+  DeleteWorkerSessionInput,
+  DeleteWorkerSessionResult,
   EnqueueRunInput,
   FileListResult,
   FsChangeEvent,
@@ -56,11 +64,24 @@ import type {
   NotificationSoundKind,
   NotifyEvent,
   UpdateChatBackendInput,
+  UpdateCoraWhiteboardInput,
+  ExportCoraWhiteboardFileInput,
+  ExportFileDialogInput,
+  ImportedCoraWhiteboardFile,
+  WorkerSessionRuntime,
+  WorkerSessionSummary,
   PauseRunInput,
+  PiRuntimeInstallEvent,
+  PiSubscriptionAuthEvent,
+  PiCatalogModel,
+  PiSubscriptionOverview,
+  PiUsageOverview,
+  PiSubscriptionProvider,
   PlanFile,
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
+  PtyExitInfo,
   QueuedRun,
   RenameRunInput,
   ResumeRunInput,
@@ -91,7 +112,7 @@ import type {
 } from "@shared/types";
 
 type PtyDataHandler = (data: Uint8Array | string) => void;
-type PtyExitHandler = (info: { exitCode: number; signal?: number }) => void;
+type PtyExitHandler = (info: PtyExitInfo) => void;
 type HostResumeHandler = (info: {
   reason: "resume" | "unlock-screen";
   at: number;
@@ -172,10 +193,51 @@ const api = {
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
     save: (state: AppState): Promise<void> => ipcRenderer.invoke("state:save", state),
+    // Main-side clients such as the `cora` CLI can create a workspace while
+    // the renderer is already open. Push the authoritative state immediately
+    // so the new Cora session appears without requiring an app restart.
+    onChanged: (handler: (state: AppState) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: AppState) => handler(state);
+      ipcRenderer.on("state:changed", listener);
+      return () => ipcRenderer.off("state:changed", listener);
+    },
   },
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
+  },
+  piSubscriptions: {
+    status: (): Promise<PiSubscriptionOverview> => ipcRenderer.invoke("pi-subscriptions:status"),
+    connect: (
+      provider: PiSubscriptionProvider,
+    ): Promise<{ requestId: string; provider: PiSubscriptionProvider }> =>
+      ipcRenderer.invoke("pi-subscriptions:connect", { provider }),
+    respond: (input: { requestId: string; promptId: string; value: string }): Promise<void> =>
+      ipcRenderer.invoke("pi-subscriptions:respond", input),
+    cancel: (requestId: string): Promise<void> =>
+      ipcRenderer.invoke("pi-subscriptions:cancel", { requestId }),
+    disconnect: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:disconnect", { provider }),
+    onEvent: (handler: (event: PiSubscriptionAuthEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, authEvent: PiSubscriptionAuthEvent) =>
+        handler(authEvent);
+      ipcRenderer.on("pi-subscriptions:event", listener);
+      return () => ipcRenderer.off("pi-subscriptions:event", listener);
+    },
+    installRuntime: (): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-runtime:install"),
+    usage: (force = false): Promise<PiUsageOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:usage", { force }),
+    // Returns [] rather than throwing when Pi is absent, so the picker falls
+    // back to its curated rows instead of failing to render.
+    catalog: (force = false): Promise<PiCatalogModel[]> =>
+      ipcRenderer.invoke("pi-models:catalog", { force }).catch(() => []),
+    onRuntimeInstallEvent: (handler: (event: PiRuntimeInstallEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, installEvent: PiRuntimeInstallEvent) =>
+        handler(installEvent);
+      ipcRenderer.on("pi-runtime:install-event", listener);
+      return () => ipcRenderer.off("pi-runtime:install-event", listener);
+    },
   },
   agents: {
     runtimes: (force = false): Promise<AgentRuntimeDiagnostic[]> =>
@@ -213,6 +275,28 @@ const api = {
         }
         throw err;
       }),
+    mcpTargets: (input?: { cwd?: string | null }): Promise<AgentMcpTarget[]> =>
+      ipcRenderer.invoke("agents:mcpTargets", input ?? {}).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:mcpTargets")) return [];
+        throw err;
+      }),
+    mcpDetail: (id: string): Promise<AgentMcpServerDetail | null> =>
+      ipcRenderer.invoke("agents:mcpDetail", { id }).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:mcpDetail")) return null;
+        throw err;
+      }),
+    saveMcpServer: (input: {
+      cwd?: string | null;
+      targetId: string;
+      server: AgentMcpServerDraft;
+      replaceId?: string | null;
+    }): Promise<AgentMcpSaveResult> =>
+      ipcRenderer.invoke("agents:saveMcpServer", input).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:saveMcpServer")) {
+          return { ok: false, error: "Restart Codara to enable adding MCP servers." };
+        }
+        throw err;
+      }),
     builtins: (): Promise<SparkBuiltinMcpStatus[]> =>
       ipcRenderer.invoke("agents:builtins").catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:builtins")) return [];
@@ -238,6 +322,25 @@ const api = {
         }
         throw err;
       }),
+  },
+  // Cora's writable memory files. Reads and mutations both resolve to the
+  // fresh status pair for both tiers, so a toggle or a clear needs no follow-up
+  // read. Content is edited in the editor, not through this bridge.
+  memory: {
+    get: (workspaceId: string | null): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:get", { workspaceId }),
+    setEnabled: (
+      scope: CoraMemoryScope,
+      workspaceId: string | null,
+      enabled: boolean,
+    ): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:setEnabled", { scope, workspaceId, enabled }),
+    clear: (
+      scope: CoraMemoryScope,
+      workspaceId: string | null,
+      includeUserLines: boolean,
+    ): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines }),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),
@@ -317,6 +420,15 @@ const api = {
       ipcRenderer.invoke("dialog:openDirectory", defaultPath),
     openImages: (defaultPath?: string): Promise<string[]> =>
       ipcRenderer.invoke("dialog:openImages", defaultPath),
+    exportWhiteboard: (input: ExportCoraWhiteboardFileInput): Promise<string | null> =>
+      ipcRenderer.invoke("dialog:exportWhiteboard", input),
+    importWhiteboard: (defaultPath?: string): Promise<ImportedCoraWhiteboardFile | null> =>
+      ipcRenderer.invoke("dialog:importWhiteboard", defaultPath),
+    // Generic dialog-based export for renderer-produced artifacts (board
+    // images, …): prompts for a destination and writes utf8 text or base64
+    // bytes. See dialog:exportFile in ipc.ts.
+    exportFile: (input: ExportFileDialogInput): Promise<string | null> =>
+      ipcRenderer.invoke("dialog:exportFile", input),
   },
   attachments: {
     savePastedImage: (input: { dataUrl: string; name?: string }): Promise<string> =>
@@ -521,6 +633,8 @@ const api = {
       ipcRenderer.invoke("orchestration:createRun", input),
     getRun: (runId: string): Promise<RunState | null> =>
       ipcRenderer.invoke("orchestration:getRun", runId),
+    readWorkerPrompt: (runId: string, attemptId: string): Promise<string> =>
+      ipcRenderer.invoke("orchestration:readWorkerPrompt", { runId, attemptId }),
     listRuns: (workspaceId?: string): Promise<RunState[]> =>
       ipcRenderer.invoke("orchestration:listRuns", workspaceId),
     listEvents: (runId: string): Promise<SparkEvent[]> =>
@@ -555,6 +669,8 @@ const api = {
       ipcRenderer.invoke("orchestration:markRunSeen", input),
     renameRun: (input: RenameRunInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:renameRun", input),
+    updateWhiteboard: (input: UpdateCoraWhiteboardInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:updateWhiteboard", input),
     updateChatBackend: (input: UpdateChatBackendInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateChatBackend", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>
@@ -669,8 +785,7 @@ const api = {
     },
     onExit: (id: string, handler: PtyExitHandler): (() => void) => {
       const channel = `pty:exit:${id}`;
-      const listener = (_e: Electron.IpcRendererEvent, info: { exitCode: number; signal?: number }) =>
-        handler(info);
+      const listener = (_e: Electron.IpcRendererEvent, info: PtyExitInfo) => handler(info);
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
@@ -679,6 +794,16 @@ const api = {
   // session's id, probe whether it still exists before resuming, and pre-seed
   // Codex directory trust. See src/main/ipc.ts "agentSession:*" handlers.
   agentSession: {
+    // List resumable sessions whose recorded cwd matches the worker launch
+    // directory. The main process reads CLI-owned JSONL metadata; transcript
+    // contents remain on disk.
+    list: (args: {
+      runtime: WorkerSessionRuntime;
+      cwd: string;
+    }): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:list", args),
+    listAll: (): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:listAll"),
+    delete: (input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> =>
+      ipcRenderer.invoke("agentSession:delete", input),
     // Discover the session id of a Claude/Codex agent just detected running in a
     // pane, by finding the transcript it started writing for this cwd. Resolves
     // null on timeout.
@@ -759,8 +884,19 @@ const api = {
     sync: (input: {
       workspaceId: string;
       workspaceName?: string;
-      panes: Array<{ paneId: string; tabId: string; tabTitle: string; excluded: boolean }>;
-    }): Promise<void> => ipcRenderer.invoke("terminalNotify:sync", input),
+      panes: Array<{
+        paneId: string;
+        tabId: string;
+        tabTitle: string;
+        excluded: boolean;
+        runtimeHint?: "claude" | "codex" | null;
+      }>;
+    }): Promise<TerminalAgentStatePayload[]> => ipcRenderer.invoke("terminalNotify:sync", input),
+    // Level-triggered recovery for renderer reload/cold hydration. Live events
+    // stay the fast path; this snapshot repairs any transition emitted before
+    // the listener or restored worker chip existed.
+    snapshot: (): Promise<TerminalAgentStatePayload[]> =>
+      ipcRenderer.invoke("terminalNotify:snapshot"),
     // Fires alongside every terminal-agent alert (regardless of channel
     // settings) so the workspace rail can mark the owning workspace as
     // needing attention until the user visits the pane's tab.
@@ -832,8 +968,20 @@ const api = {
     // BEFORE it kills the PTYs, so the renderer can mark teardown and stop
     // deactivating running agents' restore pointers as their shells die. Returns
     // an unsubscribe function.
-    onBeforeQuit: (handler: () => void): (() => void) => {
-      const listener = () => handler();
+    onBeforeQuit: (
+      handler: (payload: { activeAgentPaneIds: string[] }) => void,
+    ): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload?: { activeAgentPaneIds?: unknown },
+      ) =>
+        handler({
+          activeAgentPaneIds: Array.isArray(payload?.activeAgentPaneIds)
+            ? payload.activeAgentPaneIds.filter(
+                (paneId): paneId is string => typeof paneId === "string" && paneId.length > 0,
+              )
+            : [],
+        });
       ipcRenderer.on("app:before-quit", listener);
       return () => ipcRenderer.off("app:before-quit", listener);
     },

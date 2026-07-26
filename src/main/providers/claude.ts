@@ -30,19 +30,14 @@ import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 // Opus 4.8, and Sonnet 4.6 share the same 5-tier ladder; tier sizing affects
 // throughput/latency, not the available knobs.
 //
-// Fable 5 is Anthropic's top-tier model (above Opus 4.8). It is allowed as a
-// main chat-session model and as an opt-in automation (loom) worker model — the
-// automation engine validates pinned/handoff models against THIS list, so its
-// presence here is what unblocks `worker.model = "claude-fable-5"`. Opus 4.8
-// stays the default (isDefault) so nothing silently upgrades to fable. Workers
-// that Codara itself spawns (execute-mode codara_spawn_workers, plan-council,
-// autopilot) run fable whenever the user explicitly asked for it in their own
-// message this run (the setting does NOT gate this worker path — automation
-// launches keep their own setting check); otherwise their fable hint is
-// downgraded to Opus 4.8. That gate
-// lives at the spawn chokepoints (agent-socket handleOrchestratorSpawnWorkers)
-// plus a buildLaunchCommandLine backstop, not here; see sanitizeWorkerModelHint
-// + workerFableAllowed in run-store.ts (and worker-model-hint.ts).
+// Fable 5 is Anthropic's premium tier (above Opus 4.8). It is available
+// everywhere a model can be picked — chat, Cora-spawned workers, automation
+// (loom) workers; the automation engine validates pinned/handoff models
+// against THIS list, so its presence here is what unblocks
+// `worker.model = "claude-fable-5"`. Opus 4.8 keeps `isDefault` so a launch
+// with NO model specified never silently lands on the premium tier — picking
+// Fable is always a deliberate choice (see WORKER_DEFAULT_CLAUDE_MODEL in
+// worker-model-hint.ts for the worker-side pin).
 const CLAUDE_MODELS: AgentRuntimeModel[] = [
   {
     id: "claude-fable-5",
@@ -51,8 +46,8 @@ const CLAUDE_MODELS: AgentRuntimeModel[] = [
     tier: "top",
   },
   {
-    id: "claude-opus-4-8",
-    label: "Opus 4.8",
+    id: "claude-opus-5",
+    label: "Opus 5",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isDefault: true,
     tier: "top",

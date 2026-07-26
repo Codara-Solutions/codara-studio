@@ -207,25 +207,21 @@ function normalizeModifiers(raw: unknown): string[] {
 // Console capture — wired at tab announce (dom-ready). Ring buffer cap 500.
 // ---------------------------------------------------------------------------
 
-// Electron 32 emits the classic numeric-level signature. Map to readable names.
-const CONSOLE_LEVELS: Record<number, string> = { 0: "debug", 1: "info", 2: "warning", 3: "error" };
-
 function ensureConsoleAttached(wc: WebContents): void {
   const state = getState(wc.id);
   if (state.consoleAttached) return;
   state.consoleAttached = true;
-  wc.on(
-    "console-message",
-    (_event: unknown, level: number, message: string, line: number, sourceId: string) => {
-      pushConsole(state, {
-        level: CONSOLE_LEVELS[level] ?? "log",
-        message: typeof message === "string" ? message : String(message),
-        line: typeof line === "number" ? line : null,
-        source: typeof sourceId === "string" && sourceId ? sourceId : null,
-        at: new Date().toISOString(),
-      });
-    },
-  );
+  // Modern params-object signature (Electron ≥ 30) — reading the legacy
+  // positional args triggers a deprecation warning on every message.
+  wc.on("console-message", (event) => {
+    pushConsole(state, {
+      level: typeof event.level === "string" ? event.level : "log",
+      message: typeof event.message === "string" ? event.message : String(event.message),
+      line: typeof event.lineNumber === "number" ? event.lineNumber : null,
+      source: typeof event.sourceId === "string" && event.sourceId ? event.sourceId : null,
+      at: new Date().toISOString(),
+    });
+  });
   wc.once("destroyed", () => {
     guests.delete(wc.id);
   });

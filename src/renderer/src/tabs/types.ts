@@ -34,9 +34,10 @@ export interface EditorTab extends BaseTab {
   preview?: boolean;
 }
 
-// Durable pointer to a Claude/Codex CLI session that was launched in a terminal
-// leaf via the "Worker — Claude/Codex" entries. Persisted with the tab layout so
-// a reopen can relaunch the same conversation with `claude -r <id>` /
+// Durable pointer to a Claude/Codex CLI session detected in a terminal leaf,
+// whether it came from Codara's launcher or a command typed by the user.
+// Persisted with the tab layout so a reopen can relaunch the same conversation
+// with `claude --resume <id>` /
 // `codex resume <id>`. Only the session id (+ its cwd) is stored — the transcript
 // itself lives in the CLI's own on-disk history and is rehydrated by --resume.
 // Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
@@ -89,21 +90,43 @@ export interface TerminalLeaf {
   // any later re-mount (the PTY persists across remounts, so the command
   // should only fire once per session).
   autorun?: string;
-  // Runtime Claude/Codex session pointer for an agent launched in this pane.
-  // Cold hydration strips it; Codara never auto-resumes terminal agents after a
-  // full app relaunch.
+  // Durable Claude/Codex session pointer for an agent running in this pane.
+  // Cold hydration validates it and marks an active session as eligible for the
+  // opt-in resume-on-launch flow; the preference is checked before any command
+  // is started.
   agentSession?: TerminalAgentSession | null;
-  // Runtime-only legacy restore marker. Retained in the type while same-process
-  // agent plumbing is simplified, but stripped from persisted layouts.
+  // Runtime-only, one-shot cold-restore marker. It is derived from a validated
+  // active agentSession during hydration and is never written to localStorage.
   bootResume?: boolean;
 }
 
 export interface TerminalLeafWorker {
-  runtime?: "claude" | "codex" | "cursor" | "opencode";
+  runtime?: "claude" | "codex" | "opencode";
   runId: string;
   workerTaskId: string;
   attemptId: string;
   source: "spark" | "manual";
+  // Human task title (WorkerTask.title) shown in the worker pane header so the
+  // user can tell panes apart. Best-effort: filled from a getRun lookup, so it
+  // can lag the pane by a beat or stay unset if the lookup fails.
+  title?: string;
+  // 1-based WorkerAttempt.attemptNumber. The pane header shows "attempt N"
+  // when > 1, and open-from-graph prefers the leaf with the highest ordinal.
+  attemptOrdinal?: number;
+  // Which harness executes the attempt: "cli" panes host a real provider TUI,
+  // "pi" panes mirror the main-process Pi event stream. Derived from
+  // WorkerAttempt.command, which is only stamped at launch — undefined before
+  // then.
+  harness?: "pi" | "cli";
+  // WorkerAttempt.model, the model this attempt actually launched on. The
+  // pane header names this rather than the provider, because under Pi every
+  // worker runs on the same harness and "Claude"/"Codex" only identifies the
+  // subscription. Undefined for attempts recorded before the field existed,
+  // which is why the header still falls back to the harness/provider label.
+  model?: string;
+  // WorkerAttempt.startedAt (ISO). Drives the header's live elapsed readout;
+  // absent until the attempt has actually launched.
+  startedAt?: string;
   // Lifecycle of the worker attempt. While "running" the chip pulses; on
   // "done" the pane may show a static completion chip until the foreground
   // agent exits and the shell prompt is back.
@@ -206,7 +229,24 @@ export interface AutomationsTab extends BaseTab {
   kind: "automations";
 }
 
-export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab | AutomationsTab | DiffTab;
+// An untitled whiteboard draft opened from the "+" picker. The board content
+// itself is runtime-only (a module-level draft map in WhiteboardFilePreview
+// keyed by this tab's id), so these tabs are never restored from a persisted
+// layout — the first save-as replaces the draft tab with a regular editor tab
+// bound to the saved .coraboard file, which IS durable.
+export interface WhiteboardTab extends BaseTab {
+  kind: "whiteboard";
+}
+
+export type Tab =
+  | ChatTab
+  | EditorTab
+  | TerminalTab
+  | PreviewTab
+  | RunsTab
+  | AutomationsTab
+  | WhiteboardTab
+  | DiffTab;
 
 export type TabKind = Tab["kind"];
 

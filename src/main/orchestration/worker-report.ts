@@ -94,6 +94,15 @@ function normalizeVerifierVerdict(value: unknown): VerifierVerdict | undefined {
   };
 }
 
+// The run's own artifact layout. files_changed means WORKSPACE mutations, but
+// workers sometimes pedantically list the mandatory final-report.json they were
+// told to write. Counting that as implementation work made the verification
+// freshness gate demand a verifier for a pure research run (observed live:
+// run-ms0jrhy3-q4jhgm), so entries inside any run artifact tree are dropped at
+// parse time for every consumer, whatever prefix the worker recorded the path
+// under.
+const RUN_ARTIFACT_PATH = /(^|[\\/])runs[\\/]run-[^\\/]+[\\/]steps[\\/]step-[^\\/]+[\\/]workers[\\/]task-[^\\/]+[\\/]attempts[\\/]attempt-[^\\/]+[\\/]/;
+
 function normalizeReportItems(value: unknown, keys: ["path", "reason"]): WorkerReport["filesChanged"] {
   if (!Array.isArray(value)) return [];
   return value
@@ -105,7 +114,8 @@ function normalizeReportItems(value: unknown, keys: ["path", "reason"]): WorkerR
         path: typeof path === "string" ? path : "",
         reason: typeof reason === "string" ? reason : "",
       };
-    });
+    })
+    .filter((item) => !RUN_ARTIFACT_PATH.test(item.path));
 }
 
 function normalizeCommandReports(value: unknown): WorkerReport["commandsRun"] {
@@ -140,7 +150,7 @@ function normalizeStringList(value: unknown): string[] {
 
 export function decideWorkerReport(report: WorkerReport): ReviewDecision {
   if (report.status === "complete") {
-    // Trust complete-status reports. Workers are full Claude/Codex/Cursor harnesses
+    // Trust complete-status reports. Workers are full Claude/Codex harnesses
     // and can run their own verification — risks/followups are advisory, not
     // blockers. The manager loop reviews them when planning the next step.
     return {

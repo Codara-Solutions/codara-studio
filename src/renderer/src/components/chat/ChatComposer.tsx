@@ -9,6 +9,7 @@ import type {
   SparkEvent,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import AnchoredMenu from "./composer/AnchoredMenu";
 import { contextWindowForModel } from "@shared/context-window";
 import {
   chatBackendSupportsFastMode,
@@ -17,17 +18,17 @@ import {
   normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
 import { findOpenQuestion } from "./timeline";
+import { workerModelLabel } from "../runs/run-format";
 import ContextPill from "./composer/ContextPill";
 import ModelPicker from "./composer/ModelPicker";
-import PlanModeToggle from "./composer/PlanModeToggle";
 import ThinkingControl from "./composer/ThinkingControl";
 import {
-  ALL_EFFORTS,
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
   DEFAULT_CHAT_MODE,
   DEFAULT_CHAT_MODEL,
   buildVisibleGroups,
+  defaultChatModel,
   clampEffort,
   decomposeModelId,
   effortsFor,
@@ -60,12 +61,16 @@ export interface ChatComposerStartConfig {
 interface Props {
   run: RunState | null;
   cwd: string | null;
+  // Stable identity supplied by the workbench (`workspaceId:chatTabId`). The
+  // chat panel is deliberately unmounted while an editor/terminal/other
+  // workspace is active, so local React state alone cannot preserve an
+  // unfinished prompt across navigation.
+  draftKey?: string;
   disabled?: boolean;
-  // Pin the manager mode: the PlanModeToggle is hidden and every send (draft
-  // and follow-up alike) carries exactly this mode. Used by embedded surfaces
-  // that exist FOR one mode — e.g. the Automations Hub's loom-architect chat,
-  // which is always chatMode "automation". Leaving this unset keeps the normal
-  // user-cycling pill.
+  // Pin the manager mode for every send (draft and follow-up alike). Used by
+  // embedded surfaces that exist FOR one mode, i.e. the Automations Hub's
+  // loom-architect chat, which is always chatMode "automation". Unset means the
+  // ordinary chat contract: Auto, which the user cannot change.
   lockedMode?: ChatMode;
   // Detach the window-level spark:focus-composer / spark:prefill-composer
   // listeners while true. The chat tab only ever mounts ONE composer, but an
@@ -121,49 +126,156 @@ interface MentionQuery {
   query: string;
 }
 
+interface ChatComposerDraftSnapshot {
+  draft: string;
+  images: AddRunMessageAttachmentInput[];
+  fileReferences: FileMention[];
+  backend: ChatBackendKind;
+  model: string;
+  effort: AgentEffortLevel;
+  fastMode: boolean;
+  oneMillionContext: boolean;
+}
+
+// Navigation-only draft cache. It intentionally lives outside React so it
+// survives ChatStack returning null for a file/terminal tab and survives the
+// active Workspace component switching to another project. It is not written
+// to disk: successful sends clear it, and quitting Codara discards unsent text.
+const chatComposerDrafts = new Map<string, ChatComposerDraftSnapshot>();
+const MAX_CACHED_CHAT_DRAFTS = 100;
+
+function rememberChatComposerDraft(key: string, snapshot: ChatComposerDraftSnapshot): void {
+  // Refresh insertion order so the bounded map behaves as a small LRU cache.
+  chatComposerDrafts.delete(key);
+  chatComposerDrafts.set(key, snapshot);
+  while (chatComposerDrafts.size > MAX_CACHED_CHAT_DRAFTS) {
+    const oldest = chatComposerDrafts.keys().next().value as string | undefined;
+    if (!oldest) break;
+    chatComposerDrafts.delete(oldest);
+  }
+}
+
 export default function ChatComposer({
   run,
   cwd,
+  draftKey,
   disabled,
   lockedMode,
   suspendGlobalEvents,
   onStartChat,
   onForcePauseRun,
 }: Props) {
-  const [draft, setDraft] = useState("");
-  const [images, setImages] = useState<AddRunMessageAttachmentInput[]>([]);
+  const restoredDraft = draftKey ? chatComposerDrafts.get(draftKey) : undefined;
+  const [draft, setDraft] = useState(() => restoredDraft?.draft ?? "");
+  const [images, setImages] = useState<AddRunMessageAttachmentInput[]>(() =>
+    restoredDraft?.images ? [...restoredDraft.images] : [],
+  );
   const [fileMentions, setFileMentions] = useState<FileMention[]>([]);
-  const [fileReferences, setFileReferences] = useState<FileMention[]>([]);
+  const [fileReferences, setFileReferences] = useState<FileMention[]>(() =>
+    restoredDraft?.fileReferences ? [...restoredDraft.fileReferences] : [],
+  );
   const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
+  // Anchor for the portalled @-mention panel (see AnchoredMenu).
+  const composerShellRef = useRef<HTMLDivElement>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pastingImages, setPastingImages] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [draftChatBackend, setDraftChatBackend] = useState<ChatBackendKind>(DEFAULT_CHAT_BACKEND);
-  const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
-  const [draftChatMode, setDraftChatMode] = useState<ChatMode>(lockedMode ?? DEFAULT_CHAT_MODE);
-  const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
+  const [draftChatBackend, setDraftChatBackend] = useState<ChatBackendKind>(
+    run?.chatBackend ?? restoredDraft?.backend ?? DEFAULT_CHAT_BACKEND,
+  );
+  const [draftChatModel, setDraftChatModel] = useState<string>(
+    run?.chatModel ?? restoredDraft?.model ?? DEFAULT_CHAT_MODEL,
+  );
+  const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(
+    run?.chatEffort ?? restoredDraft?.effort ?? DEFAULT_CHAT_EFFORT,
+  );
   // Tracks whether the draft default has been resolved from settings + runtime
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
   // IPC round-trip returns we replace them with the actual first visible
   // model so the bar doesn't open on a model the user can't see in the
-  // dropdown (e.g. the legacy Gemini default when no OpenRouter is configured).
-  const draftDefaultsResolved = useRef(false);
-  const [draftFastMode, setDraftFastMode] = useState<boolean>(false);
-  const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(false);
+  // dropdown (e.g. a CLI default when that runtime isn't installed).
+  const draftDefaultsResolved = useRef(Boolean(restoredDraft || run));
+  const [draftFastMode, setDraftFastMode] = useState<boolean>(
+    run?.chatFastMode ?? restoredDraft?.fastMode ?? false,
+  );
+  const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(
+    run?.chat1mContext ?? restoredDraft?.oneMillionContext ?? false,
+  );
   // Latest model-context occupancy from chat.usage SparkEvents. This is a
   // gauge, not a billing counter: each update replaces the prior value so a
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
   // millions/billions of tokens.
   const [tokensUsed, setTokensUsed] = useState(0);
   const [reportedContextBudget, setReportedContextBudget] = useState<number | null>(null);
+  // Read by the run-change seed below, which must see the run being switched TO
+  // without taking `run` as a dependency (that would re-seed on every snapshot
+  // and stomp the live gauge mid-turn).
+  const runRef = useRef(run);
+  runRef.current = run;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Synchronous in-flight latch — blocks a second send before React has
   // re-rendered the busy state, which a fast double-click or Enter-key
   // repeat would otherwise slip through into a duplicate message.
   const inFlight = useRef(false);
   const suppressMentionUpdate = useRef(false);
+
+  // Latest snapshot of every meaningful composer field, INCLUDING the selector
+  // state of an empty composer. A user can choose a model before typing;
+  // dropping that empty snapshot made a remount paint the generic model first
+  // and only switch back once the run/settings IPC caught up. Captured each
+  // render so the save-on-key-change cleanup below reads fresh state without
+  // re-registering per keystroke.
+  const draftSnapshotRef = useRef<ChatComposerDraftSnapshot | null>(null);
+  draftSnapshotRef.current = {
+    draft,
+    images: [...images],
+    fileReferences: [...fileReferences],
+    backend: draftChatBackend,
+    model: draftChatModel,
+    effort: draftChatEffort,
+    fastMode: draftFastMode,
+    oneMillionContext: draftOneMillionContext,
+  };
+  // This instance's draft state belongs to the key it restored from at mount.
+  // On a chat-tab switch the parent updates draftKey one commit BEFORE the
+  // composer remounts (activeRunId syncs from the tab strip a render later),
+  // so the live draftKey transiently names the NEXT chat — writing under it
+  // would leak this chat's unsent draft into that chat. The snapshot is
+  // therefore written in the effect CLEANUP, closing over the previous key,
+  // and only registered while draftKey still matches the mount-time key, so a
+  // stale instance can never write its state under another chat's key.
+  const boundDraftKeyRef = useRef(draftKey);
+  useEffect(() => {
+    const key = draftKey;
+    if (!key || key !== boundDraftKeyRef.current) return;
+    return () => {
+      const snapshot = draftSnapshotRef.current;
+      if (snapshot) rememberChatComposerDraft(key, snapshot);
+    };
+  }, [draftKey]);
+
+  // Existing runs are authoritative, but mirror their selector fields into
+  // the local fallback too. The visible chips normally read `run` directly;
+  // this mirror matters during a transient run-list refresh where `run` can be
+  // null for one render. Keeping the last known values prevents a one-frame
+  // jump to the generic draft model.
+  useEffect(() => {
+    if (!run) return;
+    if (run.chatBackend !== undefined) setDraftChatBackend(run.chatBackend);
+    if (run.chatModel !== undefined) setDraftChatModel(run.chatModel);
+    if (run.chatEffort !== undefined) setDraftChatEffort(run.chatEffort);
+    if (run.chatFastMode !== undefined) setDraftFastMode(run.chatFastMode);
+    if (run.chat1mContext !== undefined) setDraftOneMillionContext(run.chat1mContext);
+  }, [
+    run?.id,
+    run?.chatBackend,
+    run?.chatModel,
+    run?.chatEffort,
+    run?.chatFastMode,
+    run?.chat1mContext,
+  ]);
 
   // Focus on the global composer shortcut (App broadcasts spark:focus-composer).
   useEffect(() => {
@@ -173,33 +285,24 @@ export default function ChatComposer({
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, [suspendGlobalEvents]);
 
-  // Resolve the draft default from settings + runtimes. The hardcoded
-  // fallback above (OpenRouter + Gemini Flash) only matters before this
+  // Resolve the draft default from the runtime diagnostics. The hardcoded
+  // fallback above (Pi + GPT-5.6 Sol/high) only matters before this
   // resolves: once we know what's actually available we land on the first
-  // visible model (Claude Opus 4.8 in the common case), so the bar never
-  // opens on a model the user can't see in the dropdown. Runs once per
-  // mount; an active run uses run.chatBackend/run.chatModel and is unaffected.
+  // visible model, so the bar never opens on a model the user can't see in
+  // the dropdown. Runs once per mount; an active run uses
+  // run.chatBackend/run.chatModel and is unaffected.
   useEffect(() => {
     if (draftDefaultsResolved.current) return;
     let cancelled = false;
-    void Promise.all([
-      window.spark.agents.runtimes(),
-      window.spark.settings.load(),
-      window.spark.preferences.load(),
-    ])
-      .then(([diagnostics, settings, preferences]) => {
+    void window.spark.agents
+      .runtimes()
+      .then((diagnostics) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
-        const orModel = (settings.openRouterModel ?? "").trim();
-        const groups = buildVisibleGroups({
-          diagnostics: diagnostics ?? [],
-          openRouterModel: orModel,
-          // Keep Fable out of the default-draft resolution unless opted in;
-          // otherwise the first Claude row (Fable, top of CLAUDE_MODELS) would
-          // become the default chat model.
-          fableEnabled: preferences?.fableEnabled === true,
-        });
-        const first = groups[0]?.models[0];
+        const groups = buildVisibleGroups({});
+        // Not groups[0].models[0]: that would open a new chat on the premium
+        // tier whenever premium happens to lead the first group.
+        const first = defaultChatModel(groups);
         if (!first) return;
         const { baseId, oneMillion } = decomposeModelId(first.id);
         const normalizedFlags = normalizeChatFeatureFlags(first.backend, {
@@ -220,7 +323,7 @@ export default function ChatComposer({
     return () => {
       cancelled = true;
     };
-    // intentionally one-shot: subsequent settings changes don't override the
+    // intentionally one-shot: a later runtime change doesn't override the
     // draft, since by that point the user has typically committed a choice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -287,11 +390,20 @@ export default function ChatComposer({
     return () => observer.disconnect();
   }, [autosizeTextarea]);
 
-  // Reset the token accumulator on run change so a freshly-selected chat
-  // starts at 0 rather than carrying the previous chat's running total.
+  // Re-seed the gauge on run change so a freshly-selected chat never carries
+  // the previous chat's number. chat.usage only streams while a turn is live,
+  // so a chat that is merely opened has to read its occupancy from the last
+  // manager call the run persisted; the stream takes over from there.
   useEffect(() => {
-    setTokensUsed(0);
-    setReportedContextBudget(null);
+    const call = [...(runRef.current?.sparkCalls ?? [])]
+      .reverse()
+      .find((item) => typeof item.promptTokens === "number" && item.promptTokens > 0);
+    setTokensUsed(call?.promptTokens ?? 0);
+    setReportedContextBudget(
+      typeof call?.contextWindowTokens === "number" && call.contextWindowTokens > 0
+        ? call.contextWindowTokens
+        : null,
+    );
   }, [run?.id]);
 
   // Track the latest live context gauge. Modern backends provide
@@ -323,28 +435,16 @@ export default function ChatComposer({
   useEffect(() => {
     setFileReferences([]);
     setMentionQuery(null);
-    if (!cwd) {
-      setFileMentions([]);
-      setFilesLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setFilesLoading(true);
-    void collectWorkspaceFiles(cwd)
-      .then((files) => {
-        if (!cancelled) setFileMentions(files);
-      })
-      .catch(() => {
-        if (!cancelled) setFileMentions([]);
-      })
-      .finally(() => {
-        if (!cancelled) setFilesLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    setFileMentions([]);
+    setFilesLoading(false);
   }, [cwd]);
 
+  // Building the @file index is intentionally lazy. Eagerly walking every
+  // directory whenever a workspace became active flooded the main process
+  // with hundreds of fs:list IPC calls—even when the composer was hidden or
+  // the user never typed "@". This is especially noticeable for parent
+  // workspaces that contain several repositories. The first mention opens the
+  // picker immediately in its loading state and populates it in the background.
   useEffect(() => {
     if (!cwd || !mentionQuery) return;
     let cancelled = false;
@@ -407,18 +507,22 @@ export default function ChatComposer({
     return Boolean(attempt);
   }) ?? [];
   const hasActiveWorker = activeWorkers.length > 0;
-  // Pick the first active task for the status pill — multi-worker shows the
-  // count and one representative title to keep the line short.
-  const primaryActiveWorker = activeWorkers[0] ?? null;
-  const activeWorkerRuntime = primaryActiveWorker
-    ? run?.workerAttempts?.find(
-        (a) =>
-          a.workerTaskId === primaryActiveWorker.id &&
-          a.status !== "succeeded" &&
-          a.status !== "failed" &&
-          a.status !== "cancelled",
-      )?.runtime ?? primaryActiveWorker.runtimePreference
-    : null;
+  // One engine label per active worker so the status line can state the real
+  // mix ("3 Opus 5 + 2 Sol") instead of stamping the first worker's model on
+  // the whole fleet, which read as the nonsense "Opus 5 5 workers running".
+  const activeWorkerEngines = activeWorkers.map((task) => {
+    const attempt = run?.workerAttempts?.find(
+      (a) =>
+        a.workerTaskId === task.id &&
+        a.status !== "succeeded" &&
+        a.status !== "failed" &&
+        a.status !== "cancelled",
+    );
+    const runtime = attempt?.runtime ?? task.runtimePreference;
+    const runtimeLabel =
+      runtime === "claude" ? "claude" : runtime === "codex" ? "codex" : runtime ?? "worker";
+    return workerModelLabel(attempt?.model ?? task.modelHint, runtimeLabel);
+  });
   const filesForSend = collectFileReferencesForSend(draft, fileReferences, fileMentions).slice(
     0,
     Math.max(0, MAX_ATTACHMENTS - images.length),
@@ -475,7 +579,7 @@ export default function ChatComposer({
         const chatConfig: ChatComposerStartConfig = {
           backend: draftChatBackend,
           model: draftChatModel,
-          mode: lockedMode ?? draftChatMode,
+          mode: lockedMode ?? DEFAULT_CHAT_MODE,
           effort: draftChatEffort,
           fastMode: draftFastMode,
           oneMillionContext: draftOneMillionContext,
@@ -499,6 +603,7 @@ export default function ChatComposer({
           attachments,
         });
       }
+      if (draftKey) chatComposerDrafts.delete(draftKey);
       setDraft("");
       setImages([]);
       setFileReferences([]);
@@ -731,23 +836,16 @@ export default function ChatComposer({
 
   const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
-  // lockedMode wins even over a run's persisted chatMode — the embedding
-  // surface owns the mode outright, so the shell styling and every send stay
-  // pinned to it no matter what the run record says. An EXISTING run with no
-  // stamped chatMode dispatches as execute (resolveChatBackendConfig's
-  // fallback), so display that — not the draft default, which is now "auto".
-  const activeChatMode: ChatMode =
-    lockedMode ?? run_?.chatMode ?? (run_ ? "execute" : draftChatMode);
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
   const rawFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
   const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
   const activeFastMode: boolean = effectiveChatFastMode(activeChatBackend, rawFastMode);
   const activeOneMillionContext: boolean = effectiveChatOneMillionContext(activeChatBackend);
-  // The active model's option pulled from the STATIC catalog (Claude/Codex);
-  // null for OpenRouter (its catalog is dynamic — the configured model
-  // lives in settings). Used only to derive the available effort cycle for
-  // the thinking pill; rendering of the model name happens inside the
-  // ModelPicker which reads from the dynamic visible groups.
+  // The active model's option pulled from the STATIC catalog; null for a model
+  // discovered from the live catalog, which has no curated row (effortsFor
+  // then yields the full ladder). Used only to derive the available effort
+  // cycle for the thinking pill; rendering of the model name happens inside
+  // the ModelPicker, which reads from the dynamic visible groups.
   const activeChatModelOption = findOptionInCatalog(
     activeChatBackend,
     activeChatModelId,
@@ -767,7 +865,6 @@ export default function ChatComposer({
   const applyChatBackendChange = (changes: {
     chatBackend?: ChatBackendKind;
     chatModel?: string;
-    chatMode?: ChatMode;
     chatEffort?: AgentEffortLevel;
     chatFastMode?: boolean;
     chat1mContext?: boolean;
@@ -792,7 +889,6 @@ export default function ChatComposer({
     }
     if (normalizedChanges.chatBackend !== undefined) setDraftChatBackend(normalizedChanges.chatBackend);
     if (normalizedChanges.chatModel !== undefined) setDraftChatModel(normalizedChanges.chatModel);
-    if (normalizedChanges.chatMode !== undefined) setDraftChatMode(normalizedChanges.chatMode);
     if (normalizedChanges.chatEffort !== undefined) setDraftChatEffort(normalizedChanges.chatEffort);
     if (normalizedChanges.chatFastMode !== undefined) setDraftFastMode(normalizedChanges.chatFastMode);
     if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
@@ -812,12 +908,9 @@ export default function ChatComposer({
     // chat1mContext in the same payload the legacy 1M pill used to write.
     const { baseId, oneMillion } = decomposeModelId(model.id);
     const backendChanged = model.backend !== activeChatBackend;
-    const nextEffortLevels =
-      model.backend === "openrouter"
-        ? ALL_EFFORTS
-        : model.effortLevels && model.effortLevels.length > 0
-          ? model.effortLevels
-          : ALL_EFFORTS;
+    // The row's own ladder when it pins one, else the full list, exactly what
+    // the thinking pill will offer for this model once the pick lands.
+    const nextEffortLevels = effortsFor(model);
     const nextEffort: AgentEffortLevel = nextEffortLevels.includes(activeChatEffort)
       ? activeChatEffort
       : (nextEffortLevels.includes(DEFAULT_CHAT_EFFORT)
@@ -833,10 +926,6 @@ export default function ChatComposer({
 
   const onPickEffort = (effort: AgentEffortLevel) => {
     applyChatBackendChange({ chatEffort: effort });
-  };
-
-  const onSelectMode = (mode: ChatMode) => {
-    applyChatBackendChange({ chatMode: mode });
   };
 
   const onToggleFastMode = () => {
@@ -879,44 +968,58 @@ export default function ChatComposer({
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        padding: "8px 12px 10px",
-        background: "var(--panel)",
-        borderTop: "1px solid var(--rule-soft)",
+        padding: "8px clamp(14px, 3vw, 42px) 12px",
+        background: "linear-gradient(to bottom, transparent, color-mix(in oklab, var(--panel) 88%, transparent) 38%)",
       }}
     >
-      {error && (
-        <div
-          role="alert"
-          style={{
-            flex: "0 0 auto",
-            marginBottom: 8,
-            padding: "6px 9px",
-            borderRadius: "var(--radius-surface, 10px)",
-            border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
-            background: "var(--danger-soft)",
-            color: "var(--danger)",
-            fontSize: 11,
-            lineHeight: 1.4,
-          }}
-        >
-          {error}
-        </div>
-      )}
-      <div
-        className={`composer-shell${activeChatMode === "execute" ? " is-execute-mode" : ""}`}
-        onMouseDown={focusComposerShell}
-        onDragOver={onComposerDragOver}
-        onDrop={onComposerDrop}
-      >
-        {mentionQuery && (
-          <MentionPopover
-            query={mentionQuery.query}
-            loading={filesLoading}
-            suggestions={mentionSuggestions}
-            activeIndex={mentionIndex}
-            onPick={insertFileMention}
-          />
+      <div style={{ width: "100%", maxWidth: 768, margin: "0 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {error && (
+          <div
+            role="alert"
+            style={{
+              flex: "0 0 auto",
+              marginBottom: 8,
+              padding: "6px 9px",
+              borderRadius: "var(--radius-surface, 10px)",
+              border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
+              background: "var(--danger-soft)",
+              color: "var(--danger)",
+              fontSize: 11,
+              lineHeight: 1.4,
+            }}
+          >
+            {error}
+          </div>
         )}
+        <div
+          ref={composerShellRef}
+          className="composer-shell spark-glass--strong"
+          onMouseDown={focusComposerShell}
+          onDragOver={onComposerDragOver}
+          onDrop={onComposerDrop}
+        >
+        {/* Portalled for the same reason as the composer's pill menus: this
+            shell carries spark-glass--strong, so it is a backdrop root and any
+            .spark-menu inside it renders flat instead of frosted. Anchored to
+            the shell itself, matching its width, so it lands where the old
+            absolutely-positioned version did. */}
+        <AnchoredMenu
+          anchorRef={composerShellRef}
+          open={Boolean(mentionQuery)}
+          onClose={() => setMentionQuery(null)}
+          matchAnchorWidth
+          inset={8}
+        >
+          {mentionQuery && (
+            <MentionPopover
+              query={mentionQuery.query}
+              loading={filesLoading}
+              suggestions={mentionSuggestions}
+              activeIndex={mentionIndex}
+              onPick={insertFileMention}
+            />
+          )}
+        </AnchoredMenu>
         {(images.length > 0 || fileReferences.length > 0) && (
           <div
             style={{
@@ -987,23 +1090,12 @@ export default function ChatComposer({
             maxHeight: MAX_TEXTAREA_H,
           }}
         />
-        <div
-          style={{
-            flex: "0 0 auto",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            marginTop: 5,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              flex: "0 0 auto",
-            }}
-          >
+        {/* Class-driven rather than inline-styled: this row is a size
+            container, and the pills below collapse progressively as it
+            narrows (see .composer-toolbar in styles.css). Container queries
+            cannot reach inline styles. */}
+        <div className="composer-toolbar">
+          <div className="composer-toolbar__left">
             <ModelPicker
               activeBackend={activeChatBackend}
               activeModelId={activeChatModelId}
@@ -1015,7 +1107,6 @@ export default function ChatComposer({
               availableEfforts={availableEfforts}
               onCycle={onPickEffort}
             />
-            {!lockedMode && <PlanModeToggle mode={activeChatMode} onSelect={onSelectMode} />}
             {fastModeAvailable && (
               <button
                 type="button"
@@ -1035,23 +1126,11 @@ export default function ChatComposer({
           </div>
           {hasActiveWorker ? (
             <WorkerActivityStatus
-              count={activeWorkers.length}
-              runtime={activeWorkerRuntime}
-              title={primaryActiveWorker?.title ?? null}
+              engines={activeWorkerEngines}
+              titles={activeWorkers.map((task) => task.title)}
             />
           ) : (
-            <span
-              style={{
-                flex: 1,
-                minWidth: 0,
-                fontSize: 10,
-                color: "var(--muted)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                textAlign: "center",
-              }}
-            >
+            <span className="composer-toolbar__hint">
               {busy
                 ? "Working..."
                 : pastingImages
@@ -1065,14 +1144,7 @@ export default function ChatComposer({
               as one group, so the bottom row resolves to [pills · status ·
               actions] instead of a scatter. Layout grouping only — every
               handler and ref is unchanged. */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              flex: "0 0 auto",
-            }}
-          >
+          <div className="composer-toolbar__right">
             <ContextPill
               used={tokensUsed}
               budget={
@@ -1101,6 +1173,7 @@ export default function ChatComposer({
             {isActive && <StopButton onClick={onForcePauseRun} />}
           </div>
         </div>
+        </div>
       </div>
     </div>
   );
@@ -1113,39 +1186,30 @@ function messageForSend(draft: string, attachmentCount: number): string {
 }
 
 // Replaces the static "Queued for next manager decision" status line whenever
-// at least one worker_task is in `running` or `claimed`. Shows: a pulsing
-// accent dot, the worker count + runtime, the task title (truncated), and an
-// explicit note that the user's next message will queue. The visual goal is
-// to let the user tell at a glance whether they're waiting on the LLM
-// manager's next decision or on a worker that's actively editing files.
+// at least one worker_task is in `running` or `claimed`. A solo worker shows
+// its engine and its task title; a fleet shows the count and the real model
+// mix ("3 Opus 5 + 2 Sol"), with every task title in the tooltip. The old
+// shape prefixed the first worker's model onto the fleet count ("Opus 5 5
+// workers running") and truncated one arbitrary title, which carried no
+// information at a glance.
 function WorkerActivityStatus({
-  count,
-  runtime,
-  title,
+  engines,
+  titles,
 }: {
-  count: number;
-  runtime: string | null;
-  title: string | null;
+  engines: string[];
+  titles: string[];
 }): JSX.Element {
-  const runtimeLabel = runtime === "claude" ? "claude" : runtime === "codex" ? "codex" : runtime ?? "worker";
-  const countLabel = count > 1 ? `${count} workers` : "worker";
+  const count = engines.length;
+  const mix = new Map<string, number>();
+  for (const engine of engines) mix.set(engine, (mix.get(engine) ?? 0) + 1);
+  const mixLabel = [...mix.entries()]
+    .map(([label, n]) => (mix.size > 1 ? `${n} ${label}` : label))
+    .join(" + ");
+  const solo = count === 1;
   return (
     <span
-      style={{
-        flex: 1,
-        minWidth: 0,
-        fontSize: 10,
-        color: "var(--muted)",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-        textAlign: "center",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 6,
-      }}
-      title={title ?? undefined}
+      className="composer-toolbar__hint composer-toolbar__hint--worker"
+      title={titles.join("\n") || undefined}
     >
       <span
         aria-hidden
@@ -1159,19 +1223,16 @@ function WorkerActivityStatus({
         }}
       />
       <span style={{ color: "var(--accent)", fontWeight: 600 }}>
-        {runtimeLabel} {countLabel} running
+        {solo ? `${mixLabel} working` : `${count} workers running`}
       </span>
-      {title && (
-        <span
-          style={{
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            minWidth: 0,
-          }}
-        >
-          · {title}
-        </span>
-      )}
+      {/* The only elastic child: when the row runs out of room this segment
+          ellipsises, rather than every child being cut mid-glyph. Sizing lives
+          in .composer-toolbar__hint--worker so the rule sits with the rest of
+          the row's collapse behaviour. Solo shows the task title; a fleet
+          shows the model mix, which says more than one truncated title. */}
+      {solo
+        ? titles[0] && <span className="composer-toolbar__hint-title">· {titles[0]}</span>
+        : mixLabel && <span className="composer-toolbar__hint-title">· {mixLabel}</span>}
       <span style={{ flex: "0 0 auto" }}>· steering queues</span>
     </span>
   );
@@ -1408,13 +1469,10 @@ function MentionPopover({
   const empty = !loading && suggestions.length === 0;
   return (
     <div
-      className="spark-glass"
+      className="spark-menu"
       style={{
-        position: "absolute",
-        left: 8,
-        right: 8,
-        bottom: "calc(100% + 6px)",
-        zIndex: 50,
+        // Positioning belongs to the AnchoredMenu portal that wraps this;
+        // keeping `position: absolute` here would fight it.
         padding: 5,
         borderRadius: "var(--radius-popover, 12px)",
       }}
@@ -1566,7 +1624,7 @@ function AttachmentChip({
         height: 24,
         border: "1px solid var(--rule-soft)",
         borderRadius: "var(--radius-control, 7px)",
-        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        background: "color-mix(in oklab, var(--ink) 4%, transparent)",
         boxShadow: "var(--lift-hi)",
         padding: "0 4px 0 7px",
         color: "var(--ink-dim)",
@@ -1654,7 +1712,7 @@ function IconButton({
         borderRadius: "var(--radius-control, 7px)",
         background:
           pressed && live
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover && live
               ? "var(--hover)"
               : "transparent",
@@ -1796,7 +1854,7 @@ function SendButton({
         border: "none",
         borderRadius: "var(--radius-control, 7px)",
         background: disabled
-          ? "color-mix(in oklch, var(--ink) 7%, transparent)"
+          ? "color-mix(in oklab, var(--ink) 7%, transparent)"
           : hover
             ? "color-mix(in oklch, var(--accent) 88%, var(--ink))"
             : "var(--accent)",

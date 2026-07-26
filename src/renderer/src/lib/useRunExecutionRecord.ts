@@ -69,10 +69,26 @@ export function useRunExecutionRecord(run: RunState | null): RunExecutionProject
     const buffered: SparkEvent[] = [];
     let historyLoaded = false;
 
+    // Streaming backends emit chat.* events per delta — often dozens per
+    // second. Applying each one individually re-projects the whole record and
+    // re-parses the streamed Markdown per token, which is what made a pinned
+    // reader's scroll feel laggy. Coalesce bursts behind one short trailing
+    // flush; merge-by-id makes the batching invisible to correctness.
+    const STREAM_COALESCE_MS = 80;
+    let pending: SparkEvent[] = [];
+    let flushTimer: number | null = null;
+    const flush = () => {
+      flushTimer = null;
+      const batch = pending;
+      pending = [];
+      if (batch.length > 0) setEvents((current) => mergeExecutionEvents(current, batch));
+    };
+
     const unsubscribe = window.spark.orchestration.onEvent((event) => {
       if (event.runId !== run.id || generationRef.current !== generation) return;
       if (!historyLoaded) buffered.push(event);
-      setEvents((current) => mergeExecutionEvents(current, [event]));
+      pending.push(event);
+      if (flushTimer === null) flushTimer = window.setTimeout(flush, STREAM_COALESCE_MS);
     });
 
     void window.spark.orchestration.listEvents(run.id).then(
@@ -95,6 +111,7 @@ export function useRunExecutionRecord(run: RunState | null): RunExecutionProject
 
     return () => {
       unsubscribe();
+      if (flushTimer !== null) window.clearTimeout(flushTimer);
       if (generationRef.current === generation) generationRef.current += 1;
     };
   }, [run?.id]);

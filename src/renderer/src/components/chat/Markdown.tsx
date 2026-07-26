@@ -82,7 +82,7 @@ function MermaidDiagram({ source }: { source: string }) {
 
 const INLINE_CODE_STYLE: React.CSSProperties = {
   fontFamily: "var(--font-mono)", fontSize: "0.9em",
-  background: "color-mix(in oklch, var(--ink) 8%, transparent)",
+  background: "color-mix(in oklab, var(--ink) 8%, transparent)",
   padding: "1px 5px", borderRadius: 4, color: "var(--ink)",
 };
 const CODE_BLOCK_STYLE: React.CSSProperties = {

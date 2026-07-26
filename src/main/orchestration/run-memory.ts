@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { sparkHome } from "../spark-home";
+import { writeFileAtomic } from "../fs-atomic";
 import type {
   RunState,
   WorkerReport,
@@ -8,6 +10,7 @@ import type {
   WorkspaceRunMemoryRecord,
   WorkspaceRunMemoryRuntimeOutcome,
 } from "@shared/types";
+import { classifyOutcomeMemory } from "@shared/outcome-memory";
 
 // Per-workspace persistent orchestration memory. One distilled JSON ledger per
 // workspaceId under ~/.SparkAgent/memory. The writer (recordRunMemory) runs
@@ -15,10 +18,10 @@ import type {
 // reader (formatPriorRunsSection) is folded into the manager's plan_analysis
 // prompt so it can learn this repo's task shapes, which runtimes survived
 // verification, and which build/test commands actually worked. This module
-// imports only spark-home + shared types — never run-store or openrouter-manager
+// imports only spark-home, fs-atomic + shared types, never run-store or manager-protocol
 // — so there is no import cycle.
 
-const LEDGER_VERSION = 1;
+const LEDGER_VERSION = 2;
 // Writer trims the ledger to this many newest-first records.
 const MAX_RECORDS = 50;
 // Reader returns at most this many records, ranked by similarity.
@@ -30,6 +33,7 @@ const MAX_PLAN_KEYWORDS = 24;
 const MAX_TOUCHED_GLOBS = 16;
 const MAX_RUNTIME_OUTCOMES = 8;
 const MAX_VERIFIED_COMMANDS = 6;
+const MAX_ORACLE_EVIDENCE = 6;
 const VERIFIED_COMMAND_MAX_LENGTH = 120;
 
 // Common English + code stopwords dropped from the keyword fingerprint so the
@@ -191,8 +195,18 @@ function renderRecordEntry(record: WorkspaceRunMemoryRecord): string {
   const lines = [`- ${truncate(record.title || "(untitled run)", 120)}`];
   const meta: string[] = [];
   if (record.complexity) meta.push(`complexity=${record.complexity}`);
-  meta.push(`verified=${record.verificationSurvived ? "survived" : "FAILED"}`);
+  const verificationStatus = record.verificationStatus ?? "unverified";
+  meta.push(`outcome=${verificationStatus}`);
+  if (typeof record.verifiedClaimCount === "number") {
+    meta.push(`verifiedClaims=${record.verifiedClaimCount}`);
+  }
+  if (typeof record.failedClaimCount === "number" && record.failedClaimCount > 0) {
+    meta.push(`failedClaims=${record.failedClaimCount}`);
+  }
   lines.push(`  ${meta.join(", ")}`);
+  if (verificationStatus !== "verified") {
+    lines.push("  caution: not a reusable recipe; use only as failure/uncertainty evidence");
+  }
   if (record.touchedGlobs.length > 0) {
     lines.push(`  touched: ${record.touchedGlobs.slice(0, 4).join(", ")}`);
   }
@@ -202,6 +216,9 @@ function renderRecordEntry(record: WorkspaceRunMemoryRecord): string {
   if (record.verifiedCommands.length > 0) {
     const cmds = record.verifiedCommands.slice(0, 3).map((c) => truncate(c, 80));
     lines.push(`  verified cmds: ${cmds.join(" | ")}`);
+  }
+  if ((record.oracleEvidence?.length ?? 0) > 0) {
+    lines.push(`  oracle evidence: ${record.oracleEvidence!.slice(0, 2).map((item) => truncate(item, 100)).join(" | ")}`);
   }
   return lines.join("\n");
 }
@@ -235,12 +252,15 @@ export function formatPriorRunsSection(run: RunState): string | null {
     }))
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
+      const verifiedDelta = Number(b.record.verificationStatus === "verified") -
+        Number(a.record.verificationStatus === "verified");
+      if (verifiedDelta !== 0) return verifiedDelta;
       return (b.record.completedAt ?? "").localeCompare(a.record.completedAt ?? "");
     })
     .slice(0, TOP_K);
 
   const lines = [
-    "PRIOR RUNS IN THIS WORKSPACE (most similar first; distilled from past Codara runs — use as soft prior, not gospel)",
+    "OUTCOME-CONDITIONED PRIOR RUNS (most similar first; only outcome=verified is reusable; mixed/unverified entries are cautions, never recipes)",
     ...ranked.map(({ record }) => renderRecordEntry(record)),
   ];
   return lines.join("\n");
@@ -327,7 +347,8 @@ function looksLikeBuildOrTest(command: string): boolean {
   );
 }
 
-function distillVerifiedCommands(attemptReports: AttemptReport[]): string[] {
+function distillVerifiedCommands(attemptReports: AttemptReport[], reusable: boolean): string[] {
+  if (!reusable) return [];
   const preferred: string[] = [];
   const rest: string[] = [];
   const push = (command: string): void => {
@@ -350,8 +371,22 @@ function distillVerifiedCommands(attemptReports: AttemptReport[]): string[] {
 }
 
 function distillRecord(run: RunState, attemptReports: AttemptReport[]): WorkspaceRunMemoryRecord {
-  const verificationSurvived = !attemptReports.some(
-    (ar) => ar.report.verifier?.status === "failed",
+  const classification = classifyOutcomeMemory(
+    attemptReports.flatMap((ar) => ar.report.verifier
+      ? [{
+          taskId: ar.task?.id ?? ar.attempt.workerTaskId,
+          attemptNumber: ar.attempt.attemptNumber,
+          accepted: ar.task?.status === "accepted",
+          status: ar.report.verifier.status,
+          claims: ar.report.verifier.atomicClaims,
+        }]
+      : []),
+  );
+  const oracleEvidence = dedupeCap(
+    (run.resultManifest?.evidence ?? [])
+      .filter((item) => item.provenance === "verified")
+      .map((item) => truncate(item.text, 180)),
+    MAX_ORACLE_EVIDENCE,
   );
   return {
     runId: run.id,
@@ -360,9 +395,13 @@ function distillRecord(run: RunState, attemptReports: AttemptReport[]): Workspac
     planKeywords: planKeywordsFromRun(run),
     touchedGlobs: distillTouchedGlobs(attemptReports),
     complexity: run.taskComplexity,
-    verificationSurvived,
+    verificationSurvived: classification.reusable,
+    verificationStatus: classification.status,
+    verifiedClaimCount: classification.verifiedClaimCount,
+    failedClaimCount: classification.failedClaimCount,
+    oracleEvidence,
     runtimeOutcomes: distillRuntimeOutcomes(attemptReports),
-    verifiedCommands: distillVerifiedCommands(attemptReports),
+    verifiedCommands: distillVerifiedCommands(attemptReports, classification.reusable),
   };
 }
 
@@ -394,8 +433,12 @@ export async function recordRunMemory(
     ledger.workspaceId = run.workspaceId;
     ledger.version = LEDGER_VERSION;
 
-    mkdirSync(memoryRoot(), { recursive: true });
-    writeFileSync(ledgerPath(run.workspaceId), JSON.stringify(ledger), "utf8");
+    // Async + atomic. The old writeFileSync blocked the event loop for the size
+    // of the whole ledger, and a plain async write would let this module's
+    // synchronous reader observe a half-written file; the tmp+rename in
+    // fs-atomic hands the reader the old ledger or the new one, never a torn one.
+    await mkdir(memoryRoot(), { recursive: true });
+    await writeFileAtomic(ledgerPath(run.workspaceId), JSON.stringify(ledger));
   } catch (err) {
     console.warn("[run-memory] failed to record run memory:", err);
   }

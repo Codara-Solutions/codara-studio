@@ -5,19 +5,22 @@ import {
   deriveAgentStatus,
   isLiveStatus,
   runtimeTone,
+  sentenceCase,
   statusColor,
   stepStatusColor,
   stepStatusLabel,
+  WORKER_ATTEMPT_CAP,
+  workerModelLabel,
 } from "./run-format";
 import { ElapsedTime } from "./elapsed";
 
-// The graph's nodes: the SPARK origin, step nodes (with a checkpoint variant),
-// worker nodes, and the COMPLETE terminal. Each is sized to fill the absolute
-// wrapper RunGraph positions it in; the wire layer connects them by their
-// laid-out edge ports.
+// The graph's nodes: the Cora manager origin, step nodes (with a checkpoint
+// variant), worker nodes, and the terminal end node. Each is sized to fill the
+// absolute wrapper RunGraph positions it in; the wire layer connects them by
+// their laid-out edge ports.
 //
 // Silhouette language (shared with the automations LiveBoard): the SHAPE tells
-// the role. Capsules bookend the pipeline (SPARK origin / COMPLETE terminal),
+// the role. Capsules bookend the pipeline (manager origin / end terminal),
 // steps are soft generous-radius cards, checkpoints are chamfered gates, and
 // workers are small cards wearing a runtime-colored left edge. Shapes only —
 // the wire/port geometry (box edges) is untouched, so GraphWires still lands
@@ -25,10 +28,12 @@ import { ElapsedTime } from "./elapsed";
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 
+// Quiet circle-dot mark for the manager node — a plain product mark, no glow.
 function SparkGlyph({ size = 22 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12 1.6l2.1 6.6a4 4 0 0 0 2.6 2.6l6.6 2.1-6.6 2.1a4 4 0 0 0-2.6 2.6L12 24.4l-2.1-6.8a4 4 0 0 0-2.6-2.6L0.7 12.9l6.6-2.1a4 4 0 0 0 2.6-2.6z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="12" cy="12" r="3.4" fill="currentColor" />
     </svg>
   );
 }
@@ -65,15 +70,31 @@ function CheckpointGlyph({ size = 16 }: { size?: number }) {
   );
 }
 
-function FlagGlyph({ size = 22 }: { size?: number }) {
+// Check-circle for the end terminal — a completion mark, not a finish flag.
+function CheckCircleGlyph({ size = 22 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d="M6 2.6v18.8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
       <path
-        d="M6 3.6h11.2l-2.4 3.4 2.4 3.4H6z"
-        fill="currentColor"
+        d="M8 12.2 10.8 15 16 8.9"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+// 12px arrow-up-right — the worker card's open-in-terminal affordance.
+function ArrowUpRightGlyph({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" aria-hidden>
+      <path
+        d="M4 3h5v5M9 3 3 9"
         stroke="currentColor"
         strokeWidth="1.4"
+        strokeLinecap="round"
         strokeLinejoin="round"
       />
     </svg>
@@ -115,6 +136,7 @@ export const StatusDot = React.memo(function StatusDot({
 }) {
   const color = statusColor(status);
   const live = isLiveStatus(status);
+  // The one canonical live indicator: an opacity-only pulse, no scale, no glow.
   return (
     <span
       aria-hidden
@@ -124,46 +146,33 @@ export const StatusDot = React.memo(function StatusDot({
         borderRadius: 999,
         background: color,
         flex: "0 0 auto",
-        boxShadow: live ? `0 0 8px ${color}` : "none",
-        animation: live ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
+        animation: live ? "runs-pulse 1.6s ease-in-out infinite" : undefined,
       }}
     />
   );
 });
 
-// Small uppercase status word, tinted to the status tone.
+// Small sentence-case status word, tinted to the status tone.
 function StatusTag({ label, tone }: { label: string; tone: string }) {
   return (
     <span
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 5,
         color: tone,
         border: `1px solid color-mix(in oklch, ${tone} 38%, var(--rule))`,
         background: `color-mix(in oklch, ${tone} 8%, transparent)`,
         borderRadius: 999,
-        padding: "3px 6px",
+        padding: "2px 7px",
         fontFamily: "var(--font-sans)",
-        fontSize: 8,
-        fontWeight: 700,
-        letterSpacing: "0.11em",
-        textTransform: "uppercase",
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: "0.02em",
         whiteSpace: "nowrap",
         flex: "0 0 auto",
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 3.5,
-          height: 3.5,
-          borderRadius: 999,
-          background: tone,
-          boxShadow: `0 0 5px ${tone}`,
-        }}
-      />
-      {label}
+      {sentenceCase(label)}
     </span>
   );
 }
@@ -291,18 +300,18 @@ export interface VerdictTone {
 export function verdictTone(kind: StepVerdictKind): VerdictTone | null {
   switch (kind) {
     case "perfect":
-      return { color: "var(--ok)", label: "PERFECT", title: "Verifier confirmed: perfect" };
+      return { color: "var(--ok)", label: "Perfect", title: "Verifier confirmed: perfect" };
     case "verified":
-      return { color: "var(--ok)", label: "VERIFIED", title: "Verifier confirmed the work" };
+      return { color: "var(--ok)", label: "Verified", title: "Verifier confirmed the work" };
     case "partial":
     case "feedback":
-      return { color: "var(--warn)", label: "PARTIAL", title: "Verifier found gaps — partial" };
+      return { color: "var(--warn)", label: "Partial", title: "Verifier found gaps — partial" };
     case "failed":
-      return { color: "var(--danger)", label: "FAILED", title: "Verifier rejected the work" };
+      return { color: "var(--danger)", label: "Failed", title: "Verifier rejected the work" };
     case "unverified-accepted":
       return {
         color: "var(--muted)",
-        label: "UNVERIFIED",
+        label: "Unverified",
         title: "Unverified — accepted to avoid deadlock",
       };
     case "none":
@@ -310,8 +319,8 @@ export function verdictTone(kind: StepVerdictKind): VerdictTone | null {
   }
 }
 
-// A rounded, tinted pill speaking the verdict — same color-mix/border/mono idiom
-// as the run-graph status tags. Returns null for 'none' so callers can drop it
+// A rounded, tinted pill speaking the verdict — same color-mix/border idiom as
+// the run-graph status tags. Returns null for 'none' so callers can drop it
 // in unconditionally.
 export function VerdictPill({ kind, compact }: { kind: StepVerdictKind; compact?: boolean }) {
   const tone = verdictTone(kind);
@@ -324,12 +333,11 @@ export function VerdictPill({ kind, compact }: { kind: StepVerdictKind; compact?
         background: `color-mix(in oklch, ${tone.color} 14%, transparent)`,
         border: `1px solid color-mix(in oklch, ${tone.color} 38%, transparent)`,
         borderRadius: 999,
-        padding: compact ? "1px 5px" : "2px 7px",
-        fontFamily: "var(--font-mono)",
-        fontSize: 9,
-        fontWeight: 700,
-        letterSpacing: "0.09em",
-        textTransform: "uppercase",
+        padding: compact ? "1px 6px" : "2px 8px",
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: "0.02em",
         whiteSpace: "nowrap",
         flex: "0 0 auto",
         lineHeight: 1.5,
@@ -340,7 +348,7 @@ export function VerdictPill({ kind, compact }: { kind: StepVerdictKind; compact?
   );
 }
 
-// ── SPARK origin node ────────────────────────────────────────────────────────
+// ── Cora (manager) origin node ───────────────────────────────────────────────
 
 export const SparkNode = React.memo(function SparkNode({
   runStatus,
@@ -349,7 +357,13 @@ export const SparkNode = React.memo(function SparkNode({
 }) {
   const live = isLiveStatus(runStatus);
   const failed = runStatus === "failed" || runStatus === "blocked";
-  const tone = failed ? "var(--danger)" : live ? "var(--accent)" : "var(--ink-dim)";
+  const tone = failed
+    ? "var(--danger)"
+    : live
+      ? "var(--accent)"
+      : runStatus === "paused"
+        ? "var(--info)"
+        : "var(--ink-dim)";
   return (
     <div
       title="Cora — the orchestration manager"
@@ -360,16 +374,17 @@ export const SparkNode = React.memo(function SparkNode({
         // Capsule — the origin's silhouette; ports still meet the box edges.
         borderRadius: 999,
         border: `1px solid ${live ? "var(--accent-edge)" : failed ? "var(--danger)" : "var(--rule-strong)"}`,
-        background:
-          "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 8%), color-mix(in oklch, var(--panel) 78%, var(--bg) 22%))",
-        boxShadow: live
-          ? "var(--lift-hi), 0 0 24px var(--accent-glow), var(--shadow-2)"
-          : "var(--lift-hi), var(--shadow-2)",
+        background: failed
+          ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
+          : live
+            ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
+            : "var(--panel)",
+        boxShadow: "var(--lift-hi), var(--shadow-2)",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 7,
+        gap: 4,
         fontFamily: "var(--font-sans)",
       }}
     >
@@ -377,21 +392,30 @@ export const SparkNode = React.memo(function SparkNode({
         style={{
           color: failed ? "var(--danger)" : "var(--accent)",
           display: "inline-flex",
-          filter: live ? "drop-shadow(0 0 7px var(--accent-glow))" : "none",
         }}
       >
-        <SparkGlyph size={23} />
+        <SparkGlyph size={18} />
       </span>
       <span
         style={{
           color: "var(--ink)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          fontWeight: 700,
-          letterSpacing: "0.16em",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 600,
+          letterSpacing: "0.01em",
         }}
       >
-        SPARK
+        Cora
+      </span>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 500,
+        }}
+      >
+        Manager
       </span>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
         <StatusDot status={runStatus} size={6} />
@@ -399,13 +423,12 @@ export const SparkNode = React.memo(function SparkNode({
           style={{
             color: tone,
             fontFamily: "var(--font-sans)",
-            fontSize: 9.5,
+            fontSize: 10,
             fontWeight: 600,
-            letterSpacing: "0.07em",
-            textTransform: "uppercase",
+            letterSpacing: "0.02em",
           }}
         >
-          {runStatus}
+          {sentenceCase(runStatus)}
         </span>
       </span>
     </div>
@@ -421,6 +444,11 @@ interface StepNodeProps {
   fileCount: number;
   // The run's current / running step — earns the ambient accent treatment.
   active: boolean;
+  // True while the whole run is paused. A step's own status is not rewritten
+  // when the user stops a run, so the node has to be told: without this it
+  // would keep wearing the live accent and calling itself "Running" over work
+  // that is not moving.
+  runPaused?: boolean;
   selected: boolean;
   onSelect: () => void;
   // Optional verdict inputs — when present, WorkerBatchNode renders the shared
@@ -444,6 +472,7 @@ function WorkerBatchNode({
   rows,
   fileCount,
   active,
+  runPaused = false,
   selected,
   onSelect,
   reportByAttempt,
@@ -452,20 +481,29 @@ function WorkerBatchNode({
 }: StepNodeProps) {
   const [hover, setHover] = useState(false);
   const status = step.status;
-  const tone = stepStatusColor(status);
+  const inMotion = status === "running" || status === "reviewing";
+  const held = runPaused && (active || inMotion);
+  const tone = held ? statusColor("paused") : stepStatusColor(status);
   const verdict =
     reportByAttempt && attemptByTask && tasksById
       ? stepVerdict(step, attemptByTask, reportByAttempt, tasksById)
       : "none";
   const complete = status === "complete" || status === "skipped";
   const attention = status === "blocked" || status === "failed";
-  const live = active || status === "running" || status === "reviewing";
+  const live = !runPaused && (active || inMotion);
 
   const total = rows.length;
   const done = rows.filter(
     (row) => deriveAgentStatus(row.task, row.attempt, status) === "done",
   ).length;
   const progress = total > 0 ? done / total : complete ? 1 : 0;
+  // Retries hide behind logical worker rows; surface the raw try count when
+  // it outgrows the worker count so the step admits its rework.
+  const spawned = rows.filter((row) => row.task).length;
+  const attemptTotal = rows.reduce(
+    (sum, row) => sum + (row.attemptCount ?? (row.attempt ? 1 : 0)),
+    0,
+  );
 
   const attempts = rows
     .map((row) => row.attempt)
@@ -488,18 +526,20 @@ function WorkerBatchNode({
       ? "var(--danger)"
       : live
         ? "var(--accent-edge)"
-        : hover
-          ? "var(--rule-strong)"
-          : "var(--rule)";
+        : held
+          ? "color-mix(in oklch, var(--info) 46%, var(--rule))"
+          : hover
+            ? "var(--rule-strong)"
+            : "var(--rule)";
   const background = attention
-    ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 9%), color-mix(in oklch, var(--panel) 84%, var(--bg) 16%))"
+    ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
     : live
-      ? "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 82%, var(--accent) 9%), color-mix(in oklch, var(--panel) 86%, transparent))"
-      : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 92%, var(--ink) 2%), color-mix(in oklch, var(--panel) 84%, var(--bg) 16%))";
+      ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
+      : held
+        ? "color-mix(in oklab, var(--info) 4%, var(--panel))"
+        : "var(--panel)";
   const shadow = [
     selected ? "0 0 0 1.5px var(--accent)" : null,
-    selected || live ? "0 0 22px var(--accent-glow)" : null,
-    attention ? "0 0 18px color-mix(in oklch, var(--danger) 30%, transparent)" : null,
     "var(--lift-hi)",
     "var(--shadow-2)",
   ]
@@ -535,49 +575,19 @@ function WorkerBatchNode({
           "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      {live && (
-        <span
-          aria-hidden
-          className="runs-node-scan"
-          style={{
-            position: "absolute",
-            top: 0,
-            bottom: 0,
-            width: "38%",
-            pointerEvents: "none",
-            background:
-              "linear-gradient(90deg, transparent, color-mix(in oklch, var(--accent) 7%, transparent), transparent)",
-          }}
-        />
-      )}
-      <span
-        aria-hidden
-        style={{
-          position: "absolute",
-          inset: "0 0 auto 0",
-          height: 1,
-          background: live
-            ? "linear-gradient(90deg, transparent, var(--accent), transparent)"
-            : complete
-              ? "linear-gradient(90deg, transparent, var(--ok), transparent)"
-              : "linear-gradient(90deg, transparent, var(--rule-strong), transparent)",
-          opacity: live ? 0.85 : 0.42,
-        }}
-      />
       <header style={{ display: "grid", gridTemplateColumns: "32px minmax(0,1fr) auto", gap: 11, alignItems: "start" }}>
-        <StepBadge index={index} status={status} />
+        <StepBadge index={index} status={status} tone={held ? tone : undefined} />
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
           <span
             style={{
               color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 9,
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
               fontWeight: 600,
-              letterSpacing: "0.13em",
-              textTransform: "uppercase",
+              letterSpacing: "0.04em",
             }}
           >
-            Step {String(index).padStart(2, "0")}
+            Step {index}
           </span>
           <span
             style={{
@@ -596,7 +606,7 @@ function WorkerBatchNode({
           </span>
         </div>
         <div style={{ display: "inline-flex", alignItems: "center", gap: 6, flex: "0 0 auto" }}>
-          <StatusTag label={stepStatusLabel(status)} tone={tone} />
+          <StatusTag label={held ? "paused" : stepStatusLabel(status)} tone={tone} />
           <VerdictPill kind={verdict} compact />
         </div>
       </header>
@@ -633,6 +643,20 @@ function WorkerBatchNode({
           value={total > 0 ? `${done}/${total}` : "—"}
           tone={total > 0 && done === total ? "var(--ok)" : "var(--ink-dim)"}
         />
+        {attemptTotal > spawned && spawned > 0 && (
+          <span
+            title={`${spawned} workers ran ${attemptTotal} attempts, retries included`}
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
+              fontWeight: 500,
+              whiteSpace: "nowrap",
+            }}
+          >
+            · {attemptTotal} attempts
+          </span>
+        )}
         <Stat
           icon={<FilesGlyph />}
           label="Files"
@@ -652,19 +676,6 @@ function WorkerBatchNode({
             <ElapsedTime startedAt={startedAt} finishedAt={finishedAt} />
           </span>
         )}
-        <span
-          style={{
-            minWidth: 29,
-            color: live ? "var(--accent)" : complete ? "var(--ok)" : "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 9,
-            fontWeight: 700,
-            textAlign: "right",
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          {Math.round(progress * 100)}% done
-        </span>
       </div>
 
       {/* Worker-completion bar, flush along the node's bottom edge. */}
@@ -676,7 +687,7 @@ function WorkerBatchNode({
           right: 0,
           bottom: 0,
           height: 3,
-          background: "color-mix(in oklch, var(--ink) 8%, transparent)",
+          background: "color-mix(in oklab, var(--ink) 8%, transparent)",
         }}
       >
         <span
@@ -685,7 +696,6 @@ function WorkerBatchNode({
             height: "100%",
             width: `${Math.round(progress * 100)}%`,
             background: attention ? "var(--danger)" : complete ? "var(--ok)" : "var(--accent)",
-            boxShadow: live ? "0 0 10px var(--accent-glow)" : "none",
             transition: "width var(--motion) var(--ease-out)",
           }}
         />
@@ -696,19 +706,30 @@ function WorkerBatchNode({
 
 // Brake / checkpoint step: a manager replanning pause, no workers. Lighter and
 // dashed so it reads as a gate between worker batches rather than a work node.
-function CheckpointNode({ step, index, active, selected, onSelect }: StepNodeProps) {
+function CheckpointNode({
+  step,
+  index,
+  active,
+  runPaused = false,
+  selected,
+  onSelect,
+}: StepNodeProps) {
   const [hover, setHover] = useState(false);
   const status = step.status;
-  const tone = stepStatusColor(status);
+  const inMotion = status === "running" || status === "reviewing";
+  const held = runPaused && (active || inMotion);
+  const tone = held ? statusColor("paused") : stepStatusColor(status);
   const complete = status === "complete" || status === "skipped";
-  const live = active || status === "running" || status === "reviewing";
+  const live = !runPaused && (active || inMotion);
   const border = selected
     ? "var(--accent)"
     : live
       ? "var(--accent-edge)"
-      : hover
-        ? "var(--rule-strong)"
-        : "var(--rule)";
+      : held
+        ? "color-mix(in oklch, var(--info) 46%, var(--rule))"
+        : hover
+          ? "var(--rule-strong)"
+          : "var(--rule)";
   return (
     <article
       onClick={(event) => {
@@ -726,17 +747,12 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
         cursor: "pointer",
         fontFamily: "var(--font-sans)",
         overflow: "hidden",
-        // A gate between worker batches: dashed border + accent top rule —
-        // quieter than a work node, no clip-path theatrics.
+        // A gate between worker batches: dashed border — quieter than a work
+        // node, no clip-path theatrics.
         borderRadius: 14,
         border: `1px dashed ${border}`,
-        background:
-          "linear-gradient(150deg, color-mix(in oklch, var(--panel) 84%, var(--ink) 1%), color-mix(in oklch, var(--panel) 80%, var(--bg) 18%))",
-        boxShadow: selected
-          ? "0 0 0 1.5px var(--accent), 0 0 20px var(--accent-glow), var(--shadow-1)"
-          : live
-            ? "0 0 16px var(--accent-glow), var(--shadow-1)"
-            : "var(--shadow-1)",
+        background: live ? "color-mix(in oklab, var(--accent) 5%, var(--panel))" : "var(--panel)",
+        boxShadow: selected ? "0 0 0 1.5px var(--accent), var(--shadow-1)" : "var(--shadow-1)",
         padding: "13px 16px",
         display: "flex",
         flexDirection: "column",
@@ -745,18 +761,6 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
           "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          right: 0,
-          height: 2,
-          background:
-            "linear-gradient(90deg, color-mix(in oklch, var(--accent) 55%, transparent), color-mix(in oklch, var(--accent) 10%, transparent))",
-        }}
-      />
       <header style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <span
           style={{
@@ -765,7 +769,7 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
             borderRadius: 8,
             flex: "0 0 auto",
             border: `1px solid ${tone}`,
-            background: complete ? "var(--ok-soft)" : "color-mix(in oklch, var(--ink) 4%, transparent)",
+            background: complete ? "var(--ok-soft)" : "color-mix(in oklab, var(--ink) 4%, transparent)",
             color: tone,
             display: "inline-flex",
             alignItems: "center",
@@ -778,14 +782,13 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
           <span
             style={{
               color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 9,
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
               fontWeight: 600,
-              letterSpacing: "0.13em",
-              textTransform: "uppercase",
+              letterSpacing: "0.04em",
             }}
           >
-            Step {String(index).padStart(2, "0")} · Checkpoint
+            Step {index} · Checkpoint
           </span>
           <span
             style={{
@@ -818,15 +821,25 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
         {step.goal || "Cora pauses here to replan downstream steps."}
       </p>
       <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 7 }}>
-        <StatusDot status={status} size={6} />
-        <StatusTag label={stepStatusLabel(status)} tone={tone} />
+        <StatusDot status={held ? "paused" : status} size={6} />
+        <StatusTag label={held ? "paused" : stepStatusLabel(status)} tone={tone} />
       </div>
     </article>
   );
 }
 
-function StepBadge({ index, status }: { index: number; status: StepState["status"] }) {
-  const tone = stepStatusColor(status);
+function StepBadge({
+  index,
+  status,
+  tone: toneOverride,
+}: {
+  index: number;
+  status: StepState["status"];
+  // Set when the node paints the step in a tone its own status cannot express
+  // (a running step held by a paused run), so the badge agrees with the chip.
+  tone?: string;
+}) {
+  const tone = toneOverride ?? stepStatusColor(status);
   const complete = status === "complete" || status === "skipped";
   const failed = status === "failed" || status === "blocked";
   return (
@@ -840,7 +853,9 @@ function StepBadge({ index, status }: { index: number; status: StepState["status
           ? "var(--ok-soft)"
           : failed
             ? "var(--danger-soft)"
-            : "color-mix(in oklch, var(--accent) 8%, transparent)",
+            : toneOverride
+              ? `color-mix(in oklch, ${toneOverride} 8%, transparent)`
+              : "color-mix(in oklch, var(--accent) 8%, transparent)",
         color: tone,
         display: "inline-flex",
         alignItems: "center",
@@ -851,7 +866,7 @@ function StepBadge({ index, status }: { index: number; status: StepState["status
         fontVariantNumeric: "tabular-nums",
       }}
     >
-      {complete ? <CheckGlyph /> : failed ? <AlertGlyph /> : String(index).padStart(2, "0")}
+      {complete ? <CheckGlyph /> : failed ? <AlertGlyph /> : String(index)}
     </span>
   );
 }
@@ -874,10 +889,9 @@ function Stat({
         style={{
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 9,
-          fontWeight: 600,
-          letterSpacing: "0.08em",
-          textTransform: "uppercase",
+          fontSize: 10,
+          fontWeight: 500,
+          letterSpacing: "0.02em",
         }}
       >
         {label}
@@ -902,6 +916,10 @@ function Stat({
 interface WorkerNodeProps {
   row: AgentRow;
   stepStatus: StepState["status"];
+  // True while the whole run is paused. A stop kills the worker's process but
+  // an attempt caught mid-launch can still read as running, so the card is told
+  // the run is held rather than inferring aliveness from a stale attempt.
+  runPaused?: boolean;
   selected: boolean;
   onSelect: () => void;
   onOpen: () => void;
@@ -910,6 +928,7 @@ interface WorkerNodeProps {
 export const WorkerNode = React.memo(function WorkerNode({
   row,
   stepStatus,
+  runPaused = false,
   selected,
   onSelect,
   onOpen,
@@ -920,31 +939,39 @@ export const WorkerNode = React.memo(function WorkerNode({
   const status = deriveAgentStatus(task, attempt, stepStatus);
   // The badge must reflect the runtime that actually ran the worker, not just
   // the manager's original plan. Manager rewrites and rerouteUnavailableAgent-
-  // Runtimes can swap the runtime at spawn time (e.g. plan said claude but the
-  // selection only enables cursor, so the worker actually spawns on cursor with
-  // composer-2.5-fast). Reading agent.runtimePreference would render CLAUDE
-  // while the terminal shows composer-2.5-fast — exactly the mismatch the user
-  // reported in the runs graph. Prefer the live attempt.runtime, fall back to
+  // Runtimes can swap the runtime at spawn time when the planned CLI is not
+  // enabled. Prefer the live attempt.runtime, fall back to
   // the routed task.runtimePreference, and only use the planned-agent value
   // when nothing has spawned yet (queued).
   const liveRuntime = attempt?.runtime ?? task?.runtimePreference ?? agent.runtimePreference;
   const tone = runtimeTone(liveRuntime);
-  const running = status === "running";
+  // A paused run has no worker doing work, whatever the last persisted attempt
+  // status says, so the card drops every live affordance: no accent edge, no
+  // pulsing dot, no "Running" word over a process the stop already killed.
+  const held = runPaused && status === "running";
+  const running = status === "running" && !held;
   const blocked = status === "blocked";
   const runtimeState = attempt?.runtimeState;
-  const stateLabel = runtimeState
-    ? runtimeState === "idle"
-      ? "ready"
-      : runtimeState === "working"
-        ? "working"
-        : runtimeState
-    : queued
-      ? "queued"
-      : attempt?.status === "succeeded"
-        ? "complete"
-        : attempt?.status === "finishing"
-          ? "finishing"
-          : status;
+  const stateLabel = held
+    ? "paused"
+    : runtimeState
+      ? runtimeState === "idle"
+        ? "ready"
+        : runtimeState === "working"
+          ? "working"
+          : runtimeState === "error"
+            // Matches the terminal pane chip. The raw state name ("error") is
+            // vaguer than what happened: the worker's process died on its own,
+            // which is never a sanctioned end since only Cora may stop a worker.
+            ? "crashed"
+            : runtimeState
+      : queued
+        ? "queued"
+        : attempt?.status === "succeeded"
+          ? "complete"
+          : attempt?.status === "finishing"
+            ? "finishing"
+            : status;
 
   const border = selected
     ? "var(--accent)"
@@ -952,25 +979,50 @@ export const WorkerNode = React.memo(function WorkerNode({
       ? "var(--danger)"
       : running
         ? "var(--accent-edge)"
-        : hover && !queued
-          ? "var(--rule-strong)"
-          : "var(--rule)";
+        : held
+          ? "color-mix(in oklch, var(--info) 46%, var(--rule))"
+          : hover && !queued
+            ? "var(--rule-strong)"
+            : "var(--rule)";
 
   const label = task?.title || agent.label;
   const role = task?.taskClass ?? "worker";
-  const model = task?.modelHint ?? "default model";
-  const stateColor = statusColor(status);
+  // Prefer the model the attempt actually launched on, the planner's hint can
+  // be coerced onto the worker roster at spawn time, so the hint is a request
+  // and the attempt's value is the truth.
+  const liveModel = attempt?.model ?? task?.modelHint ?? agent.modelHint;
+  const modelBadge = workerModelLabel(liveModel, liveRuntime);
+  const effort = task?.effortHint ?? agent.effortHint;
+  const modelLine = liveModel
+    ? effort
+      ? `${liveModel} · ${effort}`
+      : liveModel
+    : "model pending";
+  const stateColor = held ? statusColor("paused") : statusColor(status);
+
+  // Attempt lineage: ordinal counts every try across the task's supersedes
+  // chain; the tooltip recounts the earlier tries so rework is inspectable
+  // without opening the inspector.
+  const attemptOrdinal = row.attemptCount ?? attempt?.attemptNumber ?? 0;
+  const priorAttempts = (row.attempts ?? []).filter((entry) => entry.id !== attempt?.id);
+  const attemptHistory =
+    priorAttempts.length > 0
+      ? priorAttempts
+          .map((entry, i) => `Attempt ${i + 1} · ${entry.runtime} · ${sentenceCase(entry.status)}`)
+          .join("\n")
+      : undefined;
 
   return (
     <button
       type="button"
       disabled={queued}
+      data-worker-task-id={task?.id}
+      data-worker-state={task?.status}
       onClick={(event) => {
         event.stopPropagation();
-        // A double-click emits two click events before dblclick. Ignore the
-        // second click so it cannot toggle the inspector closed immediately
-        // before navigation.
-        if (!queued && event.detail === 1) onSelect();
+        // Synthetic accessibility/test clicks use detail 0; real single
+        // clicks use 1. Ignore the second click from a legacy double-click.
+        if (!queued && event.detail <= 1) onSelect();
       }}
       onDoubleClick={(event) => {
         event.stopPropagation();
@@ -981,7 +1033,7 @@ export const WorkerNode = React.memo(function WorkerNode({
       title={
         queued
           ? `${label}\n\nQueued — Cora has not spawned this worker yet.`
-          : `${label}\n\nClick to inspect. Double-click to open this worker's terminal.`
+          : `${label}${row.retryNote ? `\n${row.retryNote}` : ""}\n\nClick to open this worker's terminal.`
       }
       style={{
         appearance: "none",
@@ -992,21 +1044,30 @@ export const WorkerNode = React.memo(function WorkerNode({
         borderRadius: 14,
         border: `1px solid ${border}`,
         background: blocked
-          ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 8%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))"
+          ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
           : running
-            ? "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 7%), color-mix(in oklch, var(--panel) 86%, transparent))"
-            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, var(--ink) 2%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))",
-        // The runtime-colored left edge is the worker card's silhouette cue —
-        // same left-rule convention as the LiveBoard worker nodes.
-        boxShadow: `inset 3px 0 0 color-mix(in oklch, ${tone.label} 78%, transparent), ${
-            selected
-            ? "0 0 16px var(--accent-glow), var(--shadow-1)"
+            ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
+            : held
+              ? "color-mix(in oklab, var(--info) 4%, var(--panel))"
+              : "var(--panel)",
+        // The colored top edge is the worker card's silhouette cue, the band
+        // that separates one card from the one stacked above it. While the
+        // worker runs the edge turns accent and the card lifts a level: the
+        // working lane must be structural, not just a tint. Model identity
+        // stays on the chip.
+        boxShadow: `${
+          running
+            ? "inset 0 2px 0 var(--accent)"
+            : `inset 0 3px 0 color-mix(in oklch, ${tone.label} 78%, transparent)`
+        }, ${
+          selected
+            ? "0 0 0 1.5px var(--accent), var(--shadow-1)"
             : running
-              ? "var(--lift-hi), 0 0 14px var(--accent-glow), var(--shadow-1)"
+              ? "var(--lift-hi), var(--shadow-2)"
               : "var(--lift-hi), var(--shadow-1)"
         }`,
         opacity: queued ? 0.62 : 1,
-        padding: "8px 10px 8px 14px",
+        padding: "11px 10px 8px 10px",
         display: "flex",
         flexDirection: "column",
         gap: 5,
@@ -1036,24 +1097,26 @@ export const WorkerNode = React.memo(function WorkerNode({
             borderRadius: 4,
             padding: "2px 5px",
             fontFamily: "var(--font-mono)",
-            fontSize: 8,
-            fontWeight: 800,
-            letterSpacing: "0.07em",
-            textTransform: "uppercase",
+            fontSize: 9,
+            fontWeight: 650,
+            letterSpacing: "0.04em",
+            // Deliberately NOT uppercased, see ModelTag in Inspector.tsx. The
+            // chip holds a model name with a version, not a runtime label, and
+            // the same string renders un-uppercased in the run header.
             whiteSpace: "nowrap",
           }}
+          title={`${liveModel ?? "model not resolved yet"}, running on the Pi harness, authenticated as ${liveRuntime}`}
         >
-          {liveRuntime}
+          {modelBadge}
         </span>
         <span
           style={{
             minWidth: 0,
             color: "var(--muted-2)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 7.5,
-            fontWeight: 700,
-            letterSpacing: "0.1em",
-            textTransform: "uppercase",
+            fontFamily: "var(--font-sans)",
+            fontSize: 9.5,
+            fontWeight: 600,
+            letterSpacing: "0.03em",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -1066,30 +1129,44 @@ export const WorkerNode = React.memo(function WorkerNode({
             display: "inline-flex",
             alignItems: "center",
             gap: 4,
-            color: runtimeState === "error" || blocked ? "var(--danger)" : runtimeState === "idle" || runtimeState === "done" ? "var(--ok)" : stateColor,
-            fontFamily: "var(--font-mono)",
-            fontSize: 7.5,
-            fontWeight: 700,
-            letterSpacing: "0.07em",
-            textTransform: "uppercase",
+            color: held
+              ? stateColor
+              : runtimeState === "error" || blocked
+                ? "var(--danger)"
+                : runtimeState === "idle" || runtimeState === "done"
+                  ? "var(--ok)"
+                  : stateColor,
+            fontFamily: "var(--font-sans)",
+            fontSize: 9.5,
+            fontWeight: 600,
+            letterSpacing: "0.02em",
             whiteSpace: "nowrap",
           }}
         >
-          <StatusDot status={mapAgentToStepStatus(status)} size={5} />
-          {stateLabel}
+          <StatusDot status={held ? "paused" : mapAgentToStepStatus(status)} size={5} />
+          {sentenceCase(stateLabel)}
         </span>
         <span
+          // Kept out of the a11y tree: a nested button is invalid inside the
+          // card <button>. The inspector's "Open worker terminal" action is
+          // the accessible route; this arrow is the pointer shortcut.
           aria-hidden
+          title="Open terminal"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!queued) onOpen();
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
           style={{
+            display: "inline-flex",
+            padding: 2,
+            margin: -2,
+            cursor: queued ? "default" : "pointer",
             color: queued ? "var(--muted-2)" : hover || selected ? "var(--accent)" : "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            lineHeight: 1,
-            transform: hover && !queued ? "translateX(1px)" : undefined,
-            transition: "color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
+            transition: "color var(--motion-fast) var(--ease-out)",
           }}
         >
-          ↗
+          <ArrowUpRightGlyph />
         </span>
       </div>
       <span
@@ -1114,38 +1191,46 @@ export const WorkerNode = React.memo(function WorkerNode({
             minWidth: 0,
             color: "var(--muted)",
             fontFamily: "var(--font-mono)",
-            fontSize: 8.5,
+            fontSize: 10,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
         >
-          {model}
+          {modelLine}
         </span>
+        {attemptOrdinal > 1 && (
+          <span
+            title={
+              attemptHistory ??
+              `${attemptOrdinal - 1} earlier ${attemptOrdinal === 2 ? "attempt" : "attempts"}`
+            }
+            style={{
+              flex: "0 0 auto",
+              color: "var(--muted-2)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
+            }}
+          >
+            attempt {attemptOrdinal} of {Math.max(WORKER_ATTEMPT_CAP, attemptOrdinal)}
+          </span>
+        )}
         <span
           style={{
             flex: "0 0 auto",
-            color: "var(--muted-2)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 8,
-            textTransform: "uppercase",
-          }}
-        >
-          {task?.effortHint ?? "auto"} · A{String(attempt?.attemptNumber ?? 0).padStart(2, "0")}
-        </span>
-        <span
-          style={{
-            flex: "0 0 auto",
+            minWidth: 34,
+            textAlign: "right",
             color: running ? "var(--accent)" : stateColor,
             fontFamily: "var(--font-mono)",
-            fontSize: 9.5,
+            fontSize: 10,
+            fontWeight: running ? 600 : undefined,
             fontVariantNumeric: "tabular-nums",
           }}
         >
           {attempt ? (
-            <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="--:--" />
+            <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="—" />
           ) : (
-            "--:--"
+            "—"
           )}
         </span>
       </div>
@@ -1164,7 +1249,7 @@ function mapAgentToStepStatus(
   return "queued";
 }
 
-// ── COMPLETE terminal node ───────────────────────────────────────────────────
+// ── End terminal node ────────────────────────────────────────────────────────
 
 export const EndNode = React.memo(function EndNode({
   runStatus,
@@ -1174,7 +1259,7 @@ export const EndNode = React.memo(function EndNode({
   const complete = runStatus === "complete";
   const failed = runStatus === "failed" || runStatus === "blocked";
   const tone = complete ? "var(--ok)" : failed ? "var(--danger)" : "var(--muted)";
-  const label = complete ? "complete" : failed ? runStatus : "pending";
+  const label = complete ? "Complete" : failed ? sentenceCase(runStatus) : "Pending";
   return (
     <div
       title={`Run outcome: ${runStatus}`}
@@ -1182,17 +1267,15 @@ export const EndNode = React.memo(function EndNode({
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        // Capsule — the terminal's silhouette, matching the SPARK origin.
+        // Capsule — the terminal's silhouette, matching the manager origin.
         borderRadius: 999,
         border: `1px solid ${complete ? "var(--ok)" : failed ? "var(--danger)" : "var(--rule)"}`,
         background: complete
-          ? "linear-gradient(150deg, color-mix(in oklch, var(--ok) 16%, var(--panel)), color-mix(in oklch, var(--panel) 86%, transparent))"
+          ? "color-mix(in oklab, var(--ok) 6%, var(--panel))"
           : failed
-            ? "linear-gradient(150deg, color-mix(in oklch, var(--danger) 14%, var(--panel)), color-mix(in oklch, var(--panel) 86%, transparent))"
-            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, var(--ink) 1%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))",
-        boxShadow: complete
-          ? "var(--lift-hi), 0 0 22px color-mix(in oklch, var(--ok) 30%, transparent), var(--shadow-2)"
-          : "var(--lift-hi), var(--shadow-1)",
+            ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
+            : "var(--panel)",
+        boxShadow: "var(--lift-hi), var(--shadow-1)",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
@@ -1202,16 +1285,15 @@ export const EndNode = React.memo(function EndNode({
       }}
     >
       <span style={{ color: tone, display: "inline-flex" }}>
-        <FlagGlyph size={22} />
+        <CheckCircleGlyph size={22} />
       </span>
       <span
         style={{
           color: tone,
           fontFamily: "var(--font-sans)",
           fontSize: 10.5,
-          fontWeight: 700,
-          letterSpacing: "0.12em",
-          textTransform: "uppercase",
+          fontWeight: 600,
+          letterSpacing: "0.02em",
         }}
       >
         {label}

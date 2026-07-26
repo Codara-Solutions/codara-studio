@@ -11,7 +11,9 @@
 // architect) are layered on TOP of that roster only when a backend spawns the
 // server with SPARK_MCP_MODE=execute|automation — Claude via a per-run
 // --mcp-config, Codex via a `-c mcp_servers."codara-studio".env.SPARK_MCP_MODE`
-// override. The single server, three rosters, live in the server.js itself.
+// override — and structured automation workers get SPARK_MCP_MODE=worker (the
+// studio surface plus the loop-lifecycle pair, structured-worker.ts). The
+// single server and all its rosters live in server.js itself.
 //
 // Design mirrors hook-installer.ts:
 // 1. Idempotent. JSON entries are tagged `_sparkManaged: true` + version;
@@ -30,7 +32,7 @@
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 import type {
   SparkBuiltinActionResult,
@@ -48,6 +50,9 @@ import { sparkHome } from "./spark-home";
 // The merged built-in server. Was two servers (cora-preview + cora-orchestrator)
 // before v5 — both are cleaned up as legacy on launch.
 const SERVER_NAME = "codara-studio";
+// Callers that report on the built-in (sync summaries, IPC status text) use
+// this instead of re-typing the name.
+export const SPARK_BUILTIN_SERVER_NAME = SERVER_NAME;
 // Pre-merge managed entries cleaned up on every launch (never user-owned ones):
 // the original Playwright experiment, the pre-Cora spark-* names, and the two
 // separate Cora servers that codara-studio replaced.
@@ -168,6 +173,23 @@ const LEGACY_CODEX_TABLE_NAMES = [
   "cora-orchestrator",
 ] as const;
 
+// Resource directories the built-in server has ever shipped from. A
+// codara-studio entry whose args point at one of these, under a path that no
+// longer exists, is a Codara entry stranded by a moved/renamed install, not a
+// server the user wired up: the marker comments that would have identified it
+// can be lost to a merge or truncation, the command path cannot.
+const MANAGED_SERVER_DIRS = new Set([
+  "codara-studio-mcp",
+  "cora-preview-mcp",
+  "cora-orchestrator-mcp",
+  "spark-preview-mcp",
+  "spark-orchestrator-mcp",
+]);
+
+// How a `[mcp_servers."codara-studio"]` section sitting outside our markers is
+// classified. "stale" is repairable, "user" is untouchable.
+type CodexBuiltinSection = "absent" | "user" | "stale";
+
 interface ManagedClaudeMcpServer {
   type: "stdio";
   command: string;
@@ -213,6 +235,20 @@ export async function installPlaywrightMcp(): Promise<void> {
 
 export async function installSparkPreviewMcp(): Promise<void> {
   await Promise.all([installForClaude(), installForCodex()]);
+}
+
+// Repair-only pass over both runtimes: reports which config files it had to
+// rewrite. The Capability Center's "Sync Claude and Codex" action calls this so
+// a stale built-in entry (a Codara entry left pointing at an install path that
+// no longer exists) is repaired on demand, not only at the next launch. It never
+// installs from absent: a runtime the user just removed the built-in from stays
+// removed until the next launch or an explicit install.
+export async function repairSparkBuiltinEntries(): Promise<{ claude: boolean; codex: boolean }> {
+  const [claude, codex] = await Promise.all([
+    installForClaude(false, { repairOnly: true }),
+    installForCodex(false, { repairOnly: true }),
+  ]);
+  return { claude, codex };
 }
 
 // Boot-time installer. Design rule #3 (stay conservative) says the auto-
@@ -263,10 +299,15 @@ export async function installOrchestratorMcpForCodex(createIfMissing = false): P
 // Claude (~/.claude.json)
 // ---------------------------------------------------------------------------
 
-async function installForClaude(createIfMissing = false): Promise<void> {
-  if (isSandboxedHome()) return;
+// `repairOnly` restricts the write to an entry that is already ours: absent or
+// user-owned means the caller asked for a repair, not an install.
+async function installForClaude(
+  createIfMissing = false,
+  options?: { repairOnly?: boolean },
+): Promise<boolean> {
+  if (isSandboxedHome()) return false;
   const fileExists = existsSync(CLAUDE_USER_CONFIG);
-  if (!fileExists && !createIfMissing) return;
+  if (!fileExists && !createIfMissing) return false;
 
   let raw = "";
   if (fileExists) {
@@ -274,7 +315,7 @@ async function installForClaude(createIfMissing = false): Promise<void> {
       raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
     } catch (err) {
       console.warn("[mcp-installer] could not read ~/.claude.json:", err);
-      return;
+      return false;
     }
   }
 
@@ -284,12 +325,12 @@ async function installForClaude(createIfMissing = false): Promise<void> {
       const value = JSON.parse(raw) as unknown;
       if (value === null || typeof value !== "object" || Array.isArray(value)) {
         console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping");
-        return;
+        return false;
       }
       parsed = value as Record<string, unknown>;
     } catch (err) {
       console.warn("[mcp-installer] ~/.claude.json parse failed; skipping:", (err as Error).message);
-      return;
+      return false;
     }
   } else {
     parsed = {};
@@ -299,6 +340,8 @@ async function installForClaude(createIfMissing = false): Promise<void> {
     parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
       ? (parsed.mcpServers as Record<string, unknown>)
       : {};
+
+  if (options?.repairOnly && !isSparkManaged(servers[SERVER_NAME])) return false;
 
   let changed = false;
 
@@ -321,15 +364,17 @@ async function installForClaude(createIfMissing = false): Promise<void> {
     changed = true;
   }
 
-  if (!changed) return;
+  if (!changed) return false;
 
   parsed.mcpServers = servers;
   try {
     const payload = JSON.stringify(parsed, null, 2) + "\n";
-    if (raw === payload) return;
+    if (raw === payload) return false;
     await writeFileAtomic(CLAUDE_USER_CONFIG, payload);
+    return true;
   } catch (err) {
     console.warn("[mcp-installer] failed to write ~/.claude.json:", err);
+    return false;
   }
 }
 
@@ -374,16 +419,19 @@ function matchesCurrent(value: unknown): boolean {
 // Codex (~/.codex/config.toml)
 // ---------------------------------------------------------------------------
 
-async function installForCodex(createIfMissing = false): Promise<void> {
-  if (isSandboxedHome()) return;
+async function installForCodex(
+  createIfMissing = false,
+  options?: { repairOnly?: boolean },
+): Promise<boolean> {
+  if (isSandboxedHome()) return false;
   const dirExists = directoryExists(CODEX_DIR);
-  if (!dirExists && !createIfMissing) return;
+  if (!dirExists && !createIfMissing) return false;
   if (!dirExists) {
     try {
       await fs.mkdir(CODEX_DIR, { recursive: true });
     } catch (err) {
       console.warn("[mcp-installer] could not create ~/.codex:", err);
-      return;
+      return false;
     }
   }
 
@@ -393,26 +441,36 @@ async function installForCodex(createIfMissing = false): Promise<void> {
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       console.warn("[mcp-installer] could not read ~/.codex/config.toml:", err);
-      return;
+      return false;
     }
   }
 
   // If the user has a non-Codara `codara-studio` server defined outside our
-  // managed block, leave the file alone.
-  if (hasUserCodaraStudioSection(existing)) return;
+  // managed block, leave the file alone. A stale Codara entry (markers lost,
+  // command path gone) is ours to rewrite, so it is swept with the rest.
+  const section = classifyCodexBuiltinSection(existing);
+  if (section === "user") return false;
+
+  // A repair pass only rewrites an entry that is already there: our managed
+  // block, or a stranded table outside it. Absent means the user removed it, and
+  // re-adding it here would undo that.
+  const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
+  if (options?.repairOnly && !managedBlockPresent && section !== "stale") return false;
 
   // Strip our managed block, the retired orchestrator block, and any broken
   // legacy-named tables, then append one fresh block.
-  const stripped = stripAllManagedBlocks(existing);
+  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
   const block = renderCodexBlock();
   const base = stripped.trimEnd();
   const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
-  if (next === existing) return;
+  if (next === existing) return false;
 
   try {
     await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
+    return true;
   } catch (err) {
     console.warn("[mcp-installer] failed to write ~/.codex/config.toml:", err);
+    return false;
   }
 }
 
@@ -425,9 +483,109 @@ function directoryExists(path: string): boolean {
 }
 
 function hasUserCodaraStudioSection(text: string): boolean {
-  const withoutManaged = stripAllManagedBlocks(text);
-  const pattern = /^\s*\[mcp_servers\.(?:"codara-studio"|'codara-studio'|codara-studio)\]\s*$/m;
-  return pattern.test(withoutManaged);
+  return classifyCodexBuiltinSection(text) === "user";
+}
+
+// Classify the codara-studio table that survives outside our markers. JSON
+// entries carry `_sparkManaged` inside the object, so ~/.claude.json always
+// knows whose entry it is; a TOML block only has two comment lines around it,
+// and those have been seen split apart or dropped by a merge. When they are
+// gone, the entry itself is the only evidence left: our own command/args shape
+// pointing at an install path that no longer exists means the entry is a
+// stranded Codara one and repairing it is the whole point.
+function classifyCodexBuiltinSection(text: string): CodexBuiltinSection {
+  const section = readCodexServerSection(stripAllManagedBlocks(text), SERVER_NAME);
+  if (!section) return "absent";
+  return isStrandedBuiltinSection(section) ? "stale" : "user";
+}
+
+function isStrandedBuiltinSection(section: CodexServerSection): boolean {
+  // Every entry we have ever written runs the server script through Electron's
+  // node mode. Without that env the entry is somebody else's.
+  if (section.env.ELECTRON_RUN_AS_NODE !== "1") return false;
+  const script = section.args.find(
+    (arg) => basename(arg) === "server.js" && MANAGED_SERVER_DIRS.has(basename(dirname(arg))),
+  );
+  if (!script || !isAbsolute(script)) return false;
+  if (!existsSync(script)) return true;
+  const command = section.command ?? "";
+  return isAbsolute(command) && !existsSync(command);
+}
+
+interface CodexServerSection {
+  command?: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+// Minimal reader for one `[mcp_servers.<name>]` table plus its `.env` subtable.
+// Only the fields the staleness check needs are kept; a full TOML parse is not
+// worth pulling in for a shape we wrote ourselves.
+function readCodexServerSection(text: string, name: string): CodexServerSection | null {
+  const header = new RegExp(
+    `^\\s*\\[mcp_servers\\.(?:"${escapeRegExp(name)}"|'${escapeRegExp(name)}'|${escapeRegExp(name)})(\\.env)?\\]\\s*$`,
+  );
+  const section: CodexServerSection = { args: [], env: {} };
+  let found = false;
+  let inSection = false;
+  let inEnv = false;
+  for (const line of text.split("\n")) {
+    const match = header.exec(line);
+    if (match) {
+      found = true;
+      inSection = true;
+      inEnv = Boolean(match[1]);
+      continue;
+    }
+    if (/^\s*\[/.test(line)) {
+      inSection = false;
+      inEnv = false;
+      continue;
+    }
+    if (!inSection) continue;
+    const pair = parseTomlAssignment(line);
+    if (!pair) continue;
+    if (inEnv) {
+      section.env[pair.key] = unquoteTomlValue(pair.value);
+      continue;
+    }
+    if (pair.key === "command") section.command = unquoteTomlValue(pair.value);
+    else if (pair.key === "args") section.args = parseTomlStringArray(pair.value);
+  }
+  return found ? section : null;
+}
+
+function parseTomlAssignment(line: string): { key: string; value: string } | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  const match = trimmed.match(/^("[^"]*"|'[^']*'|[A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
+  if (!match) return null;
+  return { key: unquoteTomlValue(match[1]), value: match[2].trim() };
+}
+
+function unquoteTomlValue(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+    return trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
+  if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function parseTomlStringArray(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
+  const out: string[] = [];
+  for (const match of trimmed.slice(1, -1).matchAll(/"((?:\\.|[^"\\])*)"|'([^']*)'/g)) {
+    out.push(match[1] !== undefined ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\") : match[2]);
+  }
+  return out;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // Strip the codara-studio managed block, the retired orchestrator block, and
@@ -438,12 +596,19 @@ function hasUserCodaraStudioSection(text: string): boolean {
 // pass as the first marker region let that pass's legacy-section consumption run
 // past the SECOND block's END marker (an END marker is a comment, not a `[`
 // line), orphaning the second block's comment lines forever.
-function stripAllManagedBlocks(text: string): string {
+// `sweepBuiltinName` adds the CURRENT name to that final sweep. Only the
+// installer passes it, and only once classifyCodexBuiltinSection has proved the
+// surviving codara-studio table is a stranded Codara entry rather than a
+// user-owned one.
+function stripAllManagedBlocks(text: string, options?: { sweepBuiltinName?: boolean }): string {
   let out = stripManagedCodexRegions(text, CODEX_BLOCK_START, CODEX_BLOCK_END, []);
   out = stripManagedCodexRegions(out, CODEX_ORCHESTRATOR_BLOCK_START, CODEX_ORCHESTRATOR_BLOCK_END, []);
   // Markers are gone now; reuse the builtin-marker strings as harmless no-ops so
   // only the legacy-table sweep runs on this final pass.
-  out = stripManagedCodexRegions(out, CODEX_BLOCK_START, CODEX_BLOCK_END, LEGACY_CODEX_TABLE_NAMES);
+  const names = options?.sweepBuiltinName
+    ? [...LEGACY_CODEX_TABLE_NAMES, SERVER_NAME]
+    : LEGACY_CODEX_TABLE_NAMES;
+  out = stripManagedCodexRegions(out, CODEX_BLOCK_START, CODEX_BLOCK_END, names);
   return out;
 }
 
@@ -867,13 +1032,14 @@ async function uninstallCodexBuiltinBlock(): Promise<SparkBuiltinActionResult> {
   } catch (err) {
     return { ok: false, error: `Could not read ~/.codex/config.toml: ${(err as Error).message}` };
   }
-  if (hasUserCodaraStudioSection(existing)) {
+  const section = classifyCodexBuiltinSection(existing);
+  if (section === "user") {
     return {
       ok: false,
       error: `A user-defined ${SERVER_NAME} section exists in config.toml; Codara won't remove it.`,
     };
   }
-  const next = stripAllManagedBlocks(existing);
+  const next = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
   if (next === existing) return { ok: true };
   try {
     await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
@@ -886,6 +1052,8 @@ async function uninstallCodexBuiltinBlock(): Promise<SparkBuiltinActionResult> {
 // Test/diagnostic surface.
 export const __test = {
   SERVER_NAME,
+  classifyCodexBuiltinSection,
+  readCodexServerSection,
   LEGACY_SERVER_NAMES,
   SPARK_VERSION,
   CLAUDE_USER_CONFIG,

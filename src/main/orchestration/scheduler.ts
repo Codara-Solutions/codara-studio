@@ -17,10 +17,10 @@ import { AUTOMATION_HISTORY_CAP } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
 import { sparkHome } from "../spark-home";
-// run-store is heavy (it transitively loads openrouter + agent-sync). Importing
-// scheduler at boot to arm timers must NOT drag run-store into cold start, so we
-// lazy-import startAutopilot only when a job actually fires (runJobNow below;
-// fireJob goes through run-queue, also lazily).
+// run-store is heavy (it transitively loads the manager backends + agent-sync).
+// Importing scheduler at boot to arm timers must NOT drag run-store into cold
+// start, so we lazy-import startAutopilot only when a job actually fires
+// (runJobNow below; fireJob goes through run-queue, also lazily).
 
 // Automation scheduler ─────────────────────────────────────────────────────────
 // A registry of saved automations. Each one pins a StartAutopilotInput and a

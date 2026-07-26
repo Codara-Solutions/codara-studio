@@ -9,19 +9,23 @@
 // can find and identify a rollout after spawning `codex`.
 
 import { promises as fs } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const ROLLOUT_FILENAME_UUID_RE = /rollout-.*-([0-9a-f-]{36})\.jsonl$/i;
+
+export function codexHomeDir(): string {
+  const configured = process.env.CODEX_HOME?.trim();
+  return configured || join(homedir(), ".codex");
+}
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
 export function sessionsDirFor(date: Date): string {
-  const homeDir = process.env.USERPROFILE || process.env.HOME || "";
   return join(
-    homeDir,
-    ".codex",
+    codexHomeDir(),
     "sessions",
     String(date.getFullYear()),
     pad2(date.getMonth() + 1),

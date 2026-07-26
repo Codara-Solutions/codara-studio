@@ -302,11 +302,17 @@ export async function burnDown(): Promise<RunQueueState> {
 
 /**
  * On boot, items left 'running' belong to runs whose in-process completion
- * watcher died with the previous session. Reset them to 'queued' so the work
- * resumes, then kick a drain. (Duplicate-run risk is acceptable for the in-app
- * version; durable in-flight ownership is the daemon split's job.)
+ * watcher died with the previous session. Reset them to 'queued' so the item is
+ * not stranded mid-flight forever.
+ *
+ * REPAIR ONLY: this deliberately does NOT drain the queue. Relaunching the app
+ * must never start Cora on its own, and draining here did exactly that: the
+ * reset above clears item.runId, so burnDown would not resume the parked run,
+ * it would call startAutopilot on the item's original input and create a SECOND
+ * run doing the same work while the first sat paused with its queue link gone.
+ * The user's Resume, or the next enqueue, is what drains the queue now.
  */
-export async function resumeQueue(): Promise<void> {
+export async function reconcileQueueAfterRestart(): Promise<void> {
   await withQueue(async () => {
     const state = await loadQueue();
     let changed = false;
@@ -320,7 +326,6 @@ export async function resumeQueue(): Promise<void> {
     }
     if (changed) await persist(state);
   });
-  void burnDown().catch((err: unknown) => console.error("[queue] resume drain failed:", err));
 }
 
 /**

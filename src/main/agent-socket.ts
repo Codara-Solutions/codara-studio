@@ -2,7 +2,7 @@ import { app, BrowserWindow } from "electron";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
@@ -11,15 +11,37 @@ import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./pr
 import { requestTerminalOp } from "./terminal-bridge";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
+import { loadState, saveState } from "./storage";
+import { setAllowedRoots } from "./fs-sandbox";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
+import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
+import {
+  MAX_BULLETS_ADDED_PER_RUN,
+  MAX_REMEMBER_CALLS_PER_RUN,
+  rememberAdd,
+  rememberReplace,
+  type MemoryScope,
+} from "./orchestration/cora-memory";
+import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
+import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
   CODEX_MODEL_CATALOG,
-  CODEX_MODEL_BY_TIER,
   normalizeCodexModelId,
 } from "@shared/model-catalog";
+import { ALLOWED_WORKER_MODELS, rosterModelFor } from "./orchestration/worker-model-hint";
+import {
+  headroomForRuntime,
+  preferredRuntimeForHeadroom,
+  readSubscriptionHeadroomSummary,
+  runtimeLimitReached,
+} from "./orchestration/subscription-headroom";
 import type {
   AppPreferences,
+  AppState,
+  AgentEffortLevel,
+  ChatBackendKind,
+  ChatMode,
   InAppNotificationTone,
   NotificationSoundKind,
   NotifyKind,
@@ -31,8 +53,11 @@ import type {
   LoomWorkerConfig,
   RunQuestionCategory,
   RunState,
+  SparkEvent,
   ScheduledJob,
   UpdateScheduledJobInput,
+  UpdateCoraWhiteboardInput,
+  Workspace,
 } from "@shared/types";
 
 const HANDSHAKE_FILE = "agent-socket.json";
@@ -351,6 +376,16 @@ async function dispatch(
         return await handleTerminalWrite(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
+      case "chat.create":
+        return await handleChatCreate(params, id);
+      case "chat.send":
+        return await handleChatSend(params, id);
+      case "chat.wait":
+        return await handleChatWait(params, id, res);
+      case "chat.events":
+        return await handleChatEvents(params, id, res);
+      case "chat.cancel":
+        return await handleChatCancel(params, id);
       case "app.info":
         return handleAppInfo(id);
       case "app.screenshot":
@@ -410,6 +445,12 @@ async function dispatch(
         return await handleOrchestratorCheckMessages(params, id);
       case "orchestrator.name_chat":
         return await handleOrchestratorNameChat(params, id);
+      case "orchestrator.whiteboard_get":
+        return await handleOrchestratorWhiteboardGet(params, id);
+      case "orchestrator.whiteboard_update":
+        return await handleOrchestratorWhiteboardUpdate(params, id);
+      case "orchestrator.remember":
+        return await handleOrchestratorRemember(params, id);
       case "automation.list":
         return await handleAutomationList(params, id);
       case "automation.get":
@@ -502,6 +543,32 @@ async function handleTerminalCreate(
   const cwd = stringParam(params, "cwd");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
+  // The MCP server stamps SPARK_RUN_ID onto terminal.create so a background
+  // run's terminal lands in — and defaults its cwd to — the RUN's workspace,
+  // not whichever workspace the user happens to be viewing. Resolution is
+  // best-effort: no runId (user-facing/non-run agents) or an unknown run keeps
+  // the active-workspace behavior.
+  const runId = stringParam(params, "runId");
+  let workspaceId: string | null = null;
+  let workspaceCwd: string | null = null;
+  if (runId) {
+    try {
+      const run = await (await getRunStore()).getRun(runId);
+      if (run) {
+        workspaceId = run.workspaceId ?? null;
+        workspaceCwd =
+          typeof run.settingsSnapshot?.workspaceCwd === "string"
+            ? run.settingsSnapshot.workspaceCwd
+            : null;
+        if (workspaceId && !workspaceCwd) {
+          const state = await loadState();
+          workspaceCwd = state.workspaces.find((w) => w.id === workspaceId)?.cwd ?? null;
+        }
+      }
+    } catch {
+      /* identity resolution is best-effort */
+    }
+  }
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string }>(
       "create",
@@ -509,6 +576,8 @@ async function handleTerminalCreate(
         ...(cwd ? { cwd } : {}),
         ...(command ? { command } : {}),
         ...(title ? { title } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(workspaceCwd ? { workspaceCwd } : {}),
       },
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
@@ -661,6 +730,387 @@ async function handleChatAppend(
       return errorResponse(id, ERR_INVALID_PARAMS, message);
     }
     return errorResponse(id, ERR_INTERNAL, message);
+  }
+}
+
+const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["claude", "codex", "pi"]);
+// Auto is the only chat mode a user-facing chat can be started in. Rejecting an
+// old `--mode plan` loudly beats silently coercing it to something else.
+const CLI_CHAT_MODES = new Set<ChatMode>(["auto"]);
+const CLI_CHAT_EFFORTS = new Set<AgentEffortLevel>([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+const CLI_WAIT_STOP_STATUSES = new Set<RunState["status"]>([
+  "blocked",
+  "paused",
+  "complete",
+  "failed",
+  "cancelled",
+]);
+
+function enumParam<T extends string>(
+  params: Record<string, unknown>,
+  key: string,
+  allowed: ReadonlySet<T>,
+): T | null | undefined {
+  const value = params[key];
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || !allowed.has(value as T)) return null;
+  return value as T;
+}
+
+async function canonicalWorkspaceDirectory(rawCwd: string): Promise<string> {
+  const requested = resolve(rawCwd);
+  let cwd: string;
+  try {
+    cwd = await fsp.realpath(requested);
+  } catch {
+    throw new Error(`Workspace directory does not exist: ${requested}`);
+  }
+  const stat = await fsp.stat(cwd).catch(() => null);
+  if (!stat?.isDirectory()) throw new Error(`Workspace path is not a directory: ${cwd}`);
+  return cwd;
+}
+
+async function workspacePathMatches(candidate: string, cwd: string): Promise<boolean> {
+  try {
+    return (await fsp.realpath(resolve(candidate))) === cwd;
+  } catch {
+    return resolve(candidate) === cwd;
+  }
+}
+
+function broadcastStateChanged(state: AppState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const wc = window.webContents;
+    if (wc.isDestroyed()) continue;
+    try {
+      wc.send("state:changed", state);
+    } catch {
+      /* A window may disappear between enumeration and send. */
+    }
+  }
+}
+
+async function ensureCliWorkspace(
+  rawCwd: string,
+  requestedName?: string,
+): Promise<{ workspace: Workspace; created: boolean }> {
+  const cwd = await canonicalWorkspaceDirectory(rawCwd);
+  const state = await loadState();
+  for (const workspace of state.workspaces) {
+    if (await workspacePathMatches(workspace.cwd, cwd)) {
+      return { workspace, created: false };
+    }
+  }
+
+  const workspace: Workspace = {
+    id: `ws-cli-${randomBytes(8).toString("hex")}`,
+    name: requestedName?.trim() || basename(cwd) || "workspace",
+    cwd,
+    color: "#2AA298",
+    workers: [],
+  };
+  const next: AppState = {
+    workspaces: [...state.workspaces, workspace],
+    workspaceGroups: state.workspaceGroups,
+    workspaceRailOrder: [...(state.workspaceRailOrder ?? []), workspace.id],
+    activeWorkspaceId: state.activeWorkspaceId ?? workspace.id,
+  };
+  await saveState(next);
+  setAllowedRoots(next.workspaces.map((item) => item.cwd));
+  broadcastStateChanged(next);
+  return { workspace, created: true };
+}
+
+async function activateCliWorkspace(workspaceId: string): Promise<void> {
+  const state = await loadState();
+  if (state.activeWorkspaceId === workspaceId) return;
+  const next: AppState = { ...state, activeWorkspaceId: workspaceId };
+  await saveState(next);
+  broadcastStateChanged(next);
+}
+
+async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {
+  const runStore = await getRunStore();
+  const exact = await runStore.getRun(runIdOrPrefix);
+  if (exact) return exact;
+  const matches = (await runStore.listRuns()).filter((run) => run.id.startsWith(runIdOrPrefix));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// Public headless Cora lifecycle used by bin/cora.cjs. Unlike orchestrator.*,
+// these methods represent the human at the top of a chat: create starts a real
+// managed run, send appends a user turn (or answers the current question), and
+// wait blocks without consuming manager tokens until the run needs attention.
+async function handleChatCreate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const rawCwd = stringParam(params, "cwd");
+  if (!rawCwd) return errorResponse(id, ERR_INVALID_PARAMS, "cwd is required");
+  const rawPrompt = stringParam(params, "prompt");
+  if (!rawPrompt) return errorResponse(id, ERR_INVALID_PARAMS, "prompt is required");
+
+  const backend = enumParam(params, "backend", CLI_CHAT_BACKENDS);
+  if (backend === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be claude, codex, or pi");
+  }
+  const mode = enumParam(params, "mode", CLI_CHAT_MODES);
+  if (mode === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "mode must be auto");
+  }
+  const effort = enumParam(params, "effort", CLI_CHAT_EFFORTS);
+  if (effort === null) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "effort must be minimal, low, medium, high, xhigh, or max",
+    );
+  }
+
+  let binding: { workspace: Workspace; created: boolean };
+  try {
+    binding = await ensureCliWorkspace(rawCwd, stringParam(params, "workspaceName") ?? undefined);
+  } catch (err) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Visible Claude/Codex worker panes are owned by the renderer workspace
+  // store. A run left in a background workspace can create task envelopes, but
+  // the renderer correctly refuses to put their PTYs in the currently active
+  // project's tab store, so activate the workspace for any mode that can spawn
+  // workers.
+  if (effectiveChatMode(mode) === "auto") {
+    await activateCliWorkspace(binding.workspace.id);
+  }
+
+  const prompt = rawPrompt.slice(0, CHAT_APPEND_MAX_CHARS);
+  const title = stringParam(params, "title")?.trim();
+  const model = stringParam(params, "model")?.trim();
+  const runStore = await getRunStore();
+  try {
+    let runId: string | undefined;
+    if (title) {
+      const seeded = await runStore.createRun({
+        workspaceId: binding.workspace.id,
+        workspaceName: binding.workspace.name,
+        cwd: binding.workspace.cwd,
+        title,
+        chatBackend: backend,
+        chatModel: model,
+        chatMode: mode,
+        chatEffort: effort,
+      });
+      runId = seeded.id;
+    }
+    const run = await runStore.startAutopilot({
+      runId,
+      workspaceId: binding.workspace.id,
+      workspaceName: binding.workspace.name,
+      cwd: binding.workspace.cwd,
+      initialUserNote: prompt,
+      initialUserNoteClientMessageId: `cli-${randomBytes(8).toString("hex")}`,
+      chatBackend: backend,
+      chatModel: model,
+      chatMode: mode,
+      chatEffort: effort,
+    });
+    return successResponse(id, {
+      run,
+      workspace: binding.workspace,
+      workspaceCreated: binding.created,
+      truncated: prompt.length < rawPrompt.length,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleChatSend(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const rawContent = stringParam(params, "content");
+  if (!rawContent) return errorResponse(id, ERR_INVALID_PARAMS, "content is required");
+  const run = await resolveCliRun(runIdOrPrefix);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found or prefix is ambiguous: ${runIdOrPrefix}`);
+
+  const content = rawContent.slice(0, CHAT_APPEND_MAX_CHARS);
+  const runStore = await getRunStore();
+  try {
+    const questionMessageId = run.blockedOn?.questionMessageId;
+    const updated = questionMessageId
+      ? await runStore.answerRunQuestion({
+          runId: run.id,
+          questionMessageId,
+          clientMessageId: `cli-${randomBytes(8).toString("hex")}`,
+          message: content,
+        })
+      : await runStore.addRunMessage({
+          runId: run.id,
+          clientMessageId: `cli-${randomBytes(8).toString("hex")}`,
+          author: "user",
+          kind: "note",
+          message: content,
+        });
+    return successResponse(id, {
+      run: updated,
+      answeredQuestion: Boolean(questionMessageId),
+      truncated: content.length < rawContent.length,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleChatWait(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const requestedTimeout = optionalNumberParam(params, "timeoutMs");
+  const timeoutMs = Math.max(0, Math.min(requestedTimeout ?? 20 * 60_000, 60 * 60_000));
+  const deadline = Date.now() + timeoutMs;
+  let run = await resolveCliRun(runIdOrPrefix);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found or prefix is ambiguous: ${runIdOrPrefix}`);
+
+  while (!CLI_WAIT_STOP_STATUSES.has(run.status) && Date.now() < deadline) {
+    if (res.destroyed) {
+      return errorResponse(id, ERR_INTERNAL, "client disconnected while waiting");
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    const fresh = await (await getRunStore()).getRun(run.id);
+    if (!fresh) return errorResponse(id, ERR_INVALID_PARAMS, `Run disappeared while waiting: ${run.id}`);
+    run = fresh;
+  }
+  return successResponse(id, {
+    run,
+    timedOut: !CLI_WAIT_STOP_STATUSES.has(run.status),
+    needsAttention: run.status === "blocked" || run.status === "paused",
+  });
+}
+
+// Cap on events per chat.events response. A large backlog pages: the response
+// carries hasMore=true so the client re-polls with the advanced cursor and
+// drains the remainder before honoring a terminal status.
+const CHAT_EVENTS_MAX_BATCH = 500;
+const CHAT_EVENTS_DEFAULT_WAIT_MS = 25_000;
+// Kept under a minute so the long poll returns well before any socket idle
+// policy could sever it mid-response; the client simply re-polls.
+const CHAT_EVENTS_MAX_WAIT_MS = 55_000;
+
+// Cursor-based long-poll over a run's event journal — the CLI's substitute for
+// the renderer's live push channel (mirrors daemon-host's subscribeDaemonEvents
+// seam, but over the wire). Without afterSequence it answers immediately with
+// the current cursor ("follow from now" bootstrap); with one it returns journal
+// events past the cursor, long-polling up to waitMs when already caught up.
+// Streams everything the journal carries: chat.assistant_block deltas,
+// chat.tool_use/tool_result, step.* transitions, worker_attempt.* status.
+async function handleChatEvents(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const run = await resolveCliRun(runIdOrPrefix);
+  if (!run) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Run not found or prefix is ambiguous: ${runIdOrPrefix}`,
+    );
+  }
+  const afterSequence = optionalNumberParam(params, "afterSequence");
+  const waitMs = Math.max(
+    0,
+    Math.min(
+      optionalNumberParam(params, "waitMs") ?? CHAT_EVENTS_DEFAULT_WAIT_MS,
+      CHAT_EVENTS_MAX_WAIT_MS,
+    ),
+  );
+
+  const { listEvents, subscribeToEvents } = await import("./orchestration/event-log");
+  // Subscribe before reading the journal so an event landing between the read
+  // and the wait loop arrives via the live feed instead of being lost until
+  // the client's next poll.
+  const live: SparkEvent[] = [];
+  const unsubscribe = subscribeToEvents((event) => {
+    if (event.runId === run.id) live.push(event);
+  });
+  try {
+    const journal = await listEvents(run.id);
+    const highWater = journal.reduce((max, event) => Math.max(max, event.sequence ?? 0), 0);
+    if (afterSequence === null) {
+      return successResponse(id, { runId: run.id, cursor: highWater, events: [], status: run.status });
+    }
+
+    const events = journal.filter((event) => (event.sequence ?? 0) > afterSequence);
+    if (events.length === 0 && waitMs > 0) {
+      const deadline = Date.now() + waitMs;
+      while (live.length === 0 && Date.now() < deadline && !res.destroyed) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+      }
+      const seen = new Set(events.map((event) => event.id));
+      for (const event of live) {
+        if ((event.sequence ?? 0) > afterSequence && !seen.has(event.id)) events.push(event);
+      }
+      events.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+    }
+
+    const batch = events.slice(0, CHAT_EVENTS_MAX_BATCH);
+    const cursor = batch.length > 0 ? (batch[batch.length - 1].sequence ?? afterSequence) : afterSequence;
+    const fresh = await (await getRunStore()).getRun(run.id);
+    return successResponse(id, {
+      runId: run.id,
+      cursor,
+      events: batch,
+      // Truncation signal: the journal held more events past the cursor than
+      // this batch carries. Clients must keep draining before treating a
+      // terminal status as the end of the stream, or the transcript tail is
+      // silently dropped.
+      hasMore: events.length > batch.length,
+      status: (fresh ?? run).status,
+    });
+  } finally {
+    unsubscribe();
+  }
+}
+
+async function handleChatCancel(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const run = await resolveCliRun(runIdOrPrefix);
+  if (!run) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Run not found or prefix is ambiguous: ${runIdOrPrefix}`,
+    );
+  }
+  const reason = stringParam(params, "reason")?.slice(0, CHAT_APPEND_MAX_CHARS);
+  try {
+    const updated = await (await getRunStore()).cancelRun({ runId: run.id, reason });
+    return successResponse(id, { run: updated });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -899,6 +1349,16 @@ async function handleAppPrefsSet(
 
 const ASK_USER_POLL_MS = 500;
 const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers the user being AFK
+// A plan approval is read-then-decide: the user reads a whole proposed plan
+// before answering, so the manager waits longer than for a one-line blocker.
+// Hard bound: the MCP client (and the in-process Pi bridge) abort every
+// orchestrator.* RPC at ORCHESTRATION_TIMEOUT_MS = 20 min
+// (resources/codara-studio-mcp/server.js). Overshooting that does NOT buy the
+// user more time: the socket dies first, clientGone releases the blocker, and
+// the plan card becomes unanswerable while the manager gets a transport error
+// instead of the graceful "ask_user timed out". Stay under the ceiling, like
+// ASK_USER_TIMEOUT_MS does.
+const PLAN_APPROVAL_TIMEOUT_MS = 18 * 60 * 1000;
 const ORCHESTRATOR_RUNTIME_FALLBACK = "claude" as const;
 
 interface OrchestratorWorkerInput {
@@ -912,6 +1372,31 @@ interface OrchestratorWorkerInput {
   expectedOutputs?: string[];
   verificationCommands?: string[];
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
+}
+
+// Map a requested model onto its counterpart on the OTHER provider, for a
+// cross-provider peer (an independent verifier, usually). The worker roster
+// has one standard tier per provider, so the only distinction that can survive
+// the hop is premium vs standard, and premium exists on Anthropic alone, so a
+// premium Claude worker's Codex peer lands on the frontier model.
+function crossProviderPeerModel(
+  runtime: "claude" | "codex",
+  requestedModel?: string,
+): string {
+  const model = requestedModel?.trim().toLowerCase() ?? "";
+  return rosterModelFor(runtime, /fable/.test(model) ? "premium" : "standard");
+}
+
+function runtimeHadEnvironmentalFailure(
+  run: RunState,
+  runtime: "claude" | "codex",
+): boolean {
+  return run.workerAttempts.some((attempt) =>
+    attempt.runtime === runtime &&
+    attempt.status === "failed" &&
+    /oauth|auth(?:entication|orization)?|subscription|provider|cli|failed to launch|parseable final-report/i
+      .test(attempt.error ?? ""),
+  );
 }
 
 // Declarative counterpart to orchestrator.spawn_workers. This RPC validates
@@ -961,6 +1446,85 @@ function handleOrchestratorSpawnTerminals(
   });
 }
 
+// ── Verification-round hard cap ─────────────────────────────────────────────
+// The manager LLM is the only thing that mints verification steps for
+// execute-mode runs, and prose policy alone does not stop a hedging verifier
+// from being re-requested forever (run-mrz25z39-9ffs4w chained Build → Verify
+// → Reverify → Final verification → DOM regression verifier on a one-file
+// task). The cap is enforced here — the spawn chokepoint shared by
+// Claude/Codex/Pi managers — as an actual limit, extending the reuse guards
+// below which only dedupe.
+
+function normalizeScopePath(path: string): string {
+  return path.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+
+// How many verifier tasks already ran (or are live) against the requested
+// scope. Overlap is deliberately permissive: an unscoped verifier counts
+// against every scope, because manager-spawned verifiers usually target "the
+// implementation so far" rather than named files. Only FRESH rounds count:
+// a verifier that began before the most recent finished implementation
+// attempt examined code that has since changed (same finishedAt >
+// verifierBeganAt idiom as the live-verifier reuse guard below), so it must
+// not consume the budget for verifying the new work — otherwise turn 1's
+// verifier would starve turn 2's first-ever verification in a long-lived
+// chat run.
+function countVerifierRoundsForScope(
+  run: RunState,
+  requested: Array<Record<string, unknown>>,
+): number {
+  const requestedPaths = new Set<string>();
+  for (const worker of requested) {
+    const raw = [
+      ...(Array.isArray(worker.allowedPaths) ? worker.allowedPaths : []),
+      ...(Array.isArray(worker.expectedOutputs) ? worker.expectedOutputs : []),
+    ];
+    for (const path of raw) {
+      if (typeof path === "string" && path.trim()) requestedPaths.add(normalizeScopePath(path));
+    }
+  }
+  let rounds = 0;
+  for (const task of run.workerTasks) {
+    if (task.taskClass !== "verifier" || task.status === "cancelled") continue;
+    const verifierBeganAt = Date.parse(task.createdAt);
+    const supersededByNewerWork = run.workerAttempts.some((attempt) => {
+      const implementation = run.workerTasks.find(
+        (candidate) => candidate.id === attempt.workerTaskId && candidate.taskClass !== "verifier",
+      );
+      const finishedAt = attempt.finishedAt ? Date.parse(attempt.finishedAt) : Number.NaN;
+      return Boolean(implementation) && Number.isFinite(finishedAt) && finishedAt > verifierBeganAt;
+    });
+    if (supersededByNewerWork) continue;
+    const taskPaths = [...task.allowedPaths, ...task.expectedOutputs]
+      .map(normalizeScopePath)
+      .filter((path) => path.length > 0);
+    const overlaps =
+      requestedPaths.size === 0 ||
+      taskPaths.length === 0 ||
+      taskPaths.some((path) => requestedPaths.has(path));
+    if (overlaps) rounds += 1;
+  }
+  return rounds;
+}
+
+// Verifier rounds allowed per implementation scope, derived from the run's
+// execution policy (itself derived from the manager's complexity call): fast
+// gets a single independent verification, deep two, frontier three.
+function verifierRoundCapForRun(run: RunState): number {
+  const policy = effectiveRunExecutionPolicy(run);
+  const base = policy === "frontier" ? 3 : policy === "deep" ? 2 : 1;
+  return run.taskComplexity === "complex" ? Math.max(base, 2) : base;
+}
+
+// Backstop on manager-minted steps: every spawn RPC creates one synthetic
+// worker_batch step, and a runaway manager can chain them without limit —
+// chat autopilot has no automation-loop hardCap. Generous on purpose: it
+// bounds pathological loops, not normal runs. Scoped to the current user
+// turn (batches minted since the latest user-authored message) because chat
+// runs are long-lived — legitimate batches spread across many turns must
+// never accumulate into a force-land.
+const SYNTHETIC_STEP_CEILING = 20;
+
 async function handleOrchestratorSpawnWorkers(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -972,15 +1536,221 @@ async function handleOrchestratorSpawnWorkers(
     return errorResponse(id, ERR_INVALID_PARAMS, "workers array is required and non-empty");
   }
   const runStore = await getRunStore();
-  const run = await runStore.getRun(runId);
+  let run = await runStore.getRun(runId);
   if (!run) {
     return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   }
   const blocked = rejectIfAutomationRun(run, id, "codara_spawn_workers");
   if (blocked) return blocked;
+  // The MCP orchestrator has no plan_analysis JSON decision to carry its
+  // complexity call, so this is its only channel. Persist before the verifier
+  // cap below is computed: the classification is what the cap derives from.
+  const declaredComplexity = params.taskComplexity;
+  if (
+    declaredComplexity === "trivial" ||
+    declaredComplexity === "standard" ||
+    declaredComplexity === "complex"
+  ) {
+    const reclassified = await runStore
+      .recordTaskComplexity(runId, declaredComplexity)
+      .catch(() => null);
+    if (reclassified) run = reclassified;
+  }
   const cwd = typeof run.settingsSnapshot?.workspaceCwd === "string"
     ? run.settingsSnapshot.workspaceCwd
     : process.cwd();
+
+  // A wait on a failed worker may unblock just as run-store queues its
+  // opposite-runtime fallback. The manager can then immediately request a
+  // semantically identical verifier while the fallback is already queued or
+  // running. Reuse that live verifier instead of creating a second step and
+  // spending twice for the same evidence. Multi-verifier batches remain
+  // supported: this guard only handles a later, single-verifier spawn.
+  const onlyRequestedWorker = rawWorkers.length === 1 && rawWorkers[0] && typeof rawWorkers[0] === "object"
+    ? rawWorkers[0] as Record<string, unknown> & OrchestratorWorkerInput
+    : null;
+  if (onlyRequestedWorker?.taskClass === "verifier") {
+    const liveVerifier = [...run.workerTasks].reverse().find((task) => {
+      if (task.taskClass !== "verifier" || TERMINAL_WORKER_TASK_STATUSES.has(task.status)) return false;
+      const verifierBeganAt = Date.parse(task.createdAt);
+      return !run.workerAttempts.some((attempt) => {
+        const implementation = run.workerTasks.find(
+          (candidate) => candidate.id === attempt.workerTaskId && candidate.taskClass !== "verifier",
+        );
+        const finishedAt = attempt.finishedAt ? Date.parse(attempt.finishedAt) : Number.NaN;
+        return Boolean(implementation) && Number.isFinite(finishedAt) && finishedAt > verifierBeganAt;
+      });
+    });
+    if (liveVerifier) {
+      return successResponse(id, {
+        worker_task_ids: [liveVerifier.id],
+        reused_existing_verifier: true,
+        note:
+          `Reused live verifier ${liveVerifier.id} (${liveVerifier.status}) instead of creating duplicate ` +
+          "verification work. Wait for this worker before deciding whether another verifier is needed.",
+      });
+    }
+  }
+
+  if (onlyRequestedWorker && onlyRequestedWorker.taskClass !== "verifier") {
+    const liveFeedbackRetry = findLiveVerifierFeedbackRetry(run, onlyRequestedWorker);
+    if (liveFeedbackRetry) {
+      return successResponse(id, {
+        worker_task_ids: [liveFeedbackRetry.id],
+        reused_feedback_retry: true,
+        note:
+          `Reused verifier-feedback retry ${liveFeedbackRetry.id} (${liveFeedbackRetry.status}) instead of ` +
+          "starting another corrective worker on the same files. Wait for this worker before deciding " +
+          "whether more implementation work is needed.",
+      });
+    }
+  }
+
+  const workerEntries = rawWorkers.filter(
+    (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
+      Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
+  );
+
+  // Structural shape guard, before anything is created and before the round cap
+  // can spend budget on it: an all-verifier batch on a run with no
+  // implementation worker has nothing to verify and, being read-only, cannot
+  // produce the deliverable either. Rejected rather than coerced so the manager
+  // reclassifies and rewrites the briefs (a brief written as an audit is wrong
+  // even once the class is fixed).
+  const batchRejection = runStore.evaluateSpawnBatchShape(run, workerEntries);
+  if (batchRejection) {
+    console.warn(
+      `[agent-socket] rejected ${batchRejection.verifierCount}-worker all-verifier batch on run ${runId}: ` +
+        "no implementation worker exists to verify",
+    );
+    return errorResponse(id, ERR_INVALID_PARAMS, batchRejection.message);
+  }
+
+  // Hard verification-round cap: past the policy's budget, refuse to mint
+  // another verification step. The manager must either accept the work (it
+  // lands via the completed_unverified path with the existing caveats) or ask
+  // the user, more verifier rounds cannot produce new evidence.
+  let workersToCreate = workerEntries;
+  const guardrailNotes: string[] = [];
+  const requestedVerifiers = workerEntries.filter((worker) => worker.taskClass === "verifier");
+  if (requestedVerifiers.length > 0) {
+    const verifierRoundCap = verifierRoundCapForRun(run);
+    const verifierRoundsUsed = countVerifierRoundsForScope(run, requestedVerifiers);
+    if (verifierRoundsUsed >= verifierRoundCap) {
+      const policy = effectiveRunExecutionPolicy(run);
+      const capNote =
+        `Verification cap reached: ${verifierRoundsUsed} verifier round(s) already ran against this scope ` +
+        `(cap ${verifierRoundCap} for the ${policy} policy). Do not spawn another verifier. Either accept ` +
+        "the implementation now — it lands as completed_unverified carrying the existing verifier caveats — " +
+        "or ask the user one concrete question. If a verifier could not run because tooling was unavailable, " +
+        "treat that as an environmental caveat, not a code failure.";
+      if (requestedVerifiers.length === workerEntries.length) {
+        return successResponse(id, {
+          worker_task_ids: [],
+          verification_cap_reached: true,
+          verifier_rounds_used: verifierRoundsUsed,
+          verifier_round_cap: verifierRoundCap,
+          note: capNote,
+        });
+      }
+      workersToCreate = workerEntries.filter((worker) => worker.taskClass !== "verifier");
+      guardrailNotes.push(capNote);
+    }
+  }
+
+  // Subscription-quota headroom, read once per spawn batch, after the
+  // early-return reuse guards above so their fast paths never wait on it (the
+  // read hits pi-subscription-usage's 60s cache, usually warmed by the manager
+  // turn that issued this RPC). Consulted by the cross-provider verifier
+  // reroute below (never send the verifier into a provider that already hit
+  // its limit) and by the headroom reroute at task creation. A failed read
+  // degrades to null, which every consumer treats as "no signal", so a usage
+  // hiccup can never fail a spawn.
+  const headroomSummary = await readSubscriptionHeadroomSummary();
+
+  // Cross-provider verification is a control-plane invariant, not merely a
+  // prompt suggestion. For the common single-verifier follow-up, reroute a
+  // same-provider request to the installed/enabled peer and translate the
+  // requested model to the equivalent tier. Multi-verifier batches are left
+  // untouched so complex work can deliberately request one peer from each
+  // provider.
+  let verifierPeerOverride: {
+    runtime: "claude" | "codex";
+    modelHint: string;
+    note: string;
+  } | null = null;
+  if (
+    onlyRequestedWorker?.taskClass === "verifier" &&
+    (onlyRequestedWorker.runtimePreference === "claude" || onlyRequestedWorker.runtimePreference === "codex")
+  ) {
+    const latestImplementation = [...run.workerTasks].reverse().find(
+      (task) =>
+        task.taskClass !== "verifier" &&
+        (task.runtimePreference === "claude" || task.runtimePreference === "codex"),
+    );
+    if (latestImplementation?.runtimePreference === onlyRequestedWorker.runtimePreference) {
+      const opposite = latestImplementation.runtimePreference === "claude" ? "codex" : "claude";
+      const { detectAgentRuntimes } = await import("./agent-runtimes");
+      const runtimes = await detectAgentRuntimes();
+      // Cross-provider verification is valuable only when that provider is
+      // healthy: it must be installed and must not have already failed
+      // environmentally in this run (expired OAuth, launch failure, etc.) —
+      // rerouting into a provider that just failed sent workers into the same
+      // broken subscription twice in run-mrwp6vfh-wkticw. The sign-in probe is
+      // deliberately NOT consulted: `authenticated === false` is advisory (the
+      // probe misses env/helper credentials), and an actual sign-out shows up
+      // as an environmental failure on first use anyway.
+      // A limit-reached subscription is the quota flavor of the same problem:
+      // the reroute would send the verifier into a provider guaranteed to
+      // refuse it. Only the explicit limitReached flag blocks the reroute; a
+      // failed or missing usage read stays permissive.
+      const oppositeAvailable =
+        runtimes.some((runtime) => runtime.kind === opposite && runtime.installed) &&
+        !runtimeHadEnvironmentalFailure(run, opposite) &&
+        !runtimeLimitReached(headroomSummary, opposite);
+      if (oppositeAvailable) {
+        verifierPeerOverride = {
+          runtime: opposite,
+          modelHint: crossProviderPeerModel(opposite, onlyRequestedWorker.modelHint),
+          note:
+            `Rerouted the verifier from ${latestImplementation.runtimePreference} to ${opposite} so the ` +
+            "implementation is checked by an independent provider family.",
+        };
+      }
+    }
+  }
+
+  // Quota-aware routing enforcement. When one subscription is nearly exhausted
+  // while the other has clear room (thresholds in subscription-headroom.ts:
+  // tight means limitReached or under 10% left, comfortable means at least 35%
+  // left), workers the manager pointed at the constrained provider are
+  // rerouted to the roomy one at the equivalent roster tier. Two deliberate
+  // exemptions: an explicit claude-fable-5 hint is a premium pin and is never
+  // rerouted, and the single-verifier cross-provider override above always
+  // wins, since that reroute is an independence invariant rather than a
+  // load-balancing choice. The reroute only arms when the preferred runtime is
+  // actually usable here: installed, and without an environmental failure this
+  // run (mirroring the verifier reroute's health check).
+  const headroomPreferredRuntime = preferredRuntimeForHeadroom(headroomSummary);
+  let headroomReroute: { from: "claude" | "codex"; to: "claude" | "codex" } | null = null;
+  if (headroomPreferredRuntime) {
+    const constrainedRuntime = headroomPreferredRuntime === "claude" ? "codex" : "claude";
+    const anyReroutableWorker = workersToCreate.some(
+      (worker) =>
+        (worker.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) === constrainedRuntime &&
+        !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : ""),
+    );
+    if (anyReroutableWorker) {
+      const { detectAgentRuntimes } = await import("./agent-runtimes");
+      const detected = await detectAgentRuntimes();
+      const preferredUsable =
+        detected.some((runtime) => runtime.kind === headroomPreferredRuntime && runtime.installed) &&
+        !runtimeHadEnvironmentalFailure(run, headroomPreferredRuntime);
+      if (preferredUsable) {
+        headroomReroute = { from: constrainedRuntime, to: headroomPreferredRuntime };
+      }
+    }
+  }
 
   // Execute-mode workers don't belong to a planned step; the manager
   // spawns them ad-hoc. RunGraph.tsx renders FROM run.steps, so without a
@@ -989,8 +1759,39 @@ async function handleOrchestratorSpawnWorkers(
   // even though the worker actually ran and edited files. Create one
   // synthetic worker_batch step per spawn_workers RPC call so the graph
   // can render the worker rows via the existing agentRowsForStep path.
-  const workerTitles = rawWorkers
-    .filter((r): r is Record<string, unknown> => Boolean(r) && typeof r === "object")
+  // Only batches minted during the current user turn count toward the
+  // ceiling: a fresh user message resets the budget, so the brake catches a
+  // runaway single-turn spawn loop without ever tripping on a multi-turn
+  // chat run's accumulated history.
+  const latestUserTurnAt = run.humanMessages.reduce((max, message) => {
+    if (message.author !== "user") return max;
+    const at = Date.parse(message.createdAt);
+    return Number.isFinite(at) && at > max ? at : max;
+  }, Number.NEGATIVE_INFINITY);
+  const syntheticStepCount = run.steps.filter(
+    (step) =>
+      (step.kind ?? "worker_batch") === "worker_batch" &&
+      Date.parse(step.createdAt) >= latestUserTurnAt,
+  ).length;
+  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING) {
+    await runStore
+      .forceLandRunUnverified(runId, {
+        trigger: "synthetic_step_ceiling",
+        note:
+          `This run reached the ceiling of ${SYNTHETIC_STEP_CEILING} manager-spawned worker batches in one turn. ` +
+          "Codara accepted the remaining reviewed work and landed the run as unverified rather than keep spawning.",
+      })
+      .catch(() => undefined);
+    return successResponse(id, {
+      worker_task_ids: [],
+      step_ceiling_reached: true,
+      note:
+        `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
+        `(cap ${SYNTHETIC_STEP_CEILING}). Codara has landed the run with the work completed so far. ` +
+        "Summarize the outcome for the user and end the turn — do not spawn more workers.",
+    });
+  }
+  const workerTitles = workersToCreate
     .map((r) => (typeof r.title === "string" ? r.title.trim() : ""))
     .filter((t) => t.length > 0);
   const stepTitle = workerTitles.length === 1
@@ -1021,40 +1822,44 @@ async function handleOrchestratorSpawnWorkers(
   // (raw entries with empty titles are dropped, so rawWorkers can't be used to
   // find the surviving worker's class for the solo-spawn advisory below).
   const createdTaskClasses: (string | undefined)[] = [];
+  // Titles of workers the headroom reroute actually moved, for the note below.
+  const headroomReroutedTitles: string[] = [];
   const attemptIdsToLaunch: string[] = [];
-  // Fable 5 is the premium tier — a Cora-spawned worker may run it whenever the
-  // user explicitly asked for Fable this run (workerFableAllowed; the setting does
-  // not gate this worker path). Otherwise downgrade any fable modelHint the manager emits to Opus 4.8 here
-  // (the spawn chokepoint) and remember the titles so we can surface ONE visible
-  // system note after the loop. Computed once per spawn RPC — the run's
-  // user-authored messages don't change mid-call.
-  const allowFable = runStore.workerFableAllowed(run);
-  const downgradedFableTitles: string[] = [];
   // Create every task BEFORE preparing any: prepareWorkerTask renders the
   // worker prompt and evaluates shouldUsePeerComms against the run snapshot at
   // that instant. If we interleaved create+prepare, the first worker's prompt
   // would be rendered before its peers exist on the step, so it would miss the
   // mailbox + peer-comms guidance (the synthetic step has no plannedAgents to
   // compensate). Two passes guarantee each worker's prompt sees the full batch.
-  for (const raw of rawWorkers) {
-    if (!raw || typeof raw !== "object") continue;
-    const w = raw as Record<string, unknown> & OrchestratorWorkerInput;
+  for (const w of workersToCreate) {
     const title = typeof w.title === "string" ? w.title.trim() : "";
     if (!title) continue;
     const description = typeof w.description === "string" ? w.description : "";
-    const sanitizedModel = runStore.sanitizeWorkerModelHint(
-      typeof w.modelHint === "string" ? w.modelHint : undefined,
-      { allowFable },
-    );
-    if (sanitizedModel.downgraded) downgradedFableTitles.push(title);
+    let effectiveRuntime = verifierPeerOverride?.runtime ?? w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
+    let effectiveModelHint = verifierPeerOverride?.modelHint ??
+      (typeof w.modelHint === "string" ? w.modelHint : undefined);
+    // Headroom reroute, per worker: skipped for the verifier peer override
+    // (independence invariant) and for an explicit fable pin (deliberate
+    // premium ask, honored even while the Claude quota is tight).
+    if (
+      headroomReroute &&
+      !verifierPeerOverride &&
+      effectiveRuntime === headroomReroute.from &&
+      !/fable/i.test(effectiveModelHint ?? "")
+    ) {
+      effectiveRuntime = headroomReroute.to;
+      effectiveModelHint = crossProviderPeerModel(headroomReroute.to, effectiveModelHint);
+      headroomReroutedTitles.push(title);
+    }
+    const sanitizedModel = runStore.sanitizeWorkerModelHint(effectiveModelHint);
     const updated = await runStore.createWorkerTask({
       runId,
       stepId: synthStepId,
       title,
       description,
-      runtimePreference: (w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) as
+      runtimePreference: effectiveRuntime as
         | "claude" | "codex" | "shell" | "manual",
-      modelHint: sanitizedModel.hint,
+      modelHint: sanitizedModel,
       effortHint: w.effortHint,
       allowedPaths: Array.isArray(w.allowedPaths) ? w.allowedPaths.filter((p): p is string => typeof p === "string") : [],
       forbiddenPaths: Array.isArray(w.forbiddenPaths) ? w.forbiddenPaths.filter((p): p is string => typeof p === "string") : [],
@@ -1064,6 +1869,12 @@ async function handleOrchestratorSpawnWorkers(
         : [],
       taskClass: w.taskClass,
       canRunParallel: isParallelBatch,
+      // Every attempt of a multi-worker spawn launches simultaneously below
+      // (scheduleAutopilotCycles), bypassing pickAutopilotTasks. Mark the
+      // tasks so retry/fallback waves keep that concurrency: without the
+      // marker the picker's fan-out guard reads their empty allowedPaths as
+      // "no concrete scope" and relaunches the batch one task at a time.
+      parallelTrust: isParallelBatch ? "manager_batch" : undefined,
       createdBy: "spark",
     });
     // The just-created task is the LAST entry on updated.workerTasks.
@@ -1095,23 +1906,6 @@ async function handleOrchestratorSpawnWorkers(
       );
     }
   }
-  if (downgradedFableTitles.length > 0) {
-    const list = downgradedFableTitles.map((t) => `"${t}"`).join(", ");
-    const note =
-      `Fable 5 (claude-fable-5) is the premium tier — a worker runs it only when you ` +
-      `explicitly ask for Fable in your message. ` +
-      `Downgraded ${downgradedFableTitles.length === 1 ? "worker" : "workers"} ${list} to Opus 4.8 (claude-opus-4-8).`;
-    try {
-      await runStore.addRunMessage({
-        runId,
-        author: "system",
-        kind: "note",
-        message: note,
-      });
-    } catch {
-      /* the note is advisory — never block the spawn on it */
-    }
-  }
   if (attemptIdsToLaunch.length > 0) {
     runStore.scheduleAutopilotCycles(runId, attemptIdsToLaunch);
   }
@@ -1119,10 +1913,29 @@ async function handleOrchestratorSpawnWorkers(
   // sees run system notes, and its system prompt is frozen at run start, so
   // this response is the ONLY channel that reaches managers of long-lived
   // runs when fleet/model policy evolves underneath them.
-  const notes: string[] = [];
-  if (downgradedFableTitles.length > 0) {
+  const notes: string[] = [...guardrailNotes];
+  if (verifierPeerOverride) notes.push(verifierPeerOverride.note);
+  if (headroomReroute && headroomReroutedTitles.length > 0) {
+    const constrainedInfo = headroomForRuntime(headroomSummary, headroomReroute.from);
+    const preferredInfo = headroomForRuntime(headroomSummary, headroomReroute.to);
+    const constrainedLabel = constrainedInfo?.label ?? headroomReroute.from;
+    const constrainedState = constrainedInfo?.limitReached
+      ? "has hit its subscription limit"
+      : `has only ${constrainedInfo?.headroomPercent ?? 0}% of its ${
+          constrainedInfo?.tightestWindowLabel ?? "quota"
+        } window left`;
+    const constrainedReset = constrainedInfo?.tightestWindowResetsIn
+      ? ` (resets in ${constrainedInfo.tightestWindowResetsIn})`
+      : "";
     notes.push(
-      `Fable 5 (claude-fable-5) is the premium tier; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8 because the user did not explicitly request Fable this run. Only assign claude-fable-5 to a worker when the user's own message explicitly asks for Fable 5 — and when they do, it IS available; assign it rather than telling them it is unavailable.`,
+      `Subscription headroom reroute: moved ${headroomReroutedTitles.length} worker(s) ` +
+        `(${headroomReroutedTitles.join(", ")}) from ${headroomReroute.from} to ${headroomReroute.to} ` +
+        `at the equivalent model tier. The ${constrainedLabel} subscription ${constrainedState}` +
+        `${constrainedReset}, while ${preferredInfo?.label ?? headroomReroute.to} has ` +
+        `${preferredInfo?.headroomPercent != null ? `${preferredInfo.headroomPercent}% left` : "more headroom"}. ` +
+        "Route follow-up workers to " +
+        `${headroomReroute.to} until the quota resets; an explicit claude-fable-5 modelHint is treated ` +
+        "as a deliberate premium pin and is never rerouted.",
     );
   }
   // Solo-spawn advisory. Legitimate solo spawns exist — a lone verifier or
@@ -1141,8 +1954,9 @@ async function handleOrchestratorSpawnWorkers(
       "Note: this batch spawned a single worker. That is right for a cohesive same-file or sequential " +
         "change, a targeted corrective fix, or a deliberate skeleton before a fan-out. For a feature with " +
         "genuinely independent slices, prefer 2-4 workers on DISJOINT allowedPaths plus a verifier, mixing " +
-        "Claude and Codex when both CLIs are installed. Do not split a cohesive change or invent files just " +
-        `to manufacture parallelism; use a strong worker plus an independent verifier instead. Standard independent pieces can use claude-sonnet-5 / ${CODEX_MODEL_BY_TIER.mid}.`,
+        "Claude and Codex so two model families cover each other's blind spots. Do not split a cohesive " +
+        "change or invent files just to manufacture parallelism, but do not default to one worker out of " +
+        "caution either: independent slices run together should run together.",
     );
   }
   return successResponse(
@@ -1194,6 +2008,7 @@ async function handleOrchestratorAskUser(
     "destructive_irreversible",
     "safety_policy",
     "irreducible_product_scope",
+    "plan_approval",
   ]);
   const category =
     requestedCategory && validCategories.has(requestedCategory as RunQuestionCategory)
@@ -1244,7 +2059,9 @@ async function handleOrchestratorAskUser(
     }
   };
 
-  const deadline = Date.now() + ASK_USER_TIMEOUT_MS;
+  const deadline =
+    Date.now() +
+    (category === "plan_approval" ? PLAN_APPROVAL_TIMEOUT_MS : ASK_USER_TIMEOUT_MS);
   while (Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, ASK_USER_POLL_MS));
     // Client hung up — stop polling; writeJsonRpc on a dead socket is a no-op.
@@ -1326,6 +2143,22 @@ async function handleOrchestratorComplete(
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   const blocked = rejectIfAutomationRun(run, id, "codara_complete");
   if (blocked) return blocked;
+  // `codara_complete` is the terminal half of the managed execution protocol,
+  // not a substitute for spawning work. Rejecting it before any worker has
+  // existed prevents a manager from turning a prose-only "I'll spawn..."
+  // response into a successful zero-edit run. Read-only chat answers do not
+  // call this tool, and completed managed runs always retain worker history.
+  if (
+    effectiveChatMode(run.chatMode) === "auto" &&
+    (run.workerTasks ?? []).length === 0
+  ) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "Cannot complete a run before any worker task exists. " +
+        "Call codara_spawn_workers for the active user request, wait for the workers, verify their reports, then call codara_complete.",
+    );
+  }
   // Guard: never complete the run while a worker task the coordinator spawned is
   // still in-flight. Completing here flips the run to `complete`, which fires the
   // "done" toast and tears the run down mid-flight — observed live: a corrective
@@ -1350,8 +2183,22 @@ async function handleOrchestratorComplete(
       id,
       ERR_INVALID_PARAMS,
       `Cannot complete: ${pendingTasks.length} worker task(s) still pending/running: ${detail}. ` +
-        `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
+      `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
         `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).`,
+    );
+  }
+  // Verification freshness invariant: an earlier green verifier does not cover
+  // a later corrective edit. One implementation (run-store), shared with the
+  // orchestrator-side terminal hops that complete a run when this tool never
+  // arrives, so a manager that skips codara_complete cannot skip the rule.
+  const verification = await runStore.describeVerificationFreshness(run);
+  if (!verification.ok) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
+        `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
+        "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
     );
   }
   try {
@@ -1363,7 +2210,7 @@ async function handleOrchestratorComplete(
         message: summary,
       });
     }
-    await runStore.updateRunStatus({ runId, status: "complete" });
+    await runStore.completeRunFromOrchestrator(runId);
     return successResponse(id, { ok: true });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
@@ -1399,14 +2246,25 @@ async function handleOrchestratorRequestNextIteration(
   let nextModel: string | undefined;
   let nextEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined;
   let warning: string | undefined;
+  // Non-blocking caveat attached to an ACCEPTED handoff (vs `warning`, which
+  // marks steering that was rejected and feeds the handoff_rejected event).
+  let advisory: string | undefined;
   if (requestedEngine !== undefined || requestedModel !== undefined || requestedEffort !== undefined) {
     try {
       const { detectAgentRuntimes } = await import("./agent-runtimes");
       const runtimes = await detectAgentRuntimes();
       if (requestedEngine === "claude" || requestedEngine === "codex") {
         const runtime = runtimes.find((r) => r.kind === requestedEngine);
-        if (runtime?.installed && !runtime.disabledBySettings) {
+        if (runtime?.installed) {
           nextEngine = requestedEngine;
+          if (runtime.authenticated === false) {
+            // Advisory, never a refusal: the sign-in probe cannot see
+            // shell-exported credentials from a Finder-launched app, so "no
+            // credential detected" must not veto the handoff.
+            advisory =
+              `nextEngine "${requestedEngine}" may not be signed in on this machine` +
+              `${runtime.authHint ? ` (${runtime.authHint})` : ""} — proceeding anyway.`;
+          }
           if (requestedModel) {
             const known = runtime.models.map((m) => m.id);
             if (known.length === 0 || known.includes(requestedModel)) {
@@ -1416,7 +2274,7 @@ async function handleOrchestratorRequestNextIteration(
             }
           }
         } else {
-          warning = `nextEngine "${requestedEngine}" is not installed/enabled — keeping the current engine.`;
+          warning = `nextEngine "${requestedEngine}" is not installed — keeping the current engine.`;
         }
       } else if (requestedEngine !== undefined) {
         warning = `nextEngine must be "claude" or "codex" — got "${requestedEngine}".`;
@@ -1441,6 +2299,7 @@ async function handleOrchestratorRequestNextIteration(
       nextEngine = undefined;
       nextModel = undefined;
       nextEffort = undefined;
+      advisory = undefined;
     }
   }
 
@@ -1449,7 +2308,8 @@ async function handleOrchestratorRequestNextIteration(
     recordAgentSignal(runId, { continue: !done, prompt, nextEngine, nextModel, nextEffort, nodeId });
     const accepted =
       nextEngine || nextModel || nextEffort ? { nextEngine, nextModel, nextEffort } : undefined;
-    return successResponse(id, { ok: true, continue: !done, accepted, warning });
+    const responseWarning = [warning, advisory].filter(Boolean).join(" ") || undefined;
+    return successResponse(id, { ok: true, continue: !done, accepted, warning: responseWarning });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, (err as Error).message);
   }
@@ -1481,33 +2341,76 @@ async function handleOrchestratorWaitForWorkers(
       : WAIT_FOR_WORKERS_DEFAULT_TIMEOUT_MS;
   const runStore = await getRunStore();
   const deadline = Date.now() + requestedTimeout;
-  const snapshotWorkers = (run: RunState): {
+  const resolveLatestReplacement = (run: RunState, requestedTaskId: string) => {
+    let current = run.workerTasks.find((task) => task.id === requestedTaskId) ?? null;
+    const seen = new Set<string>();
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      const replacement = [...run.workerTasks]
+        .reverse()
+        .find((task) => task.supersedesTaskId === current?.id);
+      if (!replacement) break;
+      current = replacement;
+    }
+    return current;
+  };
+  const snapshotWorkers = async (run: RunState): Promise<{
     worker_task_id: string;
+    requested_worker_task_id?: string;
     task_status: string | null;
     attempt_status: string | null;
     runtime: string | null;
     started_at: string | null;
     finished_at: string | null;
     final_report_path: string | null;
+    final_report: unknown;
     is_terminal: boolean;
-  }[] =>
-    workerTaskIds.map((wtid) => {
-      const task = run.workerTasks.find((wt) => wt.id === wtid);
+  }[]> =>
+    Promise.all(workerTaskIds.map(async (wtid) => {
+      const task = resolveLatestReplacement(run, wtid);
       const lastAttempt = task
-        ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === wtid)
+        ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === task.id)
         : null;
       const taskStatus = task ? task.status : null;
+      const report = lastAttempt?.finalReportPath
+        ? await runStore.readWorkerReport(lastAttempt.finalReportPath).catch(() => null)
+        : null;
       return {
-        worker_task_id: wtid,
+        worker_task_id: task?.id ?? wtid,
+        ...(task && task.id !== wtid ? { requested_worker_task_id: wtid } : {}),
         task_status: taskStatus,
         attempt_status: lastAttempt?.status ?? null,
         runtime: lastAttempt?.runtime ?? task?.runtimePreference ?? null,
         started_at: lastAttempt?.startedAt ?? null,
         finished_at: lastAttempt?.finishedAt ?? null,
         final_report_path: lastAttempt?.finalReportPath ?? null,
+        final_report: report
+          ? {
+              status: report.status,
+              summary: report.summary,
+              files_changed: report.filesChanged,
+              proof: report.proof.slice(0, 8),
+              risks: report.risks.slice(0, 6),
+              followups: report.followups.slice(0, 6),
+              verifier: report.verifier
+                ? {
+                    status: report.verifier.status,
+                    confidence: report.verifier.confidence,
+                    failed_claims: report.verifier.atomicClaims
+                      .filter((claim) => claim.verdict === "failed")
+                      .slice(0, 8),
+                    unsure_claims: report.verifier.atomicClaims
+                      .filter((claim) => claim.verdict === "unsure")
+                      .slice(0, 8),
+                    corrective_prompt: report.verifier.correctivePrompt ?? null,
+                    missing_oracle: report.verifier.missingOracle ?? null,
+                  }
+                : null,
+            }
+          : null,
         is_terminal: taskStatus !== null && TERMINAL_WORKER_TASK_STATUSES.has(taskStatus),
       };
-    });
+    }));
   const firstRun = await runStore.getRun(runId);
   if (!firstRun) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   const blocked = rejectIfAutomationRun(firstRun, id, "codara_wait_for_workers");
@@ -1529,7 +2432,7 @@ async function handleOrchestratorWaitForWorkers(
     }
     const run = await runStore.getRun(runId);
     if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
-    const snapshot = snapshotWorkers(run);
+    const snapshot = await snapshotWorkers(run);
     const terminalCount = snapshot.filter((w) => w.is_terminal).length;
     if (mode === "any" && terminalCount > 0) {
       return successResponse(id, {
@@ -1548,7 +2451,7 @@ async function handleOrchestratorWaitForWorkers(
     await new Promise<void>((resolve) => setTimeout(resolve, WAIT_FOR_WORKERS_POLL_MS));
   }
   const finalRun = await runStore.getRun(runId);
-  const finalSnapshot = finalRun ? snapshotWorkers(finalRun) : snapshotWorkers(firstRun);
+  const finalSnapshot = await snapshotWorkers(finalRun ?? firstRun);
   return successResponse(id, {
     workers: finalSnapshot.map(({ is_terminal: _t, ...rest }) => rest),
     manager_messages: await peekManagerInbox(runStore, runId),
@@ -2147,7 +3050,6 @@ function validateGraph(graph: LoomGraph): string | null {
 // create/update path so the architect corrects itself.)
 const CONCRETE_ENGINES = new Set(["claude", "codex"]);
 const WORKER_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
-const CODEX_AUTOMATION_MODELS = new Set(CODEX_MODEL_CATALOG.map((model) => model.id));
 
 /** Reject any worker that fails to pin a concrete engine ∈ {claude, codex}, a
  *  non-blank model, and a valid effort. Returns an instructive error naming the
@@ -2163,12 +3065,24 @@ function validateConcreteWorker(
     return `${label} has engine '${String(worker.engine)}' — it must be 'claude' or 'codex' ('auto' and an unset engine are no longer allowed; choose one explicitly)`;
   }
   if (typeof worker.model !== "string" || worker.model.trim().length === 0) {
-    return `${label} must set an explicit model (claude: claude-opus-4-8 or claude-sonnet-5; codex: gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) — a CLI-default/blank model is no longer allowed`;
+    return `${label} must set an explicit model (${ALLOWED_WORKER_MODELS.join(", ")}), a CLI-default/blank model is no longer allowed`;
   }
   if (worker.engine === "codex") {
-    const normalized = normalizeCodexModelId(worker.model.trim());
-    if (!CODEX_AUTOMATION_MODELS.has(normalized as (typeof CODEX_MODEL_CATALOG)[number]["id"])) {
-      return `${label} has unknown Codex model '${worker.model}' — choose gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna`;
+    // Lowercase before validating AND persisting: OpenAI model ids are
+    // lowercase, so "GPT-5.6-Sol" would otherwise be stored as-is, match no
+    // picker row in NodeContextPanel, and reach the codex CLI verbatim as an
+    // unusable `-m` value. Loom workers launch the codex CLI directly via
+    // buildLaunchCommandLine (usePiWorkerHarness excludes automation runs), so
+    // there is NO downstream validation on this path — this normalization is
+    // the only gate before the id hits the CLI.
+    const normalized = normalizeCodexModelId(worker.model.trim()).toLowerCase();
+    // Shape check, not an allow-list. This used to reject anything outside the
+    // three curated ids, which meant a model released after this build could
+    // not be used in an automation until someone shipped a catalog edit. A
+    // typo that breaks the gpt-* shape is still caught here while a genuinely
+    // new GPT model goes through.
+    if (!/^gpt-[a-z0-9.\-]+$/.test(normalized)) {
+      return `${label} has an invalid Codex model '${worker.model}' — expected a gpt-* model id such as ${CODEX_MODEL_CATALOG.map((model) => model.id).join(", ")}`;
     }
     // Migrate legacy model ids from a long-lived architect session before the
     // automation is persisted, so the saved loom opens on a real picker row.
@@ -2825,11 +3739,11 @@ async function handleOrchestratorNameChat(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
-  if (run.chatMode !== "execute" && run.chatMode !== "auto") {
+  if (effectiveChatMode(run.chatMode) !== "auto") {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      `orchestrator.name_chat is only available for execute/auto chats (this run's chatMode is "${run.chatMode ?? "unset"}"). Automation chats use automation.name_chat.`,
+      `orchestrator.name_chat is only available for auto chats (this run's chatMode is "${run.chatMode ?? "unset"}"). Automation chats use automation.name_chat.`,
     );
   }
   const title = sanitizeChatTitle(rawTitle);
@@ -2839,6 +3753,168 @@ async function handleOrchestratorNameChat(
     // the chat history popover.
     const updated = await runStore.renameRun({ runId: run.id, title });
     return successResponse(id, { ok: true, run_id: updated.id, title: updated.title });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleOrchestratorWhiteboardGet(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  return successResponse(id, {
+    run_id: run.id,
+    whiteboard: run.whiteboard ?? null,
+  });
+}
+
+async function handleOrchestratorWhiteboardUpdate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const rawAction = stringParam(params, "action") ?? "replace";
+  if (rawAction !== "replace" && rawAction !== "merge" && rawAction !== "clear") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "action must be replace, merge, or clear");
+  }
+  const input: UpdateCoraWhiteboardInput = {
+    runId,
+    action: rawAction,
+    editor: "cora",
+    baseRevision:
+      typeof params.baseRevision === "number" && Number.isFinite(params.baseRevision)
+        ? Math.max(0, Math.floor(params.baseRevision))
+        : undefined,
+    title: stringParam(params, "title") ?? undefined,
+    summary: stringParam(params, "summary") ?? undefined,
+    nodes: Array.isArray(params.nodes)
+      ? params.nodes as UpdateCoraWhiteboardInput["nodes"]
+      : undefined,
+    edges: Array.isArray(params.edges)
+      ? params.edges as UpdateCoraWhiteboardInput["edges"]
+      : undefined,
+    removeNodeIds: Array.isArray(params.removeNodeIds)
+      ? params.removeNodeIds.filter((value): value is string => typeof value === "string")
+      : undefined,
+    removeEdgeIds: Array.isArray(params.removeEdgeIds)
+      ? params.removeEdgeIds.filter((value): value is string => typeof value === "string")
+      : undefined,
+  };
+  try {
+    const runStore = await getRunStore();
+    const updated = await runStore.updateCoraWhiteboard(input);
+    return successResponse(id, {
+      ok: true,
+      run_id: updated.id,
+      whiteboard: updated.whiteboard ?? null,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// orchestrator.remember, the codara_remember tool's RPC (the MCP server maps
+// the tool name onto this method). Only Cora, the Execute/Auto manager, holds
+// this tool; workers never write memory. The heavy lifting (tag grammar,
+// dedup, TTL, byte caps, the user-line preservation guardrail) lives in
+// cora-memory.ts; this handler owns the per-run write budget, an in-memory
+// map that resets on app restart by design.
+const rememberBudgetByRun = new Map<string, { calls: number; bulletsAdded: number }>();
+const REMEMBER_BUDGET_RUN_LIMIT = 256;
+
+function rememberBudgetFor(runId: string): { calls: number; bulletsAdded: number } {
+  let budget = rememberBudgetByRun.get(runId);
+  if (!budget) {
+    budget = { calls: 0, bulletsAdded: 0 };
+    rememberBudgetByRun.set(runId, budget);
+    while (rememberBudgetByRun.size > REMEMBER_BUDGET_RUN_LIMIT) {
+      const oldest = rememberBudgetByRun.keys().next();
+      if (oldest.done) break;
+      rememberBudgetByRun.delete(oldest.value);
+    }
+  }
+  return budget;
+}
+
+async function handleOrchestratorRemember(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const scope = stringParam(params, "scope");
+  if (scope !== "workspace" && scope !== "global") {
+    return errorResponse(id, ERR_INVALID_PARAMS, 'scope must be "workspace" or "global"');
+  }
+  const action = stringParam(params, "action");
+  if (action !== "add" && action !== "replace") {
+    return errorResponse(id, ERR_INVALID_PARAMS, 'action must be "add" or "replace"');
+  }
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+
+  const budget = rememberBudgetFor(runId);
+  if (budget.calls >= MAX_REMEMBER_CALLS_PER_RUN) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `memory write limit reached for this run (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
+    );
+  }
+
+  let bullets: string[] = [];
+  if (action === "add") {
+    const raw = Array.isArray(params.bullets) ? params.bullets : null;
+    bullets = (raw ?? []).filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    if (!raw || bullets.length === 0 || bullets.length > 5) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        'action "add" requires bullets: 1-5 plain strings (no tags; the tag is stamped for you)',
+      );
+    }
+    if (budget.bulletsAdded + bullets.length > MAX_BULLETS_ADDED_PER_RUN) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `memory bullet limit reached for this run (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
+      );
+    }
+  }
+  const body = stringParam(params, "body");
+  if (action === "replace" && body === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, 'action "replace" requires body: the full new file content');
+  }
+
+  // The call consumes budget once it reaches the memory API, whether or not
+  // the API accepts it: the budget exists to stop runaway write loops, and a
+  // loop of rejected calls is still a loop.
+  budget.calls += 1;
+  try {
+    const result =
+      action === "add"
+        ? await rememberAdd(scope as MemoryScope, run.workspaceId, bullets, runId)
+        : await rememberReplace(
+            scope as MemoryScope,
+            run.workspaceId,
+            body as string,
+            params.confirm_drop_user_lines === true,
+            runId,
+          );
+    if (action === "add") budget.bulletsAdded += bullets.length;
+    return successResponse(id, {
+      ok: true,
+      bytes_used: result.bytesUsed,
+      bytes_cap: result.bytesCap,
+      message: result.message,
+    });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }

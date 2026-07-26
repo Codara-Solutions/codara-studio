@@ -160,13 +160,12 @@ export default function QueuePanel({ workspaceId, workspaceName, cwd }: Props): 
           style={{
             fontFamily: "var(--font-sans)",
             fontSize: 11,
-            fontWeight: 800,
-            letterSpacing: "0.1em",
-            textTransform: "uppercase",
+            fontWeight: 600,
+            letterSpacing: "0.02em",
             color: "var(--ink-dim)",
           }}
         >
-          Overnight queue
+          Queue
         </span>
         <span
           style={{
@@ -176,7 +175,7 @@ export default function QueuePanel({ workspaceId, workspaceName, cwd }: Props): 
             color: "var(--muted-2)",
           }}
         >
-          {String(items.length).padStart(2, "0")}
+          {items.length}
         </span>
         <span style={{ flex: 1 }} />
         <button
@@ -333,15 +332,14 @@ function QueueRow({
       <span
         style={{
           flex: "0 0 auto",
-          fontFamily: "var(--font-mono)",
-          fontSize: 9.5,
-          fontWeight: 700,
-          letterSpacing: "0.08em",
-          textTransform: "uppercase",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 600,
+          letterSpacing: "0.02em",
           color: tone,
         }}
       >
-        {item.status}
+        {item.status.charAt(0).toUpperCase() + item.status.slice(1)}
       </span>
       <button
         type="button"

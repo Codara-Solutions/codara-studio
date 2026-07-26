@@ -75,14 +75,23 @@ export default function RemoteConnectDialog({ onClose, onPick }: Props) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 55%, transparent)",
-        backdropFilter: "blur(2px)",
+        // NO backdrop-filter on this overlay. It is the dialog's PARENT, and a
+        // backdrop-filter ancestor becomes a backdrop root, the glass dialog
+        // inside would then frost this overlay's own empty interior instead of
+        // the workbench, painting flat. The blur belongs on a sibling scrim
+        // (the `.spark-scrim` element below), which is what every other dialog
+        // in the app does.
+        background: "transparent",
       }}
     >
+      <div className="spark-scrim" style={{ position: "absolute", inset: 0, zIndex: 0 }} />
       <div
         className="spark-glass"
         onClick={(e) => e.stopPropagation()}
         style={{
+          // Above the sibling scrim, which is the only other positioned child.
+          position: "relative",
+          zIndex: 1,
           width: 520,
           maxWidth: "92vw",
           maxHeight: "80vh",

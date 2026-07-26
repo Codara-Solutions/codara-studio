@@ -133,7 +133,7 @@
   margin: 0 0 16px;
   padding: 0.4em 1em;
   color: var(--ink-dim, var(--muted));
-  background: color-mix(in oklch, var(--ink) 3%, transparent);
+  background: color-mix(in oklab, var(--ink) 3%, transparent);
   border-left: 3px solid var(--rule);
   border-radius: 0 5px 5px 0;
 }
@@ -148,7 +148,7 @@
 .spark-markdown code {
   font-family: var(--font-mono);
   font-size: 0.85em;
-  background: color-mix(in oklch, var(--ink) 8%, transparent);
+  background: color-mix(in oklab, var(--ink) 8%, transparent);
   border: 1px solid var(--rule-soft);
   padding: 0.15em 0.4em;
   border-radius: 4px;
@@ -163,7 +163,7 @@
   padding: 14px 16px;
   /* One step below the prose surface + a soft well so the block reads as
      recessed code, not a floating slab. --well is re-tinted per theme. */
-  background: color-mix(in oklch, var(--ink) 3%, var(--bg));
+  background: color-mix(in oklab, var(--ink) 3%, var(--bg));
   border: 1px solid var(--rule-soft);
   border-radius: 7px;
   box-shadow: var(--well);
@@ -208,7 +208,7 @@
   border-bottom-color: var(--rule);
 }
 .spark-markdown tr:nth-child(2n) {
-  background: color-mix(in oklch, var(--panel) 50%, transparent);
+  background: color-mix(in oklab, var(--panel) 50%, transparent);
 }
 
 /* Images — sit on their own line, never overflow the column. */

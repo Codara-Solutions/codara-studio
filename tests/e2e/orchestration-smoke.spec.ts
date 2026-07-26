@@ -1,11 +1,9 @@
-import { test, expect, type ElectronApplication, type Page } from "@playwright/test";
+import { test, expect, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 
 test("autopilot runs from a selected markdown plan", async () => {
   // Manual-fallback plan → pause → notes → resume → the TEST plays the worker
@@ -28,10 +26,13 @@ test("autopilot runs from a selected markdown plan", async () => {
         CODARA_HOME_DIR: userDataDir,
         SPARK_HOME_DIR: userDataDir,
         SPARK_SKIP_LEGACY_MIGRATION: "1",
-        // No OpenRouter key + manual fallback → one deterministic "manual"
-        // worker task whose pane is a plain shell: nothing external spawns
-        // and nothing completes until the test writes the report.
+        // Throwaway user-data dir → no Pi subscription auth → the manager
+        // produces no decision, and manual fallback turns that into one
+        // deterministic "manual" worker task whose pane is a plain shell:
+        // nothing external spawns and nothing completes until the test
+        // writes the report.
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
+        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         // Worker panes must stay open until the test writes their report;
         // shell-integration injection can crash zsh startup in the Playwright
         // env ("Worker pane closed before final report", exit 1 within ~1s).
@@ -101,7 +102,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     // which swaps the composer into its note-and-resume form. (A blocked
     // AUTOPILOT with a "reviewing" RUN still shows the normal composer — only
     // run.status paused/blocked does.)
-    await page.getByRole("button", { name: "Stop run" }).click();
+    await clickAttached(page.getByRole("button", { name: "Stop run" }));
     await expectRunEvent(page, runId, "run.force_paused", 15_000);
 
     // Two human notes while paused, then resume.
@@ -164,7 +165,9 @@ test("spark chat renders as a workbench tab", async () => {
     // a bare /Explorer/ regex also matches the Refresh/Reveal icon buttons.
     // At this 900px compact viewport the right rail starts collapsed and is
     // available as an overlay through the window-chrome toggle.
-    await page.getByTitle("Toggle right sidebar").click();
+    const rightSidebarToggle = page.getByTitle("Toggle right sidebar");
+    await expect(rightSidebarToggle).toBeAttached();
+    await rightSidebarToggle.dispatchEvent("click");
     await expect(page.getByRole("button", { name: "Explorer workspace" })).toBeVisible();
   } finally {
     await app?.close();
@@ -173,6 +176,26 @@ test("spark chat renders as a workbench tab", async () => {
 
 test("settings dialog saves default terminal, OpenRouter, and inline model settings", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-settings-e2e-");
+  const piAuthDir = join(userDataDir, "pi-agent");
+  await mkdir(piAuthDir, { recursive: true });
+  await writeFile(
+    join(piAuthDir, "auth.json"),
+    JSON.stringify({
+      anthropic: {
+        type: "oauth",
+        access: "synthetic-anthropic-access-never-cross-ipc",
+        refresh: "synthetic-anthropic-refresh-never-cross-ipc",
+        expires: Date.now() + 60 * 60 * 1000,
+      },
+      "openai-codex": {
+        type: "oauth",
+        access: "synthetic-openai-access-never-cross-ipc",
+        refresh: "synthetic-openai-refresh-never-cross-ipc",
+        expires: Date.now() + 60 * 60 * 1000,
+      },
+    }),
+    { encoding: "utf8", mode: 0o600 },
+  );
   await writeFile(
     join(userDataDir, "spark-preferences.json"),
     JSON.stringify({ inlineAutocompleteModelId: "google/gemini-3.1-flash-lite" }, null, 2),
@@ -197,33 +220,86 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    await page.getByRole("button", { name: "Settings" }).click();
+    const settingsButton = page.getByRole("button", { name: "Settings" });
+    await expect(settingsButton).toBeAttached();
+    const settingsOpenLatencyMs = await settingsButton.evaluate((button) => new Promise<number>((resolve) => {
+      const startedAt = performance.now();
+      const existing = document.querySelector("[data-settings-surface]");
+      if (existing) {
+        resolve(0);
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector("[data-settings-surface]")) return;
+        observer.disconnect();
+        resolve(performance.now() - startedAt);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }));
+    expect(settingsOpenLatencyMs).toBeLessThan(250);
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+    const settingsGlass = await page.evaluate(() => {
+      const surface = document.querySelector<HTMLElement>("[data-settings-surface]");
+      const scrim = document.querySelector<HTMLElement>(".settings-dialog-scrim");
+      if (!surface || !scrim) return null;
+      return {
+        surfaceBackdrop: getComputedStyle(surface).backdropFilter,
+        scrimBackdrop: getComputedStyle(scrim).backdropFilter,
+      };
+    });
+    expect(settingsGlass).not.toBeNull();
+    expect(settingsGlass!.surfaceBackdrop).not.toContain("url(");
+    expect(settingsGlass!.scrimBackdrop).toBe("none");
 
-    await page.getByRole("button", { name: "Editor" }).click();
+    await clickAttached(page.getByRole("button", { name: "Agents" }));
+    await expect(page.getByText("Cora subscriptions", { exact: true })).toBeVisible();
+    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true })).toBeVisible();
+    await expect(page.getByText("Claude Pro / Max", { exact: true })).toBeVisible();
+    await expect(page.getByText(/one auth store for manager \+ workers/)).toBeVisible();
+    await expect(page.getByText(/GPT-5\.6 Sol · Connected/)).toBeVisible();
+    await expect(page.getByText(/Fable 5 · Connected/)).toBeVisible();
+    const serializedSubscriptionStatus = await page.evaluate(async () => {
+      const spark = (window as unknown as { spark: any }).spark;
+      return JSON.stringify(await spark.piSubscriptions.status());
+    });
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-anthropic-access");
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-anthropic-refresh");
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-openai-access");
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-openai-refresh");
+
+    await clickAttached(page.getByRole("button", { name: "Sessions" }));
+    const restoreSessions = page.getByRole("switch", {
+      name: "Resume running agent sessions when Codara reopens",
+    });
+    await expect(restoreSessions).toHaveAttribute("aria-checked", "false");
+    await clickAttached(restoreSessions);
+    await expect(restoreSessions).toHaveAttribute("aria-checked", "true");
+
+    await clickAttached(page.getByRole("button", { name: "Editor" }));
     const inlineModelInput = page.getByRole("textbox", { name: "Inline AI model" });
     await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
     await expect(page.getByRole("button", { name: "Use Gemini 3.5 Flash for Inline AI" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    await page.getByRole("button", { name: "Use Gemini 3.5 Flash Nitro for Inline AI" }).click();
+    await clickAttached(page.getByRole("button", { name: "Use Gemini 3.5 Flash Nitro for Inline AI" }));
     await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash:nitro");
-    await page.getByRole("button", { name: "Use GLM-4.7 Nitro for Inline AI" }).click();
+    await clickAttached(page.getByRole("button", { name: "Use GLM-4.7 Nitro for Inline AI" }));
     await expect(inlineModelInput).toHaveValue("z-ai/glm-4.7:nitro");
-    await page.getByRole("button", { name: "Use default Inline AI model" }).click();
+    await clickAttached(page.getByRole("button", { name: "Use default Inline AI model" }));
     await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
     const inlineWaitInput = page.getByLabel("Inline AI wait time");
     await expect(inlineWaitInput).toHaveValue("0");
-    await page.getByRole("button", { name: /After pause/ }).click();
+    await clickAttached(page.getByRole("button", { name: /After pause/ }));
     await expect(inlineWaitInput).toHaveValue("1500");
 
-    await page.getByRole("button", { name: "Default terminal" }).click();
+    await clickAttached(page.getByRole("button", { name: "Default terminal" }));
     const terminalButton = page.getByRole("button", { name: /Use .* as default terminal/ }).first();
     await expect(terminalButton).toBeVisible();
-    await terminalButton.click();
+    await clickAttached(terminalButton);
 
-    await page.getByRole("button", { name: "API and model" }).click();
+    await clickAttached(page.getByRole("button", { name: "API and model" }));
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
     await page.getByLabel("MODEL").fill("test/settings-model");
     await clickButton(page, "Save");
@@ -242,10 +318,68 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
       .poll(async () => {
         const preferences = JSON.parse(
           await readFile(join(userDataDir, "spark-preferences.json"), "utf8"),
-        ) as { inlineAutocompleteDelayMs?: number; inlineAutocompleteModelId?: string };
-        return `${preferences.inlineAutocompleteModelId}:${preferences.inlineAutocompleteDelayMs}`;
+        ) as {
+          inlineAutocompleteDelayMs?: number;
+          inlineAutocompleteModelId?: string;
+          restoreAgentSessions?: boolean;
+        };
+        return `${preferences.inlineAutocompleteModelId}:${preferences.inlineAutocompleteDelayMs}:${preferences.restoreAgentSessions}`;
       })
-      .toBe("google/gemini-3.5-flash:1500");
+      .toBe("google/gemini-3.5-flash:1500:true");
+
+    // The Capability Center shares Settings' footprint. Its shell must also
+    // paint without the SVG lens/full-screen blur combination that made
+    // opening and typing visibly trail the pointer.
+    const capabilityOpenLatencyMs = await page.getByTitle("MCP and skills").evaluate((button) => new Promise<number>((resolve) => {
+      const startedAt = performance.now();
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector("[data-agent-capabilities-surface]")) return;
+        observer.disconnect();
+        resolve(performance.now() - startedAt);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }));
+    expect(capabilityOpenLatencyMs).toBeLessThan(250);
+    await expect(page.getByRole("dialog", { name: "Capability Center" })).toBeVisible();
+    // The pinned codara-studio row arrives with the builtin status IPC, so the
+    // content-visibility gate below needs a row on screen first.
+    await expect(page.locator(".agent-capability-row").first()).toBeVisible();
+    const capabilityGlass = await page.evaluate(() => {
+      const surface = document.querySelector<HTMLElement>("[data-agent-capabilities-surface]");
+      const scrim = document.querySelector<HTMLElement>(".agent-capabilities-scrim");
+      if (!surface || !scrim) return null;
+      return {
+        surfaceBackdrop: getComputedStyle(surface).backdropFilter,
+        scrimBackdrop: getComputedStyle(scrim).backdropFilter,
+        scrollContain: getComputedStyle(document.querySelector<HTMLElement>(".agent-capabilities-scroll")!).contain,
+        rowVisibility: getComputedStyle(document.querySelector<HTMLElement>(".agent-capability-row")!).contentVisibility,
+        width: surface.getBoundingClientRect().width,
+        height: surface.getBoundingClientRect().height,
+        borderRadius: getComputedStyle(surface).borderRadius,
+        expectedWidth: Math.min(880, window.innerWidth - 44),
+        expectedHeight: Math.min(760, window.innerHeight - 44),
+      };
+    });
+    expect(capabilityGlass).not.toBeNull();
+    // Peer of the Settings panel: one composited blur layer, never the SVG
+    // refraction lens that made a viewport-sized surface re-rasterize.
+    expect(capabilityGlass!.surfaceBackdrop).not.toContain("url(");
+    expect(capabilityGlass!.scrimBackdrop).toBe("none");
+    expect(capabilityGlass!.scrollContain).toMatch(/content|paint/);
+    expect(capabilityGlass!.rowVisibility).toBe("auto");
+    expect(capabilityGlass!.width).toBe(capabilityGlass!.expectedWidth);
+    expect(capabilityGlass!.height).toBe(capabilityGlass!.expectedHeight);
+    expect(capabilityGlass!.borderRadius).toBe("12px");
+    if (process.env.SPARK_CAPABILITY_SCREENSHOT) {
+      await page.screenshot({ path: process.env.SPARK_CAPABILITY_SCREENSHOT });
+    }
+    // Two flat sections, no nav rail: the MCP inventory is the first heading.
+    await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
+    const capabilitySearch = page.getByPlaceholder("Filter servers");
+    await capabilitySearch.fill("playwright");
+    await expect(capabilitySearch).toHaveValue("playwright");
+    await page.getByRole("button", { name: "Close", exact: true }).click();
   } finally {
     await app?.close();
   }
@@ -279,7 +413,7 @@ test("runs can be deleted from the run list inline", async () => {
     // Runs are now deleted inline from the chat-history popover (header button
     // "Open chat history") with a two-step arm/confirm on each row, replacing
     // the old DELETE RUN / CONFIRM DELETE run-list buttons.
-    await page.getByRole("button", { name: "Open chat history" }).click();
+    await clickAttached(page.getByRole("button", { name: "Open chat history" }));
     const deleteChat = page.getByRole("button", { name: "Delete chat", exact: true });
     await expect(deleteChat).toBeVisible({ timeout: 10_000 });
     // dispatchEvent, not click(): the popover rows re-render on run-store sync
@@ -318,6 +452,7 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
         SPARK_HOME_DIR: userDataDir,
         SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
+        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -349,86 +484,15 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
   }
 });
 
-test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
-  // The manager planning contract runs against a fake OpenRouter server; the
-  // workers themselves are played by the test (final-report.json writes, same
-  // trick as the autopilot test). Fake `claude`/`codex` CLIs are prepended to
-  // PATH so the worker panes never launch a real agent — and if the pane
-  // shell's rc re-prepends the real CLI dir, that's still harmless because
-  // completion is driven by the report file, not the CLI.
-  test.setTimeout(120_000);
-  const { userDataDir, workspaceDir } = await prepareElectronWorkspace("spark-agent-openrouter-e2e-");
-  const server = await startFakeOpenRouterServer();
-  const fakeBin = await makeFakeAgentBin(userDataDir);
-
-  let app: ElectronApplication | null = null;
-  try {
-    app = await electron.launch({
-      args: ["."],
-      env: {
-        ...process.env,
-        PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
-        // Pin every home override the app honors: a shell inside the dev app
-        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
-        SPARK_USER_DATA_DIR: userDataDir,
-        CODARA_HOME_DIR: userDataDir,
-        SPARK_HOME_DIR: userDataDir,
-        SPARK_SKIP_LEGACY_MIGRATION: "1",
-        SPARK_OPENROUTER_API_KEY: "test-key",
-        SPARK_OPENROUTER_BASE_URL: server.baseUrl,
-        SPARK_OPENROUTER_MODEL: "test/unsupported-manager",
-        SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL: "test/spark-manager",
-        SPARK_NO_SHELL_INTEGRATION: "1",
-      },
-    });
-
-    const page = await app.firstWindow();
-    await page.waitForLoadState("domcontentloaded");
-    await startPlanRun(page, workspaceDir);
-    await openRunChat(page);
-
-    await waitForOnlyRun(userDataDir, (candidate) =>
-      candidate.sparkCalls.some((call) => call.status === "completed") &&
-      candidate.workerTasks.length === 2,
-    );
-    await expect(page.locator(".xterm-host")).toHaveCount(2, { timeout: 20_000 });
-    await completeLiveAttempts(userDataDir, 2);
-    const run = await waitForOnlyRun(userDataDir, (candidate) =>
-      candidate.status === "complete" &&
-      candidate.workerAttempts.length === 2 &&
-      candidate.workerAttempts.every((attempt) => attempt.status === "succeeded") &&
-      candidate.workerTasks.every((task) => task.status === "accepted"),
-    );
-
-    // plan_analysis → step_planning → 1+ worker_result_review calls (one per
-    // reviewed report batch; whether the two reports land in one review tick
-    // or two is scheduler timing).
-    const modes = run.sparkCalls.map((call) => call.mode);
-    expect(modes.slice(0, 2)).toEqual(["plan_analysis", "step_planning"]);
-    expect(modes.length).toBeGreaterThanOrEqual(3);
-    expect(modes.slice(2).every((mode) => mode === "worker_result_review")).toBe(true);
-    expect(run.sparkCalls.every((call) => call.status === "completed")).toBe(true);
-    expect(run.status).toBe("complete");
-    expect(run.autopilot?.status).toBe("complete");
-    expect(run.workerTasks).toHaveLength(2);
-    expect(run.workerTasks.map((task) => task.runtimePreference).sort()).toEqual(["claude", "codex"]);
-    expect(run.workerAttempts).toHaveLength(2);
-    expect(run.workerAttempts.every((attempt) => attempt.status === "succeeded")).toBe(true);
-    expect(run.workerTasks.every((task) => task.status === "accepted")).toBe(true);
-    // Prompt delivery: each attempt's on-disk prompt carries the structured
-    // task section plus the fake manager's task description for its runtime.
-    const prompts = await Promise.all(
-      run.workerAttempts.map(async (attempt) => readFile(attempt.promptPath!, "utf8")),
-    );
-    expect(prompts.every((prompt) => prompt.includes("## TASK"))).toBe(true);
-    expect(prompts.some((prompt) => prompt.includes("Use Claude Code to inspect the plan"))).toBe(true);
-    expect(prompts.some((prompt) => prompt.includes("Use Codex to inspect the plan"))).toBe(true);
-  } finally {
-    await app?.close();
-    await server.close();
-  }
-});
+// REMOVED: "OpenRouter manager can plan Claude and Codex worker tasks".
+// That test drove the manager through a fake OpenRouter HTTP server
+// (SPARK_OPENROUTER_* env + a strict-structured-output endpoint plus the
+// unsupported-model fallback). Cora no longer has an HTTP manager backend,
+// claude / codex / pi are all local CLI/runtime backends with no mockable
+// endpoint, so the fixture has nothing left to point at. The equivalent
+// end-to-end manager planning contract is covered by
+// tests/e2e/pi-manager-live-smoke.spec.ts (opt-in via
+// CODARA_E2E_PI_MANAGER_LIVE=1, real subscription auth).
 
 async function prepareElectronWorkspace(prefix: string): Promise<{ userDataDir: string; workspaceDir: string }> {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -464,7 +528,12 @@ async function prepareElectronWorkspace(prefix: string): Promise<{ userDataDir: 
 async function clickButton(page: Page, name: string): Promise<void> {
   const button = page.getByRole("button", { name, exact: true });
   await expect(button).toBeEnabled();
-  await button.click();
+  await button.dispatchEvent("click");
+}
+
+async function clickAttached(locator: Locator): Promise<void> {
+  await expect(locator).toBeAttached();
+  await locator.dispatchEvent("click");
 }
 
 // The old "Selected plan file" chip + "RUN" button were replaced by a
@@ -485,6 +554,10 @@ async function startPlanRun(page: Page, workspaceDir: string): Promise<string> {
       planPath,
       planTitle: "PLAN.md",
       planText: file.content,
+      // No chatBackend override: the run takes Cora's default (Pi). With no
+      // subscription auth in the throwaway user-data dir the manager yields
+      // no decision, which is what SPARK_ENABLE_MANUAL_FALLBACK turns into the
+      // deterministic manual worker task these fixtures drive.
     });
     return run.id as string;
   }, workspaceDir);
@@ -494,7 +567,9 @@ async function startPlanRun(page: Page, workspaceDir: string): Promise<string> {
 // graph mount (mirrors handleRunPlan → handleSelectRun). Run-backed chat tabs
 // are all labelled with the fixed CHAT_TAB_LABEL ("Cora") in App.tsx.
 async function openRunChat(page: Page): Promise<void> {
-  await page.getByRole("tab", { name: "Cora" }).click();
+  const tab = page.getByRole("tab", { name: "Cora" });
+  await expect(tab).toBeAttached();
+  await tab.dispatchEvent("click");
 }
 
 // Orchestration events no longer render inline in the run view; they live in
@@ -523,151 +598,6 @@ async function expectRunEvent(
     .toBe(true);
 }
 
-async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
-  const server = createServer((req, res) => {
-    if (req.method !== "POST" || req.url !== "/api/v1/chat/completions") {
-      res.writeHead(404).end();
-      return;
-    }
-
-    let body = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => {
-      body += chunk;
-    });
-    req.on("end", () => {
-      const parsedBody = JSON.parse(body) as {
-        model?: string;
-        messages?: Array<{ content?: string }>;
-        provider?: { require_parameters?: boolean };
-        response_format?: {
-          type?: string;
-          json_schema?: { strict?: boolean; schema?: { required?: string[] } };
-        };
-      };
-      if (
-        parsedBody.provider?.require_parameters !== true ||
-        parsedBody.response_format?.type !== "json_schema" ||
-        parsedBody.response_format.json_schema?.strict !== true ||
-        !parsedBody.response_format.json_schema.schema?.required?.includes("tasks")
-      ) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { message: "Expected strict OpenRouter structured output request." } }));
-        return;
-      }
-      if (parsedBody.model === "test/unsupported-manager") {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            error: {
-              message:
-                "No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection",
-            },
-          }),
-        );
-        return;
-      }
-      const prompt = parsedBody.messages?.map((message) => message.content ?? "").join("\n") ?? "";
-      const mode = prompt.match(/MANAGER MODE\n([a-z_]+)/)?.[1];
-      const isPlanAnalysis = mode === "plan_analysis";
-      const isReview = mode === "worker_result_review";
-      // A SINGLE step: the current engine walks every planned step, so a
-      // second "review" step would spawn a third worker instead of letting the
-      // worker_result_review "complete" verdict end the run.
-      const decision = isPlanAnalysis
-        ? {
-            status: "run_workers",
-            summary: "Analyze the fixture plan into a durable step-by-step division.",
-            steps: [
-              {
-                title: "Run local subscription workers",
-                goal: "Launch local coding workers through Spark's worker control path.",
-                plannedAgents: [
-                  {
-                    label: "agent 1",
-                    summary: "Run Claude Code fixture worker for broad implementation slice.",
-                    runtimePreference: "claude",
-                    modelHint: "sonnet",
-                    effortHint: "low",
-                  },
-                  {
-                    label: "agent 2",
-                    summary: "Run Codex fixture worker for validation slice.",
-                    runtimePreference: "codex",
-                    modelHint: "gpt-5.5",
-                    effortHint: "low",
-                  },
-                ],
-                acceptanceCriteria: ["Both worker tasks write final reports."],
-                verificationCommands: ["npm run typecheck"],
-                riskLevel: "low",
-              },
-            ],
-            tasks: [],
-          }
-        : isReview
-        ? {
-            status: "complete",
-            summary: "Both local subscription worker fixture reports are accepted, so the run is complete.",
-            steps: [],
-            tasks: [],
-          }
-        : {
-            status: "run_workers",
-            summary: "Create first-step worker prompts from the existing step division.",
-            steps: [],
-            tasks: [
-              {
-                stepIndex: 0,
-                title: "Claude fixture task",
-                description: "Use Claude Code to inspect the plan and report the first implementation slice.",
-                runtimePreference: "claude",
-                expectedOutputs: ["final-report.json"],
-                verificationCommands: ["npm run typecheck"],
-                canRunParallel: true,
-              },
-              {
-                stepIndex: 0,
-                title: "Codex fixture task",
-                description: "Use Codex to inspect the plan and report risks or missing pieces.",
-                runtimePreference: "codex",
-                expectedOutputs: ["final-report.json"],
-                verificationCommands: ["npm run typecheck"],
-                canRunParallel: true,
-              },
-            ],
-          };
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          choices: [
-            {
-              message: {
-                content: JSON.stringify(decision),
-              },
-            },
-          ],
-          usage: {
-            prompt_tokens: 100,
-            completion_tokens: 50,
-          },
-        }),
-      );
-    });
-  });
-
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address() as AddressInfo;
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}/api/v1`,
-    close: () =>
-      new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
-      }),
-  };
-}
-
 // The report the test writes when it plays a worker. "complete" reviews to an
 // accepted task; "partial" reviews to needs_review + a blocked autopilot.
 function fixtureWorkerReport(status: "complete" | "partial"): Record<string, unknown> {
@@ -681,45 +611,6 @@ function fixtureWorkerReport(status: "complete" | "partial"): Record<string, unk
     risks: [],
     followups: status === "partial" ? ["Continue the plan."] : [],
   };
-}
-
-// Fake `claude` / `codex` CLIs: print the TUI markers waitForAgentTui sniffs
-// for (see worker-launch.ts), then idle until the report poll kills the pane.
-async function makeFakeAgentBin(userDataDir: string): Promise<string> {
-  const dir = join(userDataDir, "fake-bin");
-  await mkdir(dir, { recursive: true });
-  const make = async (name: string, marker: string) =>
-    writeFile(join(dir, name), `#!/bin/sh\necho "${marker}"\nexec sleep 600\n`, {
-      encoding: "utf8",
-      mode: 0o755,
-    });
-  await make("claude", "Sonnet ready (fake) -- bypass permissions on");
-  await make("codex", "Codex GPT-5 ready (fake) /help");
-  return dir;
-}
-
-// Play the workers: as attempts go live (launching/running — i.e. after the
-// launch path has cleared any stale report file), write each one's
-// final-report.json. The launch driver polls that file every 750ms and
-// settles the attempt once it parses.
-async function completeLiveAttempts(userDataDir: string, count: number): Promise<void> {
-  const written = new Set<string>();
-  await expect
-    .poll(
-      async () => {
-        const run = await readOnlyRun(userDataDir);
-        for (const attempt of run.workerAttempts) {
-          const reportPath = attempt.finalReportPath;
-          if (!reportPath || written.has(reportPath)) continue;
-          if (!["launching", "running"].includes(attempt.status)) continue;
-          await writeFile(reportPath, JSON.stringify(fixtureWorkerReport("complete"), null, 2), "utf8");
-          written.add(reportPath);
-        }
-        return written.size;
-      },
-      { timeout: 60_000 },
-    )
-    .toBe(count);
 }
 
 // A run only needs to exist to appear in (and be deleted from) the chat
@@ -759,22 +650,6 @@ async function readOnlyRun(userDataDir: string): Promise<{
   expect(entries).toHaveLength(1);
   const raw = await readFile(join(runsDir, entries[0], "run.json"), "utf8");
   return JSON.parse(raw);
-}
-
-async function waitForOnlyRun(
-  userDataDir: string,
-  predicate: (run: Awaited<ReturnType<typeof readOnlyRun>>) => boolean,
-): Promise<Awaited<ReturnType<typeof readOnlyRun>>> {
-  await expect
-    .poll(async () => {
-      try {
-        return predicate(await readOnlyRun(userDataDir));
-      } catch {
-        return false;
-      }
-    }, { timeout: 20_000 })
-    .toBe(true);
-  return readOnlyRun(userDataDir);
 }
 
 async function waitForRunCount(

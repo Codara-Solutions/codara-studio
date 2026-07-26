@@ -52,6 +52,26 @@ check(
   "working",
 );
 check(
+  "worker submit accepts Codex 0.144 bare Working shimmer",
+  ap.workerSubmitTurnStarted("codex", "\x1b[27;3H\x1b[38;2;128;128;128mWorking"),
+  true,
+);
+check(
+  "worker submit rejects an active MCP startup spinner",
+  ap.workerSubmitTurnStarted("codex", "Starting MCP servers (2/5) (0s • esc to interrupt)"),
+  false,
+);
+check(
+  "worker submit lets newer Working beat a stale MCP startup line",
+  ap.workerSubmitTurnStarted("codex", "Starting MCP servers (3/3)\nready\nWorking"),
+  true,
+);
+check(
+  "worker submit rejects idle Codex composer",
+  ap.workerSubmitTurnStarted("codex", "Ask about this codebase  Context 0% used"),
+  false,
+);
+check(
   "claude permission prompt beats working footer",
   ap.classifyTail(
     "claude",
@@ -197,7 +217,7 @@ check(
 
 // ── absenceResetSafe: fail-safe gate for anchor-absence-only chip clearing ──
 // Only Claude's IDLE chrome is verified against real frames, so only Claude may
-// have its chip cleared by agentUiPresent()===false alone. Codex/Cursor idle
+// have its chip cleared by agentUiPresent()===false alone. Codex idle
 // anchors are unverified (a 2026-06-18 live capture confirmed Codex renders
 // inline like Claude — no alt-screen — but a clean idle composer frame could not
 // be captured), so they must clear via POSITIVE exit signals only. If a real
@@ -205,7 +225,6 @@ check(
 // promoted into ABSENCE_RESET_SAFE and this expectation flipped to true.
 check("absenceResetSafe(claude) — verified idle chrome", ap.absenceResetSafe("claude"), true);
 check("absenceResetSafe(codex) — UNVERIFIED, fail-safe off", ap.absenceResetSafe("codex"), false);
-check("absenceResetSafe(cursor) — UNVERIFIED, fail-safe off", ap.absenceResetSafe("cursor"), false);
 
 // ── REAL Claude Code v2.1.170 frames (live pty capture, 2026-06-10) ──
 // The v2.1.17x footer dropped "esc to interrupt" entirely; the reliable

@@ -1,13 +1,18 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  AgentRuntimeDiagnostic,
-  AgentRuntimeKind,
-  AgentRuntimeSelection,
   AppSettings,
   EditorThemeId,
+  PiSubscriptionAuthEvent,
+  PiSubscriptionConnection,
+  PiSubscriptionOverview,
+  PiSubscriptionPrompt,
+  PiSubscriptionProvider,
   RunState,
   ShellInfo,
   ThemePref,
+  WorkerSessionMemoryScope,
+  WorkerSessionRuntime,
+  WorkerSessionSummary,
 } from "@shared/types";
 import {
   APP_THEME_IDS,
@@ -24,8 +29,8 @@ import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/ThemeProvider";
 import { usePreferences } from "../preferences/usePreferences";
 import KeybindingsSection from "../shortcuts/KeybindingsSection";
+import SubscriptionUsage from "./SubscriptionUsage";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
-import { Capability } from "./Capability";
 import packageJson from "../../../../package.json";
 
 // Settings is a single in-app dialog with seven tabs. Everything renders
@@ -36,6 +41,7 @@ type SettingsTab =
   | "terminal"
   | "api"
   | "agents"
+  | "sessions"
   | "keybindings"
   | "runs"
   | "about";
@@ -46,6 +52,7 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "terminal", label: "Default terminal" },
   { id: "api", label: "API and model" },
   { id: "agents", label: "Agents" },
+  { id: "sessions", label: "Sessions" },
   { id: "keybindings", label: "Keybindings" },
   { id: "runs", label: "Runs" },
   { id: "about", label: "About" },
@@ -171,6 +178,15 @@ function NavIcon({ tab }: { tab: SettingsTab }) {
           <circle cx="14.5" cy="14" r="1" />
         </svg>
       );
+    case "sessions": // stacked conversation cards
+      return (
+        <svg {...common}>
+          <rect x="4" y="5" width="16" height="11" rx="2.5" />
+          <path d="M8 16v3l4-3" />
+          <line x1="8" y1="9" x2="16" y2="9" />
+          <line x1="8" y1="12" x2="13" y2="12" />
+        </svg>
+      );
     case "keybindings": // command key (⌘) drawn as SVG, not a glyph
       return (
         <svg {...common}>
@@ -211,6 +227,11 @@ interface SettingsDialogProps {
   // Click "Open" on a row in the Runs tab. Caller is expected to switch
   // active workspace, select the run, and close this dialog.
   onOpenRun: (runId: string, workspaceId: string) => void;
+  onOpenWorkerSession: (
+    runtime: WorkerSessionRuntime,
+    cwd: string,
+    session: WorkerSessionSummary | null,
+  ) => void;
 }
 
 export default function SettingsDialog({
@@ -222,8 +243,14 @@ export default function SettingsDialog({
   onClose,
   onSave,
   onOpenRun,
+  onOpenWorkerSession,
 }: SettingsDialogProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+  // Selecting a section should acknowledge the click before a large section
+  // (Runs, Sessions, Agents, or the theme gallery) builds its DOM and starts
+  // background IPC. The nav follows activeTab immediately while React renders
+  // the section body at deferred priority.
+  const renderedTab = useDeferredValue(activeTab);
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -235,7 +262,7 @@ export default function SettingsDialog({
   // The runs tab has its own scrolling list and per-row destructive actions;
   // the global Save/Cancel footer would be misleading there. Hide the
   // footer entirely on tabs that manage their own persistence semantics.
-  const hideFooter = activeTab === "runs";
+  const hideFooter = activeTab === "runs" || activeTab === "sessions";
 
   useEffect(() => {
     setDraft(settings);
@@ -287,12 +314,13 @@ export default function SettingsDialog({
     >
       {/* Scrim + dialog face come from the shared glass classes (frosted in
           glass mode, opaque panel look otherwise). */}
-      <div className="spark-scrim" style={{ zIndex: 0 }} />
+      <div className="spark-scrim settings-dialog-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="spark-glass--strong"
+        className="spark-glass--strong settings-dialog-surface"
+        data-settings-surface
         style={{
           zIndex: 1,
           // Fixed footprint — switching tabs (or resizing the inner content)
@@ -326,6 +354,8 @@ export default function SettingsDialog({
           {/* A real System-Settings title: title case at 15px/600, not an
               all-caps tracked eyebrow. The accent dot supplies the brand mark. */}
           <div
+            data-settings-tab={renderedTab}
+            aria-busy={renderedTab !== activeTab}
             style={{
               fontFamily: "var(--font-sans)",
               fontSize: 15,
@@ -345,7 +375,7 @@ export default function SettingsDialog({
               borderRight: "1px solid var(--rule-soft)",
               // Translucent so the dialog's glass face shows through; over the
               // opaque fallback face it reads like the old --bg/--panel mix.
-              background: "color-mix(in oklch, var(--bg) 45%, transparent)",
+              background: "color-mix(in oklab, var(--bg) 45%, transparent)",
               padding: "12px 10px",
               display: "flex",
               flexDirection: "column",
@@ -371,9 +401,9 @@ export default function SettingsDialog({
               overflow: "auto",
             }}
           >
-            {activeTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
-            {activeTab === "editor" && <EditorSettings />}
-            {activeTab === "terminal" && (
+            {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
+            {renderedTab === "editor" && <EditorSettings />}
+            {renderedTab === "terminal" && (
               <TerminalSettings
                 shells={shells}
                 selectedShellId={selectedShell?.id ?? null}
@@ -386,13 +416,19 @@ export default function SettingsDialog({
                 }
               />
             )}
-            {activeTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
-            {activeTab === "agents" && (
-              <AgentsSettings draft={draft} onChange={setDraft} />
+            {renderedTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
+            {renderedTab === "agents" && (
+              <AgentsSettings />
             )}
-            {activeTab === "keybindings" && <KeybindingsTab />}
-            {activeTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
-            {activeTab === "about" && <AboutSettings />}
+            {renderedTab === "sessions" && (
+              <SessionsSettings
+                workspaceCwd={workspaceCwd}
+                onOpenWorkerSession={onOpenWorkerSession}
+              />
+            )}
+            {renderedTab === "keybindings" && <KeybindingsTab />}
+            {renderedTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
+            {renderedTab === "about" && <AboutSettings />}
           </div>
         </div>
 
@@ -536,10 +572,10 @@ function ShellOption({
         background: selected
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--ink) 2%, transparent)",
+              : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "10px 11px",
         fontFamily: "var(--font-sans)",
@@ -607,7 +643,7 @@ function ApiSettings({
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="OpenRouter"
-        detail="Used by Cora to plan Claude and Codex worker tasks."
+        detail="Powers the editor's inline AI and git commit-message drafts. Cora's own models are picked in the chat composer, not here."
       />
       <Label text="OpenRouter API key">
         <input
@@ -663,9 +699,9 @@ function TabButton({
         border: "1px solid transparent",
         borderRadius: "var(--radius-control, 5px)",
         background: active
-          ? "color-mix(in oklch, var(--ink) 7%, var(--panel))"
+          ? "color-mix(in oklab, var(--ink) 7%, var(--panel))"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
               : "transparent",
@@ -1143,7 +1179,7 @@ function DefaultModelButton({ active, onClick }: { active: boolean; onClick: () 
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
               : "var(--bg)",
@@ -1428,80 +1464,571 @@ function EditorSettings() {
   );
 }
 
-const ALL_AGENT_RUNTIME_KINDS: ReadonlyArray<AgentRuntimeKind> = ["claude", "codex"];
+interface PiLoginView {
+  requestId: string;
+  provider: PiSubscriptionProvider;
+  status: "running" | "completed" | "failed" | "cancelled";
+  message: string;
+  url?: string;
+  deviceCode?: string;
+  promptId?: string;
+  prompt?: PiSubscriptionPrompt;
+}
 
-function AgentsSettings({
-  draft,
-  onChange,
-}: {
-  draft: AppSettings;
-  onChange: (settings: AppSettings) => void;
-}) {
-  const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[] | null>(null);
+interface PiInstallView {
+  status: "running" | "completed" | "failed";
+  message: string;
+}
+
+function PiSubscriptionSettings() {
+  const [overview, setOverview] = useState<PiSubscriptionOverview | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { preferences, setPreference } = usePreferences();
+  const [login, setLogin] = useState<PiLoginView | null>(null);
+  const [promptValue, setPromptValue] = useState("");
+  const [install, setInstall] = useState<PiInstallView | null>(null);
+  // Bumped on connect/disconnect to force the usage panel to re-read; the main
+  // process caches usage for a minute, which is right for idle re-renders but
+  // wrong immediately after the set of connected subscriptions changes.
+  const [usageEpoch, setUsageEpoch] = useState(0);
 
-  useEffect(() => {
-    let alive = true;
-    void window.spark.agents
-      .runtimes(true)
-      .then((next) => {
-        if (!alive) return;
-        setDiagnostics(next);
-        setError(null);
-      })
-      .catch((err) => {
-        if (!alive) return;
-        setError((err as Error).message);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  const enabledKinds = enabledRuntimeKinds(draft.agentRuntimeSelection);
-
-  const toggleRuntime = (kind: AgentRuntimeKind) => {
-    const next = new Set(enabledKinds);
-    if (next.has(kind)) next.delete(kind);
-    else next.add(kind);
-    // Preserve canonical order so the persisted form is stable.
-    const ordered = ALL_AGENT_RUNTIME_KINDS.filter((k) => next.has(k));
-    onChange({ ...draft, agentRuntimeSelection: ordered });
+  const refresh = () => {
+    setLoading(true);
+    setError(null);
+    void window.spark.piSubscriptions
+      .status()
+      .then(setOverview)
+      .catch((err) => setError((err as Error).message))
+      .finally(() => setLoading(false));
   };
 
+  useEffect(() => {
+    refresh();
+    const remove = window.spark.piSubscriptions.onEvent((event) => {
+      // Broadcast store-change pings carry no login-flow state; they exist for
+      // the always-on usage surfaces. This dialog re-reads the connection
+      // overview and leaves the login view alone.
+      if (event.type === "changed") {
+        refresh();
+        return;
+      }
+      setPromptValue("");
+      if (event.type === "completed") {
+        setOverview(event.overview);
+        setUsageEpoch((epoch) => epoch + 1);
+        setLogin({
+          requestId: event.requestId,
+          provider: event.provider,
+          status: "completed",
+          message: event.message,
+        });
+        return;
+      }
+      if (event.type === "failed" || event.type === "cancelled") {
+        setLogin((current) => ({
+          requestId: event.requestId,
+          provider: event.provider,
+          status: event.type,
+          message: event.message,
+          ...(current?.requestId === event.requestId && current.url ? { url: current.url } : {}),
+        }));
+        return;
+      }
+      setLogin((current) => {
+        const base: PiLoginView = current?.requestId === event.requestId
+          ? current
+          : {
+              requestId: event.requestId,
+              provider: event.provider,
+              status: "running",
+              message: "Connecting subscription…",
+            };
+        if (event.type === "auth_url") {
+          return {
+            ...base,
+            status: "running",
+            message: event.instructions || "Finish signing in in your browser.",
+            url: event.url,
+          };
+        }
+        if (event.type === "device_code") {
+          return {
+            ...base,
+            status: "running",
+            message: "Enter this code in the browser to finish connecting.",
+            url: event.verificationUri,
+            deviceCode: event.userCode,
+          };
+        }
+        if (event.type === "prompt") {
+          return {
+            ...base,
+            status: "running",
+            message: event.prompt.message,
+            promptId: event.promptId,
+            prompt: event.prompt,
+          };
+        }
+        return { ...base, status: "running", message: event.message };
+      });
+    });
+    return remove;
+  }, []);
+
+  // The install runs in the main process, so its progress arrives on its own
+  // channel. A Settings dialog reopened mid-install picks the run back up from
+  // the overview's runtimeInstalling flag below.
+  useEffect(() => {
+    return window.spark.piSubscriptions.onRuntimeInstallEvent((event) => {
+      if (event.type === "completed") {
+        setOverview(event.overview);
+        setInstall({ status: "completed", message: event.message });
+        return;
+      }
+      setInstall({
+        status: event.type === "failed" ? "failed" : "running",
+        message: event.message,
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (overview?.runtimeInstalling && !install) {
+      setInstall({ status: "running", message: "Installing Pi…" });
+    }
+  }, [overview?.runtimeInstalling, install]);
+
+  const installRuntime = () => {
+    setError(null);
+    setInstall({ status: "running", message: "Starting install…" });
+    void window.spark.piSubscriptions.installRuntime().catch((err) => {
+      setInstall({ status: "failed", message: (err as Error).message });
+    });
+  };
+
+  const connect = (provider: PiSubscriptionProvider) => {
+    setError(null);
+    setLogin({
+      requestId: "starting",
+      provider,
+      status: "running",
+      message: "Preparing secure browser login…",
+    });
+    void window.spark.piSubscriptions.connect(provider).catch((err) => {
+      setLogin({
+        requestId: "failed-to-start",
+        provider,
+        status: "failed",
+        message: (err as Error).message,
+      });
+    });
+  };
+
+  const disconnect = (provider: PiSubscriptionProvider) => {
+    setLoading(true);
+    setError(null);
+    void window.spark.piSubscriptions
+      .disconnect(provider)
+      .then((next) => {
+        setOverview(next);
+        setUsageEpoch((epoch) => epoch + 1);
+        setLogin(null);
+      })
+      .catch((err) => setError((err as Error).message))
+      .finally(() => setLoading(false));
+  };
+
+  const submitPrompt = (value: string) => {
+    if (!login?.promptId || !value.trim()) return;
+    const { requestId, promptId } = login;
+    setLogin((current) => current ? {
+      ...current,
+      message: "Finishing secure login…",
+      prompt: undefined,
+      promptId: undefined,
+    } : current);
+    setPromptValue("");
+    void window.spark.piSubscriptions.respond({ requestId, promptId, value }).catch((err) => {
+      setLogin((current) => current ? {
+        ...current,
+        status: "failed",
+        message: (err as Error).message,
+      } : current);
+    });
+  };
+
+  const busyProvider = login?.status === "running" ? login.provider : null;
+
   return (
-    <div style={{ display: "grid", gap: 18 }}>
-      <div style={{ display: "grid", gap: 12 }}>
-        <SectionTitle
-          title="Agent runtimes"
-          detail="Pick which local agent CLIs Cora may dispatch workers to. Each runtime can be toggled independently — deselect any that you do not want Cora to spawn."
+    <div style={{ display: "grid", gap: 12 }}>
+      <SectionTitle
+        title="Cora subscriptions"
+        detail="Connect the subscriptions Pi uses for Cora chat, planning, and every worker. Credentials stay in Codara's private Pi store; API-key environment variables are stripped from every launch."
+      />
+      <div
+        className="spark-glass"
+        style={{
+          display: "grid",
+          gap: 8,
+          padding: 10,
+          borderRadius: "var(--radius-surface, 7px)",
+          border: "1px solid var(--rule-soft)",
+          boxShadow: "var(--well)",
+        }}
+      >
+        {overview?.connections.map((connection) => (
+          <PiSubscriptionRow
+            key={connection.provider}
+            connection={connection}
+            busy={busyProvider === connection.provider}
+            disabled={
+              // Connecting without the runtime can only fail — the OAuth flow
+              // itself is loaded out of the Pi package. Point at Install
+              // instead of letting the user earn the error.
+              !overview.runtimeInstalled ||
+              (busyProvider !== null && busyProvider !== connection.provider)
+            }
+            onConnect={() => connect(connection.provider)}
+            onDisconnect={() => disconnect(connection.provider)}
+          />
+        ))}
+        {!overview && loading ? <RuntimeDiagnosticSkeleton /> : null}
+        {overview?.runtimeInstalled ? (
+          <div
+            style={{
+              padding: "3px 3px 0",
+              color: "var(--muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+            }}
+          >
+            Pinned Pi {overview.runtimeVersion} · one auth store for manager + workers
+          </div>
+        ) : overview ? (
+          <PiRuntimeInstallRow
+            expectedVersion={overview.runtimeExpectedVersion}
+            runtimeError={overview.runtimeError}
+            install={install}
+            onInstall={installRuntime}
+          />
+        ) : null}
+      </div>
+
+      {login ? (
+        <PiLoginPanel
+          login={login}
+          promptValue={promptValue}
+          onPromptValue={setPromptValue}
+          onSubmitPrompt={submitPrompt}
+          onCancel={() => {
+            if (login.status === "running" && login.requestId !== "starting") {
+              void window.spark.piSubscriptions.cancel(login.requestId);
+            } else {
+              setLogin(null);
+            }
+          }}
         />
-        <div style={{ display: "grid", gap: 8 }}>
-          {diagnostics?.map((runtime) => (
-            <RuntimeDiagnosticRow
-              key={runtime.kind}
-              runtime={runtime}
-              enabled={enabledKinds.has(runtime.kind)}
-              onToggle={() => toggleRuntime(runtime.kind)}
-            />
-          ))}
-          {!diagnostics && !error ? (
-            <RuntimeDiagnosticSkeleton />
-          ) : null}
-          {error ? (
-            <div style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}>
-              {error}
-            </div>
-          ) : null}
+      ) : null}
+
+      {error ? (
+        <div style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}>
+          {error}
+        </div>
+      ) : null}
+
+      {/* Remounted whenever a connection changes so the bars re-read instead of
+          showing the pre-login state of a subscription you just connected. */}
+      {overview?.runtimeInstalled ? <SubscriptionUsage key={usageEpoch} /> : null}
+
+      <div
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          lineHeight: 1.45,
+        }}
+      >
+        Claude note: Pi documents that third-party Claude Pro/Max harness use may draw from Anthropic Extra Usage.
+        Codara never substitutes an Anthropic API key, but you should keep Extra Usage disabled if you require a hard
+        no-metered-usage boundary.
+      </div>
+    </div>
+  );
+}
+
+function PiSubscriptionRow({
+  connection,
+  busy,
+  disabled,
+  onConnect,
+  onDisconnect,
+}: {
+  connection: PiSubscriptionConnection;
+  busy: boolean;
+  disabled: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+}) {
+  // A stored refresh token is not proof that the provider will accept it.
+  // Treat an expired access token as needing attention until a real launch or
+  // reconnect succeeds; the previous "Refresh ready" green state hid broken
+  // Anthropic refresh credentials behind a healthy-looking row.
+  const healthy = connection.connected && !connection.expired;
+  const status = busy
+    ? "Connecting…"
+    : connection.connected
+      ? connection.expired
+        ? connection.canRefresh ? "Expired · reconnect recommended" : "Expired"
+        : "Connected"
+      : "Not connected";
+  const expiry = connection.expiresAt
+    ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+        .format(new Date(connection.expiresAt))
+    : null;
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "10px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 10px",
+        borderRadius: "var(--radius-control, 5px)",
+        border: healthy ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
+        background: healthy ? "var(--accent-soft)" : "color-mix(in oklab, var(--ink) 3%, transparent)",
+        boxShadow: healthy ? "var(--lift-hi)" : "none",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 99,
+          background: healthy ? "var(--accent)" : connection.error ? "var(--danger)" : "var(--muted)",
+          boxShadow: healthy ? "0 0 8px var(--accent-glow)" : "none",
+        }}
+      />
+      <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 13, fontWeight: 650 }}>
+          {connection.label}
+        </span>
+        <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
+          {connection.model} · {status}{expiry && connection.connected ? ` · token ${connection.expired ? "expired" : `until ${expiry}`}` : ""}
+        </span>
+        {connection.error ? (
+          <span style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 10 }}>
+            {connection.error}
+          </span>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <FooterButton onClick={onConnect} disabled={disabled || busy} primary={!connection.connected}>
+          {busy ? "Opening…" : connection.connected ? "Reconnect" : "Connect"}
+        </FooterButton>
+        {connection.connected ? (
+          <FooterButton onClick={onDisconnect} disabled={disabled || busy}>Disconnect</FooterButton>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The missing-runtime state. Cora cannot chat, plan, or launch a worker
+ * without the pinned Pi build, so the one thing this row has to do is make
+ * getting it a single click instead of a terminal errand.
+ */
+function PiRuntimeInstallRow({
+  expectedVersion,
+  runtimeError,
+  install,
+  onInstall,
+}: {
+  expectedVersion: string;
+  runtimeError?: string;
+  install: PiInstallView | null;
+  onInstall: () => void;
+}) {
+  const running = install?.status === "running";
+  const failed = install?.status === "failed";
+  const tone = failed ? "var(--danger)" : running ? "var(--accent)" : "var(--danger)";
+  return (
+    <div
+      aria-live="polite"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 10,
+        padding: "9px 10px",
+        borderRadius: "var(--radius-control, 5px)",
+        border: `1px solid color-mix(in oklab, ${tone} 38%, var(--rule-soft))`,
+        background: "color-mix(in oklab, var(--ink) 3%, transparent)",
+      }}
+    >
+      <div style={{ minWidth: 0, display: "grid", gap: 3 }}>
+        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
+          {running ? `Installing Pi ${expectedVersion}…` : `Pi ${expectedVersion} is not installed`}
+        </span>
+        <span
+          style={{
+            color: failed ? "var(--danger)" : "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            lineHeight: 1.4,
+            // npm's progress lines and error tails are long; keep the row from
+            // stretching the dialog while staying readable.
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+            maxHeight: 74,
+            overflowY: "auto",
+          }}
+        >
+          {install?.message ||
+            runtimeError ||
+            "Cora needs this exact Pi build for chat, planning, and every worker."}
+        </span>
+        {!running ? (
+          <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+            Installs into your Codara home · needs npm on your PATH
+          </span>
+        ) : null}
+      </div>
+      <FooterButton onClick={onInstall} disabled={running} primary>
+        {running ? "Installing…" : failed ? "Retry install" : `Install Pi ${expectedVersion}`}
+      </FooterButton>
+    </div>
+  );
+}
+
+function PiLoginPanel({
+  login,
+  promptValue,
+  onPromptValue,
+  onSubmitPrompt,
+  onCancel,
+}: {
+  login: PiLoginView;
+  promptValue: string;
+  onPromptValue: (value: string) => void;
+  onSubmitPrompt: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const done = login.status === "completed";
+  const failed = login.status === "failed";
+  const tone = done ? "var(--ok)" : failed ? "var(--danger)" : "var(--accent)";
+  const select = login.prompt?.type === "select" ? login.prompt : null;
+  const textPrompt = login.prompt && login.prompt.type !== "select" ? login.prompt : null;
+  return (
+    <div
+      className="spark-glass--strong"
+      aria-live="polite"
+      style={{
+        display: "grid",
+        gap: 10,
+        padding: 12,
+        borderRadius: "var(--radius-surface, 7px)",
+        border: `1px solid color-mix(in oklab, ${tone} 42%, var(--rule-soft))`,
+        boxShadow: "var(--lift-hi)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 9 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 8,
+            height: 8,
+            marginTop: 4,
+            borderRadius: 99,
+            background: tone,
+            boxShadow: login.status === "running" ? `0 0 10px ${tone}` : "none",
+          }}
+        />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
+            {done ? "Subscription connected" : failed ? "Could not connect" : "Secure subscription login"}
+          </div>
+          <div style={{ marginTop: 2, color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11, lineHeight: 1.45 }}>
+            {login.message}
+          </div>
         </div>
       </div>
+
+      {login.deviceCode ? (
+        <div
+          className="spark-mono"
+          style={{
+            justifySelf: "start",
+            padding: "7px 10px",
+            borderRadius: "var(--radius-control, 5px)",
+            border: "1px solid var(--accent-edge)",
+            background: "var(--accent-soft)",
+            color: "var(--ink)",
+            fontSize: 14,
+            letterSpacing: "0.14em",
+          }}
+        >
+          {login.deviceCode}
+        </div>
+      ) : null}
+
+      {select ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {select.options.map((option, index) => (
+            <FooterButton key={option.id} primary={index === 0} onClick={() => onSubmitPrompt(option.id)}>
+              {option.label}
+            </FooterButton>
+          ))}
+        </div>
+      ) : null}
+
+      {textPrompt ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmitPrompt(promptValue);
+          }}
+          style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 7 }}
+        >
+          <input
+            autoFocus
+            className="spark-input spark-mono"
+            type={textPrompt.type === "secret" ? "password" : "text"}
+            value={promptValue}
+            onChange={(event) => onPromptValue(event.currentTarget.value)}
+            placeholder={textPrompt.placeholder || "Paste the authorization code"}
+            style={inputShellStyle}
+          />
+          <button type="submit" className="spark-btn is-primary" disabled={!promptValue.trim()}>
+            Continue
+          </button>
+        </form>
+      ) : null}
+
+      <div style={{ display: "flex", gap: 6 }}>
+        {login.url ? (
+          <FooterButton onClick={() => void window.spark.openExternal(login.url!)}>Open browser again</FooterButton>
+        ) : null}
+        <FooterButton onClick={onCancel}>{login.status === "running" ? "Cancel" : "Dismiss"}</FooterButton>
+      </div>
+    </div>
+  );
+}
+
+function AgentsSettings() {
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <PiSubscriptionSettings />
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
       <div
         style={{
           border: "1px solid var(--rule-soft)",
           borderRadius: "var(--radius-surface, 7px)",
           padding: 12,
-          background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+          background: "color-mix(in oklab, var(--ink) 3%, transparent)",
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 12,
@@ -1511,60 +2038,6 @@ function AgentsSettings({
       >
         MCP servers and skills now live in the Capability Center from the Cora composer. That space is larger and gives
         per-item activation, compatibility, deletion, and sync controls.
-      </div>
-
-      <hr className="spark-divider" style={{ margin: "2px 0" }} />
-
-      <div style={{ display: "grid", gap: 8 }}>
-        <SectionTitle
-          title="Stuck-worker watchdog"
-          detail="Three-channel idle detector. A worker is killed and auto-restarted from its on-disk state only when the pty stream, the agent's session log, and the workspace filesystem are ALL silent for the threshold. Long thinks and tool work each ping at least one channel, so false positives are essentially zero."
-        />
-        <ToggleRow
-          title="Auto-kill stuck workers"
-          desc="If a Claude or Codex worker stops emitting any activity at all, kill it and (optionally) spin up a fresh attempt on the same task."
-          checked={draft.workerStuckDetectEnabled}
-          onChange={(workerStuckDetectEnabled) =>
-            onChange({ ...draft, workerStuckDetectEnabled })
-          }
-        />
-        <NumberRow
-          title="Idle threshold (seconds)"
-          desc="All three channels (pty, session log, workspace) must be silent for this long before the worker is declared stuck. Default 180s."
-          min={60}
-          max={3600}
-          value={draft.workerStuckIdleSeconds}
-          disabled={!draft.workerStuckDetectEnabled}
-          onChange={(workerStuckIdleSeconds) =>
-            onChange({ ...draft, workerStuckIdleSeconds })
-          }
-        />
-        <NumberRow
-          title="Max auto-retries per task"
-          desc="After this many stuck-fails on the same task, Cora stops auto-retrying and surfaces it to the planner instead. 0 disables auto-retry (kill only). Default 2."
-          min={0}
-          max={5}
-          value={draft.workerStuckMaxAutoRetries}
-          disabled={!draft.workerStuckDetectEnabled}
-          onChange={(workerStuckMaxAutoRetries) =>
-            onChange({ ...draft, workerStuckMaxAutoRetries })
-          }
-        />
-      </div>
-
-      <hr className="spark-divider" style={{ margin: "2px 0" }} />
-
-      <div style={{ display: "grid", gap: 8 }}>
-        <SectionTitle
-          title="Models"
-          detail="Extra models that are hidden by default because they cost significantly more."
-        />
-        <ToggleRow
-          title="Allow Fable 5"
-          desc="Fable 5 is Anthropic's top-tier model — significantly more expensive than Opus 4.8. Off by default: when off it is hidden from the chat model picker and any automation that requests it falls back to Opus 4.8."
-          checked={preferences.fableEnabled === true}
-          onChange={(v) => void setPreference("fableEnabled", v)}
-        />
       </div>
     </div>
   );
@@ -1702,214 +2175,6 @@ function NumberRow({
   );
 }
 
-type CapabilityChipTone = "neutral" | "success" | "warning" | "blue" | "violet";
-
-function CapabilityChip({
-  text,
-  tone,
-  title,
-}: {
-  text: string;
-  tone: CapabilityChipTone;
-  title?: string;
-}) {
-  // Adopt the shared .spark-badge so every status tint re-tints across the 8
-  // OKLCH palettes (the old hardcoded hex froze a color that clashed on light
-  // themes). Tones map onto the badge's token-backed modifiers: success -> ok,
-  // warning -> warn, blue -> info, violet -> accent (brand).
-  const toneClass: Record<CapabilityChipTone, string> = {
-    neutral: "",
-    success: "is-ok",
-    warning: "is-warn",
-    blue: "is-info",
-    violet: "is-accent",
-  };
-  return (
-    <span
-      className={`spark-badge ${toneClass[tone]}`.trim()}
-      title={title}
-      style={{
-        // These tags read as lowercase code-ish identifiers, not shouted
-        // labels — keep mono + lowercase rather than the badge's uppercase.
-        fontFamily: "var(--font-mono)",
-        textTransform: "none",
-        letterSpacing: "0.02em",
-      }}
-    >
-      {text}
-    </span>
-  );
-}
-
-function enabledRuntimeKinds(selection: AgentRuntimeSelection): Set<AgentRuntimeKind> {
-  if (Array.isArray(selection)) {
-    return new Set(selection.filter((kind) => ALL_AGENT_RUNTIME_KINDS.includes(kind)));
-  }
-  if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
-  if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
-  if (selection === "both") return new Set<AgentRuntimeKind>(["claude", "codex"]);
-  return new Set<AgentRuntimeKind>(ALL_AGENT_RUNTIME_KINDS);
-}
-
-function RuntimeDiagnosticRow({
-  runtime,
-  enabled,
-  onToggle,
-}: {
-  runtime: AgentRuntimeDiagnostic;
-  enabled: boolean;
-  onToggle: () => void;
-}) {
-  const active = runtime.installed && enabled;
-  const status = !runtime.installed
-    ? "Missing"
-    : enabled
-      ? "Enabled"
-      : "Off";
-  const dotColor = active
-    ? "var(--accent)"
-    : runtime.installed
-      ? "var(--muted)"
-      : "var(--danger)";
-  const detail = runtime.installed
-    ? runtime.version || runtime.executablePath || "Installed"
-    : runtime.installHint;
-  const canToggle = runtime.installed;
-  const { hover, focus, pressed, handlers } = useInteractive();
-  const restShadow = active ? "var(--lift-hi)" : undefined;
-
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      onClick={canToggle ? onToggle : undefined}
-      disabled={!canToggle}
-      {...handlers}
-      title={
-        !canToggle
-          ? "Install this runtime to enable it."
-          : enabled
-            ? `Click to disable ${runtime.label} workers.`
-            : `Click to enable ${runtime.label} workers.`
-      }
-      style={{
-        display: "grid",
-        gridTemplateColumns: "10px minmax(0, 1fr) auto auto",
-        alignItems: "center",
-        gap: 10,
-        padding: "9px 10px",
-        // One soft cue for the enabled state: accent-edge border + accent-soft
-        // fill. No stacked glow halo.
-        border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
-        borderRadius: "var(--radius-surface, 7px)",
-        background: active
-          ? "var(--accent-soft)"
-          : !canToggle
-            ? "color-mix(in oklch, var(--ink) 2%, transparent)"
-            : pressed
-              ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
-              : hover
-                ? "var(--hover)"
-                : "color-mix(in oklch, var(--ink) 3%, transparent)",
-        // Default arrow cursor when togglable (matching the .spark-* utility
-        // classes); a not-allowed cue only when the runtime can't be enabled.
-        cursor: canToggle ? "default" : "not-allowed",
-        textAlign: "left",
-        font: "inherit",
-        color: "inherit",
-        width: "100%",
-        boxShadow: withFocusRing(restShadow, focus),
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: 999,
-          background: dotColor,
-          boxShadow: active ? "0 0 8px var(--accent-glow)" : "none",
-        }}
-      />
-      <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
-        <span
-          style={{
-            color: "var(--ink)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 13,
-            fontWeight: 600,
-          }}
-        >
-          {runtime.label}
-        </span>
-        <span
-          title={detail}
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {detail}
-        </span>
-        {runtime.installed ? (
-          <span style={capabilityChipRowStyle}>
-            <Capability runtime={runtime} feature="costTracking">
-              <CapabilityChip text="cost" tone="neutral" title="Reports per-run cost" />
-            </Capability>
-            <Capability runtime={runtime} feature="contextWindow">
-              <CapabilityChip text="context" tone="neutral" title="Reports context-window usage" />
-            </Capability>
-            <Capability runtime={runtime} feature="hookStatus">
-              <CapabilityChip text="hooks" tone="neutral" title="Supports hook status events" />
-            </Capability>
-            <Capability runtime={runtime} feature="planModeArg">
-              <CapabilityChip text="plan-mode" tone="neutral" title="Accepts a plan-mode argument" />
-            </Capability>
-            <Capability runtime={runtime} feature="shiftEnterNewline">
-              <CapabilityChip text="shift+enter" tone="neutral" title="Supports shift+enter newline" />
-            </Capability>
-            <Capability runtime={runtime} feature="systemPromptInjection">
-              <CapabilityChip text="sys-prompt" tone="neutral" title="Accepts an injected system prompt" />
-            </Capability>
-            <Capability runtime={runtime} feature="sessionResume">
-              <CapabilityChip text="resume" tone="neutral" title="Supports session resume" />
-            </Capability>
-          </span>
-        ) : null}
-      </span>
-      <span
-        style={{
-          color: active ? "var(--ink)" : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.1em",
-          textTransform: "uppercase",
-        }}
-      >
-        {status}
-      </span>
-      {/* One switch metric: the same visual track as ToggleRow, rendered as a
-          decorative indicator because the whole row is the clickable target. */}
-      <SwitchTrack checked={enabled} disabled={!canToggle} />
-    </button>
-  );
-}
-
-const capabilityChipRowStyle: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 4,
-  marginTop: 4,
-};
-
 function RuntimeDiagnosticSkeleton() {
   return (
     <div className="spark-empty" style={{ minHeight: 64, padding: "16px 12px" }}>
@@ -1938,6 +2203,400 @@ function KeybindingsTab() {
     );
   }
   return <KeybindingsSection preferences={preferences} setPreference={setPreference} />;
+}
+
+function SessionsSettings({
+  workspaceCwd,
+  onOpenWorkerSession,
+}: {
+  workspaceCwd?: string | null;
+  onOpenWorkerSession: (
+    runtime: WorkerSessionRuntime,
+    cwd: string,
+    session: WorkerSessionSummary | null,
+  ) => void;
+}) {
+  const { preferences, setPreference, hydrated } = usePreferences();
+  const [sessions, setSessions] = useState<WorkerSessionSummary[] | null>(null);
+  const [filter, setFilter] = useState("");
+  const [runtimeFilter, setRuntimeFilter] = useState<"all" | WorkerSessionRuntime>("all");
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<WorkerSessionSummary | null>(null);
+  const [deleteMemory, setDeleteMemory] = useState(false);
+
+  const refresh = async () => {
+    const bridge = window.spark.agentSession as Partial<typeof window.spark.agentSession>;
+    try {
+      if (typeof bridge.listAll !== "function") {
+        setSessions([]);
+        setError("Restart Codara once to finish enabling the all-project session index.");
+        return;
+      }
+      const next = await bridge.listAll();
+      setSessions(next);
+      setError(null);
+    } catch (err) {
+      setSessions([]);
+      setError(
+        /no handler registered/i.test((err as Error).message)
+          ? "Restart Codara once to finish enabling the all-project session index."
+          : (err as Error).message,
+      );
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!sessions) return [];
+    const query = filter.trim().toLowerCase();
+    return sessions.filter((session) => {
+      if (runtimeFilter !== "all" && session.runtime !== runtimeFilter) return false;
+      if (!query) return true;
+      return (
+        session.title.toLowerCase().includes(query) ||
+        session.cwd.toLowerCase().includes(query) ||
+        session.sessionId.toLowerCase().includes(query)
+      );
+    });
+  }, [filter, runtimeFilter, sessions]);
+
+  const startNew = async (runtime: WorkerSessionRuntime) => {
+    const cwd = await window.spark.dialog.openDirectory(workspaceCwd ?? undefined);
+    if (cwd) onOpenWorkerSession(runtime, cwd, null);
+  };
+
+  const confirmDelete = async () => {
+    const session = pendingDelete;
+    if (!session) return;
+    const deleteSession = (
+      window.spark.agentSession as Partial<typeof window.spark.agentSession>
+    ).delete;
+    if (typeof deleteSession !== "function") {
+      setPendingDelete(null);
+      setDeleteMemory(false);
+      setError("Restart Codara once to enable session deletion.");
+      return;
+    }
+    const memoryScope: WorkerSessionMemoryScope = deleteMemory
+      ? session.runtime === "claude"
+        ? "claude-project"
+        : "codex-all"
+      : "none";
+    setBusyId(`${session.runtime}:${session.sessionId}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await deleteSession({
+        runtime: session.runtime,
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        transcriptPath: session.transcriptPath,
+        memoryScope,
+      });
+      setPendingDelete(null);
+      setDeleteMemory(false);
+      setNotice(
+        result.warnings.length > 0
+          ? result.warnings.join(" ")
+          : result.memoryDeleted
+            ? "Session and the selected local memory scope were deleted."
+            : "Session deleted.",
+      );
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <SectionTitle
+        title="Agent sessions"
+        detail="Start or resume Claude and Codex sessions from any local project. Opening a session switches to its workspace, or creates the workspace in Codara first."
+      />
+
+      {hydrated ? (
+        <ToggleRow
+          title="Resume running agent sessions when Codara reopens"
+          desc="Reopens terminal tabs that still had Claude or Codex running and resumes their exact local session. Shell tabs and agents you already exited still start normally."
+          checked={preferences.restoreAgentSessions === true}
+          onChange={(next) => void setPreference("restoreAgentSessions", next)}
+        />
+      ) : null}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <FooterButton primary onClick={() => void startNew("claude")}>New Claude</FooterButton>
+        <FooterButton primary onClick={() => void startNew("codex")}>New Codex</FooterButton>
+        <div style={{ flex: 1 }} />
+        <FooterButton onClick={() => void refresh()}>Refresh</FooterButton>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          className="spark-input"
+          type="text"
+          value={filter}
+          onChange={(event) => setFilter(event.currentTarget.value)}
+          placeholder="Filter by title, directory, or session id"
+          style={{ flex: 1, width: "auto" }}
+        />
+        <select
+          className="spark-input"
+          aria-label="Filter sessions by provider"
+          value={runtimeFilter}
+          onChange={(event) =>
+            setRuntimeFilter(event.currentTarget.value as "all" | WorkerSessionRuntime)
+          }
+          style={{ width: 112 }}
+        >
+          <option value="all">All agents</option>
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
+      </div>
+
+      {error ? <SessionManagerMessage tone="danger">{error}</SessionManagerMessage> : null}
+      {notice ? <SessionManagerMessage tone="info">{notice}</SessionManagerMessage> : null}
+
+      {pendingDelete ? (
+        <div
+          role="alertdialog"
+          aria-label="Confirm session deletion"
+          style={{
+            display: "grid",
+            gap: 10,
+            padding: "12px 13px",
+            borderRadius: "var(--radius-surface, 7px)",
+            border: "1px solid color-mix(in oklch, var(--danger) 42%, var(--rule-soft))",
+            background: "color-mix(in oklch, var(--danger) 8%, var(--bg))",
+          }}
+        >
+          <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 700 }}>
+            Permanently delete “{pendingDelete.title}”?
+          </div>
+          <div style={{ color: "var(--muted)", fontSize: 10, lineHeight: 1.45 }}>
+            This removes the local transcript and cannot be undone. Close a running copy of the
+            session before deleting it.
+          </div>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              color: deleteMemory ? "var(--danger)" : "var(--ink-dim)",
+              fontSize: 10,
+              lineHeight: 1.4,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={deleteMemory}
+              onChange={(event) => setDeleteMemory(event.currentTarget.checked)}
+            />
+            <span>
+              {pendingDelete.runtime === "claude"
+                ? "Also delete this Claude project's auto-memory. This affects every Claude session sharing that project memory."
+                : "Also delete ALL local Codex memories. This affects every Codex project and session on this machine."}
+            </span>
+          </label>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 7 }}>
+            <FooterButton
+              onClick={() => {
+                setPendingDelete(null);
+                setDeleteMemory(false);
+              }}
+            >
+              Cancel
+            </FooterButton>
+            <DangerButton
+              disabled={busyId !== null}
+              onClick={() => void confirmDelete()}
+            >
+              {busyId ? "Deleting…" : deleteMemory ? "Delete session + memory" : "Delete session"}
+            </DangerButton>
+          </div>
+        </div>
+      ) : null}
+
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+          maxHeight: 430,
+          overflow: "auto",
+          paddingRight: 2,
+        }}
+      >
+        {sessions === null ? (
+          <SessionsEmptyMessage text="Reading local session stores…" />
+        ) : filtered.length === 0 ? (
+          <SessionsEmptyMessage
+            text={sessions.length === 0 ? "No local agent sessions found." : "No sessions match that filter."}
+          />
+        ) : (
+          filtered.map((session) => {
+            const key = `${session.runtime}:${session.sessionId}`;
+            return (
+              <SessionManagerRow
+                key={key}
+                session={session}
+                busy={busyId === key}
+                onOpen={() => onOpenWorkerSession(session.runtime, session.cwd, session)}
+                onDelete={() => {
+                  setPendingDelete(session);
+                  setDeleteMemory(false);
+                  setNotice(null);
+                }}
+              />
+            );
+          })
+        )}
+      </div>
+
+      <div style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9 }}>
+        {sessions ? `${filtered.length} of ${sessions.length} sessions` : ""}
+      </div>
+    </div>
+  );
+}
+
+function SessionManagerRow({
+  session,
+  busy,
+  onOpen,
+  onDelete,
+}: {
+  session: WorkerSessionSummary;
+  busy: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const providerColor = session.runtime === "claude" ? "var(--accent)" : "var(--info)";
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "auto minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 11,
+        padding: "9px 10px",
+        background: "color-mix(in oklab, var(--bg) 82%, transparent)",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: "var(--radius-surface, 7px)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 26,
+          height: 26,
+          display: "grid",
+          placeItems: "center",
+          borderRadius: 8,
+          color: providerColor,
+          background: `color-mix(in oklch, ${providerColor} 11%, transparent)`,
+          border: `1px solid color-mix(in oklch, ${providerColor} 30%, transparent)`,
+          fontFamily: "var(--font-mono)",
+          fontWeight: 800,
+          fontSize: 11,
+        }}
+      >
+        {session.runtime === "claude" ? "C" : "X"}
+      </span>
+      <div style={{ minWidth: 0, display: "grid", gap: 3 }}>
+        <div
+          title={session.title}
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: "var(--ink)",
+            fontSize: 12,
+            fontWeight: 650,
+          }}
+        >
+          {session.title}
+        </div>
+        <div
+          title={session.cwd}
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: session.cwdExists ? "var(--muted)" : "var(--danger)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+          }}
+        >
+          {session.cwdExists ? session.cwd : `${session.cwd} · directory missing`}
+        </div>
+        <div style={{ display: "flex", gap: 7, color: "var(--muted)", fontSize: 9 }}>
+          <span>{session.runtime === "claude" ? "Claude" : "Codex"}</span>
+          <span>·</span>
+          <span title={session.sessionId}>{shortWorkerSessionId(session.sessionId)}</span>
+          <span>·</span>
+          <span>{formatSessionUpdated(session.updatedAt)}</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <FooterButton onClick={onOpen} disabled={!session.cwdExists || busy}>Open</FooterButton>
+        <DangerButton onClick={onDelete} disabled={busy}>Delete</DangerButton>
+      </div>
+    </div>
+  );
+}
+
+function SessionManagerMessage({
+  tone,
+  children,
+}: {
+  tone: "danger" | "info";
+  children: React.ReactNode;
+}) {
+  const color = tone === "danger" ? "var(--danger)" : "var(--info)";
+  return (
+    <div
+      role={tone === "danger" ? "alert" : "status"}
+      style={{
+        color,
+        fontSize: 10,
+        lineHeight: 1.45,
+        border: `1px solid color-mix(in oklch, ${color} 34%, transparent)`,
+        background: `color-mix(in oklch, ${color} 8%, transparent)`,
+        borderRadius: "var(--radius-surface, 7px)",
+        padding: "7px 10px",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function shortWorkerSessionId(id: string): string {
+  return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+}
+
+function formatSessionUpdated(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Recently";
+  const minutes = Math.round((timestamp - Date.now()) / 60_000);
+  if (Math.abs(minutes) < 1) return "Just now";
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  if (Math.abs(minutes) < 60) return formatter.format(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return formatter.format(hours, "hour");
+  const days = Math.round(hours / 24);
+  if (Math.abs(days) < 30) return formatter.format(days, "day");
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
+    .format(timestamp);
 }
 
 // Cross-workspace runs index. Shows every run on disk with its status,
@@ -2226,7 +2885,7 @@ function RunRow({
               flex: "0 0 auto",
               padding: "1px 6px",
               borderRadius: "var(--radius-control, 5px)",
-              background: "color-mix(in oklch, var(--ink) 6%, transparent)",
+              background: "color-mix(in oklab, var(--ink) 6%, transparent)",
               color: "var(--ink-dim)",
             }}
           >
@@ -2287,6 +2946,14 @@ function DangerButton({
 }
 
 function RunsEmptyMessage({ text }: { text: string }) {
+  return <SettingsEmptyMessage label="Runs" text={text} />;
+}
+
+function SessionsEmptyMessage({ text }: { text: string }) {
+  return <SettingsEmptyMessage label="Sessions" text={text} />;
+}
+
+function SettingsEmptyMessage({ label, text }: { label: string; text: string }) {
   return (
     <div
       className="spark-empty"
@@ -2296,7 +2963,7 @@ function RunsEmptyMessage({ text }: { text: string }) {
         borderRadius: "var(--radius-surface, 7px)",
       }}
     >
-      <span className="spark-eyebrow">Runs</span>
+      <span className="spark-eyebrow">{label}</span>
       <span className="spark-empty__body">{text}</span>
     </div>
   );
@@ -2409,10 +3076,10 @@ function ThemeCard({
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--panel) 70%, transparent)",
+              : "color-mix(in oklab, var(--panel) 70%, transparent)",
         // Surface rung — a card sits on the 7px ladder step.
         borderRadius: "var(--radius-surface, 7px)",
         padding: 10,
@@ -2635,7 +3302,7 @@ function CustomSelect({
           // Default arrow cursor, matching the .spark-* utility classes.
           cursor: "default",
           background: pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
               : "var(--bg)",
@@ -2714,7 +3381,7 @@ function SelectOption({
         // Pressed beat for rows where the .spark-btn transform would break the
         // menu seam — a momentary darker fill instead.
         background: pressed
-          ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+          ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
           : undefined,
       }}
     >
@@ -2751,10 +3418,10 @@ function TimingPresetButton({
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--ink) 2%, transparent)",
+              : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "7px 9px",
         // Default arrow cursor, matching the .spark-* utility classes.
@@ -2826,10 +3493,10 @@ function ModelPresetCard({
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--ink) 2%, transparent)",
+              : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "9px 11px",
         // Default arrow cursor, matching the .spark-* utility classes.
@@ -2925,9 +3592,10 @@ function ModelPresetCard({
   );
 }
 
-// One liquid-glass tuning slider: 0–200% of the design default. Lives right
-// under the glass toggle; changes apply live (ThemeProvider maps the pref to
-// CSS scale vars / SVG lens attributes), so the dialog itself is the preview.
+// One liquid-glass tuning slider: 0–200% of the design default. Keep drag state
+// local and persist once on release/blur. Sending an IPC preference write for
+// every pointer sample forced the whole themed app (including SVG lens filters)
+// to repaint dozens of times per second and made Settings feel sticky.
 function GlassSliderRow({
   label,
   hint,
@@ -2941,6 +3609,24 @@ function GlassSliderRow({
   value: number;
   onChange: (next: number) => void;
 }) {
+  const [draftValue, setDraftValue] = useState(value);
+  const dragging = useRef(false);
+  const committedValue = useRef(value);
+
+  useEffect(() => {
+    committedValue.current = value;
+    if (!dragging.current) setDraftValue(value);
+  }, [value]);
+
+  const commit = (next: number) => {
+    dragging.current = false;
+    setDraftValue(next);
+    if (next !== committedValue.current) {
+      committedValue.current = next;
+      onChange(next);
+    }
+  };
+
   return (
     <div
       style={{
@@ -2959,8 +3645,15 @@ function GlassSliderRow({
         min={min}
         max={200}
         step={5}
-        value={value}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        value={draftValue}
+        onPointerDown={() => {
+          dragging.current = true;
+        }}
+        onChange={(event) => setDraftValue(Number(event.currentTarget.value))}
+        onPointerUp={(event) => commit(Number(event.currentTarget.value))}
+        onPointerCancel={(event) => commit(Number(event.currentTarget.value))}
+        onBlur={(event) => commit(Number(event.currentTarget.value))}
+        onKeyUp={(event) => commit(Number(event.currentTarget.value))}
         style={{ width: "100%", accentColor: "var(--accent)" }}
       />
       <span
@@ -2972,7 +3665,7 @@ function GlassSliderRow({
           textAlign: "right",
         }}
       >
-        {value}%
+        {draftValue}%
       </span>
     </div>
   );
@@ -3001,8 +3694,8 @@ function ToggleRow({
 // One switch metric, app-wide. 34x20 track, 16px knob, 2px inset, accent fill
 // + glow when on. SwitchTrack is the pure-visual part so the same geometry can
 // be (a) an interactive role=switch button, or (b) a decorative indicator
-// nested inside a larger clickable row (RuntimeDiagnosticRow), where a nested
-// <button> would be invalid HTML.
+// nested inside a larger clickable row, where a nested <button> would be
+// invalid HTML.
 const SWITCH_W = 34;
 const SWITCH_H = 20;
 const SWITCH_KNOB = 16;
@@ -3023,7 +3716,7 @@ function SwitchTrack({ checked, disabled }: { checked: boolean; disabled?: boole
           : "1px solid var(--rule-strong)",
         background: checked
           ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
-          : "color-mix(in oklch, var(--ink) 5%, transparent)",
+          : "color-mix(in oklab, var(--ink) 5%, transparent)",
         opacity: disabled ? 0.55 : 1,
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",

@@ -85,6 +85,10 @@ async function main() {
     checkpoints: [{ kind: "run-start", sha: baseline }],
     workerTasks: [{ id: "task-1" }],
     workerAttempts: [{ id: "attempt-1", workerTaskId: "task-1", finalReportPath: reportPath }],
+    humanMessages: [
+      { author: "user", message: "Implement the behavior." },
+      { author: "spark", message: "Manager-verified run outcome." },
+    ],
   };
   const manifest = await collectRunResultManifest(run, () => { throw new Error("unexpected path fallback"); });
   const byPath = new Map(manifest.workspaceDelta.map((item) => [item.path, item]));
@@ -100,6 +104,8 @@ async function main() {
   assert.equal(manifest.checks.find((item) => item.command === "npm run typecheck").provenance, "verified");
   assert.equal(manifest.checks.find((item) => item.command === "npm test").provenance, "reported");
   assert.equal(manifest.evidence.find((item) => item.text.startsWith("The change works")).provenance, "verified");
+  assert.equal(manifest.summary, "Manager-verified run outcome.");
+  assert.equal(manifest.outcomes[0].text, "Implemented the requested behavior.");
   const prose = renderRunResultManifestSummary(manifest);
   assert.match(prose, /tracked\.txt.*observed/);
   assert.match(prose, /npm run typecheck.*passed.*verified/);

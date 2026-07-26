@@ -1,6 +1,6 @@
 "use strict";
 // Deterministic check of the long-run manager-context compaction implemented in
-// src/main/orchestration/openrouter-manager.ts (formatCompactRunState ->
+// src/main/orchestration/manager-protocol.ts (formatCompactRunState ->
 // existingSteps). LLM evals can't affordably reach the 30-50+ step depth where
 // the reviewSummary cap engages, so this proves the bounding property directly.
 //

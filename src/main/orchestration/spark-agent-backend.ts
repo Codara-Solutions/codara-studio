@@ -1,13 +1,12 @@
 // Cora manager backend abstraction.
 //
-// One TypeScript interface per "manager" the chat composer can target. Today
-// there are three implementations:
+// One TypeScript interface per "manager" the chat composer can target. Every
+// implementation drives an agent CLI, Cora has no hosted-API manager, so a
+// backend is always a local process the user is already licensed for:
 //
-//   - OpenRouter   (src/main/orchestration/openrouter-backend.ts)
-//       The original built-in manager. Calls an LLM over HTTPS with a strict
-//       json_schema response_format and produces a SparkManagerDecision the
-//       run-store consumes directly. Execute and Talk modes are both
-//       structured-output calls.
+//   - Pi           (src/main/orchestration/pi-backend.ts)
+//       The bundled, subscription-only Cora harness and the default backend
+//       for a new chat.
 //
 //   - Claude Code  (src/main/orchestration/claude-backend.ts)
 //       Runs Anthropic's Claude Agent SDK and turns its partial-message deltas,
@@ -21,7 +20,7 @@
 //       thread resume, usage, interruption, and turn completion directly.
 //
 // The dispatch lives in run-store.ts: when the manager pipeline is about to
-// fire, it picks the backend from `run.chatBackend` (defaulting to OpenRouter
+// fire, it picks the backend from `run.chatBackend` (defaulting to Pi
 // for legacy / unset chats) and calls one of the methods below.
 
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -31,19 +30,22 @@ import type {
   AgentRuntimeDiagnostic,
   ChatBackendKind,
   ChatMode,
+  CoraExecutionPolicy,
   HumanRunMessage,
   RunState,
 } from "@shared/types";
 import { DEFAULT_CODEX_CHAT_MODEL } from "@shared/model-catalog";
 import type {
-  OpenRouterManagerMode,
+  ManagerMode,
   SparkManagerDecision,
   SparkManagerWorkerReportContext,
-} from "./openrouter-manager";
+} from "./manager-protocol";
 import {
   effectiveChatFastMode,
+  effectiveChatMode,
   effectiveChatOneMillionContext,
 } from "@shared/chat-policy";
+import { effectiveRunExecutionPolicy } from "./execution-policy";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -52,11 +54,13 @@ import {
  */
 export interface ChatBackendConfig {
   backend: ChatBackendKind;
-  /** Backend-specific model id. Free-form for OpenRouter; one of the enum
-   *  values for Claude/Codex. */
+  /** Backend-specific model id, one of the enum values for the backend's
+   *  runtime. */
   model: string;
   mode: ChatMode;
   effort: AgentEffortLevel;
+  /** Per-chat Pi execution depth. Non-Pi backends always resolve to Fast. */
+  executionPolicy: CoraExecutionPolicy;
   /** Provider-side session UUID, when this chat already has one. Empty on
    *  the first call; the backend populates it onto the RunState on first
    *  spawn so subsequent calls can resume. */
@@ -67,7 +71,7 @@ export interface ChatBackendConfig {
    *  assistant replies from the OLD mode's persona, and CC/Codex anchor on
    *  that when they resume. */
   sessionMode?: ChatMode;
-  /** Fast-mode toggle. Codex-only; Claude Code and OpenRouter ignore it. */
+  /** Fast-mode toggle. Codex-only; Claude Code ignores it. */
   fastMode: boolean;
   /** 1M-context toggle. Claude Code is normalized to true. */
   oneMillionContext: boolean;
@@ -75,13 +79,13 @@ export interface ChatBackendConfig {
 
 /**
  * Inputs the manager pipeline hands to a backend's `requestManagerDecision`.
- * Mirrors the existing OpenRouter call site so the dispatch is a 1:1
- * structural translation, not a redesign.
+ * Mirrors manager-protocol's `buildManagerRequest` inputs so the dispatch is a
+ * 1:1 structural translation, not a redesign.
  */
 export interface ManagerRequestInput {
   run: RunState;
   cwd: string;
-  mode: OpenRouterManagerMode;
+  mode: ManagerMode;
   workerReports?: SparkManagerWorkerReportContext[];
   availableRuntimes?: AgentRuntimeDiagnostic[];
   agentSyncContext?: string;
@@ -100,12 +104,11 @@ export interface ManagerRequestInput {
 }
 
 /**
- * Result shape every backend returns from `requestManagerDecision`. Identical
- * to the OpenRouter manager's existing OpenRouterManagerResult so run-store
- * doesn't need to branch on backend after the call. The `decision` is the
- * canonical Codara structured output; non-OpenRouter backends synthesize a
- * decision (typically status=complete + chatReply for Talk mode, or a parsed
- * MCP-tool-call payload for Execute mode).
+ * Result shape every backend returns from `requestManagerDecision`. Uniform
+ * across backends so run-store doesn't need to branch on backend after the
+ * call. The `decision` is the canonical Codara structured output, which every
+ * CLI backend synthesizes (typically status=complete + chatReply for Talk
+ * mode, or a parsed MCP-tool-call payload for Execute mode).
  */
 export interface ManagerCallResult {
   decision: SparkManagerDecision;
@@ -114,15 +117,19 @@ export interface ManagerCallResult {
   decisionAlreadyApplied?: boolean;
   durationMs: number;
   model: string;
-  /** Optional usage metadata. Populated for OpenRouter (priced) and for
-   *  Claude/Codex when their JSONL transcript carries token counts; left
-   *  undefined otherwise so the costs UI shows "—" instead of $0.00. */
+  /** Optional usage metadata. Populated when the backend's JSONL transcript
+   *  carries token counts; left undefined otherwise so the costs UI shows
+   *  ", " instead of $0.00. */
   costUsd?: number;
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
   promptTokens?: number;
   completionTokens?: number;
+  /** The model's context window, when the backend reported one for this turn.
+   *  Persisted onto the SparkCall so the context meter reads a real window
+   *  instead of contextWindowForModel()'s per-model default. */
+  contextWindowTokens?: number;
   /**
    * If the backend rotated this chat onto a new CLI session UUID (e.g. a
    * fresh `claude` spawn that printed a new id), it returns the new id here.
@@ -131,8 +138,8 @@ export interface ManagerCallResult {
    */
   newSessionUuid?: string;
   /** Free-form non-fatal status — surfaced as a system event in the run log
-   *  but doesn't block the decision. Used by the stub backends to tell the
-   *  user "claude backend is not yet wired; falling back to OpenRouter". */
+   *  but doesn't block the decision. Used by a backend to tell the user
+   *  something about the turn without failing it. */
   notice?: string;
   /**
    * The backend could NOT complete this turn (turn timeout, CLI crash,
@@ -236,13 +243,16 @@ export function isCheckpointJobCurrent(
  * manager turn in the new epoch was actually accepted by the provider. Failed
  * pre-submission attempts do not consume replay ownership, so an idempotent
  * retry still receives the retained conversation.
+ *
+ * Epoch 0 is the original conversation, no rewind happened, so the live CLI
+ * session still holds the whole dialogue and replaying it would double it up.
+ * Every backend drives a CLI session, so this applies to all of them.
  */
 export function shouldIncludeCanonicalReplay(
   run: RunState,
-  backend: ChatBackendKind,
   epoch: number,
 ): boolean {
-  if (backend === "openrouter" || epoch <= 0) return false;
+  if (epoch <= 0) return false;
   const currentCallIds = new Set(
     run.sparkCalls
       .filter((call) => (call.conversationEpoch ?? 0) === epoch)
@@ -306,34 +316,30 @@ export interface SparkAgentBackend {
  * manager turn so every backend sees a fully-populated config.
  *
  * Defaults:
- *   - backend: openrouter (preserves pre-feature behaviour)
- *   - model:   backend-specific default (OpenRouter from settings,
- *              Claude=opus-4-8, Codex=GPT-5.6 Sol)
- *   - mode:    execute (the original behaviour)
- *   - effort:  medium
+ *   - backend: Pi (the bundled, subscription-only Cora harness)
+ *   - model:   backend-specific default (Pi/Codex=GPT-5.6 Sol,
+ *              Claude=opus-4-8)
+ *   - mode:    auto for every chat except an Automations loom (effectiveChatMode)
+ *   - effort:  high for Pi, medium for explicitly selected legacy backends
+ *
+ * This is the single authoritative mode seam: an unset chatMode (explorer "Run
+ * plan", `cora start` with no mode) and a legacy talk/plan/execute stamp both
+ * dispatch as Auto from here.
  */
-export function resolveChatBackendConfig(
-  run: RunState,
-  settings: AppSettings,
-): ChatBackendConfig {
-  const backend: ChatBackendKind = run.chatBackend ?? "openrouter";
-  const mode: ChatMode = run.chatMode ?? "execute";
-  const effort: AgentEffortLevel = run.chatEffort ?? "medium";
-  let model = run.chatModel?.trim();
-  if (!model) {
-    if (backend === "openrouter") {
-      model = settings.openRouterModel || "google/gemini-flash-latest";
-    } else if (backend === "claude") {
-      model = "claude-opus-4-8";
-    } else {
-      model = DEFAULT_CODEX_CHAT_MODEL;
-    }
-  }
+export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
+  const backend: ChatBackendKind = run.chatBackend ?? "pi";
+  const mode: ChatMode = effectiveChatMode(run.chatMode);
+  const effort: AgentEffortLevel = run.chatEffort ?? (backend === "pi" ? "high" : "medium");
+  // Pi and Codex both drive the Codex runtime, so they share its default model.
+  const model =
+    run.chatModel?.trim() ||
+    (backend === "claude" ? "claude-opus-5" : DEFAULT_CODEX_CHAT_MODEL);
   return {
     backend,
     model,
     mode,
     effort,
+    executionPolicy: effectiveRunExecutionPolicy(run),
     sessionUuid: run.chatSessionUuid,
     sessionMode: run.chatSessionMode,
     fastMode: effectiveChatFastMode(backend, run.chatFastMode),
@@ -383,11 +389,77 @@ function renderBundledManagerInput(messages: HumanRunMessage[]): string {
  * Build the one immutable prompt a manager turn owns. On the first CLI turn
  * after a rewind, prepend a capped replay of retained canonical user/Cora
  * dialogue only; provider transcripts and tool/activity noise never participate.
+ *
+ * This is the DYNAMIC half of a turn (everything after
+ * MANAGER_PROMPT_DYNAMIC_MARKER). New per-turn context belongs here, never in
+ * the stable prefix: this text is appended to the conversation, so changing it
+ * costs no cached tokens, while a byte moved into the prefix invalidates the
+ * whole cached conversation for the rest of the run.
  */
 export function buildManagerTurnPrompt(
   run: RunState,
   inputMessages: HumanRunMessage[],
-  opts?: { includeCanonicalReplay?: boolean },
+  opts?: ManagerTurnPromptOptions,
+): string {
+  return appendSubscriptionHeadroom(
+    appendCoraMemory(
+      buildManagerTurnInput(run, inputMessages, opts),
+      opts?.coraMemory,
+    ),
+    opts?.subscriptionHeadroom,
+  );
+}
+
+export interface ManagerTurnPromptOptions {
+  includeCanonicalReplay?: boolean;
+  /**
+   * Rendered Cora memory sections (cora-memory.ts formatCoraMemoryForTurn), or
+   * null when there is nothing to inject or the unchanged content was already
+   * injected earlier in this run. The caller reads it rather than this module:
+   * the memory files live in the user's Codara home, and this file is
+   * deliberately a pure prompt builder with no disk or Electron dependency (see
+   * scripts/test-manager-prompt-cache.cjs, which bundles it standalone).
+   */
+  coraMemory?: string | null;
+  /**
+   * Rendered subscription-headroom section (subscription-headroom.ts), or null
+   * when no provider reported usable quota data. Same contract as
+   * coraMemory: the caller reads it (the usage cache lives Electron-side)
+   * and it rides the dynamic tail only, its numbers change every turn, so a
+   * byte of it in the stable prefix would kill the prompt cache for the run.
+   */
+  subscriptionHeadroom?: string | null;
+}
+
+/**
+ * Cora memory (the user-editable global + workspace markdown files) rides at
+ * the tail of the dynamic half, after the turn input and before the headroom
+ * section. Two reasons it cannot move into the stable prefix: the content
+ * changes as memory is written or edited, so it would invalidate the cached
+ * prefix for every later turn, and injection is hash-gated per run (usually
+ * only the first turn carries it), so most turns append nothing. The rendered
+ * text carries its own section markers ([END CORA MEMORY ...]).
+ */
+function appendCoraMemory(prompt: string, memory: string | null | undefined): string {
+  if (!memory || !memory.trim()) return prompt;
+  return [prompt, "", memory.trim()].join("\n");
+}
+
+/**
+ * Subscription-quota headroom rides the dynamic tail for the same reasons the
+ * lessons do: it changes turn to turn (a cached-prefix byte it touched would be
+ * invalidated every turn), and it is live evidence, not standing guidance. A
+ * turn where no provider reported usable data appends nothing.
+ */
+function appendSubscriptionHeadroom(prompt: string, headroom: string | null | undefined): string {
+  if (!headroom || !headroom.trim()) return prompt;
+  return [prompt, "", headroom.trim()].join("\n");
+}
+
+function buildManagerTurnInput(
+  run: RunState,
+  inputMessages: HumanRunMessage[],
+  opts?: ManagerTurnPromptOptions,
 ): string {
   const bundledInput = renderBundledManagerInput(inputMessages);
   const recentAssumptions = (run.assumptions ?? []).slice(-8);
@@ -442,6 +514,106 @@ export function buildManagerTurnPrompt(
     "[NEW USER INPUT FOR THIS TURN]",
     promptInput,
   ].join("\n\n");
+}
+
+/**
+ * The seam every manager turn is assembled around:
+ *
+ *   <stable prefix>  MANAGER_PROMPT_DYNAMIC_MARKER  <per-turn dynamic suffix>
+ *
+ * The stable prefix is what the provider caches. It is the mode's shipped
+ * guidance plus the run's workspace cwd, and NOTHING else: no clock, no run
+ * state, no worker digests, no message counts. Every one of those belongs after
+ * the marker, where a changed byte costs nothing because the suffix was never
+ * cacheable to begin with.
+ *
+ * Backends send the two halves on different wires (system prompt vs user
+ * message), so the marker never travels to the provider verbatim. It exists so
+ * the property can be asserted on one concatenated string, in the order the
+ * model actually reads it. See scripts/test-manager-prompt-cache.cjs.
+ */
+export const MANAGER_PROMPT_DYNAMIC_MARKER = "[CORA TURN INPUT]";
+
+export interface ManagerPromptParts {
+  /** Byte-identical across every turn of one run. Sent as the system prompt. */
+  stablePrefix: string;
+  /** Everything that changes turn to turn. Sent as the user message. */
+  dynamic: string;
+  /** The two halves in wire order, separated by the dynamic marker. */
+  text: string;
+}
+
+/**
+ * Build the cacheable half of a manager turn. Deliberately takes primitives
+ * rather than a RunState: a function that cannot see the run cannot leak a
+ * timestamp or a worker digest into the cached prefix.
+ */
+export function buildManagerStablePrefix(input: {
+  guidance: string;
+  cwd: string;
+}): string {
+  return `${input.guidance}\n\nWorkspace cwd: ${input.cwd}\n`;
+}
+
+/** Join the two halves for auditing. `turnPrompt` is buildManagerTurnPrompt's output. */
+export function assembleManagerPrompt(input: {
+  guidance: string;
+  cwd: string;
+  turnPrompt: string;
+}): ManagerPromptParts {
+  const stablePrefix = buildManagerStablePrefix(input);
+  return {
+    stablePrefix,
+    dynamic: input.turnPrompt,
+    text: `${stablePrefix}\n${MANAGER_PROMPT_DYNAMIC_MARKER}\n${input.turnPrompt}`,
+  };
+}
+
+const runManagerGuidance = new Map<string, { key: string; guidance: string }>();
+// Bounded so a long-lived app with many chats cannot hold every prompt file it
+// ever pinned. Eviction is least-recently-USED (each hit reinserts), so the
+// entry that gets dropped belongs to a run that is not taking turns; an evicted
+// run simply re-reads on its next turn, which is the pre-pin behavior.
+const RUN_MANAGER_GUIDANCE_LIMIT = 64;
+
+/**
+ * Read a run's manager guidance ONCE per run instead of once per turn.
+ *
+ * Those bytes are the cacheable prefix of every turn in the run, so re-reading
+ * them mid-conversation is the one way this file could split a live prompt
+ * cache: a dev editing resources/orchestration/*.md, or an installer swapping
+ * the bundle under a running app, would change the prefix between turn N and
+ * turn N+1 and throw away every cached token. Pinning per run also drops one
+ * disk read per manager turn. A new run reads the file again, so an edit still
+ * takes effect without restarting the app.
+ *
+ * `cacheKey` identifies which guidance was pinned (mode + resolved path), so a
+ * mode flip, which already forces a fresh provider session, re-reads.
+ */
+export async function loadRunManagerGuidance(
+  runId: string,
+  cacheKey: string,
+  read: () => Promise<string>,
+): Promise<string> {
+  const cached = runManagerGuidance.get(runId);
+  if (cached && cached.key === cacheKey) {
+    runManagerGuidance.delete(runId);
+    runManagerGuidance.set(runId, cached);
+    return cached.guidance;
+  }
+  const guidance = await read();
+  runManagerGuidance.set(runId, { key: cacheKey, guidance });
+  while (runManagerGuidance.size > RUN_MANAGER_GUIDANCE_LIMIT) {
+    const oldest = runManagerGuidance.keys().next();
+    if (oldest.done) break;
+    runManagerGuidance.delete(oldest.value);
+  }
+  return guidance;
+}
+
+/** Drop a run's pinned guidance when its chat session is torn down. */
+export function forgetRunManagerGuidance(runId: string): void {
+  runManagerGuidance.delete(runId);
 }
 
 /** @deprecated Manager turns must use the frozen `ManagerRequestInput.prompt`. */

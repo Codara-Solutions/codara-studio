@@ -2,6 +2,7 @@ import { app } from "electron";
 import path from "node:path";
 import os from "node:os";
 import { isRemotePath } from "@shared/remote";
+import { sparkHome } from "./spark-home";
 
 // Read-path allowlist for fs:* IPC handlers. Defence-in-depth only — if the
 // renderer is compromised, this stops a hostile script from reading arbitrary
@@ -60,8 +61,12 @@ function staticAllowed(): string[] {
   return [
     home(".claude"),
     home(".codex"),
-    home(".cursor"),
     home(".cache/spark"),
+    // Cora memory files (MEMORY.md and workspaces/<id>.md) open in ordinary
+    // editor tabs, and they live outside every workspace root. Deliberately
+    // scoped to the memory subdirectory only: the Codara home also holds
+    // auth tokens (pi-agent/auth.json), which the renderer must never read.
+    path.join(sparkHome(), "memory"),
     app.getPath("userData"),
     app.getPath("temp"),
   ].map((p) => path.resolve(p));

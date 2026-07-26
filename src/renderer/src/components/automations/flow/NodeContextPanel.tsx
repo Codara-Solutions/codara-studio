@@ -10,7 +10,6 @@ import type {
   ScheduledJob,
 } from "@shared/types";
 import { DEFAULT_ITERATION_TIMEOUT_MINUTES } from "@shared/types";
-import { usePreferences } from "../../../preferences/usePreferences";
 import { Check, Field, Segmented } from "../FormKit";
 import {
   DEFAULT_ENGINE_MODEL,
@@ -416,14 +415,8 @@ function WorkerForm({
   const engineOptions: { value: LoomEngine; label: string }[] = (["claude", "codex"] as LoomEngine[]).map(
     (e) => ({ value: e, label: e === "claude" ? "Claude" : "Codex" }),
   );
-  const { preferences } = usePreferences();
   const runtime = runtimes.find((r) => r.kind === w.engine);
-  // Fable 5 gate (default off): hide it from the loom worker model dropdown
-  // unless opted in via Settings, matching the chat composer picker. With the
-  // pref off, launchWorkerAttempt downgrades any lingering fable hint to Opus.
-  const models = (runtime?.models ?? []).filter(
-    (m) => preferences.fableEnabled === true || !/fable/i.test(m.id),
-  );
+  const models = runtime?.models ?? [];
   const selectedModel = models.find((m) => m.id === w.model);
   const effortLevels: AgentEffortLevel[] = selectedModel?.effortLevels ?? ["low", "medium", "high", "xhigh"];
 
@@ -481,6 +474,13 @@ function WorkerForm({
           // would die with engine-missing at run time. Warn here, at selection.
           <span className="spark-badge is-danger" style={{ alignSelf: "flex-start" }}>
             {w.engine === "claude" ? "Claude Code" : "Codex"} isn't installed — this node can't run
+          </span>
+        ) : runtime?.authenticated === false ? (
+          // Advisory only — the probe can miss env/helper credentials, so this
+          // never blocks saving or running; the CLI may well be signed in.
+          <span className="spark-badge is-warn" style={{ alignSelf: "flex-start" }}>
+            {w.engine === "claude" ? "Claude Code" : "Codex"} may not be signed in
+            {runtime.authHint ? ` — ${runtime.authHint}` : ""}
           </span>
         ) : null}
         {/* Model + effort are required — every worker carries a concrete value,

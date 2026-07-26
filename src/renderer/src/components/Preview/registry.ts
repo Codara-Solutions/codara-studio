@@ -56,8 +56,11 @@ export function listPreviewTabs(): Array<{ id: string; url: string; isActive: bo
 }
 
 // Adapter injected by App.tsx so the spark-preview MCP bridge can spawn a
-// preview tab without a manual user action. Returns the new tab id.
-type OpenPreviewTabFn = (url: string) => Promise<string> | string;
+// preview tab without a manual user action. Returns the new tab id. `runId` is
+// the CALLING run's id (threaded from the MCP server's SPARK_RUN_ID stamp) so
+// the minted tab is attributed to the run that is driving it, not whichever
+// run the user has selected.
+type OpenPreviewTabFn = (url: string, runId?: string | null) => Promise<string> | string;
 let openPreviewTabFn: OpenPreviewTabFn | null = null;
 
 export function setOpenPreviewTabFn(fn: OpenPreviewTabFn | null): void {
@@ -68,7 +71,7 @@ export function setOpenPreviewTabFn(fn: OpenPreviewTabFn | null): void {
 // pointing at `url` and wait briefly for PreviewStack to register its
 // BrowserPaneHandle. Used by previewRpc.navigate so a sub-agent doesn't have
 // to ask the user to "please open a preview tab".
-export async function ensurePreviewTab(url: string): Promise<RegistryEntry> {
+export async function ensurePreviewTab(url: string, runId?: string | null): Promise<RegistryEntry> {
   const existing = pickPreviewTab(null);
   if (existing) return existing;
   if (!openPreviewTabFn) {
@@ -76,7 +79,7 @@ export async function ensurePreviewTab(url: string): Promise<RegistryEntry> {
       "Codara is not ready to open preview tabs yet (renderer not mounted). Retry in a moment.",
     );
   }
-  const id = await Promise.resolve(openPreviewTabFn(url));
+  const id = await Promise.resolve(openPreviewTabFn(url, runId));
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const entry = entries.get(id);
