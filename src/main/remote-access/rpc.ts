@@ -123,6 +123,13 @@ export interface RemoteTerminalHandle {
   write(data: string): void;
   resize(cols: number, rows: number): void;
   close(): void;
+  // Optional OS-level read flow control. The session calls these when the
+  // peer's socket backs up, so a pty running something noisy against a slow
+  // phone blocks the child rather than growing our write buffer. Handles
+  // that cannot pause (the ssh2 adapter) simply omit them, and the session
+  // falls back to dropping output. See MAX_PENDING_EVENT_BYTES.
+  pause?(): void;
+  resume?(): void;
 }
 
 export interface RemoteTerminalCreateRequest {
@@ -152,12 +159,21 @@ export interface RemoteRpcServices {
 // the cap bounds pty spawn abuse from a compromised paired device.
 export const MAX_TERMINALS_PER_CONNECTION = 8;
 
+// Outbound terminal bytes buffered while the peer's socket is backed up
+// and the pty could not be paused. Past this we drop output: losing
+// scrollback to a phone that cannot keep up is survivable, growing the main
+// process without limit is not.
+export const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
+
 interface DuplexLike {
-  write(data: Buffer): void;
+  // Node's Writable contract: false means the internal buffer is over its
+  // high water mark and the caller should stop until "drain".
+  write(data: Buffer): boolean;
   destroy(): void;
   on(event: "data", handler: (chunk: Buffer) => void): void;
   on(event: "close", handler: () => void): void;
   on(event: "error", handler: (err: Error) => void): void;
+  on(event: "drain", handler: () => void): void;
 }
 
 // One authenticated connection's RPC state machine. Terminals created here
@@ -174,6 +190,10 @@ export class RpcSession {
   private nextTerminalId = 1;
   private helloDone = false;
   private destroyed = false;
+  // Peer socket is over its high water mark; see onBackpressure.
+  private backpressured = false;
+  private pendingEventBytes = 0;
+  private droppedOutput = false;
 
   constructor(
     private readonly stream: DuplexLike,
@@ -183,6 +203,7 @@ export class RpcSession {
     stream.on("data", (chunk) => this.onData(chunk));
     stream.on("close", () => this.teardown());
     stream.on("error", () => this.teardown());
+    stream.on("drain", () => this.onDrain());
   }
 
   destroy(): void {
@@ -227,11 +248,61 @@ export class RpcSession {
 
   private send(value: unknown): void {
     if (this.destroyed) return;
-    this.stream.write(encodeFrame(value));
+    // A false return means the peer is not keeping up. Replies stay
+    // unconditional (they are small and the caller is waiting on them);
+    // it is the unsolicited terminal firehose we throttle below.
+    if (!this.stream.write(encodeFrame(value))) this.onBackpressure();
   }
 
   pushEvent(event: string, payload: unknown): void {
     this.send({ event, payload });
+  }
+
+  // Terminal output specifically: unsolicited, unbounded in volume, and the
+  // one thing a slow peer can use to grow our memory. While the socket is
+  // backed up we first try to stop the pty at the OS level; if the handle
+  // cannot pause, we account for what we have queued and start dropping
+  // once it passes the cap.
+  private pushTerminalData(terminalId: string, data: string): void {
+    if (this.destroyed) return;
+    if (this.backpressured) {
+      const bytes = Buffer.byteLength(data, "utf8");
+      if (this.pendingEventBytes + bytes > MAX_PENDING_EVENT_BYTES) {
+        if (!this.droppedOutput) {
+          this.droppedOutput = true;
+          this.log(`dropping terminal output for ${terminalId}: peer is not keeping up`);
+        }
+        return;
+      }
+      this.pendingEventBytes += bytes;
+    }
+    this.pushEvent("terminal.data", { terminalId, data });
+  }
+
+  private onBackpressure(): void {
+    if (this.backpressured) return;
+    this.backpressured = true;
+    for (const terminal of this.terminals.values()) {
+      try {
+        terminal.pause?.();
+      } catch {
+        // A pty that died mid-pause is handled by its exit path.
+      }
+    }
+  }
+
+  private onDrain(): void {
+    if (!this.backpressured) return;
+    this.backpressured = false;
+    this.pendingEventBytes = 0;
+    this.droppedOutput = false;
+    for (const terminal of this.terminals.values()) {
+      try {
+        terminal.resume?.();
+      } catch {
+        // Same as above.
+      }
+    }
   }
 
   private reply(id: number, result: unknown): void {
@@ -367,7 +438,7 @@ export class RpcSession {
         cols,
         rows,
         cwd: p.cwd,
-        onData: (data) => this.pushEvent("terminal.data", { terminalId, data }),
+        onData: (data) => this.pushTerminalData(terminalId, data),
         onExit: () => {
           this.terminals.delete(terminalId);
         },

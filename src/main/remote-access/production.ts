@@ -7,7 +7,8 @@
 import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { join, resolve, relative, isAbsolute } from "node:path";
+import { realpath } from "node:fs/promises";
+import { join, resolve, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isRemotePath } from "@shared/remote";
 import { logMain } from "../file-log";
@@ -87,11 +88,27 @@ async function createRemoteTerminal(
     const requested = isAbsolute(request.cwd)
       ? resolve(request.cwd)
       : resolve(workspace.cwd, request.cwd);
-    const rel = relative(resolve(workspace.cwd), requested);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
+    // Resolve symlinks on BOTH sides before comparing: a link inside the
+    // workspace pointing at / would otherwise pass a purely lexical check.
+    // realpath needs the paths to exist, which is correct here since a
+    // terminal cwd must exist anyway.
+    let realRoot: string;
+    let realRequested: string;
+    try {
+      realRoot = await realpath(workspace.cwd);
+      realRequested = await realpath(requested);
+    } catch {
+      throw new Error("cwd must be an existing directory inside the workspace.");
+    }
+    const rel = relative(realRoot, realRequested);
+    // "" means the root itself. A leading ".." SEGMENT means outside; test
+    // for the separator so a legitimately named directory like "..config"
+    // is not mistaken for an escape.
+    const escapes = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+    if (escapes) {
       throw new Error("cwd must stay inside the workspace.");
     }
-    cwd = requested;
+    cwd = realRequested;
   }
 
   const shell = await defaultShell();
@@ -126,6 +143,14 @@ async function createRemoteTerminal(
   return {
     write: (data) => pty.write(id, data),
     resize: (cols, rows) => pty.resize(id, cols, rows),
+    // Real OS-level flow control, so a noisy command against a slow phone
+    // blocks the child instead of growing the main process.
+    pause: () => {
+      pty.pauseFlow(id);
+    },
+    resume: () => {
+      pty.resumeFlow(id);
+    },
     close: () => {
       if (!closed) {
         closed = true;

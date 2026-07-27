@@ -22,7 +22,7 @@
 // whose `iat` is older than 2 minutes (30s clock skew tolerance).
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, promises as fsp, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import type { RemotePairedDevice } from "@shared/remote-access";
@@ -33,6 +33,9 @@ export const PAIRING_SECRET_BYTES = 32;
 export const PAIRED_DEVICES_FILE = "paired-devices.json";
 // Matches the phone parser's cap on the optional display name.
 const MAX_DEVICE_NAME_CHARS = 64;
+// How long last-seen updates coalesce before one async write. Long enough
+// that a reconnect storm collapses into a single flush.
+const LAST_SEEN_FLUSH_DELAY_MS = 5_000;
 
 /* -------------------------------------------------------------------------- */
 /* Paired-device store                                                        */
@@ -76,6 +79,8 @@ export function isAuthorizedKey(
 export class PairedDeviceStore {
   private readonly file: string;
   private cache: PairedDeviceRecord[] | null = null;
+  private lastSeenFlushTimer: NodeJS.Timeout | null = null;
+  private writing: Promise<void> = Promise.resolve();
 
   constructor(private readonly remoteDir: string) {
     this.file = join(remoteDir, PAIRED_DEVICES_FILE);
@@ -133,13 +138,40 @@ export class PairedDeviceStore {
     return true;
   }
 
+  // Last-seen is cosmetic (it renders in the Settings list), so unlike
+  // pairing and revocation it must never cost the main thread a synchronous
+  // write. The in-memory value updates immediately; the file catches up on
+  // a coalesced async flush, so a device reconnecting in a tight loop
+  // cannot turn accept() into disk I/O.
   touchLastSeen(publicKey: Buffer | Uint8Array, now = Date.now()): void {
     const b64 = Buffer.from(publicKey).toString("base64");
     const devices = this.list();
     const record = devices.find((device) => device.publicKey === b64);
     if (!record) return;
     record.lastSeenAt = now;
-    this.save(devices);
+    this.scheduleLastSeenFlush();
+  }
+
+  private scheduleLastSeenFlush(): void {
+    if (this.lastSeenFlushTimer) return;
+    this.lastSeenFlushTimer = setTimeout(() => {
+      this.lastSeenFlushTimer = null;
+      void this.saveAsync(this.list()).catch(() => {
+        // Losing a last-seen timestamp is not worth surfacing; the trust
+        // list itself is written synchronously elsewhere.
+      });
+    }, LAST_SEEN_FLUSH_DELAY_MS);
+    // Never hold the process open for a cosmetic write.
+    this.lastSeenFlushTimer.unref?.();
+  }
+
+  // Flush any pending last-seen write now. Called on shutdown so the final
+  // timestamps are not lost, and by tests that assert persistence.
+  async flushPendingWrites(): Promise<void> {
+    if (!this.lastSeenFlushTimer) return;
+    clearTimeout(this.lastSeenFlushTimer);
+    this.lastSeenFlushTimer = null;
+    await this.saveAsync(this.list()).catch(() => undefined);
   }
 
   private readFromDisk(): PairedDeviceRecord[] {
@@ -158,6 +190,8 @@ export class PairedDeviceStore {
     }
   }
 
+  // Synchronous, for the security-relevant mutations (pairing a device,
+  // revoking one). Those must be durable before the caller proceeds.
   private save(devices: PairedDeviceRecord[]): void {
     this.cache = devices;
     ensureRemoteDir(this.remoteDir);
@@ -170,6 +204,30 @@ export class PairedDeviceStore {
       // Windows: no POSIX modes.
     }
     renameSync(tmp, this.file);
+  }
+
+  // Async twin of save() for the cosmetic last-seen flush. Same tmp+rename
+  // atomicity; serialized behind `writing` so two flushes cannot interleave
+  // their renames.
+  private async saveAsync(devices: PairedDeviceRecord[]): Promise<void> {
+    this.cache = devices;
+    const run = this.writing.then(async () => {
+      ensureRemoteDir(this.remoteDir);
+      const payload: DevicesFileShape = { version: 1, devices };
+      const tmp = `${this.file}.tmp`;
+      await fsp.writeFile(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
+      try {
+        await fsp.chmod(tmp, 0o600);
+      } catch {
+        // Windows: no POSIX modes.
+      }
+      await fsp.rename(tmp, this.file);
+    });
+    this.writing = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
   }
 }
 
