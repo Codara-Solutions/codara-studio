@@ -7,6 +7,12 @@ import type {
   RemoteHostConfig,
 } from "@shared/remote";
 import type {
+  RemoteAccessStatus,
+  RemotePairedDevice,
+  RemotePairingSession,
+  RemotePairingState,
+} from "@shared/remote-access";
+import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
   AgentAssetDeleteResult,
@@ -1056,6 +1062,34 @@ const api = {
     // hint before launching a remote agent terminal.
     detectAgents: (hostIdOrPath: string): Promise<{ hostId: string; claude: boolean; codex: boolean }> =>
       ipcRenderer.invoke("remote:detectAgents", hostIdOrPath),
+  },
+  // Phone Remote Access (Settings, "Remote access"): listener lifecycle,
+  // QR pairing, and the paired-device list. Distinct from `remote` above
+  // (SSH remote workspaces). The renderer receives only status objects,
+  // device summaries, and the QR payload string; never key material.
+  remoteAccess: {
+    getStatus: (): Promise<RemoteAccessStatus> => ipcRenderer.invoke("remoteAccess:getStatus"),
+    setEnabled: (enabled: boolean): Promise<RemoteAccessStatus> =>
+      ipcRenderer.invoke("remoteAccess:setEnabled", enabled),
+    startPairing: (): Promise<RemotePairingSession> =>
+      ipcRenderer.invoke("remoteAccess:startPairing"),
+    cancelPairing: (): Promise<void> => ipcRenderer.invoke("remoteAccess:cancelPairing"),
+    listDevices: (): Promise<RemotePairedDevice[]> =>
+      ipcRenderer.invoke("remoteAccess:listDevices"),
+    revokeDevice: (publicKey: string): Promise<RemotePairedDevice[]> =>
+      ipcRenderer.invoke("remoteAccess:revokeDevice", publicKey),
+    onStatusChanged: (handler: (status: RemoteAccessStatus) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, status: RemoteAccessStatus) =>
+        handler(status);
+      ipcRenderer.on("remoteAccess:statusChanged", listener);
+      return () => ipcRenderer.off("remoteAccess:statusChanged", listener);
+    },
+    onPairingChanged: (handler: (state: RemotePairingState) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, state: RemotePairingState) =>
+        handler(state);
+      ipcRenderer.on("remoteAccess:pairingChanged", listener);
+      return () => ipcRenderer.off("remoteAccess:pairingChanged", listener);
+    },
   },
   // cora-preview MCP bridge: main forwards preview-tool requests here, the
   // renderer dispatches against the picked preview tab and sends a response

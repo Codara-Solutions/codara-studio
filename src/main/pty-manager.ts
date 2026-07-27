@@ -18,7 +18,12 @@ import { getConnection, shQuote } from "./remote/connections";
 // downstream (tail buffers, pause/resume, taps, kill bookkeeping) is
 // transport-agnostic. Remote handles report pid 0, which the Windows
 // taskkill reaping paths already skip via their `pid > 0` guards.
-type PtyHandle = Pick<nodePty.IPty, "pid" | "write" | "resize" | "kill" | "onData" | "onExit">;
+type PtyHandle = Pick<nodePty.IPty, "pid" | "write" | "resize" | "kill" | "onData" | "onExit"> &
+  // Real OS-level read flow control, present on node-pty's IPty but not on
+  // the ssh2 remote adapter, hence optional. Distinct from this module's
+  // pause()/resume(), which only divert the RENDERER sink and leave the
+  // child producing at full speed. See pauseFlow below.
+  Partial<Pick<nodePty.IPty, "pause" | "resume">>;
 
 interface Session {
   id: string;
@@ -1125,6 +1130,29 @@ export function resume(id: string): void {
 // while detached, since onData routes through enqueueData regardless of
 // webContents (it tolerated webContents===null before the first attach too).
 // Safe no-op for unknown ids.
+// Stop reading from the pty at the OS level, so a child that floods stdout
+// blocks on its own write buffer instead of growing ours. Unlike pause()
+// above (which keeps the child running and buffers for the renderer), this
+// applies real backpressure to the process.
+//
+// Added for remote sessions, whose consumer is a network socket that can be
+// far slower than a local pty. Returns whether flow control was available:
+// the ssh2 remote adapter has no equivalent, so callers must treat a false
+// return as "no backpressure possible here" rather than assuming success.
+export function pauseFlow(id: string): boolean {
+  const s = sessions.get(id);
+  if (!s?.pty.pause) return false;
+  s.pty.pause();
+  return true;
+}
+
+export function resumeFlow(id: string): boolean {
+  const s = sessions.get(id);
+  if (!s?.pty.resume) return false;
+  s.pty.resume();
+  return true;
+}
+
 export function detach(id: string): void {
   const s = sessions.get(id);
   if (!s) return;

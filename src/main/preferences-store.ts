@@ -254,6 +254,13 @@ function normalize(
       typeof src.restoreAgentSessions === "boolean"
         ? src.restoreAgentSessions
         : DEFAULT_PREFERENCES.restoreAgentSessions,
+    // Opt-in: the phone Remote Access listener. Off for absent/invalid
+    // values, so an existing preference file never turns a network listener
+    // on by surprise.
+    remoteAccessEnabled:
+      typeof src.remoteAccessEnabled === "boolean"
+        ? src.remoteAccessEnabled
+        : DEFAULT_PREFERENCES.remoteAccessEnabled,
   };
 }
 
