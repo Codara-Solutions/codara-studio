@@ -65,7 +65,8 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
 
     // 3. The secret behind that QR must live in the image and nowhere a human
     // (or a screenshot, or a screen share) can read it as text.
-    const { secret, publicKey } = await mintPairingPayload(page);
+    const pairing = await mintPairingPayload(page);
+    const { secret, publicKey } = pairing;
     const rendered = await renderedText(page);
     expect(rendered.innerText).not.toContain(secret);
     expect(rendered.textContent).not.toContain(secret);
@@ -73,10 +74,19 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
     // screen does not.
     expect(rendered.textContent).not.toContain(publicKey);
 
-    // 4. Turning it back off tears the listener down and returns the panel to
-    // the off state.
+    // 4. Closing the modal has to close the listener's stranger window too,
+    // not just hide the QR: a pairing window left open would keep accepting
+    // devices for the rest of its TTL with nothing on screen to say so. The
+    // listener is still up here, so a client that dials with the secret it
+    // just showed proves which one happened.
     await modal.getByRole("button", { name: "Cancel" }).click({ force: true });
     await expect(modal).toHaveCount(0);
+    const refused = await runPairClient(pairing.qrPayload, fixture.clientDir);
+    expect(refused.stderr).toContain("closed the connection without pairing");
+    expect(refused.code).not.toBe(0);
+
+    // 5. Turning it back off tears the listener down and returns the panel to
+    // the off state.
     await toggle.click({ force: true });
     await expect(toggle).toHaveAttribute("aria-checked", "false");
     await expect(toggle).toHaveText("Turn on");
