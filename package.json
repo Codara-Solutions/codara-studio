@@ -59,7 +59,8 @@
     "test:manager-playbooks": "node scripts/test-manager-playbooks.cjs",
     "test:chat-timeline": "node scripts/test-chat-timeline.cjs",
     "test:run-graph-layout": "node scripts/test-run-graph-layout.cjs",
-    "test:pane-format": "node scripts/test-pane-format.cjs"
+    "test:pane-format": "node scripts/test-pane-format.cjs",
+    "test:remote-access": "node scripts/test-remote-access.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",
@@ -98,10 +99,12 @@
     "docx-preview": "^0.4.0",
     "electron-updater": "^6.8.3",
     "highlight.js": "^11.10.0",
+    "hyperswarm": "^4.17.0",
     "mermaid": "^11.4.1",
     "node-pty": "^1.0.0",
     "pdfjs-dist": "^6.1.200",
     "pi-web-search": "1.3.1",
+    "qrcode": "^1.5.4",
     "react-markdown": "^9.0.3",
     "react-virtuoso": "^4.18.7",
     "rehype-highlight": "^7.0.2",
@@ -144,7 +147,9 @@
       "node_modules/@earendil-works/pi-coding-agent/node_modules/**/*.node",
       "node_modules/pi-web-search/**",
       "node_modules/@vscode/ripgrep/**",
-      "node_modules/@vscode/ripgrep-${os}-${arch}/**"
+      "node_modules/@vscode/ripgrep-${os}-${arch}/**",
+      "node_modules/sodium-native/**",
+      "node_modules/udx-native/**"
     ],
     "extraResources": [
       "build/icon.ico",

@@ -475,6 +475,11 @@ export interface AppPreferences {
   // that had already exited still open as fresh shells. Off = fresh shells on
   // every relaunch.
   restoreAgentSessions?: boolean;
+  // Opt-in (default off): the phone Remote Access listener
+  // (docs/remote-access.md). While on, paired devices can reach this
+  // computer over LAN or the DHT; pairing and revocation live in Settings,
+  // "Remote access".
+  remoteAccessEnabled?: boolean;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -609,6 +614,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
   restoreAgentSessions: false,
+  remoteAccessEnabled: false,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the

@@ -65,7 +65,10 @@ function staticAllowed(): string[] {
     // Cora memory files (MEMORY.md and workspaces/<id>.md) open in ordinary
     // editor tabs, and they live outside every workspace root. Deliberately
     // scoped to the memory subdirectory only: the Codara home also holds
-    // auth tokens (pi-agent/auth.json), which the renderer must never read.
+    // auth tokens (pi-agent/auth.json) AND the Remote Access key material
+    // in remote/ (identity.json is the computer's private key; see
+    // src/main/remote-access/). Neither the home root nor remote/ may EVER
+    // be allowlisted here.
     path.join(sparkHome(), "memory"),
     app.getPath("userData"),
     app.getPath("temp"),

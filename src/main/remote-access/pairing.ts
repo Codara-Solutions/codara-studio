@@ -1,0 +1,315 @@
+// LAN pairing and the paired-device store for phone Remote Access
+// (docs/remote-access.md, "Identity and pairing"). Pairing is the security
+// boundary of the whole feature: a paired phone can create terminals, which
+// is remote code execution by design, so everything here favors refusing
+// over recovering.
+//
+// Flow: opening the pairing modal creates a PairingWindow (32-byte one-time
+// secret, 2 minute expiry, single use) and the QR payload below. The phone
+// scans it, dials the listed LAN endpoint, and completes the Noise IK
+// handshake pinned to our public key (so the channel is encrypted and the
+// computer is authenticated before any application byte flows). Over that
+// channel it sends one pairing frame proving knowledge of the secret; we pin
+// its static key from the handshake, persist it, and reply with our display
+// name. Anything else - wrong secret, second use, expired window, malformed
+// frame - tears the stream down without a reply, per the silent-listener
+// rule.
+//
+// The QR payload is a hard interop contract: it must parse with the phone
+// app's parser (codara-mobile src/lib/remote/pairing-payload.ts). That
+// parser requires `pk` to be exactly 32 base64 bytes, `secret` to decode to
+// at least 16 bytes, plain host strings in `addrs`, and rejects payloads
+// whose `iat` is older than 2 minutes (30s clock skew tolerance).
+
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
+import { join } from "node:path";
+import type { RemotePairedDevice } from "@shared/remote-access";
+import { ensureRemoteDir, shortKey } from "./identity";
+
+export const PAIRING_TTL_MS = 2 * 60 * 1000;
+export const PAIRING_SECRET_BYTES = 32;
+export const PAIRED_DEVICES_FILE = "paired-devices.json";
+// Matches the phone parser's cap on the optional display name.
+const MAX_DEVICE_NAME_CHARS = 64;
+
+/* -------------------------------------------------------------------------- */
+/* Paired-device store                                                        */
+/* -------------------------------------------------------------------------- */
+
+export interface PairedDeviceRecord {
+  // Canonical padded standard base64 of the device's 32-byte Ed25519 key.
+  // Canonical spelling matters: this string is the identity we compare on
+  // every connection and on revoke, so two spellings of one key must never
+  // exist. addDevice re-encodes from bytes to guarantee it.
+  publicKey: string;
+  name: string;
+  // Epoch milliseconds.
+  addedAt: number;
+  lastSeenAt: number | null;
+}
+
+interface DevicesFileShape {
+  version: 1;
+  devices: PairedDeviceRecord[];
+}
+
+// The firewall decision. Pure so tests can hit it directly: given the raw
+// 32-byte key a transport handshake produced, is this a device the user
+// paired? Unknown and revoked keys both land on `false`; the caller drops
+// the connection without a response either way.
+export function isAuthorizedKey(
+  publicKey: Buffer | Uint8Array,
+  devices: ReadonlyArray<Pick<PairedDeviceRecord, "publicKey">>,
+): boolean {
+  if (publicKey.length !== 32) return false;
+  const b64 = Buffer.from(publicKey).toString("base64");
+  return devices.some((device) => device.publicKey === b64);
+}
+
+// On-disk store for paired devices, one JSON file under <spark-home>/remote.
+// Reads are cached; every mutation writes through atomically (tmp + rename)
+// so a crash never leaves a truncated trust list. A corrupt file loads as
+// empty: failing CLOSED (no devices trusted) is the only safe reading of an
+// unreadable trust store.
+export class PairedDeviceStore {
+  private readonly file: string;
+  private cache: PairedDeviceRecord[] | null = null;
+
+  constructor(private readonly remoteDir: string) {
+    this.file = join(remoteDir, PAIRED_DEVICES_FILE);
+  }
+
+  list(): PairedDeviceRecord[] {
+    if (this.cache) return this.cache;
+    this.cache = this.readFromDisk();
+    return this.cache;
+  }
+
+  listForUi(): RemotePairedDevice[] {
+    return this.list().map((device) => ({
+      publicKey: device.publicKey,
+      shortKey: shortKey(device.publicKey),
+      name: device.name,
+      addedAt: device.addedAt,
+      lastSeenAt: device.lastSeenAt,
+    }));
+  }
+
+  isAuthorized(publicKey: Buffer | Uint8Array): boolean {
+    return isAuthorizedKey(publicKey, this.list());
+  }
+
+  // Adds (or re-pairs) a device keyed by its raw public key. Re-pairing an
+  // existing key updates the name and keeps the original addedAt, so a phone
+  // that re-scans after a reinstall does not show up twice.
+  addDevice(publicKey: Buffer | Uint8Array, name: string, now = Date.now()): PairedDeviceRecord {
+    const b64 = Buffer.from(publicKey).toString("base64");
+    const cleanName = sanitizeDeviceName(name);
+    const devices = this.list();
+    const existing = devices.find((device) => device.publicKey === b64);
+    let record: PairedDeviceRecord;
+    if (existing) {
+      existing.name = cleanName;
+      existing.lastSeenAt = now;
+      record = existing;
+    } else {
+      record = { publicKey: b64, name: cleanName, addedAt: now, lastSeenAt: now };
+      devices.push(record);
+    }
+    this.save(devices);
+    return record;
+  }
+
+  // Removes a device by its canonical base64 key. Returns whether anything
+  // was removed; the caller (index.ts) is responsible for killing the
+  // device's live sessions the moment this returns true.
+  revokeDevice(publicKeyB64: string): boolean {
+    const devices = this.list();
+    const next = devices.filter((device) => device.publicKey !== publicKeyB64);
+    if (next.length === devices.length) return false;
+    this.save(next);
+    return true;
+  }
+
+  touchLastSeen(publicKey: Buffer | Uint8Array, now = Date.now()): void {
+    const b64 = Buffer.from(publicKey).toString("base64");
+    const devices = this.list();
+    const record = devices.find((device) => device.publicKey === b64);
+    if (!record) return;
+    record.lastSeenAt = now;
+    this.save(devices);
+  }
+
+  private readFromDisk(): PairedDeviceRecord[] {
+    let raw: string;
+    try {
+      raw = readFileSync(this.file, "utf8");
+    } catch {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<DevicesFileShape>;
+      if (parsed.version !== 1 || !Array.isArray(parsed.devices)) return [];
+      return parsed.devices.filter(isPlausibleRecord);
+    } catch {
+      return [];
+    }
+  }
+
+  private save(devices: PairedDeviceRecord[]): void {
+    this.cache = devices;
+    ensureRemoteDir(this.remoteDir);
+    const payload: DevicesFileShape = { version: 1, devices };
+    const tmp = `${this.file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
+    try {
+      chmodSync(tmp, 0o600);
+    } catch {
+      // Windows: no POSIX modes.
+    }
+    renameSync(tmp, this.file);
+  }
+}
+
+function isPlausibleRecord(value: unknown): value is PairedDeviceRecord {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<PairedDeviceRecord>;
+  if (typeof candidate.publicKey !== "string") return false;
+  const decoded = Buffer.from(candidate.publicKey, "base64");
+  if (decoded.length !== 32 || decoded.toString("base64") !== candidate.publicKey) return false;
+  if (typeof candidate.name !== "string") return false;
+  if (typeof candidate.addedAt !== "number") return false;
+  return candidate.lastSeenAt === null || typeof candidate.lastSeenAt === "number";
+}
+
+// Device names render in the Settings list and in logs; strip control
+// characters so a hostile name can never smuggle escape sequences there.
+function sanitizeDeviceName(name: string): string {
+  const clean = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, MAX_DEVICE_NAME_CHARS);
+  return clean.length > 0 ? clean : "Unnamed device";
+}
+
+/* -------------------------------------------------------------------------- */
+/* Pairing window                                                             */
+/* -------------------------------------------------------------------------- */
+
+// One open pairing opportunity: a secret that is minted when the modal
+// opens and dies on first use, on expiry, or when the modal closes -
+// whichever comes first. The secret itself never leaves this object except
+// inside the QR payload string; consume() only ever answers yes or no.
+export class PairingWindow {
+  private readonly secret: Buffer;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  private used = false;
+
+  constructor(now = Date.now(), ttlMs = PAIRING_TTL_MS) {
+    this.secret = randomBytes(PAIRING_SECRET_BYTES);
+    this.createdAt = now;
+    this.expiresAt = now + ttlMs;
+  }
+
+  secretB64(): string {
+    return this.secret.toString("base64");
+  }
+
+  isExpired(now = Date.now()): boolean {
+    return now >= this.expiresAt;
+  }
+
+  isUsed(): boolean {
+    return this.used;
+  }
+
+  // Single-use, constant-time verification. A correct proof consumes the
+  // window even if the caller later fails to persist the device, so a
+  // network race can never redeem one secret twice.
+  consume(proof: Buffer | Uint8Array, now = Date.now()): boolean {
+    if (this.used || this.isExpired(now)) return false;
+    const candidate = Buffer.from(proof);
+    if (candidate.length !== this.secret.length) return false;
+    if (!timingSafeEqual(candidate, this.secret)) return false;
+    this.used = true;
+    return true;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* QR payload                                                                 */
+/* -------------------------------------------------------------------------- */
+
+export interface QrPayloadInput {
+  publicKeyB64: string;
+  addrs: string[];
+  port: number;
+  window: PairingWindow;
+  // Computer display name shown on the phone during pairing.
+  name?: string;
+  now?: number;
+}
+
+// Builds the exact JSON string the phone parser accepts. Field order is not
+// part of the contract but is kept stable anyway so two QR renders of one
+// window are byte-identical.
+export function buildQrPayloadString(input: QrPayloadInput): string {
+  const name = input.name ? sanitizeDeviceName(input.name) : undefined;
+  return JSON.stringify({
+    v: 1,
+    pk: input.publicKeyB64,
+    addrs: input.addrs,
+    port: input.port,
+    secret: input.window.secretB64(),
+    iat: input.now ?? Date.now(),
+    ...(name ? { name } : {}),
+  });
+}
+
+// LAN endpoints for the QR, in preference order: non-internal IPv4 first
+// (phones dial these), loopback last as a same-machine fallback for the
+// test client. Hostnames are deliberately not included; mDNS names resolve
+// unreliably across phone platforms.
+export function lanAddresses(): string[] {
+  const addrs: string[] = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.internal) continue;
+      if (entry.family !== "IPv4" && (entry.family as unknown) !== 4) continue;
+      addrs.push(entry.address);
+    }
+  }
+  addrs.push("127.0.0.1");
+  return addrs;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Pairing exchange frames                                                    */
+/* -------------------------------------------------------------------------- */
+
+// The single request/response pair spoken over the encrypted stream when an
+// unknown key connects during an open pairing window. Framed with the same
+// length-prefixed JSON as RPC v0 (see rpc.ts). Documented in
+// docs/remote-access.md; the phone transport implements the client half.
+export interface PairRequestFrame {
+  t: "pair";
+  // Base64 of the QR secret, proving the sender saw this window's QR.
+  secret: string;
+  // The device's display name, e.g. "iPhone 17".
+  name: string;
+}
+
+export interface PairResponseFrame {
+  t: "paired";
+  // The computer's display name, for the phone's paired-computer record.
+  name: string;
+}
+
+export function parsePairRequestFrame(value: unknown): PairRequestFrame | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<PairRequestFrame>;
+  if (candidate.t !== "pair") return null;
+  if (typeof candidate.secret !== "string" || candidate.secret.length === 0) return null;
+  if (typeof candidate.name !== "string") return null;
+  return { t: "pair", secret: candidate.secret, name: candidate.name };
+}
