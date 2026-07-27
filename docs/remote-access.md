@@ -12,7 +12,7 @@ computer to share a network.
 The phone tries:
 
 1. The computer's recorded LAN addresses and stable Remote Access ports.
-2. `wss://relay.codarasolutions.com/v1/relay`.
+2. `wss://codara-remote-relay.codarasolutions.com/v1/relay`.
 
 LAN is the fast path. The relay is the reliable fallback when NAT, carrier
 networks, or firewalls prevent a direct socket.

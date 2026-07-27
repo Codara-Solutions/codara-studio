@@ -10,7 +10,8 @@ import NoiseSecretStream from "@hyperswarm/secret-stream";
 import sodium from "sodium-native";
 import WebSocket from "ws";
 
-export const DEFAULT_REMOTE_RELAY_URL = "wss://relay.codarasolutions.com/v1/relay";
+export const DEFAULT_REMOTE_RELAY_URL =
+  "wss://codara-remote-relay.codarasolutions.com/v1/relay";
 
 const AUTH_NONCE_BYTES = 24;
 const AUTH_SIGNATURE_BYTES = 64;
