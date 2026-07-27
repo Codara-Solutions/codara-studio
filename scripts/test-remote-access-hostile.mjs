@@ -397,10 +397,10 @@ async function main() {
   /* ====================================================================== */
 
   {
-    // The store's cosmetic last-seen flush is async. A revoke is synchronous
-    // and is the security boundary of the feature, so it has to win no
-    // matter where the flush happens to be. This drives the REAL scheduled
-    // flush callback and fires the revoke inside the async write window by
+    // The store's cosmetic last-seen flush is async. A revoke is the security
+    // boundary of the feature and awaits any in-flight flush before writing,
+    // so it has to win no matter where the flush happens to be. This drives
+    // the REAL scheduled flush callback and fires the revoke inside the async write window by
     // holding fs.promises.writeFile open, which makes the race deterministic
     // instead of relying on timing luck.
     const pairingModule = await loadPairing();

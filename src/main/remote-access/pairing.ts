@@ -154,6 +154,12 @@ export class PairedDeviceStore {
   // bring the device back. Getting there means ordering this write strictly
   // after any last-seen flush that is already in the air, since that flush
   // may have been carrying the pre-revoke set toward a rename.
+  //
+  // The one qualifier: if the bounded wait below expires on a pathologically
+  // slow filesystem, ordering falls back to the flush's post-rename backstop,
+  // and the full crash-immunity narrows to that backstop's window (see the
+  // inline note at the wait). Under any healthy filesystem the guarantee above
+  // holds unconditionally.
   async revokeDevice(publicKeyB64: string): Promise<boolean> {
     const devices = this.list();
     const next = devices.filter((device) => device.publicKey !== publicKeyB64);
@@ -274,9 +280,13 @@ export class PairedDeviceStore {
   // `writing` so two flushes cannot interleave their renames.
   //
   // This write is NEVER allowed to be the last word. A revoke is the
-  // security boundary of the whole feature, and it is synchronous, so a
-  // flush that was already in flight when the revoke landed must not put the
-  // revoked device back on disk. Three windows exist and all three are shut:
+  // security boundary of the whole feature. Its primary defence is ordering:
+  // revokeDevice awaits any in-flight flush (this promise, tracked as
+  // flushInFlight) before it writes, so on a healthy filesystem a flush that
+  // was already dispatched when the revoke landed finishes FIRST and the
+  // revoke's synchronous write is strictly last. The three windows below are
+  // the defences that still hold if that ordering wait is bypassed or times
+  // out on a pathological filesystem:
   //
   //   1. Superseded BEFORE the write starts. The payload is read from
   //      this.list() at execution time rather than captured at scheduling
@@ -286,9 +296,10 @@ export class PairedDeviceStore {
   //      of publishing it.
   //   3. Superseded DURING the rename itself, which is the only window the
   //      first two cannot see because the rename is already on the
-  //      threadpool when the synchronous write runs. Here the rename may
-  //      genuinely have clobbered the authoritative file, so we re-assert
-  //      the truth with a synchronous write of the current state.
+  //      threadpool. Here the rename may genuinely have clobbered the
+  //      authoritative file, so we re-assert the truth with a synchronous
+  //      write of the current state. This is a backstop; the ordering wait
+  //      means it should not normally be reached.
   private async saveAsync(): Promise<void> {
     const run = this.writing.then(async () => {
       const generation = this.generation;
