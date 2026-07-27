@@ -182,7 +182,7 @@ async function main() {
     check("round trip reported complete", /round trip complete/.test(connected.stdout));
 
     /* ---- revoke ---------------------------------------------------------- */
-    const revoked = service.revokeDevice(devices[0].publicKey);
+    const revoked = await service.revokeDevice(devices[0].publicKey);
     check("revoke reports success", revoked === true);
     check("the paired list is empty after revoke", service.listPairedDevices().length === 0);
 

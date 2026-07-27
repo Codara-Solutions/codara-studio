@@ -442,7 +442,7 @@ async function main() {
       await entered;
 
       // The revoke lands while the flush is suspended mid-write.
-      const revoked = store.revokeDevice(deviceKeyB64);
+      const revoked = await store.revokeDevice(deviceKeyB64);
       check("F4: revoke reports success during the flush window", revoked === true);
       check("F4: revoke is durable immediately", readDevices(home).length === 0, readDevices(home));
 
@@ -464,24 +464,24 @@ async function main() {
         reloaded.list(),
       );
 
-      // The hardest window: the revoke lands while the flush's RENAME is
-      // already on the threadpool, so the flush genuinely can clobber the
-      // authoritative file and the only cure is re-asserting the truth
-      // afterwards. Intercepting rename (not writeFile) is what puts the
-      // race in that exact window.
+      // The durability guarantee, tested where it is hardest to hold: the
+      // flush's RENAME is already on the threadpool when the revoke arrives,
+      // so the pre-revoke set is physically on its way to the canonical
+      // file. The old design let the revoke return here and corrected the
+      // file afterwards, which left a real window: a crash between the
+      // rename landing and the correction, or a correction that itself
+      // failed, would leave the revoked device on disk and a fresh store
+      // would re-authorize it on next launch.
       //
-      // Note on what this case does and does not prove. Unlike the F4 case
-      // above, it does NOT fail against the ORIGINAL code, because there
-      // both writers shared one tmp path: the synchronous revoke happened to
-      // overwrite and then rename away the very staging file the flush was
-      // about to publish, so the flush's rename failed with ENOENT and the
-      // revoke survived by accident. What this case guards is the deliberate
-      // repair in the CURRENT design, where unique tmp names remove that
-      // accident. Verified by deleting the post-rename repair: both
-      // assertions below fail without it.
+      // The guarantee now is ordering, not repair: a revoke does not resolve
+      // until any in-flight flush has landed and its own write is the last
+      // one. So the assertion below is about WHEN the revoke resolves, which
+      // is what actually rules the crash window out. It fails against the
+      // previous code, where revoke was synchronous and returned while the
+      // rename was still in the air.
       nodeFs.promises.writeFile = realWriteFile;
       const realRename = nodeFs.promises.rename;
-      const home2 = mkdtempSync(join(tmpdir(), "codara-hostile-f4b-"));
+      const home2 = mkdtempSync(join(tmpdir(), "codara-hostile-f4c-"));
       try {
         const store3 = new pairingModule.PairedDeviceStore(home2);
         store3.addDevice(deviceKey, "Doomed again", Date.now());
@@ -507,18 +507,36 @@ async function main() {
         store3.touchLastSeen(deviceKey, Date.now());
         const flushing3 = store3.flushPendingWrites();
         await enteredRename;
-        check("F4b: revoke lands while the flush rename is in flight", store3.revokeDevice(deviceKeyB64) === true);
-        releaseRename();
-        await flushing3;
-        await store3.flushPendingWrites();
 
+        // Revoke while the flush's rename is stuck in flight.
+        let revokeSettled = false;
+        const revoking = Promise.resolve(store3.revokeDevice(deviceKeyB64)).then((value) => {
+          revokeSettled = true;
+          return value;
+        });
+        // Give it every chance to settle early. A synchronous revoke (the
+        // old shape) resolves here; the current one must not, because the
+        // flush it has to outlive is still in the air.
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+        await wait(50);
         check(
-          "F4b: the clobbering rename is repaired, revoke is the last word",
+          "F4c: a revoke does not resolve while a flush rename is in flight",
+          revokeSettled === false,
+        );
+
+        releaseRename();
+        check("F4c: revoke reports removal", (await revoking) === true);
+        await flushing3;
+
+        // No repair, no extra flush, no settling time: whatever is on disk
+        // the instant the revoke resolved is what a crash would preserve.
+        check(
+          "F4c: the trust file is already correct when the revoke resolves",
           readDevices(home2).length === 0,
           readDevices(home2),
         );
         check(
-          "F4b: a fresh store still does not re-authorize",
+          "F4c: a fresh store does not re-authorize after a simulated crash",
           new pairingModule.PairedDeviceStore(home2).isAuthorized(deviceKey) === false,
         );
       } finally {

@@ -251,26 +251,42 @@ terminals. A revoked device's next connection attempt is met with the same
 silence as any unknown key.
 
 Revocation is durable, and it is deliberately the last word on disk. The
-trust file has two writers: the synchronous authoritative one (pairing and
-revoking) and an asynchronous cosmetic one (the coalesced last-seen flush).
-Without care the second can undo the first, which would let a revoked device
-be re-authorized on the next launch. The guarantee is that once
-`revokeDevice` returns, no scheduled or in-flight flush can put that device
-back, enforced by:
+trust file has two writers: the authoritative one (pairing and revoking) and
+an asynchronous cosmetic one (the coalesced last-seen flush). Without care
+the second can undo the first, which would let a revoked device be
+re-authorized on the next launch.
 
-- a generation counter bumped by every authoritative write, which a flush
-  carries and re-checks;
-- cancelling any pending flush timer when an authoritative write happens;
-- reading the payload at flush EXECUTION time rather than capturing it when
-  the flush was scheduled;
+The guarantee is: **at no point after `revokeDevice` resolves, including
+across a crash at any instant, does `paired-devices.json` contain the
+revoked device.** `revokeDevice` is therefore async, and resolving means
+both that the removal is on disk and that no other write to that file is
+outstanding. It is enforced by ordering rather than by correcting after the
+fact:
+
+- the in-memory list stops trusting the device synchronously, before the
+  first await, so live sessions are killed in the same tick;
+- a generation counter, bumped by every authoritative write, which a flush
+  carries and re-checks before it publishes, so a superseded flush discards
+  its staging file instead of renaming it;
+- any pending flush timer is cancelled, so no new flush can start;
+- the payload is read at flush EXECUTION time, never captured when the flush
+  was scheduled;
 - unique staging file names, so the two writers can never collide on a tmp
   path;
-- and, for the one window the checks cannot pre-empt (a revoke landing while
-  the flush's rename is already on the threadpool), re-asserting the
-  authoritative state with a synchronous write once the rename returns.
+- and the revoke waits (briefly, bounded) for any flush whose fs work is
+  already in the air, so a stale rename can never land after the revoke's
+  own write.
+
+The last point is what removes the crash window. An earlier iteration let
+the revoke return immediately and repaired the file afterwards if a stale
+rename had clobbered it; that left two moments where disk transiently held
+the revoked device, so a crash, or a failing repair write, could persist it.
+The repair remains only as a backstop for the case where the bounded wait
+expires, and it now logs loudly rather than failing silently.
 
 Pairing was never exposed to this, because `addDevice` mutates the cached
-array in place, so a stale flush would write identical content.
+array in place, so a stale flush would write identical content. It stays
+synchronous.
 
 ## Phases
 

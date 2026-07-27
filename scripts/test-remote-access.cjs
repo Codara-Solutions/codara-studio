@@ -156,11 +156,11 @@ async function main() {
 
     // Revocation: key gone, persisted, and the firewall refuses it again.
     store.addDevice(keyB, "Phone B", T0 + 10);
-    check("revoke reports removal", store.revokeDevice(keyA.toString("base64")) === true);
+    check("revoke reports removal", (await store.revokeDevice(keyA.toString("base64"))) === true);
     check("revoked key is rejected", store.isAuthorized(keyA) === false);
     check("other devices survive a revoke", store.isAuthorized(keyB) === true);
     check("revoke persists", new pairing.PairedDeviceStore(dir).isAuthorized(keyA) === false);
-    check("revoking an unknown key is a no-op", store.revokeDevice(keyA.toString("base64")) === false);
+    check("revoking an unknown key is a no-op", (await store.revokeDevice(keyA.toString("base64"))) === false);
 
     // A corrupt trust store fails closed: nobody is authorized.
     fs.writeFileSync(path.join(dir, "paired-devices.json"), "{not json");
