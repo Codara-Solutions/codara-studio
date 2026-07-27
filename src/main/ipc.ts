@@ -2212,7 +2212,10 @@ export function registerIpc(): void {
     "remoteAccess:revokeDevice",
     async (_e, publicKey: string): Promise<RemotePairedDevice[]> => {
       const service = await getRemoteAccess();
-      service.revokeDevice(publicKey);
+      // Awaited: the renderer's list must not repaint as "revoked" until the
+      // removal is durable, so the UI can never claim a revocation that a
+      // crash could undo.
+      await service.revokeDevice(publicKey);
       return service.listPairedDevices();
     },
   );

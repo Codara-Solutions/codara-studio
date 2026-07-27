@@ -89,7 +89,7 @@ export class RemoteAccessService {
   private lifecycle: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: RemoteAccessDeps) {
-    this.devices = new PairedDeviceStore(deps.remoteDir);
+    this.devices = new PairedDeviceStore(deps.remoteDir, deps.log);
   }
 
   /* ---------------------------------------------------------------- status */
@@ -301,15 +301,18 @@ export class RemoteAccessService {
     return this.devices.listForUi();
   }
 
-  // Removes the key and kills its live sessions in the same tick, so a
-  // revoked phone loses both future and current access at once.
-  revokeDevice(publicKeyB64: string): boolean {
-    const removed = this.devices.revokeDevice(publicKeyB64);
+  // Removes the key and kills its live sessions. The session teardown runs
+  // FIRST and synchronously, so a revoked phone loses live access in this
+  // tick; the returned promise then additionally guarantees the removal is
+  // on disk with no other trust-file write outstanding, so a crash after it
+  // resolves cannot bring the device back.
+  async revokeDevice(publicKeyB64: string): Promise<boolean> {
     const sessions = this.sessions.get(publicKeyB64);
     if (sessions) {
       for (const session of sessions) session.destroy();
       this.sessions.delete(publicKeyB64);
     }
+    const removed = await this.devices.revokeDevice(publicKeyB64);
     if (removed) this.deps.log(`revoked device ${shortKey(publicKeyB64)}`);
     return removed;
   }

@@ -36,6 +36,10 @@ const MAX_DEVICE_NAME_CHARS = 64;
 // How long last-seen updates coalesce before one async write. Long enough
 // that a reconnect storm collapses into a single flush.
 const LAST_SEEN_FLUSH_DELAY_MS = 5_000;
+// How long a revoke will wait for an in-flight cosmetic flush to land before
+// writing anyway. Only ever reached if the filesystem is pathologically
+// slow; a revoke must not hang the UI regardless.
+const REVOKE_FLUSH_WAIT_MS = 2_000;
 
 /* -------------------------------------------------------------------------- */
 /* Paired-device store                                                        */
@@ -81,12 +85,20 @@ export class PairedDeviceStore {
   private cache: PairedDeviceRecord[] | null = null;
   private lastSeenFlushTimer: NodeJS.Timeout | null = null;
   private writing: Promise<void> = Promise.resolve();
-  // Bumped by every synchronous authoritative write (pair, revoke). An
-  // async last-seen flush carries the generation it started under and
-  // refuses to be the last word once that number has moved. See saveAsync.
+  // Bumped by every authoritative write (pair, revoke). An async last-seen
+  // flush carries the generation it started under and refuses to be the
+  // last word once that number has moved. See saveAsync.
   private generation = 0;
+  // The last-seen flush whose fs work is currently in the air, or null.
+  // revokeDevice awaits this so its own write is provably the last one.
+  private flushInFlight: Promise<void> | null = null;
 
-  constructor(private readonly remoteDir: string) {
+  // `log` carries durability failures that the user would otherwise never
+  // hear about. Never pass anything key-bearing to it.
+  constructor(
+    private readonly remoteDir: string,
+    private readonly log: (line: string) => void = () => {},
+  ) {
     this.file = join(remoteDir, PAIRED_DEVICES_FILE);
   }
 
@@ -132,13 +144,41 @@ export class PairedDeviceStore {
   }
 
   // Removes a device by its canonical base64 key. Returns whether anything
-  // was removed; the caller (index.ts) is responsible for killing the
-  // device's live sessions the moment this returns true.
-  revokeDevice(publicKeyB64: string): boolean {
+  // was removed; the caller (index.ts) kills the device's live sessions the
+  // moment the in-memory list stops trusting it, which happens synchronously
+  // below, before this function's first await.
+  //
+  // Async because of the durability guarantee it carries: when the returned
+  // promise resolves, the revocation is on disk AND no other write to the
+  // trust file is outstanding, so a crash at any instant from then on cannot
+  // bring the device back. Getting there means ordering this write strictly
+  // after any last-seen flush that is already in the air, since that flush
+  // may have been carrying the pre-revoke set toward a rename.
+  async revokeDevice(publicKeyB64: string): Promise<boolean> {
     const devices = this.list();
     const next = devices.filter((device) => device.publicKey !== publicKeyB64);
     if (next.length === devices.length) return false;
-    this.save(next);
+
+    // Synchronous half: memory stops trusting the device immediately, the
+    // generation bump tells an in-flight flush it is stale (so in the usual
+    // interleaving it abandons its staging file rather than renaming it),
+    // and the pending timer is cancelled so no NEW flush can start.
+    this.cache = next;
+    this.generation += 1;
+    if (this.lastSeenFlushTimer) {
+      clearTimeout(this.lastSeenFlushTimer);
+      this.lastSeenFlushTimer = null;
+    }
+
+    // Let any already-dispatched flush finish before we write, so its rename
+    // can never land after ours. Bounded so a pathological fs cannot block a
+    // revoke indefinitely; if the bound is hit we write anyway and the
+    // flush's own post-rename check is the backstop.
+    if (this.flushInFlight) {
+      await withWriteTimeout(this.flushInFlight, REVOKE_FLUSH_WAIT_MS);
+    }
+
+    this.writeSync(next);
     return true;
   }
 
@@ -262,21 +302,45 @@ export class PairedDeviceStore {
       } catch {
         // Windows: no POSIX modes.
       }
-      // Window 2.
+      // Superseded before we publish: drop the staging file rather than
+      // rename it. This is the path that normally fires when a revoke races
+      // us, and it means no clobber happens at all.
       if (this.generation !== generation) {
         await fsp.unlink(tmp).catch(() => undefined);
         return;
       }
       await fsp.rename(tmp, this.file);
-      // Window 3.
+      // Backstop only. An authoritative write now waits for this flush
+      // before writing (see revokeDevice), so it should not be able to
+      // supersede us between the check above and this line. If that ever
+      // happens anyway (the revoke's bounded wait expired), the rename just
+      // published stale content and the repair below is the last defence.
+      // It is deliberately loud: a silently failed durable revoke is the
+      // worst outcome this file can produce.
       if (this.generation !== generation) {
-        this.writeSync(this.list());
+        try {
+          this.writeSync(this.list());
+        } catch (err) {
+          this.log(
+            `URGENT: could not re-assert the paired-device list after a superseded flush; a revoked device may still be on disk: ${(err as Error).message}`,
+          );
+          throw err;
+        }
       }
     });
-    this.writing = run.then(
+    // Tracked separately from `writing` so an authoritative write can await
+    // exactly the fs work that is in the air. Settles rather than rejects,
+    // so a failed flush can never wedge a later revoke.
+    const settled: Promise<void> = run.then(
       () => undefined,
       () => undefined,
     );
+    this.writing = settled;
+    this.flushInFlight = settled;
+    void settled.then(() => {
+      // Only clear if no newer flush has taken the slot.
+      if (this.flushInFlight === settled) this.flushInFlight = null;
+    });
     await run;
   }
 }
@@ -285,6 +349,23 @@ export class PairedDeviceStore {
 // authoritative write and an in-flight async flush can never share a tmp
 // path.
 let tmpCounter = 0;
+
+// Resolves when `promise` settles or the bound elapses, whichever is first.
+// Never rejects: the caller's next step must run either way.
+function withWriteTimeout(promise: Promise<void>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    timer.unref?.();
+    void promise.then(finish, finish);
+  });
+}
 
 function isPlausibleRecord(value: unknown): value is PairedDeviceRecord {
   if (!value || typeof value !== "object") return false;
