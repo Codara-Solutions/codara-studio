@@ -62,6 +62,7 @@
     "test:pane-format": "node scripts/test-pane-format.cjs",
     "test:navigation-allowlist": "node scripts/test-navigation-allowlist.cjs",
     "test:ipc-gate": "node scripts/test-ipc-gate-default.cjs",
+    "test:declared-deps": "node scripts/test-declared-deps.cjs",
     "test:trusted-sender": "node scripts/test-trusted-sender.cjs",
     "test:remote-access": "node scripts/test-remote-access.cjs",
     "test:remote-access-e2e": "node scripts/remote-access-e2e.mjs",
