@@ -128,6 +128,52 @@ a port scanner reads zero bytes, and an unknown key after handshake is
 either a pairing candidate (only while a pairing window is open) or gets its
 stream destroyed with nothing written.
 
+To be precise about what "silence" does and does not cover: no APPLICATION
+byte ever reaches an unpaired peer, and a revoked device is treated exactly
+like a key we have never seen. But our static public key is not a secret (it
+appears in every QR code we display), and Noise IK's responder will complete
+a handshake with anyone who presents it. So to a party that already knows
+the computer's key, the listener is a presence oracle: they learn something
+is running, and nothing more. Hiding presence from that party would need a
+pre-shared obfuscation secret, which is out of scope for phase 1.
+
+### Pre-authentication resource limits
+
+An accepted socket costs memory before anyone has authenticated: the Noise
+framing sizes its receive buffer from a 24-bit length the peer declares in
+its first three bytes, so four bytes of attacker input reserve about 16 MiB.
+That allocation happens inside the transport library and cannot be undone
+from above, so the listener bounds the blast radius instead:
+
+- at most 8 unauthenticated sockets at once, refused silently beyond that;
+- a 5 second handshake deadline, after which a socket that has not
+  authenticated is destroyed (covering both the peer that goes silent and
+  the one that dribbles bytes to look active);
+- 64 total accepted sockets;
+- TCP keepalive rather than a wall-clock idle timeout on ESTABLISHED
+  sessions, so a paired phone may idle for hours with a terminal open;
+- shutdown destroys tracked sockets itself and bounds its wait, because
+  `net.Server.close()` on its own waits for every accepted connection to
+  end, and a single silent peer would otherwise hold the listener, the DHT
+  announce, the status update, and the whole enable/disable lifecycle open
+  indefinitely.
+
+The residual worst case is roughly 8 x 16 MiB held for up to 5 seconds. The
+accepted cost is that eight simultaneous hostile sockets can delay a
+legitimate pairing by a few seconds.
+
+Concurrent sessions are capped per device (4, evicting that device's oldest
+session rather than refusing the newcomer, so a phone reconnecting after a
+dead socket is never locked out of its own computer) and globally (16,
+refusing beyond that). Without those caps the 8-terminals-per-connection
+limit bounded nothing, since a device could simply open more connections.
+
+Outbound terminal output respects socket backpressure: when the peer stops
+draining, the pty is paused at the OS level, and for a handle that cannot
+pause, queued output past 1 MiB is dropped rather than buffered. Losing
+scrollback to a phone that cannot keep up is recoverable; unbounded growth
+in the main process is not.
+
 UPnP / NAT-PMP (rung 2 of the ladder) is **not** implemented in phase 1. The
 DHT rung already covers off-LAN reachability, and a port mapping only widens
 the exposed surface. The rung stays in the ladder above for phase 3.
@@ -170,8 +216,32 @@ fixes:
   cap), and `terminalId` values are scoped to the connection, so they are
   not portable across reconnects.
 - `terminal.create` resolves a `cwd` argument against the workspace root and
-  refuses anything outside it. The remote surface deliberately does not grow
-  ad hoc filesystem access.
+  refuses anything outside it. Both sides are passed through `realpath`
+  first, so a symlink inside the workspace cannot be used to land the shell
+  outside it, and the containment test compares path SEGMENTS so a directory
+  legitimately named something like `..config` is not mistaken for an
+  escape. The remote surface deliberately does not grow ad hoc filesystem
+  access. Note the scope of this check: it constrains where the shell
+  STARTS, not where the user can go afterwards. A remote terminal is an
+  interactive shell and can `cd` anywhere the user can, by design, because a
+  paired device is a fully trusted client.
+
+### Trust model notes
+
+Two consequences of where this feature sits, recorded so they are choices
+rather than surprises:
+
+- A compromised renderer can enable remote access and read a pairing QR
+  payload (and therefore its one-time secret) over IPC. This is consistent
+  with the existing IPC trust model, in which the renderer can already spawn
+  terminals and read workspace files; the renderer is not a security
+  boundary against itself. Key material is still never exposed: the identity
+  secret key stays in the main process and is not reachable over any
+  channel.
+- Status and pairing-state pushes fan out to every live `webContents`,
+  including preview tabs. Those payloads carry only connection state,
+  device display names, and short key prefixes, never key material or
+  pairing secrets, so the fanout leaks nothing a preview page could use.
 
 ### Revocation
 
