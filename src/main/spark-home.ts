@@ -35,6 +35,14 @@ const MIGRATED_ENTRIES = [
 
 let homeDirCached: string | null = null;
 
+// The home we use when no override is set: $HOME/.Codara. Exported because
+// callers that must land on a DURABLE per-user path (the Claude hook script
+// copy, see hook-installer.ts) need somewhere to fall back to when the
+// override points at a throwaway directory.
+export function defaultSparkHome(): string {
+  return path.join(os.homedir(), DEFAULT_DIR_NAME);
+}
+
 export function sparkHome(): string {
   if (homeDirCached !== null) return homeDirCached;
   const override =
@@ -43,7 +51,7 @@ export function sparkHome(): string {
     process.env.SPARK_USER_DATA_DIR;
   homeDirCached = override && override.trim()
     ? override
-    : path.join(os.homedir(), DEFAULT_DIR_NAME);
+    : defaultSparkHome();
   return homeDirCached;
 }
 
