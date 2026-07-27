@@ -2,23 +2,35 @@
 
 Mobile companion apps (iOS and Android) connect to a user's running Codara
 Studio, with no Codara-hosted infrastructure on the happy path. This document
-is the source of truth for the security model and the phases.
+is the source of truth for the security model and the phases. iOS ships today
+and pairs for real (see phase 2 below); Android does not exist yet.
 
-Reachability honesty (as shipped in phase 1): "from anywhere" is the design
-goal, not a guarantee the current code can always keep. The shipped rungs are
-the LAN direct connection and the DHT hole punch. When both sides sit behind
-symmetric or carrier-grade NAT with UDP blocked, the hole punch cannot form a
-path, and there is no relay yet (rung 4 is phase 3), so the phone simply
-cannot reach the computer. In that case remote access is unavailable until
-either side is on a friendlier network or the relay ships. Do not read the
-"from anywhere" language below as a promise for those networks.
+Reachability today: **LAN only**. "From anywhere" is the design goal, not what
+ships. The desktop implements both the LAN rung and the DHT rung and does
+announce itself on the DHT, but the iOS app never dials it: `enableDht`
+defaults to false in both `src/lib/remote/create-transport.ts` and
+`worklet-transport.ts` and nothing sets it true. The worklet's ladder planner
+also enables that rung only in `session` mode, so pairing could not use it
+even if the flag were flipped. Phone and computer must therefore be on the
+same network, for pairing and for sessions alike. Connecting over the internet
+is the next milestone and is **not** shipped.
+
+Even once the phone does dial it, the DHT rung is a hole punch, not a
+promise. When both sides sit behind symmetric or carrier-grade NAT with UDP
+blocked it cannot form a path, and there is no relay yet (rung 4 is phase 3),
+so the phone simply cannot reach the computer. In that case remote access is
+unavailable until either side is on a friendlier network or the relay ships.
+Do not read the "from anywhere" language below as a promise for those
+networks.
 
 ## Goals
 
 - A phone can reach the user's computer from another network (5G, hotel
   wifi), as long as the computer runs Codara Studio, has internet access, and
-  a NAT path can actually be formed (see the reachability note above: with
-  symmetric/CGNAT and UDP blocked and no relay yet, it cannot).
+  a NAT path can actually be formed. This is the goal, not the state of the
+  code: today the phone dials the LAN rung only (see "Reachability today"
+  above), and once it does dial the others, symmetric/CGNAT with UDP blocked
+  and no relay still leaves it unreachable.
 - Zero Codara-hosted infrastructure for the common case. The project is open
   source; users must not depend on our servers to use their own machines.
 - End to end encryption always. No intermediary (DHT node, relay, ISP) can
@@ -35,7 +47,9 @@ either side is on a friendlier network or the relay ships. Do not read the
 
 ## Connection ladder
 
-Each rung is tried in order; the first that works wins.
+Each rung is tried in order; the first that works wins. This is the target
+ladder. The phone dials rung 1 only today, and rung 2 is not implemented on
+either side (see "Reachability today" above).
 
 1. Same LAN: direct connection to the computer's local address.
 2. Direct WAN: the computer auto-opens a port via UPnP or NAT-PMP and
@@ -88,7 +102,10 @@ Each rung is tried in order; the first that works wins.
   With Hyperswarm this is implicit (peers find each other by public key on
   the DHT). If we ever need an explicit record store, use PKARR-style signed
   mutable records on the mainline DHT.
-- The phone resolves the computer by public key, then climbs the ladder.
+- The phone resolves the computer by public key, then climbs the ladder. Not
+  exercised yet: resolving by key is the DHT rung, and the shipped phone never
+  dials it, so today it reaches the computer by the LAN addresses the QR
+  carried instead.
 
 ## RPC surface (v0)
 
@@ -130,8 +147,32 @@ from the code.
 We took the primary candidate. `sodium-native` and `udx-native` ship N-API
 prebuilds that load unmodified under this repo's Electron, so no native
 rebuild step was needed (they are listed in `asarUnpack` because native
-binaries cannot load from inside the asar archive). Two rungs share one
-identity keypair:
+binaries cannot load from inside the asar archive; they are also the only two
+addons in this tree that actually `dlopen` under Node, so the list is
+complete, and the `bare-*` packages that ship prebuilds alongside them are
+Bare-runtime artifacts that Electron never loads).
+
+**The packages this module imports must stay in `dependencies`, and that is
+load-bearing, not hygiene.** `electron.vite.config.ts` builds main and preload
+with `externalizeDepsPlugin()`, whose rule is exactly
+`Object.keys(pkg.dependencies)`: a declared package stays an external
+`require(...)` resolved from `node_modules` at runtime, and anything else is
+inlined into `out/main/chunks`. Inlining a native addon is fatal, because its
+resolver then looks for the prebuilt `.node` next to the CHUNK and finds
+nothing. `hyperdht`, `@hyperswarm/secret-stream` and `sodium-native` were
+imported here while being declared nowhere, reachable only transitively
+through `hyperswarm`, which this code has never imported. So from the first
+commit of the feature (1767c9c) until 732f18e, the toggle in Settings could
+not start the listener at all: `remoteAccess:setEnabled` rejected with
+`Cannot find addon '.'`, which the panel rendered as a red error line under a
+switch still reading "Turn on". No QR, no pairing, no way to reach that code
+from the UI. The feature ran only under `scripts/remote-access-e2e.mjs`,
+which marks those same three modules external by hand, which is precisely why
+no script-based test noticed; the first thing to catch it was the UI e2e spec
+that drives the built app. `npm run test:declared-deps` now fails when any
+main-process or preload import is missing from `dependencies`.
+
+Two rungs share one identity keypair:
 
 - **Direct TCP** (LAN, and WAN wherever the router already forwards): a
   plain `net.Server` whose every connection is wrapped in
@@ -294,21 +335,38 @@ implies:
   private, or link-local; a routable (off-LAN, or VPN-public) address is
   refused silently. The QR likewise advertises only addresses in those
   ranges. Pairing therefore cannot be driven from off the local network,
-  which is the property the modal's "same wifi" copy promises.
+  which is the property the modal's "same wifi" copy promises. A VPN address
+  that is publicly routable is refused for the same reason, so pairing over a
+  VPN does not work by design. The phone reinforces this from its own side:
+  its ladder planner never enables the DHT rung in `pair` mode, so both ends
+  restrict pairing to the LAN independently.
 - **Explicit approval, not first-bearer-wins.** Proving the secret no longer
-  silently trusts the device. It puts the request into a pending-approval
-  state, and the desktop shows the requesting device's display name and its
-  key fingerprint (the leading eight bytes of the key as uppercase hex in
-  groups of four, byte-for-byte the short form the phone shows on its own
-  confirm screen, so the user compares the two screens). The device is
-  written to the trust store only after the user explicitly approves. A deny,
-  or a timeout of about a minute, refuses with a clean stream close that the
-  phone reads as a refusal rather than a hang. Consuming the secret at
-  presentation time means a racing device cannot also redeem it; if the
-  racing device is the one that reaches the approval prompt, the user sees a
-  name and fingerprint that do not match their phone and denies. The wire
-  format is unchanged: the phone sends the same pair request and simply waits
-  longer for the reply.
+  silently trusts the device. It parks the request in a pending-approval state
+  and waits (60 seconds, `PAIRING_APPROVAL_TIMEOUT_MS`) for a human to press
+  Approve or Deny in the pairing modal. The device is written to the trust
+  store only on an explicit approve. A deny, or the timeout, refuses with a
+  clean stream close that the phone reads as a refusal rather than a hang.
+
+  **The fingerprint comparison is the defense, and it is only as good as the
+  user performing it.** The desktop shows two things about the waiting device,
+  and they have very different provenance. The display name is whatever the
+  device asked to be called: attacker-controlled, sanitized but not
+  trustworthy. The fingerprint is computed by the desktop from
+  `stream.remotePublicKey`, the key the peer actually authenticated with in
+  the live Noise handshake, so it cannot be self-reported or spoofed without
+  possessing the matching secret key. Both ends render that key identically,
+  its leading eight bytes as uppercase hex in groups of four: the desktop in
+  `keyFingerprint` (`identity.ts`), the phone in `formatKeyShortForm`
+  (`codara-mobile/src/lib/remote/format.ts`), which is why the phone's confirm
+  screen says to check that the key the computer shows matches "This phone's
+  key" shown below it. Comparing those two strings is what stops the user
+  approving a different device that reached the prompt first. Consuming the
+  secret at presentation time means a racing device cannot also redeem it; if
+  the racing device is the one that reaches the prompt, the user sees a
+  fingerprint that does not match their phone and denies.
+
+  The wire format is unchanged: the phone sends the same pair request and
+  simply waits longer for the reply.
 
 ### RPC v0 deviations from the mobile types
 
@@ -349,16 +407,32 @@ fixes:
 
 ### Trust model notes
 
-Two consequences of where this feature sits, recorded so they are choices
-rather than surprises:
+Three notes on where this feature sits in the app's trust model, recorded so
+they are choices rather than surprises:
 
-- A compromised renderer can enable remote access and read a pairing QR
-  payload (and therefore its one-time secret) over IPC. This is consistent
-  with the existing IPC trust model, in which the renderer can already spawn
-  terminals and read workspace files; the renderer is not a security
-  boundary against itself. Key material is still never exposed: the identity
-  secret key stays in the main process and is not reachable over any
-  channel.
+- Every `remoteAccess:*` channel is privileged, and all of them are gated by
+  default. IPC is no longer allowlist-by-exception: about 200 channels,
+  including these, are registered through a `handle()` wrapper that runs
+  `requireTrustedSender` before the listener ever sees the call, so a new
+  channel cannot land ungated by omission (`npm run test:ipc-gate` fails the
+  build if a raw `ipcMain.handle` appears). Trust is two independent
+  properties: the sender must be the main window's CURRENT `mainFrame` object,
+  re-read per call, which rejects subframes and `<webview>` guests without
+  relying on any string; and the document in that frame must have arrived by a
+  COMMITTED navigation the allowlist accepted. That second flag is maintained
+  from `did-navigate` / `did-frame-navigate` only, never from
+  `did-navigate-in-page`. The earlier check read the frame's URL, which is
+  renderer-writable: `history.pushState` rewrites it with no navigation, so a
+  compromised renderer could forge a trusted-looking URL and reach every gated
+  channel. Reading the committed-navigation result instead of a live URL is
+  what closes that.
+- A compromised renderer that is still the trusted main frame can nevertheless
+  enable remote access and read a pairing QR payload, and therefore its
+  one-time secret, over IPC. The gate above is about which sender may call,
+  not about restraining the real renderer, which can already spawn terminals
+  and read workspace files; the renderer is not a security boundary against
+  itself. Key material is still never exposed: the identity secret key stays
+  in the main process and is not reachable over any channel.
 - Status and pairing-state pushes fan out to every live `webContents`,
   including preview tabs. Those payloads carry only connection state,
   device display names, and short key prefixes, never key material or
@@ -422,13 +496,27 @@ durability path.
 
 ## Phases
 
-1. Studio foundation (this repo): identity, QR pairing over LAN, silent
-   listener with paired-key firewall, DHT presence, Settings panel (Remote
-   access toggle, status, QR pairing modal, paired devices with revoke),
-   plus `scripts/remote-test-client.mjs` proving pair + connect + terminal
-   round trip from another network.
-2. Mobile app v1 (new repo, likely React Native): pair, workspaces list,
-   terminals, Cora chat.
+1. Studio foundation (this repo), shipped: identity, QR pairing over LAN,
+   silent listener with paired-key firewall, DHT presence, Settings panel
+   (Remote access toggle, status, QR pairing modal, paired devices with
+   revoke). Proven by `scripts/remote-access-e2e.mjs`, which drives
+   `scripts/remote-test-client.mjs` through pair, connect, and a terminal
+   round trip over the LAN rung on one machine with the DHT deliberately
+   disabled, and by `tests/e2e/remote-access-settings.spec.ts`, which drives
+   the built Electron app through the real IPC gate: enable, QR, a real
+   pairing request denied and then approved, and revoke. No test has ever
+   proven a round trip from another network, because the phone does not yet
+   dial that rung.
+2. Mobile app v1: shipped for iOS and pairing for real, in
+   `Codara/codara-mobile` (branch `agent/bare-transport`). It is Expo and
+   React Native, and the whole networking stack runs inside a Bare worklet via
+   `react-native-bare-kit`: the worklet requires `@hyperswarm/secret-stream`,
+   `bare-tcp`, and (when the DHT rung is enabled, which it is not) `hyperdht`.
+   That matters for the security model: the phone runs the SAME Hyperswarm
+   implementation the desktop does, so there is no second crypto stack to
+   review or to keep in step. Working today: pairing (scan, confirm, approve
+   on the desktop), workspaces list, and terminals. The Cora tab is present
+   but is UI only, since RPC v0 has no chat method.
 3. Relay: small blind frame-forwarder, self-hostable, default instance on
    Codara Cloud. Studio and mobile gain the fourth rung of the ladder.
 4. Later: file browsing and editing through the sandbox, previews, push
