@@ -44,6 +44,11 @@ const PAIRING_FRAME_TIMEOUT_MS = 10_000;
 // The pairing exchange consists of one small JSON frame; anything bigger is
 // not a pairing attempt.
 const PAIRING_MAX_FRAME_BYTES = 4096;
+// Concurrent sessions one paired device may hold, and across all devices.
+// These are what make the per-connection terminal cap in rpc.ts meaningful:
+// the real pty ceiling is MAX_TOTAL_SESSIONS x MAX_TERMINALS_PER_CONNECTION.
+const MAX_SESSIONS_PER_DEVICE = 4;
+const MAX_TOTAL_SESSIONS = 16;
 
 export interface RemoteAccessDeps {
   // <spark-home>/remote in production; a temp dir in tests.
@@ -71,6 +76,9 @@ export class RemoteAccessService {
   private pairing: PairingWindow | null = null;
   private pairingExpiryTimer: NodeJS.Timeout | null = null;
   private pairingState: RemotePairingState = { phase: "idle" };
+  // Mirrors the last listener's DHT state across its own teardown; see
+  // isDhtActive.
+  private dhtActive = false;
   // Live sessions keyed by the peer's canonical base64 public key. One
   // device may hold several (phone reconnect race); revoke kills them all.
   private readonly sessions = new Map<string, Set<RpcSession>>();
@@ -144,6 +152,7 @@ export class RemoteAccessService {
       });
       const { port, dhtReady } = await listener.start();
       this.listener = listener;
+      this.dhtActive = listener.isDhtActive();
       this.setStatus({ state: "reachable", detail: "", port, dhtReady });
       this.deps.log(
         `listening on port ${port} (dht ${dhtReady ? "announced" : "unavailable"}) as ${shortKey(this.identity.publicKeyB64)}`,
@@ -167,7 +176,14 @@ export class RemoteAccessService {
       for (const session of sessions) session.destroy();
     }
     this.sessions.clear();
-    if (listener) await listener.stop();
+    if (listener) {
+      await listener.stop();
+      // Observed AFTER the stop so it reflects what teardown actually
+      // achieved, not what it intended. See isDhtActive.
+      this.dhtActive = listener.isDhtActive();
+    }
+    // Land any coalesced last-seen timestamps before going quiet.
+    await this.devices.flushPendingWrites();
     this.setStatus({ state: "disabled", detail: "", port: null, dhtReady: false });
   }
 
@@ -302,6 +318,29 @@ export class RemoteAccessService {
 
   private onAuthorizedStream(stream: EncryptedPeerStream): void {
     const keyB64 = Buffer.from(stream.remotePublicKey).toString("base64");
+    // Connection caps. Without these the per-connection terminal cap in
+    // rpc.ts bounds nothing: a paired device could open any number of
+    // connections and multiply its pty budget by that number.
+    //
+    // Per device we evict the OLDEST session rather than refusing the new
+    // one, because the common cause of a stacked session is a phone that
+    // reconnected before we noticed the old socket was dead; refusing there
+    // would lock the user out of their own computer. Globally we refuse,
+    // since that path means several devices are already at their limit.
+    if (this.totalSessionCount() >= MAX_TOTAL_SESSIONS) {
+      this.deps.log(`refused session for ${shortKey(keyB64)}: global session cap reached`);
+      stream.destroy();
+      return;
+    }
+    const existing = this.sessions.get(keyB64);
+    if (existing && existing.size >= MAX_SESSIONS_PER_DEVICE) {
+      const oldest = existing.values().next().value;
+      if (oldest) {
+        this.deps.log(`evicting the oldest session for ${shortKey(keyB64)}: per-device cap reached`);
+        oldest.destroy();
+        existing.delete(oldest);
+      }
+    }
     this.devices.touchLastSeen(stream.remotePublicKey);
     const services: RemoteRpcServices = {
       device: {
@@ -332,6 +371,19 @@ export class RemoteAccessService {
   // Test/diagnostic visibility only.
   sessionCountFor(publicKeyB64: string): number {
     return this.sessions.get(publicKeyB64)?.size ?? 0;
+  }
+
+  totalSessionCount(): number {
+    let total = 0;
+    for (const set of this.sessions.values()) total += set.size;
+    return total;
+  }
+
+  // Whether the last listener this service built still holds DHT objects.
+  // Survives stop() on purpose: "did the teardown really run" is only a
+  // meaningful question after the listener is gone.
+  isDhtActive(): boolean {
+    return this.dhtActive;
   }
 }
 

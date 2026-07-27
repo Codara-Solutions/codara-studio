@@ -40,12 +40,15 @@ import HyperDHT from "hyperdht";
 // TCP rung or a hyperdht connection (which is also a NoiseSecretStream).
 export interface EncryptedPeerStream {
   remotePublicKey: Buffer;
-  write(data: Buffer): void;
+  // Node's Writable contract: false means the peer is not draining and the
+  // caller should back off until "drain". RPC sessions rely on this.
+  write(data: Buffer): boolean;
   end(): void;
   destroy(): void;
   on(event: "data", handler: (chunk: Buffer) => void): void;
   on(event: "close", handler: () => void): void;
   on(event: "error", handler: (err: Error) => void): void;
+  on(event: "drain", handler: () => void): void;
 }
 
 export interface RemoteListenerOptions {
@@ -75,12 +78,46 @@ export interface RemoteListenerStartResult {
   dhtReady: boolean;
 }
 
+// Pre-authentication resource limits. These exist because an accepted
+// socket costs real memory BEFORE anyone has proved anything: the Noise
+// layer allocates a buffer sized by a length the peer declares in its
+// first three bytes (up to ~16 MiB), so an unauthenticated peer can turn 4
+// bytes into megabytes. Nothing downstream can undo that, so the defence is
+// to keep the number of unauthenticated sockets small and their lifetime
+// short.
+//
+// Worst case with these numbers is roughly MAX_PENDING_HANDSHAKES x 16 MiB
+// held for at most HANDSHAKE_DEADLINE_MS, which is survivable and transient
+// rather than unbounded. The cost is that eight simultaneous hostile
+// sockets can delay a legitimate pairing by a few seconds; the short
+// deadline is what keeps that from becoming a lasting lockout.
+const MAX_PENDING_HANDSHAKES = 8;
+const HANDSHAKE_DEADLINE_MS = 5_000;
+// Total accepted sockets, authenticated or not. Node destroys anything past
+// this itself.
+const MAX_CONNECTIONS = 64;
+// Applied to established sessions instead of the handshake deadline: a
+// paired phone may legitimately sit idle for a long time with a terminal
+// open, so we reap dead peers with TCP keepalive rather than by wall clock.
+const KEEPALIVE_DELAY_MS = 60_000;
+// stop() must always settle. server.close() only fires its callback once
+// every accepted connection has ended, so we destroy sockets first and then
+// bound the wait regardless.
+const STOP_CLOSE_TIMEOUT_MS = 2_000;
+
 export class RemoteListener {
   private tcpServer: Server | null = null;
   private dht: HyperDHT | null = null;
   private dhtServer: ReturnType<HyperDHT["createServer"]> | null = null;
   private pairingOpen = false;
   private stopped = false;
+  // Every accepted socket, authenticated or not, so stop() can destroy them
+  // instead of waiting on peers that may never disconnect.
+  private readonly sockets = new Set<Socket>();
+  // Sockets that have not completed a handshake yet, with their deadline
+  // timers. Kept separate from `sockets` because the pre-auth cap and the
+  // deadline apply only to this set.
+  private readonly pendingHandshakes = new Map<Socket, NodeJS.Timeout>();
 
   constructor(private readonly options: RemoteListenerOptions) {}
 
@@ -91,6 +128,14 @@ export class RemoteListener {
     this.pairingOpen = open;
   }
 
+  // Whether this listener still holds DHT objects. False after a completed
+  // stop(), including one whose TCP half timed out, which is exactly the
+  // property the hostile-peer suite asserts: a wedged TCP close must never
+  // leave this computer announced on the DHT.
+  isDhtActive(): boolean {
+    return this.dht !== null || this.dhtServer !== null;
+  }
+
   async start(): Promise<RemoteListenerStartResult> {
     if (this.tcpServer) throw new Error("listener already started");
     this.stopped = false;
@@ -99,29 +144,60 @@ export class RemoteListener {
     return { port, dhtReady };
   }
 
+  // Always settles, and always tears the DHT down. The TCP half is best
+  // effort by construction: server.close() waits for every accepted
+  // connection to end, so a peer that connects and then goes silent could
+  // otherwise hold the whole shutdown (and with it the DHT announce, the
+  // status update, and any future enable) open forever.
   async stop(): Promise<void> {
     this.stopped = true;
     const tcp = this.tcpServer;
     this.tcpServer = null;
-    if (tcp) {
-      await new Promise<void>((resolve) => tcp.close(() => resolve()));
-    }
-    const dhtServer = this.dhtServer;
-    this.dhtServer = null;
-    if (dhtServer) {
-      try {
-        await dhtServer.close();
-      } catch {
-        // Already closing.
+    try {
+      for (const timer of this.pendingHandshakes.values()) clearTimeout(timer);
+      this.pendingHandshakes.clear();
+      for (const socket of [...this.sockets]) {
+        try {
+          socket.destroy();
+        } catch {
+          // Already gone.
+        }
       }
-    }
-    const dht = this.dht;
-    this.dht = null;
-    if (dht) {
-      try {
-        await dht.destroy();
-      } catch {
-        // Already destroyed.
+      this.sockets.clear();
+      if (tcp) {
+        // net.Server has no closeAllConnections (that is http.Server), so
+        // the destroy loop above IS the mechanism. It is complete because
+        // every accepted socket is tracked, and `stopped` was set first, so
+        // anything accepted from here on is destroyed on arrival. The
+        // bounded wait is the backstop for a socket that resists teardown.
+        await withTimeout(
+          new Promise<void>((resolve) => tcp.close(() => resolve())),
+          STOP_CLOSE_TIMEOUT_MS,
+        );
+      }
+    } catch (err) {
+      this.options.log(`tcp teardown did not complete cleanly: ${(err as Error).message}`);
+    } finally {
+      // The DHT announce is the part that must not survive a disable: it is
+      // what makes this computer findable by key. Run it whatever the TCP
+      // path did.
+      const dhtServer = this.dhtServer;
+      this.dhtServer = null;
+      if (dhtServer) {
+        try {
+          await dhtServer.close();
+        } catch {
+          // Already closing.
+        }
+      }
+      const dht = this.dht;
+      this.dht = null;
+      if (dht) {
+        try {
+          await dht.destroy();
+        } catch {
+          // Already destroyed.
+        }
       }
     }
   }
@@ -129,6 +205,9 @@ export class RemoteListener {
   private startTcp(): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const server = createServer((socket) => this.onTcpConnection(socket));
+      // Node destroys anything past this itself, so the accept queue cannot
+      // be used to hold thousands of sockets open.
+      server.maxConnections = MAX_CONNECTIONS;
       this.tcpServer = server;
       server.on("error", (err) => {
         if (!server.listening) reject(err);
@@ -146,6 +225,39 @@ export class RemoteListener {
     socket.on("error", () => {
       // A prober resetting mid-handshake is routine, not reportable.
     });
+    if (this.stopped) {
+      socket.destroy();
+      return;
+    }
+    // Refuse a new unauthenticated socket while the pre-auth slots are
+    // full. Silently, like every other refusal on this rung.
+    if (this.pendingHandshakes.size >= MAX_PENDING_HANDSHAKES) {
+      socket.destroy();
+      return;
+    }
+
+    this.sockets.add(socket);
+    socket.on("close", () => {
+      this.sockets.delete(socket);
+      const timer = this.pendingHandshakes.get(socket);
+      if (timer) {
+        clearTimeout(timer);
+        this.pendingHandshakes.delete(socket);
+      }
+    });
+
+    // Hard deadline on the unauthenticated phase. This is the fix that
+    // matters: without it a peer can connect, declare a large Noise frame,
+    // and then simply stop sending, holding that allocation forever.
+    const deadline = setTimeout(() => {
+      this.pendingHandshakes.delete(socket);
+      socket.destroy();
+    }, HANDSHAKE_DEADLINE_MS);
+    this.pendingHandshakes.set(socket, deadline);
+    // Covers the peer that dribbles bytes to keep a socket technically
+    // active; the deadline above covers the one that sends nothing.
+    socket.setTimeout(HANDSHAKE_DEADLINE_MS, () => socket.destroy());
+
     // Responder side of Noise IK under our identity key. The handshake
     // itself proves the initiator holds a full keypair; whether that key is
     // TRUSTED is decided below, after `open`.
@@ -157,10 +269,17 @@ export class RemoteListener {
       // Handshake failures (wrong server key, garbage bytes) end silently.
     });
     stream.on("open", () => {
+      clearTimeout(deadline);
+      this.pendingHandshakes.delete(socket);
       if (this.stopped) {
         stream.destroy();
         return;
       }
+      // An established session may idle for hours with a terminal open, so
+      // swap the handshake deadline for TCP keepalive: dead peers still get
+      // reaped, live idle ones are left alone.
+      socket.setTimeout(0);
+      socket.setKeepAlive(true, KEEPALIVE_DELAY_MS);
       this.route(stream);
     });
   }
@@ -236,4 +355,31 @@ export class RemoteListener {
     // Unknown key, no pairing window: silence. No banner, no error frame.
     stream.destroy();
   }
+}
+
+// Resolves when `promise` settles or when the timeout elapses, whichever is
+// first. Used so a shutdown step can never hang the lifecycle chain.
+function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    }, ms);
+    void promise.then(
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      },
+    );
+  });
 }
