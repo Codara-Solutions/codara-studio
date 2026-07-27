@@ -114,6 +114,26 @@ async function loadIdentity() {
   return require(outfile);
 }
 
+// The listener module, so the F8 DHT rate-limiter test can drive the pure
+// DhtRateLimiter without a live DHT.
+async function loadListener() {
+  const cacheDir = join(ROOT, "node_modules", ".cache");
+  mkdirSync(cacheDir, { recursive: true });
+  const outfile = join(cacheDir, "remote-access-hostile-listener.cjs");
+  await build({
+    entryPoints: [join(ROOT, "src", "main", "remote-access", "listener.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+    alias: { "@shared": join(ROOT, "src", "shared") },
+    external: ["sodium-native", "hyperdht", "@hyperswarm/secret-stream"],
+  });
+  delete require.cache[outfile];
+  return require(outfile);
+}
+
 // Reads the trust file the way a fresh app launch would.
 function readDevices(home) {
   try {
@@ -907,6 +927,24 @@ async function main() {
       }
       rmSync(base, { recursive: true, force: true });
     }
+  }
+
+  /* ====================================================================== */
+  /* F8: the DHT rung's accepted-connection rate limiter                    */
+  /* ====================================================================== */
+
+  {
+    // The only DHT-rung backpressure we can genuinely enforce is in the
+    // firewall hook: rate-limiting the connection attempts we ACCEPT. This
+    // exercises that limiter directly with an injected clock, so it is fully
+    // deterministic (the holepunch state hyperdht leaves for a rejected
+    // attempt is outside our control and documented, not tested here).
+    const listenerMod = await loadListener();
+    const limiter = new listenerMod.DhtRateLimiter(3, 1_000);
+    check("F8: accepts up to the budget within the window", limiter.allow(0) && limiter.allow(10) && limiter.allow(20));
+    check("F8: blocks the attempt over the budget", limiter.allow(30) === false);
+    check("F8: still blocks while inside the window", limiter.allow(999) === false);
+    check("F8: accepts again once the window has slid past the oldest hits", limiter.allow(1_030) === true);
   }
 
   if (failures > 0) {

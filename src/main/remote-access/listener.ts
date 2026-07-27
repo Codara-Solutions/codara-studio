@@ -104,6 +104,37 @@ const HANDSHAKE_DEADLINE_MS = 5_000;
 // to the 64-socket server cap (~1 GiB) during a pairing window.
 const MAX_IK_UNAUTHORIZED = 4;
 const IK_UNAUTH_DEADLINE_MS = 10_000;
+// DHT rung backpressure. hyperdht's firewall hook is the only point on this
+// rung where we can refuse a peer before its handshake, and it is the only
+// place any of this is enforceable: everything before the hook (the
+// holepunch coordination, the ~10s of timers a rejected attempt leaves) lives
+// inside hyperdht and cannot be bounded from above. See docs/remote-access.md.
+// So we do what we can: rate-limit the connection attempts we ACCEPT (an
+// unknown key is already blocked outright), and cap the number of concurrent
+// established DHT connections, as a backstop under the per-device/global
+// session caps in index.ts.
+const DHT_ACCEPT_MAX = 20;
+const DHT_ACCEPT_WINDOW_MS = 10_000;
+const MAX_DHT_CONNECTIONS = 32;
+
+// A fixed-window rate limiter over a stream of event timestamps. Pure and
+// injectable-now so it can be unit-tested without a live DHT.
+export class DhtRateLimiter {
+  private readonly hits: number[] = [];
+
+  constructor(
+    private readonly max: number,
+    private readonly windowMs: number,
+  ) {}
+
+  // Records an event at `now` and returns whether it is within the budget.
+  allow(now: number): boolean {
+    while (this.hits.length > 0 && now - this.hits[0] >= this.windowMs) this.hits.shift();
+    if (this.hits.length >= this.max) return false;
+    this.hits.push(now);
+    return true;
+  }
+}
 // Total accepted sockets, authenticated or not. Node destroys anything past
 // this itself.
 const MAX_CONNECTIONS = 64;
@@ -125,6 +156,10 @@ export class RemoteListener {
   private dhtServer: ReturnType<HyperDHT["createServer"]> | null = null;
   private pairingOpen = false;
   private stopped = false;
+  // DHT rung accounting (see startDht). The rate limiter bounds accepted
+  // connection attempts; dhtConnections caps concurrent established ones.
+  private readonly dhtAccepts = new DhtRateLimiter(DHT_ACCEPT_MAX, DHT_ACCEPT_WINDOW_MS);
+  private dhtConnections = 0;
   // Every accepted socket, authenticated or not, so stop() can destroy them
   // instead of waiting on peers that may never disconnect.
   private readonly sockets = new Set<Socket>();
@@ -319,7 +354,21 @@ export class RemoteListener {
       // value semantics: true means BLOCK.
       const server = dht.createServer(
         {
-          firewall: (remotePublicKey: Buffer) => !this.options.isAuthorized(remotePublicKey),
+          firewall: (remotePublicKey: Buffer) => {
+            // Reject an unknown key as early as we can: before the handshake
+            // completes, so a stranger cannot even establish a connection.
+            // Returning true means BLOCK.
+            if (!this.options.isAuthorized(remotePublicKey)) return true;
+            // A paired key is allowed, but rate-limited: a compromised paired
+            // device must not be able to drive an unbounded storm of accepted
+            // connection attempts. Over the budget we block; a legitimate
+            // phone retries and gets in on the next window.
+            if (!this.dhtAccepts.allow(Date.now())) {
+              this.options.log("dht rung: accepted-connection rate limit hit; deferring a paired peer");
+              return true;
+            }
+            return false;
+          },
         },
         (conn: EncryptedPeerStream) => {
           conn.on("error", () => {
@@ -336,6 +385,16 @@ export class RemoteListener {
             conn.destroy();
             return;
           }
+          // Backstop cap on concurrent established DHT connections, under the
+          // per-device and global session caps in index.ts.
+          if (this.dhtConnections >= MAX_DHT_CONNECTIONS) {
+            conn.destroy();
+            return;
+          }
+          this.dhtConnections += 1;
+          conn.on("close", () => {
+            this.dhtConnections = Math.max(0, this.dhtConnections - 1);
+          });
           this.options.onAuthorizedStream(conn);
         },
       );
