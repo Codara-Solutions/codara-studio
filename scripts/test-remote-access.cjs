@@ -201,6 +201,54 @@ async function main() {
   const smallFrame = rpc.encodeFrame({ pad: "x".repeat(20) });
   check("frames under a custom limit pass", atLimit.push(smallFrame).length === 1);
 
+  /* ---- frame-count cap and linear buffering (item 2) -------------------- */
+
+  // A single chunk that carries more than MAX_FRAMES_PER_PUSH complete frames
+  // is treated as fatal, so a ~16 MiB write of tiny frames cannot turn into
+  // millions of synchronous JSON.parse calls. Pre-fix the decoder returned
+  // every frame with no cap.
+  {
+    const tiny = rpc.encodeFrame(0);
+    const flood = Buffer.concat(Array.from({ length: rpc.MAX_FRAMES_PER_PUSH + 5 }, () => tiny));
+    let countErr = null;
+    try {
+      new rpc.FrameDecoder().push(flood);
+    } catch (err) {
+      countErr = err;
+    }
+    check("a chunk over the per-push frame cap throws FrameCountError", countErr?.name === "FrameCountError", countErr?.name);
+
+    // Exactly at the cap is still accepted: the cap is a ceiling, not an
+    // off-by-one.
+    const atCap = Buffer.concat(Array.from({ length: rpc.MAX_FRAMES_PER_PUSH }, () => tiny));
+    check("a chunk exactly at the per-push frame cap is accepted", new rpc.FrameDecoder().push(atCap).length === rpc.MAX_FRAMES_PER_PUSH);
+
+    // The declared-length cap still rejects before the body is buffered, even
+    // when the body bytes never arrive: only the 4-byte prefix is present.
+    const headerOnly = Buffer.alloc(4);
+    headerOnly.writeUInt32BE(rpc.MAX_FRAME_BYTES + 1, 0);
+    let limitErr2 = null;
+    try {
+      new rpc.FrameDecoder().push(headerOnly);
+    } catch (err) {
+      limitErr2 = err;
+    }
+    check("oversize is rejected from the length prefix alone, no body", limitErr2?.name === "FrameLimitError");
+
+    // Byte-at-a-time delivery of a large frame reassembles correctly and
+    // stays linear (the chunk-list buffer never re-copies consumed bytes).
+    const bigBody = { blob: "q".repeat(200_000) };
+    const bigFrame = rpc.encodeFrame(bigBody);
+    const dripDecoder = new rpc.FrameDecoder();
+    let dripped = [];
+    const started = Date.now();
+    for (let i = 0; i < bigFrame.length; i += 1) {
+      dripped = dripped.concat(dripDecoder.push(bigFrame.subarray(i, i + 1)));
+    }
+    check("byte-at-a-time delivery reassembles the frame", dripped.length === 1 && dripped[0].blob.length === 200_000);
+    check("byte-at-a-time delivery stays fast (linear, not quadratic)", Date.now() - started < 4000, Date.now() - started);
+  }
+
   /* ---- rpc session ------------------------------------------------------ */
 
   // A minimal in-process duplex: write() parses server frames, push()
@@ -348,6 +396,29 @@ async function main() {
   check("oversized inbound frame destroys the session", stream2.destroyed === true);
   check("no reply is sent for a framing violation", stream2.outbox.length === 0);
 
+  /* ---- fatal frame abandons the rest of its chunk (item 7) ------------- */
+
+  // A malformed frame and a valid terminal.create delivered in ONE decrypted
+  // chunk: the malformed frame destroys the session synchronously, and the
+  // create that follows it in the same chunk must never reach the spawn path.
+  {
+    const stream3 = makeFakeStream();
+    void new rpc.RpcSession(stream3, services);
+    stream3.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0, device: services.device } }));
+    await flush();
+    const before = madeTerminals.length;
+    const malformed = rpc.encodeFrame(12345); // a bare number is not a request
+    const create = rpc.encodeFrame({ id: 2, method: "terminal.create", params: { workspaceId: "ws1", cols: 80, rows: 24 } });
+    stream3.inject(Buffer.concat([malformed, create]));
+    await flush();
+    check("a fatal frame destroys the session", stream3.destroyed === true);
+    check(
+      "a terminal.create after a fatal frame in the same chunk never spawns",
+      madeTerminals.length === before,
+      madeTerminals.length - before,
+    );
+  }
+
   /* ---- outbound backpressure (F5) --------------------------------------- */
 
   const bpStream = makeFakeStream();
@@ -384,6 +455,39 @@ async function main() {
   const afterDrain = bpStream.outbox.length;
   bpTerminal.request.onData("z");
   check("output flows again after drain", bpStream.outbox.length === afterDrain + 1);
+
+  /* ---- all writes gated, paused-birth terminals (item 6) --------------- */
+
+  {
+    const g = makeFakeStream();
+    void new rpc.RpcSession(g, services);
+    const greq = (id, method, params) => g.inject(rpc.encodeFrame({ id, method, params }));
+    greq(1, "hello", { protocol: 0, device: services.device });
+    await flush();
+    // Back the peer up first, then create a terminal: it must be born paused
+    // so its opening burst is held at the pty, not produced into a paused
+    // session and dropped.
+    g.writeAccepts = false;
+    greq(2, "ping", { nonce: "x" }); // a reply that returns backpressure
+    await flush();
+    greq(3, "terminal.create", { workspaceId: "ws1", cols: 80, rows: 24 });
+    await flush();
+    const born = madeTerminals[madeTerminals.length - 1];
+    check("a terminal created while backpressured is born paused", born.paused === true);
+
+    // A peer that never drains but keeps forcing replies must not grow our
+    // write queue without bound: past MAX_PENDING_WRITE_BYTES the session is
+    // destroyed rather than buffered forever. Ordinary replies, not just
+    // terminal events, are what this bounds.
+    let guard = 0;
+    while (!g.destroyed && guard < 5000) {
+      greq(100 + guard, "ping", { nonce: "y".repeat(4000) });
+      guard += 1;
+      if (guard % 200 === 0) await flush();
+    }
+    await flush();
+    check("a peer that will not drain replies has its session closed", g.destroyed === true, guard);
+  }
 
   if (failures > 0) {
     console.error(`${failures} failure(s)`);

@@ -65,6 +65,15 @@ export interface RpcErrorBody {
 
 export const MAX_FRAME_BYTES = 1024 * 1024;
 const LENGTH_PREFIX_BYTES = 4;
+// The most complete frames a single push() will yield before it treats the
+// chunk as hostile and throws. One decrypted Noise write can be ~16 MiB; at
+// the 6-byte floor of a framed empty object that is millions of frames, so
+// without this cap a single write turns into millions of synchronous
+// JSON.parse calls and live objects, un-interruptible by any timer. A real
+// peer never batches anywhere near this many requests into one chunk (during
+// pairing only frames[0] is ever read at all), so exceeding it is fatal, not
+// throttled.
+export const MAX_FRAMES_PER_PUSH = 1024;
 
 export function encodeFrame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value), "utf8");
@@ -77,7 +86,7 @@ export function encodeFrame(value: unknown): Buffer {
 // Incremental decoder for the length-prefixed stream. push() accepts
 // arbitrary chunk boundaries (Noise delivers whatever TCP coalesced) and
 // throws FrameLimitError the moment a declared length exceeds the cap,
-// BEFORE buffering the body, so an attacker cannot make us allocate it.
+// BEFORE the body is ever copied, so an attacker cannot make us allocate it.
 export class FrameLimitError extends Error {
   constructor(declared: number, limit: number) {
     super(`frame of ${declared} bytes exceeds the ${limit} byte limit`);
@@ -85,31 +94,122 @@ export class FrameLimitError extends Error {
   }
 }
 
-export class FrameDecoder {
-  private buffered: Buffer = Buffer.alloc(0);
+// A single decrypted chunk carried more than MAX_FRAMES_PER_PUSH complete
+// frames. Treated exactly like FrameLimitError: the peer is broken or
+// hostile and the connection is dropped.
+export class FrameCountError extends Error {
+  constructor(limit: number) {
+    super(`a single chunk carried more than the ${limit} frame per push limit`);
+    this.name = "FrameCountError";
+  }
+}
 
-  constructor(private readonly maxFrameBytes = MAX_FRAME_BYTES) {}
+export class FrameDecoder {
+  // Buffered bytes are held as a list of views over the incoming chunks
+  // rather than one growing Buffer. Appending is O(1), and each byte is
+  // copied at most once (only when a full frame is materialized), so
+  // fragmented delivery (Noise handing us bytes a few at a time) stays
+  // linear instead of the quadratic Buffer.concat the old decoder did on
+  // every push.
+  private chunks: Buffer[] = [];
+  private buffered = 0;
+
+  constructor(
+    private readonly maxFrameBytes = MAX_FRAME_BYTES,
+    private readonly maxFramesPerPush = MAX_FRAMES_PER_PUSH,
+  ) {}
 
   // Returns every complete frame the new chunk yields, parsed as JSON.
   // Unparseable JSON inside a well-framed body throws SyntaxError; the
-  // session treats both that and FrameLimitError as fatal.
+  // session treats that, FrameLimitError and FrameCountError all as fatal.
   push(chunk: Buffer | Uint8Array): unknown[] {
-    this.buffered = this.buffered.length === 0
-      ? Buffer.from(chunk)
-      : Buffer.concat([this.buffered, Buffer.from(chunk)]);
+    // Reference the incoming bytes without copying them. The previous
+    // decoder ran Buffer.from(chunk) on the whole chunk before it had even
+    // read the length prefix, so an oversized frame was fully buffered
+    // before being rejected. Here nothing is copied until a complete,
+    // size-checked frame is consumed.
+    const view = Buffer.isBuffer(chunk)
+      ? chunk
+      : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    if (view.length > 0) {
+      this.chunks.push(view);
+      this.buffered += view.length;
+    }
     const frames: unknown[] = [];
     for (;;) {
-      if (this.buffered.length < LENGTH_PREFIX_BYTES) break;
-      const declared = this.buffered.readUInt32BE(0);
+      if (this.buffered < LENGTH_PREFIX_BYTES) break;
+      const declared = this.readUInt32BE();
       if (declared > this.maxFrameBytes) {
         throw new FrameLimitError(declared, this.maxFrameBytes);
       }
-      if (this.buffered.length < LENGTH_PREFIX_BYTES + declared) break;
-      const body = this.buffered.subarray(LENGTH_PREFIX_BYTES, LENGTH_PREFIX_BYTES + declared);
-      this.buffered = this.buffered.subarray(LENGTH_PREFIX_BYTES + declared);
+      if (this.buffered < LENGTH_PREFIX_BYTES + declared) break;
+      if (frames.length >= this.maxFramesPerPush) {
+        throw new FrameCountError(this.maxFramesPerPush);
+      }
+      this.consume(LENGTH_PREFIX_BYTES);
+      const body = this.consume(declared);
       frames.push(JSON.parse(body.toString("utf8")));
     }
     return frames;
+  }
+
+  // The big-endian u32 length prefix at the front of the buffer. Fast path
+  // when it lies within the first chunk; otherwise assembled byte by byte
+  // across the chunk boundary.
+  private readUInt32BE(): number {
+    const first = this.chunks[0];
+    if (first !== undefined && first.length >= LENGTH_PREFIX_BYTES) {
+      return first.readUInt32BE(0);
+    }
+    let value = 0;
+    for (let i = 0; i < LENGTH_PREFIX_BYTES; i += 1) {
+      value = value * 256 + this.byteAt(i);
+    }
+    return value;
+  }
+
+  private byteAt(pos: number): number {
+    let remaining = pos;
+    for (const chunk of this.chunks) {
+      if (remaining < chunk.length) return chunk[remaining];
+      remaining -= chunk.length;
+    }
+    // Callers only read within `buffered`, so this is unreachable.
+    throw new Error("frame decoder read past its buffer");
+  }
+
+  // Removes the first n bytes from the front of the buffer and returns them
+  // as a contiguous Buffer. Whole chunks are handed back without a copy; a
+  // frame that spans chunks is copied exactly once.
+  private consume(n: number): Buffer {
+    const first = this.chunks[0];
+    if (first.length === n) {
+      this.chunks.shift();
+      this.buffered -= n;
+      return first;
+    }
+    if (first.length > n) {
+      this.chunks[0] = first.subarray(n);
+      this.buffered -= n;
+      return first.subarray(0, n);
+    }
+    const out = Buffer.allocUnsafe(n);
+    let offset = 0;
+    while (offset < n) {
+      const chunk = this.chunks[0];
+      const need = n - offset;
+      if (chunk.length <= need) {
+        chunk.copy(out, offset);
+        offset += chunk.length;
+        this.chunks.shift();
+      } else {
+        chunk.copy(out, offset, 0, need);
+        this.chunks[0] = chunk.subarray(need);
+        offset = n;
+      }
+    }
+    this.buffered -= n;
+    return out;
   }
 }
 
@@ -165,6 +265,16 @@ export const MAX_TERMINALS_PER_CONNECTION = 8;
 // process without limit is not.
 export const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
 
+// Total bytes we will let pile up unwritten across ALL outbound frames
+// (replies and events alike) while the peer is not draining, before we give
+// up on the peer and destroy the session. Terminal output is capped and
+// dropped well under this by MAX_PENDING_EVENT_BYTES; a peer that keeps
+// firing requests but never reads our replies cannot drop them (the peer is
+// waiting on them), so once the backlog crosses this ceiling the only bound
+// left is to close the connection. Kept above MAX_PENDING_EVENT_BYTES so a
+// noisy terminal alone never trips it.
+export const MAX_PENDING_WRITE_BYTES = 4 * 1024 * 1024;
+
 interface DuplexLike {
   // Node's Writable contract: false means the internal buffer is over its
   // high water mark and the caller should stop until "drain".
@@ -194,6 +304,10 @@ export class RpcSession {
   private backpressured = false;
   private pendingEventBytes = 0;
   private droppedOutput = false;
+  // Bytes handed to stream.write() that the peer has not drained yet, across
+  // every outbound frame. Reset on drain; a session that lets this cross
+  // MAX_PENDING_WRITE_BYTES is destroyed. See send().
+  private pendingWriteBytes = 0;
 
   constructor(
     private readonly stream: DuplexLike,
@@ -214,6 +328,16 @@ export class RpcSession {
 
   terminalCount(): number {
     return this.terminals.size;
+  }
+
+  // Whether this session has proved liveness: a valid `hello` has completed.
+  // A passively replayed IK first flight can open a stream and even report a
+  // paired device's key, but it can never derive the session keys to send a
+  // real hello, so it stays unproven forever. index.ts uses this to keep an
+  // unproven newcomer from evicting a proven, healthy session, and to reap
+  // sessions that authenticate but never speak.
+  isProven(): boolean {
+    return this.helloDone;
   }
 
   private teardown(): void {
@@ -242,16 +366,33 @@ export class RpcSession {
       return;
     }
     for (const frame of frames) {
+      // A fatal frame (malformed request, oversize, etc.) destroys the
+      // session synchronously inside dispatch. Every frame after it in this
+      // same decrypted chunk must be abandoned, otherwise a bad frame
+      // followed by a terminal.create in ONE chunk could still reach the
+      // spawn path after the stream was already torn down.
+      if (this.destroyed) return;
       void this.dispatch(frame);
     }
   }
 
   private send(value: unknown): void {
     if (this.destroyed) return;
-    // A false return means the peer is not keeping up. Replies stay
-    // unconditional (they are small and the caller is waiting on them);
-    // it is the unsolicited terminal firehose we throttle below.
-    if (!this.stream.write(encodeFrame(value))) this.onBackpressure();
+    const frame = encodeFrame(value);
+    // Every outbound frame flows through here, replies included. A false
+    // return means the peer is not draining. We cannot drop replies (the
+    // peer is waiting on them) and terminal output is already capped
+    // separately, so the remaining defence against a peer that reads nothing
+    // but keeps asking is to bound the total backlog and close the session
+    // once it is clear the peer will never catch up.
+    if (!this.stream.write(frame)) {
+      if (!this.backpressured) this.onBackpressure();
+      this.pendingWriteBytes += frame.length;
+      if (this.pendingWriteBytes > MAX_PENDING_WRITE_BYTES) {
+        this.log("closing session: the peer is not draining our writes");
+        this.destroy();
+      }
+    }
   }
 
   pushEvent(event: string, payload: unknown): void {
@@ -295,6 +436,7 @@ export class RpcSession {
     if (!this.backpressured) return;
     this.backpressured = false;
     this.pendingEventBytes = 0;
+    this.pendingWriteBytes = 0;
     this.droppedOutput = false;
     for (const terminal of this.terminals.values()) {
       try {
@@ -405,6 +547,7 @@ export class RpcSession {
   }
 
   private async handleTerminalCreate(id: number, params: unknown): Promise<void> {
+    if (this.destroyed) return;
     const p = (params ?? {}) as {
       workspaceId?: unknown;
       cols?: unknown;
@@ -433,6 +576,11 @@ export class RpcSession {
     let handle: RemoteTerminalHandle;
     this.pendingTerminalCreates += 1;
     try {
+      // Re-check liveness right before the spawn: the loop in onData already
+      // abandons frames after a fatal one, but the session can also die
+      // (peer disconnect, revoke) between here and the awaited spawn, and we
+      // must not leave a pty running for a session that no longer exists.
+      if (this.destroyed) return;
       handle = await this.services.createTerminal({
         workspaceId: p.workspaceId,
         cols,
@@ -460,6 +608,17 @@ export class RpcSession {
       return;
     }
     this.terminals.set(terminalId, handle);
+    // If the peer is already backed up when this terminal is born, pause it
+    // at the OS level immediately. Otherwise its first burst of output would
+    // be produced into a paused session and dropped (held at neither the pty
+    // nor a bounded buffer) until the next drain.
+    if (this.backpressured) {
+      try {
+        handle.pause?.();
+      } catch {
+        // A pty that died mid-pause is handled by its own exit path.
+      }
+    }
     this.reply(id, { terminalId });
   }
 
