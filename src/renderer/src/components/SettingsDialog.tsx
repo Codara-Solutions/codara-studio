@@ -190,6 +190,15 @@ function NavIcon({ tab }: { tab: SettingsTab }) {
           <line x1="8" y1="12" x2="13" y2="12" />
         </svg>
       );
+    case "remote-access": // phone with radiating link
+      return (
+        <svg {...common}>
+          <rect x="4" y="4" width="9" height="16" rx="2" />
+          <line x1="6.5" y1="17" x2="10.5" y2="17" />
+          <path d="M16 9a5 5 0 0 1 0 6" />
+          <path d="M18.5 6.5a9 9 0 0 1 0 11" />
+        </svg>
+      );
     case "keybindings": // command key (⌘) drawn as SVG, not a glyph
       return (
         <svg {...common}>
