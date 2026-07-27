@@ -55,6 +55,7 @@ import {
   type SessionStartRecord,
 } from "./resume-policy";
 import { isAppTearingDown } from "../../lib/app-lifecycle";
+import { subscribeExternalTerminalSize } from "./terminalRegistry";
 
 export type { SparkOpenInput };
 
@@ -314,6 +315,12 @@ interface Options {
   // canonical: raw-tail replay, snapshot capture, and runtime-state reports
   // are unaffected by this flag.
   inputBlocked?: boolean;
+  // Keep this xterm interactive and lifecycle-canonical, but let an external
+  // client own PTY geometry. Phone-origin tabs use this so Studio remains a
+  // usable mirror while the measured phone viewport determines cols/rows.
+  externalSizeOwner?: boolean;
+  initialExternalCols?: number;
+  initialExternalRows?: number;
   // Raw-tail reattach mode. Opt-in, default off — used by the hosts that attach
   // an xterm onto a live Ink TUI (Claude/Codex): ChatPanel's backend terminal,
   // ChatBackendTerminalStack, and the automation Workers panes. Such a TUI
@@ -414,6 +421,9 @@ export function useTerminalSession({
   extraEnv,
   readOnly = false,
   inputBlocked = false,
+  externalSizeOwner = false,
+  initialExternalCols,
+  initialExternalRows,
   rawTailReattach = false,
   writeWhileHidden = false,
   onSearchReady,
@@ -446,6 +456,15 @@ export function useTerminalSession({
   useEffect(() => {
     inputBlockedRef.current = inputBlocked;
   }, [inputBlocked]);
+  const externalSizeOwnerRef = useRef<boolean>(externalSizeOwner);
+  const externalGridRef = useRef<{ cols: number; rows: number } | null>(
+    initialExternalCols && initialExternalRows
+      ? { cols: initialExternalCols, rows: initialExternalRows }
+      : null,
+  );
+  useEffect(() => {
+    externalSizeOwnerRef.current = externalSizeOwner;
+  }, [externalSizeOwner]);
   // Same latest-value pattern for rawTailReattach. The unmount cleanup and the
   // mount replay both branch on this; a ref lets the parent flip it without
   // forcing the once-per-sessionId xterm setup effect to re-run (in practice
@@ -511,6 +530,36 @@ export function useTerminalSession({
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const resizeXtermForOwner = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const externalGrid = externalGridRef.current;
+    if (externalSizeOwnerRef.current && externalGrid) {
+      if (term.cols !== externalGrid.cols || term.rows !== externalGrid.rows) {
+        term.resize(externalGrid.cols, externalGrid.rows);
+      }
+      return;
+    }
+    fitRef.current?.fit();
+  }, []);
+  useEffect(() => {
+    if (
+      typeof initialExternalCols !== "number" ||
+      typeof initialExternalRows !== "number"
+    ) {
+      return;
+    }
+    externalGridRef.current = {
+      cols: Math.max(2, Math.trunc(initialExternalCols)),
+      rows: Math.max(2, Math.trunc(initialExternalRows)),
+    };
+    if (externalSizeOwner) resizeXtermForOwner();
+  }, [
+    externalSizeOwner,
+    initialExternalCols,
+    initialExternalRows,
+    resizeXtermForOwner,
+  ]);
   // Bridge to the effect-local `scheduleFitRetry` (defined once the PTY is
   // spawned) so the WebGL onContextLoss handler — which is created much earlier
   // in the same effect — can trigger a re-fit + pty.resize after xterm falls
@@ -1293,9 +1342,24 @@ export function useTerminalSession({
 
       term.open(container.current);
       try {
-        fit.fit();
+        resizeXtermForOwner();
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
+      }
+      if (externalSizeOwnerRef.current) {
+        const unsubscribeExternalSize = subscribeExternalTerminalSize(
+          sessionId,
+          ({ cols, rows }) => {
+            externalGridRef.current = { cols, rows };
+            try {
+              resizeXtermForOwner();
+              term.refresh(0, Math.max(0, term.rows - 1));
+            } catch {
+              /* xterm may be disposing while the shared terminal closes */
+            }
+          },
+        );
+        cleanups.push(unsubscribeExternalSize);
       }
       // Raw-tail reattach mode (chat backend terminal): the reattach is driven
       // ENTIRELY by main replaying the raw pty tail bytes into this fresh xterm
@@ -2589,8 +2653,14 @@ export function useTerminalSession({
       // the real visible size — without this, ConPTY paints at 80×24 then
       // reflows once the renderer reports the actual size, which the user
       // perceives as a flicker on first prompt.
-      const cols = Math.max(1, term.cols);
-      const rows = Math.max(1, term.rows);
+      const cols =
+        externalSizeOwnerRef.current && initialExternalCols
+          ? initialExternalCols
+          : Math.max(1, term.cols);
+      const rows =
+        externalSizeOwnerRef.current && initialExternalRows
+          ? initialExternalRows
+          : Math.max(1, term.rows);
       const cwd = initialCwd && initialCwd.trim().length > 0 ? initialCwd : "";
       // Agent panes — a claude/codex autorun or any restore/resume — flip
       // SPARK_NO_SHELL_INTEGRATION=1: spark.ps1's OSC 633;E echo would feed
@@ -2618,6 +2688,9 @@ export function useTerminalSession({
           // and garble the canonical pane's display. It also refuses to
           // create a session, so a mirror can never spawn the noop shell.
           mirror: readOnlyRef.current || undefined,
+          // A phone-origin pane is still Studio's canonical renderer sink, but
+          // reattaching it must not overwrite the phone's measured PTY grid.
+          preserveSizeOnAttach: externalSizeOwnerRef.current || undefined,
         });
         if (disposed) {
           // The spawn attempt happened — consume the one-shot marker even
@@ -2775,6 +2848,10 @@ export function useTerminalSession({
 
       const scheduleFitRetry = () => {
         if (disposed || !spawned) return;
+        if (externalSizeOwnerRef.current) {
+          resizeXtermForOwner();
+          return;
+        }
         if (rafHandle !== null) window.cancelAnimationFrame(rafHandle);
         rafFits = 0;
         const tick = () => {
@@ -2798,7 +2875,7 @@ export function useTerminalSession({
             return;
           }
           try {
-            fit.fit();
+            resizeXtermForOwner();
           } catch {
             return;
           }
@@ -2813,7 +2890,11 @@ export function useTerminalSession({
           // left-hand sub-column, the reported symptom). Coalescing to one resize
           // at the final size sidesteps that and restores the two-stage-debounce
           // contract the ResizeObserver path already honors.
-          if (!readOnlyRef.current && (term.cols !== lastSentCols || term.rows !== lastSentRows)) {
+          if (
+            !readOnlyRef.current &&
+            !externalSizeOwnerRef.current &&
+            (term.cols !== lastSentCols || term.rows !== lastSentRows)
+          ) {
             if (ptyTimer !== null) window.clearTimeout(ptyTimer);
             ptyTimer = window.setTimeout(flushPtyResize, PTY_RESIZE_DEBOUNCE_MS);
           }
@@ -2845,12 +2926,10 @@ export function useTerminalSession({
       const flushPtyResize = () => {
         ptyTimer = null;
         if (disposed || !spawned) return;
-        // Read-only mirror panes must not send pty.resize — the canonical
-        // pane owns the PTY's dimensions. Without this guard, two mounts
-        // of the same sessionId would each fit() to their own container
-        // size and race their pty.resize calls; the last (often smaller)
-        // one would win and garble the larger xterm's display.
-        if (readOnlyRef.current) return;
+        // Read-only mirrors and externally-sized phone panes must not send
+        // pty.resize. The former has another renderer owner; the latter is
+        // deliberately sized by the phone's measured terminal viewport.
+        if (readOnlyRef.current || externalSizeOwnerRef.current) return;
         if (term.cols === lastSentCols && term.rows === lastSentRows) return;
         lastSentCols = term.cols;
         lastSentRows = term.rows;
@@ -2859,6 +2938,10 @@ export function useTerminalSession({
 
       if (el) {
         const observer = new ResizeObserver(() => {
+          if (externalSizeOwnerRef.current) {
+            resizeXtermForOwner();
+            return;
+          }
           if (fitTimer !== null) window.clearTimeout(fitTimer);
           fitTimer = window.setTimeout(() => {
             fitTimer = null;
@@ -2890,14 +2973,16 @@ export function useTerminalSession({
               return;
             }
             try {
-              fit.fit();
+              resizeXtermForOwner();
             } catch {
               return;
             }
             lastAppliedCols = term.cols;
             lastAppliedRows = term.rows;
-            if (ptyTimer !== null) window.clearTimeout(ptyTimer);
-            ptyTimer = window.setTimeout(flushPtyResize, PTY_RESIZE_DEBOUNCE_MS);
+            if (!externalSizeOwnerRef.current) {
+              if (ptyTimer !== null) window.clearTimeout(ptyTimer);
+              ptyTimer = window.setTimeout(flushPtyResize, PTY_RESIZE_DEBOUNCE_MS);
+            }
             scheduleFitRetry();
           }, FIT_DEBOUNCE_MS);
         });
@@ -2916,13 +3001,14 @@ export function useTerminalSession({
       // paints at the correct width on first render. Skip on read-only mirror
       // panes; the canonical pane already sized this PTY.
       try {
-        fit.fit();
+        resizeXtermForOwner();
       } catch {
         /* host transitioned to display:none between mount and now */
       }
       scheduleFitRetry();
       if (
         !readOnlyRef.current &&
+        !externalSizeOwnerRef.current &&
         (term.cols !== lastSentCols || term.rows !== lastSentRows)
       ) {
         lastSentCols = term.cols;
@@ -3098,7 +3184,7 @@ export function useTerminalSession({
       hiddenLineBreaksRef.current = 0;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [resizeXtermForOwner, sessionId]);
 
   // Mark a hidden→visible transition synchronously with the commit so PTY
   // bytes arriving before the post-paint drain stay ordered behind the hidden
@@ -3175,7 +3261,7 @@ export function useTerminalSession({
   useLayoutEffect(() => {
     if (!visible) return;
     try {
-      fitRef.current?.fit();
+      resizeXtermForOwner();
     } catch {
       /* host may be hidden during the transition */
     }
@@ -3194,7 +3280,7 @@ export function useTerminalSession({
     // xterm doesn't stay pinned to the smaller first-pass row count.
     const raf = window.requestAnimationFrame(() => {
       try {
-        fitRef.current?.fit();
+        resizeXtermForOwner();
       } catch {
         /* ignore late layout churn */
       }
@@ -3211,7 +3297,7 @@ export function useTerminalSession({
     // Click-to-focus (the explicit focus() API) still works for copy/scroll.
     if (!readOnlyRef.current && !inputBlockedRef.current) termRef.current?.focus();
     return () => window.cancelAnimationFrame(raf);
-  }, [visible]);
+  }, [resizeXtermForOwner, visible]);
 
   // System sleep does not necessarily toggle React's `visible` prop, so the
   // normal reveal recovery above may never run. Listen to Electron's explicit
@@ -3235,7 +3321,7 @@ export function useTerminalSession({
         recoveryFrame = null;
         recoveryTimer = null;
         try {
-          fitRef.current?.fit();
+          resizeXtermForOwner();
         } catch {
           /* the host can still be transitioning from lock-screen geometry */
         }
@@ -3274,7 +3360,7 @@ export function useTerminalSession({
       if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
       if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
     };
-  }, [sessionId]);
+  }, [resizeXtermForOwner, sessionId]);
 
   const write = useCallback((data: string) => {
     void window.spark.pty.write(sessionId, data);

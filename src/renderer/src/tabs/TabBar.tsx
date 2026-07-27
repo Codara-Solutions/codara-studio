@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ChatTab, Tab, TabId } from "./types";
-import { CloseIcon, FileIcon, PlusIcon, SparkIcon } from "../components/icons";
+import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
+import { CloseIcon, FileIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
+import { collectLeaves } from "./paneTree";
 import {
   TAB_REORDER_DRAG_MIME,
   TERMINAL_PANE_DRAG_MIME,
@@ -1022,8 +1023,26 @@ function KindIcon({ tab }: { tab: Tab }) {
       </span>
     );
   }
-  if (tab.kind === "terminal")
+  if (tab.kind === "terminal") {
+    if (phoneDeviceNames(tab).length > 0) {
+      return (
+        <span
+          aria-hidden
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 14,
+            flex: "0 0 14px",
+            color: "var(--info)",
+          }}
+        >
+          <PhoneIcon size={12} />
+        </span>
+      );
+    }
     return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent)"} />;
+  }
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
   if (tab.kind === "automations") return <GlyphIcon glyph="◷" color="var(--accent)" />;
   if (tab.kind === "whiteboard") {
@@ -1082,10 +1101,23 @@ function titleFor(t: Tab): string {
   if (t.kind === "chat") return t.title;
   if (t.kind === "editor") return t.path;
   if (t.kind === "preview") return t.url;
-  if (t.kind === "terminal") return t.title;
+  if (t.kind === "terminal") {
+    const devices = phoneDeviceNames(t);
+    if (devices.length === 1) return `${t.title} — opened from phone (${devices[0]})`;
+    if (devices.length > 1) return `${t.title} — opened from phones (${devices.join(", ")})`;
+    return t.title;
+  }
   if (t.kind === "automations") return t.title;
   if (t.kind === "diff") return `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   return t.title;
+}
+
+function phoneDeviceNames(tab: TerminalTab): string[] {
+  const names = new Set<string>();
+  for (const pane of collectLeaves(tab.root)) {
+    if (pane.origin?.kind === "phone") names.add(pane.origin.deviceName);
+  }
+  return [...names];
 }
 
 function cssEscape(value: string): string {

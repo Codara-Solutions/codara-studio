@@ -63,6 +63,16 @@ export interface TerminalAgentSession {
   active?: boolean;
 }
 
+export type TerminalLeafOrigin = {
+  kind: "phone";
+  deviceName: string;
+  // Initial phone grid, carried only by the runtime-only origin metadata so
+  // the renderer can spawn the shared PTY at the correct size on its first
+  // frame. Later terminal.resize messages remain authoritative.
+  initialCols?: number;
+  initialRows?: number;
+};
+
 // Each terminal tab owns a recursive tree of panes. A leaf is one PTY-backed
 // pane; a split renders two children separated by a draggable handle. The tab
 // remembers which leaf is "active" so split / close shortcuts know what to
@@ -71,6 +81,11 @@ export interface TerminalLeaf {
   kind: "leaf";
   paneId: string;
   cwd?: string;
+  // Runtime-only trusted origin for the live PTY. Keeping ownership on the leaf
+  // makes it follow that pane through tab moves and detaches without marking
+  // unrelated sibling panes. Cold hydration strips it before spawning a fresh
+  // local shell.
+  origin?: TerminalLeafOrigin;
   // Runtime scrollback snapshot used to preserve context while panes move
   // between mounted workspace layers. Cold hydration strips it, so a full app
   // relaunch always starts with a clean shell.

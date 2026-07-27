@@ -3351,21 +3351,30 @@ export default function App() {
     return () => setOpenPreviewTabFn(null);
   }, [tabs]);
 
-  // codara-studio MCP terminal.create bridge: an agent asks for a new terminal
-  // tab; we mint an agent-tinted, UNFOCUSED tab (newAgentTerminalTab never steals
-  // focus) and hand the paneId back so the agent can write/read the PTY. cwd
+  // Shared terminal bridge: an MCP client or the Remote Access service asks
+  // for a new terminal tab; we mint an origin-marked, UNFOCUSED tab
+  // (newAgentTerminalTab never steals focus) and hand the paneId back so the
+  // caller can write/read the PTY. cwd
   // defaults to the calling run's workspace cwd (threaded through the bridge),
   // else the active workspace's cwd.
   //
-  // Remembers where each agent tab was minted (survives the effect re-running
-  // on tab-state changes) so the failed-spawn destroy path can reach a tab that
-  // lives in a background workspace's layout — plain closeTab only mutates the
-  // active store.
+  // Remembers where each bridge-owned pane was minted (survives the effect
+  // re-running on tab-state changes) so destroy can reach a pane in a
+  // background workspace's layout — plain closeTab only mutates the active
+  // store.
   const agentTerminalPlacementsRef = useRef(
-    new Map<string, { workspaceId: string; paneId: string }>(),
+    new Map<
+      string,
+      { workspaceId: string | null; tabId: string; paneId: string }
+    >(),
   );
   useEffect(() => {
     setCreateAgentTerminalFn((input) => {
+      if (input.workspaceId && !validWorkspaceIds.has(input.workspaceId)) {
+        throw new Error(
+          `Cannot create a terminal for unknown workspace '${input.workspaceId}'.`,
+        );
+      }
       const cwd = input.cwd || input.workspaceCwd || activeWorkspace?.cwd || home;
       // A background run's terminal must not land in the ACTIVE workspace's
       // strip (same invariant as the spawn_terminals queue path). The hidden
@@ -3376,22 +3385,27 @@ export default function App() {
           cwd,
           autorun: input.command,
           title: input.title,
+          origin: input.origin,
         });
-        if (minted) {
-          agentTerminalPlacementsRef.current.set(minted.tabId, {
-            workspaceId: input.workspaceId,
-            paneId: minted.paneId,
-          });
-          return { ...minted, cwd };
-        }
-        // Workspace never visited this session — no hidden stack is mounted to
-        // spawn the pane, so fall through to the active store (cwd above still
-        // points at the run's workspace root).
+        agentTerminalPlacementsRef.current.set(minted.tabId, {
+          workspaceId: input.workspaceId,
+          tabId: minted.tabId,
+          paneId: minted.paneId,
+        });
+        return { ...minted, cwd };
       }
       const { tabId, paneId } = tabs.newAgentTerminalTab({
         cwd,
         autorun: input.command,
         title: input.title,
+        origin: input.origin,
+      });
+      const placementWorkspaceId =
+        input.workspaceId ?? tabs.tabsWorkspaceId ?? activeWorkspace?.id ?? null;
+      agentTerminalPlacementsRef.current.set(tabId, {
+        workspaceId: placementWorkspaceId,
+        tabId,
+        paneId,
       });
       return { tabId, paneId, cwd };
     });
@@ -3400,18 +3414,76 @@ export default function App() {
     setCloseAgentTerminalFn((tabId) => {
       const placed = agentTerminalPlacementsRef.current.get(tabId);
       agentTerminalPlacementsRef.current.delete(tabId);
-      if (placed && placed.workspaceId !== tabs.tabsWorkspaceId) {
-        // Closing the tab's only pane drops the tab from the frozen layout.
-        tabs.closeTerminalPaneInWorkspace(placed.workspaceId, tabId, placed.paneId);
-        return;
+      if (placed) {
+        // Close the exact bridge-owned pane wherever the user has since moved
+        // it; do not destroy unrelated panes that now share its tab.
+        if (placed.workspaceId) {
+          tabs.closeTerminalPaneInWorkspace(
+            placed.workspaceId,
+            placed.tabId,
+            placed.paneId,
+          );
+        } else {
+          tabs.closeTerminalPane(placed.tabId, placed.paneId);
+        }
       }
-      tabs.closeTab(tabId);
+      // A missing placement means the user already removed the pane and the
+      // prune effect below retired its entry. Do not close the old tab id:
+      // after a move/split it may now contain unrelated desktop panes.
     });
     return () => {
       setCreateAgentTerminalFn(null);
       setCloseAgentTerminalFn(null);
     };
-  }, [tabs, activeWorkspace?.cwd, home]);
+  }, [tabs, activeWorkspace?.cwd, activeWorkspace?.id, home, validWorkspaceIds]);
+
+  // A user may close or move a bridge-created pane before main later sends its
+  // destroy notification. Keep the process-lifetime placement registry aligned
+  // with the live layouts: update a moved pane's current tab, and forget an
+  // entry once the pane no longer exists anywhere.
+  useEffect(() => {
+    const layouts: Array<{ workspaceId: string; tabs: Tab[] }> = [];
+    if (tabs.tabsWorkspaceId && validWorkspaceIds.has(tabs.tabsWorkspaceId)) {
+      layouts.push({ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs });
+    }
+    for (const layout of tabs.inactiveWorkspaceLayouts) {
+      if (!validWorkspaceIds.has(layout.workspaceId)) continue;
+      layouts.push({ workspaceId: layout.workspaceId, tabs: layout.tabs });
+    }
+
+    for (const [bridgeTabId, placement] of agentTerminalPlacementsRef.current) {
+      let located: { workspaceId: string; tabId: string } | null = null;
+      for (const layout of layouts) {
+        const tab = layout.tabs.find(
+          (item) =>
+            item.kind === "terminal" &&
+            findLeafByPaneId(item.root, placement.paneId) !== null,
+        );
+        if (tab) {
+          located = { workspaceId: layout.workspaceId, tabId: tab.id };
+          break;
+        }
+      }
+      if (!located) {
+        agentTerminalPlacementsRef.current.delete(bridgeTabId);
+        continue;
+      }
+      if (
+        located.workspaceId !== placement.workspaceId ||
+        located.tabId !== placement.tabId
+      ) {
+        agentTerminalPlacementsRef.current.set(bridgeTabId, {
+          ...placement,
+          ...located,
+        });
+      }
+    }
+  }, [
+    tabs.tabsWorkspaceId,
+    tabs.tabs,
+    tabs.inactiveWorkspaceLayouts,
+    validWorkspaceIds,
+  ]);
 
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {
@@ -5015,15 +5087,15 @@ const Workspace = React.memo(function Workspace({
   const noopTerminalCb = useCallback(() => {}, []);
 
   // One terminal layer per kept-alive workspace: the ACTIVE workspace driven by
-  // the live tab store, plus every visited-but-inactive workspace driven by its
-  // frozen layout. Rendering them all mounted (only the active one visible) is
-  // what keeps each workspace's xterm — colors, alt-screen TUI frame, real
-  // scrollback — alive across a switch, instead of disposing it and replaying a
-  // lossy gray text snapshot. Keyed AND sorted by workspaceId so React
-  // preserves each stack's instance (and its live PTYs) as it moves between the
-  // active and hidden roles. The active layer is keyed off `tabsWorkspaceId`
-  // (not App's activeId) so its key always agrees with `tabs.tabs`, which lags
-  // by one render during a switch.
+  // the live tab store, plus every visited-or-bridge-initialized inactive
+  // workspace driven by its frozen layout. Rendering them all mounted (only the
+  // active one visible) is what keeps each workspace's xterm — colors,
+  // alt-screen TUI frame, real scrollback — alive across a switch, instead of
+  // disposing it and replaying a lossy gray text snapshot. Keyed AND sorted by
+  // workspaceId so React preserves each stack's instance (and its live PTYs)
+  // as it moves between the active and hidden roles. The active layer is keyed
+  // off `tabsWorkspaceId` (not App's activeId) so its key always agrees with
+  // `tabs.tabs`, which lags by one render during a switch.
   const terminalWorkspaceLayers = useMemo(() => {
     const layers: Array<{ workspaceId: string; active: boolean; tabs: Tab[] }> = [];
     const seen = new Set<string>();

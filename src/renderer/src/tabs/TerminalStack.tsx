@@ -1039,6 +1039,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               onResumeFallback={bundle.onResumeFallback}
               onBootResumeConsumed={bundle.onBootResumeConsumed}
               inputBlocked={workerTerminal && workerInputProtected}
+              externalSizeOwner={leaf.origin?.kind === "phone"}
+              initialExternalCols={leaf.origin?.initialCols}
+              initialExternalRows={leaf.origin?.initialRows}
             />
             {!placeOffScreen && !workerTerminal && workerChip ? (
               <WorkerChip worker={workerChip} />

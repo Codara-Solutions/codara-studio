@@ -168,6 +168,26 @@ export function SparkIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function PhoneIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      aria-hidden
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.35"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3.5" y="1.25" width="7" height="11.5" rx="1.6" />
+      <path d="M5.5 3h3" />
+      <circle cx="7" cy="10.75" r=".55" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function ZoomPaneIcon({ size = 14, zoomed = false }: { size?: number; zoomed?: boolean }) {
   // Four corner brackets — reads as "expand to fill" when not zoomed and
   // "collapse back into split" when zoomed. The zoomed state pulls the

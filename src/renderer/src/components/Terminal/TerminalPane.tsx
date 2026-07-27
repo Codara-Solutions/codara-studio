@@ -68,6 +68,11 @@ interface Props {
   // canonical pane of a watch-only surface (the automation Workers grid). All
   // other canonical duties (raw-tail replay, runtime-state reports) are kept.
   inputBlocked?: boolean;
+  // Keep input/lifecycle ownership here while another client controls the
+  // PTY's cols/rows. Used by phone-origin Studio tabs.
+  externalSizeOwner?: boolean;
+  initialExternalCols?: number;
+  initialExternalRows?: number;
   // Raw-tail reattach mode. Opt-in, default off — only ChatPanel's backend
   // terminal sets it. Makes every re-attach behave like the first attach
   // (unmount → pty.detach, remount → replay main's raw pty tail) so a live Ink
@@ -121,6 +126,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       extraEnv,
       readOnly,
       inputBlocked,
+      externalSizeOwner,
+      initialExternalCols,
+      initialExternalRows,
       rawTailReattach,
       writeWhileHidden,
       showCodaraIntro = false,
@@ -196,6 +204,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       extraEnv,
       readOnly,
       inputBlocked,
+      externalSizeOwner,
+      initialExternalCols,
+      initialExternalRows,
       rawTailReattach,
       writeWhileHidden,
       onSearchReady,

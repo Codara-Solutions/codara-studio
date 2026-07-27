@@ -32,6 +32,7 @@ import type {
   TabId,
   TerminalAgentSession,
   TerminalLeaf,
+  TerminalLeafOrigin,
   TerminalLeafWorker,
   TerminalSplit,
   TerminalTab,
@@ -302,6 +303,7 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
   if (node.kind === "leaf") {
     delete node.worker;
     delete node.autorun;
+    delete node.origin;
     // Scrollback is durable here: when the restore preference is off,
     // persist() already stripped it, so whatever survived to hydration is
     // meant to replay.
@@ -372,10 +374,11 @@ function stripTransientTerminalState(tabs: Tab[], persistAgentState: boolean): T
 
 // Exported for tests (scripts/test-session-restore.cjs); only persist calls it
 // in production. `keepAgentState` mirrors the restoreAgentSessions preference:
-// worker chips, autorun, and the boot-once marker are ALWAYS process-local and
-// stripped, but the durable resume pointer + scrollback survive persist only
-// when the user opted into resume-on-relaunch. Off keeps the fresh-shell
-// contract: a relaunch restores layout and cwd, never process state.
+// worker chips, autorun, phone origin, and the boot-once marker are ALWAYS
+// process-local and stripped, but the durable resume pointer + scrollback
+// survive persist only when the user opted into resume-on-relaunch. Off keeps
+// the fresh-shell contract: a relaunch restores layout and cwd, never process
+// state.
 export function stripTransientPaneState(node: PaneNode, keepAgentState = false): PaneNode {
   if (node.kind === "leaf") {
     const session = keepAgentState ? validatedTerminalAgentSession(node.agentSession) : null;
@@ -387,6 +390,7 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
     if (
       !("worker" in node) &&
       !("autorun" in node) &&
+      !("origin" in node) &&
       !("bootResume" in node) &&
       !dropProcessState
     ) {
@@ -395,6 +399,7 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
     const {
       worker: _worker,
       autorun: _autorun,
+      origin: _origin,
       bootResume: _bootResume,
       ...rest
     } = node;
@@ -605,15 +610,116 @@ function initialTabsState(
 }
 
 // One workspace's terminal layout, surfaced so the workbench can keep every
-// visited workspace's TerminalStack mounted (hidden) instead of unmounting it
-// on a workspace switch. Unmounting is what disposed the live xterm and forced
-// the lossy gray-text snapshot/replay; keeping the stack mounted preserves the
-// real colored / alt-screen buffer and scrollback. See App's
-// terminalWorkspaceLayers.
+// visited (or bridge-initialized) workspace's TerminalStack mounted (hidden)
+// instead of unmounting it on a workspace switch. Unmounting is what disposed
+// the live xterm and forced the lossy gray-text snapshot/replay; keeping the
+// stack mounted preserves the real colored / alt-screen buffer and scrollback.
+// See App's terminalWorkspaceLayers.
 export interface WorkspaceTerminalLayout {
   workspaceId: string;
   tabs: Tab[];
   activeId: TabId | null;
+}
+
+export interface AgentTerminalTabOptions {
+  cwd?: string;
+  autorun?: string;
+  title?: string;
+  color?: string;
+  origin?: TerminalLeafOrigin;
+}
+
+// Pure helpers shared by the hook and the session-layout regression harness.
+// A bridge-created background layout starts deliberately empty: mounting a
+// never-visited workspace solely to host a phone pane must not also spawn the
+// workspace's unrelated default/restored shells. On the user's first visit,
+// mergeDeferredWorkspaceTerminalLayout folds those live bridge panes into the
+// normal cold layout while preserving its prior/default selection.
+export function appendAgentTerminalToWorkspaceLayout(
+  layout: WorkspaceTerminalLayout,
+  options?: AgentTerminalTabOptions,
+): {
+  layout: WorkspaceTerminalLayout;
+  tabId: TabId;
+  paneId: string;
+} {
+  const tabId = makeId("term");
+  const paneId = makeId("pane");
+  const tab: TerminalTab = {
+    id: tabId,
+    kind: "terminal",
+    title: options?.title?.trim() || "terminals",
+    root: leaf(paneId, options?.cwd, options?.autorun, options?.origin),
+    activePaneId: paneId,
+    ...(options?.origin?.kind === "phone"
+      ? {}
+      : { color: options?.color ?? "var(--agent-tab-accent)" }),
+  };
+  return {
+    layout: {
+      ...layout,
+      // Keep the frozen activeId untouched: bridge-created terminals never
+      // steal focus, including when their workspace is hidden.
+      tabs: normalizeTerminalTitles([...layout.tabs, tab]),
+    },
+    tabId,
+    paneId,
+  };
+}
+
+export function mergeDeferredWorkspaceTerminalLayout(
+  cold: WorkspaceTerminalLayout,
+  deferred: WorkspaceTerminalLayout,
+): WorkspaceTerminalLayout {
+  return {
+    workspaceId: cold.workspaceId,
+    tabs: normalizeTerminalTitles([...cold.tabs, ...deferred.tabs]),
+    activeId: cold.activeId,
+  };
+}
+
+export function upsertInactiveWorkspaceLayout(
+  current: ReadonlyArray<WorkspaceTerminalLayout>,
+  nextLayout: WorkspaceTerminalLayout,
+): ReadonlyArray<WorkspaceTerminalLayout> {
+  const index = current.findIndex(
+    (layout) => layout.workspaceId === nextLayout.workspaceId,
+  );
+  if (index < 0) return [...current, nextLayout];
+  const existing = current[index];
+  if (
+    existing.tabs === nextLayout.tabs &&
+    existing.activeId === nextLayout.activeId
+  ) {
+    return current;
+  }
+  const next = [...current];
+  next[index] = nextLayout;
+  return next;
+}
+
+// Bridge teardown is keyed by the tab that originally hosted a pane, but the
+// desktop user may move/detach that pane before main asks to destroy it. Prefer
+// the supplied tab when it still owns the pane, then locate the pane by its
+// stable PTY id across the rest of the workspace.
+export function terminalTabIdForPane(
+  tabs: ReadonlyArray<Tab>,
+  preferredTabId: TabId,
+  paneId: string,
+): TabId | null {
+  const preferred = tabs.find(
+    (tab): tab is TerminalTab =>
+      tab.id === preferredTabId &&
+      tab.kind === "terminal" &&
+      findLeaf(tab.root, paneId) !== null,
+  );
+  if (preferred) return preferred.id;
+  return (
+    tabs.find(
+      (tab): tab is TerminalTab =>
+        tab.kind === "terminal" && findLeaf(tab.root, paneId) !== null,
+    )?.id ?? null
+  );
 }
 
 export interface UseTabsApi {
@@ -623,7 +729,8 @@ export interface UseTabsApi {
   // Workspace id the current `tabs` array belongs to. Lags App's activeId by
   // one render during a workspace switch — see the note at the useMemo.
   tabsWorkspaceId: string | null;
-  // Frozen layouts for every visited workspace that is NOT currently active.
+  // Frozen layouts for every visited or bridge-initialized workspace that is
+  // NOT currently active.
   // The active workspace is driven by `tabs`/`activeId` above; these let the
   // workbench render a mounted-but-hidden TerminalStack per inactive workspace
   // so its panes (and the live PTYs behind them) survive a workspace switch.
@@ -648,32 +755,25 @@ export interface UseTabsApi {
     autorun?: string,
     options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
   ) => TabId;
-  // Create a terminal tab owned by a background agent (agent-socket
-  // terminal.create). It is tinted (color token stored on the tab) and NEVER
-  // focused — an agent must not yank the user off their current surface.
+  // Create a terminal tab owned by a bridge caller (agent-socket
+  // terminal.create or a trusted paired phone). Agent tabs are tinted; phone
+  // tabs carry an origin badge. Neither is EVER focused automatically.
   // Returns BOTH ids: the paneId is the PTY session id the agent then drives
   // via terminal.write / terminal.read.
-  newAgentTerminalTab: (options?: {
-    cwd?: string;
-    autorun?: string;
-    title?: string;
-    color?: string;
-  }) => { tabId: TabId; paneId: string };
+  newAgentTerminalTab: (
+    options?: AgentTerminalTabOptions,
+  ) => { tabId: TabId; paneId: string };
   // Cross-workspace variant of newAgentTerminalTab: mint the agent tab into a
   // BACKGROUND workspace's frozen layout so a run's terminal.create never lands
   // in whichever workspace is on screen. The hidden mounted stack picks the new
   // pane up and spawns its PTY, so the returned paneId still comes online for
-  // terminal.write/read. Returns null when the workspace has no live snapshot
-  // this session (nothing mounted to spawn the pane) — callers fall back.
+  // terminal.write/read. A never-visited target gets a minimal frozen layout
+  // containing only bridge-created panes; its regular restored/default tabs
+  // are merged in on the first real visit.
   newAgentTerminalTabInWorkspace: (
     workspaceId: string,
-    options?: {
-      cwd?: string;
-      autorun?: string;
-      title?: string;
-      color?: string;
-    },
-  ) => { tabId: TabId; paneId: string } | null;
+    options?: AgentTerminalTabOptions,
+  ) => { tabId: TabId; paneId: string };
   // Open ONE terminal tab whose panes are split into a grid — used when Cora
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
@@ -908,6 +1008,12 @@ export function useTabs(
     string,
     { scrollbackLineLimit: number; state: InitialTabsStateSnapshot }
   >());
+  // A background bridge request can be the first touch of a workspace this
+  // renderer session. Its hidden layout contains only the live bridge panes so
+  // mounting it does not eagerly spawn unrelated default/restored terminals.
+  // The first actual workspace visit consumes this marker and merges those
+  // panes into the normal cold layout.
+  const deferredColdWorkspaceIdsRef = useRef(new Set<string>());
   const tabsWorkspaceIdRef = useRef(workspaceId);
   if (tabsWorkspaceIdRef.current) {
     liveWorkspaceTabsRef.current.set(tabsWorkspaceIdRef.current, { tabs, activeId });
@@ -931,6 +1037,7 @@ export function useTabs(
       if (!validWorkspaceIds.has(workspaceId)) {
         liveWorkspaceTabsRef.current.delete(workspaceId);
         closedChatRunIdsByWorkspaceRef.current.delete(workspaceId);
+        deferredColdWorkspaceIdsRef.current.delete(workspaceId);
       }
     }
     setInactiveWorkspaceLayouts((prev) => {
@@ -1092,11 +1199,14 @@ export function useTabs(
       return filtered;
     });
     const live = workspaceId ? liveWorkspaceTabsRef.current.get(workspaceId) : null;
+    const hasDeferredColdLayout = workspaceId
+      ? deferredColdWorkspaceIdsRef.current.has(workspaceId)
+      : false;
     const preloaded = workspaceId
       ? preloadedWorkspaceTabsRef.current.get(workspaceId)
       : null;
     if (workspaceId && preloaded) preloadedWorkspaceTabsRef.current.delete(workspaceId);
-    const cold = live
+    const cold = live && !hasDeferredColdLayout
       ? null
       : preloaded?.scrollbackLineLimit === terminalScrollbackLineLimitRef.current
         ? preloaded.state
@@ -1105,7 +1215,22 @@ export function useTabs(
             defaultCwdRef.current,
             terminalScrollbackLineLimitRef.current,
           );
-    const next = live ?? cold!;
+    const next =
+      workspaceId && live && cold && hasDeferredColdLayout
+        ? mergeDeferredWorkspaceTerminalLayout(
+            { workspaceId, tabs: cold.tabs, activeId: cold.activeId },
+            { workspaceId, tabs: live.tabs, activeId: live.activeId },
+          )
+        : live ?? cold!;
+    if (workspaceId && hasDeferredColdLayout) {
+      deferredColdWorkspaceIdsRef.current.delete(workspaceId);
+      // Publish the merged layout before React's state update so a second
+      // bridge call arriving in the same turn composes with it.
+      liveWorkspaceTabsRef.current.set(workspaceId, {
+        tabs: next.tabs,
+        activeId: next.activeId,
+      });
+    }
     if (workspaceId && !closedChatRunIdsByWorkspaceRef.current.has(workspaceId)) {
       // First time entering this workspace this session: restore its persisted
       // closed-run set alongside the preloaded or freshly parsed layout.
@@ -1368,17 +1493,15 @@ export function useTabs(
   );
 
   const newAgentTerminalTab = useCallback(
-    (options?: {
-      cwd?: string;
-      autorun?: string;
-      title?: string;
-      color?: string;
-    }): { tabId: TabId; paneId: string } => {
+    (options?: AgentTerminalTabOptions): { tabId: TabId; paneId: string } => {
       const id = makeId("term");
       const paneId = makeId("pane");
-      const root = leaf(paneId, options?.cwd, options?.autorun);
+      const root = leaf(paneId, options?.cwd, options?.autorun, options?.origin);
       const title = options?.title?.trim() || "terminals";
-      const color = options?.color ?? "var(--agent-tab-accent)";
+      const color =
+        options?.origin?.kind === "phone"
+          ? undefined
+          : options?.color ?? "var(--agent-tab-accent)";
       setTabs((curr) => {
         const tab: TerminalTab = {
           id,
@@ -1386,7 +1509,7 @@ export function useTabs(
           title,
           root,
           activePaneId: paneId,
-          color,
+          ...(color ? { color } : {}),
         };
         return normalizeTerminalTitles([...curr, tab]);
       });
@@ -1404,46 +1527,31 @@ export function useTabs(
   const newAgentTerminalTabInWorkspace = useCallback(
     (
       targetWorkspaceId: string,
-      options?: {
-        cwd?: string;
-        autorun?: string;
-        title?: string;
-        color?: string;
-      },
-    ): { tabId: TabId; paneId: string } | null => {
+      options?: AgentTerminalTabOptions,
+    ): { tabId: TabId; paneId: string } => {
       if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
         return newAgentTerminalTab(options);
       }
-      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
-      if (!live) return null;
-      const id = makeId("term");
-      const paneId = makeId("pane");
-      const tab: TerminalTab = {
-        id,
-        kind: "terminal",
-        title: options?.title?.trim() || "terminals",
-        root: leaf(paneId, options?.cwd, options?.autorun),
-        activePaneId: paneId,
-        color: options?.color ?? "var(--agent-tab-accent)",
-      };
-      // The frozen activeId is deliberately untouched — an agent-spawned
-      // terminal never steals focus, not even inside its own hidden workspace.
-      const nextTabs = normalizeTerminalTitles([...live.tabs, tab]);
-      liveWorkspaceTabsRef.current.set(targetWorkspaceId, { ...live, tabs: nextTabs });
-      setInactiveWorkspaceLayouts((current) => {
-        const latest = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
-        if (!latest) return current;
-        let changed = false;
-        const next = current.map((layout) => {
-          if (layout.workspaceId !== targetWorkspaceId || layout.tabs === latest.tabs) {
-            return layout;
-          }
-          changed = true;
-          return { ...layout, tabs: latest.tabs };
-        });
-        return changed ? next : current;
+      let live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      if (!live) {
+        // Minimal live shell: only the bridge-created pane mounts now. Loading
+        // the workspace's persisted/default layout is deferred until the user
+        // actually enters it, avoiding surprise background PTYs.
+        live = { tabs: [], activeId: null };
+        deferredColdWorkspaceIdsRef.current.add(targetWorkspaceId);
+      }
+      const created = appendAgentTerminalToWorkspaceLayout(
+        { workspaceId: targetWorkspaceId, tabs: live.tabs, activeId: live.activeId },
+        options,
+      );
+      liveWorkspaceTabsRef.current.set(targetWorkspaceId, {
+        tabs: created.layout.tabs,
+        activeId: created.layout.activeId,
       });
-      return { tabId: id, paneId };
+      setInactiveWorkspaceLayouts((current) =>
+        upsertInactiveWorkspaceLayout(current, created.layout),
+      );
+      return { tabId: created.tabId, paneId: created.paneId };
     },
     [newAgentTerminalTab],
   );
@@ -1811,15 +1919,22 @@ export function useTabs(
       // child) reaps the conpty even if the React tree is still in the middle
       // of unmounting. Live spark workers are only detached — see
       // releaseTerminalPanePty.
+      const committedTabId =
+        terminalTabIdForPane(tabsRef.current, tabId, paneId) ?? tabId;
       const owner = tabsRef.current.find(
-        (t): t is TerminalTab => t.id === tabId && t.kind === "terminal",
+        (t): t is TerminalTab => t.id === committedTabId && t.kind === "terminal",
       );
       releaseTerminalPanePty(owner ? findLeaf(owner.root, paneId) : null, paneId);
       setTabs((curr) => {
+        // Resolve again inside the updater. If a move and teardown were queued
+        // in the same React batch, `curr` already contains the moved pane even
+        // though tabsRef still described its former tab above.
+        const targetTabId = terminalTabIdForPane(curr, tabId, paneId);
+        if (!targetTabId) return curr;
         const next: Tab[] = [];
         let dropped = false;
         for (const t of curr) {
-          if (t.id !== tabId || t.kind !== "terminal") {
+          if (t.id !== targetTabId || t.kind !== "terminal") {
             next.push(t);
             continue;
           }
@@ -1855,7 +1970,7 @@ export function useTabs(
         }
         if (dropped) {
           setActiveId((active) => {
-            if (active !== tabId) return active;
+            if (active !== targetTabId) return active;
             // Prefer a top-strip (non-run-owned) tab so closing a worker tab's
             // last pane doesn't strand the active id on a hidden worker/runs tab.
             const isRunOwned = (t: Tab) =>
@@ -1886,16 +2001,19 @@ export function useTabs(
       // Same best-effort PTY teardown as closeTerminalPane (dispose/detach is
       // idempotent for already-dead sessions).
       const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      const targetTabId = live
+        ? terminalTabIdForPane(live.tabs, tabId, paneId)
+        : null;
       const frozenTab = live?.tabs.find(
-        (t): t is TerminalTab => t.id === tabId && t.kind === "terminal",
+        (t): t is TerminalTab => t.id === targetTabId && t.kind === "terminal",
       );
       releaseTerminalPanePty(frozenTab ? findLeaf(frozenTab.root, paneId) : null, paneId);
-      if (!live) return;
+      if (!live || !targetTabId) return;
       let changed = false;
       let droppedTabId: TabId | null = null;
       const nextTabs: Tab[] = [];
       for (const t of live.tabs) {
-        if (t.id !== tabId || t.kind !== "terminal" || !findLeaf(t.root, paneId)) {
+        if (t.id !== targetTabId || t.kind !== "terminal" || !findLeaf(t.root, paneId)) {
           nextTabs.push(t);
           continue;
         }
@@ -2659,8 +2777,14 @@ export function useTabs(
       );
       const next = { ...live, tabs: nextTabs };
       liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
-      const closed = closedChatRunIdsByWorkspaceRef.current.get(targetWorkspaceId);
-      persist(targetWorkspaceId, nextTabs, next.activeId, limit, persistAgentStateRef.current, closed ? Array.from(closed) : undefined);
+      // A never-visited bridge-only layout is intentionally incomplete. Do not
+      // overwrite that workspace's saved/default layout with this minimal
+      // runtime shell during disconnect or quit; if the user visits, the
+      // switch effect first merges the two and clears the marker.
+      if (!deferredColdWorkspaceIdsRef.current.has(targetWorkspaceId)) {
+        const closed = closedChatRunIdsByWorkspaceRef.current.get(targetWorkspaceId);
+        persist(targetWorkspaceId, nextTabs, next.activeId, limit, persistAgentStateRef.current, closed ? Array.from(closed) : undefined);
+      }
       if (nextTabs !== live.tabs) {
         setInactiveWorkspaceLayouts((current) =>
           current.map((layout) =>
@@ -2704,15 +2828,17 @@ export function useTabs(
     for (const [workspace, layout] of liveWorkspaceTabsRef.current) {
       if (workspace === currentWorkspaceId) continue;
       const nextTabs = markTabAgentSessionsActive(layout.tabs, paneIds);
-      const closed = closedChatRunIdsByWorkspaceRef.current.get(workspace);
-      persist(
-        workspace,
-        nextTabs,
-        layout.activeId,
-        limit,
-        persistAgentStateRef.current,
-        closed ? Array.from(closed) : undefined,
-      );
+      if (!deferredColdWorkspaceIdsRef.current.has(workspace)) {
+        const closed = closedChatRunIdsByWorkspaceRef.current.get(workspace);
+        persist(
+          workspace,
+          nextTabs,
+          layout.activeId,
+          limit,
+          persistAgentStateRef.current,
+          closed ? Array.from(closed) : undefined,
+        );
+      }
       if (nextTabs !== layout.tabs) {
         inactiveChanged = true;
         liveWorkspaceTabsRef.current.set(workspace, { ...layout, tabs: nextTabs });

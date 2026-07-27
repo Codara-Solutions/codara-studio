@@ -1,4 +1,4 @@
-import type { PaneNode, TerminalLeaf, TerminalSplit } from "./types";
+import type { PaneNode, TerminalLeaf, TerminalLeafOrigin, TerminalSplit } from "./types";
 
 // Sequence of "a" / "b" choices describing how to walk the tree from root to
 // a specific subtree. Used by the recursive renderer to update the ratio of
@@ -10,8 +10,13 @@ export type PanePath = Array<"a" | "b">;
 // Kept separate from useTabs so the operations can be unit-tested without a
 // React harness, and so the React store stays focused on ids + persistence.
 
-export function leaf(paneId: string, cwd?: string, autorun?: string): TerminalLeaf {
-  return { kind: "leaf", paneId, cwd, autorun };
+export function leaf(
+  paneId: string,
+  cwd?: string,
+  autorun?: string,
+  origin?: TerminalLeafOrigin,
+): TerminalLeaf {
+  return { kind: "leaf", paneId, cwd, autorun, ...(origin ? { origin } : {}) };
 }
 
 export function findLeaf(node: PaneNode, paneId: string): TerminalLeaf | null {

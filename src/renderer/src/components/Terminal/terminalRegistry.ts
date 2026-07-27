@@ -6,6 +6,8 @@
 // here at mount and terminalRpc calls it. Mirrors Preview/registry.ts'
 // setOpenPreviewTabFn. Lives for the renderer process lifetime.
 
+import type { TerminalLeafOrigin } from "../../tabs/types";
+
 export interface CreateAgentTerminalInput {
   // Working directory for the new terminal. Undefined → the adapter defaults it
   // to the calling run's workspace cwd (below), else the active workspace cwd.
@@ -20,6 +22,9 @@ export interface CreateAgentTerminalInput {
   // of the active one. Absent for user-facing/non-run agents.
   workspaceId?: string;
   workspaceCwd?: string;
+  // Trusted device origin supplied by main. Phone-created terminals use this
+  // for a live tab badge and tooltip instead of the amber agent tint.
+  origin?: TerminalLeafOrigin;
 }
 
 export interface CreateAgentTerminalResult {
@@ -64,4 +69,50 @@ export function closeAgentTerminal(tabId: string): void {
   // No-op if unregistered — the caller is best-effort cleanup and must not throw
   // just because the renderer already tore the adapter down.
   closeAgentTerminalFn?.(tabId);
+}
+
+type ExternalTerminalSize = { cols: number; rows: number };
+type ExternalTerminalSizeHandler = (size: ExternalTerminalSize) => void;
+
+// Phone-origin PTYs are sized by the phone rather than the desktop container.
+// Main routes each authenticated terminal.resize through terminalRpc into this
+// tiny registry. Keeping the latest size lets a temporarily remounting pane
+// catch up before it receives another PTY byte.
+const externalTerminalSizes = new Map<string, ExternalTerminalSize>();
+const externalTerminalSizeHandlers = new Map<string, ExternalTerminalSizeHandler>();
+const MAX_EXTERNAL_TERMINAL_SIZES = 256;
+
+export function setExternalTerminalSize(
+  paneId: string,
+  cols: number,
+  rows: number,
+): void {
+  const size = { cols, rows };
+  externalTerminalSizes.delete(paneId);
+  externalTerminalSizes.set(paneId, size);
+  while (externalTerminalSizes.size > MAX_EXTERNAL_TERMINAL_SIZES) {
+    const oldest = externalTerminalSizes.keys().next().value;
+    if (!oldest) break;
+    externalTerminalSizes.delete(oldest);
+  }
+  externalTerminalSizeHandlers.get(paneId)?.(size);
+}
+
+export function subscribeExternalTerminalSize(
+  paneId: string,
+  handler: ExternalTerminalSizeHandler,
+): () => void {
+  externalTerminalSizeHandlers.set(paneId, handler);
+  const current = externalTerminalSizes.get(paneId);
+  if (current) handler(current);
+  return () => {
+    if (externalTerminalSizeHandlers.get(paneId) === handler) {
+      externalTerminalSizeHandlers.delete(paneId);
+    }
+  };
+}
+
+export function forgetExternalTerminalSize(paneId: string): void {
+  externalTerminalSizes.delete(paneId);
+  externalTerminalSizeHandlers.delete(paneId);
 }
