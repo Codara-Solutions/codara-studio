@@ -623,8 +623,10 @@ async function pruneDeadSparkEntries(
       // An entry that only ever held a dead command of ours goes away with it.
       if (survivors.length > 0) keep.push({ ...entry, hooks: survivors });
     }
-    // Empty arrays are kept: the user put the key there, and we are only here
-    // to remove commands that cannot run.
+    // An empty array the USER wrote stays: this pass repairs, it does not tidy.
+    // An empty array WE created by removing the last dead entry is our own
+    // litter, so it goes.
+    if (keep.length === 0 && entries.length > 0) continue;
     out[event] = keep;
   }
   return { hooks: out, removed };

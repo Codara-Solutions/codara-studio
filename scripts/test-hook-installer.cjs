@@ -893,6 +893,11 @@ async function main() {
         JSON.stringify(settings.hooks),
       );
       check(
+        "the rescue path leaves behind no empty event of its own making",
+        settings.hooks.PreToolUse === undefined,
+        JSON.stringify(settings.hooks.PreToolUse),
+      );
+      check(
         "the rescue path still removes the dead command",
         sparkCommands(settings).length === 0,
       );
