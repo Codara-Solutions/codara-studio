@@ -205,14 +205,18 @@ async function main() {
 
   // A minimal in-process duplex: write() parses server frames, push()
   // injects client bytes.
+  // `writeAccepts` models Node's Writable contract: set it false to make
+  // write() report backpressure, then call drain() to release it.
   function makeFakeStream() {
-    const handlers = { data: [], close: [], error: [] };
+    const handlers = { data: [], close: [], error: [], drain: [] };
     const outDecoder = new rpc.FrameDecoder();
     const outbox = [];
     return {
       outbox,
+      writeAccepts: true,
       write(buf) {
         for (const frame of outDecoder.push(buf)) outbox.push(frame);
+        return this.writeAccepts;
       },
       destroyed: false,
       destroy() {
@@ -225,6 +229,10 @@ async function main() {
       inject(buf) {
         for (const h of handlers.data) h(buf);
       },
+      drain() {
+        this.writeAccepts = true;
+        for (const h of handlers.drain) h();
+      },
     };
   }
 
@@ -236,11 +244,18 @@ async function main() {
       const terminal = {
         request,
         closed: false,
+        paused: false,
         written: [],
         write(data) {
           this.written.push(data);
         },
         resize() {},
+        pause() {
+          this.paused = true;
+        },
+        resume() {
+          this.paused = false;
+        },
         close() {
           this.closed = true;
         },
@@ -332,6 +347,43 @@ async function main() {
   stream2.inject(evil);
   check("oversized inbound frame destroys the session", stream2.destroyed === true);
   check("no reply is sent for a framing violation", stream2.outbox.length === 0);
+
+  /* ---- outbound backpressure (F5) --------------------------------------- */
+
+  const bpStream = makeFakeStream();
+  void new rpc.RpcSession(bpStream, services);
+  const bpRequest = (id, method, params) =>
+    bpStream.inject(rpc.encodeFrame({ id, method, params }));
+  bpRequest(1, "hello", { protocol: 0, device: services.device });
+  await flush();
+  bpRequest(2, "terminal.create", { workspaceId: "ws1", cols: 80, rows: 24 });
+  await flush();
+  const bpTerminal = madeTerminals[madeTerminals.length - 1];
+  check("a fresh terminal is not paused", bpTerminal.paused === false);
+
+  // The peer stops draining: the next write reports backpressure, which
+  // must stop the pty rather than let us buffer without limit.
+  bpStream.writeAccepts = false;
+  bpTerminal.request.onData("x".repeat(100));
+  check("backpressure pauses the pty", bpTerminal.paused === true);
+
+  // Past the cap, output is dropped instead of queued.
+  const beforeDrop = bpStream.outbox.length;
+  for (let i = 0; i < 20; i += 1) {
+    bpTerminal.request.onData("y".repeat(100_000));
+  }
+  const emitted = bpStream.outbox.length - beforeDrop;
+  check(
+    "queued output past the cap is dropped, not buffered",
+    emitted * 100_000 <= rpc.MAX_PENDING_EVENT_BYTES,
+    emitted,
+  );
+
+  bpStream.drain();
+  check("drain resumes the pty", bpTerminal.paused === false);
+  const afterDrain = bpStream.outbox.length;
+  bpTerminal.request.onData("z");
+  check("output flows again after drain", bpStream.outbox.length === afterDrain + 1);
 
   if (failures > 0) {
     console.error(`${failures} failure(s)`);
