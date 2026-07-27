@@ -8,11 +8,15 @@
 //
 //   1. The dev renderer origin. In `npm run dev` the renderer is served by the
 //      Vite dev server and loaded via process.env.ELECTRON_RENDERER_URL. Only
-//      an http origin whose hostname is exactly "localhost" or "127.0.0.1" and
-//      whose port matches that dev server URL is allowed. This is parsed with
-//      `new URL`, never with startsWith, so "http://localhost.attacker.example/"
-//      (a different hostname) and "http://localhost:9999/" (a different port)
-//      are both rejected.
+//      an http origin that matches that configured dev server URL by exact
+//      protocol + hostname + port is allowed. The dev URL is the developer's
+//      own configuration and only exists in unpackaged builds, so we trust the
+//      host it names, whatever it is: `vite --host` (0.0.0.0), a dev server on
+//      [::1], or a LAN IP all boot with their own origin allowed. localhost and
+//      127.0.0.1 are additionally treated as interchangeable aliases of each
+//      other. This is parsed with `new URL`, never with startsWith, so
+//      "http://localhost.attacker.example/" (a different hostname) and
+//      "http://localhost:9999/" (a different port) are both rejected.
 //
 //   2. The packaged renderer entry file. Production builds load the renderer
 //      via loadFile(index.html). Only that exact file, matched by resolved
@@ -41,10 +45,12 @@ export interface NavigationAllowlistConfig {
   rendererEntryPath: string;
 }
 
-// Loopback hostnames the dev server is allowed to bind. Anything else (a real
-// remote host, a "localhost.attacker.example" lookalike) is not loopback and is
-// rejected regardless of how the string is spelled.
-const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1"]);
+// localhost and 127.0.0.1 name the same loopback interface, so a dev server
+// configured on one is reachable via the other. When BOTH the configured dev
+// host and the navigation target are in this set they are treated as equal.
+// A "localhost.attacker.example" lookalike is not in this set (its parsed
+// hostname is the full string), so it never aliases into the dev origin.
+const LOOPBACK_ALIASES = new Set(["localhost", "127.0.0.1"]);
 
 // Resolve `..` segments and follow symlinks where the target exists. When the
 // path does not exist on disk (e.g. inside a unit test with a synthetic entry
@@ -98,9 +104,10 @@ export function isAllowedMainWindowUrl(
   }
 
   if (url.protocol === "http:") {
-    // http is only ever legitimate for the local dev server. https, ws, etc.
-    // are never allowed for the privileged window, so "https://localhost/" is
-    // rejected here by falling through.
+    // http is only ever legitimate for the local dev server, whose exact origin
+    // the developer configured via ELECTRON_RENDERER_URL (present only in
+    // unpackaged builds). https, ws, etc. are never allowed for the privileged
+    // window, so "https://localhost/" is rejected here by falling through.
     if (!config.devServerUrl) return false;
     let dev: URL;
     try {
@@ -109,16 +116,22 @@ export function isAllowedMainWindowUrl(
       return false;
     }
     if (dev.protocol !== "http:") return false;
-    // The dev server itself must be loopback, and the navigation target must be
-    // the same loopback hostname AND the same port. Hostname is compared for
-    // exact equality after the loopback membership check, so a lookalike host
-    // like "localhost.attacker.example" (parsed hostname is the full string) is
-    // rejected because it is not in the loopback set.
-    if (!LOOPBACK_HOSTNAMES.has(dev.hostname)) return false;
-    if (!LOOPBACK_HOSTNAMES.has(url.hostname)) return false;
-    if (url.hostname !== dev.hostname) return false;
+    // Same port is always required. "http://localhost:9999/" against a dev
+    // server on :5173 is rejected here.
     if (url.port !== dev.port) return false;
-    return true;
+    // Trust the configured dev origin for whatever host it names. Exact hostname
+    // equality against the developer's own config is the rule (not membership in
+    // a fixed loopback set), so `vite --host` (0.0.0.0), [::1], and LAN-IP dev
+    // servers all allow their own origin.
+    if (url.hostname === dev.hostname) return true;
+    // Additionally treat localhost and 127.0.0.1 as interchangeable, since they
+    // resolve to the same loopback and the dev server answers on both.
+    // "localhost.attacker.example" is not in this set (and its port would not
+    // match anyway), so it is still rejected.
+    if (LOOPBACK_ALIASES.has(url.hostname) && LOOPBACK_ALIASES.has(dev.hostname)) {
+      return true;
+    }
+    return false;
   }
 
   if (url.protocol === "file:") {
@@ -132,6 +145,16 @@ export function isAllowedMainWindowUrl(
     // already normalizes `..` segments, and canonicalPath resolves+realpaths
     // both sides, so a traversal like renderer/../../evil.html can never
     // resolve back to the entry file.
+    //
+    // KNOWN, EXOTIC LIMITATION: Electron's loadFile() formats the file: URL with
+    // the legacy url.format(), which does NOT percent-escape a literal "%" in
+    // the install path. fileURLToPath then decodes any "%NN" sequence, so an
+    // install directory containing a literal "%" (e.g. ".../codara%20studio/")
+    // can round-trip to a different path and fail this equality. The only
+    // consequence is the app's own renderer entry failing the allowlist on such
+    // a path (a fail-closed self-DoS for that one install, never a bypass). This
+    // is rare enough that it is documented rather than special-cased; if it ever
+    // matters, install to a "%"-free path.
     return isSameResolvedPath(filePath, config.rendererEntryPath);
   }
 

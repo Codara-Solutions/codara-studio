@@ -100,6 +100,44 @@ async function main() {
     mod.isAllowedMainWindowUrl(DEV_URL, { devServerUrl: null, rendererEntryPath }) === false,
   );
 
+  // ── Dev server on a non-loopback host (defect 5) ──────────────────────────
+  // `vite --host` binds 0.0.0.0; developers also run the dev server on [::1] or
+  // a LAN IP. The app's own origin (== the configured dev URL) must be allowed
+  // in each shape, or the app boots to a silently half-dead state (pty:spawn,
+  // state:save, fs mutators all denied). A DIFFERENT host on the same port is
+  // still rejected.
+  const ownOrigin = (devUrl, targetUrl) =>
+    mod.isAllowedMainWindowUrl(targetUrl, { devServerUrl: devUrl, rendererEntryPath });
+  check(
+    "accepts its own origin when the dev server binds 0.0.0.0 (vite --host)",
+    ownOrigin("http://0.0.0.0:5173/", "http://0.0.0.0:5173/index.html") === true,
+  );
+  check(
+    "accepts its own origin when the dev server is on [::1]",
+    ownOrigin("http://[::1]:5173/", "http://[::1]:5173/") === true,
+  );
+  check(
+    "accepts its own origin when the dev server is on a LAN IP",
+    ownOrigin("http://192.168.1.50:5173/", "http://192.168.1.50:5173/") === true,
+  );
+  check(
+    "rejects a different LAN host on the same port",
+    ownOrigin("http://192.168.1.50:5173/", "http://192.168.1.51:5173/") === false,
+  );
+  check(
+    "rejects localhost when the dev server binds 0.0.0.0 (0.0.0.0 is not a loopback alias)",
+    ownOrigin("http://0.0.0.0:5173/", "http://localhost:5173/") === false,
+  );
+  // localhost <-> 127.0.0.1 aliasing in both directions.
+  check(
+    "accepts 127.0.0.1 target when the dev server is spelled localhost",
+    ownOrigin("http://localhost:5173/", "http://127.0.0.1:5173/") === true,
+  );
+  check(
+    "accepts localhost target when the dev server is spelled 127.0.0.1",
+    ownOrigin("http://127.0.0.1:5173/", "http://localhost:5173/") === true,
+  );
+
   // ── file:// cases ─────────────────────────────────────────────────────────
   check("accepts the real renderer entry file", allowed(rendererEntryUrl) === true);
   check('rejects "file:///etc/passwd"', allowed("file:///etc/passwd") === false);

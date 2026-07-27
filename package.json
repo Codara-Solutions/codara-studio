@@ -60,6 +60,7 @@
     "test:chat-timeline": "node scripts/test-chat-timeline.cjs",
     "test:run-graph-layout": "node scripts/test-run-graph-layout.cjs",
     "test:pane-format": "node scripts/test-pane-format.cjs",
+    "test:navigation-allowlist": "node scripts/test-navigation-allowlist.cjs",
     "test:remote-access": "node scripts/test-remote-access.cjs",
     "test:remote-access-e2e": "node scripts/remote-access-e2e.mjs",
     "test:remote-access-hostile": "node --expose-gc scripts/test-remote-access-hostile.mjs"
