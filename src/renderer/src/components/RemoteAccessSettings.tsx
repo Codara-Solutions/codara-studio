@@ -204,8 +204,12 @@ export default function RemoteAccessSettings() {
       {pairingOpen ? (
         <PairingModal
           onClose={() => {
+            // Cancelling the pairing window is the modal's own unmount
+            // cleanup, not this callback: the whole Settings dialog can be
+            // dismissed (scrim, footer, workspace switch) without this ever
+            // running, and a pairing window left open would keep accepting
+            // strangers for the rest of its TTL with no UI on screen.
             setPairingOpen(false);
-            void window.spark.remoteAccess.cancelPairing().catch(() => undefined);
             void refreshDevices();
           }}
         />
@@ -215,8 +219,10 @@ export default function RemoteAccessSettings() {
 }
 
 // The pairing modal owns one pairing window for its whole lifetime: it
-// starts one on mount and cancels it on unmount, so closing the modal
-// always closes the listener's stranger window too.
+// starts one on mount and cancels it in the mount effect's CLEANUP, so
+// every way of dismissing it (including ones that never call onClose, like
+// the Settings dialog closing underneath it) closes the listener's
+// stranger window too.
 function PairingModal({ onClose }: { onClose: () => void }) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<RemotePairingState>({ phase: "idle" });
@@ -248,6 +254,11 @@ function PairingModal({ onClose }: { onClose: () => void }) {
     })();
     return () => {
       cancelled = true;
+      // Any unmount closes the pairing window, however the modal went away
+      // (Escape, scrim, the whole Settings dialog closing, a workspace
+      // switch). Harmless when pairing already succeeded: the main process
+      // closed the window itself at that point.
+      void window.spark.remoteAccess.cancelPairing().catch(() => undefined);
     };
   }, []);
 
