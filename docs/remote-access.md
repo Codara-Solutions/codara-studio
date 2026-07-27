@@ -370,10 +370,44 @@ implies:
 
 ### RPC v0 deviations from the mobile types
 
-None in the payload shapes: `hello`, `ping`, `workspaces.list`,
-`terminal.create/write/resize/close`, and the pushed `terminal.data` event
-all match `codara-mobile/src/lib/remote/types.ts` field for field. Framing
-details the mobile types deliberately leave open, and that the studio now
+No payload mismatch. Audited field by field (names, types, optionality) in
+both directions against `codara-mobile/src/lib/remote/types.ts` and the
+worklet's real encode/decode path in `worklet/lib/session.js`, at mobile
+commit 297680a: `hello`, `ping`, `workspaces.list`,
+`terminal.create/write/resize/close`, the pushed `terminal.data` event, and
+the request/response/error envelopes all agree, including the seven error
+codes. Nothing either side sends is misparsed by the other.
+
+"Field for field" would still overclaim, because agreement on the shapes is
+not the same as both sides using them. Four gaps, none of which breaks
+interop today:
+
+- **`hello.device` is sent and ignored.** The phone reports
+  `{ publicKey, name, role, version }`; `handleHello` reads only
+  `params.protocol`. Discarding it is the right instinct, since the
+  authenticated identity comes from the Noise handshake and a self-reported
+  key is worth nothing. The cost is that the paired-device name in Settings is
+  frozen at whatever the phone called itself during PAIRING and never follows a
+  later rename, and the phone's app version is never recorded anywhere.
+- **Three `RemoteWorkspace` fields are declared and never sent.** `branch`,
+  `sessionCount` and `lastActiveAt` are optional in the shared type, and
+  `listWorkspacesForRemote` returns exactly `{ id, name, path }`. The phone is
+  already built to render a branch chip when the field is present, so that
+  affordance is currently unreachable.
+- **`ping` and `terminal.resize` are unexercised.** Both sides implement them
+  and neither the app nor the worklet ever calls either one. The phone opens
+  terminals at a hardcoded 80x24 and never resizes, so `terminal.resize` has
+  no call site at all. `scripts/remote-test-client.mjs` is the only thing that
+  sends `ping`.
+- **The dimension constraint lives only on this side.** `normalizeDimension`
+  requires an INTEGER between 2 and 1000 and answers `invalid-params`
+  otherwise; the shared type says only `cols: number`. The hardcoded 80x24
+  cannot trip it, but a phone that later computes columns from a measured
+  layout width would hand us a float and be refused, and nothing in the shared
+  types says so. Worth encoding in the mobile types, or relaxing here, before
+  the phone gains a real resize.
+
+Framing details the mobile types deliberately leave open, and that the studio
 fixes:
 
 - 4-byte big-endian unsigned length prefix, then that many bytes of UTF-8
