@@ -389,19 +389,40 @@ export function broadcastPreferencesChanged<K extends PrefKey>(
 }
 
 // ── Privileged-channel sender gating ────────────────────────────────────────
-// Some IPC channels can enable remote access, spawn processes, widen the
-// filesystem sandbox, write arbitrary paths, or mutate preferences. Those must
-// only ever be driven by the app's own trusted renderer, never by
-// attacker-controlled content that somehow became a frame of a window (or by a
-// preview <webview> guest). requireTrustedSender enforces three things:
-//   1. The sender is a real top-level BrowserWindow, not a <webview> guest
-//      (guests return null from fromWebContents).
-//   2. The sending frame is the window's top frame, not a subframe.
-//   3. The frame's current URL passes the SAME allowlist the main window's
-//      navigation guard uses (dev renderer origin or the packaged renderer
-//      entry file).
+// Almost every IPC channel here can spawn processes, run arbitrary shell
+// commands (pty:write / pty:inject), enable remote access, widen the filesystem
+// sandbox, write arbitrary paths, drive git in an arbitrary cwd, or mutate
+// preferences. Those must only ever be driven by the app's own trusted
+// renderer, never by attacker-controlled content that somehow became a frame of
+// a window (or by a preview <webview> guest).
+//
+// The gate is DEFAULT-ON: registrations go through `handle()` below, which runs
+// requireTrustedSender before the listener. The rare channel that must accept
+// any sender uses `handleOpen()` with a comment justifying it (there are none
+// today: only one BrowserWindow exists and the webview inspector preload
+// exposes no ipcRenderer.invoke, so no non-main-window sender can reach these
+// channels at all).
+//
+// requireTrustedSender proves the sender is the main window's CURRENT main
+// frame, and that the document living in that frame arrived by a COMMITTED
+// navigation the allowlist accepts:
+//   1. Frame identity: event.senderFrame must be the exact
+//      mainWindow.webContents.mainFrame object (re-read per call). This rejects
+//      subframes (a different RenderFrame) and <webview> guests (a different
+//      webContents' main frame) robustly, without relying on a URL string.
+//   2. Trusted document: a boolean maintained from `did-navigate` /
+//      `did-frame-navigate` (see registerTrustedMainWindow). It is recomputed
+//      from the COMMITTED url via isAllowedMainWindowUrl, and deliberately NOT
+//      updated on `did-navigate-in-page`, so history.pushState / location.hash
+//      cannot forge it: a rewritten in-page URL fires no committed-navigation
+//      event and leaves the flag untouched.
+// We deliberately do NOT read event.senderFrame.url: a frame's URL is
+// renderer-writable state (pushState rewrites it with no navigation), so it is
+// not an identity. The navigation guard in index.ts keeps using the predicate
+// for what it is good at (deciding which URLs may commit); this gate keys off
+// the RESULT of that guard, not a live URL read.
 // A failing check throws, which the renderer sees as a rejected promise, and
-// logs a single line with no URL, path, or key material.
+// logs a single line with a short reason code and no URL, path, or key material.
 function mainWindowAllowlistConfig(): ReturnType<typeof resolveMainWindowAllowlistConfig> {
   return resolveMainWindowAllowlistConfig({
     isPackaged: app.isPackaged,
@@ -410,31 +431,132 @@ function mainWindowAllowlistConfig(): ReturnType<typeof resolveMainWindowAllowli
   });
 }
 
-function requireTrustedSender(event: Electron.IpcMainInvokeEvent, channel: string): void {
-  const deny = (reason: string): never => {
-    // Deliberately no URL/path in the log line: a file:// sender URL can carry
-    // a user's home path, and we never want that in the logs.
-    logMain("security", `blocked privileged channel ${channel} from untrusted sender (${reason})`);
-    throw new Error(`Blocked: ${channel} is not available to this sender.`);
+// The privileged main window and whether its currently-committed main-frame
+// document passed the allowlist. Both start empty and fail closed: until the
+// first committed navigation is evaluated, no gated channel is trusted.
+let trustedWindow: BrowserWindow | null = null;
+let trustedDocumentCommitted = false;
+
+// Wire the trust tracker to a freshly-created main window. Called from
+// index.ts createWindow() immediately after `new BrowserWindow(...)` and BEFORE
+// the initial loadURL/loadFile, so the very first committed navigation (which
+// fires no will-navigate but DOES fire did-navigate) is evaluated. A renderer
+// can only run its preload/scripts, and therefore only send its first
+// ipcRenderer.invoke, AFTER the document commits, so did-navigate (emitted
+// synchronously in the main process at commit) is always processed before the
+// first gated invoke: the fail-closed initial state cannot deadlock legitimate
+// startup IPC.
+export function registerTrustedMainWindow(win: BrowserWindow): void {
+  trustedWindow = win;
+  trustedDocumentCommitted = false;
+  const config = mainWindowAllowlistConfig();
+  const wc = win.webContents;
+  const evaluateCommit = (url: string, isMainFrame: boolean): void => {
+    // A stale listener from a previous window must never move the global flag
+    // for the current one. All current teardown paths destroy the old window
+    // first, so this is latent, but the guard closes it permanently.
+    if (trustedWindow !== win) return;
+    // Only the top frame's committed document decides trust; subframe commits
+    // never move it.
+    if (!isMainFrame) return;
+    trustedDocumentCommitted = isAllowedMainWindowUrl(url, config);
   };
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win || win.isDestroyed()) deny("not-a-window");
-  const frame = event.senderFrame;
-  if (!frame) deny("no-frame");
-  // Reject subframe senders: only the window's own top frame is trusted.
-  if (frame!.parent !== null) deny("subframe");
-  if (!isAllowedMainWindowUrl(frame!.url, mainWindowAllowlistConfig())) deny("url-not-allowlisted");
+  // did-navigate is the main-frame committed-navigation signal (initial load,
+  // reload, and crash-recovery reload all fire it). did-frame-navigate covers
+  // every frame; we act on it only for the main frame. did-navigate-in-page is
+  // intentionally NOT observed: an in-page URL rewrite (pushState / hash) must
+  // not change trust.
+  wc.on("did-navigate", (_e, url) => evaluateCommit(url, true));
+  wc.on("did-frame-navigate", (_e, url, _httpResponseCode, _httpStatusText, isMainFrame) =>
+    evaluateCommit(url, isMainFrame),
+  );
+  wc.on("destroyed", () => {
+    if (trustedWindow === win) {
+      trustedWindow = null;
+      trustedDocumentCommitted = false;
+    }
+  });
 }
 
+// Shared core for both the invoke gate (which throws) and the ipcMain.on gate
+// (which must NOT throw: an uncaught throw inside an 'on' handler crashes the
+// main process, whereas invoke handlers turn a throw into a rejected promise).
+// Returns a short reason code when the sender is not trusted, or null when it
+// is. Reason codes never carry a URL, path, or key: they only distinguish
+// "wrong frame" from "right frame, untrusted document" so a real self-DoS (e.g.
+// an accidental router that starts committing out-of-allowlist URLs) is
+// diagnosable without leaking user data.
+function untrustedSenderReason(
+  event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent,
+): string | null {
+  const win = trustedWindow;
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return "no-window";
+  // Re-read mainFrame per call: a cross-document navigation swaps the frame
+  // object, and we must compare against the CURRENT one, not a captured handle.
+  const mainFrame = win.webContents.mainFrame;
+  const frame = event.senderFrame;
+  if (!frame || frame !== mainFrame) return "not-main-frame";
+  if (!trustedDocumentCommitted) return "untrusted-document";
+  return null;
+}
+
+function requireTrustedSender(event: Electron.IpcMainInvokeEvent, channel: string): void {
+  const reason = untrustedSenderReason(event);
+  if (reason) {
+    logMain("security", `blocked privileged channel ${channel} from untrusted sender (${reason})`);
+    throw new Error(`Blocked: ${channel} is not available to this sender.`);
+  }
+}
+
+// The ipcMain.on counterpart: logs and returns false (never throws) so callers
+// can early-return. Used to gate the handful of fire-and-forget 'on' channels.
+function isTrustedOnSender(event: Electron.IpcMainEvent, channel: string): boolean {
+  const reason = untrustedSenderReason(event);
+  if (reason) {
+    logMain("security", `blocked privileged channel ${channel} from untrusted sender (${reason})`);
+    return false;
+  }
+  return true;
+}
+
+// Mirror Electron's own ipcMain.handle listener signature exactly (its args are
+// `...args: any[]`), so every existing typed listener stays assignable through
+// the wrapper without widening or casting at 200 call sites.
+type InvokeListener = Parameters<typeof ipcMain.handle>[1];
+
+// Gate-by-default registration. Every channel registered through `handle`
+// requires the trusted main-window sender BEFORE its listener runs. This is the
+// only registration path used in registerIpc, so a newly-added channel cannot
+// silently land ungated (see scripts/test-ipc-gate-default.cjs, which fails the
+// build if a raw ipcMain.handle appears in this file).
+function handle(channel: string, listener: InvokeListener): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    requireTrustedSender(event, channel);
+    return listener(event, ...args);
+  });
+}
+
+// Explicit, commented opt-out: NOT gated, for the (currently empty) set of
+// channels that must accept a non-main-window sender. Kept as a distinct,
+// greppable entry point so every ungated channel is auditable at a glance and
+// the gate-by-default test can enumerate the opt-outs. If you reach for this,
+// justify it in a comment at the call site. `void handleOpen` below marks it
+// used while the opt-out set is empty, so it stays available without a lint
+// error.
+function handleOpen(channel: string, listener: InvokeListener): void {
+  ipcMain.handle(channel, listener);
+}
+void handleOpen;
+
 export function registerIpc(): void {
-  ipcMain.handle("state:load", async (): Promise<AppState> => {
+  handle("state:load", async (): Promise<AppState> => {
     return loadState();
   });
 
-  ipcMain.handle("state:save", async (event, state: AppState): Promise<void> => {
+  handle("state:save", async (event, state: AppState): Promise<void> => {
     // Persisting workspaces re-seeds the fs sandbox allowlist (below), so this
-    // channel can widen readable roots. Gate it to the trusted renderer.
-    requireTrustedSender(event, "state:save");
+    // channel can widen readable roots. It is gated to the trusted renderer by
+    // default via handle() (see the sender-gating section above).
     await saveState(state);
     // Refresh the fs sandbox allowlist whenever workspaces change. The
     // renderer also pushes via ui:setAllowedRoots, but updating here means a
@@ -446,57 +568,57 @@ export function registerIpc(): void {
     setAllowedRoots(roots);
   });
 
-  ipcMain.handle("settings:load", async (): Promise<AppSettings> => {
+  handle("settings:load", async (): Promise<AppSettings> => {
     return loadSettings();
   });
 
-  ipcMain.handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
+  handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
     return saveSettings(settings);
   });
 
-  ipcMain.handle("pi-subscriptions:status", async () => {
+  handle("pi-subscriptions:status", async () => {
     const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
     return inspectPiSubscriptions();
   });
-  ipcMain.handle("pi-subscriptions:connect", async (event, input?: { provider?: unknown }) => {
+  handle("pi-subscriptions:connect", async (event, input?: { provider?: unknown }) => {
     const { startPiSubscriptionLogin } = await getPiSubscriptionAuth();
     return startPiSubscriptionLogin(input?.provider, event.sender);
   });
-  ipcMain.handle(
+  handle(
     "pi-subscriptions:respond",
     async (event, input?: { requestId?: unknown; promptId?: unknown; value?: unknown }) => {
       const { answerPiSubscriptionPrompt } = await getPiSubscriptionAuth();
       answerPiSubscriptionPrompt(input ?? {}, event.sender);
     },
   );
-  ipcMain.handle("pi-subscriptions:cancel", async (event, input?: { requestId?: unknown }) => {
+  handle("pi-subscriptions:cancel", async (event, input?: { requestId?: unknown }) => {
     const { cancelPiSubscriptionLogin } = await getPiSubscriptionAuth();
     cancelPiSubscriptionLogin(input?.requestId, event.sender);
   });
-  ipcMain.handle("pi-subscriptions:disconnect", async (_event, input?: { provider?: unknown }) => {
+  handle("pi-subscriptions:disconnect", async (_event, input?: { provider?: unknown }) => {
     const { disconnectPiSubscription } = await getPiSubscriptionAuth();
     return disconnectPiSubscription(input?.provider);
   });
-  ipcMain.handle("pi-runtime:install", async (event) => {
+  handle("pi-runtime:install", async (event) => {
     const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();
     return installPiRuntimeForWindow(event.sender);
   });
-  ipcMain.handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
+  handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
     const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
     return inspectPiSubscriptionUsage(input?.force === true);
   });
-  ipcMain.handle("pi-models:catalog", async (_event, input?: { force?: unknown }) => {
+  handle("pi-models:catalog", async (_event, input?: { force?: unknown }) => {
     const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
     return inspectPiModelCatalog(input?.force === true);
   });
 
-  ipcMain.handle(
+  handle(
     "agents:runtimes",
     async (_e, input?: { force?: boolean }) => {
       return detectAgentRuntimes(Boolean(input?.force));
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:sync",
     async (_e, input?: { cwd?: string | null }) => {
       const { syncAgentAssets } = await getAgentSync();
@@ -522,42 +644,42 @@ export function registerIpc(): void {
       return result;
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:assets",
     async (_e, input?: { cwd?: string | null }) => {
       const { listAgentAssets } = await getAgentSync();
       return listAgentAssets({ cwd: input?.cwd ?? null, settings: await loadSettings() });
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:deleteAsset",
     async (_e, input: { id: string }) => {
       const { deleteAgentAsset } = await getAgentSync();
       return deleteAgentAsset({ id: input.id });
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:installAsset",
     async (_e, input: { id: string; target: "claude" | "codex" }) => {
       const { installAgentAssetToRuntime } = await getAgentSync();
       return installAgentAssetToRuntime({ id: input.id, target: input.target });
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:mcpTargets",
     async (_e, input?: { cwd?: string | null }) => {
       const { listMcpWriteTargets } = await getAgentSync();
       return listMcpWriteTargets({ cwd: input?.cwd ?? null });
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:mcpDetail",
     async (_e, input: { id: string }) => {
       const { readMcpServerDetail } = await getAgentSync();
       return readMcpServerDetail({ id: input.id });
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:saveMcpServer",
     async (
       _e,
@@ -577,7 +699,7 @@ export function registerIpc(): void {
       });
     },
   );
-  ipcMain.handle("agents:builtins", async () => {
+  handle("agents:builtins", async () => {
     const [{ getSparkBuiltinStatus }, runtimes, settings] = await Promise.all([
       getMcpInstaller(),
       detectAgentRuntimes(false),
@@ -591,14 +713,14 @@ export function registerIpc(): void {
       autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
   });
-  ipcMain.handle(
+  handle(
     "agents:installBuiltin",
     async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
       const { installSparkBuiltin } = await getMcpInstaller();
       return installSparkBuiltin(input.id, input.runtime);
     },
   );
-  ipcMain.handle(
+  handle(
     "agents:uninstallBuiltin",
     async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
       const { uninstallSparkBuiltin } = await getMcpInstaller();
@@ -606,17 +728,16 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("preferences:load", async (): Promise<AppPreferences> => {
+  handle("preferences:load", async (): Promise<AppPreferences> => {
     return loadPreferences();
   });
 
-  ipcMain.handle(
+  handle(
     "preferences:set",
     async <K extends PrefKey>(
       event: Electron.IpcMainInvokeEvent,
       args: { key: K; value: AppPreferences[K] },
     ): Promise<AppPreferences> => {
-      requireTrustedSender(event, "preferences:set");
       const next = await setPreference(args.key, args.value);
       broadcastPreferencesChanged({ key: args.key, value: next[args.key] });
       // Reflect keepRunningInBackground changes in the tray immediately so the
@@ -638,14 +759,14 @@ export function registerIpc(): void {
   // user edits them in the editor, so these three channels only report on them
   // and toggle/clear a whole tier. Every one resolves to the fresh status PAIR,
   // including the mutations, so the Capability Center never has to re-read.
-  ipcMain.handle(
+  handle(
     "memory:get",
     async (_e, input?: MemoryStatusInput): Promise<CoraMemoryStatus> => {
       return readMemoryStatus(input?.workspaceId ?? null);
     },
   );
 
-  ipcMain.handle(
+  handle(
     "memory:setEnabled",
     async (_e, input: MemorySetEnabledInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
@@ -655,7 +776,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "memory:clear",
     async (_e, input: MemoryClearInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
@@ -669,27 +790,27 @@ export function registerIpc(): void {
 
   // Inline-AI editor autocomplete proxy. Renderer-side fetch to OpenRouter
   // hits CORS in dev; routing through main bypasses that.
-  ipcMain.handle(
+  handle(
     "inline-ai:complete",
     async (_e, req: InlineAiCompletionRequest): Promise<InlineAiCompletionResponse> => {
       const { runInlineAiCompletion } = await getInlineAi();
       return runInlineAiCompletion(req);
     },
   );
-  ipcMain.handle("inline-ai:abort", async (_e, requestId: string): Promise<void> => {
+  handle("inline-ai:abort", async (_e, requestId: string): Promise<void> => {
     const { abortInlineAiCompletion } = await getInlineAi();
     abortInlineAiCompletion(requestId);
   });
 
-  ipcMain.handle("shells:list", async (): Promise<ShellInfo[]> => {
+  handle("shells:list", async (): Promise<ShellInfo[]> => {
     return listShells();
   });
 
-  ipcMain.handle("shells:default", async (): Promise<ShellInfo | null> => {
+  handle("shells:default", async (): Promise<ShellInfo | null> => {
     return defaultShell();
   });
 
-  ipcMain.handle("shells:integratedDefault", async (): Promise<ShellInfo> => {
+  handle("shells:integratedDefault", async (): Promise<ShellInfo> => {
     // Materializes the bundled OSC 7/133/633/8888 shell-integration scripts
     // into ~/.cache/spark/shell-integration/ and returns a ShellInfo whose
     // args/env wire the shell to dot-source them on startup. Used by the
@@ -706,7 +827,7 @@ export function registerIpc(): void {
     };
   });
 
-  ipcMain.handle("dialog:openDirectory", async (e, defaultPath?: string): Promise<string | null> => {
+  handle("dialog:openDirectory", async (e, defaultPath?: string): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const result = await dialog.showOpenDialog(win!, {
       properties: ["openDirectory", "createDirectory"],
@@ -716,7 +837,7 @@ export function registerIpc(): void {
     return result.filePaths[0];
   });
 
-  ipcMain.handle("dialog:openImages", async (e, defaultPath?: string): Promise<string[]> => {
+  handle("dialog:openImages", async (e, defaultPath?: string): Promise<string[]> => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const result = await dialog.showOpenDialog(win!, {
       properties: ["openFile", "multiSelections"],
@@ -732,7 +853,7 @@ export function registerIpc(): void {
     return result.filePaths;
   });
 
-  ipcMain.handle(
+  handle(
     "dialog:exportWhiteboard",
     async (e, input: ExportCoraWhiteboardFileInput): Promise<string | null> => {
       const win = BrowserWindow.fromWebContents(e.sender);
@@ -752,7 +873,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "dialog:importWhiteboard",
     async (e, defaultPath?: string): Promise<ImportedCoraWhiteboardFile | null> => {
       const win = BrowserWindow.fromWebContents(e.sender);
@@ -778,7 +899,7 @@ export function registerIpc(): void {
   // renderer-produced payload (board SVG/PNG images today). One narrow channel
   // instead of one IPC surface per format; the extension is forced onto the
   // chosen name exactly like dialog:exportWhiteboard does for .coraboard.
-  ipcMain.handle(
+  handle(
     "dialog:exportFile",
     async (e, input: ExportFileDialogInput): Promise<string | null> => {
       const win = BrowserWindow.fromWebContents(e.sender);
@@ -815,7 +936,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "attachments:savePastedImage",
     async (_e, input: { dataUrl?: unknown; name?: unknown }): Promise<string> => {
       const parsed = parsePastedImageDataUrl(input?.dataUrl);
@@ -839,7 +960,7 @@ export function registerIpc(): void {
   // and lets Claude Code use its native image-read tool on the file. Inputs
   // are validated as a `data:image/png;base64,...` URL; everything else is
   // rejected so a compromised webview can't drop arbitrary bytes on disk.
-  ipcMain.handle(
+  handle(
     "drawing:save",
     async (_e, input: { dataUrl?: unknown }): Promise<string> => {
       const value = input?.dataUrl;
@@ -864,22 +985,22 @@ export function registerIpc(): void {
   // create/delete handlers further down are intentionally NOT gated — they
   // have a different attack surface and broader internal use; future work can
   // extend the sandbox to those if needed.
-  ipcMain.handle("fs:list", async (_e, dir: string) => {
+  handle("fs:list", async (_e, dir: string) => {
     assertAllowedReadPath(dir);
     return listDir(dir);
   });
 
-  ipcMain.handle("fs:listFiles", async (_e, root: string): Promise<FileListResult> => {
+  handle("fs:listFiles", async (_e, root: string): Promise<FileListResult> => {
     assertAllowedReadPath(root);
     return listFiles(root);
   });
 
-  ipcMain.handle("fs:readText", async (_e, path: string): Promise<FsFileContent> => {
+  handle("fs:readText", async (_e, path: string): Promise<FsFileContent> => {
     assertAllowedReadPath(path);
     return readTextFile(path);
   });
 
-  ipcMain.handle("fs:readEx", async (_e, path: string): Promise<FsReadResult> => {
+  handle("fs:readEx", async (_e, path: string): Promise<FsReadResult> => {
     assertAllowedReadPath(path);
     return readFileEx(path);
   });
@@ -889,7 +1010,7 @@ export function registerIpc(): void {
   // tracked cwd), then checks via fs.stat. Sandboxed against the same
   // allow-list as the other read primitives so a hostile pty can't make the
   // renderer probe arbitrary disk locations.
-  ipcMain.handle(
+  handle(
     "fs:pathExists",
     async (
       _e,
@@ -921,12 +1042,12 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
+  handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
     assertAllowedReadPath(root);
     return listMarkdownFiles(root);
   });
 
-  ipcMain.handle(
+  handle(
     "fs:statFile",
     async (_e, path: string): Promise<{ size: number; mtimeMs: number }> => {
       assertAllowedReadPath(path);
@@ -934,21 +1055,20 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("fs:readFileBytes", async (_e, path: string): Promise<Uint8Array> => {
+  handle("fs:readFileBytes", async (_e, path: string): Promise<Uint8Array> => {
     assertAllowedReadPath(path);
     return readFileBytes(path);
   });
 
-  ipcMain.handle(
+  handle(
     "fs:writeText",
     async (
       event,
       args: { path: string; content: string; expectedMtimeMs?: number },
     ): Promise<FsWriteResult> => {
       // Write/create/delete/rename/import/move take arbitrary destination paths
-      // and are intentionally NOT read-sandboxed, so gate them to the trusted
-      // renderer instead.
-      requireTrustedSender(event, "fs:writeText");
+      // and are intentionally NOT read-sandboxed; they rely on the default-on
+      // sender gate (handle()) to keep untrusted content out instead.
       return writeTextFile(
         args.path,
         args.content,
@@ -957,23 +1077,19 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("fs:renameFile", async (event, args: RenameFileInput): Promise<FsEntry> => {
-    requireTrustedSender(event, "fs:renameFile");
+  handle("fs:renameFile", async (event, args: RenameFileInput): Promise<FsEntry> => {
     return renameFile(args.path, args.newName);
   });
 
-  ipcMain.handle("fs:deleteFile", async (event, path: string): Promise<void> => {
-    requireTrustedSender(event, "fs:deleteFile");
+  handle("fs:deleteFile", async (event, path: string): Promise<void> => {
     await deleteFile(path);
   });
 
-  ipcMain.handle("fs:createFile", async (event, args: CreateEntryInput): Promise<FsEntry> => {
-    requireTrustedSender(event, "fs:createFile");
+  handle("fs:createFile", async (event, args: CreateEntryInput): Promise<FsEntry> => {
     return createFile(args.parentPath, args.name);
   });
 
-  ipcMain.handle("fs:createFolder", async (event, args: CreateEntryInput): Promise<FsEntry> => {
-    requireTrustedSender(event, "fs:createFolder");
+  handle("fs:createFolder", async (event, args: CreateEntryInput): Promise<FsEntry> => {
     return createFolder(args.parentPath, args.name);
   });
 
@@ -981,10 +1097,9 @@ export function registerIpc(): void {
   // is gated by the read sandbox so a hostile renderer can't make Codara write
   // a copy outside the open workspaces; the sources can live anywhere on disk
   // (that's the whole point of importing them in).
-  ipcMain.handle(
+  handle(
     "fs:importEntries",
     async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
-      requireTrustedSender(event, "fs:importEntries");
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing import destination.");
       assertAllowedReadPath(destDir);
@@ -1001,10 +1116,9 @@ export function registerIpc(): void {
   // unlike importEntries — whose sources may live anywhere on disk because it
   // only copies — a move DELETES from the source location, so each source must
   // already sit inside an allowed workspace root.
-  ipcMain.handle(
+  handle(
     "fs:moveEntries",
     async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
-      requireTrustedSender(event, "fs:moveEntries");
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing move destination.");
       assertAllowedReadPath(destDir);
@@ -1023,6 +1137,9 @@ export function registerIpc(): void {
   // (`ipcMain.on`) because `webContents.startDrag` returns nothing and must run
   // on the sender's own contents while the drag gesture is live.
   ipcMain.on("fs:startDrag", (e, paths: unknown) => {
+    // Starts an OS drag of arbitrary paths on behalf of the sender; gate it to
+    // the trusted main frame like the invoke channels.
+    if (!isTrustedOnSender(e, "fs:startDrag")) return;
     const files = Array.isArray(paths)
       ? paths.filter((p): p is string => typeof p === "string" && p.length > 0)
       : typeof paths === "string" && paths.length > 0
@@ -1042,7 +1159,7 @@ export function registerIpc(): void {
     }
   });
 
-  ipcMain.handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {
+  handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {
     // Remote (ssh://) roots have no local fs.watch — the git panel's 10s poll
     // + manual refresh cover change detection, exactly as on Linux where
     // recursive fs.watch is unavailable. No-op here so nothing throws.
@@ -1059,16 +1176,15 @@ export function registerIpc(): void {
   // The renderer is authoritative about which workspaces are open, but the
   // sandbox lives in main. Renderer pushes the cwd list whenever it changes;
   // main treats the list as the source of truth for read-path checks.
-  ipcMain.handle("ui:setAllowedRoots", async (event, roots: unknown): Promise<void> => {
+  handle("ui:setAllowedRoots", async (event, roots: unknown): Promise<void> => {
     // This directly sets the fs read-sandbox allowlist, so only the trusted
     // renderer may call it.
-    requireTrustedSender(event, "ui:setAllowedRoots");
     if (!Array.isArray(roots)) return;
     const cleaned = roots.filter((r): r is string => typeof r === "string" && r.length > 0);
     setAllowedRoots(cleaned);
   });
 
-  ipcMain.handle("fs:revealInOS", async (_e, path: string): Promise<void> => {
+  handle("fs:revealInOS", async (_e, path: string): Promise<void> => {
     // No OS file manager for a path on a remote host — silently ignore.
     if (isRemotePath(path)) return;
     try {
@@ -1084,17 +1200,17 @@ export function registerIpc(): void {
     shell.showItemInFolder(path);
   });
 
-  ipcMain.handle("git:status", async (_e, cwd: string): Promise<GitStatus> => {
+  handle("git:status", async (_e, cwd: string): Promise<GitStatus> => {
     const { getGitStatus } = await getGitOps();
     return getGitStatus(cwd);
   });
 
-  ipcMain.handle("git:log", async (_e, cwd: string): Promise<GitLog> => {
+  handle("git:log", async (_e, cwd: string): Promise<GitLog> => {
     const { getGitLog } = await getGitOps();
     return getGitLog(cwd);
   });
 
-  ipcMain.handle(
+  handle(
     "git:diff",
     async (
       _e,
@@ -1108,7 +1224,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:stage",
     async (_e, input: { cwd: string; paths: string[] }): Promise<GitOpResult> => {
       const { stageFiles } = await getGitOps();
@@ -1116,7 +1232,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:unstage",
     async (_e, input: { cwd: string; paths: string[] }): Promise<GitOpResult> => {
       const { unstageFiles } = await getGitOps();
@@ -1124,17 +1240,17 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("git:stageAll", async (_e, cwd: string): Promise<GitOpResult> => {
+  handle("git:stageAll", async (_e, cwd: string): Promise<GitOpResult> => {
     const { stageAll } = await getGitOps();
     return stageAll(cwd);
   });
 
-  ipcMain.handle("git:unstageAll", async (_e, cwd: string): Promise<GitOpResult> => {
+  handle("git:unstageAll", async (_e, cwd: string): Promise<GitOpResult> => {
     const { unstageAll } = await getGitOps();
     return unstageAll(cwd);
   });
 
-  ipcMain.handle(
+  handle(
     "git:discard",
     async (_e, input: { cwd: string; files: GitFileChange[] }): Promise<GitOpResult> => {
       const { discardChanges } = await getGitOps();
@@ -1142,7 +1258,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:commit",
     async (
       _e,
@@ -1153,37 +1269,37 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("git:generateCommitMessage", async (_e, cwd: string): Promise<GitCommitMessageResult> => {
+  handle("git:generateCommitMessage", async (_e, cwd: string): Promise<GitCommitMessageResult> => {
     const { generateCommitMessage } = await getGitCommitMessage();
     return generateCommitMessage(cwd);
   });
 
-  ipcMain.handle("git:push", async (_e, cwd: string): Promise<GitOpResult> => {
+  handle("git:push", async (_e, cwd: string): Promise<GitOpResult> => {
     const { push } = await getGitOps();
     return push(cwd);
   });
 
-  ipcMain.handle("git:pull", async (_e, cwd: string): Promise<GitOpResult> => {
+  handle("git:pull", async (_e, cwd: string): Promise<GitOpResult> => {
     const { pull } = await getGitOps();
     return pull(cwd);
   });
 
-  ipcMain.handle("git:fetch", async (_e, cwd: string): Promise<GitOpResult> => {
+  handle("git:fetch", async (_e, cwd: string): Promise<GitOpResult> => {
     const { fetchRemote } = await getGitOps();
     return fetchRemote(cwd);
   });
 
-  ipcMain.handle("git:prepareSmartMerge", async (_e, cwd: string): Promise<GitSmartMergeResult> => {
+  handle("git:prepareSmartMerge", async (_e, cwd: string): Promise<GitSmartMergeResult> => {
     const { prepareSmartMerge } = await getGitOps();
     return prepareSmartMerge(cwd);
   });
 
-  ipcMain.handle("git:undoLastCommit", async (_e, cwd: string): Promise<GitOpResult> => {
+  handle("git:undoLastCommit", async (_e, cwd: string): Promise<GitOpResult> => {
     const { undoLastCommit } = await getGitOps();
     return undoLastCommit(cwd);
   });
 
-  ipcMain.handle(
+  handle(
     "git:checkout",
     async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
       const { checkoutRef } = await getGitOps();
@@ -1191,7 +1307,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:revert",
     async (_e, input: { cwd: string; hash: string }): Promise<GitOpResult> => {
       const { revertCommit } = await getGitOps();
@@ -1199,18 +1315,18 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("git:init", async (_e, cwd: string): Promise<GitOpResult> => {
+  handle("git:init", async (_e, cwd: string): Promise<GitOpResult> => {
     const { initRepo } = await getGitOps();
     return initRepo(cwd);
   });
 
   // ── Branches ──────────────────────────────────────────────────────────────
-  ipcMain.handle("git:branches", async (_e, cwd: string): Promise<GitBranchList> => {
+  handle("git:branches", async (_e, cwd: string): Promise<GitBranchList> => {
     const { listBranches } = await getGitBranches();
     return listBranches(cwd);
   });
 
-  ipcMain.handle(
+  handle(
     "git:checkoutBranch",
     async (_e, input: { cwd: string; name: string }): Promise<GitOpResult> => {
       const { checkoutBranch } = await getGitBranches();
@@ -1218,7 +1334,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:createBranch",
     async (
       _e,
@@ -1232,7 +1348,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:renameBranch",
     async (_e, input: { cwd: string; oldName: string; newName: string }): Promise<GitOpResult> => {
       const { renameBranch } = await getGitBranches();
@@ -1240,7 +1356,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:deleteBranch",
     async (_e, input: { cwd: string; name: string; force?: boolean }): Promise<GitOpResult> => {
       const { deleteBranch } = await getGitBranches();
@@ -1248,7 +1364,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:mergeBranch",
     async (_e, input: { cwd: string; name: string }): Promise<GitOpResult> => {
       const { mergeBranch } = await getGitBranches();
@@ -1257,7 +1373,7 @@ export function registerIpc(): void {
   );
 
   // ── Copy-branch worktrees ───────────────────────────────────────────────────
-  ipcMain.handle(
+  handle(
     "git:createCopyWorktree",
     async (
       _e,
@@ -1293,7 +1409,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:removeCopyWorktree",
     async (
       _e,
@@ -1322,12 +1438,12 @@ export function registerIpc(): void {
   );
 
   // ── Stash ───────────────────────────────────────────────────────────────────
-  ipcMain.handle("git:stashes", async (_e, cwd: string): Promise<GitStashList> => {
+  handle("git:stashes", async (_e, cwd: string): Promise<GitStashList> => {
     const { listStashes } = await getGitStash();
     return listStashes(cwd);
   });
 
-  ipcMain.handle(
+  handle(
     "git:stashSave",
     async (
       _e,
@@ -1341,7 +1457,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:stashApply",
     async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
       const { applyStash } = await getGitStash();
@@ -1349,7 +1465,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:stashPop",
     async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
       const { popStash } = await getGitStash();
@@ -1357,7 +1473,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:stashDrop",
     async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
       const { dropStash } = await getGitStash();
@@ -1366,7 +1482,7 @@ export function registerIpc(): void {
   );
 
   // ── Commit inspection ────────────────────────────────────────────────────────
-  ipcMain.handle(
+  handle(
     "git:commitDetail",
     async (_e, input: { cwd: string; hash: string }): Promise<GitCommitDetailResult> => {
       const { getCommitDetail } = await getGitInspect();
@@ -1374,7 +1490,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:commitFileDiff",
     async (_e, input: { cwd: string; hash: string; path: string }): Promise<GitDiff> => {
       const { getCommitFileDiff } = await getGitInspect();
@@ -1383,7 +1499,7 @@ export function registerIpc(): void {
   );
 
   // ── Partial staging + conflict resolution ─────────────────────────────────────
-  ipcMain.handle(
+  handle(
     "git:applyPatch",
     async (
       _e,
@@ -1397,7 +1513,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "git:resolveConflict",
     async (
       _e,
@@ -1408,18 +1524,18 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {
+  handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {
     assertLocalWorkspace(input.cwd, "Managed chat");
     const { createRun } = await getRunStore();
     return createRun(input);
   });
 
-  ipcMain.handle("orchestration:getRun", async (_e, runId: string): Promise<RunState | null> => {
+  handle("orchestration:getRun", async (_e, runId: string): Promise<RunState | null> => {
     const { getRun } = await getRunStore();
     return getRun(runId);
   });
 
-  ipcMain.handle(
+  handle(
     "orchestration:readWorkerPrompt",
     async (_e, input: { runId: string; attemptId: string }): Promise<string> => {
       if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
@@ -1430,47 +1546,47 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("orchestration:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
+  handle("orchestration:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
     const { listRuns } = await getRunStore();
     return listRuns(workspaceId);
   });
 
-  ipcMain.handle("orchestration:listEvents", async (_e, runId: string): Promise<SparkEvent[]> => {
+  handle("orchestration:listEvents", async (_e, runId: string): Promise<SparkEvent[]> => {
     return listEvents(runId);
   });
 
-  ipcMain.handle("orchestration:getArtifactPaths", async (_e, runId: string): Promise<RunArtifactPaths> => {
+  handle("orchestration:getArtifactPaths", async (_e, runId: string): Promise<RunArtifactPaths> => {
     const { getRunArtifactPaths } = await getRunStore();
     return getRunArtifactPaths(runId);
   });
 
-  ipcMain.handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
+  handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
     const { appendTestEvent } = await getRunStore();
     return appendTestEvent(args.runId, args.message);
   });
 
-  ipcMain.handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
+  handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
     assertLocalWorkspace(input.cwd, "Automations and autopilot");
     const { startAutopilot } = await getRunStore();
     return startAutopilot(input);
   });
 
-  ipcMain.handle("orchestration:pauseRun", async (_e, input: PauseRunInput): Promise<RunState> => {
+  handle("orchestration:pauseRun", async (_e, input: PauseRunInput): Promise<RunState> => {
     const { pauseRun } = await getRunStore();
     return pauseRun(input);
   });
 
-  ipcMain.handle("orchestration:pauseRunAfterCurrentWorkers", async (_e, input: PauseRunInput): Promise<RunState> => {
+  handle("orchestration:pauseRunAfterCurrentWorkers", async (_e, input: PauseRunInput): Promise<RunState> => {
     const { pauseRunAfterCurrentWorkers } = await getRunStore();
     return pauseRunAfterCurrentWorkers(input);
   });
 
-  ipcMain.handle("orchestration:forcePauseRun", async (_e, runId: string): Promise<RunState> => {
+  handle("orchestration:forcePauseRun", async (_e, runId: string): Promise<RunState> => {
     const { forcePauseRun } = await getRunStore();
     return forcePauseRun(runId);
   });
 
-  ipcMain.handle(
+  handle(
     "orchestration:stopAndUndoPending",
     async (_e, runId: string): Promise<UndoToCheckpointResult> => {
       const { stopAndUndoPending } = await getRunStore();
@@ -1478,17 +1594,17 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("orchestration:resumeRun", async (_e, input: ResumeRunInput): Promise<RunState> => {
+  handle("orchestration:resumeRun", async (_e, input: ResumeRunInput): Promise<RunState> => {
     const { resumeRun } = await getRunStore();
     return resumeRun(input);
   });
 
-  ipcMain.handle("orchestration:addRunMessage", async (_e, input: AddRunMessageInput): Promise<RunState> => {
+  handle("orchestration:addRunMessage", async (_e, input: AddRunMessageInput): Promise<RunState> => {
     const { addRunMessage } = await getRunStore();
     return addRunMessage(input);
   });
 
-  ipcMain.handle(
+  handle(
     "orchestration:answerRunQuestion",
     async (_e, input: AnswerRunQuestionInput): Promise<RunState> => {
       const { answerRunQuestion } = await getRunStore();
@@ -1496,7 +1612,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "orchestration:undoToCheckpoint",
     async (_e, input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> => {
       const { undoToCheckpoint } = await getRunStore();
@@ -1504,7 +1620,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "orchestration:interruptRunWithMessage",
     async (_e, input: InterruptRunWithMessageInput): Promise<RunState> => {
       const { interruptRunWithMessage } = await getRunStore();
@@ -1512,22 +1628,22 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
+  handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
     const { updateRunStatus } = await getRunStore();
     return updateRunStatus(input);
   });
 
-  ipcMain.handle("orchestration:markRunSeen", async (_e, input: MarkRunSeenInput): Promise<RunState> => {
+  handle("orchestration:markRunSeen", async (_e, input: MarkRunSeenInput): Promise<RunState> => {
     const { markRunSeen } = await getRunStore();
     return markRunSeen(input);
   });
 
-  ipcMain.handle("orchestration:renameRun", async (_e, input: RenameRunInput): Promise<RunState> => {
+  handle("orchestration:renameRun", async (_e, input: RenameRunInput): Promise<RunState> => {
     const { renameRun } = await getRunStore();
     return renameRun(input);
   });
 
-  ipcMain.handle(
+  handle(
     "orchestration:updateWhiteboard",
     async (_e, input: UpdateCoraWhiteboardInput): Promise<RunState> => {
       const { updateCoraWhiteboard } = await getRunStore();
@@ -1535,7 +1651,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "orchestration:updateChatBackend",
     async (_e, input: UpdateChatBackendInput): Promise<RunState> => {
       const { updateChatBackend } = await getRunStore();
@@ -1543,42 +1659,42 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("orchestration:createStep", async (_e, input: CreateStepInput): Promise<RunState> => {
+  handle("orchestration:createStep", async (_e, input: CreateStepInput): Promise<RunState> => {
     const { createStep } = await getRunStore();
     return createStep(input);
   });
 
-  ipcMain.handle("orchestration:updateStep", async (_e, input: UpdateStepInput): Promise<RunState> => {
+  handle("orchestration:updateStep", async (_e, input: UpdateStepInput): Promise<RunState> => {
     const { updateStep } = await getRunStore();
     return updateStep(input);
   });
 
-  ipcMain.handle("orchestration:createWorkerTask", async (_e, input: CreateWorkerTaskInput): Promise<RunState> => {
+  handle("orchestration:createWorkerTask", async (_e, input: CreateWorkerTaskInput): Promise<RunState> => {
     const { createWorkerTask } = await getRunStore();
     return createWorkerTask(input);
   });
 
-  ipcMain.handle("orchestration:updateWorkerTask", async (_e, input: UpdateWorkerTaskInput): Promise<RunState> => {
+  handle("orchestration:updateWorkerTask", async (_e, input: UpdateWorkerTaskInput): Promise<RunState> => {
     const { updateWorkerTask } = await getRunStore();
     return updateWorkerTask(input);
   });
 
-  ipcMain.handle("orchestration:prepareWorkerTask", async (_e, input: PrepareWorkerTaskInput) => {
+  handle("orchestration:prepareWorkerTask", async (_e, input: PrepareWorkerTaskInput) => {
     const { prepareWorkerTask } = await getRunStore();
     return prepareWorkerTask(input);
   });
 
-  ipcMain.handle("orchestration:launchWorkerAttempt", async (_e, input: LaunchWorkerAttemptInput): Promise<RunState> => {
+  handle("orchestration:launchWorkerAttempt", async (_e, input: LaunchWorkerAttemptInput): Promise<RunState> => {
     const { launchWorkerAttempt } = await getRunStore();
     return launchWorkerAttempt(input);
   });
 
-  ipcMain.handle("orchestration:readWorkerReport", async (_e, path: string) => {
+  handle("orchestration:readWorkerReport", async (_e, path: string) => {
     const { readWorkerReport } = await getRunStore();
     return readWorkerReport(path);
   });
 
-  ipcMain.handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
+  handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
     const { deleteRun } = await getRunStore();
     await deleteRun(runId);
   });
@@ -1590,12 +1706,12 @@ export function registerIpc(): void {
   // burn-down trigger so the renderer Queue panel can enqueue/list. run-queue.ts
   // imports RunQueueState/QueuedRun/EnqueueRunInput from @shared/types, so these
   // handlers return its values directly — the shapes are the IPC contract.
-  ipcMain.handle("queue:list", async (): Promise<RunQueueState> => {
+  handle("queue:list", async (): Promise<RunQueueState> => {
     const { loadQueue } = await getRunQueue();
     return loadQueue();
   });
 
-  ipcMain.handle("queue:enqueue", async (_e, input: EnqueueRunInput): Promise<QueuedRun> => {
+  handle("queue:enqueue", async (_e, input: EnqueueRunInput): Promise<QueuedRun> => {
     const { enqueue, burnDown } = await getRunQueue();
     const queued = await enqueue(input);
     // Fire-and-forget: kick the drain so a free slot starts this run without
@@ -1606,19 +1722,19 @@ export function registerIpc(): void {
     return queued;
   });
 
-  ipcMain.handle("queue:dequeue", async (_e, id: string): Promise<RunQueueState> => {
+  handle("queue:dequeue", async (_e, id: string): Promise<RunQueueState> => {
     const { dequeue } = await getRunQueue();
     return dequeue(id);
   });
 
-  ipcMain.handle("queue:setConcurrency", async (_e, n: number): Promise<RunQueueState> => {
+  handle("queue:setConcurrency", async (_e, n: number): Promise<RunQueueState> => {
     const { setConcurrency } = await getRunQueue();
     return setConcurrency(n);
   });
 
   // burnDown() drains in place and resolves with the post-drain queue snapshot,
   // which is exactly what the renderer wants back from this channel.
-  ipcMain.handle("queue:burnDown", async (): Promise<RunQueueState> => {
+  handle("queue:burnDown", async (): Promise<RunQueueState> => {
     const { burnDown } = await getRunQueue();
     return burnDown();
   });
@@ -1627,12 +1743,12 @@ export function registerIpc(): void {
   // Thin IPC over the scheduler registry stub (scheduler.ts). Cron firing is
   // stubbed for the scaffold; these channels manage the job registry and let
   // the renderer trigger a job immediately via runNow.
-  ipcMain.handle("scheduler:list", async (): Promise<ScheduledJob[]> => {
+  handle("scheduler:list", async (): Promise<ScheduledJob[]> => {
     const { listJobs } = await getScheduler();
     return listJobs();
   });
 
-  ipcMain.handle(
+  handle(
     "scheduler:create",
     async (_e, input: CreateScheduledJobInput): Promise<ScheduledJob> => {
       const { createJob } = await getScheduler();
@@ -1640,12 +1756,12 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("scheduler:delete", async (_e, id: string): Promise<void> => {
+  handle("scheduler:delete", async (_e, id: string): Promise<void> => {
     const { deleteJob } = await getScheduler();
     await deleteJob(id);
   });
 
-  ipcMain.handle(
+  handle(
     "scheduler:setEnabled",
     async (_e, input: { id: string; enabled: boolean }): Promise<ScheduledJob> => {
       const { setEnabled } = await getScheduler();
@@ -1653,13 +1769,13 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("scheduler:runNow", async (_e, id: string): Promise<RunState> => {
+  handle("scheduler:runNow", async (_e, id: string): Promise<RunState> => {
     const { runJobNow } = await getScheduler();
     return runJobNow(id);
   });
 
   // Edit an automation's definition (name / trigger / input / loop / prompt).
-  ipcMain.handle(
+  handle(
     "scheduler:update",
     async (_e, input: UpdateScheduledJobInput): Promise<ScheduledJob> => {
       const { updateJob } = await getScheduler();
@@ -1668,36 +1784,36 @@ export function registerIpc(): void {
   );
 
   // Pause an automation's loop (trigger stays armed).
-  ipcMain.handle("scheduler:pause", async (_e, id: string): Promise<ScheduledJob | undefined> => {
+  handle("scheduler:pause", async (_e, id: string): Promise<ScheduledJob | undefined> => {
     const { pauseJob } = await getScheduler();
     return pauseJob(id);
   });
 
   // Resume a paused loop.
-  ipcMain.handle("scheduler:resume", async (_e, id: string): Promise<ScheduledJob | undefined> => {
+  handle("scheduler:resume", async (_e, id: string): Promise<ScheduledJob | undefined> => {
     const { resumeJob } = await getScheduler();
     return resumeJob(id);
   });
 
   // Stop an automation's loop now (finalize + force-pause the live run).
-  ipcMain.handle("scheduler:stop", async (_e, id: string): Promise<ScheduledJob | undefined> => {
+  handle("scheduler:stop", async (_e, id: string): Promise<ScheduledJob | undefined> => {
     const { stopJob } = await getScheduler();
     return stopJob(id);
   });
 
   // Resolve an automation + its live worker run for the Hub detail pane.
-  ipcMain.handle("scheduler:getDetail", async (_e, id: string): Promise<AutomationDetail | null> => {
+  handle("scheduler:getDetail", async (_e, id: string): Promise<AutomationDetail | null> => {
     const { getDetail } = await getScheduler();
     return getDetail(id);
   });
 
   // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
-  ipcMain.handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {
+  handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {
     const { listActiveAutomationWorkers } = await import("./orchestration/direct-worker");
     return listActiveAutomationWorkers();
   });
 
-  ipcMain.handle(
+  handle(
     "pty:spawn",
     async (
       e,
@@ -1713,7 +1829,6 @@ export function registerIpc(): void {
       },
     ) => {
       // Spawning a pty starts a real OS process; only the trusted renderer may.
-      requireTrustedSender(e, "pty:spawn");
       return pty.spawn({
         id: args.id,
         shell: args.shell,
@@ -1728,14 +1843,14 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("pty:write", async (_e, args: { id: string; data: string }) => {
+  handle("pty:write", async (_e, args: { id: string; data: string }) => {
     pty.write(args.id, args.data);
     // User keystrokes are the notifier's "a fresh turn may start" signal —
     // they re-arm the pane's alert dedup (see noteTerminalUserInput).
     noteTerminalUserInput(args.id);
   });
 
-  ipcMain.handle(
+  handle(
     "pty:inject",
     async (_e, args: { id: string; text: string; submit?: boolean }) => {
       pty.inject(args.id, args.text, { submit: args.submit ?? true });
@@ -1745,11 +1860,11 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("pty:resize", async (_e, args: { id: string; cols: number; rows: number }) => {
+  handle("pty:resize", async (_e, args: { id: string; cols: number; rows: number }) => {
     pty.resize(args.id, args.cols, args.rows);
   });
 
-  ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
+  handle("pty:dispose", async (_e, args: { id: string }) => {
     // Only Cora may kill a live worker attempt — downgrade to detach so the
     // session keeps running headless (the workers-tab reconcile loop can
     // re-attach it later). See workerAttemptRunIds above.
@@ -1765,7 +1880,7 @@ export function registerIpc(): void {
   // to decide whether to mount a TerminalPane (which would try to spawn —
   // and fail with ENOENT — if the session hasn't been spawned yet by the
   // headless cli-session). Cheap: just a Map.has() check.
-  ipcMain.handle("pty:exists", async (_e, args: { id: string }) => {
+  handle("pty:exists", async (_e, args: { id: string }) => {
     return pty.exists(args.id);
   });
 
@@ -1774,22 +1889,22 @@ export function registerIpc(): void {
   // detached backlog instead of sending it to webContents — the listener is
   // gone, so the send would be dropped. Resume drains the backlog through the
   // same data channel before live output continues.
-  ipcMain.handle("pty:pause", async (_e, args: { id: string }) => {
+  handle("pty:pause", async (_e, args: { id: string }) => {
     pty.pause(args.id);
   });
-  ipcMain.handle("pty:resume", async (_e, args: { id: string }) => {
+  handle("pty:resume", async (_e, args: { id: string }) => {
     pty.resume(args.id);
   });
   // Detach — the raw-tail-reattach variant of pause used by ChatPanel's backend
   // terminal. Nulls the renderer sink and DISCARDS the pause/backlog state so
   // the next spawn() replays the raw pty tail into a fresh xterm (like a first
   // attach) instead of resuming a backlog that would double-deliver tail bytes.
-  ipcMain.handle("pty:detach", async (_e, args: { id: string }) => {
+  handle("pty:detach", async (_e, args: { id: string }) => {
     pty.detach(args.id);
   });
 
   // ── Agent session restore (manual Claude/Codex terminal panes) ──────────
-  ipcMain.handle(
+  handle(
     "agentSession:list",
     async (
       _e,
@@ -1802,12 +1917,12 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "agentSession:listAll",
     async (): Promise<WorkerSessionSummary[]> => listAllWorkerSessions(),
   );
 
-  ipcMain.handle(
+  handle(
     "agentSession:delete",
     async (_e, input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> => {
       if (typeof input?.cwd === "string") {
@@ -1824,7 +1939,7 @@ export function registerIpc(): void {
   // (newest .jsonl in ~/.claude/projects/<enc-cwd>/); Codex date-buckets rollout
   // files (newest matching this cwd). Polls up to 15s since the file may appear
   // a beat after the TUI does.
-  ipcMain.handle(
+  handle(
     "agentSession:capture",
     async (
       _e,
@@ -1872,7 +1987,8 @@ export function registerIpc(): void {
   // Persistent trail of restore decisions (fire-and-forget from the renderer).
   // "Some panes resume, some don't" is undebuggable without knowing what each
   // pane decided at boot — this lands every decision in <sparkHome>/logs/main.log.
-  ipcMain.on("agentSession:logRestore", (_e, line: string) => {
+  ipcMain.on("agentSession:logRestore", (e, line: string) => {
+    if (!isTrustedOnSender(e, "agentSession:logRestore")) return;
     if (typeof line === "string" && line.length < 2048) logMain("restore", line);
   });
 
@@ -1880,7 +1996,7 @@ export function registerIpc(): void {
   // The renderer consults this before every restore/hint so a pointer that
   // went stale via in-TUI `/resume` or `/clear` heals to the session that
   // ACTUALLY last ran in the pane, instead of resuming a dead id.
-  ipcMain.handle(
+  handle(
     "agentSession:latestStart",
     async (_e, args: { paneId: string }) =>
       args?.paneId ? latestSessionStart(args.paneId) : null,
@@ -1893,7 +2009,7 @@ export function registerIpc(): void {
   // "No conversation found with session ID" — stranding the pane on an error.
   // `resumable: false` → the renderer self-heals (fresh forced-id Claude, or a
   // plain shell for codex) instead of delivering a doomed resume.
-  ipcMain.handle(
+  handle(
     "agentSession:probe",
     async (
       _e,
@@ -1944,7 +2060,7 @@ export function registerIpc(): void {
   // every resumable Claude/Codex session recorded for this cwd, newest first.
   // Read-only listing; the renderer resumes by injecting the CLI's own
   // resume command into a pane, so no session state changes here.
-  ipcMain.handle(
+  handle(
     "agentSession:history",
     async (_e, args: { cwd: string; limit?: number }) => {
       if (!args?.cwd || typeof args.cwd !== "string") return [];
@@ -1954,7 +2070,7 @@ export function registerIpc(): void {
 
   // Pre-seed Codex directory trust before a resumed (or fresh) `codex --yolo`
   // pane so its TUI never stalls on the "trust this directory?" prompt.
-  ipcMain.handle("agentSession:ensureCodexTrust", async (_e, args: { cwd: string }): Promise<void> => {
+  handle("agentSession:ensureCodexTrust", async (_e, args: { cwd: string }): Promise<void> => {
     await ensureCodexProjectTrust(args.cwd).catch(() => undefined);
   });
 
@@ -1963,7 +2079,7 @@ export function registerIpc(): void {
   // trailing partial JSON line, keeping a `<path>.bak`. Claude only — Codex
   // rollout formats are not safely truncatable, so this is a no-op for them.
   // Returns whether a repair was actually written.
-  ipcMain.handle(
+  handle(
     "agentSession:repairTranscript",
     async (
       _e,
@@ -1981,7 +2097,7 @@ export function registerIpc(): void {
   // paneId/attemptId and updates its `runtimeState` field, broadcasting a
   // change event). Reports for panes with no matching attempt — manual
   // claude/codex panes started by the user — are silently ignored.
-  ipcMain.handle(
+  handle(
     "terminalState:report",
     async (_e, input: { paneId: string; state: RuntimeState }) => {
       if (!input?.paneId || !input.state) return;
@@ -1994,7 +2110,7 @@ export function registerIpc(): void {
   // for a workspace whenever its terminal layout changes; main reconciles
   // watchers against it (see terminal-agent-notify.ts). Cheap enough to call
   // on every layout change — the per-pane upsert is a Map write.
-  ipcMain.handle(
+  handle(
     "terminalNotify:sync",
     async (
       _e,
@@ -2003,12 +2119,12 @@ export function registerIpc(): void {
       return syncTerminalNotifyPanes(input);
     },
   );
-  ipcMain.handle("terminalNotify:snapshot", async () => terminalAgentStateSnapshot());
+  handle("terminalNotify:snapshot", async () => terminalAgentStateSnapshot());
 
   // Renderer reports what the user is looking at (focus + active workspace/
   // tab/run/pane) in one snapshot; the notify policy suppresses alerts for
   // the surface the user is already watching.
-  ipcMain.handle(
+  handle(
     "ui:setAttention",
     async (_e, snapshot: Partial<UiAttentionSnapshot> | null): Promise<void> => {
       setAttention(snapshot);
@@ -2016,28 +2132,28 @@ export function registerIpc(): void {
   );
 
   // Notification center (src/main/notify/center-store).
-  ipcMain.handle(
+  handle(
     "notify:list",
     async (): Promise<NotificationCenterEntry[]> => listCenterEntries(),
   );
-  ipcMain.handle("notify:markRead", async (_e, id: string): Promise<void> => {
+  handle("notify:markRead", async (_e, id: string): Promise<void> => {
     if (typeof id === "string") await markCenterRead(id);
   });
-  ipcMain.handle("notify:markAllRead", async (): Promise<void> => {
+  handle("notify:markAllRead", async (): Promise<void> => {
     await markCenterAllRead();
   });
-  ipcMain.handle("notify:remove", async (_e, id: string): Promise<void> => {
+  handle("notify:remove", async (_e, id: string): Promise<void> => {
     if (typeof id === "string") await removeCenterEntry(id);
   });
-  ipcMain.handle("notify:clear", async (): Promise<void> => {
+  handle("notify:clear", async (): Promise<void> => {
     await clearCenter();
   });
 
-  ipcMain.handle("window:minimize", async (e): Promise<void> => {
+  handle("window:minimize", async (e): Promise<void> => {
     BrowserWindow.fromWebContents(e.sender)?.minimize();
   });
 
-  ipcMain.handle("window:toggleMaximize", async (e): Promise<boolean> => {
+  handle("window:toggleMaximize", async (e): Promise<boolean> => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (!win) return false;
     if (win.isMaximized()) {
@@ -2048,25 +2164,25 @@ export function registerIpc(): void {
     return win.isMaximized();
   });
 
-  ipcMain.handle("window:isMaximized", async (e): Promise<boolean> => {
+  handle("window:isMaximized", async (e): Promise<boolean> => {
     return BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false;
   });
 
-  ipcMain.handle("window:close", async (e): Promise<void> => {
+  handle("window:close", async (e): Promise<void> => {
     BrowserWindow.fromWebContents(e.sender)?.close();
   });
 
   // Hide the window to the system tray (close-to-tray) without quitting. On
   // win32 we also drop the taskbar button so the hidden window doesn't linger
   // there — mirrors the close-to-tray path in main's window `close` handler.
-  ipcMain.handle("window:hide-to-tray", async (e): Promise<void> => {
+  handle("window:hide-to-tray", async (e): Promise<void> => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (!win) return;
     win.hide();
     if (process.platform === "win32") win.setSkipTaskbar(true);
   });
 
-  ipcMain.handle(
+  handle(
     "window:setTitleBarTheme",
     async (e, theme: { color?: unknown; symbolColor?: unknown }): Promise<void> => {
       const win = BrowserWindow.fromWebContents(e.sender);
@@ -2093,14 +2209,14 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
-  ipcMain.handle("app:home", async (): Promise<string> => app.getPath("home"));
+  handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
+  handle("app:home", async (): Promise<string> => app.getPath("home"));
 
   // Resolve the absolute file:// URL of the webview-side inspector preload
   // bundle so the renderer can attach it via `<webview preload="...">`.
   // The bundle is emitted by electron-vite alongside the main renderer
   // preload, so we walk relative to `__dirname` (out/main).
-  ipcMain.handle("app:inspectorPreloadUrl", async (): Promise<string> => {
+  handle("app:inspectorPreloadUrl", async (): Promise<string> => {
     const path = join(__dirname, "..", "preload", "inspector-preload.js");
     return pathToFileURL(path).toString();
   });
@@ -2114,7 +2230,7 @@ export function registerIpc(): void {
   >();
   let searchCounter = 0;
 
-  ipcMain.handle(
+  handle(
     "search:start",
     async (e, opts: SearchOptions): Promise<StartSearchResponse> => {
       const sender = e.sender;
@@ -2149,7 +2265,7 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("search:cancel", async (_e, searchId: string): Promise<void> => {
+  handle("search:cancel", async (_e, searchId: string): Promise<void> => {
     const entry = activeSearches.get(searchId);
     if (entry) {
       entry.handle.cancel();
@@ -2162,14 +2278,14 @@ export function registerIpc(): void {
   // canvas can't reach navigator.clipboard reliably inside Electron when the
   // renderer hasn't been granted clipboard-read permission, so route through
   // main where Electron's `clipboard` API works unconditionally.
-  ipcMain.handle("clipboard:readText", async (): Promise<string> => {
+  handle("clipboard:readText", async (): Promise<string> => {
     try {
       return clipboard.readText();
     } catch {
       return "";
     }
   });
-  ipcMain.handle("clipboard:writeText", async (_e, text: string): Promise<void> => {
+  handle("clipboard:writeText", async (_e, text: string): Promise<void> => {
     if (typeof text !== "string" || text.length === 0) return;
     try {
       clipboard.writeText(text);
@@ -2194,16 +2310,16 @@ export function registerIpc(): void {
   setAuthPromptSender((request) => broadcast("remote:authPrompt", request));
   setStatusSender((status) => broadcast("remote:status", status));
 
-  ipcMain.handle("remote:listHosts", async (): Promise<RemoteHostConfig[]> => listHosts());
-  ipcMain.handle(
+  handle("remote:listHosts", async (): Promise<RemoteHostConfig[]> => listHosts());
+  handle(
     "remote:saveHost",
     async (_e, host: RemoteHostConfig): Promise<RemoteHostConfig[]> => saveManualHost(host),
   );
-  ipcMain.handle(
+  handle(
     "remote:deleteHost",
     async (_e, hostId: string): Promise<RemoteHostConfig[]> => deleteManualHost(hostId),
   );
-  ipcMain.handle(
+  handle(
     "remote:connect",
     async (_e, hostId: string): Promise<RemoteConnectionStatus> => {
       try {
@@ -2215,22 +2331,25 @@ export function registerIpc(): void {
       return getConnectionStatus(hostId);
     },
   );
-  ipcMain.handle("remote:disconnect", async (_e, hostId: string): Promise<void> => {
+  handle("remote:disconnect", async (_e, hostId: string): Promise<void> => {
     disconnectHost(hostId);
   });
-  ipcMain.handle(
+  handle(
     "remote:status",
     async (_e, hostId: string): Promise<RemoteConnectionStatus> => getConnectionStatus(hostId),
   );
-  ipcMain.handle(
+  handle(
     "remote:browse",
     async (_e, args: { hostId: string; path: string | null }): Promise<RemoteBrowseResult> =>
       browseRemoteDir(args.hostId, args.path),
   );
-  ipcMain.on("remote:authPromptAnswer", (_e, answer: RemoteAuthPromptAnswer) => {
+  ipcMain.on("remote:authPromptAnswer", (e, answer: RemoteAuthPromptAnswer) => {
+    // Answers an SSH auth prompt (password/passphrase/host-key acceptance);
+    // only the trusted renderer may answer, never a webview guest process.
+    if (!isTrustedOnSender(e, "remote:authPromptAnswer")) return;
     answerAuthPrompt(answer);
   });
-  ipcMain.handle(
+  handle(
     "remote:detectAgents",
     async (_e, hostIdOrPath: string): Promise<RemoteAgentAvailability> =>
       detectRemoteAgents(hostIdOrPath),
@@ -2241,15 +2360,13 @@ export function registerIpc(): void {
   // above, which are the SSH remote-workspace feature. The renderer only
   // ever sees status, device summaries, the pairing state, and the QR
   // payload string; key material and pairing secret internals stay in main.
-  ipcMain.handle("remoteAccess:getStatus", async (event): Promise<RemoteAccessStatus> => {
-    requireTrustedSender(event, "remoteAccess:getStatus");
+  handle("remoteAccess:getStatus", async (event): Promise<RemoteAccessStatus> => {
     const service = await getRemoteAccess();
     return service.getStatus();
   });
-  ipcMain.handle(
+  handle(
     "remoteAccess:setEnabled",
     async (event, enabled: boolean): Promise<RemoteAccessStatus> => {
-      requireTrustedSender(event, "remoteAccess:setEnabled");
       const on = enabled === true;
       // Persist first so a crash mid-start still remembers the intent, then
       // fan the preference out exactly like the preferences:set handler.
@@ -2259,25 +2376,21 @@ export function registerIpc(): void {
       return service.setEnabled(on);
     },
   );
-  ipcMain.handle("remoteAccess:startPairing", async (event): Promise<RemotePairingSession> => {
-    requireTrustedSender(event, "remoteAccess:startPairing");
+  handle("remoteAccess:startPairing", async (event): Promise<RemotePairingSession> => {
     const service = await getRemoteAccess();
     return service.startPairing();
   });
-  ipcMain.handle("remoteAccess:cancelPairing", async (event): Promise<void> => {
-    requireTrustedSender(event, "remoteAccess:cancelPairing");
+  handle("remoteAccess:cancelPairing", async (event): Promise<void> => {
     const service = await getRemoteAccess();
     service.cancelPairing();
   });
-  ipcMain.handle("remoteAccess:listDevices", async (event): Promise<RemotePairedDevice[]> => {
-    requireTrustedSender(event, "remoteAccess:listDevices");
+  handle("remoteAccess:listDevices", async (event): Promise<RemotePairedDevice[]> => {
     const service = await getRemoteAccess();
     return service.listPairedDevices();
   });
-  ipcMain.handle(
+  handle(
     "remoteAccess:revokeDevice",
     async (event, publicKey: string): Promise<RemotePairedDevice[]> => {
-      requireTrustedSender(event, "remoteAccess:revokeDevice");
       const service = await getRemoteAccess();
       // Awaited: the renderer's list must not repaint as "revoked" until the
       // removal is durable, so the UI can never claim a revocation that a
@@ -2289,13 +2402,11 @@ export function registerIpc(): void {
   // Approving is what actually writes a device into the trust store, so it is
   // gated like the rest: only the real renderer's top frame can decide, never
   // a navigated-away document or a preview guest.
-  ipcMain.handle("remoteAccess:approvePairing", async (event): Promise<void> => {
-    requireTrustedSender(event, "remoteAccess:approvePairing");
+  handle("remoteAccess:approvePairing", async (event): Promise<void> => {
     const service = await getRemoteAccess();
     service.approvePairing();
   });
-  ipcMain.handle("remoteAccess:denyPairing", async (event): Promise<void> => {
-    requireTrustedSender(event, "remoteAccess:denyPairing");
+  handle("remoteAccess:denyPairing", async (event): Promise<void> => {
     const service = await getRemoteAccess();
     service.denyPairing();
   });
@@ -2304,10 +2415,10 @@ export function registerIpc(): void {
   // interop with the native file manager via clipboard-files.ts (Windows
   // CF_HDROP, macOS NSPasteboard file URLs); both directions fail soft so the
   // renderer's in-app clipboard keeps working regardless.
-  ipcMain.handle("clipboard:readFilePaths", async (): Promise<string[] | null> => {
+  handle("clipboard:readFilePaths", async (): Promise<string[] | null> => {
     return readClipboardFilePaths();
   });
-  ipcMain.handle(
+  handle(
     "clipboard:writeFilePaths",
     async (_e, args: { paths: string[] }): Promise<boolean> => {
       const paths = Array.isArray(args?.paths)
@@ -2324,7 +2435,7 @@ export function registerIpc(): void {
   // usable text), materialise it as a PNG in the OS temp dir and return that
   // path for the renderer to shell-escape and bracketed-paste. Returns null
   // when the clipboard has no image, so the caller can fall back cleanly.
-  ipcMain.handle("clipboard:readImageAsTempFile", async (): Promise<string | null> => {
+  handle("clipboard:readImageAsTempFile", async (): Promise<string | null> => {
     try {
       const image = clipboard.readImage();
       if (!image || image.isEmpty()) return null;
@@ -2341,7 +2452,7 @@ export function registerIpc(): void {
     }
   });
 
-  ipcMain.handle("app:openExternal", async (_e, url: string): Promise<void> => {
+  handle("app:openExternal", async (_e, url: string): Promise<void> => {
     if (typeof url !== "string" || url.length === 0) return;
     // file: URLs are deliberately NOT handed to shell.openExternal — on
     // Windows that executes the file with its default handler (e.g. a .bat),
@@ -2374,7 +2485,7 @@ export function registerIpc(): void {
   // Auto-updater: renderer's "Restart and install" button calls this after
   // the download-complete event arrives. Lazy-imported so loading ipc.ts
   // never pulls in electron-updater on the dev/test path.
-  ipcMain.handle("updater:quitAndInstall", async (): Promise<void> => {
+  handle("updater:quitAndInstall", async (): Promise<void> => {
     const { quitAndInstall } = await import("./auto-updater");
     quitAndInstall();
   });

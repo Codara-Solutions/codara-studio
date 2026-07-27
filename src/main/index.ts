@@ -12,7 +12,7 @@ import {
 import { logMain } from "./file-log";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registerIpc, setTrayHook } from "./ipc";
+import { registerIpc, registerTrustedMainWindow, setTrayHook } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
@@ -534,6 +534,17 @@ function createWindow(): void {
   });
 
   const windowForEvents = mainWindow;
+
+  // Wire the privileged-IPC sender gate to this window BEFORE the initial
+  // load below. The gate trusts a channel only when the sender is this
+  // window's current main frame AND its committed document passed the
+  // allowlist; that "committed" flag is maintained from did-navigate, which
+  // the initial loadURL/loadFile fires. Attaching here (pre-load) guarantees
+  // the very first committed navigation is observed, so legitimate startup IPC
+  // is trusted the moment the renderer can send it, while the fail-closed
+  // initial state keeps a forged in-page URL (pushState) from ever qualifying.
+  registerTrustedMainWindow(windowForEvents);
+
   windowForEvents.on("maximize", () => sendWindowState(windowForEvents));
   windowForEvents.on("unmaximize", () => sendWindowState(windowForEvents));
 
@@ -620,21 +631,33 @@ function createWindow(): void {
   // the privileged API. We do not preventDefault the attach itself: that would
   // break the legitimate preview feature; we only sanitize its web preferences.
   const inspectorPreloadPath = join(__dirname, "../preload/inspector-preload.js");
-  // We force only the guest's node/isolation posture (which already matches
-  // the app's existing preview config) and the preload restriction. We do NOT
-  // newly toggle sandbox here: that would change the guest's process model, and
-  // the hole is closed by denying node + stripping any non-inspector preload.
+  // The load-bearing hardening is stripping any non-inspector preload from
+  // `webPreferences.preload`: Electron 43 builds the guest's WebPreferences from
+  // this object at attach time, so deleting a smuggled preload here is what
+  // actually keeps the privileged window.spark preload out of the guest.
+  // The nodeIntegration / nodeIntegrationInSubFrames / contextIsolation writes
+  // below only reaffirm Electron's own defaults for a webview guest (node off,
+  // isolation on); they are defense in depth, not the mechanism. We do NOT
+  // newly toggle sandbox here: that would change the guest's process model.
   mainWindow.webContents.on("will-attach-webview", (_event, webPreferences, params) => {
     webPreferences.nodeIntegration = false;
     webPreferences.nodeIntegrationInSubFrames = false;
     webPreferences.contextIsolation = true;
+    // Force same-origin policy back on: a guest must never run with web
+    // security disabled. BrowserPane sets no `disablewebsecurity` today, so this
+    // only guards against a future/repointed guest requesting it.
+    webPreferences.webSecurity = true;
     const requestedPreload = webPreferences.preload;
     if (requestedPreload && !isSameResolvedPath(requestedPreload, inspectorPreloadPath)) {
       delete webPreferences.preload;
     }
-    // The `preload` attribute is also surfaced in params as a file:// URL.
-    // Strip it too when it is not the inspector preload so neither channel can
-    // smuggle the privileged preload into the guest.
+    // Belt-and-suspenders: also clear the `preload` attribute surfaced in
+    // params. In Electron 43 the guest's preload is taken from webPreferences
+    // (stripped above), so this params write does not itself change what loads;
+    // it is kept only so the two views of the attach can never disagree and
+    // mislead a future reader. `allowpopups` is intentionally left as BrowserPane
+    // sets it: window.open from a guest is already routed to the in-app browser
+    // by setWindowOpenHandler below, so it cannot open a privileged window.
     const attrPreload = params.preload;
     if (attrPreload) {
       let attrPath = "";
