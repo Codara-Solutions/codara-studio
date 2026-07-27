@@ -11,7 +11,7 @@ import {
 } from "electron";
 import { logMain } from "./file-log";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerIpc, setTrayHook } from "./ipc";
 import { isTrustedOnSender, registerTrustedMainWindow } from "./main-window-trust";
 import * as pty from "./pty-manager";
@@ -44,6 +44,7 @@ import {
   isAllowedMainWindowUrl,
   isSameResolvedPath,
   resolveMainWindowAllowlistConfig,
+  type NavigationAllowlistConfig,
 } from "./navigation-allowlist";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
@@ -380,6 +381,9 @@ ipcMain.on("app:renderer-ready", (e) => {
 });
 
 function onBootFailure(reason: string): void {
+  // The renderer entry itself is untrusted; the ladder below cannot fix that and
+  // reportRendererEntryRejected already named the cause and told the user.
+  if (rendererEntryRejected) return;
   bootFailures += 1;
   logMain("boot", `renderer failed to boot (${reason}); failure #${bootFailures}`);
   if (bootFailures <= 2) {
@@ -404,7 +408,54 @@ function onBootFailure(reason: string): void {
   );
 }
 
+// ── Renderer-entry self-check ──────────────────────────────────────────────
+// Set when the URL we load the renderer from does not pass the SAME navigation
+// allowlist the privileged-IPC sender gate keys off (see the load site in
+// createWindow). That is fail-closed, never a bypass: the gate denies every
+// privileged channel, so the UI paints and then does nothing. But it is silent,
+// and none of the watchdog's remedies below can repair it: a reload commits the
+// same URL and a relaunch re-resolves the same install path, so the ladder
+// would just cycle reload/reload/relaunch/dialog roughly every 75s while
+// blaming the renderer. When this is set we name the real cause once and stand
+// the ladder down.
+let rendererEntryRejected = false;
+
+function reportRendererEntryRejected(
+  rendererUrl: string,
+  entryPath: string,
+  config: NavigationAllowlistConfig,
+): void {
+  rendererEntryRejected = true;
+  const offender = rendererUrl.startsWith("file:") ? (entryPath.match(/[%#?]/) || [])[0] : undefined;
+  const cause = !rendererUrl.startsWith("file:")
+    ? `the dev renderer URL is not the http origin the allowlist was configured with (ELECTRON_RENDERER_URL=${config.devServerUrl ?? "unset"})`
+    : offender
+      ? `the install path contains a literal "${offender}", which a file: URL round-trip does not survive`
+      : "the resolved renderer entry is not the path the allowlist was configured with";
+  logMain("security", `renderer entry FAILS its own navigation allowlist: ${cause}`);
+  logMain("security", `renderer entry url=${rendererUrl}`);
+  logMain("security", `renderer entry path=${entryPath}`);
+  logMain(
+    "boot",
+    "boot watchdog stood down: reloading or relaunching cannot fix a renderer entry the allowlist rejects",
+  );
+  // Off the load path so a modal never blocks the navigation we are starting.
+  const notify = setTimeout(() => {
+    dialog.showErrorBox(
+      "Codara Studio can't trust its own window",
+      `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
+        `Cause: ${cause}.\n\n` +
+        (offender
+          ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
+          : "") +
+        `Details are in ${join(sparkHome(), "logs", "main.log")}.`,
+    );
+  }, 0);
+  notify.unref?.();
+}
+
 function armBootWatchdog(): void {
+  if (rendererEntryRejected) return;
   if (bootWatchdog) clearTimeout(bootWatchdog);
   bootWatchdog = setTimeout(() => {
     bootWatchdog = null;
@@ -552,7 +603,7 @@ function createWindow(): void {
   // load below. The gate trusts a channel only when the sender is this
   // window's current main frame AND its committed document passed the
   // allowlist; that "committed" flag is maintained from did-navigate, which
-  // the initial loadURL/loadFile fires. Attaching here (pre-load) guarantees
+  // the initial loadURL at the end of this function fires. Attaching here (pre-load) guarantees
   // the very first committed navigation is observed, so legitimate startup IPC
   // is trusted the moment the renderer can send it, while the fail-closed
   // initial state keeps a forged in-page URL (pushState) from ever qualifying.
@@ -620,10 +671,11 @@ function createWindow(): void {
   // top frame to an attacker origin. This does NOT govern preview <webview>
   // guests: they are separate webContents and do not fire these events on the
   // host, so the browser/preview panes keep navigating freely.
+  const rendererEntryPath = join(__dirname, "../renderer/index.html");
   const navAllowlistConfig = resolveMainWindowAllowlistConfig({
     isPackaged: app.isPackaged,
     rendererDevUrl: process.env.ELECTRON_RENDERER_URL,
-    rendererEntryPath: join(__dirname, "../renderer/index.html"),
+    rendererEntryPath,
   });
   const guardNavigation = (details: Electron.Event, url: string) => {
     if (isAllowedMainWindowUrl(url, navAllowlistConfig)) return;
@@ -761,11 +813,25 @@ function createWindow(): void {
     console.error("[main] preload error", preloadPath, error);
   });
 
-  if (isDev && process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
-  } else {
-    mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
+  // The renderer entry is loaded through loadURL(pathToFileURL(...)) rather than
+  // loadFile() deliberately. loadFile builds its URL with the legacy
+  // url.format(), which does NOT percent-escape a literal "%" in the path, while
+  // the allowlist's fileURLToPath DECODES "%NN", so an install directory
+  // containing a literal "%" round-trips to a different path and the app's own
+  // entry fails its own allowlist. pathToFileURL escapes it ("%" -> "%25"), so
+  // the round-trip is exact and such an install boots normally.
+  //
+  // Then prove it: run the EXACT string we are about to commit through the same
+  // predicate the sender gate keys off. Checking the literal URL rather than
+  // re-deriving one leaves no gap between what we load and what we validated.
+  const rendererUrl =
+    isDev && process.env.ELECTRON_RENDERER_URL
+      ? process.env.ELECTRON_RENDERER_URL
+      : pathToFileURL(rendererEntryPath).href;
+  if (!isAllowedMainWindowUrl(rendererUrl, navAllowlistConfig)) {
+    reportRendererEntryRejected(rendererUrl, rendererEntryPath, navAllowlistConfig);
   }
+  mainWindow.loadURL(rendererUrl);
 }
 
 app.whenReady().then(async () => {

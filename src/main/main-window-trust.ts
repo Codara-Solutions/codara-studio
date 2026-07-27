@@ -74,6 +74,12 @@ let allowlistConfig: NavigationAllowlistConfig | null = null;
 // steer main into attaching the DevTools protocol to an arbitrary webContents.
 const previewGuestHosts = new Map<number, number>();
 
+// Every window this module has already wired listeners to. See the
+// re-registration guard in registerTrustedMainWindow: a second call for the same
+// window must not reset the trust flag or double-subscribe the listeners. A
+// WeakSet so a closed window's entry disappears with the window.
+const wiredWindows = new WeakSet<BrowserWindow>();
+
 export function getTrustedMainWindow(): BrowserWindow | null {
   if (!trustedWindow || trustedWindow.isDestroyed()) return null;
   return trustedWindow;
@@ -91,10 +97,27 @@ export function getTrustedMainWindow(): BrowserWindow | null {
 //
 // `resolveConfig` defaults to the production allowlist; the sender-gate test
 // injects one pointing at its synthetic renderer entry.
+//
+// PRECONDITION: call this ONCE per window, before its first load. The initial
+// state is fail-closed (trustedDocumentCommitted = false) and only a COMMITTED
+// navigation can restore it, so calling it again on a window whose document has
+// already committed would blank the flag with no further commit coming to
+// re-set it: every privileged invoke would be denied until the user happened to
+// reload. It would also subscribe a second copy of every listener below. The
+// only production call site (index.ts createWindow) satisfies the precondition,
+// but this is an exported function in a shared module, so the guard below makes
+// a repeat call a no-op instead of a silent trust outage. A repeat call also
+// deliberately ignores its `resolveConfig`: the allowlist for a window is fixed
+// at the moment it is wired.
 export function registerTrustedMainWindow(
   win: BrowserWindow,
   resolveConfig: () => NavigationAllowlistConfig = defaultAllowlistConfig,
 ): void {
+  if (wiredWindows.has(win)) {
+    logMain("security", "registerTrustedMainWindow called twice for the same window; keeping the existing trust state");
+    return;
+  }
+  wiredWindows.add(win);
   trustedWindow = win;
   trustedDocumentCommitted = false;
   allowlistConfig = resolveConfig();

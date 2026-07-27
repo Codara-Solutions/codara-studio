@@ -19,7 +19,7 @@
 //      "http://localhost:9999/" (a different port) are both rejected.
 //
 //   2. The packaged renderer entry file. Production builds load the renderer
-//      via loadFile(index.html). Only that exact file, matched by resolved
+//      via loadURL(pathToFileURL(index.html)). Only that exact file, matched by resolved
 //      filesystem path equality (not prefix), is allowed. Any other file:// URL,
 //      including one whose path traverses out of the renderer directory, is
 //      rejected.
@@ -40,8 +40,8 @@ export interface NavigationAllowlistConfig {
   // the Vite dev renderer, otherwise null. When null, no http origin is
   // allowed at all (packaged builds never navigate to http).
   devServerUrl: string | null;
-  // Absolute path to the packaged renderer entry (index.html) that loadFile
-  // targets. Compared by resolved-path equality, never by prefix.
+  // Absolute path to the packaged renderer entry (index.html) that the window
+  // loader targets. Compared by resolved-path equality, never by prefix.
   rendererEntryPath: string;
 }
 
@@ -74,7 +74,7 @@ export function isSameResolvedPath(a: string, b: string): boolean {
 
 // Derive the runtime allowlist config from the same source of truth the window
 // loader uses: the dev server URL is honored only in an unpackaged build, and
-// the renderer entry path is the file loadFile() targets.
+// the renderer entry path is the file the loader navigates to.
 export function resolveMainWindowAllowlistConfig(params: {
   isPackaged: boolean;
   rendererDevUrl: string | undefined;
@@ -146,15 +146,19 @@ export function isAllowedMainWindowUrl(
     // both sides, so a traversal like renderer/../../evil.html can never
     // resolve back to the entry file.
     //
-    // KNOWN, EXOTIC LIMITATION: Electron's loadFile() formats the file: URL with
-    // the legacy url.format(), which does NOT percent-escape a literal "%" in
-    // the install path. fileURLToPath then decodes any "%NN" sequence, so an
-    // install directory containing a literal "%" (e.g. ".../codara%20studio/")
-    // can round-trip to a different path and fail this equality. The only
-    // consequence is the app's own renderer entry failing the allowlist on such
-    // a path (a fail-closed self-DoS for that one install, never a bypass). This
-    // is rare enough that it is documented rather than special-cased; if it ever
-    // matters, install to a "%"-free path.
+    // A literal "%" in the install path used to break this equality, because
+    // Electron's loadFile() formats its file: URL with the legacy url.format(),
+    // which does NOT percent-escape "%", while fileURLToPath DECODES any "%NN"
+    // sequence. So ".../codara%20studio/index.html" round-tripped to
+    // ".../codara studio/index.html" and failed the comparison. (Measured, it
+    // was worse than that: Chromium decodes the same sequence, so the load
+    // itself failed with ERR_FILE_NOT_FOUND. See MODE=percentpath in
+    // scripts/test-trusted-sender.cjs.) index.ts therefore loads the entry with
+    // loadURL(pathToFileURL(entry).href), which escapes "%" as "%25" so the
+    // round-trip through fileURLToPath is exact. Nothing here special-cases it;
+    // the fix is producing a correctly-encoded URL at the load site. index.ts
+    // also self-checks the URL it is about to commit against this predicate and
+    // says so loudly if it ever fails, rather than leaving a half-dead window.
     return isSameResolvedPath(filePath, config.rendererEntryPath);
   }
 
