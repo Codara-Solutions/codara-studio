@@ -94,6 +94,26 @@ async function loadPairing() {
   return require(outfile);
 }
 
+// The identity/storage helpers on their own, so the F7 storage-hardening
+// test can drive writeStagingFileSync and ensureRemoteDir directly.
+async function loadIdentity() {
+  const cacheDir = join(ROOT, "node_modules", ".cache");
+  mkdirSync(cacheDir, { recursive: true });
+  const outfile = join(cacheDir, "remote-access-hostile-identity.cjs");
+  await build({
+    entryPoints: [join(ROOT, "src", "main", "remote-access", "identity.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+    alias: { "@shared": join(ROOT, "src", "shared") },
+    external: ["sodium-native"],
+  });
+  delete require.cache[outfile];
+  return require(outfile);
+}
+
 // Reads the trust file the way a fresh app launch would.
 function readDevices(home) {
   try {
@@ -564,6 +584,91 @@ async function main() {
   }
 
   /* ====================================================================== */
+  /* F4d: a flush rename stalled PAST the old bounded wait must still not    */
+  /*      let a stale rename land after the revoke resolves                  */
+  /* ====================================================================== */
+
+  {
+    // The 5a window: the previous code waited only a bounded 2s for an
+    // in-flight flush, then wrote clean and relied on a post-rename repair.
+    // If the rename stalled longer than that bound, the revoke returned, then
+    // the stale rename landed and clobbered the clean file, leaving a crash
+    // window before the repair. The fix waits for the in-flight rename itself
+    // with no bound, so the revoke does not resolve until the stale rename
+    // has landed and been overwritten. This drives a rename stalled well past
+    // the old 2s bound and asserts the revoke does not resolve early.
+    const pairingModule = await loadPairing();
+    const nodeFs = require("node:fs");
+    const realRename = nodeFs.promises.rename;
+    const OLD_BOUNDED_WAIT_MS = 2_000;
+
+    const home = mkdtempSync(join(tmpdir(), "codara-hostile-f4d-"));
+    const deviceKey = Buffer.alloc(32, 11);
+    const deviceKeyB64 = deviceKey.toString("base64");
+    try {
+      const store = new pairingModule.PairedDeviceStore(home);
+      store.addDevice(deviceKey, "Doomed slow-fs", Date.now());
+
+      let releaseRename;
+      let renameEntered;
+      const enteredRename = new Promise((r) => {
+        renameEntered = r;
+      });
+      const releasedRename = new Promise((r) => {
+        releaseRename = r;
+      });
+      let renameIntercepted = false;
+      nodeFs.promises.rename = async (...args) => {
+        if (!renameIntercepted && String(args[1]).includes(PAIRED_DEVICES_FILE)) {
+          renameIntercepted = true;
+          renameEntered();
+          await releasedRename;
+        }
+        return realRename.apply(nodeFs.promises, args);
+      };
+
+      store.touchLastSeen(deviceKey, Date.now());
+      const flushing = store.flushPendingWrites();
+      await enteredRename;
+
+      let revokeSettled = false;
+      const revoking = Promise.resolve(store.revokeDevice(deviceKeyB64)).then((value) => {
+        revokeSettled = true;
+        return value;
+      });
+
+      // Wait well past the OLD bounded wait. The pre-fix revoke resolved at
+      // the 2s timeout while the rename was still stalled; the fixed revoke
+      // must still be waiting on the rename here.
+      await wait(OLD_BOUNDED_WAIT_MS + 700);
+      check(
+        "F4d: a revoke does not resolve while a rename is stalled past the old bounded wait",
+        revokeSettled === false,
+      );
+
+      releaseRename();
+      check("F4d: revoke reports removal once the rename lands", (await revoking) === true);
+      await flushing;
+
+      // Whatever is on disk the instant the revoke resolved is what a crash
+      // would preserve, and it must be clean, with no stale rename able to
+      // land afterwards.
+      check(
+        "F4d: the trust file is clean when the revoke resolves",
+        readDevices(home).length === 0,
+        readDevices(home),
+      );
+      check(
+        "F4d: a fresh store does not re-authorize after the stalled rename",
+        new pairingModule.PairedDeviceStore(home).isAuthorized(deviceKey) === false,
+      );
+    } finally {
+      nodeFs.promises.rename = realRename;
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  /* ====================================================================== */
   /* F5: a replayed (unproven) session must not evict the live phone, and    */
   /*     unproven sessions that never speak are reaped                       */
   /* ====================================================================== */
@@ -737,6 +842,70 @@ async function main() {
       for (const s of streams) s.destroy();
       await service.setEnabled(false).catch(() => undefined);
       rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  /* ====================================================================== */
+  /* F7: storage hardening (symlinked dir, symlinked staging path)          */
+  /* ====================================================================== */
+
+  {
+    const nodeFs = require("node:fs");
+    const pairingModule = await loadPairing();
+    const identity = await loadIdentity();
+
+    // A symlinked remote directory is refused, failing closed: nothing key-
+    // bearing is ever written through a directory an attacker could redirect.
+    {
+      const base = mkdtempSync(join(tmpdir(), "codara-hostile-f7dir-"));
+      const realDir = join(base, "real");
+      mkdirSync(realDir, { recursive: true });
+      const linkDir = join(base, "link");
+      nodeFs.symlinkSync(realDir, linkDir);
+      const store = new pairingModule.PairedDeviceStore(linkDir);
+      let threw = false;
+      try {
+        store.addDevice(Buffer.alloc(32, 5), "through-a-symlink", Date.now());
+      } catch {
+        threw = true;
+      }
+      check("F7: a symlinked remote directory is refused", threw === true);
+      check(
+        "F7: no trust file was written through the symlinked directory",
+        readDevices(realDir).length === 0,
+        readDevices(realDir),
+      );
+      rmSync(base, { recursive: true, force: true });
+    }
+
+    // A symlink pre-planted at the exact staging path is not followed: the
+    // exclusive/no-follow create fails rather than writing through it.
+    {
+      const base = mkdtempSync(join(tmpdir(), "codara-hostile-f7tmp-"));
+      const target = join(base, "sensitive");
+      const staging = join(base, "staging.tmp");
+      const elsewhere = join(base, "attacker-controlled");
+      nodeFs.writeFileSync(elsewhere, "original attacker content");
+      nodeFs.symlinkSync(elsewhere, staging);
+      let threw = false;
+      try {
+        identity.writeStagingFileSync(staging, "sensitive payload", 0o600);
+      } catch {
+        threw = true;
+      }
+      check("F7: a symlink at the staging path is refused, not followed", threw === true);
+      check(
+        "F7: the symlink target was not overwritten through the staging path",
+        nodeFs.readFileSync(elsewhere, "utf8") === "original attacker content",
+      );
+      // Sanity: a fresh staging path writes and is owner-only.
+      const cleanTmp = identity.stagingPath(target);
+      identity.writeStagingFileSync(cleanTmp, "ok", 0o600);
+      check("F7: a clean staging write succeeds", nodeFs.readFileSync(cleanTmp, "utf8") === "ok");
+      if (process.platform !== "win32") {
+        check("F7: the staging file is 0600", (nodeFs.statSync(cleanTmp).mode & 0o777) === 0o600);
+      }
+      rmSync(base, { recursive: true, force: true });
     }
   }
 

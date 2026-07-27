@@ -22,11 +22,19 @@
 // whose `iat` is older than 2 minutes (30s clock skew tolerance).
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, promises as fsp, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { promises as fsp, readFileSync, renameSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import type { RemotePairedDevice } from "@shared/remote-access";
-import { ensureRemoteDir, shortKey } from "./identity";
+import {
+  ensureRemoteDir,
+  fsyncDirSync,
+  fsyncFile,
+  O_EXCL_NOFOLLOW,
+  shortKey,
+  stagingPath,
+  writeStagingFileSync,
+} from "./identity";
 
 export const PAIRING_TTL_MS = 2 * 60 * 1000;
 export const PAIRING_SECRET_BYTES = 32;
@@ -36,10 +44,6 @@ const MAX_DEVICE_NAME_CHARS = 64;
 // How long last-seen updates coalesce before one async write. Long enough
 // that a reconnect storm collapses into a single flush.
 const LAST_SEEN_FLUSH_DELAY_MS = 5_000;
-// How long a revoke will wait for an in-flight cosmetic flush to land before
-// writing anyway. Only ever reached if the filesystem is pathologically
-// slow; a revoke must not hang the UI regardless.
-const REVOKE_FLUSH_WAIT_MS = 2_000;
 
 /* -------------------------------------------------------------------------- */
 /* Paired-device store                                                        */
@@ -89,9 +93,13 @@ export class PairedDeviceStore {
   // flush carries the generation it started under and refuses to be the
   // last word once that number has moved. See saveAsync.
   private generation = 0;
-  // The last-seen flush whose fs work is currently in the air, or null.
-  // revokeDevice awaits this so its own write is provably the last one.
-  private flushInFlight: Promise<void> | null = null;
+  // The in-flight last-seen flush RENAME, or null. A revoke that lands while
+  // a rename is on the threadpool awaits exactly this before its own write,
+  // so its clean write is provably the last one to touch the file and a
+  // stale rename can never land after the revoke resolves. Set synchronously
+  // in the same tick as the pre-rename generation check, with no await
+  // between, so the revoke's generation bump cannot slip in unseen.
+  private renameInFlight: Promise<void> | null = null;
 
   // `log` carries durability failures that the user would otherwise never
   // hear about. Never pass anything key-bearing to it.
@@ -150,25 +158,29 @@ export class PairedDeviceStore {
   //
   // Async because of the durability guarantee it carries: when the returned
   // promise resolves, the revocation is on disk AND no other write to the
-  // trust file is outstanding, so a crash at any instant from then on cannot
-  // bring the device back. Getting there means ordering this write strictly
-  // after any last-seen flush that is already in the air, since that flush
-  // may have been carrying the pre-revoke set toward a rename.
+  // trust file can still land, so a crash at any instant from then on cannot
+  // bring the device back.
   //
-  // The one qualifier: if the bounded wait below expires on a pathologically
-  // slow filesystem, ordering falls back to the flush's post-rename backstop,
-  // and the full crash-immunity narrows to that backstop's window (see the
-  // inline note at the wait). Under any healthy filesystem the guarantee above
-  // holds unconditionally.
+  // This is enforced by ordering, with no repair-after-the-fact. The
+  // generation bump below is synchronous and happens-before it awaits, so any
+  // flush that has not yet reached its pre-rename generation check will see
+  // the bump and abandon its staging file rather than rename it. The only
+  // flush that can still rename is one whose rename was ALREADY dispatched to
+  // the threadpool; that rename is tracked as renameInFlight and this method
+  // waits for it to land before doing its own synchronous write, so the clean
+  // write is unconditionally last. There is deliberately no bounded-wait
+  // fallback that writes concurrently with an in-flight rename, because that
+  // was exactly the window where a stalled rename could clobber the clean
+  // state after the revoke had returned.
   async revokeDevice(publicKeyB64: string): Promise<boolean> {
     const devices = this.list();
     const next = devices.filter((device) => device.publicKey !== publicKeyB64);
     if (next.length === devices.length) return false;
 
     // Synchronous half: memory stops trusting the device immediately, the
-    // generation bump tells an in-flight flush it is stale (so in the usual
-    // interleaving it abandons its staging file rather than renaming it),
-    // and the pending timer is cancelled so no NEW flush can start.
+    // generation bump tells any not-yet-committed flush it is stale (so it
+    // abandons its staging file rather than renaming it), and the pending
+    // timer is cancelled so no NEW flush can start.
     this.cache = next;
     this.generation += 1;
     if (this.lastSeenFlushTimer) {
@@ -176,12 +188,14 @@ export class PairedDeviceStore {
       this.lastSeenFlushTimer = null;
     }
 
-    // Let any already-dispatched flush finish before we write, so its rename
-    // can never land after ours. Bounded so a pathological fs cannot block a
-    // revoke indefinitely; if the bound is hit we write anyway and the
-    // flush's own post-rename check is the backstop.
-    if (this.flushInFlight) {
-      await withWriteTimeout(this.flushInFlight, REVOKE_FLUSH_WAIT_MS);
+    // A flush whose rename is already on the threadpool is the one case the
+    // generation bump cannot head off. Wait for that rename to land (it
+    // carries pre-revoke content), then write clean strictly after it. A
+    // flush stalled anywhere BEFORE its rename has renameInFlight === null
+    // and will skip its rename once it sees the bumped generation, so there
+    // is nothing to wait for and this returns at once.
+    if (this.renameInFlight) {
+      await this.renameInFlight.catch(() => undefined);
     }
 
     this.writeSync(next);
@@ -264,118 +278,84 @@ export class PairedDeviceStore {
   private writeSync(devices: PairedDeviceRecord[]): void {
     ensureRemoteDir(this.remoteDir);
     const payload: DevicesFileShape = { version: 1, devices };
-    // Unique tmp name: the async flush must never be able to collide with
-    // this write's staging file.
-    const tmp = `${this.file}.${process.pid}.${(tmpCounter += 1)}.tmp`;
-    writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
-    try {
-      chmodSync(tmp, 0o600);
-    } catch {
-      // Windows: no POSIX modes.
-    }
+    // Randomized, exclusive/no-follow staging file, fsynced before the
+    // rename, and the directory fsynced after it, so a revoke or a pairing is
+    // durable across a power loss and cannot be redirected through a
+    // pre-planted symlink.
+    const tmp = stagingPath(this.file);
+    writeStagingFileSync(tmp, JSON.stringify(payload, null, 2), 0o600);
     renameSync(tmp, this.file);
+    fsyncDirSync(this.remoteDir);
   }
 
   // Async twin of save() for the cosmetic last-seen flush, serialized behind
   // `writing` so two flushes cannot interleave their renames.
   //
-  // This write is NEVER allowed to be the last word. A revoke is the
-  // security boundary of the whole feature. Its primary defence is ordering:
-  // revokeDevice awaits any in-flight flush (this promise, tracked as
-  // flushInFlight) before it writes, so on a healthy filesystem a flush that
-  // was already dispatched when the revoke landed finishes FIRST and the
-  // revoke's synchronous write is strictly last. The three windows below are
-  // the defences that still hold if that ordering wait is bypassed or times
-  // out on a pathological filesystem:
+  // This write is NEVER allowed to survive a revoke. The defences, in order:
   //
   //   1. Superseded BEFORE the write starts. The payload is read from
   //      this.list() at execution time rather than captured at scheduling
   //      time, so it already reflects the revoke.
-  //   2. Superseded DURING the write. The generation is re-checked just
-  //      before the rename; a stale flush abandons its staging file instead
-  //      of publishing it.
-  //   3. Superseded DURING the rename itself, which is the only window the
-  //      first two cannot see because the rename is already on the
-  //      threadpool. Here the rename may genuinely have clobbered the
-  //      authoritative file, so we re-assert the truth with a synchronous
-  //      write of the current state. This is a backstop; the ordering wait
-  //      means it should not normally be reached.
+  //   2. Superseded DURING the write, before the rename. The generation is
+  //      re-checked immediately before the rename, in the same synchronous
+  //      tick that publishes the rename (no await between the check and the
+  //      dispatch), so a revoke's synchronous generation bump cannot slip in
+  //      unseen: the flush either sees the bump and abandons its staging file
+  //      or it publishes the rename and records it as renameInFlight.
+  //   3. Superseded DURING the rename itself. This is the only window the
+  //      check cannot see, because the rename is already on the threadpool.
+  //      A revoke landing here finds renameInFlight set and waits for it
+  //      before writing (see revokeDevice), so the revoke's clean write is
+  //      strictly last. There is no repair-after-the-fact: nothing stale is
+  //      ever left behind for a later write to correct.
   private async saveAsync(): Promise<void> {
     const run = this.writing.then(async () => {
       const generation = this.generation;
       const devices = this.list();
       ensureRemoteDir(this.remoteDir);
       const payload: DevicesFileShape = { version: 1, devices };
-      const tmp = `${this.file}.${process.pid}.${(tmpCounter += 1)}.tmp`;
-      await fsp.writeFile(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
+      const tmp = stagingPath(this.file);
+      // fsp.writeFile with an exclusive/no-follow flag: exclusive create so a
+      // pre-planted symlink at the staging path fails the write instead of
+      // being followed.
+      await fsp.writeFile(tmp, JSON.stringify(payload, null, 2), {
+        flag: O_EXCL_NOFOLLOW,
+        mode: 0o600,
+      });
       try {
         await fsp.chmod(tmp, 0o600);
       } catch {
         // Windows: no POSIX modes.
       }
+      await fsyncFile(tmp);
       // Superseded before we publish: drop the staging file rather than
-      // rename it. This is the path that normally fires when a revoke races
-      // us, and it means no clobber happens at all.
+      // rename it. No clobber happens at all. This check and the rename
+      // dispatch below run with no await between them, so a concurrent
+      // revoke's generation bump is either seen here or waited on via
+      // renameInFlight, never lost.
       if (this.generation !== generation) {
         await fsp.unlink(tmp).catch(() => undefined);
         return;
       }
-      await fsp.rename(tmp, this.file);
-      // Backstop only. An authoritative write now waits for this flush
-      // before writing (see revokeDevice), so it should not be able to
-      // supersede us between the check above and this line. If that ever
-      // happens anyway (the revoke's bounded wait expired), the rename just
-      // published stale content and the repair below is the last defence.
-      // It is deliberately loud: a silently failed durable revoke is the
-      // worst outcome this file can produce.
-      if (this.generation !== generation) {
-        try {
-          this.writeSync(this.list());
-        } catch (err) {
-          this.log(
-            `URGENT: could not re-assert the paired-device list after a superseded flush; a revoked device may still be on disk: ${(err as Error).message}`,
-          );
-          throw err;
-        }
+      const renamePromise = fsp.rename(tmp, this.file).then(() => {
+        fsyncDirSync(this.remoteDir);
+      });
+      this.renameInFlight = renamePromise;
+      try {
+        await renamePromise;
+      } finally {
+        if (this.renameInFlight === renamePromise) this.renameInFlight = null;
       }
     });
-    // Tracked separately from `writing` so an authoritative write can await
-    // exactly the fs work that is in the air. Settles rather than rejects,
-    // so a failed flush can never wedge a later revoke.
+    // Settles rather than rejects, so a failed flush can never wedge a later
+    // revoke or flush waiting on `writing`.
     const settled: Promise<void> = run.then(
       () => undefined,
       () => undefined,
     );
     this.writing = settled;
-    this.flushInFlight = settled;
-    void settled.then(() => {
-      // Only clear if no newer flush has taken the slot.
-      if (this.flushInFlight === settled) this.flushInFlight = null;
-    });
     await run;
   }
-}
-
-// Process-wide counter for unique staging file names, so a synchronous
-// authoritative write and an in-flight async flush can never share a tmp
-// path.
-let tmpCounter = 0;
-
-// Resolves when `promise` settles or the bound elapses, whichever is first.
-// Never rejects: the caller's next step must run either way.
-function withWriteTimeout(promise: Promise<void>, ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(finish, ms);
-    timer.unref?.();
-    void promise.then(finish, finish);
-  });
 }
 
 function isPlausibleRecord(value: unknown): value is PairedDeviceRecord {
