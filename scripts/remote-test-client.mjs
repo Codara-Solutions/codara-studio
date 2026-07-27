@@ -1,7 +1,7 @@
 // Test client for phone Remote Access, standing in for the mobile app until
 // it ships. It speaks the same wire protocol the phone does: Noise IK over
-// TCP for the LAN rung, hyperdht for the off-LAN rung, then length-prefixed
-// JSON RPC v0.
+// TCP for the LAN rung, then length-prefixed JSON RPC v0. The real mobile
+// interop matrix owns relay coverage.
 //
 // First run (pairing) takes the QR payload the Settings modal shows:
 //
@@ -12,7 +12,7 @@
 //
 //   node scripts/remote-test-client.mjs connect
 //
-// `connect` climbs the ladder (LAN addresses first, then the DHT), runs
+// `connect` tries the recorded LAN addresses, runs
 // hello + workspaces.list, opens a terminal, echoes a line through it,
 // prints what the pty sent back, and closes cleanly. State lives in
 // ./remote-test-client-state.json relative to the CURRENT WORKING
@@ -27,13 +27,11 @@ import { randomBytes } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 const NoiseSecretStream = require("@hyperswarm/secret-stream");
-const HyperDHT = require("hyperdht");
 
 const STATE_FILE = resolve(process.cwd(), "remote-test-client-state.json");
 const PROTOCOL_VERSION = 0;
 const CLIENT_NAME = "remote-test-client";
 const LAN_DIAL_TIMEOUT_MS = 4000;
-const DHT_DIAL_TIMEOUT_MS = 15_000;
 
 /* ----------------------------------------------------------------- framing */
 
@@ -85,7 +83,7 @@ function loadOrCreateIdentity(state) {
       secretKey: Buffer.from(state.identity.secretKey, "base64"),
     };
   }
-  return HyperDHT.keyPair();
+  return NoiseSecretStream.keyPair();
 }
 
 /* --------------------------------------------------------------- transport */
@@ -118,53 +116,19 @@ function dialLan(host, port, keyPair, remotePublicKey, timeoutMs = LAN_DIAL_TIME
   });
 }
 
-function dialDht(dht, remotePublicKey, keyPair, timeoutMs = DHT_DIAL_TIMEOUT_MS) {
-  return new Promise((resolvePromise, reject) => {
-    const stream = dht.connect(remotePublicKey, { keyPair });
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      stream.destroy();
-      reject(new Error("timeout dialing over the dht"));
-    }, timeoutMs);
-    stream.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(err);
-    });
-    stream.on("open", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolvePromise(stream);
-    });
-  });
-}
-
-// The connection ladder: every LAN address in the QR's preferred order,
-// then the DHT. First rung that completes a handshake wins.
-async function climbLadder(computer, keyPair, { skipDht = false } = {}) {
+// The lightweight desktop fixture covers every recorded LAN address. The
+// actual Bare phone client covers the relay rung in codara-mobile/interop.
+async function climbLadder(computer, keyPair) {
   const remotePublicKey = Buffer.from(computer.publicKey, "base64");
   for (const host of computer.addrs) {
     try {
       const stream = await dialLan(host, computer.port, keyPair, remotePublicKey);
-      return { stream, rung: `lan ${host}:${computer.port}`, dht: null };
+      return { stream, rung: `lan ${host}:${computer.port}` };
     } catch (err) {
       console.log(`  rung lan ${host}:${computer.port} failed: ${err.message}`);
     }
   }
-  if (skipDht) throw new Error("no LAN rung answered and the dht rung is disabled");
-  console.log("  trying the dht rung");
-  const dht = new HyperDHT();
-  try {
-    const stream = await dialDht(dht, remotePublicKey, keyPair);
-    return { stream, rung: "dht", dht };
-  } catch (err) {
-    await dht.destroy();
-    throw new Error(`no rung of the ladder answered (last: ${err.message})`);
-  }
+  throw new Error("no LAN rung answered");
 }
 
 /* --------------------------------------------------------------- rpc client */
@@ -275,13 +239,13 @@ async function pair(qrArgument) {
   console.log(`paired with "${response.name}", state saved to ${STATE_FILE}`);
 }
 
-async function connect({ skipDht = false } = {}) {
+async function connect() {
   const state = loadState();
   if (!state?.computer) throw new Error(`no pairing found in ${STATE_FILE}; run "pair" first`);
   const keyPair = loadOrCreateIdentity(state);
 
   console.log(`connecting to "${state.computer.name}" ${state.computer.publicKey.slice(0, 8)}`);
-  const { stream, rung, dht } = await climbLadder(state.computer, keyPair, { skipDht });
+  const { stream, rung } = await climbLadder(state.computer, keyPair);
   console.log(`  connected over ${rung}`);
 
   const client = new RpcClient(stream);
@@ -333,7 +297,6 @@ async function connect({ skipDht = false } = {}) {
   await client.request("terminal.close", { terminalId });
   console.log("  terminal.close: ok");
   stream.destroy();
-  if (dht) await dht.destroy();
 
   if (!echoed) throw new Error("the terminal never echoed hello-from-remote");
   console.log("round trip complete");
@@ -341,14 +304,13 @@ async function connect({ skipDht = false } = {}) {
 
 async function main() {
   const [command, argument] = process.argv.slice(2);
-  const skipDht = process.argv.includes("--no-dht");
   switch (command) {
     case "pair":
       await pair(argument);
       return;
     case "connect":
     case undefined:
-      await connect({ skipDht });
+      await connect();
       return;
     default:
       throw new Error(`unknown command "${command}"; use "pair <qr>" or "connect"`);

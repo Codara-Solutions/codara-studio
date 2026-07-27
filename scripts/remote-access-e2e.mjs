@@ -1,5 +1,5 @@
 // End-to-end proof for phone Remote Access, with no Electron and no live
-// DHT: it boots the REAL RemoteAccessService (identity, listener, Noise IK,
+// cloud relay: it boots the REAL RemoteAccessService (identity, listener, Noise IK,
 // pairing, RPC, session registry) over a temp home and a real node-pty
 // shell, then drives scripts/remote-test-client.mjs against it exactly as a
 // phone would.
@@ -10,9 +10,8 @@
 // reconnects and runs hello + workspaces.list + a terminal echo round trip
 // -> revoke -> client is refused. Exit code 0 only if every stage behaves.
 //
-// The DHT rung is disabled here (dhtBootstrap: false) so the run needs no
-// network; the LAN rung it exercises is the same Noise IK code path the DHT
-// rung hands its streams to.
+// The relay rung is disabled here so the run needs no network; the sibling
+// codara-mobile interop matrix exercises the complete relay path.
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
@@ -48,7 +47,7 @@ async function loadService() {
     outfile,
     logLevel: "silent",
     alias: { "@shared": join(ROOT, "src", "shared") },
-    external: ["sodium-native", "hyperdht", "@hyperswarm/secret-stream", "electron"],
+    external: ["sodium-native", "@hyperswarm/secret-stream", "ws", "electron"],
   });
   delete require.cache[outfile];
   return require(outfile);
@@ -127,9 +126,9 @@ async function main() {
       };
     },
     log: (line) => logLines.push(line),
-    // Loopback only, no DHT: this run must not touch the network.
+    // Loopback only, no relay: this run must not touch the public network.
     host: "127.0.0.1",
-    dhtBootstrap: false,
+    relayUrl: false,
     advertisedAddrs: ["127.0.0.1"],
   });
 
@@ -138,7 +137,7 @@ async function main() {
     const status = await service.setEnabled(true);
     check("listener reaches the reachable state", status.state === "reachable", status);
     check("listener reports a port", typeof status.port === "number" && status.port > 0, status.port);
-    check("dht rung is off in this harness", status.dhtReady === false);
+    check("relay rung is off in this harness", status.relayReady === false);
 
     /* ---- pairing --------------------------------------------------------- */
     // The desktop confirmation step: a device that proves the secret waits in
@@ -178,7 +177,7 @@ async function main() {
 
     /* ---- connect + terminal round trip ----------------------------------- */
     console.log("  running: remote-test-client connect");
-    const connected = await runClient(["connect", "--no-dht"], clientDir);
+    const connected = await runClient(["connect"], clientDir);
     console.log(indent(connected.stdout + connected.stderr));
     check("client reconnects and completes the round trip", connected.code === 0, connected.stderr.trim());
     check("hello identifies the computer", /hello: E2E Studio/.test(connected.stdout));
@@ -193,7 +192,7 @@ async function main() {
     check("the paired list is empty after revoke", service.listPairedDevices().length === 0);
 
     console.log("  running: remote-test-client connect (after revoke)");
-    const afterRevoke = await runClient(["connect", "--no-dht"], clientDir);
+    const afterRevoke = await runClient(["connect"], clientDir);
     console.log(indent(afterRevoke.stdout + afterRevoke.stderr));
     check("a revoked client cannot connect", afterRevoke.code !== 0, afterRevoke.stdout.trim());
 

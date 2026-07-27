@@ -9,7 +9,7 @@
 // (codara-mobile src/lib/remote/pairing-payload.ts) when that repo is
 // checked out next to this one; interop with that parser is a hard
 // contract, so a payload change that breaks the phone fails here first.
-// No live DHT, no sockets: everything below is in-process.
+// No live relay, no sockets: everything below is in-process.
 
 const path = require("node:path");
 const os = require("node:os");
@@ -60,7 +60,7 @@ async function bundle(entry, outName) {
     // Native addons must load from their installed package paths rather than
     // from inside the generated cache bundle, where require.addon cannot find
     // their prebuilds.
-    external: ["sodium-native", "hyperdht", "@hyperswarm/secret-stream"],
+    external: ["sodium-native", "@hyperswarm/secret-stream", "ws"],
   });
   delete require.cache[outfile];
   return require(outfile);
@@ -249,7 +249,7 @@ async function main() {
     }
   }
   {
-    // The real service lifecycle (with DHT disabled and loopback-only) must
+    // The real service lifecycle (with relay disabled and loopback-only) must
     // release and rebind the same derived port. This is the exact sequence a
     // stopped/restarted `npm run dev` process performs.
     const restartDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-restart-"));
@@ -258,7 +258,7 @@ async function main() {
       deviceName: "Restart Test Studio",
       appVersion: "test",
       host: "127.0.0.1",
-      dhtBootstrap: false,
+      relayUrl: false,
       listWorkspaces: async () => [],
       createTerminal: async () => {
         throw new Error("not used");
@@ -311,7 +311,7 @@ async function main() {
         deviceName: "Fallback Test Studio",
         appVersion: "test",
         host: "127.0.0.1",
-        dhtBootstrap: false,
+        relayUrl: false,
         listWorkspaces: async () => [],
         createTerminal: async () => {
           throw new Error("not used");
@@ -346,7 +346,7 @@ async function main() {
       appVersion: "test",
       host: "127.0.0.1",
       port: 0,
-      dhtBootstrap: false,
+      relayUrl: false,
       listWorkspaces: async () => [],
       createTerminal: async () => {
         throw new Error("not used");

@@ -7,9 +7,9 @@
 // into a QR image and must not parse.
 
 // Lifecycle of the always-on listener. "reachable" means the local listener
-// is up; `dhtReady` says whether the DHT announce also succeeded, so the UI
-// can distinguish LAN-only reachability from world reachability without a
-// separate state.
+// is up; `relayReady` says whether the outbound Codara relay connection is
+// authenticated, so the UI can distinguish LAN-only reachability from
+// cellular/world reachability without a separate state.
 export type RemoteAccessState = "disabled" | "starting" | "reachable" | "error";
 
 export interface RemoteAccessStatus {
@@ -18,9 +18,9 @@ export interface RemoteAccessStatus {
   detail: string;
   // TCP port the direct (LAN/WAN) listener is bound to, null when down.
   port: number | null;
-  // True when the DHT server is announced under the computer's key, so
-  // paired devices can also reach us from outside the LAN.
-  dhtReady: boolean;
+  // True when the blind relay is connected, so paired devices can also reach
+  // this computer from cellular or another network.
+  relayReady: boolean;
 }
 
 // One row of the Settings panel's paired-devices list. `publicKey` is the

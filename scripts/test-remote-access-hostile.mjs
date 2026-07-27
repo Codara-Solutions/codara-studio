@@ -16,10 +16,9 @@
 //
 // F2: stop() awaited server.close(), which Node only settles once every
 // accepted connection has ended, so a single idle socket wedged shutdown
-// forever, left the DHT announcing, and made the feature impossible to
-// re-enable. Asserted here against a LOCAL DHT testnet (no public network):
-// disable resolves promptly with an idle hostile socket attached, status
-// returns to disabled, the DHT really is torn down, and re-enabling works.
+// forever and made the feature impossible to re-enable. Asserted here with
+// the relay disabled: disable resolves promptly with an idle hostile socket
+// attached, status returns to disabled, and re-enabling works.
 
 import { connect } from "node:net";
 import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
@@ -66,7 +65,7 @@ async function loadService() {
     outfile,
     logLevel: "silent",
     alias: { "@shared": join(ROOT, "src", "shared") },
-    external: ["sodium-native", "hyperdht", "@hyperswarm/secret-stream", "electron"],
+    external: ["sodium-native", "@hyperswarm/secret-stream", "ws", "electron"],
   });
   delete require.cache[outfile];
   return require(outfile);
@@ -114,26 +113,6 @@ async function loadIdentity() {
   return require(outfile);
 }
 
-// The listener module, so the F8 DHT rate-limiter test can drive the pure
-// DhtRateLimiter without a live DHT.
-async function loadListener() {
-  const cacheDir = join(ROOT, "node_modules", ".cache");
-  mkdirSync(cacheDir, { recursive: true });
-  const outfile = join(cacheDir, "remote-access-hostile-listener.cjs");
-  await build({
-    entryPoints: [join(ROOT, "src", "main", "remote-access", "listener.ts")],
-    bundle: true,
-    platform: "node",
-    format: "cjs",
-    outfile,
-    logLevel: "silent",
-    alias: { "@shared": join(ROOT, "src", "shared") },
-    external: ["sodium-native", "hyperdht", "@hyperswarm/secret-stream"],
-  });
-  delete require.cache[outfile];
-  return require(outfile);
-}
-
 // Reads the trust file the way a fresh app launch would.
 function readDevices(home) {
   try {
@@ -156,7 +135,7 @@ function makeService(RemoteAccessService, home, extra = {}) {
     log: () => {},
     host: "127.0.0.1",
     advertisedAddrs: ["127.0.0.1"],
-    dhtBootstrap: false,
+    relayUrl: false,
     ...extra,
   });
 }
@@ -307,19 +286,12 @@ async function main() {
   /* ====================================================================== */
 
   {
-    const createTestnet = require("hyperdht/testnet");
-    const HyperDHT = require("hyperdht");
-    // A local DHT so the announce and its teardown are real without
-    // touching the public network.
-    const testnet = await createTestnet(4);
     const home = mkdtempSync(join(tmpdir(), "codara-hostile-f2-"));
-    const service = makeService(RemoteAccessService, home, {
-      dhtBootstrap: testnet.bootstrap,
-    });
+    const service = makeService(RemoteAccessService, home);
     try {
       const status = await service.setEnabled(true);
       check("F2 setup: listener is reachable", status.state === "reachable", status);
-      check("F2 setup: the dht rung announced on the testnet", status.dhtReady === true, status);
+      check("F2 setup: public relay is disabled in the isolated harness", status.relayReady === false);
 
       // One hostile socket: connected, mid-handshake, and silent. This is
       // the single connection that used to hang shutdown forever.
@@ -351,14 +323,12 @@ async function main() {
         service.getStatus().state === "disabled",
         service.getStatus(),
       );
+      // server.close() confirms the server side is gone; allow the loopback
+      // client's close event one event-loop turn to observe the FIN/RST.
+      for (let i = 0; i < 20 && !idle.closed; i += 1) await wait(25);
       check("F2: the idle socket was destroyed by shutdown", idle.closed === true);
 
-      // The DHT must really be torn down even though the TCP half of
-      // shutdown had a hostile socket attached. This is asserted on the
-      // listener's own state rather than by dialling the key: the firewall
-      // refuses an unpaired probe whether or not we are still announcing,
-      // so a connection attempt would fail either way and prove nothing.
-      check("F2: the dht was torn down despite the stuck tcp close", service.isDhtActive() === false);
+      check("F2: no relay work survives shutdown", service.isRelayActive() === false);
 
       // The lifecycle chain must not be poisoned: re-enabling has to work.
       const reEnabled = await Promise.race([
@@ -370,16 +340,9 @@ async function main() {
         reEnabled !== "timed-out" && reEnabled.state === "reachable",
         reEnabled,
       );
-      check(
-        "F2: the dht rung comes back after a re-enable",
-        reEnabled !== "timed-out" && reEnabled.dhtReady === true,
-        reEnabled,
-      );
-
       idle.socket.destroy();
     } finally {
       await service.setEnabled(false).catch(() => undefined);
-      await testnet.destroy().catch(() => undefined);
       rmSync(home, { recursive: true, force: true });
     }
   }
@@ -389,10 +352,9 @@ async function main() {
   /* ====================================================================== */
 
   {
-    const HyperDHT = require("hyperdht");
     const home = mkdtempSync(join(tmpdir(), "codara-hostile-f3-"));
     const service = makeService(RemoteAccessService, home);
-    const clientKeyPair = HyperDHT.keyPair();
+    const clientKeyPair = NoiseSecretStream.keyPair();
     const clientKeyB64 = clientKeyPair.publicKey.toString("base64");
     const opened = [];
     try {
@@ -704,12 +666,11 @@ async function main() {
   /* ====================================================================== */
 
   {
-    const HyperDHT = require("hyperdht");
     const home = mkdtempSync(join(tmpdir(), "codara-hostile-f5-"));
     // Long hello deadline so the reaper does not interfere with the eviction
     // sub-test; the reaper is exercised separately below with a short one.
     const service = makeService(RemoteAccessService, home, { sessionHelloDeadlineMs: 30_000 });
-    const clientKeyPair = HyperDHT.keyPair();
+    const clientKeyPair = NoiseSecretStream.keyPair();
     const clientKeyB64 = clientKeyPair.publicKey.toString("base64");
     const attackers = [];
     let phoneStream = null;
@@ -779,10 +740,9 @@ async function main() {
   {
     // The reaper: a session that authenticates but never sends hello is
     // destroyed after the hello deadline, so phantom replays cannot linger.
-    const HyperDHT = require("hyperdht");
     const home = mkdtempSync(join(tmpdir(), "codara-hostile-f5reap-"));
     const service = makeService(RemoteAccessService, home, { sessionHelloDeadlineMs: 700 });
-    const clientKeyPair = HyperDHT.keyPair();
+    const clientKeyPair = NoiseSecretStream.keyPair();
     const clientKeyB64 = clientKeyPair.publicKey.toString("base64");
     const streams = [];
     try {
@@ -825,7 +785,6 @@ async function main() {
   /* ====================================================================== */
 
   {
-    const HyperDHT = require("hyperdht");
     const home = mkdtempSync(join(tmpdir(), "codara-hostile-f6-"));
     const service = makeService(RemoteAccessService, home);
     const streams = [];
@@ -846,7 +805,7 @@ async function main() {
       const attempts = 12;
       for (let i = 0; i < attempts; i += 1) {
         try {
-          streams.push(await noiseDial(status.port, HyperDHT.keyPair(), computerKey));
+          streams.push(await noiseDial(status.port, NoiseSecretStream.keyPair(), computerKey));
         } catch {
           // A refused dial is a valid outcome here.
         }
@@ -942,33 +901,14 @@ async function main() {
   }
 
   /* ====================================================================== */
-  /* F8: the DHT rung's accepted-connection rate limiter                    */
-  /* ====================================================================== */
-
-  {
-    // The only DHT-rung backpressure we can genuinely enforce is in the
-    // firewall hook: rate-limiting the connection attempts we ACCEPT. This
-    // exercises that limiter directly with an injected clock, so it is fully
-    // deterministic (the holepunch state hyperdht leaves for a rejected
-    // attempt is outside our control and documented, not tested here).
-    const listenerMod = await loadListener();
-    const limiter = new listenerMod.DhtRateLimiter(3, 1_000);
-    check("F8: accepts up to the budget within the window", limiter.allow(0) && limiter.allow(10) && limiter.allow(20));
-    check("F8: blocks the attempt over the budget", limiter.allow(30) === false);
-    check("F8: still blocks while inside the window", limiter.allow(999) === false);
-    check("F8: accepts again once the window has slid past the oldest hits", limiter.allow(1_030) === true);
-  }
-
-  /* ====================================================================== */
   /* F9: desktop confirmation state machine (approve / deny / timeout)      */
   /* ====================================================================== */
 
   {
-    const HyperDHT = require("hyperdht");
     const home = mkdtempSync(join(tmpdir(), "codara-hostile-f9-"));
     // Short approval timeout so the timeout-denies path is fast.
     const service = makeService(RemoteAccessService, home, { approvalTimeoutMs: 800 });
-    const clientKeyPair = HyperDHT.keyPair();
+    const clientKeyPair = NoiseSecretStream.keyPair();
     const clientKeyB64 = clientKeyPair.publicKey.toString("base64");
     const fingerprintOf = (b64) => {
       const bytes = Buffer.from(b64, "base64");

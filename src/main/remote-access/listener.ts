@@ -2,62 +2,45 @@
 // access" setting is enabled.
 //
 // Transport choice (per docs/remote-access.md, "Transport security"):
-// we use the Hyperswarm stack, and it proved workable inside Electron's
-// main process with no rebuild step: sodium-native and udx-native ship
-// N-API prebuilds that load unchanged under Electron 43 (verified against
-// this repo's Electron before this module was written). Two rungs share one
-// identity keypair and one connection-routing path:
+// two rungs share one identity keypair and one connection-routing path:
 //
 //   1. Direct TCP (LAN, and WAN when the router cooperates): a plain
 //      net.Server wrapped per-connection in @hyperswarm/secret-stream's
-//      NoiseSecretStream with the IK pattern, the exact Noise construction
-//      hyperdht itself uses. IK means the initiating phone must already
+//      NoiseSecretStream with the IK pattern. IK means the initiating phone
+//      must already
 //      know our public key (it pinned it at pairing), and we learn the
 //      phone's static key from the handshake. The QR payload's addrs/port
 //      point here. Production derives a small candidate sequence from the
 //      persistent computer identity and binds the first available port, so a
 //      collision cannot make Remote Access unavailable and paired phones can
 //      rediscover the chosen port after a Studio process restart.
-//   2. DHT (hole punch, works from any network): a hyperdht server listening
-//      under the same keypair. Paired devices resolve us by public key with
-//      no infrastructure of ours; hyperdht performs the hole punching.
+//   2. Codara relay (works from any network): Studio makes one outbound WSS
+//      connection to our blind relay. The relay authenticates signed endpoint
+//      identities and multiplexes opaque bytes; the phone and Studio still run
+//      Noise IK end to end, so the relay cannot read application traffic.
 //
 // The silent-listener rule is enforced structurally in both rungs. On the
-// DHT rung, hyperdht's firewall hook rejects unknown keys before the
-// connection completes. On the TCP rung, Noise IK's responder never speaks
-// first, so a port scanner reads zero bytes; after the handshake, streams
+// relay rung admits only locally paired keys and then verifies that key again
+// in Noise. On the TCP rung, Noise IK's responder never speaks first, so a
+// port scanner reads zero bytes; after the handshake, streams
 // from unknown keys are either handed to the pairing exchange (only while a
 // pairing window is open) or destroyed without a single byte written.
 //
-// UPnP/NAT-PMP port mapping (the "direct WAN" rung between LAN and DHT) is
-// deliberately not in phase 1: the DHT rung already covers off-LAN
-// reachability, and a port mapping only widens the exposed surface. The
-// ladder position is documented in docs/remote-access.md.
-
 import { createServer, type Server, type Socket } from "node:net";
 import NoiseSecretStream from "@hyperswarm/secret-stream";
-import HyperDHT from "hyperdht";
 import { isPrivateOrLocalAddress } from "./pairing";
+import {
+  DEFAULT_REMOTE_RELAY_URL,
+  RemoteRelayClient,
+  type EncryptedPeerStream,
+} from "./relay-client";
 
-// The duplex both rungs hand to the router: a NoiseSecretStream from the
-// TCP rung or a hyperdht connection (which is also a NoiseSecretStream).
-export interface EncryptedPeerStream {
-  remotePublicKey: Buffer;
-  // Node's Writable contract: false means the peer is not draining and the
-  // caller should back off until "drain". RPC sessions rely on this.
-  write(data: Buffer): boolean;
-  end(): void;
-  destroy(): void;
-  on(event: "data", handler: (chunk: Buffer) => void): void;
-  on(event: "close", handler: () => void): void;
-  on(event: "error", handler: (err: Error) => void): void;
-  on(event: "drain", handler: () => void): void;
-}
+export type { EncryptedPeerStream } from "./relay-client";
 
 export interface RemoteListenerOptions {
   keyPair: { publicKey: Buffer; secretKey: Buffer };
-  // The firewall decision, consulted on every completed handshake and, on
-  // the DHT rung, before the handshake is even acknowledged.
+  // The authorization decision, consulted on every completed handshake and
+  // before a relay tunnel is accepted.
   isAuthorized(publicKey: Buffer): boolean;
   // Streams from paired devices land here.
   onAuthorizedStream(stream: EncryptedPeerStream): void;
@@ -80,14 +63,14 @@ export interface RemoteListenerOptions {
   // Used only when `port` is undefined. EADDRINUSE advances to the next one;
   // any other bind error still fails closed.
   portCandidates?: readonly number[];
-  // hyperdht bootstrap override for tests (hyperdht/testnet). `false`
-  // disables the DHT rung entirely (e2e harness on localhost).
-  dhtBootstrap?: Array<{ host: string; port: number }> | false;
+  // Relay URL override. `false` disables it in local/hostile tests.
+  relayUrl?: string | false;
+  onRelayReadyChanged?(ready: boolean): void;
 }
 
 export interface RemoteListenerStartResult {
   port: number;
-  dhtReady: boolean;
+  relayReady: boolean;
 }
 
 // Pre-authentication resource limits. These exist because an accepted
@@ -108,7 +91,7 @@ const HANDSHAKE_DEADLINE_MS = 5_000;
 // Sockets that completed IK but are NOT authorized get their own, smaller
 // budget with their own short deadline. Completing IK proves only that the
 // peer holds SOME keypair: our responder key is not secret (it is in every
-// QR and derivable from the DHT topic), so anyone can complete IK with a
+// pairing QR), so anyone can complete IK with a
 // self-generated key. Such a stream is only ever a pairing candidate, and
 // only while a pairing window is open, so beyond this small budget it is
 // refused. This is what keeps IK-complete-but-unauthorized streams, each of
@@ -116,37 +99,6 @@ const HANDSHAKE_DEADLINE_MS = 5_000;
 // to the 64-socket server cap (~1 GiB) during a pairing window.
 const MAX_IK_UNAUTHORIZED = 4;
 const IK_UNAUTH_DEADLINE_MS = 10_000;
-// DHT rung backpressure. hyperdht's firewall hook is the only point on this
-// rung where we can refuse a peer before its handshake, and it is the only
-// place any of this is enforceable: everything before the hook (the
-// holepunch coordination, the ~10s of timers a rejected attempt leaves) lives
-// inside hyperdht and cannot be bounded from above. See docs/remote-access.md.
-// So we do what we can: rate-limit the connection attempts we ACCEPT (an
-// unknown key is already blocked outright), and cap the number of concurrent
-// established DHT connections, as a backstop under the per-device/global
-// session caps in index.ts.
-const DHT_ACCEPT_MAX = 20;
-const DHT_ACCEPT_WINDOW_MS = 10_000;
-const MAX_DHT_CONNECTIONS = 32;
-
-// A fixed-window rate limiter over a stream of event timestamps. Pure and
-// injectable-now so it can be unit-tested without a live DHT.
-export class DhtRateLimiter {
-  private readonly hits: number[] = [];
-
-  constructor(
-    private readonly max: number,
-    private readonly windowMs: number,
-  ) {}
-
-  // Records an event at `now` and returns whether it is within the budget.
-  allow(now: number): boolean {
-    while (this.hits.length > 0 && now - this.hits[0] >= this.windowMs) this.hits.shift();
-    if (this.hits.length >= this.max) return false;
-    this.hits.push(now);
-    return true;
-  }
-}
 // Total accepted sockets, authenticated or not. Node destroys anything past
 // this itself.
 const MAX_CONNECTIONS = 64;
@@ -158,20 +110,14 @@ const KEEPALIVE_DELAY_MS = 60_000;
 // every accepted connection has ended, so we destroy sockets first and then
 // bound the wait regardless.
 const STOP_CLOSE_TIMEOUT_MS = 2_000;
-// Same reasoning for the DHT half of shutdown: a hang in the transport
-// library must not be able to wedge the lifecycle.
-const DHT_CLOSE_TIMEOUT_MS = 3_000;
+// A relay close is bounded for the same lifecycle reason as TCP shutdown.
+const RELAY_CLOSE_TIMEOUT_MS = 3_000;
 
 export class RemoteListener {
   private tcpServer: Server | null = null;
-  private dht: HyperDHT | null = null;
-  private dhtServer: ReturnType<HyperDHT["createServer"]> | null = null;
+  private relay: RemoteRelayClient | null = null;
   private pairingOpen = false;
   private stopped = false;
-  // DHT rung accounting (see startDht). The rate limiter bounds accepted
-  // connection attempts; dhtConnections caps concurrent established ones.
-  private readonly dhtAccepts = new DhtRateLimiter(DHT_ACCEPT_MAX, DHT_ACCEPT_WINDOW_MS);
-  private dhtConnections = 0;
   // Every accepted socket, authenticated or not, so stop() can destroy them
   // instead of waiting on peers that may never disconnect.
   private readonly sockets = new Set<Socket>();
@@ -187,32 +133,30 @@ export class RemoteListener {
   constructor(private readonly options: RemoteListenerOptions) {}
 
   // While true, post-handshake strangers on the TCP rung are routed to the
-  // pairing exchange instead of being dropped. The DHT rung never accepts
+  // pairing exchange instead of being dropped. The relay rung never accepts
   // strangers regardless: pairing is a same-LAN ceremony by design.
   setPairingOpen(open: boolean): void {
     this.pairingOpen = open;
   }
 
-  // Whether this listener still holds DHT objects. False after a completed
-  // stop(), including one whose TCP half timed out, which is exactly the
-  // property the hostile-peer suite asserts: a wedged TCP close must never
-  // leave this computer announced on the DHT.
-  isDhtActive(): boolean {
-    return this.dht !== null || this.dhtServer !== null;
+  // Whether this listener still holds a relay client. False after stop even
+  // if the TCP half was wedged.
+  isRelayActive(): boolean {
+    return this.relay?.isActive() ?? false;
   }
 
   async start(): Promise<RemoteListenerStartResult> {
     if (this.tcpServer) throw new Error("listener already started");
     this.stopped = false;
     const port = await this.startTcp();
-    const dhtReady = await this.startDht();
-    return { port, dhtReady };
+    const relayReady = await this.startRelay();
+    return { port, relayReady };
   }
 
-  // Always settles, and always tears the DHT down. The TCP half is best
+  // Always settles, and always tears the relay down. The TCP half is best
   // effort by construction: server.close() waits for every accepted
   // connection to end, so a peer that connects and then goes silent could
-  // otherwise hold the whole shutdown (and with it the DHT announce, the
+  // otherwise hold the whole shutdown (and with it the relay teardown, the
   // status update, and any future enable) open forever.
   async stop(): Promise<void> {
     this.stopped = true;
@@ -245,30 +189,9 @@ export class RemoteListener {
     } catch (err) {
       this.options.log(`tcp teardown did not complete cleanly: ${(err as Error).message}`);
     } finally {
-      // The DHT announce is the part that must not survive a disable: it is
-      // what makes this computer findable by key. Run it whatever the TCP
-      // path did.
-      // Both steps are time-bounded for the same reason the TCP close is: a
-      // hang anywhere in shutdown reintroduces the wedge where the status
-      // never returns to disabled and the feature cannot be re-enabled. The
-      // references are cleared FIRST, so isDhtActive reports the teardown as
-      // done even if one of these calls never settles.
-      const dhtServer = this.dhtServer;
-      this.dhtServer = null;
-      if (dhtServer) {
-        await withTimeout(
-          dhtServer.close().catch(() => undefined),
-          DHT_CLOSE_TIMEOUT_MS,
-        );
-      }
-      const dht = this.dht;
-      this.dht = null;
-      if (dht) {
-        await withTimeout(
-          dht.destroy().catch(() => undefined),
-          DHT_CLOSE_TIMEOUT_MS,
-        );
-      }
+      const relay = this.relay;
+      this.relay = null;
+      if (relay) await withTimeout(relay.stop(), RELAY_CLOSE_TIMEOUT_MS);
     }
   }
 
@@ -397,84 +320,25 @@ export class RemoteListener {
     });
   }
 
-  private async startDht(): Promise<boolean> {
-    if (this.options.dhtBootstrap === false) return false;
+  private async startRelay(): Promise<boolean> {
+    if (this.options.relayUrl === false) return false;
+    const relay = new RemoteRelayClient({
+      url: this.options.relayUrl ?? DEFAULT_REMOTE_RELAY_URL,
+      keyPair: this.options.keyPair,
+      isAuthorized: this.options.isAuthorized,
+      onAuthorizedStream: this.options.onAuthorizedStream,
+      onReadyChanged: (ready) => this.options.onRelayReadyChanged?.(ready),
+      log: this.options.log,
+    });
+    this.relay = relay;
     try {
-      const dht = new HyperDHT(
-        this.options.dhtBootstrap ? { bootstrap: this.options.dhtBootstrap } : {},
-      );
-      this.dht = dht;
-      // The DHT firewall runs before the connection is acknowledged, so an
-      // unknown key cannot even complete a connection on this rung. Return
-      // value semantics: true means BLOCK.
-      const server = dht.createServer(
-        {
-          firewall: (remotePublicKey: Buffer) => {
-            // Reject an unknown key as early as we can: before the handshake
-            // completes, so a stranger cannot even establish a connection.
-            // Returning true means BLOCK.
-            if (!this.options.isAuthorized(remotePublicKey)) return true;
-            // A paired key is allowed, but rate-limited: a compromised paired
-            // device must not be able to drive an unbounded storm of accepted
-            // connection attempts. Over the budget we block; a legitimate
-            // phone retries and gets in on the next window.
-            if (!this.dhtAccepts.allow(Date.now())) {
-              this.options.log("dht rung: accepted-connection rate limit hit; deferring a paired peer");
-              return true;
-            }
-            return false;
-          },
-        },
-        (conn: EncryptedPeerStream) => {
-          conn.on("error", () => {
-            // Peer went away; the session layer handles cleanup.
-          });
-          if (this.stopped) {
-            conn.destroy();
-            return;
-          }
-          // The firewall already vetted the key, but re-check right before
-          // handing the stream out: a device revoked between firewall and
-          // connect must not get a session.
-          if (!this.options.isAuthorized(conn.remotePublicKey)) {
-            conn.destroy();
-            return;
-          }
-          // Backstop cap on concurrent established DHT connections, under the
-          // per-device and global session caps in index.ts.
-          if (this.dhtConnections >= MAX_DHT_CONNECTIONS) {
-            conn.destroy();
-            return;
-          }
-          this.dhtConnections += 1;
-          conn.on("close", () => {
-            this.dhtConnections = Math.max(0, this.dhtConnections - 1);
-          });
-          this.options.onAuthorizedStream(conn);
-        },
-      );
-      this.dhtServer = server;
-      await server.listen(this.options.keyPair);
-      return true;
+      return await relay.start();
     } catch (err) {
-      // DHT failure (offline, blocked UDP) degrades to LAN-only rather than
-      // failing the whole feature.
-      this.options.log(`dht rung unavailable: ${(err as Error).message}`);
-      await this.teardownDhtAfterFailure();
+      // Relay failure degrades to LAN-only. The relay client owns its own
+      // bounded reconnect loop, so a transient cloud/network outage heals
+      // without restarting Studio or changing the Remote Access setting.
+      this.options.log(`relay unavailable: ${(err as Error).message}`);
       return false;
-    }
-  }
-
-  private async teardownDhtAfterFailure(): Promise<void> {
-    const dht = this.dht;
-    this.dht = null;
-    this.dhtServer = null;
-    if (dht) {
-      try {
-        await dht.destroy();
-      } catch {
-        // Nothing left to clean.
-      }
     }
   }
 

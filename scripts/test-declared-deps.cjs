@@ -11,11 +11,11 @@
 // resolves something relative to its own location. A native addon is the worst
 // case: its resolver looks for the prebuilt .node next to the CHUNK, finds
 // nothing, and the feature dies the first time a user touches it. That is not
-// hypothetical. hyperdht, @hyperswarm/secret-stream and sodium-native were
+// hypothetical. @hyperswarm/secret-stream and sodium-native were
 // imported by src/main/remote-access/** while being reachable only transitively
 // (through the declared but unused `hyperswarm`), so remote access threw
 // "Cannot find addon '.'" on every attempt to turn it on, in dev and in the
-// packaged app alike, while the script-based harness that marks those three
+// packaged app alike, while the script-based harness that marked those
 // external by hand stayed green. See commit 732f18e.
 //
 // devDependencies do NOT satisfy this: they are not externalized (so they get

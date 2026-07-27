@@ -1,8 +1,8 @@
 // The computer's long-lived Ed25519 identity for phone Remote Access
 // (docs/remote-access.md, "Identity and pairing"). Created lazily on first
 // use and stored at <spark-home>/remote/identity.json with mode 0600 inside
-// a 0700 directory. The same keypair drives every transport rung: the Noise
-// IK handshake on the direct TCP listener and the hyperdht server announce.
+// a 0700 directory. The same keypair authenticates the outbound relay and
+// drives the end-to-end Noise IK handshake on both transport rungs.
 //
 // Handling rules, enforced here and by every caller:
 //   * The secret key never crosses IPC, never reaches the renderer, and is

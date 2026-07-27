@@ -91,7 +91,7 @@ export interface RemoteAccessDeps {
   // Test/harness overrides. Production leaves all of these unset.
   host?: string;
   port?: number;
-  dhtBootstrap?: Array<{ host: string; port: number }> | false;
+  relayUrl?: string | false;
   advertisedAddrs?: string[];
   now?: () => number;
   // Test override for the unproven-session reaper deadline (see
@@ -119,16 +119,20 @@ export class RemoteAccessService {
   private identity: RemoteIdentity | null = null;
   private readonly devices: PairedDeviceStore;
   private listener: RemoteListener | null = null;
-  private status: RemoteAccessStatus = { state: "disabled", detail: "", port: null, dhtReady: false };
+  private status: RemoteAccessStatus = {
+    state: "disabled",
+    detail: "",
+    port: null,
+    relayReady: false,
+  };
   private pairing: PairingWindow | null = null;
   private pairingExpiryTimer: NodeJS.Timeout | null = null;
   private pairingState: RemotePairingState = { phase: "idle" };
   // A device awaiting the desktop user's approval, or null. See
   // completePairing / approvePairing / denyPairing.
   private pendingApproval: PendingApproval | null = null;
-  // Mirrors the last listener's DHT state across its own teardown; see
-  // isDhtActive.
-  private dhtActive = false;
+  // Mirrors the last listener's relay state across teardown for diagnostics.
+  private relayActive = false;
   // Live sessions keyed by the peer's canonical base64 public key. One
   // device may hold several (phone reconnect race); revoke kills them all.
   private readonly sessions = new Map<string, Set<RpcSession>>();
@@ -189,10 +193,11 @@ export class RemoteAccessService {
 
   private async start(): Promise<void> {
     if (this.listener) return;
-    this.setStatus({ state: "starting", detail: "", port: null, dhtReady: false });
+    this.setStatus({ state: "starting", detail: "", port: null, relayReady: false });
     try {
       this.identity ??= loadOrCreateIdentity(this.deps.remoteDir);
-      const listener = new RemoteListener({
+      let listener!: RemoteListener;
+      listener = new RemoteListener({
         keyPair: { publicKey: this.identity.publicKey, secretKey: this.identity.secretKey },
         isAuthorized: (publicKey) => this.devices.isAuthorized(publicKey),
         onAuthorizedStream: (stream) => this.onAuthorizedStream(stream),
@@ -205,14 +210,18 @@ export class RemoteAccessService {
         ...(this.deps.port !== undefined
           ? { port: this.deps.port }
           : { portCandidates: stableRemoteAccessPortCandidates(this.identity.publicKey) }),
-        dhtBootstrap: this.deps.dhtBootstrap,
+        ...(this.deps.relayUrl !== undefined ? { relayUrl: this.deps.relayUrl } : {}),
+        onRelayReadyChanged: (relayReady) => {
+          if (this.listener !== listener || this.status.state !== "reachable") return;
+          this.setStatus({ ...this.status, relayReady });
+        },
       });
-      const { port, dhtReady } = await listener.start();
+      const { port, relayReady } = await listener.start();
       this.listener = listener;
-      this.dhtActive = listener.isDhtActive();
-      this.setStatus({ state: "reachable", detail: "", port, dhtReady });
+      this.relayActive = listener.isRelayActive();
+      this.setStatus({ state: "reachable", detail: "", port, relayReady });
       this.deps.log(
-        `listening on port ${port} (dht ${dhtReady ? "announced" : "unavailable"}) as ${shortKey(this.identity.publicKeyB64)}`,
+        `listening on port ${port} (relay ${relayReady ? "connected" : "reconnecting"}) as ${shortKey(this.identity.publicKeyB64)}`,
       );
     } catch (err) {
       this.listener = null;
@@ -220,7 +229,7 @@ export class RemoteAccessService {
         state: "error",
         detail: plainLanguageStartError(err as Error),
         port: null,
-        dhtReady: false,
+        relayReady: false,
       });
     }
   }
@@ -237,13 +246,11 @@ export class RemoteAccessService {
     this.sessions.clear();
     if (listener) {
       await listener.stop();
-      // Observed AFTER the stop so it reflects what teardown actually
-      // achieved, not what it intended. See isDhtActive.
-      this.dhtActive = listener.isDhtActive();
+      this.relayActive = listener.isRelayActive();
     }
     // Land any coalesced last-seen timestamps before going quiet.
     await this.devices.flushPendingWrites();
-    this.setStatus({ state: "disabled", detail: "", port: null, dhtReady: false });
+    this.setStatus({ state: "disabled", detail: "", port: null, relayReady: false });
   }
 
   /* --------------------------------------------------------------- pairing */
@@ -597,11 +604,9 @@ export class RemoteAccessService {
     return total;
   }
 
-  // Whether the last listener this service built still holds DHT objects.
-  // Survives stop() on purpose: "did the teardown really run" is only a
-  // meaningful question after the listener is gone.
-  isDhtActive(): boolean {
-    return this.dhtActive;
+  // Whether the last listener this service built still owns relay work.
+  isRelayActive(): boolean {
+    return this.relayActive;
   }
 }
 

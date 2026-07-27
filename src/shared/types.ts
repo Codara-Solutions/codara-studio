@@ -477,7 +477,7 @@ export interface AppPreferences {
   restoreAgentSessions?: boolean;
   // Opt-in (default off): the phone Remote Access listener
   // (docs/remote-access.md). While on, paired devices can reach this
-  // computer over LAN or the DHT; pairing and revocation live in Settings,
+  // computer over LAN or the blind relay; pairing and revocation live in Settings,
   // "Remote access".
   remoteAccessEnabled?: boolean;
 }

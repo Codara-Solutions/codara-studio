@@ -22,10 +22,10 @@ function statusLine(status: RemoteAccessStatus): { text: string; tone: "muted" |
     case "starting":
       return { text: "Starting the listener...", tone: "muted" };
     case "reachable":
-      return status.dhtReady
+      return status.relayReady
         ? { text: "Reachable on your network and from anywhere.", tone: "ok" }
         : {
-            text: "Reachable on your local network only. Discovery from other networks is unavailable.",
+            text: "Reachable on your local network. The cellular relay is reconnecting.",
             tone: "muted",
           };
     case "error":
@@ -45,7 +45,7 @@ export default function RemoteAccessSettings() {
     state: "disabled",
     detail: "",
     port: null,
-    dhtReady: false,
+    relayReady: false,
   });
   const [devices, setDevices] = useState<RemotePairedDevice[]>([]);
   const [busy, setBusy] = useState(false);

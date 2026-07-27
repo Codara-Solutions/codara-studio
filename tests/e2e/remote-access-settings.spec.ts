@@ -45,7 +45,7 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
     // start a real listener, and report back through remoteAccess:getStatus
     // and the status push. "Pair a device" only renders in the reachable
     // state, so waiting on it is waiting on a listener that is actually up.
-    // The DHT announce is allowed to fail (an offline machine stays LAN-only);
+    // The relay connection is allowed to fail (an offline machine stays LAN-only);
     // the local rung is what pairing needs and what this asserts.
     await toggle.click({ force: true });
     await expect(dialog.getByRole("button", { name: "Pair a device" })).toBeVisible({
