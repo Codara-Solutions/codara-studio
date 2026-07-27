@@ -230,22 +230,18 @@ function PairingModal({ onClose }: { onClose: () => void }) {
   const [now, setNow] = useState(() => Date.now());
   const [deciding, setDeciding] = useState(false);
 
-  // Approve/deny cross a dedicated IPC channel that is wired separately (see
-  // the remote-access hardening report: remoteAccess:approvePairing and
-  // remoteAccess:denyPairing). Typed here as optional so this component
-  // compiles ahead of that one-line wiring and simply becomes live once the
-  // channels are exposed on the preload bridge.
-  const pairingActions = window.spark.remoteAccess as typeof window.spark.remoteAccess & {
-    approvePairing?: () => Promise<void>;
-    denyPairing?: () => Promise<void>;
-  };
+  // Approving is the moment a device becomes trusted, so both decisions cross
+  // their own main-process channels rather than riding on the pairing state.
+  // Failures are swallowed on purpose: the authoritative answer arrives as a
+  // pairing state change either way, and a rejected promise here would only
+  // ever mean the window is already gone.
   const approve = () => {
     setDeciding(true);
-    void Promise.resolve(pairingActions.approvePairing?.()).catch(() => undefined);
+    void window.spark.remoteAccess.approvePairing().catch(() => undefined);
   };
   const deny = () => {
     setDeciding(true);
-    void Promise.resolve(pairingActions.denyPairing?.()).catch(() => undefined);
+    void window.spark.remoteAccess.denyPairing().catch(() => undefined);
   };
   useEffect(() => {
     // No mount guard here on purpose. Under StrictMode's dev double-invoke

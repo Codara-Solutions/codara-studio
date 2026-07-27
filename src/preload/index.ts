@@ -1078,6 +1078,11 @@ const api = {
       ipcRenderer.invoke("remoteAccess:listDevices"),
     revokeDevice: (publicKey: string): Promise<RemotePairedDevice[]> =>
       ipcRenderer.invoke("remoteAccess:revokeDevice", publicKey),
+    // A device that proved the pairing secret waits in pending-approval until
+    // the user compares its fingerprint against the one on the phone and
+    // decides. Nothing reaches the trust store without an approve.
+    approvePairing: (): Promise<void> => ipcRenderer.invoke("remoteAccess:approvePairing"),
+    denyPairing: (): Promise<void> => ipcRenderer.invoke("remoteAccess:denyPairing"),
     onStatusChanged: (handler: (status: RemoteAccessStatus) => void): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, status: RemoteAccessStatus) =>
         handler(status);

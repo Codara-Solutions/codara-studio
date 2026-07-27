@@ -2286,6 +2286,19 @@ export function registerIpc(): void {
       return service.listPairedDevices();
     },
   );
+  // Approving is what actually writes a device into the trust store, so it is
+  // gated like the rest: only the real renderer's top frame can decide, never
+  // a navigated-away document or a preview guest.
+  ipcMain.handle("remoteAccess:approvePairing", async (event): Promise<void> => {
+    requireTrustedSender(event, "remoteAccess:approvePairing");
+    const service = await getRemoteAccess();
+    service.approvePairing();
+  });
+  ipcMain.handle("remoteAccess:denyPairing", async (event): Promise<void> => {
+    requireTrustedSender(event, "remoteAccess:denyPairing");
+    const service = await getRemoteAccess();
+    service.denyPairing();
+  });
 
   // File clipboard bridge for the explorer's copy/cut/paste. Real OS-clipboard
   // interop with the native file manager via clipboard-files.ts (Windows
