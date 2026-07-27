@@ -12,7 +12,8 @@ import {
 import { logMain } from "./file-log";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registerIpc, registerTrustedMainWindow, setTrayHook } from "./ipc";
+import { registerIpc, setTrayHook } from "./ipc";
+import { isTrustedOnSender, registerTrustedMainWindow } from "./main-window-trust";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
@@ -243,7 +244,13 @@ function showMainWindow(): void {
 // nearly-free crash recovery — the machinery below decides WHEN to reload.
 let healthPingSeq = 0;
 const pendingPongs = new Map<number, () => void>();
-ipcMain.on("app:health-pong", (_e, nonce: number) => {
+ipcMain.on("app:health-pong", (e, nonce: number) => {
+  // Only the trusted main frame answers liveness pings. A pong from anything
+  // else (a navigated-away document, a preview guest) must not stand in for the
+  // real renderer's liveness, so it is dropped like every other privileged
+  // sender. The real preload only pongs after the document commits, by which
+  // point the sender is trusted, so this never suppresses a genuine pong.
+  if (!isTrustedOnSender(e, "app:health-pong")) return;
   const resolve = pendingPongs.get(nonce);
   if (resolve) {
     pendingPongs.delete(nonce);
@@ -357,7 +364,13 @@ const BOOT_WATCHDOG_MS = 25_000;
 const RELAUNCHED_FLAG = "--spark-boot-relaunch";
 let bootWatchdog: NodeJS.Timeout | null = null;
 let bootFailures = 0;
-ipcMain.on("app:renderer-ready", () => {
+ipcMain.on("app:renderer-ready", (e) => {
+  // Same gate as the health pong: only the trusted main frame may disarm the
+  // boot watchdog. App.tsx sends this after React mounts, which only happens
+  // once the allowlisted document has committed, so the real signal is always
+  // trusted; a forged ready from an untrusted document cannot silence the
+  // watchdog.
+  if (!isTrustedOnSender(e, "app:renderer-ready")) return;
   if (bootWatchdog) {
     clearTimeout(bootWatchdog);
     bootWatchdog = null;

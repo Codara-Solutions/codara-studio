@@ -25,6 +25,7 @@
 
 import { BrowserWindow, ipcMain, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
+import { isTrustedOnSender } from "./main-window-trust";
 
 export type PreviewOpName =
   | "list"
@@ -78,7 +79,15 @@ let listenerRegistered = false;
 export function registerPreviewBridge(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
-  ipcMain.on(RESPONSE_CHANNEL, (_event, payload: BridgeResponse) => {
+  ipcMain.on(RESPONSE_CHANNEL, (event, payload: BridgeResponse) => {
+    // Gate the sender. A request carries a reqId the receiving document knows,
+    // and this response resolves the pending op with a caller-supplied
+    // webContentsId (see preview-input resolveGuest). Only the trusted main
+    // frame's previewRpc legitimately answers; a navigated-away document or a
+    // preview guest must not be able to resolve an op with an id it chose. The
+    // real renderer always answers from the committed, allowlisted document, so
+    // this never drops a legitimate response.
+    if (!isTrustedOnSender(event, RESPONSE_CHANNEL)) return;
     if (!payload || typeof payload.reqId !== "string") return;
     const entry = pending.get(payload.reqId);
     if (!entry) return;

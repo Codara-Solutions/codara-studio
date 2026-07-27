@@ -45,10 +45,7 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
 import { logMain } from "./file-log";
-import {
-  isAllowedMainWindowUrl,
-  resolveMainWindowAllowlistConfig,
-} from "./navigation-allowlist";
+import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
@@ -396,128 +393,19 @@ export function broadcastPreferencesChanged<K extends PrefKey>(
 // renderer, never by attacker-controlled content that somehow became a frame of
 // a window (or by a preview <webview> guest).
 //
-// The gate is DEFAULT-ON: registrations go through `handle()` below, which runs
-// requireTrustedSender before the listener. The rare channel that must accept
-// any sender uses `handleOpen()` with a comment justifying it (there are none
-// today: only one BrowserWindow exists and the webview inspector preload
+// The trust decision (which sender is the main window's current, allowlisted
+// main frame) lives in ./main-window-trust so ipc.ts, index.ts, and the
+// preview/terminal bridges all key their sender checks off one implementation.
+// requireTrustedSender throws for the invoke gate below; isTrustedOnSender
+// returns false for the ipcMain.on gates. registerTrustedMainWindow (called by
+// index.ts) maintains the "current allowlisted main frame" state that both read.
+//
+// The gate here is DEFAULT-ON: registrations go through `handle()` below, which
+// runs requireTrustedSender before the listener. The rare channel that must
+// accept any sender uses `handleOpen()` with a comment justifying it (there are
+// none today: only one BrowserWindow exists and the webview inspector preload
 // exposes no ipcRenderer.invoke, so no non-main-window sender can reach these
 // channels at all).
-//
-// requireTrustedSender proves the sender is the main window's CURRENT main
-// frame, and that the document living in that frame arrived by a COMMITTED
-// navigation the allowlist accepts:
-//   1. Frame identity: event.senderFrame must be the exact
-//      mainWindow.webContents.mainFrame object (re-read per call). This rejects
-//      subframes (a different RenderFrame) and <webview> guests (a different
-//      webContents' main frame) robustly, without relying on a URL string.
-//   2. Trusted document: a boolean maintained from `did-navigate` /
-//      `did-frame-navigate` (see registerTrustedMainWindow). It is recomputed
-//      from the COMMITTED url via isAllowedMainWindowUrl, and deliberately NOT
-//      updated on `did-navigate-in-page`, so history.pushState / location.hash
-//      cannot forge it: a rewritten in-page URL fires no committed-navigation
-//      event and leaves the flag untouched.
-// We deliberately do NOT read event.senderFrame.url: a frame's URL is
-// renderer-writable state (pushState rewrites it with no navigation), so it is
-// not an identity. The navigation guard in index.ts keeps using the predicate
-// for what it is good at (deciding which URLs may commit); this gate keys off
-// the RESULT of that guard, not a live URL read.
-// A failing check throws, which the renderer sees as a rejected promise, and
-// logs a single line with a short reason code and no URL, path, or key material.
-function mainWindowAllowlistConfig(): ReturnType<typeof resolveMainWindowAllowlistConfig> {
-  return resolveMainWindowAllowlistConfig({
-    isPackaged: app.isPackaged,
-    rendererDevUrl: process.env.ELECTRON_RENDERER_URL,
-    rendererEntryPath: join(__dirname, "../renderer/index.html"),
-  });
-}
-
-// The privileged main window and whether its currently-committed main-frame
-// document passed the allowlist. Both start empty and fail closed: until the
-// first committed navigation is evaluated, no gated channel is trusted.
-let trustedWindow: BrowserWindow | null = null;
-let trustedDocumentCommitted = false;
-
-// Wire the trust tracker to a freshly-created main window. Called from
-// index.ts createWindow() immediately after `new BrowserWindow(...)` and BEFORE
-// the initial loadURL/loadFile, so the very first committed navigation (which
-// fires no will-navigate but DOES fire did-navigate) is evaluated. A renderer
-// can only run its preload/scripts, and therefore only send its first
-// ipcRenderer.invoke, AFTER the document commits, so did-navigate (emitted
-// synchronously in the main process at commit) is always processed before the
-// first gated invoke: the fail-closed initial state cannot deadlock legitimate
-// startup IPC.
-export function registerTrustedMainWindow(win: BrowserWindow): void {
-  trustedWindow = win;
-  trustedDocumentCommitted = false;
-  const config = mainWindowAllowlistConfig();
-  const wc = win.webContents;
-  const evaluateCommit = (url: string, isMainFrame: boolean): void => {
-    // A stale listener from a previous window must never move the global flag
-    // for the current one. All current teardown paths destroy the old window
-    // first, so this is latent, but the guard closes it permanently.
-    if (trustedWindow !== win) return;
-    // Only the top frame's committed document decides trust; subframe commits
-    // never move it.
-    if (!isMainFrame) return;
-    trustedDocumentCommitted = isAllowedMainWindowUrl(url, config);
-  };
-  // did-navigate is the main-frame committed-navigation signal (initial load,
-  // reload, and crash-recovery reload all fire it). did-frame-navigate covers
-  // every frame; we act on it only for the main frame. did-navigate-in-page is
-  // intentionally NOT observed: an in-page URL rewrite (pushState / hash) must
-  // not change trust.
-  wc.on("did-navigate", (_e, url) => evaluateCommit(url, true));
-  wc.on("did-frame-navigate", (_e, url, _httpResponseCode, _httpStatusText, isMainFrame) =>
-    evaluateCommit(url, isMainFrame),
-  );
-  wc.on("destroyed", () => {
-    if (trustedWindow === win) {
-      trustedWindow = null;
-      trustedDocumentCommitted = false;
-    }
-  });
-}
-
-// Shared core for both the invoke gate (which throws) and the ipcMain.on gate
-// (which must NOT throw: an uncaught throw inside an 'on' handler crashes the
-// main process, whereas invoke handlers turn a throw into a rejected promise).
-// Returns a short reason code when the sender is not trusted, or null when it
-// is. Reason codes never carry a URL, path, or key: they only distinguish
-// "wrong frame" from "right frame, untrusted document" so a real self-DoS (e.g.
-// an accidental router that starts committing out-of-allowlist URLs) is
-// diagnosable without leaking user data.
-function untrustedSenderReason(
-  event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent,
-): string | null {
-  const win = trustedWindow;
-  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return "no-window";
-  // Re-read mainFrame per call: a cross-document navigation swaps the frame
-  // object, and we must compare against the CURRENT one, not a captured handle.
-  const mainFrame = win.webContents.mainFrame;
-  const frame = event.senderFrame;
-  if (!frame || frame !== mainFrame) return "not-main-frame";
-  if (!trustedDocumentCommitted) return "untrusted-document";
-  return null;
-}
-
-function requireTrustedSender(event: Electron.IpcMainInvokeEvent, channel: string): void {
-  const reason = untrustedSenderReason(event);
-  if (reason) {
-    logMain("security", `blocked privileged channel ${channel} from untrusted sender (${reason})`);
-    throw new Error(`Blocked: ${channel} is not available to this sender.`);
-  }
-}
-
-// The ipcMain.on counterpart: logs and returns false (never throws) so callers
-// can early-return. Used to gate the handful of fire-and-forget 'on' channels.
-function isTrustedOnSender(event: Electron.IpcMainEvent, channel: string): boolean {
-  const reason = untrustedSenderReason(event);
-  if (reason) {
-    logMain("security", `blocked privileged channel ${channel} from untrusted sender (${reason})`);
-    return false;
-  }
-  return true;
-}
 
 // Mirror Electron's own ipcMain.handle listener signature exactly (its args are
 // `...args: any[]`), so every existing typed listener stays assignable through
@@ -528,7 +416,8 @@ type InvokeListener = Parameters<typeof ipcMain.handle>[1];
 // requires the trusted main-window sender BEFORE its listener runs. This is the
 // only registration path used in registerIpc, so a newly-added channel cannot
 // silently land ungated (see scripts/test-ipc-gate-default.cjs, which fails the
-// build if a raw ipcMain.handle appears in this file).
+// build if a raw ipcMain.handle appears in any main-process file, or an
+// ipcMain.on registration whose body does not consult the sender gate).
 function handle(channel: string, listener: InvokeListener): void {
   ipcMain.handle(channel, (event, ...args) => {
     requireTrustedSender(event, channel);

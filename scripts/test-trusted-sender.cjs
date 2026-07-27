@@ -1,5 +1,5 @@
 // Real-Electron regression test for the privileged-IPC sender gate
-// (src/main/ipc.ts requireTrustedSender + registerTrustedMainWindow).
+// (src/main/main-window-trust.ts requireTrustedSender + registerTrustedMainWindow).
 //
 //   node scripts/test-trusted-sender.cjs
 //
@@ -17,11 +17,22 @@
 //     DENIED. pushState fires no did-navigate, so the trust flag stays false and
 //     the sender is the untrusted document.
 //
-// The `fixed` mode reimplements the exact mechanism from src/main/ipc.ts here in
-// the harness (the way the reviewer's probe copied the function), because the
-// real gate is wired deep into the app boot. The source-level companion test
-// scripts/test-ipc-gate-default.cjs guards against the real registration drifting
-// away from being gated at all.
+//   MODE=errorpage (a fail-OPEN regression for the SAME real gate): load the
+//     allowlisted renderer entry (trust flag true), then navigate the main frame
+//     to a non-existent file. Chromium commits its error page and fires
+//     did-fail-load(isMainFrame) but NO did-navigate, so a gate that only clears
+//     trust on committed navigations would keep the stale TRUE and stay OPEN. The
+//     gate also clears on main-frame did-fail-load, so a privileged invoke from
+//     the error document is DENIED. Removing that clear makes this mode fail.
+//
+// UNLIKE the prefix mode (which reproduces the OLD gate by hand for the
+// proof-of-failure), the fixed and errorpage modes import the REAL shipped gate:
+// this bundles src/main/main-window-trust.ts and calls its actual
+// registerTrustedMainWindow / requireTrustedSender. Reintroducing the pre-fix
+// defect (or removing the did-fail-load clear) into that module makes THIS test
+// fail, so the proof-of-fix is wired to the code that ships, not a copy. The
+// source-level companion scripts/test-ipc-gate-default.cjs guards against a new
+// registration landing ungated.
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -32,17 +43,33 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const NAV_ENTRY = path.join(ROOT, "src", "main", "navigation-allowlist.ts");
+const GATE_ENTRY = path.join(ROOT, "src", "main", "main-window-trust.ts");
 
 function build() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-trusted-sender-"));
 
-  // Real navigation-allowlist predicate, bundled to CJS.
+  // Real navigation-allowlist predicate, bundled to CJS (used by the pre-fix
+  // gate reproduction).
   esbuild.buildSync({
     entryPoints: [NAV_ENTRY],
     bundle: true,
     platform: "node",
     format: "cjs",
     outfile: path.join(dir, "nav.cjs"),
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+
+  // The REAL shipped sender gate, bundled to CJS. electron is provided by the
+  // runtime, so it stays external; navigation-allowlist and file-log come along
+  // in the bundle. The fixed mode below drives this exact module.
+  esbuild.buildSync({
+    entryPoints: [GATE_ENTRY],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: path.join(dir, "gate.cjs"),
+    external: ["electron"],
     logLevel: "silent",
     tsconfig: path.join(ROOT, "tsconfig.node.json"),
   });
@@ -85,6 +112,7 @@ const MAIN_JS = `
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("node:path");
 const nav = require(path.join(__dirname, "nav.cjs"));
+const gate = require(path.join(__dirname, "gate.cjs"));
 
 const RENDERER_ENTRY = process.env.PROBE_RENDERER_ENTRY;
 const MODE = process.env.PROBE_MODE;
@@ -93,6 +121,8 @@ const cfg = { devServerUrl: null, rendererEntryPath: RENDERER_ENTRY };
 let win = null;
 
 // --- PRE-FIX gate: trusts a live event.senderFrame.url read (the defect). ----
+// Reproduced by hand here purely to capture the proof-of-failure; the fixed
+// mode uses the real gate module instead of any copy.
 function requireTrustedSenderPrefix(event, channel) {
   const deny = (r) => { throw new Error("Blocked: " + channel + " (" + r + ")"); };
   const w = BrowserWindow.fromWebContents(event.sender);
@@ -103,31 +133,15 @@ function requireTrustedSenderPrefix(event, channel) {
   if (!nav.isAllowedMainWindowUrl(frame.url, cfg)) deny("url-not-allowlisted");
 }
 
-// --- FIXED gate: mirrors src/main/ipc.ts requireTrustedSender exactly. --------
-let trustedDocumentCommitted = false;
-function registerTrust(w) {
-  trustedDocumentCommitted = false;
-  const evaluate = (url, isMainFrame) => {
-    if (!isMainFrame) return;
-    trustedDocumentCommitted = nav.isAllowedMainWindowUrl(url, cfg);
-  };
-  w.webContents.on("did-navigate", (_e, url) => evaluate(url, true));
-  w.webContents.on("did-frame-navigate", (_e, url, _c, _t, isMainFrame) => evaluate(url, isMainFrame));
-  // Deliberately NOT did-navigate-in-page.
-}
-function requireTrustedSenderFixed(event, channel) {
-  const deny = (r) => { throw new Error("Blocked: " + channel + " (" + r + ")"); };
-  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) deny("no-window");
-  const mainFrame = win.webContents.mainFrame;
-  const frame = event.senderFrame;
-  if (!frame || frame !== mainFrame) deny("not-main-frame");
-  if (!trustedDocumentCommitted) deny("untrusted-document");
-}
-
-const gate = MODE === "fixed" ? requireTrustedSenderFixed : requireTrustedSenderPrefix;
+const useRealGate = MODE === "fixed" || MODE === "errorpage";
 
 ipcMain.handle("privileged:test", (event) => {
-  gate(event, "privileged:test");
+  if (useRealGate) {
+    // The REAL shipped gate from src/main/main-window-trust.ts.
+    gate.requireTrustedSender(event, "privileged:test");
+  } else {
+    requireTrustedSenderPrefix(event, "privileged:test");
+  }
   return "PRIVILEGED-ACTION-RAN";
 });
 
@@ -139,9 +153,41 @@ app.whenReady().then(async () => {
       sandbox: true, contextIsolation: true, nodeIntegration: false,
     },
   });
-  if (MODE === "fixed") registerTrust(win);
+  // Wire the REAL trust tracker to this window BEFORE the first load, exactly as
+  // index.ts does, injecting the synthetic renderer-entry allowlist.
+  if (useRealGate) gate.registerTrustedMainWindow(win, () => cfg);
   const wc = win.webContents;
   const out = [];
+
+  if (MODE === "errorpage") {
+    // Fail-OPEN regression: trust must not survive an error-page commit.
+    // 1) Legit renderer entry: committed=true, gated invoke succeeds (baseline).
+    await win.loadFile(RENDERER_ENTRY);
+    out.push("baseline=" + await wc.executeJavaScript("window.probe.invoke('privileged:test')"));
+    // 2) Navigate the main frame to a non-existent file. Chromium commits its
+    //    error page and fires did-fail-load(isMainFrame) but NO did-navigate, so
+    //    without the did-fail-load clear the trust flag would keep step 1's TRUE.
+    const badPath = path.join(__dirname, "does-not-exist", "nope.html");
+    let loadFailed = false;
+    try {
+      await win.loadFile(badPath);
+    } catch (_e) {
+      loadFailed = true;
+    }
+    out.push("loadFailed=" + loadFailed);
+    out.push("errorUrlIsAttackerChosen=" + wc.getURL().includes("does-not-exist"));
+    // 3) The preload is still live in the error document; a privileged invoke
+    //    must now be DENIED because the committed document is not allowlisted.
+    out.push(
+      "afterError=" +
+        (await wc
+          .executeJavaScript("window.probe.invoke('privileged:test')")
+          .catch((e) => "EXEC-ERR:" + e.message)),
+    );
+    console.log("PROBE_RESULT " + JSON.stringify(out));
+    app.exit(0);
+    return;
+  }
 
   // 1) Legit renderer entry: gated channel must succeed.
   await win.loadFile(RENDERER_ENTRY);
@@ -169,11 +215,14 @@ function runMode(dir, rendererEntry, mode) {
       PROBE_MODE: mode,
       PROBE_RENDERER_ENTRY: rendererEntry,
       ELECTRON_ENABLE_LOGGING: "0",
+      // Keep the real gate's security log out of the user's ~/.Codara/logs.
+      CODARA_HOME_DIR: dir,
     },
   });
-  const line = (res.stdout || "").split("\n").find((l) => l.startsWith("PROBE_RESULT "));
+  const stdout = res.stdout || "";
+  const line = stdout.split("\n").find((l) => l.startsWith("PROBE_RESULT "));
   if (!line) {
-    console.error(`[${mode}] no PROBE_RESULT. stdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+    console.error(`[${mode}] no PROBE_RESULT. stdout:\n${stdout}\nstderr:\n${res.stderr}`);
     return null;
   }
   const arr = JSON.parse(line.slice("PROBE_RESULT ".length));
@@ -182,7 +231,7 @@ function runMode(dir, rendererEntry, mode) {
     const i = kv.indexOf("=");
     map[kv.slice(0, i)] = kv.slice(i + 1);
   }
-  return map;
+  return { map, stdout };
 }
 
 function main() {
@@ -194,10 +243,11 @@ function main() {
   };
 
   console.log("── MODE=prefix (pre-fix gate, PROOF the old code was exploitable) ──");
-  const prefix = runMode(dir, rendererEntry, "prefix");
-  if (!prefix) {
+  const prefixRun = runMode(dir, rendererEntry, "prefix");
+  if (!prefixRun) {
     failures += 1;
   } else {
+    const prefix = prefixRun.map;
     console.log("  captured:", JSON.stringify(prefix));
     check("[prefix] legit renderer invoke succeeds", prefix.legit === "OK:PRIVILEGED-ACTION-RAN");
     check("[prefix] attacker (no forgery) is denied", (prefix.attacker || "").startsWith("DENIED:"));
@@ -208,17 +258,43 @@ function main() {
     check("[prefix] FORGERY SUCCEEDS against the pre-fix gate (proof-of-failure)", prefix.forged === "OK:PRIVILEGED-ACTION-RAN");
   }
 
-  console.log("\n── MODE=fixed (current gate) ──");
-  const fixed = runMode(dir, rendererEntry, "fixed");
-  if (!fixed) {
+  console.log("\n── MODE=fixed (the REAL src/main/main-window-trust.ts gate) ──");
+  const fixedRun = runMode(dir, rendererEntry, "fixed");
+  if (!fixedRun) {
     failures += 1;
   } else {
+    const fixed = fixedRun.map;
     console.log("  captured:", JSON.stringify(fixed));
     check("[fixed] legit renderer invoke still succeeds", fixed.legit === "OK:PRIVILEGED-ACTION-RAN");
     check("[fixed] attacker (no forgery) is denied", (fixed.attacker || "").startsWith("DENIED:"));
     check("[fixed] pushState still rewrote the frame url", fixed.forgedUrlMatches === "true");
-    check("[fixed] FORGERY IS DENIED (untrusted-document)", (fixed.forged || "").startsWith("DENIED:"));
-    check("[fixed] denial reason is untrusted-document, not a crash", (fixed.forged || "").includes("untrusted-document"));
+    check("[fixed] FORGERY IS DENIED", (fixed.forged || "").startsWith("DENIED:"));
+    // The real gate never leaks the reason to the renderer (the thrown message
+    // is generic); it logs it. Assert the gate denied specifically because the
+    // committed document was untrusted (the pushState-proof mechanism), not for
+    // some incidental reason, by checking its security log line.
+    check(
+      "[fixed] denial is the untrusted-document path (committed-flag mechanism)",
+      /blocked privileged channel privileged:test from untrusted sender \(untrusted-document\)/.test(
+        fixedRun.stdout,
+      ),
+    );
+  }
+
+  console.log("\n── MODE=errorpage (fail-OPEN regression: trust must not survive an error commit) ──");
+  const errorRun = runMode(dir, rendererEntry, "errorpage");
+  if (!errorRun) {
+    failures += 1;
+  } else {
+    const err = errorRun.map;
+    console.log("  captured:", JSON.stringify(err));
+    check("[errorpage] baseline renderer invoke succeeds", err.baseline === "OK:PRIVILEGED-ACTION-RAN");
+    check("[errorpage] the bad navigation actually failed to load", err.loadFailed === "true");
+    check("[errorpage] the committed url is the attacker-chosen path", err.errorUrlIsAttackerChosen === "true");
+    // The load-bearing assertion: after the error-page commit the gated channel
+    // must be DENIED. Without the did-fail-load clear the flag stays TRUE and
+    // this returns OK:PRIVILEGED-ACTION-RAN.
+    check("[errorpage] privileged invoke is DENIED after the error commit", (err.afterError || "").startsWith("DENIED:"));
   }
 
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }

@@ -28,6 +28,7 @@
 
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
+import { isTrustedOnSender } from "./main-window-trust";
 
 // "create" mints a new agent-tinted tab; "destroy" closes a tab by id (used to
 // clean up the orphan tab when terminal.create's PTY fails to spawn).
@@ -66,7 +67,12 @@ let listenerRegistered = false;
 export function registerTerminalBridge(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
-  ipcMain.on(RESPONSE_CHANNEL, (_event, payload: BridgeResponse) => {
+  ipcMain.on(RESPONSE_CHANNEL, (event, payload: BridgeResponse) => {
+    // Gate the sender like preview-bridge:response. Only the trusted main
+    // frame's terminalRpc legitimately answers a tab-create/destroy request; a
+    // navigated-away document or a preview guest must not resolve a pending op.
+    // The real renderer always answers from the committed, allowlisted document.
+    if (!isTrustedOnSender(event, RESPONSE_CHANNEL)) return;
     if (!payload || typeof payload.reqId !== "string") return;
     const entry = pending.get(payload.reqId);
     if (!entry) return;

@@ -232,17 +232,25 @@ function PairingModal({ onClose }: { onClose: () => void }) {
 
   // Approving is the moment a device becomes trusted, so both decisions cross
   // their own main-process channels rather than riding on the pairing state.
-  // Failures are swallowed on purpose: the authoritative answer arrives as a
-  // pairing state change either way, and a rejected promise here would only
-  // ever mean the window is already gone.
-  const approve = () => {
+  // On success the authoritative answer still arrives as a pairing state change,
+  // so we leave the buttons disabled and wait for it. A rejection is NOT
+  // swallowed: it can mean the privileged-IPC gate denied the call (an untrusted
+  // sender), not only that the window is gone, so surface it and re-enable the
+  // buttons rather than leaving the modal stuck in pending-approval forever.
+  const decide = async (action: "approve" | "deny") => {
     setDeciding(true);
-    void window.spark.remoteAccess.approvePairing().catch(() => undefined);
+    setError(null);
+    try {
+      await (action === "approve"
+        ? window.spark.remoteAccess.approvePairing()
+        : window.spark.remoteAccess.denyPairing());
+    } catch (err) {
+      setError((err as Error).message);
+      setDeciding(false);
+    }
   };
-  const deny = () => {
-    setDeciding(true);
-    void window.spark.remoteAccess.denyPairing().catch(() => undefined);
-  };
+  const approve = () => void decide("approve");
+  const deny = () => void decide("deny");
   useEffect(() => {
     // No mount guard here on purpose. Under StrictMode's dev double-invoke
     // the sequence is start, cleanup-cancel, start again; a ref that latched
@@ -280,8 +288,12 @@ function PairingModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     const off = window.spark.remoteAccess.onPairingChanged((next) => {
       setPhase(next);
-      // A fresh request to decide re-enables the approve/deny buttons.
-      if (next.phase === "pending-approval") setDeciding(false);
+      // A fresh request to decide re-enables the approve/deny buttons and clears
+      // any error left over from a prior decision that failed.
+      if (next.phase === "pending-approval") {
+        setDeciding(false);
+        setError(null);
+      }
     });
     return off;
   }, []);
@@ -363,6 +375,11 @@ function PairingModal({ onClose }: { onClose: () => void }) {
                 Approve
               </button>
             </div>
+            {error ? (
+              <div style={{ fontSize: 12, color: "var(--danger, #f87171)", lineHeight: 1.5 }}>
+                {error}
+              </div>
+            ) : null}
           </>
         ) : phase.phase === "paired" ? (
           <>

@@ -24,6 +24,7 @@
 import { ipcMain, webContents, type WebContents } from "electron";
 
 import { requestPreviewOp } from "./preview-bridge";
+import { isTrustedOnSender, isTrustedPreviewGuest } from "./main-window-trust";
 
 // ---------------------------------------------------------------------------
 // Op surface
@@ -111,11 +112,18 @@ export function registerPreviewInput(): void {
   registered = true;
   ipcMain.on(
     "preview-bridge:announce",
-    (_event, payload: { tabId?: string; webContentsId?: number }) => {
+    (event, payload: { tabId?: string; webContentsId?: number }) => {
+      // Only the trusted main frame announces preview tabs; a navigated-away
+      // document or a preview guest must not be able to steer console capture at
+      // an arbitrary webContents by supplying its id.
+      if (!isTrustedOnSender(event, "preview-bridge:announce")) return;
       const wcId = payload?.webContentsId;
       if (typeof wcId !== "number") return;
       const wc = webContents.fromId(wcId);
       if (!wc || wc.isDestroyed()) return;
+      // Defense in depth: even from the trusted frame, only attach to a real
+      // <webview> guest of the main window, never to some other webContents id.
+      if (!isTrustedPreviewGuest(wc)) return;
       ensureConsoleAttached(wc);
     },
   );
@@ -145,6 +153,16 @@ async function resolveGuest(
   const wc = webContents.fromId(wcId);
   if (!wc || wc.isDestroyed()) {
     throw new Error("preview tab web contents is gone; reopen the preview tab and retry");
+  }
+  // The webContentsId arrives over the preview bridge, whose response is only
+  // correlated by reqId. Even though that response channel is now sender-gated,
+  // NEVER drive CDP / executeJavaScript / DOM.setFileInputFiles against an id we
+  // have not proven is a real <webview> guest of the trusted main window: that
+  // is the difference between "steer the agent's preview tab" and "attach the
+  // DevTools protocol to an arbitrary webContents and push local file paths into
+  // a file input". Reject anything that is not a genuine preview guest.
+  if (!isTrustedPreviewGuest(wc)) {
+    throw new Error("preview target is not a preview guest of this window");
   }
   // Opportunistically wire console capture in case the tab never announced
   // (e.g. it was already open before this build attached listeners).
