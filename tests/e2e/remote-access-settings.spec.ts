@@ -87,7 +87,7 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
   }
 });
 
-test("a real pairing request can be denied and then approved from the UI", async () => {
+test("a real pairing request can be denied, approved, and the device revoked", async () => {
   test.setTimeout(180_000);
   const fixture = await prepareFixture("codara-remote-access-pairing-");
   let app: ElectronApplication | null = null;
@@ -159,11 +159,22 @@ test("a real pairing request can be denied and then approved from the UI", async
     expect(rendered.innerText).toContain(devicePublicKey.slice(0, 8));
     expect(rendered.textContent).not.toContain(pairing.secret);
 
+    // A paired device survives the listener going down: it lives in the trust
+    // store on disk, not in the listener.
     await toggle.click({ force: true });
     await expect(toggle).toHaveAttribute("aria-checked", "false");
-    // Revoking is not exercised here, but a paired device survives the
-    // listener going down: it is on disk, not in the listener.
     await expect(deviceRow).toBeVisible();
+
+    // Revoke is what a user reaches for when the phone is lost, so it has to
+    // be durable rather than a repaint. remoteAccess:revokeDevice awaits the
+    // removal reaching disk before it hands back the list, and the renderer
+    // holds the full key purely as this revoke handle.
+    const trustStore = join(fixture.userDataDir, "remote", "paired-devices.json");
+    expect(await readFile(trustStore, "utf8")).toContain(devicePublicKey);
+    await dialog.getByRole("button", { name: "Revoke" }).click({ force: true });
+    await expect(deviceRow).toHaveCount(0);
+    await expect(dialog.getByText("No paired devices yet.")).toBeVisible();
+    await expect.poll(async () => readFile(trustStore, "utf8")).not.toContain(devicePublicKey);
   } finally {
     await app?.close();
   }
