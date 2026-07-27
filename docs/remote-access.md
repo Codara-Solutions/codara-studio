@@ -1,13 +1,24 @@
 # Remote Access design
 
 Mobile companion apps (iOS and Android) connect to a user's running Codara
-Studio from anywhere, with no Codara-hosted infrastructure on the happy path.
-This document is the source of truth for the security model and the phases.
+Studio, with no Codara-hosted infrastructure on the happy path. This document
+is the source of truth for the security model and the phases.
+
+Reachability honesty (as shipped in phase 1): "from anywhere" is the design
+goal, not a guarantee the current code can always keep. The shipped rungs are
+the LAN direct connection and the DHT hole punch. When both sides sit behind
+symmetric or carrier-grade NAT with UDP blocked, the hole punch cannot form a
+path, and there is no relay yet (rung 4 is phase 3), so the phone simply
+cannot reach the computer. In that case remote access is unavailable until
+either side is on a friendlier network or the relay ships. Do not read the
+"from anywhere" language below as a promise for those networks.
 
 ## Goals
 
-- A phone can reach the user's computer from any network (5G, hotel wifi),
-  as long as the computer runs Codara Studio and has internet access.
+- A phone can reach the user's computer from another network (5G, hotel
+  wifi), as long as the computer runs Codara Studio, has internet access, and
+  a NAT path can actually be formed (see the reachability note above: with
+  symmetric/CGNAT and UDP blocked and no relay yet, it cannot).
 - Zero Codara-hosted infrastructure for the common case. The project is open
   source; users must not depend on our servers to use their own machines.
 - End to end encryption always. No intermediary (DHT node, relay, ISP) can
@@ -45,8 +56,11 @@ Each rung is tried in order; the first that works wins.
 - Pairing happens on the same wifi via QR code. The computer displays a QR
   containing its public key, LAN endpoint, and a one-time pairing secret with
   a short expiry (2 minutes). The phone connects over the LAN, proves
-  knowledge of the secret, and the two devices exchange and pin each other's
-  public keys. The secret is single-use and never leaves the LAN.
+  knowledge of the secret, and, after the desktop user approves the request
+  (see "Pairing exchange" below), the two devices exchange and pin each
+  other's public keys. The secret is single-use and never leaves the LAN, and
+  a pairing peer is accepted only from a local (loopback / private /
+  link-local) address, so "same wifi" is enforced, not just assumed.
 - The computer keeps a paired-devices list (public key, display name, added
   date, last seen). Revoking a device removes its key; existing sessions from
   that key are terminated immediately.
@@ -98,6 +112,13 @@ any future fs RPC goes through the existing sandbox checks.
 - `paired-devices.json`: pinned public keys and metadata.
 - Never readable by the renderer. Never synced, never logged.
 
+Both files are written with the same hardened path: content is staged to a
+randomized, exclusive-create, no-follow temp file (so a pre-planted symlink
+at a predictable temp name cannot redirect the write), fsynced, renamed into
+place, and the directory is fsynced afterwards, so the write survives a power
+loss. The `remote/` directory itself is checked: if it is a symlink, the code
+fails closed rather than writing key material and trust state through it.
+
 ## Phase 1 as built
 
 The studio foundation shipped on `agent/remote-access`. What follows records
@@ -117,7 +138,15 @@ identity keypair:
   `@hyperswarm/secret-stream` with the **IK** handshake pattern. The
   default pattern in that library is XX, which authenticates nobody in
   advance; IK is what makes the initiator prove it already knows our static
-  key. This is the port the QR payload advertises.
+  key. This is the port the QR payload advertises. Known limitation, not yet
+  fixed: production does not persist this port, so the OS picks a fresh
+  random one on every process start, while the phone persists the port it saw
+  in the QR at pairing time. After a desktop restart the phone's stored port
+  is therefore stale, and the LAN rung fails; reconnection then depends on the
+  DHT rung, and if that is also unavailable (UDP blocked, offline) the phone
+  cannot reconnect until it re-pairs from a fresh QR. The intended fix is to
+  persist a preferred port across restarts and fall back to a random one only
+  if it is taken; until then this is a documented gap.
 - **DHT**: a `hyperdht` server announced under the same keypair, with the
   `firewall` hook returning "block" for any key not in the paired list, so
   an unknown key cannot complete a connection at all.
@@ -143,36 +172,96 @@ An accepted socket costs memory before anyone has authenticated: the Noise
 framing sizes its receive buffer from a 24-bit length the peer declares in
 its first three bytes, so four bytes of attacker input reserve about 16 MiB.
 That allocation happens inside the transport library and cannot be undone
-from above, so the listener bounds the blast radius instead:
+from above, so the listener bounds the blast radius instead. Crucially,
+completing the IK handshake proves nothing about trust: our responder key is
+not secret (it is in every QR and derivable on the DHT topic), so anyone can
+complete IK with a self-generated key. So the accounting keeps a socket
+inside a bounded pre-authorization budget until it is actually authorized (a
+known paired key, or a successful pairing), never merely IK-complete:
 
-- at most 8 unauthenticated sockets at once, refused silently beyond that;
-- a 5 second handshake deadline, after which a socket that has not
-  authenticated is destroyed (covering both the peer that goes silent and
+- at most 8 sockets that have not yet completed the handshake, refused
+  silently beyond that;
+- a 5 second handshake deadline on that phase, after which a socket that has
+  not completed IK is destroyed (covering both the peer that goes silent and
   the one that dribbles bytes to look active);
+- a separate, smaller budget for sockets that completed IK but are NOT
+  authorized: at most 4 at once, each on a short deadline, and only ever
+  populated while a pairing window is open (a completed-IK stranger with no
+  pairing window is dropped at once). Once a candidate proves the pairing
+  secret its remaining lifetime passes to the pairing-approval window
+  instead;
 - 64 total accepted sockets;
 - TCP keepalive rather than a wall-clock idle timeout on ESTABLISHED
-  sessions, so a paired phone may idle for hours with a terminal open;
+  sessions, but only after a socket is authorized, so a paired phone may
+  idle for hours with a terminal open while an unauthenticated one never
+  gets the long leash;
 - shutdown destroys tracked sockets itself and bounds its wait, because
   `net.Server.close()` on its own waits for every accepted connection to
   end, and a single silent peer would otherwise hold the listener, the DHT
   announce, the status update, and the whole enable/disable lifecycle open
   indefinitely.
 
-The residual worst case is roughly 8 x 16 MiB held for up to 5 seconds. The
-accepted cost is that eight simultaneous hostile sockets can delay a
-legitimate pairing by a few seconds.
+The unauthenticated allocation an attacker can reach is therefore bounded by
+those two budgets together: at most (8 + 4) x 16 MiB, roughly 192 MiB, and
+only the IK-unauthorized part is reachable at all, and only during a pairing
+window. It is NOT the ~1 GiB the 64-socket server cap would otherwise imply,
+because an unauthorized socket can never occupy one of those 64 slots for
+long. The accepted cost is that a handful of simultaneous hostile sockets can
+delay a legitimate pairing by a few seconds.
 
-Concurrent sessions are capped per device (4, evicting that device's oldest
-session rather than refusing the newcomer, so a phone reconnecting after a
-dead socket is never locked out of its own computer) and globally (16,
-refusing beyond that). Without those caps the 8-terminals-per-connection
-limit bounded nothing, since a device could simply open more connections.
+### DHT rung backpressure, and its limits
 
-Outbound terminal output respects socket backpressure: when the peer stops
-draining, the pty is paused at the OS level, and for a handle that cannot
-pause, queued output past 1 MiB is dropped rather than buffered. Losing
-scrollback to a phone that cannot keep up is recoverable; unbounded growth
-in the main process is not.
+The caps above are TCP-rung caps. On the DHT rung the only point at which we
+can refuse a peer before its handshake is hyperdht's `firewall` hook, and
+that is the only place any of this is enforceable from our side:
+
+- the firewall rejects an unknown key outright, before a connection can
+  complete;
+- it rate-limits the connection attempts it ACCEPTS from paired keys, so a
+  compromised paired device cannot drive an unbounded storm of accepted
+  handshakes (a legitimate phone that trips the limit retries and gets in on
+  the next window);
+- the connection handler caps concurrent established DHT connections, under
+  the per-device and global session caps below.
+
+What we cannot bound is everything hyperdht does BEFORE the firewall hook:
+the holepunch coordination, and the roughly ten seconds of timers a rejected
+attempt leaves inside the library per attempt. Anyone who knows the public
+key can drive that from the internet, and it lives inside hyperdht, not our
+code. This is an honest limit of taking the Hyperswarm stack, not something
+the caps above close.
+
+Concurrent sessions are capped per device (4) and globally (16, refusing
+beyond that). Without those caps the 8-terminals-per-connection limit bounded
+nothing, since a device could simply open more connections.
+
+The per-device eviction rule is deliberately careful about liveness, because
+a passively recorded IK first flight can be replayed on a fresh socket: it
+completes the handshake and reports the paired device's key, but the attacker
+cannot derive the session keys, so it can never send a valid `hello`. A
+newly accepted session is therefore "unproven" until a valid hello completes.
+When the per-device cap is hit, we evict an UNPROVEN incumbent (a phantom
+replay, or a stalled peer) in preference to a proven, healthy one, and if
+every incumbent is proven we refuse the unproven newcomer rather than evict a
+live session. So four replays can no longer knock the real phone's live
+session offline. A hello deadline reaps any session that authenticates but
+never speaks, so phantom replays do not linger. The cost, versus the older
+"evict the oldest" rule, is that a phone reconnecting while it genuinely holds
+four proven live sessions and one socket is silently dead is refused until
+that dead socket is reaped by TCP keepalive; in practice a phone holds a
+single session, so the cap is rarely reached at all.
+
+Every outbound frame respects socket backpressure, replies and events alike,
+not just the terminal firehose. When the peer stops draining, the pty is
+paused at the OS level (a terminal created while already paused is born
+paused, so its opening burst is held at the pty rather than dropped), and for
+a handle that cannot pause, queued terminal output past 1 MiB is dropped
+rather than buffered. Replies cannot be dropped (the peer is waiting on
+them), so if a peer keeps issuing requests while never reading our answers,
+the total unwritten backlog is bounded: past a hard ceiling the session is
+closed rather than allowed to grow the main process without limit. Losing
+scrollback to a phone that cannot keep up is recoverable; unbounded growth in
+the main process is not.
 
 UPnP / NAT-PMP (rung 2 of the ladder) is **not** implemented in phase 1. The
 DHT rung already covers off-LAN reachability, and a port mapping only widens
@@ -197,6 +286,30 @@ A wrong, expired, or already-used secret gets no reply at all, only a closed
 stream. The secret is compared in constant time and is consumed on first
 correct use.
 
+Two properties this exchange now actually enforces, rather than merely
+implies:
+
+- **Same network.** The pairing server binds 0.0.0.0, but a pairing
+  candidate is accepted only when its remote address is loopback, RFC1918
+  private, or link-local; a routable (off-LAN, or VPN-public) address is
+  refused silently. The QR likewise advertises only addresses in those
+  ranges. Pairing therefore cannot be driven from off the local network,
+  which is the property the modal's "same wifi" copy promises.
+- **Explicit approval, not first-bearer-wins.** Proving the secret no longer
+  silently trusts the device. It puts the request into a pending-approval
+  state, and the desktop shows the requesting device's display name and its
+  key fingerprint (the leading eight bytes of the key as uppercase hex in
+  groups of four, byte-for-byte the short form the phone shows on its own
+  confirm screen, so the user compares the two screens). The device is
+  written to the trust store only after the user explicitly approves. A deny,
+  or a timeout of about a minute, refuses with a clean stream close that the
+  phone reads as a refusal rather than a hang. Consuming the secret at
+  presentation time means a racing device cannot also redeem it; if the
+  racing device is the one that reaches the approval prompt, the user sees a
+  name and fingerprint that do not match their phone and denies. The wire
+  format is unchanged: the phone sends the same pair request and simply waits
+  longer for the reply.
+
 ### RPC v0 deviations from the mobile types
 
 None in the payload shapes: `hello`, `ping`, `workspaces.list`,
@@ -208,8 +321,16 @@ fixes:
 - 4-byte big-endian unsigned length prefix, then that many bytes of UTF-8
   JSON.
 - Inbound frames over 1 MiB are a protocol violation: the connection is
-  destroyed without a response, and the limit is checked against the
-  declared length before the body is buffered.
+  destroyed without a response, and the limit really is checked against the
+  declared length before the body is buffered. The decoder holds incoming
+  bytes as a list of chunk views (it does not copy the whole chunk on
+  arrival), so an oversized declared length is rejected from the 4-byte
+  prefix alone, before any body bytes are copied, and fragmented
+  byte-at-a-time delivery stays linear rather than quadratic.
+- A single decrypted chunk is also capped at a maximum number of complete
+  frames (a 16 MiB write of 6-byte frames would otherwise be millions of
+  synchronous JSON.parse calls); exceeding that cap is fatal, like an
+  oversized frame.
 - `hello` must be the first call. Anything else before it answers
   `not-connected`.
 - Per connection: at most 8 terminals (in-flight creates count toward the
@@ -259,34 +380,45 @@ re-authorized on the next launch.
 The guarantee is: **at no point after `revokeDevice` resolves, including
 across a crash at any instant, does `paired-devices.json` contain the
 revoked device.** `revokeDevice` is therefore async, and resolving means
-both that the removal is on disk and that no other write to that file is
-outstanding. It is enforced by ordering rather than by correcting after the
-fact:
+both that the removal is on disk and that no other write to that file can
+still land. It is enforced by ordering, with no repair-after-the-fact:
 
 - the in-memory list stops trusting the device synchronously, before the
   first await, so live sessions are killed in the same tick;
 - a generation counter, bumped by every authoritative write, which a flush
-  carries and re-checks before it publishes, so a superseded flush discards
-  its staging file instead of renaming it;
+  re-checks in the SAME synchronous tick that dispatches its rename (no await
+  between the check and the dispatch), so a revoke's synchronous generation
+  bump can never slip in unseen: the flush either sees the bump and abandons
+  its staging file, or it commits the rename and records it as in-flight;
 - any pending flush timer is cancelled, so no new flush can start;
 - the payload is read at flush EXECUTION time, never captured when the flush
   was scheduled;
-- unique staging file names, so the two writers can never collide on a tmp
-  path;
-- and the revoke waits (briefly, bounded) for any flush whose fs work is
-  already in the air, so a stale rename can never land after the revoke's
-  own write.
+- randomized, exclusive-create staging file names, so the two writers can
+  never collide on a tmp path, and a pre-planted symlink at a predictable tmp
+  path cannot be followed;
+- and the one flush the generation bump cannot head off, the one whose rename
+  is already on the threadpool, is the one the revoke waits for: it awaits
+  exactly that in-flight rename (with no bound) before its own synchronous
+  write, so the clean write is unconditionally last.
 
-The last point is what removes the crash window. An earlier iteration let
-the revoke return immediately and repaired the file afterwards if a stale
-rename had clobbered it; that left two moments where disk transiently held
-the revoked device, so a crash, or a failing repair write, could persist it.
-The repair remains only as a backstop for the case where the bounded wait
-expires, and it now logs loudly rather than failing silently.
+There is no bounded-wait-then-write-concurrently fallback and no
+repair-after-the-fact. The earlier design did both: it waited a bounded 2s
+for an in-flight flush, then wrote clean and corrected the file afterwards if
+a stale rename had clobbered it. A rename stalled past that bound could land
+after the revoke returned, leaving the revoked device transiently on disk
+before the repair, so a crash in that window (or a failing repair write)
+could persist it. Waiting for the actual in-flight rename removes that window
+entirely: nothing stale is ever left behind for a later write to correct.
 
-Pairing was never exposed to this, because `addDevice` mutates the cached
-array in place, so a stale flush would write identical content. It stays
-synchronous.
+Durability is real, not just ordering: every authoritative write stages its
+content to a temp file, fsyncs that file, renames it into place, and fsyncs
+the parent directory, so a pairing or a revoke survives a power loss and not
+merely a clean process exit.
+
+Pairing was never exposed to the ordering hazard, because `addDevice`
+mutates the cached array in place, so a stale flush would write identical
+content. It stays synchronous, and it shares the same fsync-and-rename
+durability path.
 
 ## Phases
 
