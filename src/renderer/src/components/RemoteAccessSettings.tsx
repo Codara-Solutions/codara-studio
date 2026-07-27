@@ -228,6 +228,25 @@ function PairingModal({ onClose }: { onClose: () => void }) {
   const [phase, setPhase] = useState<RemotePairingState>({ phase: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [deciding, setDeciding] = useState(false);
+
+  // Approve/deny cross a dedicated IPC channel that is wired separately (see
+  // the remote-access hardening report: remoteAccess:approvePairing and
+  // remoteAccess:denyPairing). Typed here as optional so this component
+  // compiles ahead of that one-line wiring and simply becomes live once the
+  // channels are exposed on the preload bridge.
+  const pairingActions = window.spark.remoteAccess as typeof window.spark.remoteAccess & {
+    approvePairing?: () => Promise<void>;
+    denyPairing?: () => Promise<void>;
+  };
+  const approve = () => {
+    setDeciding(true);
+    void Promise.resolve(pairingActions.approvePairing?.()).catch(() => undefined);
+  };
+  const deny = () => {
+    setDeciding(true);
+    void Promise.resolve(pairingActions.denyPairing?.()).catch(() => undefined);
+  };
   useEffect(() => {
     // No mount guard here on purpose. Under StrictMode's dev double-invoke
     // the sequence is start, cleanup-cancel, start again; a ref that latched
@@ -263,7 +282,11 @@ function PairingModal({ onClose }: { onClose: () => void }) {
   }, []);
 
   useEffect(() => {
-    const off = window.spark.remoteAccess.onPairingChanged((next) => setPhase(next));
+    const off = window.spark.remoteAccess.onPairingChanged((next) => {
+      setPhase(next);
+      // A fresh request to decide re-enables the approve/deny buttons.
+      if (next.phase === "pending-approval") setDeciding(false);
+    });
     return off;
   }, []);
 
@@ -316,7 +339,36 @@ function PairingModal({ onClose }: { onClose: () => void }) {
         }}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        {phase.phase === "paired" ? (
+        {phase.phase === "pending-approval" ? (
+          <>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>Approve this device?</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+              <span style={{ fontWeight: 600, color: "var(--fg, inherit)" }}>{phase.deviceName}</span>{" "}
+              wants to pair. Approve it only if this matches the device in your hand, and the code
+              below matches the one it is showing.
+            </div>
+            <div
+              className="spark-mono"
+              style={{
+                fontSize: 15,
+                letterSpacing: "0.12em",
+                padding: "8px 12px",
+                borderRadius: 8,
+                background: "var(--surface-2, rgba(127,127,127,0.12))",
+              }}
+            >
+              {phase.fingerprint}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" className="spark-btn" disabled={deciding} onClick={deny}>
+                Deny
+              </button>
+              <button type="button" className="spark-btn is-primary" disabled={deciding} onClick={approve}>
+                Approve
+              </button>
+            </div>
+          </>
+        ) : phase.phase === "paired" ? (
           <>
             <div style={{ fontSize: 15, fontWeight: 600 }}>Paired</div>
             <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
@@ -324,6 +376,16 @@ function PairingModal({ onClose }: { onClose: () => void }) {
             </div>
             <button type="button" className="spark-btn is-primary" onClick={onClose}>
               Done
+            </button>
+          </>
+        ) : phase.phase === "denied" ? (
+          <>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>Pairing refused</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+              No device was added. Close this and start again if you meant to approve it.
+            </div>
+            <button type="button" className="spark-btn" onClick={onClose}>
+              Close
             </button>
           </>
         ) : phase.phase === "expired" ? (

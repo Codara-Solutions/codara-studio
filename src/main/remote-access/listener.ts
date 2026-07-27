@@ -35,6 +35,7 @@
 import { createServer, type Server, type Socket } from "node:net";
 import NoiseSecretStream from "@hyperswarm/secret-stream";
 import HyperDHT from "hyperdht";
+import { isPrivateOrLocalAddress } from "./pairing";
 
 // The duplex both rungs hand to the router: a NoiseSecretStream from the
 // TCP rung or a hyperdht connection (which is also a NoiseSecretStream).
@@ -59,9 +60,14 @@ export interface RemoteListenerOptions {
   // Streams from paired devices land here.
   onAuthorizedStream(stream: EncryptedPeerStream): void;
   // Streams from unknown keys land here ONLY while a pairing window is
-  // open (listener.setPairingOpen(true)); the pairing exchange decides
-  // their fate. Closed-window strangers never reach any callback.
-  onPairingCandidateStream(stream: EncryptedPeerStream): void;
+  // open (listener.setPairingOpen(true)) and only from a local (loopback /
+  // private / link-local) peer; the pairing exchange decides their fate.
+  // Closed-window strangers, and strangers from off the local network, never
+  // reach any callback. `promote` clears the short IK-unauthorized deadline
+  // for this stream: the pairing exchange calls it once the device has proven
+  // the pairing secret, handing the stream's remaining lifetime to the
+  // desktop approval timer instead of the pre-auth reaper.
+  onPairingCandidateStream(stream: EncryptedPeerStream, promote: () => void): void;
   log(line: string): void;
   // TCP bind host. Default 0.0.0.0; the e2e harness narrows it to loopback.
   host?: string;
@@ -443,6 +449,14 @@ export class RemoteListener {
       stream.destroy();
       return;
     }
+    // Pairing is a same-network ceremony. Accept a candidate only from a
+    // loopback, private, or link-local peer; a routable (off-LAN, VPN-public)
+    // remote address is refused silently, so the documented "same network"
+    // property is actually enforced rather than merely advertised.
+    if (!isPrivateOrLocalAddress(socket.remoteAddress)) {
+      stream.destroy();
+      return;
+    }
     // It is still UNAUTHORIZED until it proves the pairing secret, so it stays
     // inside a small, short-lived budget rather than being promoted to a
     // keepalive session. Beyond the budget it is refused, silently.
@@ -458,7 +472,17 @@ export class RemoteListener {
     // No keepalive: an unauthenticated pairing candidate is held on the short
     // leash above, not the hours-long idle budget a paired session gets.
     socket.setTimeout(0);
-    this.options.onPairingCandidateStream(stream);
+    // promote(): once the device proves the pairing secret, its remaining
+    // lifetime belongs to the desktop approval window (up to a minute), not
+    // the short pre-auth reaper. Clearing the deadline here is safe because
+    // the socket stays in the budget (so it still counts, and its close
+    // handler still removes it) and the approval timer in index.ts now bounds
+    // it. A candidate that never proves the secret keeps the short deadline.
+    const promote = () => {
+      const timer = this.ikUnauthorized.get(socket);
+      if (timer) clearTimeout(timer);
+    };
+    this.options.onPairingCandidateStream(stream, promote);
   }
 }
 

@@ -161,6 +161,15 @@ function makeService(RemoteAccessService, home, extra = {}) {
   });
 }
 
+// Pairing now requires desktop approval. In these harnesses there is no UI,
+// so approve as soon as a device proves the secret, standing in for the
+// user's click.
+function autoApprove(service) {
+  return service.onPairingChanged((state) => {
+    if (state.phase === "pending-approval") service.approvePairing();
+  });
+}
+
 // A raw TCP socket that never completes a handshake. `bytes` is what it
 // sends immediately after connecting.
 function hostileSocket(port, bytes) {
@@ -388,6 +397,7 @@ async function main() {
     const opened = [];
     try {
       const status = await service.setEnabled(true);
+      autoApprove(service);
 
       // Pair honestly first, so every connection below is AUTHORIZED. The
       // cap has to hold against a trusted-but-misbehaving device, which is
@@ -705,6 +715,7 @@ async function main() {
     let phoneStream = null;
     try {
       const status = await service.setEnabled(true);
+      autoApprove(service);
 
       // Pair honestly. Every stream below reports THIS key: a replayed IK
       // first flight reports the paired device's key too, which is what makes
@@ -776,6 +787,7 @@ async function main() {
     const streams = [];
     try {
       const status = await service.setEnabled(true);
+      autoApprove(service);
       const session = service.startPairing();
       const payload = JSON.parse(session.qrPayload);
       const computerKey = Buffer.from(payload.pk, "base64");
@@ -945,6 +957,89 @@ async function main() {
     check("F8: blocks the attempt over the budget", limiter.allow(30) === false);
     check("F8: still blocks while inside the window", limiter.allow(999) === false);
     check("F8: accepts again once the window has slid past the oldest hits", limiter.allow(1_030) === true);
+  }
+
+  /* ====================================================================== */
+  /* F9: desktop confirmation state machine (approve / deny / timeout)      */
+  /* ====================================================================== */
+
+  {
+    const HyperDHT = require("hyperdht");
+    const home = mkdtempSync(join(tmpdir(), "codara-hostile-f9-"));
+    // Short approval timeout so the timeout-denies path is fast.
+    const service = makeService(RemoteAccessService, home, { approvalTimeoutMs: 800 });
+    const clientKeyPair = HyperDHT.keyPair();
+    const clientKeyB64 = clientKeyPair.publicKey.toString("base64");
+    const fingerprintOf = (b64) => {
+      const bytes = Buffer.from(b64, "base64");
+      return (bytes.subarray(0, 8).toString("hex").toUpperCase().match(/.{4}/g) ?? []).join(" ");
+    };
+    const open = [];
+    try {
+      const status = await service.setEnabled(true);
+      const waitForPhase = async (phase, timeoutMs = 3_000) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeoutMs) {
+          if (service.getPairingState().phase === phase) return service.getPairingState();
+          await wait(30);
+        }
+        return null;
+      };
+      const presentSecret = async () => {
+        const payload = JSON.parse(service.startPairing().qrPayload);
+        const stream = await noiseDial(status.port, clientKeyPair, Buffer.from(payload.pk, "base64"));
+        open.push(stream);
+        stream.write(encodeFrame({ t: "pair", secret: payload.secret, name: "F9 phone" }));
+        return stream;
+      };
+
+      /* --- deny path --- */
+      const denyStream = await presentSecret();
+      let denyClosed = false;
+      denyStream.on("close", () => {
+        denyClosed = true;
+      });
+      const pending = await waitForPhase("pending-approval");
+      check("F9: presenting a valid secret surfaces pending-approval", pending !== null, service.getPairingState());
+      check("F9: pending-approval carries the requesting device name", pending?.deviceName === "F9 phone", pending);
+      check(
+        "F9: pending-approval carries the phone-format key fingerprint",
+        pending?.fingerprint === fingerprintOf(clientKeyB64),
+        { got: pending?.fingerprint, want: fingerprintOf(clientKeyB64) },
+      );
+      check("F9: a device awaiting approval is NOT yet trusted", service.listPairedDevices().length === 0);
+
+      service.denyPairing();
+      check("F9: deny surfaces a clean denied state", service.getPairingState().phase === "denied");
+      check("F9: a denied device is never written to the trust store", service.listPairedDevices().length === 0);
+      {
+        const t0 = Date.now();
+        while (!denyClosed && Date.now() - t0 < 2_000) await wait(30);
+      }
+      check("F9: deny closes the stream, a clean refusal the phone can read", denyClosed === true);
+
+      /* --- timeout denies --- */
+      await presentSecret();
+      const pendingT = await waitForPhase("pending-approval");
+      check("F9: a second request re-enters pending-approval", pendingT !== null);
+      const deniedByTimeout = await waitForPhase("denied", 3_000);
+      check("F9: an unanswered approval times out into a denied state", deniedByTimeout !== null);
+      check("F9: a timed-out device is never trusted", service.listPairedDevices().length === 0);
+
+      /* --- approve path --- */
+      const approveStream = await presentSecret();
+      const pendingA = await waitForPhase("pending-approval");
+      check("F9: a third request re-enters pending-approval", pendingA !== null);
+      const gotPaired = waitForFrame(approveStream).then(() => true).catch(() => false);
+      service.approvePairing();
+      check("F9: approve trusts the device", service.listPairedDevices().length === 1);
+      check("F9: approve surfaces the paired state", service.getPairingState().phase === "paired");
+      check("F9: approve sends the paired reply to the phone", (await gotPaired) === true);
+    } finally {
+      for (const s of open) s.destroy();
+      await service.setEnabled(false).catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+    }
   }
 
   if (failures > 0) {

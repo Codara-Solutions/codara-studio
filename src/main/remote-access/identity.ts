@@ -124,6 +124,20 @@ export function shortKey(publicKeyB64: string): string {
   return publicKeyB64.slice(0, 8);
 }
 
+// The pairing-confirmation fingerprint of a public key: its leading eight
+// bytes as uppercase hex in groups of four, e.g. "7F3A 91C2 5E08 4B6D". This
+// is byte-for-byte the short form the phone shows on its confirm screen
+// (codara-mobile src/lib/remote/format.ts formatKeyShortForm), so the user
+// can compare the desktop and phone screens by eye during pairing. Returns
+// an empty string for anything that is not a decodable 8+ byte key, so a
+// caller never renders half a fingerprint.
+export function keyFingerprint(publicKeyB64: string): string {
+  const bytes = Buffer.from(publicKeyB64, "base64");
+  if (bytes.length < 8) return "";
+  const hex = bytes.subarray(0, 8).toString("hex").toUpperCase();
+  return (hex.match(/.{4}/g) ?? []).join(" ");
+}
+
 // Ensures the remote/ dir exists with owner-only access. chmod is applied
 // even when the dir pre-exists so a copied-over home (which may have lost
 // its mode bits, see the spawn-helper saga in pty-manager) heals itself.

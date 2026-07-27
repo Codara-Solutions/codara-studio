@@ -237,8 +237,12 @@ async function pair(qrArgument) {
   if (!stream) throw new Error("could not reach the computer on any address in the QR code");
 
   const decoder = new FrameDecoder();
+  // The desktop now asks its user to approve the device before replying, so
+  // the reply can take up to the approval window (about a minute). We keep
+  // the pairing stream open and wait; a deny or a timeout closes the stream,
+  // which the "close" handler below turns into a clean refusal.
   const response = await new Promise((resolvePromise, reject) => {
-    const timer = setTimeout(() => reject(new Error("the computer did not answer the pairing request")), 10_000);
+    const timer = setTimeout(() => reject(new Error("the computer did not answer the pairing request")), 65_000);
     stream.on("data", (chunk) => {
       const frames = decoder.push(chunk);
       if (frames.length === 0) return;

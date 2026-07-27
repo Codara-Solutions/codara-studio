@@ -15,7 +15,7 @@ import type {
   RemotePairingSession,
   RemotePairingState,
 } from "@shared/remote-access";
-import { loadOrCreateIdentity, shortKey, type RemoteIdentity } from "./identity";
+import { keyFingerprint, loadOrCreateIdentity, shortKey, type RemoteIdentity } from "./identity";
 import {
   buildQrPayloadString,
   lanAddresses,
@@ -23,6 +23,7 @@ import {
   PairedDeviceStore,
   PairingWindow,
   PAIRING_TTL_MS,
+  sanitizeDeviceName,
   type PairResponseFrame,
 } from "./pairing";
 import { RemoteListener, type EncryptedPeerStream } from "./listener";
@@ -44,6 +45,12 @@ const PAIRING_FRAME_TIMEOUT_MS = 10_000;
 // The pairing exchange consists of one small JSON frame; anything bigger is
 // not a pairing attempt.
 const PAIRING_MAX_FRAME_BYTES = 4096;
+// How long a device that has proven the pairing secret waits for the desktop
+// user to approve or deny it before the request is denied automatically. The
+// phone simply keeps its pairing stream open for the reply, so this is a
+// generous window; a deny or a timeout closes the stream, which the phone
+// reads as a clean refusal rather than a hang.
+const PAIRING_APPROVAL_TIMEOUT_MS = 60_000;
 // Concurrent sessions one paired device may hold, and across all devices.
 // These are what make the per-connection terminal cap in rpc.ts meaningful:
 // the real pty ceiling is MAX_TOTAL_SESSIONS x MAX_TERMINALS_PER_CONNECTION.
@@ -75,6 +82,22 @@ export interface RemoteAccessDeps {
   // Test override for the unproven-session reaper deadline (see
   // SESSION_HELLO_DEADLINE_MS). Production leaves it unset.
   sessionHelloDeadlineMs?: number;
+  // Test override for the desktop pairing-approval timeout (see
+  // PAIRING_APPROVAL_TIMEOUT_MS). Production leaves it unset.
+  approvalTimeoutMs?: number;
+}
+
+// A device that has proven the pairing secret and is waiting for the desktop
+// user to approve or deny it. Held until approve/deny/timeout, or until the
+// device hangs up.
+interface PendingApproval {
+  stream: EncryptedPeerStream;
+  publicKey: Buffer;
+  // The name the device asked to be known by, already control-stripped.
+  displayName: string;
+  // The device key's short confirmation fingerprint, shown to the user.
+  fingerprint: string;
+  timer: NodeJS.Timeout;
 }
 
 export class RemoteAccessService {
@@ -85,6 +108,9 @@ export class RemoteAccessService {
   private pairing: PairingWindow | null = null;
   private pairingExpiryTimer: NodeJS.Timeout | null = null;
   private pairingState: RemotePairingState = { phase: "idle" };
+  // A device awaiting the desktop user's approval, or null. See
+  // completePairing / approvePairing / denyPairing.
+  private pendingApproval: PendingApproval | null = null;
   // Mirrors the last listener's DHT state across its own teardown; see
   // isDhtActive.
   private dhtActive = false;
@@ -155,7 +181,7 @@ export class RemoteAccessService {
         keyPair: { publicKey: this.identity.publicKey, secretKey: this.identity.secretKey },
         isAuthorized: (publicKey) => this.devices.isAuthorized(publicKey),
         onAuthorizedStream: (stream) => this.onAuthorizedStream(stream),
-        onPairingCandidateStream: (stream) => this.onPairingCandidateStream(stream),
+        onPairingCandidateStream: (stream, promote) => this.onPairingCandidateStream(stream, promote),
         log: this.deps.log,
         host: this.deps.host,
         port: this.deps.port,
@@ -234,10 +260,15 @@ export class RemoteAccessService {
   }
 
   // Modal closed (or a new window replaces this one): stop accepting
-  // strangers and forget the secret.
+  // strangers, forget the secret, and refuse any device still awaiting
+  // approval (a clean stream close the phone reads as a refusal).
   cancelPairing(): void {
     this.closePairingWindow();
-    if (this.pairingState.phase === "waiting") this.setPairingState({ phase: "idle" });
+    const hadPending = this.pendingApproval !== null;
+    this.abandonPendingApproval();
+    if (hadPending || this.pairingState.phase === "waiting" || this.pairingState.phase === "pending-approval") {
+      this.setPairingState({ phase: "idle" });
+    }
   }
 
   private closePairingWindow(): void {
@@ -252,7 +283,7 @@ export class RemoteAccessService {
   // A stranger connected while a pairing window is open. One frame decides:
   // a valid proof pairs the device, anything else destroys the stream with
   // no reply (silent-listener rule).
-  private onPairingCandidateStream(stream: EncryptedPeerStream): void {
+  private onPairingCandidateStream(stream: EncryptedPeerStream, promote: () => void): void {
     const decoder = new FrameDecoder(PAIRING_MAX_FRAME_BYTES);
     let settled = false;
     const timer = setTimeout(() => {
@@ -277,7 +308,7 @@ export class RemoteAccessService {
       if (frame === undefined) return;
       settled = true;
       clearTimeout(timer);
-      this.completePairing(stream, frame);
+      this.completePairing(stream, frame, promote);
     });
     stream.on("close", () => {
       settled = true;
@@ -285,7 +316,7 @@ export class RemoteAccessService {
     });
   }
 
-  private completePairing(stream: EncryptedPeerStream, frame: unknown): void {
+  private completePairing(stream: EncryptedPeerStream, frame: unknown, promote: () => void): void {
     const window = this.pairing;
     const request = parsePairRequestFrame(frame);
     const now = this.deps.now?.() ?? Date.now();
@@ -299,13 +330,82 @@ export class RemoteAccessService {
       stream.destroy();
       return;
     }
-    const record = this.devices.addDevice(stream.remotePublicKey, request.name, now);
+    // The secret is proven, but the device is NOT trusted yet. Consuming the
+    // window here means a racing device cannot also redeem the same secret;
+    // the user now decides, comparing the fingerprint below against the one
+    // the phone shows on its confirm screen. Close the stranger window (the
+    // secret is spent) and wait for an explicit approve or deny.
     this.closePairingWindow();
+    this.abandonPendingApproval();
+    // The secret is proven: hand this stream's remaining lifetime to the
+    // approval timer below rather than the listener's short pre-auth reaper,
+    // which would otherwise kill it before a human could approve.
+    promote();
+    const publicKey = Buffer.from(stream.remotePublicKey);
+    const displayName = sanitizeDeviceName(request.name);
+    const fingerprint = keyFingerprint(publicKey.toString("base64"));
+    const timeoutMs = this.deps.approvalTimeoutMs ?? PAIRING_APPROVAL_TIMEOUT_MS;
+    const timer = setTimeout(() => this.denyPairing("timeout"), timeoutMs);
+    timer.unref?.();
+    const pending: PendingApproval = { stream, publicKey, displayName, fingerprint, timer };
+    this.pendingApproval = pending;
+    // If the phone gives up and disconnects while we wait, drop the request.
+    stream.on("close", () => {
+      if (this.pendingApproval === pending) {
+        this.abandonPendingApproval();
+        if (this.pairingState.phase === "pending-approval") this.setPairingState({ phase: "idle" });
+      }
+    });
+    this.deps.log(`pairing request awaiting approval: ${fingerprint}`);
+    this.setPairingState({ phase: "pending-approval", deviceName: displayName, fingerprint });
+  }
+
+  // The desktop user approved the device waiting in pending-approval: write
+  // it to the trust store and answer the phone. No-op if nothing is pending
+  // (a double click, or the phone already hung up).
+  approvePairing(): void {
+    const pending = this.pendingApproval;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingApproval = null;
+    const now = this.deps.now?.() ?? Date.now();
+    const record = this.devices.addDevice(pending.publicKey, pending.displayName, now);
     const response: PairResponseFrame = { t: "paired", name: this.deps.deviceName };
-    stream.write(encodeFrame(response));
-    stream.end();
+    try {
+      pending.stream.write(encodeFrame(response));
+      pending.stream.end();
+    } catch {
+      // The phone vanished between approval and the reply; the device is
+      // still trusted and will connect on its next attempt.
+    }
     this.deps.log(`paired device ${shortKey(record.publicKey)} (${record.name})`);
     this.setPairingState({ phase: "paired", deviceName: record.name });
+  }
+
+  // The desktop user denied the waiting device, or the approval timed out:
+  // refuse it with a clean stream close (the phone reads this as a refusal,
+  // not a hang) and never write it to the trust store.
+  denyPairing(reason: "denied" | "timeout" = "denied"): void {
+    const pending = this.pendingApproval;
+    if (!pending) return;
+    this.abandonPendingApproval();
+    this.deps.log(`pairing ${reason}: ${pending.fingerprint}`);
+    this.setPairingState({ phase: "denied" });
+  }
+
+  // Tears down a pending approval without changing the pairing state: clears
+  // its timeout and destroys its stream. Used by deny/timeout, by a new
+  // request superseding an old one, and by shutdown.
+  private abandonPendingApproval(): void {
+    const pending = this.pendingApproval;
+    if (!pending) return;
+    this.pendingApproval = null;
+    clearTimeout(pending.timer);
+    try {
+      pending.stream.destroy();
+    } catch {
+      // Already gone.
+    }
   }
 
   /* --------------------------------------------------------------- devices */

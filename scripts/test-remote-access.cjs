@@ -63,6 +63,10 @@ async function main() {
     path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
     "remote-access-rpc-test.cjs",
   );
+  const identity = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "identity.ts"),
+    "remote-access-identity-test.cjs",
+  );
 
   /* ---- pairing window: expiry and single use ---------------------------- */
 
@@ -119,6 +123,44 @@ async function main() {
     check("phone parser expires our payload after 2 minutes", stale.ok === false && stale.code === "expired", stale);
   } else {
     console.log("SKIP phone-parser interop (codara-mobile checkout not found)");
+  }
+
+  /* ---- pairing address classification (item 8a) ------------------------- */
+
+  // Pairing accepts a peer only from a local address; lanAddresses only
+  // advertises the same, so the "same network" property is enforced, not
+  // just claimed.
+  check("loopback is local", pairing.isPrivateOrLocalAddress("127.0.0.1") === true);
+  check("10/8 is local", pairing.isPrivateOrLocalAddress("10.4.5.6") === true);
+  check("172.16/12 is local", pairing.isPrivateOrLocalAddress("172.20.1.1") === true);
+  check("172.32 is NOT local", pairing.isPrivateOrLocalAddress("172.32.0.1") === false);
+  check("192.168/16 is local", pairing.isPrivateOrLocalAddress("192.168.1.24") === true);
+  check("169.254/16 link-local is local", pairing.isPrivateOrLocalAddress("169.254.10.10") === true);
+  check("a public IPv4 is NOT local", pairing.isPrivateOrLocalAddress("8.8.8.8") === false);
+  check("a routable IPv4 is NOT local", pairing.isPrivateOrLocalAddress("203.0.113.7") === false);
+  check("IPv4-mapped loopback is local", pairing.isPrivateOrLocalAddress("::ffff:127.0.0.1") === true);
+  check("IPv4-mapped public is NOT local", pairing.isPrivateOrLocalAddress("::ffff:8.8.8.8") === false);
+  check("IPv6 loopback is local", pairing.isPrivateOrLocalAddress("::1") === true);
+  check("IPv6 link-local is local", pairing.isPrivateOrLocalAddress("fe80::1%en0") === true);
+  check("IPv6 unique-local is local", pairing.isPrivateOrLocalAddress("fd00::1234") === true);
+  check("public IPv6 is NOT local", pairing.isPrivateOrLocalAddress("2606:4700:4700::1111") === false);
+  check("empty/undefined address is NOT local", pairing.isPrivateOrLocalAddress(undefined) === false);
+  check(
+    "lanAddresses advertises only local addresses",
+    pairing.lanAddresses().every((addr) => pairing.isPrivateOrLocalAddress(addr)),
+    pairing.lanAddresses(),
+  );
+
+  // The key fingerprint the desktop shows matches the phone's short form
+  // (leading eight bytes, uppercase hex, groups of four).
+  {
+    const key = Buffer.alloc(32);
+    key.set([0x7f, 0x3a, 0x91, 0xc2, 0x5e, 0x08, 0x4b, 0x6d]);
+    check(
+      "key fingerprint matches the phone confirm-screen format",
+      identity.keyFingerprint(key.toString("base64")) === "7F3A 91C2 5E08 4B6D",
+      identity.keyFingerprint(key.toString("base64")),
+    );
   }
 
   /* ---- paired-device store ---------------------------------------------- */

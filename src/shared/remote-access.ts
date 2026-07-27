@@ -44,10 +44,21 @@ export interface RemotePairingSession {
   expiresAt: number;
 }
 
-// Pushed to the renderer while the pairing modal is open. "paired" carries
-// the new device's name so the modal can show a success state.
+// Pushed to the renderer while the pairing modal is open.
+//
+// "pending-approval" is the desktop confirmation step: a device has proven
+// the pairing secret, but is NOT trusted yet. The desktop shows its
+// requested display name and its key `fingerprint` (leading eight bytes as
+// uppercase hex in groups of four, the SAME short form the phone shows on
+// its own confirm screen, so the user can compare the two screens) and must
+// explicitly approve before the device is written to the trust store. A deny
+// or a timeout leaves the device untrusted. "paired" carries the new
+// device's name so the modal can show a success state; "denied" is the clean
+// refusal shown after a deny or an approval timeout.
 export type RemotePairingState =
   | { phase: "idle" }
   | { phase: "waiting"; expiresAt: number }
+  | { phase: "pending-approval"; deviceName: string; fingerprint: string }
   | { phase: "paired"; deviceName: string }
+  | { phase: "denied" }
   | { phase: "expired" };

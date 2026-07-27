@@ -371,7 +371,7 @@ function isPlausibleRecord(value: unknown): value is PairedDeviceRecord {
 
 // Device names render in the Settings list and in logs; strip control
 // characters so a hostile name can never smuggle escape sequences there.
-function sanitizeDeviceName(name: string): string {
+export function sanitizeDeviceName(name: string): string {
   const clean = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, MAX_DEVICE_NAME_CHARS);
   return clean.length > 0 ? clean : "Unnamed device";
 }
@@ -461,11 +461,46 @@ export function lanAddresses(): string[] {
     for (const entry of entries ?? []) {
       if (entry.internal) continue;
       if (entry.family !== "IPv4" && (entry.family as unknown) !== 4) continue;
+      // Only advertise addresses pairing will actually accept a peer from
+      // (loopback, RFC1918 private, link-local). Advertising a public or
+      // VPN-public interface would promise reachability the accept-side
+      // address check then refuses, which is exactly the "same network"
+      // claim we do not want to overstate.
+      if (!isPrivateOrLocalAddress(entry.address)) continue;
       addrs.push(entry.address);
     }
   }
   addrs.push("127.0.0.1");
   return addrs;
+}
+
+// Whether a peer's remote address is one pairing may accept: IPv4 loopback,
+// RFC1918 private, or link-local; IPv6 loopback, link-local (fe80::/10) or
+// unique-local (fc00::/7). Everything else (public IPv4/IPv6, including a
+// routable VPN address) is refused, so pairing cannot be driven from off the
+// local network. IPv4-mapped IPv6 forms and zone ids are normalized first.
+export function isPrivateOrLocalAddress(address: string | undefined | null): boolean {
+  if (!address) return false;
+  let addr = address.trim().toLowerCase();
+  if (addr.startsWith("::ffff:")) addr = addr.slice(7);
+  const zone = addr.indexOf("%");
+  if (zone >= 0) addr = addr.slice(0, zone);
+  const dotted = addr.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (dotted) {
+    const octets = dotted.slice(1).map((part) => Number(part));
+    if (octets.some((n) => n > 255)) return false;
+    const [a, b] = octets;
+    if (a === 127) return true; // loopback 127.0.0.0/8
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 169 && b === 254) return true; // link-local 169.254.0.0/16
+    return false;
+  }
+  if (addr === "::1") return true; // IPv6 loopback
+  if (/^fe[89ab]/.test(addr)) return true; // fe80::/10 link-local
+  if (/^f[cd]/.test(addr)) return true; // fc00::/7 unique-local
+  return false;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -141,8 +141,14 @@ async function main() {
     check("dht rung is off in this harness", status.dhtReady === false);
 
     /* ---- pairing --------------------------------------------------------- */
+    // The desktop confirmation step: a device that proves the secret waits in
+    // "pending-approval" until the user approves it. Here we auto-approve as
+    // soon as the request arrives, standing in for the click a user makes.
     const pairingStates = [];
-    service.onPairingChanged((state) => pairingStates.push(state));
+    service.onPairingChanged((state) => {
+      pairingStates.push(state);
+      if (state.phase === "pending-approval") service.approvePairing();
+    });
     const session = service.startPairing();
     const payload = JSON.parse(session.qrPayload);
     check("qr payload carries the live port", payload.port === status.port, payload.port);
