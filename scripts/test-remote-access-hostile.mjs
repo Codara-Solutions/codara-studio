@@ -39,6 +39,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const EVIL_HEADER = Buffer.from([0xff, 0xff, 0xff, 0x00]);
 const HANDSHAKE_DEADLINE_MS = 5_000;
 const MAX_PENDING_HANDSHAKES = 8;
+// Mirrors src/main/remote-access/listener.ts.
+const MAX_IK_UNAUTHORIZED = 4;
 // Mirrors the caps in src/main/remote-access/index.ts.
 const MAX_SESSIONS_PER_DEVICE = 4;
 const MAX_TOTAL_SESSIONS = 16;
@@ -673,6 +675,63 @@ async function main() {
         "F5: unproven sessions are reaped once the hello deadline passes",
         service.sessionCountFor(clientKeyB64) === 0,
         service.sessionCountFor(clientKeyB64),
+      );
+    } finally {
+      for (const s of streams) s.destroy();
+      await service.setEnabled(false).catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  /* ====================================================================== */
+  /* F6: IK-complete-but-unauthorized streams stay inside a small budget    */
+  /* ====================================================================== */
+
+  {
+    const HyperDHT = require("hyperdht");
+    const home = mkdtempSync(join(tmpdir(), "codara-hostile-f6-"));
+    const service = makeService(RemoteAccessService, home);
+    const streams = [];
+    try {
+      const status = await service.setEnabled(true);
+      // Open a pairing window: only then are IK-complete unknown keys routed
+      // to the pairing exchange at all. Our responder key is not secret (it
+      // is in the QR), so any attacker can complete IK with a self-generated
+      // key and become an unauthorized pairing candidate.
+      const session = service.startPairing();
+      const computerKey = Buffer.from(JSON.parse(session.qrPayload).pk, "base64");
+
+      // Far more IK-complete unauthorized streams than the budget allows.
+      // Each uses a DISTINCT self-generated key (an unpaired stranger) and,
+      // after the handshake, simply idles: unfixed, all of these lingered as
+      // pairing candidates, each pinning a ~16 MiB secret-stream buffer, up
+      // to the 64-socket server cap.
+      const attempts = 12;
+      for (let i = 0; i < attempts; i += 1) {
+        try {
+          streams.push(await noiseDial(status.port, HyperDHT.keyPair(), computerKey));
+        } catch {
+          // A refused dial is a valid outcome here.
+        }
+        await wait(80);
+      }
+      await wait(500);
+
+      const stillOpen = streams.filter((s) => !s.destroyed).length;
+      check(
+        "F6: IK-complete-but-unauthorized streams are bounded by their budget",
+        stillOpen <= MAX_IK_UNAUTHORIZED,
+        { attempts, stillOpen, cap: MAX_IK_UNAUTHORIZED },
+      );
+
+      // And they do not linger: within the IK-unauth deadline the budget
+      // holders are reaped too, so nothing unauthorized is held for long.
+      await wait(HANDSHAKE_DEADLINE_MS);
+      const stillOpenLater = streams.filter((s) => !s.destroyed).length;
+      check(
+        "F6: unauthorized pairing candidates do not linger past their deadline",
+        stillOpenLater <= MAX_IK_UNAUTHORIZED,
+        stillOpenLater,
       );
     } finally {
       for (const s of streams) s.destroy();

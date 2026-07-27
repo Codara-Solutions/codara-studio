@@ -93,6 +93,17 @@ export interface RemoteListenerStartResult {
 // deadline is what keeps that from becoming a lasting lockout.
 const MAX_PENDING_HANDSHAKES = 8;
 const HANDSHAKE_DEADLINE_MS = 5_000;
+// Sockets that completed IK but are NOT authorized get their own, smaller
+// budget with their own short deadline. Completing IK proves only that the
+// peer holds SOME keypair: our responder key is not secret (it is in every
+// QR and derivable from the DHT topic), so anyone can complete IK with a
+// self-generated key. Such a stream is only ever a pairing candidate, and
+// only while a pairing window is open, so beyond this small budget it is
+// refused. This is what keeps IK-complete-but-unauthorized streams, each of
+// which can pin a ~16 MiB secret-stream receive buffer, from accumulating up
+// to the 64-socket server cap (~1 GiB) during a pairing window.
+const MAX_IK_UNAUTHORIZED = 4;
+const IK_UNAUTH_DEADLINE_MS = 10_000;
 // Total accepted sockets, authenticated or not. Node destroys anything past
 // this itself.
 const MAX_CONNECTIONS = 64;
@@ -121,6 +132,10 @@ export class RemoteListener {
   // timers. Kept separate from `sockets` because the pre-auth cap and the
   // deadline apply only to this set.
   private readonly pendingHandshakes = new Map<Socket, NodeJS.Timeout>();
+  // Sockets that completed IK but are not yet authorized: pairing candidates
+  // held under MAX_IK_UNAUTHORIZED with their own IK_UNAUTH_DEADLINE_MS. Only
+  // ever populated while a pairing window is open.
+  private readonly ikUnauthorized = new Map<Socket, NodeJS.Timeout>();
 
   constructor(private readonly options: RemoteListenerOptions) {}
 
@@ -159,6 +174,8 @@ export class RemoteListener {
     try {
       for (const timer of this.pendingHandshakes.values()) clearTimeout(timer);
       this.pendingHandshakes.clear();
+      for (const timer of this.ikUnauthorized.values()) clearTimeout(timer);
+      this.ikUnauthorized.clear();
       for (const socket of [...this.sockets]) {
         try {
           socket.destroy();
@@ -250,6 +267,11 @@ export class RemoteListener {
         clearTimeout(timer);
         this.pendingHandshakes.delete(socket);
       }
+      const authTimer = this.ikUnauthorized.get(socket);
+      if (authTimer) {
+        clearTimeout(authTimer);
+        this.ikUnauthorized.delete(socket);
+      }
     });
 
     // Hard deadline on the unauthenticated phase. This is the fix that
@@ -281,12 +303,7 @@ export class RemoteListener {
         stream.destroy();
         return;
       }
-      // An established session may idle for hours with a terminal open, so
-      // swap the handshake deadline for TCP keepalive: dead peers still get
-      // reaped, live idle ones are left alone.
-      socket.setTimeout(0);
-      socket.setKeepAlive(true, KEEPALIVE_DELAY_MS);
-      this.route(stream);
+      this.route(stream, socket);
     });
   }
 
@@ -348,18 +365,41 @@ export class RemoteListener {
   }
 
   // Post-handshake routing for the TCP rung.
-  private route(stream: EncryptedPeerStream): void {
+  private route(stream: EncryptedPeerStream, socket: Socket): void {
     const key = stream.remotePublicKey;
     if (this.options.isAuthorized(key)) {
+      // Proven paired key: promote to an established session. An established
+      // session may idle for hours with a terminal open, so swap the
+      // handshake deadline for TCP keepalive: dead peers still get reaped,
+      // live idle ones are left alone.
+      socket.setTimeout(0);
+      socket.setKeepAlive(true, KEEPALIVE_DELAY_MS);
       this.options.onAuthorizedStream(stream);
       return;
     }
-    if (this.pairingOpen) {
-      this.options.onPairingCandidateStream(stream);
+    // Completing IK proved possession of SOME keypair, nothing more. An
+    // unknown key is a pairing candidate only while a window is open.
+    if (!this.pairingOpen) {
+      // Unknown key, no pairing window: silence. No banner, no error frame.
+      stream.destroy();
       return;
     }
-    // Unknown key, no pairing window: silence. No banner, no error frame.
-    stream.destroy();
+    // It is still UNAUTHORIZED until it proves the pairing secret, so it stays
+    // inside a small, short-lived budget rather than being promoted to a
+    // keepalive session. Beyond the budget it is refused, silently.
+    if (this.ikUnauthorized.size >= MAX_IK_UNAUTHORIZED) {
+      stream.destroy();
+      return;
+    }
+    const authDeadline = setTimeout(() => {
+      this.ikUnauthorized.delete(socket);
+      stream.destroy();
+    }, IK_UNAUTH_DEADLINE_MS);
+    this.ikUnauthorized.set(socket, authDeadline);
+    // No keepalive: an unauthenticated pairing candidate is held on the short
+    // leash above, not the hours-long idle budget a paired session gets.
+    socket.setTimeout(0);
+    this.options.onPairingCandidateStream(stream);
   }
 }
 
