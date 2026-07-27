@@ -561,6 +561,126 @@ async function main() {
     }
   }
 
+  /* ====================================================================== */
+  /* F5: a replayed (unproven) session must not evict the live phone, and    */
+  /*     unproven sessions that never speak are reaped                       */
+  /* ====================================================================== */
+
+  {
+    const HyperDHT = require("hyperdht");
+    const home = mkdtempSync(join(tmpdir(), "codara-hostile-f5-"));
+    // Long hello deadline so the reaper does not interfere with the eviction
+    // sub-test; the reaper is exercised separately below with a short one.
+    const service = makeService(RemoteAccessService, home, { sessionHelloDeadlineMs: 30_000 });
+    const clientKeyPair = HyperDHT.keyPair();
+    const clientKeyB64 = clientKeyPair.publicKey.toString("base64");
+    const attackers = [];
+    let phoneStream = null;
+    try {
+      const status = await service.setEnabled(true);
+
+      // Pair honestly. Every stream below reports THIS key: a replayed IK
+      // first flight reports the paired device's key too, which is what makes
+      // the eviction attack possible.
+      const session = service.startPairing();
+      const payload = JSON.parse(session.qrPayload);
+      const computerKey = Buffer.from(payload.pk, "base64");
+      const pairStream = await noiseDial(status.port, clientKeyPair, computerKey);
+      pairStream.write(encodeFrame({ t: "pair", secret: payload.secret, name: "f5" }));
+      await waitForFrame(pairStream);
+      pairStream.destroy();
+
+      // The real phone: dial, complete a hello, so this session is PROVEN.
+      phoneStream = await noiseDial(status.port, clientKeyPair, computerKey);
+      let phoneClosed = false;
+      phoneStream.on("close", () => {
+        phoneClosed = true;
+      });
+      phoneStream.write(encodeFrame({
+        id: 1,
+        method: "hello",
+        params: { protocol: 0, device: { publicKey: clientKeyB64, name: "f5-phone", role: "phone", version: "1" } },
+      }));
+      await waitForFrame(phoneStream);
+      await wait(100);
+
+      // Now flood with unproven sessions for the SAME key that never say
+      // hello, more than the per-device cap. Each is the observable effect of
+      // a replayed first flight.
+      for (let i = 0; i < MAX_SESSIONS_PER_DEVICE + 3; i += 1) {
+        attackers.push(await noiseDial(status.port, clientKeyPair, computerKey));
+        await wait(60);
+      }
+      await wait(300);
+
+      check(
+        "F5: an unproven replay flood does not evict the proven live session",
+        phoneClosed === false,
+      );
+      check(
+        "F5: the per-device session count stays within the cap under the flood",
+        service.sessionCountFor(clientKeyB64) <= MAX_SESSIONS_PER_DEVICE,
+        service.sessionCountFor(clientKeyB64),
+      );
+      // The proof the live session is genuinely still usable: it answers a
+      // ping. A destroyed stream would make this reject.
+      let pingOk = true;
+      phoneStream.write(encodeFrame({ id: 2, method: "ping", params: { nonce: "f5" } }));
+      await waitForFrame(phoneStream).catch(() => {
+        pingOk = false;
+      });
+      check("F5: the proven live session still answers after the flood", pingOk === true);
+    } finally {
+      for (const s of attackers) s.destroy();
+      if (phoneStream) phoneStream.destroy();
+      await service.setEnabled(false).catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  {
+    // The reaper: a session that authenticates but never sends hello is
+    // destroyed after the hello deadline, so phantom replays cannot linger.
+    const HyperDHT = require("hyperdht");
+    const home = mkdtempSync(join(tmpdir(), "codara-hostile-f5reap-"));
+    const service = makeService(RemoteAccessService, home, { sessionHelloDeadlineMs: 700 });
+    const clientKeyPair = HyperDHT.keyPair();
+    const clientKeyB64 = clientKeyPair.publicKey.toString("base64");
+    const streams = [];
+    try {
+      const status = await service.setEnabled(true);
+      const session = service.startPairing();
+      const payload = JSON.parse(session.qrPayload);
+      const computerKey = Buffer.from(payload.pk, "base64");
+      const pairStream = await noiseDial(status.port, clientKeyPair, computerKey);
+      pairStream.write(encodeFrame({ t: "pair", secret: payload.secret, name: "f5reap" }));
+      await waitForFrame(pairStream);
+      pairStream.destroy();
+
+      for (let i = 0; i < 2; i += 1) {
+        streams.push(await noiseDial(status.port, clientKeyPair, computerKey));
+        await wait(40);
+      }
+      await wait(150);
+      check(
+        "F5: unproven sessions are present before the hello deadline",
+        service.sessionCountFor(clientKeyB64) === 2,
+        service.sessionCountFor(clientKeyB64),
+      );
+
+      await wait(900); // past the 700ms hello deadline
+      check(
+        "F5: unproven sessions are reaped once the hello deadline passes",
+        service.sessionCountFor(clientKeyB64) === 0,
+        service.sessionCountFor(clientKeyB64),
+      );
+    } finally {
+      for (const s of streams) s.destroy();
+      await service.setEnabled(false).catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
   if (failures > 0) {
     console.error(`${failures} failure(s)`);
     process.exit(1);

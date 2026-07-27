@@ -49,6 +49,12 @@ const PAIRING_MAX_FRAME_BYTES = 4096;
 // the real pty ceiling is MAX_TOTAL_SESSIONS x MAX_TERMINALS_PER_CONNECTION.
 const MAX_SESSIONS_PER_DEVICE = 4;
 const MAX_TOTAL_SESSIONS = 16;
+// How long a freshly accepted session has to prove liveness (complete a
+// valid hello) before it is reaped. A passively replayed IK first flight can
+// open a stream and even report a paired device's key, but it can never
+// derive the session keys to send a real hello, so it never becomes proven;
+// this deadline is what stops such phantom sessions from lingering.
+const SESSION_HELLO_DEADLINE_MS = 15_000;
 
 export interface RemoteAccessDeps {
   // <spark-home>/remote in production; a temp dir in tests.
@@ -66,6 +72,9 @@ export interface RemoteAccessDeps {
   dhtBootstrap?: Array<{ host: string; port: number }> | false;
   advertisedAddrs?: string[];
   now?: () => number;
+  // Test override for the unproven-session reaper deadline (see
+  // SESSION_HELLO_DEADLINE_MS). Production leaves it unset.
+  sessionHelloDeadlineMs?: number;
 }
 
 export class RemoteAccessService {
@@ -82,6 +91,8 @@ export class RemoteAccessService {
   // Live sessions keyed by the peer's canonical base64 public key. One
   // device may hold several (phone reconnect race); revoke kills them all.
   private readonly sessions = new Map<string, Set<RpcSession>>();
+  // Per-session reaper timers for the hello deadline (see onAuthorizedStream).
+  private readonly sessionHelloTimers = new Map<RpcSession, NodeJS.Timeout>();
   private readonly statusListeners = new Set<(status: RemoteAccessStatus) => void>();
   private readonly pairingListeners = new Set<(state: RemotePairingState) => void>();
   // Serializes enable/disable so a fast toggle cannot interleave a start
@@ -172,6 +183,8 @@ export class RemoteAccessService {
     this.cancelPairing();
     const listener = this.listener;
     this.listener = null;
+    for (const timer of this.sessionHelloTimers.values()) clearTimeout(timer);
+    this.sessionHelloTimers.clear();
     for (const sessions of this.sessions.values()) {
       for (const session of sessions) session.destroy();
     }
@@ -309,7 +322,14 @@ export class RemoteAccessService {
   async revokeDevice(publicKeyB64: string): Promise<boolean> {
     const sessions = this.sessions.get(publicKeyB64);
     if (sessions) {
-      for (const session of sessions) session.destroy();
+      for (const session of sessions) {
+        const timer = this.sessionHelloTimers.get(session);
+        if (timer) {
+          clearTimeout(timer);
+          this.sessionHelloTimers.delete(session);
+        }
+        session.destroy();
+      }
       this.sessions.delete(publicKeyB64);
     }
     const removed = await this.devices.revokeDevice(publicKeyB64);
@@ -337,11 +357,28 @@ export class RemoteAccessService {
     }
     const existing = this.sessions.get(keyB64);
     if (existing && existing.size >= MAX_SESSIONS_PER_DEVICE) {
-      const oldest = existing.values().next().value;
-      if (oldest) {
-        this.deps.log(`evicting the oldest session for ${shortKey(keyB64)}: per-device cap reached`);
-        oldest.destroy();
-        existing.delete(oldest);
+      // A newcomer is unproven until it completes a hello. It must not be
+      // able to evict a proven, healthy session for the same device: that is
+      // exactly the replay-eviction attack, where four replayed IK first
+      // flights report the phone's key and knock its live session offline.
+      // Prefer evicting an unproven incumbent (a phantom replay or a stalled
+      // peer); if every incumbent is proven, refuse the unproven newcomer.
+      let victim: RpcSession | null = null;
+      for (const candidate of existing) {
+        if (!candidate.isProven()) {
+          victim = candidate;
+          break;
+        }
+      }
+      if (victim) {
+        this.deps.log(`evicting an unproven session for ${shortKey(keyB64)}: per-device cap reached`);
+        this.reapSession(keyB64, victim);
+      } else {
+        this.deps.log(
+          `refused session for ${shortKey(keyB64)}: per-device cap reached and every session is proven`,
+        );
+        stream.destroy();
+        return;
       }
     }
     this.devices.touchLastSeen(stream.remotePublicKey);
@@ -362,13 +399,48 @@ export class RemoteAccessService {
       this.sessions.set(keyB64, set);
     }
     set.add(session);
+    // Reap a session that authenticates but never speaks. Without this an
+    // unproven phantom (a replayed IK first flight) would sit in the
+    // per-device set indefinitely, taking a slot from real reconnects.
+    const helloDeadline = this.deps.sessionHelloDeadlineMs ?? SESSION_HELLO_DEADLINE_MS;
+    const helloTimer = setTimeout(() => {
+      this.sessionHelloTimers.delete(session);
+      if (!session.isProven()) {
+        this.deps.log(`reaping unproven session for ${shortKey(keyB64)}: no hello within the deadline`);
+        session.destroy();
+      }
+    }, helloDeadline);
+    helloTimer.unref?.();
+    this.sessionHelloTimers.set(session, helloTimer);
     stream.on("close", () => {
+      const timer = this.sessionHelloTimers.get(session);
+      if (timer) {
+        clearTimeout(timer);
+        this.sessionHelloTimers.delete(session);
+      }
       const current = this.sessions.get(keyB64);
       if (!current) return;
       current.delete(session);
       if (current.size === 0) this.sessions.delete(keyB64);
     });
     this.deps.log(`session opened for device ${shortKey(keyB64)}`);
+  }
+
+  // Destroys a session and removes it from its device set and reaper map
+  // synchronously, so the caller can rely on the slot being freed at once
+  // rather than waiting on the stream's asynchronous close event.
+  private reapSession(keyB64: string, session: RpcSession): void {
+    const timer = this.sessionHelloTimers.get(session);
+    if (timer) {
+      clearTimeout(timer);
+      this.sessionHelloTimers.delete(session);
+    }
+    const set = this.sessions.get(keyB64);
+    if (set) {
+      set.delete(session);
+      if (set.size === 0) this.sessions.delete(keyB64);
+    }
+    session.destroy();
   }
 
   // Test/diagnostic visibility only.
