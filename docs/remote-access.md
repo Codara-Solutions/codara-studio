@@ -98,6 +98,88 @@ any future fs RPC goes through the existing sandbox checks.
 - `paired-devices.json`: pinned public keys and metadata.
 - Never readable by the renderer. Never synced, never logged.
 
+## Phase 1 as built
+
+The studio foundation shipped on `agent/remote-access`. What follows records
+the decisions a reader of the sections above would otherwise have to infer
+from the code.
+
+### Transport: Hyperswarm, both rungs
+
+We took the primary candidate. `sodium-native` and `udx-native` ship N-API
+prebuilds that load unmodified under this repo's Electron, so no native
+rebuild step was needed (they are listed in `asarUnpack` because native
+binaries cannot load from inside the asar archive). Two rungs share one
+identity keypair:
+
+- **Direct TCP** (LAN, and WAN wherever the router already forwards): a
+  plain `net.Server` whose every connection is wrapped in
+  `@hyperswarm/secret-stream` with the **IK** handshake pattern. The
+  default pattern in that library is XX, which authenticates nobody in
+  advance; IK is what makes the initiator prove it already knows our static
+  key. This is the port the QR payload advertises.
+- **DHT**: a `hyperdht` server announced under the same keypair, with the
+  `firewall` hook returning "block" for any key not in the paired list, so
+  an unknown key cannot complete a connection at all.
+
+Both rungs converge on the same post-handshake router, and the silent
+listener rule holds structurally: the Noise responder never speaks first, so
+a port scanner reads zero bytes, and an unknown key after handshake is
+either a pairing candidate (only while a pairing window is open) or gets its
+stream destroyed with nothing written.
+
+UPnP / NAT-PMP (rung 2 of the ladder) is **not** implemented in phase 1. The
+DHT rung already covers off-LAN reachability, and a port mapping only widens
+the exposed surface. The rung stays in the ladder above for phase 3.
+
+### Pairing exchange
+
+The QR payload matches the phone app's parser exactly:
+`{ v: 1, pk, addrs, port, secret, iat, name? }`, where `pk` is canonical
+padded standard base64 of the 32-byte key, `secret` decodes to 32 bytes, and
+`iat` is always present so the phone can enforce the two minute window.
+
+Over the encrypted stream the phone then sends one frame, using the same
+length-prefixed JSON framing as the RPC:
+
+```
+-> { "t": "pair", "secret": "<base64 from the QR>", "name": "iPhone 17" }
+<- { "t": "paired", "name": "<computer display name>" }
+```
+
+A wrong, expired, or already-used secret gets no reply at all, only a closed
+stream. The secret is compared in constant time and is consumed on first
+correct use.
+
+### RPC v0 deviations from the mobile types
+
+None in the payload shapes: `hello`, `ping`, `workspaces.list`,
+`terminal.create/write/resize/close`, and the pushed `terminal.data` event
+all match `codara-mobile/src/lib/remote/types.ts` field for field. Framing
+details the mobile types deliberately leave open, and that the studio now
+fixes:
+
+- 4-byte big-endian unsigned length prefix, then that many bytes of UTF-8
+  JSON.
+- Inbound frames over 1 MiB are a protocol violation: the connection is
+  destroyed without a response, and the limit is checked against the
+  declared length before the body is buffered.
+- `hello` must be the first call. Anything else before it answers
+  `not-connected`.
+- Per connection: at most 8 terminals (in-flight creates count toward the
+  cap), and `terminalId` values are scoped to the connection, so they are
+  not portable across reconnects.
+- `terminal.create` resolves a `cwd` argument against the workspace root and
+  refuses anything outside it. The remote surface deliberately does not grow
+  ad hoc filesystem access.
+
+### Revocation
+
+Revoking removes the key from `paired-devices.json` and destroys every live
+`RpcSession` for that key in the same tick, which closes that session's
+terminals. A revoked device's next connection attempt is met with the same
+silence as any unknown key.
+
 ## Phases
 
 1. Studio foundation (this repo): identity, QR pairing over LAN, silent
