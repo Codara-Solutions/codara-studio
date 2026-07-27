@@ -30,6 +30,7 @@ import { useTheme } from "../theme/ThemeProvider";
 import { usePreferences } from "../preferences/usePreferences";
 import KeybindingsSection from "../shortcuts/KeybindingsSection";
 import SubscriptionUsage from "./SubscriptionUsage";
+import RemoteAccessSettings from "./RemoteAccessSettings";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
 import packageJson from "../../../../package.json";
 
@@ -42,6 +43,7 @@ type SettingsTab =
   | "api"
   | "agents"
   | "sessions"
+  | "remote-access"
   | "keybindings"
   | "runs"
   | "about";
@@ -53,6 +55,7 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "api", label: "API and model" },
   { id: "agents", label: "Agents" },
   { id: "sessions", label: "Sessions" },
+  { id: "remote-access", label: "Remote access" },
   { id: "keybindings", label: "Keybindings" },
   { id: "runs", label: "Runs" },
   { id: "about", label: "About" },
@@ -262,7 +265,8 @@ export default function SettingsDialog({
   // The runs tab has its own scrolling list and per-row destructive actions;
   // the global Save/Cancel footer would be misleading there. Hide the
   // footer entirely on tabs that manage their own persistence semantics.
-  const hideFooter = activeTab === "runs" || activeTab === "sessions";
+  const hideFooter =
+    activeTab === "runs" || activeTab === "sessions" || activeTab === "remote-access";
 
   useEffect(() => {
     setDraft(settings);
@@ -426,6 +430,7 @@ export default function SettingsDialog({
                 onOpenWorkerSession={onOpenWorkerSession}
               />
             )}
+            {renderedTab === "remote-access" && <RemoteAccessSettings />}
             {renderedTab === "keybindings" && <KeybindingsTab />}
             {renderedTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
             {renderedTab === "about" && <AboutSettings />}

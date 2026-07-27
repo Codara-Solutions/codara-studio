@@ -86,6 +86,11 @@ import type {
   InlineAiCompletionRequest,
   InlineAiCompletionResponse,
 } from "./inline-ai";
+import type {
+  RemoteAccessStatus,
+  RemotePairedDevice,
+  RemotePairingSession,
+} from "@shared/remote-access";
 
 // Heavy modules deferred via dynamic import to keep cold startup snappy. Each
 // cache slot is populated on the first IPC call that needs the module and
@@ -176,6 +181,36 @@ let schedulerMod: typeof import("./orchestration/scheduler") | undefined;
 async function getScheduler(): Promise<typeof import("./orchestration/scheduler")> {
   schedulerMod ??= await import("./orchestration/scheduler");
   return schedulerMod;
+}
+
+// Remote Access (phone pairing + listener). Deferred like the git modules:
+// the hyperswarm stack only loads when the user first touches the feature.
+// Status and pairing pushes are wired to every webContents on first access
+// so the Settings panel updates live wherever it is open.
+let remoteAccessMod: typeof import("./remote-access/production") | undefined;
+let remoteAccessPushesWired = false;
+async function getRemoteAccess(): Promise<
+  import("./remote-access/index").RemoteAccessService
+> {
+  remoteAccessMod ??= await import("./remote-access/production");
+  const service = remoteAccessMod.getRemoteAccessService();
+  if (!remoteAccessPushesWired) {
+    remoteAccessPushesWired = true;
+    const push = (channel: string, payload: unknown) => {
+      for (const wc of webContents.getAllWebContents()) {
+        if (!wc.isDestroyed()) {
+          try {
+            wc.send(channel, payload);
+          } catch {
+            /* window mid-teardown */
+          }
+        }
+      }
+    };
+    service.onStatusChanged((status) => push("remoteAccess:statusChanged", status));
+    service.onPairingChanged((state) => push("remoteAccess:pairingChanged", state));
+  }
+  return service;
 }
 
 // ── Cora-only kill authority for worker ptys ────────────────────────────────
@@ -2138,6 +2173,48 @@ export function registerIpc(): void {
     "remote:detectAgents",
     async (_e, hostIdOrPath: string): Promise<RemoteAgentAvailability> =>
       detectRemoteAgents(hostIdOrPath),
+  );
+
+  // ── Remote Access (phone pairing + listener) ───────────────────────────
+  // Settings' "Remote access" section. Distinct from the remote:* channels
+  // above, which are the SSH remote-workspace feature. The renderer only
+  // ever sees status, device summaries, the pairing state, and the QR
+  // payload string; key material and pairing secret internals stay in main.
+  ipcMain.handle("remoteAccess:getStatus", async (): Promise<RemoteAccessStatus> => {
+    const service = await getRemoteAccess();
+    return service.getStatus();
+  });
+  ipcMain.handle(
+    "remoteAccess:setEnabled",
+    async (_e, enabled: boolean): Promise<RemoteAccessStatus> => {
+      const on = enabled === true;
+      // Persist first so a crash mid-start still remembers the intent, then
+      // fan the preference out exactly like the preferences:set handler.
+      const next = await setPreference("remoteAccessEnabled", on);
+      broadcastPreferencesChanged({ key: "remoteAccessEnabled", value: next.remoteAccessEnabled });
+      const service = await getRemoteAccess();
+      return service.setEnabled(on);
+    },
+  );
+  ipcMain.handle("remoteAccess:startPairing", async (): Promise<RemotePairingSession> => {
+    const service = await getRemoteAccess();
+    return service.startPairing();
+  });
+  ipcMain.handle("remoteAccess:cancelPairing", async (): Promise<void> => {
+    const service = await getRemoteAccess();
+    service.cancelPairing();
+  });
+  ipcMain.handle("remoteAccess:listDevices", async (): Promise<RemotePairedDevice[]> => {
+    const service = await getRemoteAccess();
+    return service.listPairedDevices();
+  });
+  ipcMain.handle(
+    "remoteAccess:revokeDevice",
+    async (_e, publicKey: string): Promise<RemotePairedDevice[]> => {
+      const service = await getRemoteAccess();
+      service.revokeDevice(publicKey);
+      return service.listPairedDevices();
+    },
   );
 
   // File clipboard bridge for the explorer's copy/cut/paste. Real OS-clipboard

@@ -811,6 +811,18 @@ app.whenReady().then(async () => {
   // without creating a circular import (index → ipc is safe; ipc → index
   // would cycle).
   setTrayHook({ ensure: ensureTray, destroy: destroyTray });
+  // Re-enable the phone Remote Access listener when the user left the
+  // setting on. The preference is checked BEFORE the import so users who
+  // never enabled the feature never load the hyperswarm stack.
+  try {
+    if (getPreferenceSync("remoteAccessEnabled") === true) {
+      void import("./remote-access/production")
+        .then(({ initRemoteAccessAtBoot }) => initRemoteAccessAtBoot())
+        .catch((err) => console.warn("[main] remote access boot init failed:", err));
+    }
+  } catch (err) {
+    console.warn("[main] remote access boot check failed:", err);
+  }
   registerPreviewBridge();
   registerTerminalBridge();
   // Main-side computer-use executor for the preview tab: listens for tab
