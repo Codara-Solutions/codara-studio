@@ -81,6 +81,10 @@ export class PairedDeviceStore {
   private cache: PairedDeviceRecord[] | null = null;
   private lastSeenFlushTimer: NodeJS.Timeout | null = null;
   private writing: Promise<void> = Promise.resolve();
+  // Bumped by every synchronous authoritative write (pair, revoke). An
+  // async last-seen flush carries the generation it started under and
+  // refuses to be the last word once that number has moved. See saveAsync.
+  private generation = 0;
 
   constructor(private readonly remoteDir: string) {
     this.file = join(remoteDir, PAIRED_DEVICES_FILE);
@@ -156,7 +160,7 @@ export class PairedDeviceStore {
     if (this.lastSeenFlushTimer) return;
     this.lastSeenFlushTimer = setTimeout(() => {
       this.lastSeenFlushTimer = null;
-      void this.saveAsync(this.list()).catch(() => {
+      void this.saveAsync().catch(() => {
         // Losing a last-seen timestamp is not worth surfacing; the trust
         // list itself is written synchronously elsewhere.
       });
@@ -168,10 +172,15 @@ export class PairedDeviceStore {
   // Flush any pending last-seen write now. Called on shutdown so the final
   // timestamps are not lost, and by tests that assert persistence.
   async flushPendingWrites(): Promise<void> {
-    if (!this.lastSeenFlushTimer) return;
-    clearTimeout(this.lastSeenFlushTimer);
-    this.lastSeenFlushTimer = null;
-    await this.saveAsync(this.list()).catch(() => undefined);
+    if (this.lastSeenFlushTimer) {
+      clearTimeout(this.lastSeenFlushTimer);
+      this.lastSeenFlushTimer = null;
+      await this.saveAsync().catch(() => undefined);
+      return;
+    }
+    // No timer pending, but a flush dispatched earlier may still be in the
+    // air; callers use this to mean "all writes have landed".
+    await this.writing;
   }
 
   private readFromDisk(): PairedDeviceRecord[] {
@@ -191,12 +200,27 @@ export class PairedDeviceStore {
   }
 
   // Synchronous, for the security-relevant mutations (pairing a device,
-  // revoking one). Those must be durable before the caller proceeds.
+  // revoking one). Those must be durable before the caller proceeds, and
+  // they are AUTHORITATIVE: bumping the generation here is what tells an
+  // in-flight cosmetic flush that whatever it is carrying is now stale.
+  // Cancelling the pending timer stops a scheduled flush from resurrecting
+  // the state we just replaced.
   private save(devices: PairedDeviceRecord[]): void {
     this.cache = devices;
+    this.generation += 1;
+    if (this.lastSeenFlushTimer) {
+      clearTimeout(this.lastSeenFlushTimer);
+      this.lastSeenFlushTimer = null;
+    }
+    this.writeSync(devices);
+  }
+
+  private writeSync(devices: PairedDeviceRecord[]): void {
     ensureRemoteDir(this.remoteDir);
     const payload: DevicesFileShape = { version: 1, devices };
-    const tmp = `${this.file}.tmp`;
+    // Unique tmp name: the async flush must never be able to collide with
+    // this write's staging file.
+    const tmp = `${this.file}.${process.pid}.${(tmpCounter += 1)}.tmp`;
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
     try {
       chmodSync(tmp, 0o600);
@@ -206,22 +230,48 @@ export class PairedDeviceStore {
     renameSync(tmp, this.file);
   }
 
-  // Async twin of save() for the cosmetic last-seen flush. Same tmp+rename
-  // atomicity; serialized behind `writing` so two flushes cannot interleave
-  // their renames.
-  private async saveAsync(devices: PairedDeviceRecord[]): Promise<void> {
-    this.cache = devices;
+  // Async twin of save() for the cosmetic last-seen flush, serialized behind
+  // `writing` so two flushes cannot interleave their renames.
+  //
+  // This write is NEVER allowed to be the last word. A revoke is the
+  // security boundary of the whole feature, and it is synchronous, so a
+  // flush that was already in flight when the revoke landed must not put the
+  // revoked device back on disk. Three windows exist and all three are shut:
+  //
+  //   1. Superseded BEFORE the write starts. The payload is read from
+  //      this.list() at execution time rather than captured at scheduling
+  //      time, so it already reflects the revoke.
+  //   2. Superseded DURING the write. The generation is re-checked just
+  //      before the rename; a stale flush abandons its staging file instead
+  //      of publishing it.
+  //   3. Superseded DURING the rename itself, which is the only window the
+  //      first two cannot see because the rename is already on the
+  //      threadpool when the synchronous write runs. Here the rename may
+  //      genuinely have clobbered the authoritative file, so we re-assert
+  //      the truth with a synchronous write of the current state.
+  private async saveAsync(): Promise<void> {
     const run = this.writing.then(async () => {
+      const generation = this.generation;
+      const devices = this.list();
       ensureRemoteDir(this.remoteDir);
       const payload: DevicesFileShape = { version: 1, devices };
-      const tmp = `${this.file}.tmp`;
+      const tmp = `${this.file}.${process.pid}.${(tmpCounter += 1)}.tmp`;
       await fsp.writeFile(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
       try {
         await fsp.chmod(tmp, 0o600);
       } catch {
         // Windows: no POSIX modes.
       }
+      // Window 2.
+      if (this.generation !== generation) {
+        await fsp.unlink(tmp).catch(() => undefined);
+        return;
+      }
       await fsp.rename(tmp, this.file);
+      // Window 3.
+      if (this.generation !== generation) {
+        this.writeSync(this.list());
+      }
     });
     this.writing = run.then(
       () => undefined,
@@ -230,6 +280,11 @@ export class PairedDeviceStore {
     await run;
   }
 }
+
+// Process-wide counter for unique staging file names, so a synchronous
+// authoritative write and an in-flight async flush can never share a tmp
+// path.
+let tmpCounter = 0;
 
 function isPlausibleRecord(value: unknown): value is PairedDeviceRecord {
   if (!value || typeof value !== "object") return false;

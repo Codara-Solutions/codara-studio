@@ -104,6 +104,9 @@ const KEEPALIVE_DELAY_MS = 60_000;
 // every accepted connection has ended, so we destroy sockets first and then
 // bound the wait regardless.
 const STOP_CLOSE_TIMEOUT_MS = 2_000;
+// Same reasoning for the DHT half of shutdown: a hang in the transport
+// library must not be able to wedge the lifecycle.
+const DHT_CLOSE_TIMEOUT_MS = 3_000;
 
 export class RemoteListener {
   private tcpServer: Server | null = null;
@@ -181,23 +184,26 @@ export class RemoteListener {
       // The DHT announce is the part that must not survive a disable: it is
       // what makes this computer findable by key. Run it whatever the TCP
       // path did.
+      // Both steps are time-bounded for the same reason the TCP close is: a
+      // hang anywhere in shutdown reintroduces the wedge where the status
+      // never returns to disabled and the feature cannot be re-enabled. The
+      // references are cleared FIRST, so isDhtActive reports the teardown as
+      // done even if one of these calls never settles.
       const dhtServer = this.dhtServer;
       this.dhtServer = null;
       if (dhtServer) {
-        try {
-          await dhtServer.close();
-        } catch {
-          // Already closing.
-        }
+        await withTimeout(
+          dhtServer.close().catch(() => undefined),
+          DHT_CLOSE_TIMEOUT_MS,
+        );
       }
       const dht = this.dht;
       this.dht = null;
       if (dht) {
-        try {
-          await dht.destroy();
-        } catch {
-          // Already destroyed.
-        }
+        await withTimeout(
+          dht.destroy().catch(() => undefined),
+          DHT_CLOSE_TIMEOUT_MS,
+        );
       }
     }
   }
