@@ -1715,6 +1715,7 @@ export function registerIpc(): void {
         env?: Record<string, string>;
         startupCommand?: string;
         mirror?: boolean;
+        preserveSizeOnAttach?: boolean;
       },
     ) => {
       // Spawning a pty starts a real OS process; only the trusted renderer may.
@@ -1727,6 +1728,7 @@ export function registerIpc(): void {
         env: args.env,
         startupCommand: args.startupCommand,
         mirror: args.mirror,
+        preserveSizeOnAttach: args.preserveSizeOnAttach,
         webContents: e.sender,
       });
     },

@@ -35,6 +35,7 @@ import {
   type RemoteTerminalCreateRequest,
   type RemoteTerminalHandle,
 } from "./rpc";
+import { stableRemoteAccessPortCandidates } from "./stable-port";
 
 export type { RemoteTerminalCreateRequest, RemoteTerminalHandle };
 
@@ -71,6 +72,20 @@ export interface RemoteAccessDeps {
   // Studio version reported in hello.
   appVersion: string;
   listWorkspaces: RemoteRpcServices["listWorkspaces"];
+  listDirectories?: RemoteRpcServices["listDirectories"];
+  addWorkspace?: RemoteRpcServices["addWorkspace"];
+  listFiles?: RemoteRpcServices["listFiles"];
+  readFile?: RemoteRpcServices["readFile"];
+  createFileEntry?: RemoteRpcServices["createFileEntry"];
+  renameFileEntry?: RemoteRpcServices["renameFileEntry"];
+  moveFileEntry?: RemoteRpcServices["moveFileEntry"];
+  deleteFileEntry?: RemoteRpcServices["deleteFileEntry"];
+  getGitStatus?: RemoteRpcServices["getGitStatus"];
+  getGitLog?: RemoteRpcServices["getGitLog"];
+  getGitCommitDetail?: RemoteRpcServices["getGitCommitDetail"];
+  listCoraHistory?: RemoteRpcServices["listCoraHistory"];
+  getCoraRun?: RemoteRpcServices["getCoraRun"];
+  sendCoraMessage?: RemoteRpcServices["sendCoraMessage"];
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
   log(line: string): void;
   // Test/harness overrides. Production leaves all of these unset.
@@ -184,7 +199,12 @@ export class RemoteAccessService {
         onPairingCandidateStream: (stream, promote) => this.onPairingCandidateStream(stream, promote),
         log: this.deps.log,
         host: this.deps.host,
-        port: this.deps.port,
+        // Tests and the interop harness may request an exact port (including
+        // zero). Production derives an ordered candidate sequence from the
+        // persistent identity. The listener advances only on EADDRINUSE.
+        ...(this.deps.port !== undefined
+          ? { port: this.deps.port }
+          : { portCandidates: stableRemoteAccessPortCandidates(this.identity.publicKey) }),
         dhtBootstrap: this.deps.dhtBootstrap,
       });
       const { port, dhtReady } = await listener.start();
@@ -428,7 +448,7 @@ export class RemoteAccessService {
           clearTimeout(timer);
           this.sessionHelloTimers.delete(session);
         }
-        session.destroy();
+        session.revoke();
       }
       this.sessions.delete(publicKeyB64);
     }
@@ -482,6 +502,9 @@ export class RemoteAccessService {
       }
     }
     this.devices.touchLastSeen(stream.remotePublicKey);
+    const pairedDevice = this.devices
+      .list()
+      .find((device) => device.publicKey === keyB64);
     const services: RemoteRpcServices = {
       device: {
         publicKey: this.identity?.publicKeyB64 ?? "",
@@ -489,7 +512,27 @@ export class RemoteAccessService {
         role: "computer",
         version: this.deps.appVersion,
       },
+      peerDevice: {
+        publicKey: keyB64,
+        name: pairedDevice?.name || "Phone",
+        role: "phone",
+        version: "",
+      },
       listWorkspaces: this.deps.listWorkspaces,
+      listDirectories: this.deps.listDirectories,
+      addWorkspace: this.deps.addWorkspace,
+      listFiles: this.deps.listFiles,
+      readFile: this.deps.readFile,
+      createFileEntry: this.deps.createFileEntry,
+      renameFileEntry: this.deps.renameFileEntry,
+      moveFileEntry: this.deps.moveFileEntry,
+      deleteFileEntry: this.deps.deleteFileEntry,
+      getGitStatus: this.deps.getGitStatus,
+      getGitLog: this.deps.getGitLog,
+      getGitCommitDetail: this.deps.getGitCommitDetail,
+      listCoraHistory: this.deps.listCoraHistory,
+      getCoraRun: this.deps.getCoraRun,
+      sendCoraMessage: this.deps.sendCoraMessage,
       createTerminal: (request) => this.deps.createTerminal(request),
     };
     const session = new RpcSession(stream, services, this.deps.log);

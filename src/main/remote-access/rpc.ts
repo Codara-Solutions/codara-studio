@@ -20,6 +20,9 @@
 // RemoteRpcServices, which is what lets the unit tests and the e2e harness
 // drive a real RpcSession without booting the app.
 
+import { randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
+
 /* -------------------------------------------------------------------------- */
 /* Wire types (mirror of codara-mobile src/lib/remote/types.ts)               */
 /* -------------------------------------------------------------------------- */
@@ -40,9 +43,145 @@ export interface RemoteWorkspaceInfo {
   name: string;
   // Absolute path on the computer. Display only on the phone.
   path: string;
+  color?: string;
   branch?: string;
   sessionCount?: number;
   lastActiveAt?: number;
+}
+
+export interface RemoteDirectoryInfo {
+  name: string;
+  // Absolute path on the computer. This surface lists directories only.
+  path: string;
+}
+
+export interface RemoteDirectoryListing {
+  path: string;
+  parentPath: string | null;
+  rootPath: string;
+  directories: RemoteDirectoryInfo[];
+}
+
+export interface RemoteFileInfo {
+  name: string;
+  // Workspace-relative, slash-separated path.
+  path: string;
+  isDir: boolean;
+  ext?: string;
+}
+
+export interface RemoteFileListing {
+  path: string;
+  parentPath: string | null;
+  entries: RemoteFileInfo[];
+}
+
+export interface RemoteFileContent {
+  path: string;
+  name: string;
+  content: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface RemoteFileDeleteResult {
+  deletedPath: string;
+  parentPath: string;
+}
+
+export type RemoteGitFileStatus =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "untracked"
+  | "conflicted"
+  | "typechange";
+
+export interface RemoteGitChange {
+  path: string;
+  oldPath?: string;
+  status: RemoteGitFileStatus;
+}
+
+export interface RemoteGitStatus {
+  isRepo: boolean;
+  branch?: string;
+  detached: boolean;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  staged: RemoteGitChange[];
+  unstaged: RemoteGitChange[];
+  hasConflicts: boolean;
+  error?: string;
+}
+
+export interface RemoteGitCommitSummary {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  author: string;
+  relativeDate: string;
+  parentHashes: string[];
+  refs: string[];
+  isHead: boolean;
+}
+
+export interface RemoteGitLog {
+  isRepo: boolean;
+  commits: RemoteGitCommitSummary[];
+  error?: string;
+}
+
+export interface RemoteGitCommitFile {
+  path: string;
+  oldPath?: string;
+  status: RemoteGitFileStatus;
+  additions: number;
+  deletions: number;
+}
+
+export interface RemoteGitCommitDetail extends RemoteGitCommitSummary {
+  body: string;
+  authorEmail: string;
+  isoDate: string;
+  files: RemoteGitCommitFile[];
+}
+
+export type RemoteCoraRunStatus =
+  | "idle"
+  | "planning"
+  | "running"
+  | "reviewing"
+  | "blocked"
+  | "paused"
+  | "complete"
+  | "failed"
+  | "cancelled";
+
+export interface RemoteCoraRunSummary {
+  id: string;
+  workspaceId: string;
+  title: string;
+  status: RemoteCoraRunStatus;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  lastMessage?: string;
+  activeWorkers: number;
+}
+
+export interface RemoteCoraMessage {
+  id: string;
+  author: "user" | "cora" | "system";
+  kind: "note" | "question" | "answer" | "decision" | "assistant_stream";
+  message: string;
+  createdAt: string;
+}
+
+export interface RemoteCoraRun extends RemoteCoraRunSummary {
+  messages: RemoteCoraMessage[];
 }
 
 export type RpcErrorCode =
@@ -112,6 +251,7 @@ export class FrameDecoder {
   // linear instead of the quadratic Buffer.concat the old decoder did on
   // every push.
   private chunks: Buffer[] = [];
+  private chunkHead = 0;
   private buffered = 0;
 
   constructor(
@@ -132,6 +272,10 @@ export class FrameDecoder {
       ? chunk
       : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     if (view.length > 0) {
+      if (this.chunkHead === this.chunks.length) {
+        this.chunks = [];
+        this.chunkHead = 0;
+      }
       this.chunks.push(view);
       this.buffered += view.length;
     }
@@ -157,7 +301,7 @@ export class FrameDecoder {
   // when it lies within the first chunk; otherwise assembled byte by byte
   // across the chunk boundary.
   private readUInt32BE(): number {
-    const first = this.chunks[0];
+    const first = this.chunks[this.chunkHead];
     if (first !== undefined && first.length >= LENGTH_PREFIX_BYTES) {
       return first.readUInt32BE(0);
     }
@@ -170,7 +314,8 @@ export class FrameDecoder {
 
   private byteAt(pos: number): number {
     let remaining = pos;
-    for (const chunk of this.chunks) {
+    for (let index = this.chunkHead; index < this.chunks.length; index += 1) {
+      const chunk = this.chunks[index];
       if (remaining < chunk.length) return chunk[remaining];
       remaining -= chunk.length;
     }
@@ -182,34 +327,48 @@ export class FrameDecoder {
   // as a contiguous Buffer. Whole chunks are handed back without a copy; a
   // frame that spans chunks is copied exactly once.
   private consume(n: number): Buffer {
-    const first = this.chunks[0];
+    const first = this.chunks[this.chunkHead];
     if (first.length === n) {
-      this.chunks.shift();
+      this.chunkHead += 1;
       this.buffered -= n;
+      this.compactChunks();
       return first;
     }
     if (first.length > n) {
-      this.chunks[0] = first.subarray(n);
+      this.chunks[this.chunkHead] = first.subarray(n);
       this.buffered -= n;
       return first.subarray(0, n);
     }
     const out = Buffer.allocUnsafe(n);
     let offset = 0;
     while (offset < n) {
-      const chunk = this.chunks[0];
+      const chunk = this.chunks[this.chunkHead];
       const need = n - offset;
       if (chunk.length <= need) {
         chunk.copy(out, offset);
         offset += chunk.length;
-        this.chunks.shift();
+        this.chunkHead += 1;
       } else {
         chunk.copy(out, offset, 0, need);
-        this.chunks[0] = chunk.subarray(need);
+        this.chunks[this.chunkHead] = chunk.subarray(need);
         offset = n;
       }
     }
     this.buffered -= n;
+    this.compactChunks();
     return out;
+  }
+
+  private compactChunks(): void {
+    if (this.chunkHead === this.chunks.length) {
+      this.chunks = [];
+      this.chunkHead = 0;
+      return;
+    }
+    if (this.chunkHead >= 1024 && this.chunkHead * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.chunkHead);
+      this.chunkHead = 0;
+    }
   }
 }
 
@@ -220,8 +379,11 @@ export class FrameDecoder {
 // A live remote terminal as the session sees it. create() wires output
 // through onData/onExit; the session owns close() for teardown.
 export interface RemoteTerminalHandle {
+  // Renderer-owned tab metadata for a terminal shared with the desktop.
+  desktopTabId?: string;
+  title?: string;
   write(data: string): void;
-  resize(cols: number, rows: number): void;
+  resize(cols: number, rows: number): void | Promise<void>;
   close(): void;
   // Optional OS-level read flow control. The session calls these when the
   // peer's socket backs up, so a pty running something noisy against a slow
@@ -237,6 +399,10 @@ export interface RemoteTerminalCreateRequest {
   cols: number;
   rows: number;
   cwd?: string;
+  profile: "shell" | "claude" | "codex";
+  title?: string;
+  // Stamped by the authenticated desktop session; never supplied by the phone.
+  origin: { kind: "phone"; deviceName: string };
   onData(data: string): void;
   onExit(): void;
 }
@@ -246,7 +412,48 @@ export interface RemoteTerminalCreateRequest {
 // fakes or a bare node-pty.
 export interface RemoteRpcServices {
   device: DeviceInfo;
+  // Trusted pairing-store identity for the authenticated peer. The hello frame
+  // cannot choose terminal origin metadata.
+  peerDevice?: DeviceInfo;
   listWorkspaces(): Promise<RemoteWorkspaceInfo[]>;
+  listDirectories?(path?: string): Promise<RemoteDirectoryListing>;
+  addWorkspace?(input: { path: string; name?: string }): Promise<RemoteWorkspaceInfo>;
+  listFiles?(input: { workspaceId: string; path?: string }): Promise<RemoteFileListing>;
+  readFile?(input: { workspaceId: string; path: string }): Promise<RemoteFileContent>;
+  createFileEntry?(input: {
+    workspaceId: string;
+    parentPath?: string;
+    name: string;
+    kind: "file" | "directory";
+  }): Promise<RemoteFileInfo>;
+  renameFileEntry?(input: {
+    workspaceId: string;
+    path: string;
+    name: string;
+  }): Promise<RemoteFileInfo>;
+  moveFileEntry?(input: {
+    workspaceId: string;
+    path: string;
+    destinationPath?: string;
+  }): Promise<RemoteFileInfo>;
+  deleteFileEntry?(input: {
+    workspaceId: string;
+    path: string;
+  }): Promise<RemoteFileDeleteResult>;
+  getGitStatus?(workspaceId: string): Promise<RemoteGitStatus>;
+  getGitLog?(input: { workspaceId: string; limit: number }): Promise<RemoteGitLog>;
+  getGitCommitDetail?(input: {
+    workspaceId: string;
+    hash: string;
+  }): Promise<RemoteGitCommitDetail>;
+  listCoraHistory?(workspaceId: string): Promise<RemoteCoraRunSummary[]>;
+  getCoraRun?(input: { workspaceId: string; runId: string }): Promise<RemoteCoraRun>;
+  sendCoraMessage?(input: {
+    workspaceId: string;
+    runId?: string;
+    message: string;
+    clientMessageId: string;
+  }): Promise<RemoteCoraRun>;
   // Rejects with an Error whose message is safe to send to the peer.
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
 }
@@ -258,6 +465,12 @@ export interface RemoteRpcServices {
 // Per-connection cap on live terminals. A phone UI shows a handful at most;
 // the cap bounds pty spawn abuse from a compromised paired device.
 export const MAX_TERMINALS_PER_CONNECTION = 8;
+
+// Async service calls can hold filesystem handles, spawn git, or mutate a
+// Cora run. A compromised paired device must not be able to fan out an
+// unbounded number of them simply by sending many individually valid frames.
+// Ordinary phone usage has only a handful of overlapping reads.
+export const MAX_IN_FLIGHT_REQUESTS = 32;
 
 // Outbound terminal bytes buffered while the peer's socket is backed up
 // and the pty could not be paused. Past this we drop output: losing
@@ -275,10 +488,20 @@ export const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
 // noisy terminal alone never trips it.
 export const MAX_PENDING_WRITE_BYTES = 4 * 1024 * 1024;
 
+// One terminal.data event must remain comfortably below MAX_FRAME_BYTES even
+// after JSON escapes ANSI control bytes (ESC becomes six wire bytes).
+const MAX_TERMINAL_EVENT_DATA_BYTES = 128 * 1024;
+// Output produced while a visible renderer terminal is still being created is
+// held until the terminal.create response gives the phone its terminalId.
+const MAX_TERMINAL_BOOTSTRAP_BYTES = 256 * 1024;
+
 interface DuplexLike {
   // Node's Writable contract: false means the internal buffer is over its
   // high water mark and the caller should stop until "drain".
   write(data: Buffer): boolean;
+  // SecretStream supports graceful end. It is optional for the small fake
+  // duplexes used by unit tests.
+  end?(): void;
   destroy(): void;
   on(event: "data", handler: (chunk: Buffer) => void): void;
   on(event: "close", handler: () => void): void;
@@ -286,9 +509,13 @@ interface DuplexLike {
   on(event: "drain", handler: () => void): void;
 }
 
-// One authenticated connection's RPC state machine. Terminals created here
-// die with the session: on stream close, on protocol violation, and on
-// revoke (index.ts calls destroy() on every session of a revoked key).
+// Give the tiny authenticated revocation event a brief chance to flush before
+// forcibly destroying a peer that does not complete the graceful close.
+const REVOKE_FLUSH_GRACE_MS = 1_000;
+
+// One authenticated connection's RPC state machine. Every terminal remains
+// owned by the authenticated session: disconnect and revoke close it, including
+// production terminals that also have a visible renderer tab.
 export class RpcSession {
   private readonly decoder = new FrameDecoder();
   private readonly terminals = new Map<string, RemoteTerminalHandle>();
@@ -297,7 +524,7 @@ export class RpcSession {
   // frames all read the map before any of them lands in it and the cap is
   // worth nothing.
   private pendingTerminalCreates = 0;
-  private nextTerminalId = 1;
+  private inFlightRequests = 0;
   private helloDone = false;
   private destroyed = false;
   // Peer socket is over its high water mark; see onBackpressure.
@@ -324,6 +551,30 @@ export class RpcSession {
     if (this.destroyed) return;
     this.teardown();
     this.stream.destroy();
+  }
+
+  // Desktop-side revocation is different from a routine listener/process
+  // shutdown: tell the currently authenticated phone why this session is
+  // ending so it can suppress automatic reconnect. Access is removed
+  // synchronously by teardown(); graceful end only exists to flush that final
+  // authenticated control event.
+  revoke(): void {
+    if (this.destroyed) return;
+    this.send({ event: "session.revoked", payload: {} });
+    if (this.destroyed) return;
+    this.teardown();
+    if (!this.stream.end) {
+      this.stream.destroy();
+      return;
+    }
+    try {
+      this.stream.end();
+    } catch {
+      this.stream.destroy();
+      return;
+    }
+    const forceClose = setTimeout(() => this.stream.destroy(), REVOKE_FLUSH_GRACE_MS);
+    forceClose.unref?.();
   }
 
   terminalCount(): number {
@@ -378,7 +629,20 @@ export class RpcSession {
 
   private send(value: unknown): void {
     if (this.destroyed) return;
-    const frame = encodeFrame(value);
+    let frame = encodeFrame(value);
+    if (frame.length - LENGTH_PREFIX_BYTES > MAX_FRAME_BYTES) {
+      const id =
+        value && typeof value === "object" && typeof (value as { id?: unknown }).id === "number"
+          ? (value as { id: number }).id
+          : null;
+      this.log("dropping oversized outbound RPC frame");
+      if (id === null) return;
+      frame = encodeFrame({
+        id,
+        ok: false,
+        error: { code: "internal", message: "The response was too large for Remote Access." },
+      });
+    }
     // Every outbound frame flows through here, replies included. A false
     // return means the peer is not draining. We cannot drop replies (the
     // peer is waiting on them) and terminal output is already capped
@@ -405,6 +669,24 @@ export class RpcSession {
   // cannot pause, we account for what we have queued and start dropping
   // once it passes the cap.
   private pushTerminalData(terminalId: string, data: string): void {
+    if (this.destroyed) return;
+    if (Buffer.byteLength(data, "utf8") > MAX_TERMINAL_EVENT_DATA_BYTES) {
+      const bytes = Buffer.from(data, "utf8");
+      const decoder = new StringDecoder("utf8");
+      for (let offset = 0; offset < bytes.length; offset += MAX_TERMINAL_EVENT_DATA_BYTES) {
+        const part = decoder.write(
+          bytes.subarray(offset, Math.min(bytes.length, offset + MAX_TERMINAL_EVENT_DATA_BYTES)),
+        );
+        if (part) this.pushTerminalDataChunk(terminalId, part);
+      }
+      const final = decoder.end();
+      if (final) this.pushTerminalDataChunk(terminalId, final);
+      return;
+    }
+    this.pushTerminalDataChunk(terminalId, data);
+  }
+
+  private pushTerminalDataChunk(terminalId: string, data: string): void {
     if (this.destroyed) return;
     if (this.backpressured) {
       const bytes = Buffer.byteLength(data, "utf8");
@@ -473,6 +755,11 @@ export class RpcSession {
       this.replyError(id, "not-connected", "Say hello first.");
       return;
     }
+    if (this.inFlightRequests >= MAX_IN_FLIGHT_REQUESTS) {
+      this.replyError(id, "internal", "Too many Remote Access requests are already in progress.");
+      return;
+    }
+    this.inFlightRequests += 1;
     try {
       switch (method) {
         case "hello":
@@ -484,6 +771,327 @@ export class RpcSession {
         case "workspaces.list": {
           const workspaces = await this.services.listWorkspaces();
           this.reply(id, { workspaces });
+          return;
+        }
+        case "directories.list": {
+          if (!this.services.listDirectories) {
+            this.replyError(id, "unknown-method", "Directory browsing is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { path?: unknown };
+          if (p.path !== undefined && typeof p.path !== "string") {
+            this.replyError(id, "invalid-params", "directories.list path must be a string.");
+            return;
+          }
+          const result = await this.services.listDirectories(p.path);
+          this.reply(id, result);
+          return;
+        }
+        case "workspaces.add": {
+          if (!this.services.addWorkspace) {
+            this.replyError(id, "unknown-method", "Adding workspaces is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { path?: unknown; name?: unknown };
+          if (
+            typeof p.path !== "string" ||
+            p.path.trim().length === 0 ||
+            (p.name !== undefined && typeof p.name !== "string")
+          ) {
+            this.replyError(id, "invalid-params", "workspaces.add needs a path and optional name.");
+            return;
+          }
+          const workspace = await this.services.addWorkspace({
+            path: p.path,
+            ...(typeof p.name === "string" && p.name.trim()
+              ? { name: p.name.trim().slice(0, 120) }
+              : {}),
+          });
+          this.reply(id, { workspace });
+          return;
+        }
+        case "files.list": {
+          if (!this.services.listFiles) {
+            this.replyError(id, "unknown-method", "The file explorer is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; path?: unknown };
+          if (
+            typeof p.workspaceId !== "string" ||
+            (p.path !== undefined && typeof p.path !== "string")
+          ) {
+            this.replyError(id, "invalid-params", "files.list needs workspaceId and optional path.");
+            return;
+          }
+          const result = await this.services.listFiles({
+            workspaceId: p.workspaceId,
+            ...(typeof p.path === "string" ? { path: p.path } : {}),
+          });
+          this.reply(id, result);
+          return;
+        }
+        case "files.read": {
+          if (!this.services.readFile) {
+            this.replyError(id, "unknown-method", "File reading is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; path?: unknown };
+          if (typeof p.workspaceId !== "string" || typeof p.path !== "string" || !p.path) {
+            this.replyError(id, "invalid-params", "files.read needs workspaceId and path.");
+            return;
+          }
+          const file = await this.services.readFile({
+            workspaceId: p.workspaceId,
+            path: p.path,
+          });
+          this.reply(id, { file });
+          return;
+        }
+        case "files.create": {
+          if (!this.services.createFileEntry) {
+            this.replyError(id, "unknown-method", "Creating files is not available.");
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            parentPath?: unknown;
+            name?: unknown;
+            kind?: unknown;
+          };
+          if (
+            typeof p.workspaceId !== "string" ||
+            typeof p.name !== "string" ||
+            (p.parentPath !== undefined && typeof p.parentPath !== "string") ||
+            (p.kind !== "file" && p.kind !== "directory")
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "files.create needs workspaceId, name, kind and optional parentPath.",
+            );
+            return;
+          }
+          const entry = await this.services.createFileEntry({
+            workspaceId: p.workspaceId,
+            ...(typeof p.parentPath === "string" ? { parentPath: p.parentPath } : {}),
+            name: p.name,
+            kind: p.kind,
+          });
+          this.reply(id, { entry });
+          return;
+        }
+        case "files.rename": {
+          if (!this.services.renameFileEntry) {
+            this.replyError(id, "unknown-method", "Renaming files is not available.");
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            path?: unknown;
+            name?: unknown;
+          };
+          if (
+            typeof p.workspaceId !== "string" ||
+            typeof p.path !== "string" ||
+            !p.path ||
+            typeof p.name !== "string"
+          ) {
+            this.replyError(id, "invalid-params", "files.rename needs workspaceId, path and name.");
+            return;
+          }
+          const entry = await this.services.renameFileEntry({
+            workspaceId: p.workspaceId,
+            path: p.path,
+            name: p.name,
+          });
+          this.reply(id, { entry });
+          return;
+        }
+        case "files.move": {
+          if (!this.services.moveFileEntry) {
+            this.replyError(id, "unknown-method", "Moving files is not available.");
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            path?: unknown;
+            destinationPath?: unknown;
+          };
+          if (
+            typeof p.workspaceId !== "string" ||
+            typeof p.path !== "string" ||
+            !p.path ||
+            (p.destinationPath !== undefined && typeof p.destinationPath !== "string")
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "files.move needs workspaceId, path and optional destinationPath.",
+            );
+            return;
+          }
+          const entry = await this.services.moveFileEntry({
+            workspaceId: p.workspaceId,
+            path: p.path,
+            ...(typeof p.destinationPath === "string"
+              ? { destinationPath: p.destinationPath }
+              : {}),
+          });
+          this.reply(id, { entry });
+          return;
+        }
+        case "files.delete": {
+          if (!this.services.deleteFileEntry) {
+            this.replyError(id, "unknown-method", "Deleting files is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; path?: unknown };
+          if (
+            typeof p.workspaceId !== "string" ||
+            typeof p.path !== "string" ||
+            !p.path
+          ) {
+            this.replyError(id, "invalid-params", "files.delete needs workspaceId and path.");
+            return;
+          }
+          const deleted = await this.services.deleteFileEntry({
+            workspaceId: p.workspaceId,
+            path: p.path,
+          });
+          this.reply(id, { deleted });
+          return;
+        }
+        case "git.status": {
+          if (!this.services.getGitStatus) {
+            this.replyError(id, "unknown-method", "Source control is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown };
+          if (typeof p.workspaceId !== "string") {
+            this.replyError(id, "invalid-params", "git.status needs workspaceId.");
+            return;
+          }
+          const status = await this.services.getGitStatus(p.workspaceId);
+          this.reply(id, { status });
+          return;
+        }
+        case "git.log": {
+          if (!this.services.getGitLog) {
+            this.replyError(id, "unknown-method", "Git history is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; limit?: unknown };
+          if (
+            typeof p.workspaceId !== "string" ||
+            (p.limit !== undefined &&
+              (typeof p.limit !== "number" ||
+                !Number.isInteger(p.limit) ||
+                p.limit < 1 ||
+                p.limit > 100))
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "git.log needs workspaceId and an optional limit from 1 to 100.",
+            );
+            return;
+          }
+          const log = await this.services.getGitLog({
+            workspaceId: p.workspaceId,
+            limit: typeof p.limit === "number" ? p.limit : 50,
+          });
+          this.reply(id, { log });
+          return;
+        }
+        case "git.commitDetail": {
+          if (!this.services.getGitCommitDetail) {
+            this.replyError(id, "unknown-method", "Commit details are not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; hash?: unknown };
+          if (
+            typeof p.workspaceId !== "string" ||
+            typeof p.hash !== "string" ||
+            !/^[0-9a-f]{7,64}$/i.test(p.hash)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "git.commitDetail needs workspaceId and a hexadecimal commit hash.",
+            );
+            return;
+          }
+          const commit = await this.services.getGitCommitDetail({
+            workspaceId: p.workspaceId,
+            hash: p.hash,
+          });
+          this.reply(id, { commit });
+          return;
+        }
+        case "cora.history": {
+          if (!this.services.listCoraHistory) {
+            this.replyError(id, "unknown-method", "Cora history is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown };
+          if (typeof p.workspaceId !== "string") {
+            this.replyError(id, "invalid-params", "cora.history needs workspaceId.");
+            return;
+          }
+          const runs = await this.services.listCoraHistory(p.workspaceId);
+          this.reply(id, { runs });
+          return;
+        }
+        case "cora.get": {
+          if (!this.services.getCoraRun) {
+            this.replyError(id, "unknown-method", "Cora history is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; runId?: unknown };
+          if (typeof p.workspaceId !== "string" || typeof p.runId !== "string") {
+            this.replyError(id, "invalid-params", "cora.get needs workspaceId and runId.");
+            return;
+          }
+          const run = await this.services.getCoraRun({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+          });
+          this.reply(id, { run });
+          return;
+        }
+        case "cora.send": {
+          if (!this.services.sendCoraMessage) {
+            this.replyError(id, "unknown-method", "Cora messaging is not available.");
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+            message?: unknown;
+            clientMessageId?: unknown;
+          };
+          if (
+            typeof p.workspaceId !== "string" ||
+            typeof p.message !== "string" ||
+            !p.message.trim() ||
+            typeof p.clientMessageId !== "string" ||
+            !p.clientMessageId.trim() ||
+            (p.runId !== undefined && typeof p.runId !== "string")
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.send needs workspaceId, message, clientMessageId, and optional runId.",
+            );
+            return;
+          }
+          const run = await this.services.sendCoraMessage({
+            workspaceId: p.workspaceId,
+            ...(typeof p.runId === "string" && p.runId ? { runId: p.runId } : {}),
+            message: p.message.trim(),
+            clientMessageId: p.clientMessageId,
+          });
+          this.reply(id, { run });
           return;
         }
         case "terminal.create":
@@ -499,18 +1107,28 @@ export class RpcSession {
             this.reply(id, {});
           });
           return;
-        case "terminal.resize":
-          this.withTerminal(id, params, (terminal, p) => {
-            const cols = normalizeDimension(p.cols);
-            const rows = normalizeDimension(p.rows);
-            if (cols === null || rows === null) {
-              this.replyError(id, "invalid-params", "terminal.resize needs cols and rows.");
-              return;
-            }
-            terminal.resize(cols, rows);
-            this.reply(id, {});
-          });
+        case "terminal.resize": {
+          const p = (params ?? {}) as Record<string, unknown>;
+          const terminalId = p.terminalId;
+          if (typeof terminalId !== "string") {
+            this.replyError(id, "invalid-params", "A terminalId is required.");
+            return;
+          }
+          const terminal = this.terminals.get(terminalId);
+          if (!terminal) {
+            this.replyError(id, "unknown-terminal", `No terminal ${terminalId} on this connection.`);
+            return;
+          }
+          const cols = normalizeDimension(p.cols);
+          const rows = normalizeDimension(p.rows);
+          if (cols === null || rows === null) {
+            this.replyError(id, "invalid-params", "terminal.resize needs cols and rows.");
+            return;
+          }
+          await terminal.resize(cols, rows);
+          this.reply(id, {});
           return;
+        }
         case "terminal.close":
           this.withTerminal(id, params, (terminal, p) => {
             terminal.close();
@@ -524,6 +1142,8 @@ export class RpcSession {
       }
     } catch (err) {
       this.replyError(id, "internal", (err as Error).message || "Internal error.");
+    } finally {
+      this.inFlightRequests = Math.max(0, this.inFlightRequests - 1);
     }
   }
 
@@ -553,6 +1173,8 @@ export class RpcSession {
       cols?: unknown;
       rows?: unknown;
       cwd?: unknown;
+      profile?: unknown;
+      title?: unknown;
     };
     const cols = normalizeDimension(p.cols);
     const rows = normalizeDimension(p.rows);
@@ -564,6 +1186,19 @@ export class RpcSession {
       this.replyError(id, "invalid-params", "terminal.create cwd must be a string.");
       return;
     }
+    if (
+      p.profile !== undefined &&
+      p.profile !== "shell" &&
+      p.profile !== "claude" &&
+      p.profile !== "codex"
+    ) {
+      this.replyError(id, "invalid-params", "terminal.create profile is not supported.");
+      return;
+    }
+    if (p.title !== undefined && typeof p.title !== "string") {
+      this.replyError(id, "invalid-params", "terminal.create title must be a string.");
+      return;
+    }
     if (this.terminals.size + this.pendingTerminalCreates >= MAX_TERMINALS_PER_CONNECTION) {
       this.replyError(
         id,
@@ -572,8 +1207,15 @@ export class RpcSession {
       );
       return;
     }
-    const terminalId = `rt-${this.nextTerminalId++}`;
+    // The phone retains ended sessions in its strip. A per-connection counter
+    // reused rt-1 after every reconnect and made later data/close events
+    // ambiguous, so terminal ids are process- and connection-independent.
+    const terminalId = `rt-${randomUUID()}`;
     let handle: RemoteTerminalHandle;
+    let exitedBeforeRegistration = false;
+    const bootstrapOutput: string[] = [];
+    let bootstrapBytes = 0;
+    let droppedBootstrap = false;
     this.pendingTerminalCreates += 1;
     try {
       // Re-check liveness right before the spawn: the loop in onData already
@@ -586,9 +1228,41 @@ export class RpcSession {
         cols,
         rows,
         cwd: p.cwd,
-        onData: (data) => this.pushTerminalData(terminalId, data),
+        profile: p.profile ?? "shell",
+        title:
+          typeof p.title === "string" && p.title.trim()
+            ? p.title.trim().slice(0, 120)
+            : undefined,
+        origin: {
+          kind: "phone",
+          deviceName: this.services.peerDevice?.name || "Phone",
+        },
+        onData: (data) => {
+          if (this.terminals.has(terminalId)) {
+            this.pushTerminalData(terminalId, data);
+            return;
+          }
+          const remaining = MAX_TERMINAL_BOOTSTRAP_BYTES - bootstrapBytes;
+          if (remaining <= 0) {
+            droppedBootstrap = true;
+            return;
+          }
+          const chunk = utf8Prefix(data, remaining);
+          if (chunk) {
+            bootstrapOutput.push(chunk);
+            bootstrapBytes += Buffer.byteLength(chunk, "utf8");
+          }
+          if (Buffer.byteLength(data, "utf8") > Buffer.byteLength(chunk, "utf8")) {
+            droppedBootstrap = true;
+          }
+        },
         onExit: () => {
+          if (!this.terminals.has(terminalId)) {
+            exitedBeforeRegistration = true;
+            return;
+          }
           this.terminals.delete(terminalId);
+          this.pushEvent("terminal.exit", { terminalId });
         },
       });
     } catch (err) {
@@ -607,6 +1281,15 @@ export class RpcSession {
       }
       return;
     }
+    if (exitedBeforeRegistration) {
+      try {
+        handle.close();
+      } catch {
+        // Best effort; the process already exited.
+      }
+      this.replyError(id, "internal", "The terminal exited before it was ready.");
+      return;
+    }
     this.terminals.set(terminalId, handle);
     // If the peer is already backed up when this terminal is born, pause it
     // at the OS level immediately. Otherwise its first burst of output would
@@ -619,7 +1302,17 @@ export class RpcSession {
         // A pty that died mid-pause is handled by its own exit path.
       }
     }
-    this.reply(id, { terminalId });
+    this.reply(id, {
+      terminalId,
+      ...(handle.desktopTabId ? { desktopTabId: handle.desktopTabId } : {}),
+      ...(handle.title ? { title: handle.title } : {}),
+    });
+    // The response above must be the first frame that mentions this terminal:
+    // until then the phone has no terminalId with which to associate output.
+    for (const data of bootstrapOutput) this.pushTerminalData(terminalId, data);
+    if (droppedBootstrap) {
+      this.log(`truncated terminal bootstrap output for ${terminalId}`);
+    }
   }
 
   private withTerminal(
@@ -646,4 +1339,13 @@ function normalizeDimension(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isInteger(value)) return null;
   if (value < 2 || value > 1000) return null;
   return value;
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maxBytes) return value;
+  // StringDecoder withholds an incomplete multi-byte sequence at the boundary,
+  // yielding a valid prefix without replacement glyphs.
+  return new StringDecoder("utf8").write(bytes.subarray(0, maxBytes));
 }

@@ -14,8 +14,10 @@
 //      hyperdht itself uses. IK means the initiating phone must already
 //      know our public key (it pinned it at pairing), and we learn the
 //      phone's static key from the handshake. The QR payload's addrs/port
-//      point here, and the phone keeps dialing this port for the LAN rung
-//      after pairing, so the port stays stable for the listener's lifetime.
+//      point here. Production derives a small candidate sequence from the
+//      persistent computer identity and binds the first available port, so a
+//      collision cannot make Remote Access unavailable and paired phones can
+//      rediscover the chosen port after a Studio process restart.
 //   2. DHT (hole punch, works from any network): a hyperdht server listening
 //      under the same keypair. Paired devices resolve us by public key with
 //      no infrastructure of ours; hyperdht performs the hole punching.
@@ -71,9 +73,13 @@ export interface RemoteListenerOptions {
   log(line: string): void;
   // TCP bind host. Default 0.0.0.0; the e2e harness narrows it to loopback.
   host?: string;
-  // Preferred TCP port; 0 lets the OS pick. The chosen port is reported by
-  // start() and baked into pairing QR payloads.
+  // Exact TCP port override; 0 lets the OS pick. Tests and the interop harness
+  // use this path, including explicit zero. Production leaves it unset.
   port?: number;
+  // Ordered production bind candidates derived from the computer identity.
+  // Used only when `port` is undefined. EADDRINUSE advances to the next one;
+  // any other bind error still fails closed.
+  portCandidates?: readonly number[];
   // hyperdht bootstrap override for tests (hyperdht/testnet). `false`
   // disables the DHT rung entirely (e2e harness on localhost).
   dhtBootstrap?: Array<{ host: string; port: number }> | false;
@@ -266,22 +272,65 @@ export class RemoteListener {
     }
   }
 
-  private startTcp(): Promise<number> {
+  private async startTcp(): Promise<number> {
+    // Presence, not truthiness, distinguishes an explicit test port of zero
+    // from production's candidate sequence.
+    const candidates =
+      this.options.port !== undefined
+        ? [this.options.port]
+        : this.options.portCandidates && this.options.portCandidates.length > 0
+          ? [...this.options.portCandidates]
+          : [0];
+
+    let lastError: Error | null = null;
+    for (let index = 0; index < candidates.length; index += 1) {
+      try {
+        return await this.startTcpOnPort(candidates[index]);
+      } catch (err) {
+        lastError = err as Error;
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EADDRINUSE" || index === candidates.length - 1) throw err;
+        this.options.log(
+          `remote access port ${candidates[index]} is in use; trying the next stable candidate`,
+        );
+      }
+    }
+    throw lastError ?? new Error("No Remote Access TCP port candidate was available.");
+  }
+
+  private startTcpOnPort(port: number): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const server = createServer((socket) => this.onTcpConnection(socket));
       // Node destroys anything past this itself, so the accept queue cannot
       // be used to hold thousands of sockets open.
       server.maxConnections = MAX_CONNECTIONS;
       this.tcpServer = server;
+      let settled = false;
       server.on("error", (err) => {
-        if (!server.listening) reject(err);
-        else this.options.log(`tcp listener error: ${(err as Error).message}`);
+        if (!settled && !server.listening) {
+          settled = true;
+          if (this.tcpServer === server) this.tcpServer = null;
+          reject(err);
+          return;
+        }
+        this.options.log(`tcp listener error: ${(err as Error).message}`);
       });
-      server.listen(this.options.port ?? 0, this.options.host ?? "0.0.0.0", () => {
-        const address = server.address();
-        if (address && typeof address === "object") resolve(address.port);
-        else reject(new Error("tcp listener reported no address"));
-      });
+      try {
+        server.listen(port, this.options.host ?? "0.0.0.0", () => {
+          if (settled) return;
+          settled = true;
+          const address = server.address();
+          if (address && typeof address === "object") resolve(address.port);
+          else {
+            if (this.tcpServer === server) this.tcpServer = null;
+            reject(new Error("tcp listener reported no address"));
+          }
+        });
+      } catch (err) {
+        settled = true;
+        if (this.tcpServer === server) this.tcpServer = null;
+        reject(err);
+      }
     });
   }
 

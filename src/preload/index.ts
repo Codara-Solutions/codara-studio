@@ -755,6 +755,9 @@ const api = {
       // state (no resize / no sink change / no tail replay). Set by readOnly
       // TerminalPanes; throws if the session does not exist.
       mirror?: boolean;
+      // Reattach as the canonical renderer sink without resizing an existing
+      // PTY. Phone-origin terminals use this while the phone owns the grid.
+      preserveSizeOnAttach?: boolean;
       // Result `attached` is true when spawn bound to an EXISTING session
       // (remount / mirror) instead of creating a fresh pty — startupCommand
       // is never delivered in that case.

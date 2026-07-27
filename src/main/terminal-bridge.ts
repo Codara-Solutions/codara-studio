@@ -30,9 +30,10 @@ import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
 import { isTrustedOnSender } from "./main-window-trust";
 
-// "create" mints a new agent-tinted tab; "destroy" closes a tab by id (used to
-// clean up the orphan tab when terminal.create's PTY fails to spawn).
-export type TerminalOpName = "create" | "destroy";
+// "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
+// and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
+// caller can supply trusted phone-origin metadata or use the default tint.
+export type TerminalOpName = "create" | "destroy" | "resize";
 
 export interface TerminalOpParams {
   [key: string]: unknown;

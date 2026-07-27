@@ -3,8 +3,8 @@
 // whether terminal output and agent-session pointers survive persist is gated
 // on the restoreAgentSessions preference (stripTransientPaneState's second
 // argument). Hydration re-validates pointers and mints a one-shot resume
-// marker for sessions that were active at quit. Worker chips / autorun / the
-// boot-once marker never survive.
+// marker for sessions that were active at quit. Worker chips / autorun / phone
+// origin / the boot-once marker never survive.
 //
 //   node scripts/test-session-restore.cjs
 
@@ -56,9 +56,13 @@ async function main() {
   });
   delete require.cache[outfile];
   const {
+    appendAgentTerminalToWorkspaceLayout,
     cleanupTransientTerminalState,
     markTerminalAgentSessionsActive,
+    mergeDeferredWorkspaceTerminalLayout,
     stripTransientPaneState,
+    terminalTabIdForPane,
+    upsertInactiveWorkspaceLayout,
   } = require(outfile);
 
   let failures = 0;
@@ -67,6 +71,102 @@ async function main() {
     console.log(`${cond ? "PASS" : "FAIL"} ${name}`);
   };
 
+  // ---- never-visited background workspace placement ----
+
+  const deferredPhone = appendAgentTerminalToWorkspaceLayout(
+    { workspaceId: "ws-phone", tabs: [], activeId: null },
+    {
+      cwd: "/tmp/phone-workspace",
+      title: "Phone shell",
+      origin: { kind: "phone", deviceName: "Test phone" },
+    },
+  );
+  const phoneTab = deferredPhone.layout.tabs[0];
+  check(
+    "cold background placement contains only the requested phone terminal",
+    deferredPhone.layout.tabs.length === 1 && phoneTab?.kind === "terminal",
+  );
+  check(
+    "cold background placement preserves no active selection",
+    deferredPhone.layout.activeId === null,
+  );
+  check(
+    "cold background placement preserves authenticated phone origin",
+    phoneTab?.kind === "terminal" &&
+      phoneTab.root.kind === "leaf" &&
+      phoneTab.root.origin?.kind === "phone" &&
+      phoneTab.root.origin.deviceName === "Test phone",
+  );
+  check(
+    "phone terminal does not receive the amber agent tint",
+    phoneTab?.kind === "terminal" && !("color" in phoneTab),
+  );
+
+  const mountedColdLayout = upsertInactiveWorkspaceLayout(
+    [],
+    deferredPhone.layout,
+  );
+  check(
+    "never-visited workspace is inserted into the hidden mounted layouts",
+    mountedColdLayout.length === 1 &&
+      mountedColdLayout[0].workspaceId === "ws-phone",
+  );
+
+  const normalColdLayout = {
+    workspaceId: "ws-phone",
+    tabs: [
+      { id: "draft:cold", kind: "chat", title: "Cora" },
+      {
+        id: "term-cold",
+        kind: "terminal",
+        title: "terminals",
+        root: leaf("pane-cold", { cwd: "/tmp/phone-workspace" }),
+        activePaneId: "pane-cold",
+      },
+    ],
+    activeId: "draft:cold",
+  };
+  const mergedColdLayout = mergeDeferredWorkspaceTerminalLayout(
+    normalColdLayout,
+    deferredPhone.layout,
+  );
+  check(
+    "first desktop visit merges its normal cold layout with the live phone pane",
+    mergedColdLayout.tabs.length === 3 &&
+      mergedColdLayout.tabs.some((tab) => tab.id === deferredPhone.tabId),
+  );
+  check(
+    "first desktop visit keeps the normal cold selection instead of focusing phone",
+    mergedColdLayout.activeId === "draft:cold",
+  );
+
+  const movedPaneTabs = [
+    {
+      id: "term-original",
+      kind: "terminal",
+      title: "terminals",
+      root: leaf("pane-other"),
+      activePaneId: "pane-other",
+    },
+    {
+      id: "term-moved",
+      kind: "terminal",
+      title: "terminals 2",
+      root: leaf("pane-phone"),
+      activePaneId: "pane-phone",
+    },
+  ];
+  check(
+    "bridge teardown follows a phone pane moved out of its original tab",
+    terminalTabIdForPane(movedPaneTabs, "term-original", "pane-phone") ===
+      "term-moved",
+  );
+  check(
+    "bridge teardown still prefers the original tab while it owns the pane",
+    terminalTabIdForPane(movedPaneTabs, "term-moved", "pane-phone") ===
+      "term-moved",
+  );
+
   // ---- cold hydration: keeps durable state, mints boot-once marker ----
 
   const active = leaf("p1", {
@@ -74,12 +174,14 @@ async function main() {
     scrollback: "OLD_OUTPUT",
     worker: { runId: "manual" },
     autorun: "claude",
+    origin: { kind: "phone", deviceName: "Test phone" },
     agentSession: session({ active: true }),
   });
   cleanupTransientTerminalState(active);
   check("cold hydration keeps scrollback", active.scrollback === "OLD_OUTPUT");
   check("cold hydration strips worker", !("worker" in active));
   check("cold hydration strips autorun", !("autorun" in active));
+  check("cold hydration strips phone origin", !("origin" in active));
   check("cold hydration keeps agent session", active.agentSession?.sessionId === session().sessionId);
   check("cold hydration mints bootResume for running-at-quit pointer", active.bootResume === true);
   check("cold hydration preserves cwd and pane id", active.cwd === "/tmp/kept" && active.paneId === "p1");
@@ -135,11 +237,12 @@ async function main() {
     scrollback: "OLD_OUTPUT",
     worker: { runId: "manual" },
     autorun: "claude",
+    origin: { kind: "phone", deviceName: "Test phone" },
     bootResume: true,
     agentSession: session({ active: true }),
   });
   const stripped = stripTransientPaneState(dirty);
-  check("persist(off) strips every process-local field", ["scrollback", "worker", "autorun", "bootResume", "agentSession"].every((key) => !(key in stripped)));
+  check("persist(off) strips every process-local field", ["scrollback", "worker", "autorun", "origin", "bootResume", "agentSession"].every((key) => !(key in stripped)));
   check("persist(off) preserves layout fields", stripped.paneId === "q1" && stripped.cwd === "/persisted");
 
   const malformed = leaf("bad", { agentSession: session({ sessionId: "" }), bootResume: true });
@@ -173,6 +276,7 @@ async function main() {
       scrollback: "KEEP_ME",
       worker: { runId: "manual" },
       autorun: "claude",
+      origin: { kind: "phone", deviceName: "Test phone" },
       bootResume: true,
       agentSession: session({ active: true }),
     }),
@@ -180,7 +284,7 @@ async function main() {
   );
   check("persist(on) keeps scrollback", kept.scrollback === "KEEP_ME");
   check("persist(on) keeps agent session", kept.agentSession?.active === true);
-  check("persist(on) still strips worker/autorun/bootResume", !("worker" in kept) && !("autorun" in kept) && !("bootResume" in kept));
+  check("persist(on) still strips worker/autorun/origin/bootResume", !("worker" in kept) && !("autorun" in kept) && !("origin" in kept) && !("bootResume" in kept));
 
   const cleanOn = leaf("k2", { cwd: "/clean", scrollback: "s", agentSession: session() });
   check("persist(on) preserves durable-only leaf identity", stripTransientPaneState(cleanOn, true) === cleanOn);

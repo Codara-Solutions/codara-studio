@@ -2,8 +2,11 @@
 
 Mobile companion apps (iOS and Android) connect to a user's running Codara
 Studio, with no Codara-hosted infrastructure on the happy path. This document
-is the source of truth for the security model and the phases. iOS ships today
-and pairs for real (see phase 2 below); Android does not exist yet.
+is the source of truth for the security model and the phases. The iOS app
+exists and its original pairing path has been exercised (see phase 2 below);
+the expanded workspace, Explorer, Source Control, Cora, and shared-terminal
+work on the current feature branches still needs a physical-phone end-to-end
+pass. Android does not exist yet.
 
 Reachability today: **LAN only**. "From anywhere" is the design goal, not what
 ships. The desktop implements both the LAN rung and the DHT rung and does
@@ -103,24 +106,64 @@ either side (see "Reachability today" above).
   the DHT). If we ever need an explicit record store, use PKARR-style signed
   mutable records on the mainline DHT.
 - The phone resolves the computer by public key, then climbs the ladder. Not
-  exercised yet: resolving by key is the DHT rung, and the shipped phone never
-  dials it, so today it reaches the computer by the LAN addresses the QR
-  carried instead.
+  exercised yet: resolving by key is the DHT rung, and the current iOS
+  implementation never dials it, so today it reaches the computer by the LAN
+  addresses the QR carried instead.
 
 ## RPC surface (v0)
 
-A versioned, length-prefixed JSON-RPC over the encrypted stream. Deliberately
-narrow at first:
+A versioned, length-prefixed JSON-RPC runs over the encrypted stream. The
+current method table is:
 
-- `hello` (protocol version negotiation, device info)
-- `workspaces.list`
-- `terminal.create`, `terminal.write`, `terminal.resize`, `terminal.close`,
-  server-pushed `terminal.data` events
-- `ping`
+- connection: `hello` (protocol negotiation and device info), `ping`;
+- workspaces: `workspaces.list`, `directories.list`, `workspaces.add`;
+- project files: `files.list`, `files.read`, `files.create`, `files.rename`,
+  `files.move`, `files.delete`;
+- read-only source control: `git.status`, `git.log`, `git.commitDetail`;
+- Cora: `cora.history`, `cora.get`, `cora.send`;
+- terminals: `terminal.create`, `terminal.write`, `terminal.resize`,
+  `terminal.close`, plus server-pushed `terminal.data` and `terminal.exit`
+  events.
 
-The remote module is a second client of the same main-process services the
-renderer uses, behind the same guards. It must not grow ad hoc file access;
-any future fs RPC goes through the existing sandbox checks.
+The remote module is a client of bounded main-process service adapters, not a
+generic renderer IPC or filesystem proxy:
+
+- `workspaces.list` returns local workspaces only, including their Studio
+  color and Git branch when available. SSH workspaces are excluded.
+- `directories.list` is a directory-only browser rooted at the computer
+  user's home directory. `workspaces.add` accepts only an existing directory
+  inside that same canonical root, deduplicates an existing workspace, and
+  otherwise persists a normal Studio workspace with a Studio palette color.
+- Every file method takes a workspace id and workspace-relative path. Reads
+  reject traversal and symbolic-link components. Mutations accept only a
+  validated leaf name or an existing destination folder; they cannot change
+  the workspace root, cross the workspace boundary, enter Explorer-hidden
+  metadata/generated trees, follow symlinks, or overwrite an existing entry.
+  Creates are exclusive and mutations are serialized per workspace. A delete
+  uses the computer's Trash, matching Studio's local Explorer, so the action
+  remains recoverable after the phone's destructive confirmation. File
+  content editing is not part of v0. Explorer listings omit Studio's
+  heavyweight generated directories (`.git`, `node_modules`, `out`, `dist`,
+  `build`, `.next`, `.turbo`, and `coverage`).
+- `git.status` reports branch/upstream/divergence plus staged, unstaged, and
+  conflicted paths. `git.log` returns bounded commit summaries and
+  `git.commitDetail` returns bounded metadata and changed-file statistics for
+  a hexadecimal commit hash. All three are read-only: stage, discard, commit,
+  checkout, pull, and push are not remote methods.
+- Cora methods expose purpose-built, bounded summaries and message DTOs rather
+  than the full orchestration store. Omitting `runId` from `cora.send` starts a
+  new run; including it continues that workspace-owned run (or answers its
+  current blocking question). `clientMessageId` is required as a stable retry
+  key.
+- `terminal.create` accepts a server-owned `shell`, `claude`, or `codex`
+  profile, never an arbitrary command. It creates one renderer-owned Studio
+  terminal pane that the phone and desktop share. The desktop chooses the
+  Claude/Codex launch command.
+
+These inspection guards reduce accidental exposure and keep responses
+bounded. They do not make a paired phone untrusted: an interactive terminal is
+still remote code execution by design and can access everything the desktop
+user can access after it starts.
 
 ## Storage
 
@@ -138,9 +181,11 @@ fails closed rather than writing key material and trust state through it.
 
 ## Phase 1 as built
 
-The studio foundation shipped on `agent/remote-access`. What follows records
-the decisions a reader of the sections above would otherwise have to infer
-from the code.
+The Studio foundation was built in the remote-access feature work. The
+hardening and expanded application surface described here remain on the
+current feature branch; nothing in this section implies a merge or release.
+What follows records the decisions a reader of the sections above would
+otherwise have to infer from the code.
 
 ### Transport: Hyperswarm, both rungs
 
@@ -179,15 +224,19 @@ Two rungs share one identity keypair:
   `@hyperswarm/secret-stream` with the **IK** handshake pattern. The
   default pattern in that library is XX, which authenticates nobody in
   advance; IK is what makes the initiator prove it already knows our static
-  key. This is the port the QR payload advertises. Known limitation, not yet
-  fixed: production does not persist this port, so the OS picks a fresh
-  random one on every process start, while the phone persists the port it saw
-  in the QR at pairing time. After a desktop restart the phone's stored port
-  is therefore stale, and the LAN rung fails; reconnection then depends on the
-  DHT rung, and if that is also unavailable (UDP blocked, offline) the phone
-  cannot reconnect until it re-pairs from a fresh QR. The intended fix is to
-  persist a preferred port across restarts and fall back to a random one only
-  if it is taken; until then this is a documented gap.
+  key. Production derives four ordered port candidates from the persistent
+  computer public key and binds the first available one. Candidate zero is
+  byte-for-byte the former single derived port, preserving existing pairings;
+  `EADDRINUSE` alone advances to the next candidate, while any other bind error
+  fails closed. The QR advertises the port actually bound. A session dial tries
+  its recorded QR port first on every stored LAN address and then the complete
+  derived candidate sequence, so an old ephemeral pairing record and a
+  collision-driven port change both recover without re-pairing. Pairing itself
+  uses only the exact fresh QR port. These endpoints are discovery hints, not
+  trust: every attempt still has to complete Noise IK against the full pinned
+  computer key. Test/harness callers may explicitly request a port, including
+  zero for an OS-assigned ephemeral port; that exact override never enters the
+  candidate fallback path.
 - **DHT**: a `hyperdht` server announced under the same keypair, with the
   `firewall` hook returning "block" for any key not in the paired list, so
   an unknown key cannot complete a connection at all.
@@ -197,6 +246,15 @@ listener rule holds structurally: the Noise responder never speaks first, so
 a port scanner reads zero bytes, and an unknown key after handshake is
 either a pairing candidate (only while a pairing window is open) or gets its
 stream destroyed with nothing written.
+
+The phone keeps retrying availability failures (`closed` and `unreachable`)
+with capped exponential backoff. A foreground or network-available hint only
+wakes a retry while the transport is already disconnected; it never replaces
+a healthy session or overlaps an in-flight dial, and simultaneous hints
+coalesce. A Bare worklet `resume` is stronger evidence: BareKit confirms the
+helper was suspended and therefore lost its socket, so that signal may
+supersede the stale session/dial exactly once. Explicit disconnect, unpair,
+desktop revocation, and protocol rejection disable the retry loop.
 
 To be precise about what "silence" does and does not cover: no APPLICATION
 byte ever reaches an unpaired peer, and a revoked device is treated exactly
@@ -368,76 +426,135 @@ implies:
   The wire format is unchanged: the phone sends the same pair request and
   simply waits longer for the reply.
 
-### RPC v0 deviations from the mobile types
+### RPC v0 application contract and limits
 
-No payload mismatch. Audited field by field (names, types, optionality) in
-both directions against `codara-mobile/src/lib/remote/types.ts` and the
-worklet's real encode/decode path in `worklet/lib/session.js`, at mobile
-commit 297680a: `hello`, `ping`, `workspaces.list`,
-`terminal.create/write/resize/close`, the pushed `terminal.data` event, and
-the request/response/error envelopes all agree, including the seven error
-codes. Nothing either side sends is misparsed by the other.
+The desktop definitions in `src/main/remote-access/rpc.ts` and the mobile
+definitions in `codara-mobile/src/lib/remote/types.ts` now cover the same
+method and event table. Matching TypeScript shapes and test harnesses are not
+evidence of a physical-phone round trip; the expanded surface still needs
+that end-to-end pass.
 
-"Field for field" would still overclaim, because agreement on the shapes is
-not the same as both sides using them. Four gaps, none of which breaks
-interop today:
+The principal DTOs are deliberately smaller than the desktop's internal
+models:
 
-- **`hello.device` is sent and ignored.** The phone reports
-  `{ publicKey, name, role, version }`; `handleHello` reads only
-  `params.protocol`. Discarding it is the right instinct, since the
-  authenticated identity comes from the Noise handshake and a self-reported
-  key is worth nothing. The cost is that the paired-device name in Settings is
-  frozen at whatever the phone called itself during PAIRING and never follows a
-  later rename, and the phone's app version is never recorded anywhere.
-- **Three `RemoteWorkspace` fields are declared and never sent.** `branch`,
-  `sessionCount` and `lastActiveAt` are optional in the shared type, and
-  `listWorkspacesForRemote` returns exactly `{ id, name, path }`. The phone is
-  already built to render a branch chip when the field is present, so that
-  affordance is currently unreachable.
-- **`ping` and `terminal.resize` are unexercised.** Both sides implement them
-  and neither the app nor the worklet ever calls either one. The phone opens
-  terminals at a hardcoded 80x24 and never resizes, so `terminal.resize` has
-  no call site at all. `scripts/remote-test-client.mjs` is the only thing that
-  sends `ping`.
-- **The dimension constraint lives only on this side.** `normalizeDimension`
-  requires an INTEGER between 2 and 1000 and answers `invalid-params`
-  otherwise; the shared type says only `cols: number`. The hardcoded 80x24
-  cannot trip it, but a phone that later computes columns from a measured
-  layout width would hand us a float and be refused, and nothing in the shared
-  types says so. Worth encoding in the mobile types, or relaxing here, before
-  the phone gains a real resize.
+- A workspace carries `id`, `name`, absolute display-only `path`, optional
+  `color`, and optional `branch`. `sessionCount` and `lastActiveAt` remain
+  optional compatibility fields and are not currently populated. The mobile
+  app keeps an explicit selected workspace; it does not silently bind every
+  screen to the first item returned.
+- The home-directory browser returns its canonical `rootPath`, current path,
+  nullable parent, and directory entries only. It never returns files and
+  never permits navigation above the home root.
+- Explorer entries carry a workspace-relative slash-separated path, name,
+  directory flag, and optional extension. `files.read` returns UTF-8 text,
+  byte size, and modification time. Binary files and symbolic-link paths are
+  refused. Create, rename, and move return the resulting Explorer entry;
+  delete returns the deleted relative path and its parent so the phone can
+  refresh the right tree.
+- Git status carries `isRepo`, branch/detached state, optional upstream,
+  ahead/behind counts, staged and unstaged path/status lists, and a conflict
+  flag. Git log rows add hashes, subject, author, relative date, refs, parents,
+  and current-HEAD state. Commit detail adds the message body, author email,
+  ISO date, and bounded changed-file status/addition/deletion counts. These
+  are snapshots, not mutation APIs.
+- Cora history returns run summaries (`id`, workspace, title, status,
+  timestamps, message count, optional last message, and active-worker count).
+  `cora.get` and `cora.send` return the summary plus a bounded human-message
+  timeline. They do not expose the full run store, worker prompts, transcripts,
+  or raw orchestration event log. There is no Cora push stream in v0; the
+  mobile screen refreshes bounded snapshots after sends and while viewing a
+  run.
 
-Framing details the mobile types deliberately leave open, and that the studio
-fixes:
+Terminal creation is shared with the desktop renderer rather than spawning an
+invisible second PTY:
 
-- 4-byte big-endian unsigned length prefix, then that many bytes of UTF-8
-  JSON.
-- Inbound frames over 1 MiB are a protocol violation: the connection is
-  destroyed without a response, and the limit really is checked against the
-  declared length before the body is buffered. The decoder holds incoming
-  bytes as a list of chunk views (it does not copy the whole chunk on
-  arrival), so an oversized declared length is rejected from the 4-byte
-  prefix alone, before any body bytes are copied, and fragmented
-  byte-at-a-time delivery stays linear rather than quadratic.
-- A single decrypted chunk is also capped at a maximum number of complete
-  frames (a 16 MiB write of 6-byte frames would otherwise be millions of
-  synchronous JSON.parse calls); exceeding that cap is fatal, like an
-  oversized frame.
+- `terminal.create` takes `workspaceId`, integer `cols`/`rows`, optional
+  `cwd` canonically constrained to the workspace, optional title, and a profile
+  of `shell`, `claude`, or `codex`. The profile is an allowlist; the desktop
+  owns the launch commands and the phone cannot smuggle an arbitrary autorun
+  string.
+- The renderer creates a normal background terminal pane without stealing
+  desktop focus. Main taps that same pane's PTY for the encrypted phone
+  stream. The response includes its opaque `terminalId` and, when available,
+  the renderer `desktopTabId` and resolved title.
+- The phone origin is stamped from the authenticated pairing-store device
+  identity, never from `hello.device` or a phone-supplied field. Renderer
+  ownership lives on the terminal leaf so it follows that pane through tab
+  moves and detaches. A tab containing such a leaf shows the monoline phone
+  badge and names its device in the tooltip; it does not reuse the amber
+  background-agent tint. Origin is runtime-only and is stripped before cold
+  hydration, because a relaunched shell is no longer the phone-owned PTY.
+- The authenticated RPC session remains the lifecycle owner. Phone close,
+  stream disconnect, or device revocation closes its shared PTYs and desktop
+  terminal surfaces. A natural process exit sends `terminal.exit` first, then
+  removes the exact phone-owned Studio pane wherever the desktop user moved
+  it; the mobile keeps its ended session entry until the user closes it.
+  Opaque UUID-style terminal ids are valid only in their owning session and
+  are not reusable after reconnect.
+- PTY output can begin while the renderer bridge is still creating the tab.
+  Early output is recovered from bounded PTY tail history and buffered by the
+  RPC session. The successful `terminal.create` response is always written
+  before the first `terminal.data` event for that id, so the phone never sees
+  output for a terminal it cannot identify. A process that exits before
+  registration produces a create error instead of a dead session.
+- `terminal.resize` remains in the protocol and validates dimensions as
+  integers from 2 through 1000. For a phone-origin pane, the phone's grid is
+  authoritative: production spawns both the Studio xterm and PTY at the
+  requested columns/rows, and later resize RPCs update both before the TUI's
+  next repaint. The Studio xterm remains visible and interactive, but FitAddon
+  and its ResizeObserver do not take geometry ownership for that pane, so the
+  desktop container and phone viewport cannot fight.
+
+Current application payload limits:
+
+- collection responses share a roughly 384 KiB JSON budget, below the frame
+  ceiling: at most 200 workspaces, 500 directory-picker entries, 750 Explorer
+  entries, 100 Git log commits, 500 changed files in one commit detail, 50 Cora
+  run summaries, and 200 Cora messages;
+- `files.read` accepts regular UTF-8 text files up to 384 KiB;
+- commit subjects, refs, authors, paths, and errors have per-field byte caps;
+  a commit body is capped at 32 KiB and the whole response still shares the
+  collection budget;
+- a Cora input message is at most 32 KiB, `clientMessageId` at most 256 UTF-8
+  bytes, each returned message is truncated to 16 KiB, and the run must belong
+  to the supplied workspace;
+- at most 32 asynchronous RPC requests may be in flight per connection;
+- at most 8 live or in-flight terminal creates per connection; terminal
+  bootstrap buffering is capped at 256 KiB and individual `terminal.data`
+  chunks at 128 KiB;
+- slow-peer terminal output that cannot be paused is capped at 1 MiB, and the
+  total unwritten response/event backlog closes the session above 4 MiB;
+- sessions remain capped at 4 per paired device and 16 globally.
+
+Framing and containment limits remain security-relevant:
+
+- Frames use a 4-byte big-endian unsigned length followed by UTF-8 JSON.
+  Inbound or outbound payloads above 1 MiB are rejected rather than buffered
+  or written. The decoder checks the declared length before copying the body
+  and stores fragmented input as chunk views, keeping byte-at-a-time delivery
+  linear.
+- One decrypted push may contain at most 1024 complete frames; exceeding that
+  cap is fatal, like an oversized frame.
 - `hello` must be the first call. Anything else before it answers
   `not-connected`.
-- Per connection: at most 8 terminals (in-flight creates count toward the
-  cap), and `terminalId` values are scoped to the connection, so they are
-  not portable across reconnects.
-- `terminal.create` resolves a `cwd` argument against the workspace root and
-  refuses anything outside it. Both sides are passed through `realpath`
-  first, so a symlink inside the workspace cannot be used to land the shell
-  outside it, and the containment test compares path SEGMENTS so a directory
-  legitimately named something like `..config` is not mistaken for an
-  escape. The remote surface deliberately does not grow ad hoc filesystem
-  access. Note the scope of this check: it constrains where the shell
-  STARTS, not where the user can go afterwards. A remote terminal is an
-  interactive shell and can `cd` anywhere the user can, by design, because a
-  paired device is a fully trusted client.
+- Home browsing/addition canonicalizes both root and target and requires the
+  target to remain inside the home root; the directory browser omits symbolic
+  link entries. Workspace file paths must additionally be relative, remain
+  inside the workspace by path segment, exist, and contain no symbolic-link
+  component. Where the platform exposes `O_NOFOLLOW`, `files.read` also uses it
+  for the final open; every platform validates the opened handle as a regular
+  file before the bounded read.
+- File mutation names are single portable leaf names (byte-capped, with
+  separators, controls, Windows-reserved names, trailing dot/space, and hidden
+  Explorer roots rejected). Create uses exclusive-open/no-follow semantics;
+  rename and move preflight destination collisions and never intentionally
+  clobber; root, traversal, symlink, special-file, and move-into-descendant
+  attempts are rejected. The per-workspace serial queue prevents two phone
+  mutations from racing each other.
+- `terminal.create` applies the same canonical workspace containment to its
+  starting `cwd`. This constrains where the shell starts, not where it may go
+  afterwards: a paired device is fully trusted and the interactive shell may
+  `cd` anywhere the desktop user can access.
 
 ### Trust model notes
 
@@ -476,8 +593,8 @@ they are choices rather than surprises:
 
 Revoking removes the key from `paired-devices.json` and destroys every live
 `RpcSession` for that key in the same tick, which closes that session's
-terminals. A revoked device's next connection attempt is met with the same
-silence as any unknown key.
+shared PTYs and their visible desktop terminal surfaces. A revoked device's
+next connection attempt is met with the same silence as any unknown key.
 
 Revocation is durable, and it is deliberately the last word on disk. The
 trust file has two writers: the authoritative one (pairing and revoking) and
@@ -530,28 +647,34 @@ durability path.
 
 ## Phases
 
-1. Studio foundation (this repo), shipped: identity, QR pairing over LAN,
-   silent listener with paired-key firewall, DHT presence, Settings panel
-   (Remote access toggle, status, QR pairing modal, paired devices with
-   revoke). Proven by `scripts/remote-access-e2e.mjs`, which drives
-   `scripts/remote-test-client.mjs` through pair, connect, and a terminal
-   round trip over the LAN rung on one machine with the DHT deliberately
-   disabled, and by `tests/e2e/remote-access-settings.spec.ts`, which drives
-   the built Electron app through the real IPC gate: enable, QR, a real
-   pairing request denied and then approved, and revoke. No test has ever
-   proven a round trip from another network, because the phone does not yet
-   dial that rung.
-2. Mobile app v1: shipped for iOS and pairing for real, in
-   `Codara/codara-mobile` (branch `agent/bare-transport`). It is Expo and
-   React Native, and the whole networking stack runs inside a Bare worklet via
-   `react-native-bare-kit`: the worklet requires `@hyperswarm/secret-stream`,
-   `bare-tcp`, and (when the DHT rung is enabled, which it is not) `hyperdht`.
-   That matters for the security model: the phone runs the SAME Hyperswarm
-   implementation the desktop does, so there is no second crypto stack to
-   review or to keep in step. Working today: pairing (scan, confirm, approve
-   on the desktop), workspaces list, and terminals. The Cora tab is present
-   but is UI only, since RPC v0 has no chat method.
+1. Studio security and transport foundation (this repo): identity, QR pairing
+   over LAN, explicit approval, silent listener with paired-key firewall, DHT
+   presence, revocation, and the Settings surface. The same-machine LAN path is
+   proven by `scripts/remote-access-e2e.mjs`, which drives
+   `scripts/remote-test-client.mjs` through pairing, connection, and a terminal
+   round trip with DHT disabled. `tests/e2e/remote-access-settings.spec.ts`
+   drives the built Electron app through the real IPC gate for enable, QR,
+   deny, approve, and revoke. These tests prove those code paths, not another
+   network or a current physical-phone round trip.
+2. Studio-shaped iOS companion, on the current `agent/bare-transport` mobile
+   branch with the matching Studio feature branch: explicit workspace
+   selection, home-scoped add-workspace browser, Explorer listing/preview plus
+   create-folder/create-file/rename/move/Trash actions, read-only Source
+   Control status and commit history/detail, Cora history/get/send, and shared
+   Shell/Claude/Codex terminal profiles. Selection is workspace-wide rather
+   than implicitly using the first returned workspace. The mobile owns the PTY
+   grid for phone-origin panes through `terminal.resize`, as described above.
+   The networking stack still
+   runs inside a Bare worklet via `react-native-bare-kit` with the same
+   `@hyperswarm/secret-stream` implementation as the desktop, so there is no
+   second crypto implementation. The earlier pairing flow has been exercised
+   on iOS, and automated interop covers the real worklet transport and the
+   original protocol cases. It does not prove the expanded screens and RPCs:
+   those are feature-branch code awaiting a fresh end-to-end physical-phone
+   test. They are not claimed as merged or released.
 3. Relay: small blind frame-forwarder, self-hostable, default instance on
    Codara Cloud. Studio and mobile gain the fourth rung of the ladder.
-4. Later: file browsing and editing through the sandbox, previews, push
-   notifications for run approvals.
+4. Later: file-content editing, Source Control mutations, richer live Cora
+   event streaming, richer previews, and push notifications for run approvals.
+   These are distinct from the bounded Explorer mutations, read-only Git
+   snapshots/history, and bounded Cora messaging already in v0.

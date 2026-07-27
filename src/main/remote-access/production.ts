@@ -4,27 +4,114 @@
 // remote-access/ allowed to import the rest of the main process; everything
 // else stays plain Node so tests and the e2e harness can run it directly.
 
-import { app } from "electron";
+import { BrowserWindow, app, shell } from "electron";
 import { randomUUID } from "node:crypto";
-import { hostname } from "node:os";
-import { realpath } from "node:fs/promises";
-import { join, resolve, relative, isAbsolute, sep } from "node:path";
+import { constants as fsConstants } from "node:fs";
+import { open, readdir, realpath } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
+import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { TextDecoder } from "node:util";
 import { isRemotePath } from "@shared/remote";
+import type { AppState, RunState, Workspace } from "@shared/types";
 import { logMain } from "../file-log";
+import { setAllowedRoots } from "../fs-sandbox";
+import { getCommitDetail as readGitCommitDetail } from "../git-inspect";
+import {
+  getGitLog as readGitLog,
+  getGitStatus as readGitStatus,
+} from "../git-ops";
+import {
+  addRunMessage,
+  answerRunQuestion,
+  getRun,
+  listRuns,
+  startAutopilot,
+} from "../orchestration/run-store";
 import { getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
-import { defaultShell } from "../shells";
 import { sparkHome } from "../spark-home";
-import { loadState } from "../storage";
+import { loadState, saveState } from "../storage";
+import { requestTerminalOp } from "../terminal-bridge";
 import {
   RemoteAccessService,
   type RemoteTerminalCreateRequest,
   type RemoteTerminalHandle,
 } from "./index";
-import type { RemoteWorkspaceInfo } from "./rpc";
+import { findRemoteCoraRetry, KeyedSerialQueue } from "./cora-policy";
+import {
+  createRemoteWorkspaceEntry,
+  deleteRemoteWorkspaceEntry,
+  moveRemoteWorkspaceEntry,
+  renameRemoteWorkspaceEntry,
+} from "./file-mutations";
+import {
+  isStudioExplorerIgnoredDirectory,
+  resolveExistingInside,
+  toWireRelative,
+  truncateUtf8,
+} from "./local-policy";
+import type {
+  RemoteCoraMessage,
+  RemoteCoraRun,
+  RemoteCoraRunSummary,
+  RemoteDirectoryListing,
+  RemoteFileContent,
+  RemoteFileDeleteResult,
+  RemoteFileInfo,
+  RemoteFileListing,
+  RemoteGitChange,
+  RemoteGitCommitDetail,
+  RemoteGitCommitFile,
+  RemoteGitCommitSummary,
+  RemoteGitLog,
+  RemoteGitStatus,
+  RemoteWorkspaceInfo,
+} from "./rpc";
 
 let singleton: RemoteAccessService | null = null;
+let workspaceMutation: Promise<void> = Promise.resolve();
+const coraMessageMutations = new KeyedSerialQueue();
+const fileMutations = new KeyedSerialQueue();
+
+const WORKSPACE_COLORS = [
+  "#2AA298",
+  "#7FB3FF",
+  "#5BD68F",
+  "#FF5C2B",
+  "#C99BFF",
+  "#E0E0E0",
+  "#FF8FB1",
+  "#5DD6D6",
+] as const;
+
+// DTO budgets deliberately leave generous headroom under the 1 MiB frame
+// ceiling for JSON escaping and the response envelope.
+const COLLECTION_BUDGET_BYTES = 384 * 1024;
+const REMOTE_FILE_MAX_BYTES = 384 * 1024;
+const CORA_MESSAGE_MAX_BYTES = 32 * 1024;
+const MAX_REMOTE_WORKSPACES = 200;
+const MAX_DIRECTORY_ENTRIES = 500;
+const MAX_FILE_ENTRIES = 750;
+const MAX_CORA_RUNS = 50;
+const MAX_CORA_MESSAGES = 200;
+const MAX_GIT_LOG_COMMITS = 100;
+const MAX_GIT_COMMIT_FILES = 500;
+const GIT_COMMIT_BODY_MAX_BYTES = 32 * 1024;
+const TERMINAL_SPAWN_WAIT_MS = 10_000;
+const TERMINAL_SPAWN_SETTLE_MS = 150;
+const TERMINAL_BOOTSTRAP_BYTES = 256 * 1024;
+const READ_ONLY_NO_FOLLOW_FLAGS =
+  fsConstants.O_RDONLY |
+  ((fsConstants.O_NOFOLLOW as number | undefined) ?? 0);
+
+const ACTIVE_WORKER_ATTEMPT_STATUSES = new Set([
+  "preparing",
+  "prompt_ready",
+  "launching",
+  "running",
+  "finishing",
+]);
 
 export function getRemoteAccessService(): RemoteAccessService {
   singleton ??= new RemoteAccessService({
@@ -32,6 +119,20 @@ export function getRemoteAccessService(): RemoteAccessService {
     deviceName: hostname(),
     appVersion: app.getVersion(),
     listWorkspaces: listWorkspacesForRemote,
+    listDirectories: listDirectoriesForRemote,
+    addWorkspace: addWorkspaceForRemote,
+    listFiles: listFilesForRemote,
+    readFile: readFileForRemote,
+    createFileEntry: createFileEntryForRemote,
+    renameFileEntry: renameFileEntryForRemote,
+    moveFileEntry: moveFileEntryForRemote,
+    deleteFileEntry: deleteFileEntryForRemote,
+    getGitStatus: getGitStatusForRemote,
+    getGitLog: getGitLogForRemote,
+    getGitCommitDetail: getGitCommitDetailForRemote,
+    listCoraHistory: listCoraHistoryForRemote,
+    getCoraRun: getCoraRunForRemote,
+    sendCoraMessage: sendCoraMessageForRemote,
     createTerminal: createRemoteTerminal,
     log: (line) => logMain("remote-access", line),
   });
@@ -53,113 +154,710 @@ export function initRemoteAccessAtBoot(): void {
     .catch((err) => logMain("remote-access", `boot enable failed: ${(err as Error).message}`));
 }
 
-// The phone lists local workspaces only. SSH remote workspaces are skipped:
-// their terminals hop through a second machine, and phase 1 keeps the
-// remote surface to things this computer runs itself.
+// The phone lists local workspaces only. SSH workspaces are skipped because
+// this transport is paired to this computer, not transitively to another host.
 async function listWorkspacesForRemote(): Promise<RemoteWorkspaceInfo[]> {
   const state = await loadState();
-  return state.workspaces
-    .filter((workspace) => !isRemotePath(workspace.cwd))
-    .map((workspace) => ({
-      id: workspace.id,
-      name: workspace.name,
-      path: workspace.cwd,
-    }));
+  const result: RemoteWorkspaceInfo[] = [];
+  let usedBytes = 2;
+  for (const workspace of state.workspaces) {
+    if (result.length >= MAX_REMOTE_WORKSPACES) break;
+    if (isRemotePath(workspace.cwd)) continue;
+    const info = await workspaceInfo(workspace);
+    const bytes = Buffer.byteLength(JSON.stringify(info), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    result.push(info);
+    usedBytes += bytes;
+  }
+  return result;
 }
 
-// Remote terminals ride the same pty-manager as every renderer pane, just
-// with no webContents sink: bytes flow through a main-process tap into the
-// RPC session's terminal.data events. The pty is spawned in the workspace's
-// default shell; a requested cwd must stay inside the workspace root (the
-// remote surface must not grow into arbitrary filesystem access, per the
-// design doc).
-async function createRemoteTerminal(
-  request: RemoteTerminalCreateRequest,
-): Promise<RemoteTerminalHandle> {
+async function workspaceInfo(workspace: Workspace): Promise<RemoteWorkspaceInfo> {
+  let branch: string | undefined;
+  try {
+    const status = await readGitStatus(workspace.cwd);
+    if (status.isRepo && status.branch) branch = truncateUtf8(status.branch, 240);
+  } catch {
+    // A workspace remains selectable even if git cannot inspect it.
+  }
+  return {
+    id: workspace.id,
+    name: truncateUtf8(workspace.name, 512),
+    path: workspace.cwd,
+    color: workspace.color,
+    ...(branch ? { branch } : {}),
+  };
+}
+
+async function listDirectoriesForRemote(rawPath?: string): Promise<RemoteDirectoryListing> {
+  const resolved = await resolveExistingInside(homedir(), rawPath, {
+    allowAbsolute: true,
+    directory: true,
+  });
+  let entries;
+  try {
+    entries = await readdir(resolved.path, { withFileTypes: true });
+  } catch {
+    throw new Error("This directory cannot be opened.");
+  }
+
+  const directories: RemoteDirectoryListing["directories"] = [];
+  let usedBytes = 2;
+  for (const entry of entries
+    .filter((candidate) => candidate.isDirectory() && !candidate.isSymbolicLink())
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))) {
+    if (directories.length >= MAX_DIRECTORY_ENTRIES) break;
+    const item = {
+      name: entry.name,
+      path: join(resolved.path, entry.name),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    directories.push(item);
+    usedBytes += bytes;
+  }
+  return {
+    path: resolved.path,
+    parentPath: resolved.path === resolved.root ? null : dirname(resolved.path),
+    rootPath: resolved.root,
+    directories,
+  };
+}
+
+async function addWorkspaceForRemote(input: {
+  path: string;
+  name?: string;
+}): Promise<RemoteWorkspaceInfo> {
+  return serializeWorkspaceMutation(async () => {
+    const selected = await resolveExistingInside(homedir(), input.path, {
+      allowAbsolute: true,
+      directory: true,
+    });
+    const state = await loadState();
+    for (const workspace of state.workspaces) {
+      if (isRemotePath(workspace.cwd)) continue;
+      const existing = await realpath(resolve(workspace.cwd)).catch(() => resolve(workspace.cwd));
+      if (existing === selected.path) return workspaceInfo(workspace);
+    }
+
+    const usedColors = new Set(state.workspaces.map((workspace) => workspace.color.toLowerCase()));
+    const color =
+      WORKSPACE_COLORS.find((candidate) => !usedColors.has(candidate.toLowerCase())) ??
+      WORKSPACE_COLORS[state.workspaces.length % WORKSPACE_COLORS.length];
+    const requestedName = input.name?.trim();
+    const workspace: Workspace = {
+      id: `ws-mobile-${randomUUID()}`,
+      name: truncateUtf8(requestedName || basename(selected.path) || "workspace", 512),
+      cwd: selected.path,
+      color,
+      workers: [],
+    };
+    const next: AppState = {
+      ...state,
+      workspaces: [...state.workspaces, workspace],
+      workspaceRailOrder: [...(state.workspaceRailOrder ?? []), workspace.id],
+      activeWorkspaceId: state.activeWorkspaceId ?? workspace.id,
+    };
+    await saveState(next);
+    setAllowedRoots(next.workspaces.map((candidate) => candidate.cwd));
+    broadcastStateChanged(next);
+    return workspaceInfo(workspace);
+  });
+}
+
+function serializeWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = workspaceMutation.catch(() => undefined).then(operation);
+  workspaceMutation = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+function broadcastStateChanged(state: AppState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const contents = window.webContents;
+    if (contents.isDestroyed()) continue;
+    try {
+      contents.send("state:changed", state);
+    } catch {
+      // A window can disappear between enumeration and send.
+    }
+  }
+}
+
+async function requireLocalWorkspace(
+  workspaceId: string,
+): Promise<{ workspace: Workspace; root: string }> {
   const state = await loadState();
-  const workspace = state.workspaces.find((candidate) => candidate.id === request.workspaceId);
-  if (!workspace) throw new Error(`Unknown workspace: ${request.workspaceId}`);
+  const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
+  if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   if (isRemotePath(workspace.cwd)) {
     throw new Error("This workspace lives on an SSH host; open it on the computer instead.");
   }
+  const resolved = await resolveExistingInside(workspace.cwd, undefined, { directory: true });
+  return { workspace, root: resolved.root };
+}
 
-  let cwd = workspace.cwd;
-  if (request.cwd) {
-    const requested = isAbsolute(request.cwd)
-      ? resolve(request.cwd)
-      : resolve(workspace.cwd, request.cwd);
-    // Resolve symlinks on BOTH sides before comparing: a link inside the
-    // workspace pointing at / would otherwise pass a purely lexical check.
-    // realpath needs the paths to exist, which is correct here since a
-    // terminal cwd must exist anyway.
-    let realRoot: string;
-    let realRequested: string;
-    try {
-      realRoot = await realpath(workspace.cwd);
-      realRequested = await realpath(requested);
-    } catch {
-      throw new Error("cwd must be an existing directory inside the workspace.");
-    }
-    const rel = relative(realRoot, realRequested);
-    // "" means the root itself. A leading ".." SEGMENT means outside; test
-    // for the separator so a legitimately named directory like "..config"
-    // is not mistaken for an escape.
-    const escapes = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-    if (escapes) {
-      throw new Error("cwd must stay inside the workspace.");
-    }
-    cwd = realRequested;
+async function listFilesForRemote(input: {
+  workspaceId: string;
+  path?: string;
+}): Promise<RemoteFileListing> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  const target = await resolveExistingInside(root, input.path, {
+    directory: true,
+    rejectSymlinks: true,
+  });
+  let entries;
+  try {
+    entries = await readdir(target.path, { withFileTypes: true });
+  } catch {
+    throw new Error("This directory cannot be opened.");
   }
 
-  const shell = await defaultShell();
-  if (!shell) throw new Error("No shell is available on this computer.");
+  const result: RemoteFileInfo[] = [];
+  let usedBytes = 2;
+  const sorted = entries
+    .filter(
+      (entry) =>
+        !entry.isSymbolicLink() &&
+        (entry.isDirectory() || entry.isFile()) &&
+        !(entry.isDirectory() && isStudioExplorerIgnoredDirectory(entry.name)),
+    )
+    .sort((a, b) => {
+      if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+  for (const entry of sorted) {
+    if (result.length >= MAX_FILE_ENTRIES) break;
+    const absolute = join(target.path, entry.name);
+    const extension = entry.isFile() ? extname(entry.name).slice(1).toLowerCase() : "";
+    const item: RemoteFileInfo = {
+      name: entry.name,
+      path: toWireRelative(root, absolute),
+      isDir: entry.isDirectory(),
+      ...(extension ? { ext: extension } : {}),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    result.push(item);
+    usedBytes += bytes;
+  }
+  const path = toWireRelative(root, target.path);
+  return {
+    path,
+    parentPath: path ? (posix.dirname(path) === "." ? "" : posix.dirname(path)) : null,
+    entries: result,
+  };
+}
 
-  const id = `remote-${randomUUID()}`;
-  await pty.spawn({
-    id,
-    shell,
-    cwd,
-    cols: request.cols,
-    rows: request.rows,
-    webContents: null,
+async function readFileForRemote(input: {
+  workspaceId: string;
+  path: string;
+}): Promise<RemoteFileContent> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  const target = await resolveExistingInside(root, input.path, {
+    rejectSymlinks: true,
   });
+  // O_NOFOLLOW, where exposed by the platform, closes the final-component
+  // swap window between the policy realpath/lstat checks above and open().
+  // Intermediate components remain canonicalized by resolveExistingInside;
+  // the open handle then pins the selected inode for the bounded read below.
+  const handle = await open(target.path, READ_ONLY_NO_FOLLOW_FLAGS).catch(() => null);
+  if (!handle) throw new Error("This file cannot be opened.");
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error("Path must identify a regular file.");
+    if (info.size > REMOTE_FILE_MAX_BYTES) {
+      throw new Error(
+        `File is too large for Remote Access (maximum ${REMOTE_FILE_MAX_BYTES / 1024} KiB).`,
+      );
+    }
+    const data = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < data.length) {
+      const read = await handle.read(data, offset, data.length - offset, offset);
+      if (read.bytesRead === 0) break;
+      offset += read.bytesRead;
+    }
+    const exact = offset === data.length ? data : data.subarray(0, offset);
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(exact);
+    } catch {
+      throw new Error("Only UTF-8 text files can be opened on the phone.");
+    }
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(content)) {
+      throw new Error("Binary files cannot be opened on the phone.");
+    }
+    return {
+      path: toWireRelative(root, target.path),
+      name: basename(target.path),
+      content,
+      size: exact.length,
+      mtimeMs: info.mtimeMs,
+    };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
 
-  // Per-terminal decoder so a multi-byte glyph split across pty chunks
-  // still crosses the wire as valid UTF-8.
+async function createFileEntryForRemote(input: {
+  workspaceId: string;
+  parentPath?: string;
+  name: string;
+  kind: "file" | "directory";
+}): Promise<RemoteFileInfo> {
+  return fileMutations.run(input.workspaceId, async () => {
+    const { root } = await requireLocalWorkspace(input.workspaceId);
+    return createRemoteWorkspaceEntry(root, {
+      ...(input.parentPath !== undefined ? { parentPath: input.parentPath } : {}),
+      name: input.name,
+      kind: input.kind,
+    });
+  });
+}
+
+async function renameFileEntryForRemote(input: {
+  workspaceId: string;
+  path: string;
+  name: string;
+}): Promise<RemoteFileInfo> {
+  return fileMutations.run(input.workspaceId, async () => {
+    const { root } = await requireLocalWorkspace(input.workspaceId);
+    return renameRemoteWorkspaceEntry(root, {
+      path: input.path,
+      name: input.name,
+    });
+  });
+}
+
+async function moveFileEntryForRemote(input: {
+  workspaceId: string;
+  path: string;
+  destinationPath?: string;
+}): Promise<RemoteFileInfo> {
+  return fileMutations.run(input.workspaceId, async () => {
+    const { root } = await requireLocalWorkspace(input.workspaceId);
+    return moveRemoteWorkspaceEntry(root, {
+      path: input.path,
+      ...(input.destinationPath !== undefined
+        ? { destinationPath: input.destinationPath }
+        : {}),
+    });
+  });
+}
+
+async function deleteFileEntryForRemote(input: {
+  workspaceId: string;
+  path: string;
+}): Promise<RemoteFileDeleteResult> {
+  return fileMutations.run(input.workspaceId, async () => {
+    const { root } = await requireLocalWorkspace(input.workspaceId);
+    // Match Studio's local Explorer: deleting a local workspace entry moves it
+    // to the computer's Trash, so an accidental phone action is recoverable.
+    return deleteRemoteWorkspaceEntry(root, { path: input.path }, (path) =>
+      shell.trashItem(path),
+    );
+  });
+}
+
+async function getGitStatusForRemote(workspaceId: string): Promise<RemoteGitStatus> {
+  const { root } = await requireLocalWorkspace(workspaceId);
+  const status = await readGitStatus(root);
+  let usedBytes = 2;
+  const fitChanges = (changes: typeof status.staged): RemoteGitChange[] => {
+    const result: RemoteGitChange[] = [];
+    for (const change of changes) {
+      const item: RemoteGitChange = {
+        path: truncateUtf8(change.path, 4096),
+        ...(change.oldPath ? { oldPath: truncateUtf8(change.oldPath, 4096) } : {}),
+        status: change.status,
+      };
+      const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+      if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+      result.push(item);
+      usedBytes += bytes;
+    }
+    return result;
+  };
+  return {
+    isRepo: status.isRepo,
+    ...(status.branch ? { branch: truncateUtf8(status.branch, 240) } : {}),
+    detached: status.detached,
+    ...(status.upstream ? { upstream: truncateUtf8(status.upstream, 500) } : {}),
+    ahead: status.ahead,
+    behind: status.behind,
+    staged: fitChanges(status.staged),
+    unstaged: fitChanges(status.unstaged),
+    hasConflicts: status.hasConflicts,
+    ...(status.error ? { error: truncateUtf8(status.error, 1000) } : {}),
+  };
+}
+
+async function getGitLogForRemote(input: {
+  workspaceId: string;
+  limit: number;
+}): Promise<RemoteGitLog> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  const log = await readGitLog(root);
+  const limit = Math.max(1, Math.min(MAX_GIT_LOG_COMMITS, Math.floor(input.limit)));
+  const commits: RemoteGitCommitSummary[] = [];
+  let usedBytes = 2;
+
+  for (const row of log.rows) {
+    if (!row.hash) continue;
+    const commit: RemoteGitCommitSummary = {
+      hash: row.hash,
+      shortHash: row.shortHash || row.hash.slice(0, 7),
+      subject: truncateUtf8(row.subject || "", 2000),
+      author: truncateUtf8(row.author || "", 500),
+      relativeDate: truncateUtf8(row.relativeDate || "", 240),
+      parentHashes: (row.parentHashes || []).slice(0, 16),
+      refs: (row.refs || []).slice(0, 24).map((ref) => truncateUtf8(ref, 500)),
+      isHead: row.isHead === true,
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(commit), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    commits.push(commit);
+    usedBytes += bytes;
+    if (commits.length >= limit) break;
+  }
+
+  return {
+    isRepo: log.isRepo,
+    commits,
+    ...(log.error ? { error: truncateUtf8(log.error, 1000) } : {}),
+  };
+}
+
+async function getGitCommitDetailForRemote(input: {
+  workspaceId: string;
+  hash: string;
+}): Promise<RemoteGitCommitDetail> {
+  if (!/^[0-9a-f]{7,64}$/i.test(input.hash)) {
+    throw new Error("Commit hash must be hexadecimal.");
+  }
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  const result = await readGitCommitDetail(root, input.hash);
+  if (!result.ok) throw new Error(truncateUtf8(result.error, 1000));
+
+  const detail = result.detail;
+  const base: Omit<RemoteGitCommitDetail, "files"> = {
+    hash: detail.hash,
+    shortHash: detail.shortHash || detail.hash.slice(0, 7),
+    subject: truncateUtf8(detail.subject, 2000),
+    body: truncateUtf8(detail.body, GIT_COMMIT_BODY_MAX_BYTES),
+    author: truncateUtf8(detail.author, 500),
+    authorEmail: truncateUtf8(detail.authorEmail, 500),
+    relativeDate: truncateUtf8(detail.relativeDate, 240),
+    isoDate: truncateUtf8(detail.isoDate, 100),
+    parentHashes: detail.parentHashes.slice(0, 16),
+    refs: detail.refs.slice(0, 24).map((ref) => truncateUtf8(ref, 500)),
+    isHead: false,
+  };
+  const files: RemoteGitCommitFile[] = [];
+  let usedBytes = Buffer.byteLength(JSON.stringify({ ...base, files: [] }), "utf8");
+  for (const file of detail.files) {
+    if (files.length >= MAX_GIT_COMMIT_FILES) break;
+    const item: RemoteGitCommitFile = {
+      path: truncateUtf8(file.path, 4096),
+      ...(file.oldPath ? { oldPath: truncateUtf8(file.oldPath, 4096) } : {}),
+      status: file.status,
+      additions: Math.max(0, file.additions),
+      deletions: Math.max(0, file.deletions),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    files.push(item);
+    usedBytes += bytes;
+  }
+
+  return { ...base, files };
+}
+
+async function listCoraHistoryForRemote(
+  workspaceId: string,
+): Promise<RemoteCoraRunSummary[]> {
+  await requireLocalWorkspace(workspaceId);
+  const runs = await listRuns(workspaceId);
+  const result: RemoteCoraRunSummary[] = [];
+  let usedBytes = 2;
+  for (const run of runs.slice(0, MAX_CORA_RUNS)) {
+    const summary = toRemoteRunSummary(run);
+    const bytes = Buffer.byteLength(JSON.stringify(summary), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    result.push(summary);
+    usedBytes += bytes;
+  }
+  return result;
+}
+
+async function getCoraRunForRemote(input: {
+  workspaceId: string;
+  runId: string;
+}): Promise<RemoteCoraRun> {
+  await requireLocalWorkspace(input.workspaceId);
+  const run = await requireOwnedRun(input.workspaceId, input.runId);
+  return toRemoteRun(run);
+}
+
+async function sendCoraMessageForRemote(input: {
+  workspaceId: string;
+  runId?: string;
+  message: string;
+  clientMessageId: string;
+}): Promise<RemoteCoraRun> {
+  const { workspace, root } = await requireLocalWorkspace(input.workspaceId);
+  const message = input.message.trim();
+  if (Buffer.byteLength(message, "utf8") > CORA_MESSAGE_MAX_BYTES) {
+    throw new Error(`Cora messages are limited to ${CORA_MESSAGE_MAX_BYTES / 1024} KiB.`);
+  }
+  const clientMessageId = input.clientMessageId.trim();
+  if (!clientMessageId || Buffer.byteLength(clientMessageId, "utf8") > 256) {
+    throw new Error("clientMessageId is invalid.");
+  }
+
+  const mutationKey = JSON.stringify([workspace.id, clientMessageId]);
+  return coraMessageMutations.run(mutationKey, async () => {
+    // This lookup is deliberately inside the key queue and reads persisted run
+    // messages. It covers a reply lost after commit, a reconnect retry, and
+    // concurrent deliveries before a new conversation has a run id.
+    const retry = findRemoteCoraRetry(await listRuns(workspace.id), {
+      workspaceId: workspace.id,
+      ...(input.runId ? { runId: input.runId } : {}),
+      message,
+      clientMessageId,
+    });
+    if (retry) return toRemoteRun(retry);
+
+    let run: RunState;
+    if (!input.runId) {
+      run = await startAutopilot({
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        cwd: root,
+        initialUserNote: message,
+        initialUserNoteClientMessageId: clientMessageId,
+      });
+    } else {
+      const existing = await requireOwnedRun(workspace.id, input.runId);
+      run = existing.blockedOn?.questionMessageId
+        ? await answerRunQuestion({
+            runId: existing.id,
+            questionMessageId: existing.blockedOn.questionMessageId,
+            message,
+            clientMessageId,
+          })
+        : await addRunMessage({
+            runId: existing.id,
+            author: "user",
+            kind: "note",
+            message,
+            clientMessageId,
+          });
+    }
+    return toRemoteRun(run);
+  });
+}
+
+async function requireOwnedRun(workspaceId: string, runId: string): Promise<RunState> {
+  const run = await getRun(runId);
+  if (!run || run.workspaceId !== workspaceId) {
+    throw new Error(`Cora run not found in this workspace: ${runId}`);
+  }
+  return run;
+}
+
+function toRemoteRunSummary(run: RunState): RemoteCoraRunSummary {
+  const lastMessage = run.humanMessages.at(-1)?.message;
+  return {
+    id: run.id,
+    workspaceId: run.workspaceId,
+    title: truncateUtf8(run.title, 512),
+    status: run.status,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    messageCount: run.humanMessages.length,
+    ...(lastMessage ? { lastMessage: truncateUtf8(lastMessage, 512) } : {}),
+    activeWorkers: run.workerAttempts.filter((attempt) =>
+      ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status),
+    ).length,
+  };
+}
+
+function toRemoteRun(run: RunState): RemoteCoraRun {
+  const messages: RemoteCoraMessage[] = [];
+  let usedBytes = 2;
+  for (const message of run.humanMessages.slice(-MAX_CORA_MESSAGES).reverse()) {
+    const item: RemoteCoraMessage = {
+      id: message.id,
+      author: message.author === "spark" ? "cora" : message.author,
+      kind: message.kind,
+      message: truncateUtf8(message.message, 16 * 1024),
+      createdAt: message.createdAt,
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    messages.push(item);
+    usedBytes += bytes;
+  }
+  messages.reverse();
+  return { ...toRemoteRunSummary(run), messages };
+}
+
+// Phone terminals are real renderer-owned tabs. The bridge mints the leaf,
+// TerminalPane spawns its PTY, and this service taps that same PTY for the
+// encrypted phone stream. The session remains the lifecycle owner: disconnect
+// or revoke closes both the PTY and its visible desktop tab.
+async function createRemoteTerminal(
+  request: RemoteTerminalCreateRequest,
+): Promise<RemoteTerminalHandle> {
+  const { workspace, root } = await requireLocalWorkspace(request.workspaceId);
+  const cwd = await resolveExistingInside(root, request.cwd, {
+    allowAbsolute: true,
+    directory: true,
+    rejectSymlinks: true,
+  });
+  const command =
+    request.profile === "claude"
+      ? "claude --dangerously-skip-permissions"
+      : request.profile === "codex"
+        ? "codex --yolo"
+        : undefined;
+  const profileLabel =
+    request.profile === "claude"
+      ? "Claude"
+      : request.profile === "codex"
+        ? "Codex"
+        : "Terminal";
+  const title =
+    request.title?.trim() ||
+    `${truncateUtf8(request.origin.deviceName, 80)} · ${profileLabel}`;
+  const result = await requestTerminalOp<{
+    tabId: string;
+    paneId: string;
+    cwd: string;
+  }>(
+    "create",
+    {
+      cwd: cwd.path,
+      ...(command ? { command } : {}),
+      title: truncateUtf8(title, 240),
+      workspaceId: workspace.id,
+      workspaceCwd: root,
+      origin: {
+        ...request.origin,
+        initialCols: request.cols,
+        initialRows: request.rows,
+      },
+    },
+    { timeoutMs: 15_000 },
+  );
+  if (!result?.tabId || !result.paneId) {
+    throw new Error("Codara did not create the terminal tab.");
+  }
+
   const decoder = new StringDecoder("utf8");
-  const untap = pty.tap(id, (chunk) => {
+  // readTail() and tap() are synchronous, so no pty callback can run between
+  // them on the main event loop. This replays output emitted before the bridge
+  // response without either losing or duplicating it.
+  const bootstrap = pty.readTail(result.paneId, TERMINAL_BOOTSTRAP_BYTES);
+  if (bootstrap?.length) {
+    const text = decoder.write(bootstrap);
+    if (text) request.onData(text);
+  }
+  const untap = pty.tap(result.paneId, (chunk) => {
     const text = decoder.write(chunk);
     if (text.length > 0) request.onData(text);
   });
+  let ready = false;
   let closed = false;
-  const offExit = pty.onExit(id, () => {
+  let exitedBeforeReady = false;
+  const offExit = pty.onExit(result.paneId, () => {
     if (closed) return;
     closed = true;
     untap();
     offExit();
-    request.onExit();
+    const final = decoder.end();
+    if (final) request.onData(final);
+    if (ready) {
+      // Tell the phone first so it can mark the session ended, then remove the
+      // exact renderer-owned tab. Leaving a dead phone-origin agent pane in
+      // Studio would retain its placement bookkeeping and could let the
+      // desktop auto-resume it after remote ownership had ended.
+      request.onExit();
+      void requestTerminalOp("destroy", {
+        tabId: result.tabId,
+        paneId: result.paneId,
+      }).catch(() => undefined);
+    } else {
+      exitedBeforeReady = true;
+    }
   });
 
+  let alive = await pty.waitForSpawn(result.paneId, TERMINAL_SPAWN_WAIT_MS);
+  if (alive) {
+    await new Promise((resolvePromise) =>
+      setTimeout(resolvePromise, TERMINAL_SPAWN_SETTLE_MS),
+    );
+    alive = pty.exists(result.paneId);
+  }
+  if (!alive || exitedBeforeReady) {
+    if (!closed) {
+      closed = true;
+      untap();
+      offExit();
+      pty.resumeFlow(result.paneId);
+      pty.dispose(result.paneId, { sanctioned: true });
+    }
+    await requestTerminalOp("destroy", {
+      tabId: result.tabId,
+      paneId: result.paneId,
+    }).catch(() => undefined);
+    throw new Error("The terminal failed to start. Check that its directory is accessible.");
+  }
+  ready = true;
+
+  const closeVisibleTerminal = (): void => {
+    if (closed) return;
+    closed = true;
+    untap();
+    offExit();
+    // Always release OS-level flow control before teardown. Otherwise a PTY
+    // paused because the phone stopped draining can remain frozen during the
+    // renderer's asynchronous tab-close path.
+    pty.resumeFlow(result.paneId);
+    pty.dispose(result.paneId, { sanctioned: true });
+    void requestTerminalOp("destroy", {
+      tabId: result.tabId,
+      paneId: result.paneId,
+    }).catch(() => undefined);
+  };
+
   return {
-    write: (data) => pty.write(id, data),
-    resize: (cols, rows) => pty.resize(id, cols, rows),
-    // Real OS-level flow control, so a noisy command against a slow phone
-    // blocks the child instead of growing the main process.
+    desktopTabId: result.tabId,
+    title: truncateUtf8(title, 240),
+    write: (data) => pty.write(result.paneId, data),
+    resize: async (cols, rows) => {
+      // Resize xterm first so it parses the TUI's next repaint using the same
+      // grid the PTY is about to advertise. If the renderer is reloading, keep
+      // the remote terminal usable and let its cached size apply on remount.
+      await requestTerminalOp(
+        "resize",
+        { paneId: result.paneId, cols, rows },
+        { timeoutMs: 2_000 },
+      ).catch((err) => {
+        logMain("remote-access", `desktop terminal resize mirror missed: ${(err as Error).message}`);
+      });
+      pty.resize(result.paneId, cols, rows);
+    },
     pause: () => {
-      pty.pauseFlow(id);
+      pty.pauseFlow(result.paneId);
     },
     resume: () => {
-      pty.resumeFlow(id);
+      pty.resumeFlow(result.paneId);
     },
-    close: () => {
-      if (!closed) {
-        closed = true;
-        untap();
-        offExit();
-      }
-      // Sanctioned: the phone (or a revoke) asked for this teardown; the
-      // exit must not be branded a crash.
-      pty.dispose(id, { sanctioned: true });
-    },
+    close: closeVisibleTerminal,
   };
 }

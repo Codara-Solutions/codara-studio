@@ -229,6 +229,12 @@ export interface SpawnOptions {
   // A mirror can never CREATE a session; attaching to a missing id throws so
   // the mirror pane surfaces the error locally instead of spawning a shell.
   mirror?: boolean;
+  // Keep the dimensions of an EXISTING PTY when a renderer pane reattaches.
+  // Phone-origin terminals use this because the phone's measured grid owns
+  // canonical geometry while the Studio pane remains a fully interactive
+  // desktop view. Unlike `mirror`, this may create a missing session and does
+  // not suppress the renderer sink, input, tail replay, or lifecycle duties.
+  preserveSizeOnAttach?: boolean;
 }
 
 // node-pty on POSIX (macOS/Linux) never execs the target program directly.
@@ -373,11 +379,13 @@ export async function spawn(
         }
       }
     }
-    try {
-      existing.pty.resize(Math.max(1, opts.cols | 0), Math.max(1, opts.rows | 0));
-      existing.resizedAt = Date.now();
-    } catch {
-      /* may have exited */
+    if (!opts.preserveSizeOnAttach) {
+      try {
+        existing.pty.resize(Math.max(1, opts.cols | 0), Math.max(1, opts.rows | 0));
+        existing.resizedAt = Date.now();
+      } catch {
+        /* may have exited */
+      }
     }
     return { id: opts.id, pid: existing.pty.pid, startupCommandHandled: false, attached: true };
   }

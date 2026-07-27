@@ -14,6 +14,7 @@
 const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
+const net = require("node:net");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -25,6 +26,23 @@ const MOBILE_PARSER = path.resolve(
   "lib",
   "remote",
   "pairing-payload.ts",
+);
+const MOBILE_RPC_TYPES = path.resolve(
+  ROOT,
+  "..",
+  "codara-mobile",
+  "src",
+  "lib",
+  "remote",
+  "types.ts",
+);
+const MOBILE_STABLE_PORT = path.resolve(
+  ROOT,
+  "..",
+  "codara-mobile",
+  "worklet",
+  "lib",
+  "stable-port.js",
 );
 
 async function bundle(entry, outName) {
@@ -39,7 +57,10 @@ async function bundle(entry, outName) {
     outfile,
     logLevel: "silent",
     alias: { "@shared": path.join(ROOT, "src", "shared") },
-    external: ["sodium-native"],
+    // Native addons must load from their installed package paths rather than
+    // from inside the generated cache bundle, where require.addon cannot find
+    // their prebuilds.
+    external: ["sodium-native", "hyperdht", "@hyperswarm/secret-stream"],
   });
   delete require.cache[outfile];
   return require(outfile);
@@ -67,6 +88,320 @@ async function main() {
     path.join(ROOT, "src", "main", "remote-access", "identity.ts"),
     "remote-access-identity-test.cjs",
   );
+  const localPolicy = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "local-policy.ts"),
+    "remote-access-local-policy-test.cjs",
+  );
+  const fileMutations = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "file-mutations.ts"),
+    "remote-access-file-mutations-test.cjs",
+  );
+  const coraPolicy = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "cora-policy.ts"),
+    "remote-access-cora-policy-test.cjs",
+  );
+  const stablePort = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "stable-port.ts"),
+    "remote-access-stable-port-test.cjs",
+  );
+  const remoteAccess = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "index.ts"),
+    "remote-access-lifecycle-test.cjs",
+  );
+  const remoteIndexSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "remote-access", "index.ts"),
+    "utf8",
+  );
+  const productionSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "remote-access", "production.ts"),
+    "utf8",
+  );
+  const rpcSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
+    "utf8",
+  );
+  const rendererTerminalRpcSource = fs.readFileSync(
+    path.join(
+      ROOT,
+      "src",
+      "renderer",
+      "src",
+      "components",
+      "Terminal",
+      "terminalRpc.ts",
+    ),
+    "utf8",
+  );
+  const terminalSessionSource = fs.readFileSync(
+    path.join(
+      ROOT,
+      "src",
+      "renderer",
+      "src",
+      "components",
+      "Terminal",
+      "useTerminalSession.ts",
+    ),
+    "utf8",
+  );
+  const ptyManagerSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "pty-manager.ts"),
+    "utf8",
+  );
+  check(
+    "phone-origin terminal geometry reaches both the Studio xterm and PTY",
+    productionSource.includes("initialCols: request.cols") &&
+      productionSource.includes("initialRows: request.rows") &&
+      productionSource.includes('"resize"') &&
+      productionSource.includes(
+        "pty.resize(result.paneId, cols, rows)",
+      ) &&
+      rpcSource.includes("await terminal.resize(cols, rows)") &&
+      rendererTerminalRpcSource.includes("setExternalTerminalSize(paneId, cols, rows)") &&
+      terminalSessionSource.includes(
+        "term.resize(externalGrid.cols, externalGrid.rows)",
+      ) &&
+      ptyManagerSource.includes("if (!opts.preserveSizeOnAttach)"),
+  );
+  check(
+    "remote files.list applies Studio's generated-directory filter",
+    productionSource.includes("isStudioExplorerIgnoredDirectory(entry.name)"),
+  );
+  check(
+    "remote file reads refuse a final-component symlink swap",
+    productionSource.includes("fsConstants.O_NOFOLLOW"),
+  );
+  {
+    const exitNotify = productionSource.indexOf("request.onExit();");
+    const exitTabClose = productionSource.indexOf(
+      'requestTerminalOp("destroy"',
+      exitNotify,
+    );
+    check(
+      "natural terminal exit notifies the phone before closing its desktop tab",
+      exitNotify >= 0 && exitTabClose > exitNotify && exitTabClose - exitNotify < 500,
+      { exitNotify, exitTabClose },
+    );
+  }
+  check(
+    "production serializes and persistently looks up Cora retry keys",
+    productionSource.includes("coraMessageMutations.run") &&
+      productionSource.includes("findRemoteCoraRetry(await listRuns(workspace.id)"),
+  );
+  check(
+    "production listener uses identity-derived candidates unless an exact test port is present",
+    remoteIndexSource.includes(
+      "this.deps.port !== undefined",
+    ) &&
+      remoteIndexSource.includes(
+        "portCandidates: stableRemoteAccessPortCandidates(this.identity.publicKey)",
+      ),
+  );
+  check(
+    "the listener advances candidates only for an occupied bind",
+    remoteIndexSource.includes("portCandidates:") &&
+      fs
+        .readFileSync(path.join(ROOT, "src", "main", "remote-access", "listener.ts"), "utf8")
+        .includes('code !== "EADDRINUSE"'),
+  );
+  check(
+    "an explicit test port of zero is not mistaken for an absent override",
+    remoteIndexSource.includes(
+      "this.deps.port !== undefined",
+    ),
+  );
+  {
+    const keys = [
+      Buffer.alloc(32, 0),
+      Buffer.alloc(32, 7),
+      Buffer.from(Array.from({ length: 32 }, (_, index) => index)),
+      Buffer.from(Array.from({ length: 32 }, (_, index) => 255 - index)),
+    ];
+    check(
+      "identity-derived listener candidates are bounded, complete, and distinct",
+      keys.every((key) => {
+        const ports = stablePort.stableRemoteAccessPortCandidates(key);
+        return ports.length === stablePort.REMOTE_ACCESS_PORT_CANDIDATE_COUNT &&
+          new Set(ports).size === ports.length &&
+          ports.every(
+            (port) =>
+              port >= stablePort.REMOTE_ACCESS_PORT_MIN &&
+              port < stablePort.REMOTE_ACCESS_PORT_MIN + stablePort.REMOTE_ACCESS_PORT_SPAN,
+          );
+      }),
+      keys.map((key) => stablePort.stableRemoteAccessPortCandidates(key)),
+    );
+    if (fs.existsSync(MOBILE_STABLE_PORT)) {
+      delete require.cache[MOBILE_STABLE_PORT];
+      const mobileStablePort = require(MOBILE_STABLE_PORT);
+      check(
+        "desktop and phone derive the same ordered restart candidates from every pinned key",
+        keys.every(
+          (key) =>
+            JSON.stringify(stablePort.stableRemoteAccessPortCandidates(key)) ===
+            JSON.stringify(
+              mobileStablePort.stableRemoteAccessPortCandidates(key.toString("base64")),
+            ),
+        ),
+      );
+    } else {
+      console.log("SKIP mobile restart-port parity (codara-mobile checkout not found)");
+    }
+  }
+  {
+    // The real service lifecycle (with DHT disabled and loopback-only) must
+    // release and rebind the same derived port. This is the exact sequence a
+    // stopped/restarted `npm run dev` process performs.
+    const restartDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-restart-"));
+    const restartDeps = {
+      remoteDir: restartDir,
+      deviceName: "Restart Test Studio",
+      appVersion: "test",
+      host: "127.0.0.1",
+      dhtBootstrap: false,
+      listWorkspaces: async () => [],
+      createTerminal: async () => {
+        throw new Error("not used");
+      },
+      log: () => {},
+    };
+    const service = new remoteAccess.RemoteAccessService(restartDeps);
+    let restartedService = null;
+    try {
+      await service.setEnabled(true);
+      const firstPort = service.getStatus().port;
+      const key = identity.loadOrCreateIdentity(restartDir).publicKey;
+      const candidates = stablePort.stableRemoteAccessPortCandidates(key);
+      await service.setEnabled(false);
+      // A fresh service instance reloads the key from disk like a new Electron
+      // process; this is stronger than toggling one in-memory singleton.
+      restartedService = new remoteAccess.RemoteAccessService(restartDeps);
+      await restartedService.setEnabled(true);
+      const secondPort = restartedService.getStatus().port;
+      check(
+        "a fresh desktop process rebinds the paired phone's exact stable candidate",
+        firstPort === candidates[0] &&
+          secondPort === firstPort &&
+          restartedService.getStatus().state === "reachable",
+        { firstPort, secondPort, state: restartedService.getStatus().state },
+      );
+    } finally {
+      await service.setEnabled(false);
+      if (restartedService) await restartedService.setEnabled(false);
+      fs.rmSync(restartDir, { recursive: true, force: true });
+    }
+  }
+  {
+    // Occupy candidate zero like an unrelated dev server or an ephemeral
+    // socket could. A production service must remain reachable on the next
+    // deterministic candidate; the phone derives the same ordered set.
+    const fallbackDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-fallback-"));
+    const key = identity.loadOrCreateIdentity(fallbackDir).publicKey;
+    const candidates = stablePort.stableRemoteAccessPortCandidates(key);
+    const blocker = net.createServer();
+    const logs = [];
+    let fallbackService = null;
+    try {
+      await new Promise((resolve, reject) => {
+        blocker.once("error", reject);
+        blocker.listen(candidates[0], "127.0.0.1", resolve);
+      });
+      fallbackService = new remoteAccess.RemoteAccessService({
+        remoteDir: fallbackDir,
+        deviceName: "Fallback Test Studio",
+        appVersion: "test",
+        host: "127.0.0.1",
+        dhtBootstrap: false,
+        listWorkspaces: async () => [],
+        createTerminal: async () => {
+          throw new Error("not used");
+        },
+        log: (line) => logs.push(line),
+      });
+      await fallbackService.setEnabled(true);
+      const actual = fallbackService.getStatus().port;
+      check(
+        "an occupied first stable candidate advances the production service",
+        fallbackService.getStatus().state === "reachable" &&
+          actual !== candidates[0] &&
+          candidates.slice(1).includes(actual),
+        { actual, candidates, state: fallbackService.getStatus().state },
+      );
+      check(
+        "the occupied-candidate fallback is visible in local diagnostics",
+        logs.some((line) => line.includes("trying the next stable candidate")),
+        logs,
+      );
+    } finally {
+      if (fallbackService) await fallbackService.setEnabled(false);
+      await new Promise((resolve) => blocker.close(resolve));
+      fs.rmSync(fallbackDir, { recursive: true, force: true });
+    }
+  }
+  {
+    const zeroDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-zero-port-"));
+    const zeroService = new remoteAccess.RemoteAccessService({
+      remoteDir: zeroDir,
+      deviceName: "Zero Port Test Studio",
+      appVersion: "test",
+      host: "127.0.0.1",
+      port: 0,
+      dhtBootstrap: false,
+      listWorkspaces: async () => [],
+      createTerminal: async () => {
+        throw new Error("not used");
+      },
+      log: () => {},
+    });
+    try {
+      await zeroService.setEnabled(true);
+      check(
+        "an explicit zero test port still asks the OS for an available port",
+        zeroService.getStatus().state === "reachable" &&
+          typeof zeroService.getStatus().port === "number" &&
+          zeroService.getStatus().port > 0,
+        zeroService.getStatus(),
+      );
+    } finally {
+      await zeroService.setEnabled(false);
+      fs.rmSync(zeroDir, { recursive: true, force: true });
+    }
+  }
+  if (fs.existsSync(MOBILE_RPC_TYPES)) {
+    const mobileTypesSource = fs.readFileSync(MOBILE_RPC_TYPES, "utf8");
+    const interfaceKeys = (source, name) => {
+      const body = source.match(
+        new RegExp(`export interface ${name} \\{([\\s\\S]*?)^\\}`, "m"),
+      )?.[1] ?? "";
+      return [...body.matchAll(/^\s*(?:'([^']+)'|([A-Za-z][A-Za-z0-9]*))\s*:/gm)]
+        .map((match) => match[1] || match[2])
+        .sort();
+    };
+    const mobileMethods = interfaceKeys(mobileTypesSource, "RpcMethods");
+    const desktopMethods = [...rpcSource.matchAll(/^\s*case "([^"]+)":/gm)]
+      .map((match) => match[1])
+      .sort();
+    const mobileEvents = interfaceKeys(mobileTypesSource, "RpcEvents");
+    check(
+      "desktop dispatch implements every live mobile RPC method and no extras",
+      mobileMethods.length > 0 &&
+        JSON.stringify(desktopMethods) === JSON.stringify(mobileMethods),
+      { desktopMethods, mobileMethods },
+    );
+    check(
+      "desktop emits every live mobile RPC event",
+      mobileEvents.length > 0 &&
+        mobileEvents.every((event) => rpcSource.includes(`pushEvent("${event}"`)),
+      mobileEvents,
+    );
+    check(
+      "desktop and mobile negotiate the same RPC protocol version",
+      rpc.RPC_PROTOCOL_VERSION ===
+        Number(mobileTypesSource.match(/RPC_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]),
+    );
+  } else {
+    console.log("SKIP mobile RPC contract parity (codara-mobile checkout not found)");
+  }
 
   /* ---- pairing window: expiry and single use ---------------------------- */
 
@@ -212,6 +547,395 @@ async function main() {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  /* ---- local filesystem policy ----------------------------------------- */
+
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-root-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-outside-"));
+    try {
+      fs.mkdirSync(path.join(root, "project", "src"), { recursive: true });
+      fs.writeFileSync(path.join(root, "project", "src", "index.ts"), "export {};\n");
+      const nested = await localPolicy.resolveExistingInside(root, "project/src", {
+        directory: true,
+        rejectSymlinks: true,
+      });
+      check(
+        "filesystem policy resolves an ordinary directory inside its root",
+        nested.path === fs.realpathSync(path.join(root, "project", "src")),
+        nested,
+      );
+      check(
+        "filesystem policy emits slash-separated workspace paths",
+        localPolicy.toWireRelative(nested.root, nested.path) === "project/src",
+      );
+      check(
+        "remote explorer hides the same generated trees as Studio",
+        [
+          ".git",
+          "node_modules",
+          "out",
+          "dist",
+          "build",
+          ".next",
+          ".turbo",
+          "coverage",
+        ].every(localPolicy.isStudioExplorerIgnoredDirectory) &&
+          !localPolicy.isStudioExplorerIgnoredDirectory("src"),
+      );
+
+      let traversalError = null;
+      try {
+        await localPolicy.resolveExistingInside(root, "../", { directory: true });
+      } catch (err) {
+        traversalError = err;
+      }
+      check("filesystem policy rejects lexical parent traversal", Boolean(traversalError));
+
+      let outsideError = null;
+      try {
+        await localPolicy.resolveExistingInside(root, outside, {
+          allowAbsolute: true,
+          directory: true,
+        });
+      } catch (err) {
+        outsideError = err;
+      }
+      check("filesystem policy rejects an absolute path outside its root", Boolean(outsideError));
+
+      if (process.platform !== "win32") {
+        fs.symlinkSync(path.join(root, "project", "src"), path.join(root, "linked-src"));
+        let symlinkError = null;
+        try {
+          await localPolicy.resolveExistingInside(root, "linked-src/index.ts", {
+            rejectSymlinks: true,
+          });
+        } catch (err) {
+          symlinkError = err;
+        }
+        check(
+          "filesystem policy rejects symlinks even when they resolve back inside",
+          /symbolic link/i.test(symlinkError?.message ?? ""),
+          symlinkError?.message,
+        );
+
+        fs.symlinkSync(outside, path.join(root, "escape"));
+        let symlinkEscapeError = null;
+        try {
+          await localPolicy.resolveExistingInside(root, "escape", { directory: true });
+        } catch (err) {
+          symlinkEscapeError = err;
+        }
+        check("filesystem policy rejects a symlink escape from the root", Boolean(symlinkEscapeError));
+      }
+
+      const glyphs = "🙂".repeat(100);
+      const truncated = localPolicy.truncateUtf8(glyphs, 33);
+      check(
+        "UTF-8 truncation stays inside its byte budget without a broken glyph",
+        Buffer.byteLength(truncated, "utf8") <= 33 && !truncated.includes("\ufffd"),
+        { bytes: Buffer.byteLength(truncated, "utf8"), truncated },
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  }
+
+  /* ---- workspace-bound file mutations --------------------------------- */
+
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-mutate-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-mutate-outside-"));
+    try {
+      fs.mkdirSync(path.join(root, "src"));
+      fs.mkdirSync(path.join(root, "archive"));
+      fs.mkdirSync(path.join(root, ".git"));
+      fs.writeFileSync(path.join(root, "src", "existing.ts"), "keep");
+      fs.writeFileSync(path.join(outside, "outside.txt"), "outside");
+
+      const created = await fileMutations.createRemoteWorkspaceEntry(root, {
+        parentPath: "src",
+        name: "new.ts",
+        kind: "file",
+      });
+      check(
+        "remote Explorer creates an exclusive workspace-relative file",
+        created.path === "src/new.ts" &&
+          created.ext === "ts" &&
+          fs.readFileSync(path.join(root, "src", "new.ts"), "utf8") === "",
+        created,
+      );
+
+      const folder = await fileMutations.createRemoteWorkspaceEntry(root, {
+        name: "notes",
+        kind: "directory",
+      });
+      check(
+        "remote Explorer creates a folder without recursive path injection",
+        folder.path === "notes" && folder.isDir && fs.statSync(path.join(root, "notes")).isDirectory(),
+        folder,
+      );
+
+      const renamed = await fileMutations.renameRemoteWorkspaceEntry(root, {
+        path: "src/new.ts",
+        name: "renamed.ts",
+      });
+      check(
+        "remote Explorer renames without leaving the workspace",
+        renamed.path === "src/renamed.ts" &&
+          !fs.existsSync(path.join(root, "src", "new.ts")) &&
+          fs.existsSync(path.join(root, "src", "renamed.ts")),
+        renamed,
+      );
+
+      let collisionError = null;
+      try {
+        await fileMutations.renameRemoteWorkspaceEntry(root, {
+          path: "src/renamed.ts",
+          name: "existing.ts",
+        });
+      } catch (err) {
+        collisionError = err;
+      }
+      check(
+        "remote rename refuses to overwrite an existing entry",
+        /already exists/i.test(collisionError?.message ?? "") &&
+          fs.readFileSync(path.join(root, "src", "existing.ts"), "utf8") === "keep" &&
+          fs.existsSync(path.join(root, "src", "renamed.ts")),
+        collisionError?.message,
+      );
+
+      const moved = await fileMutations.moveRemoteWorkspaceEntry(root, {
+        path: "src/renamed.ts",
+        destinationPath: "archive",
+      });
+      check(
+        "remote Explorer moves an entry into another workspace folder",
+        moved.path === "archive/renamed.ts" &&
+          !fs.existsSync(path.join(root, "src", "renamed.ts")) &&
+          fs.existsSync(path.join(root, "archive", "renamed.ts")),
+        moved,
+      );
+
+      let traversalError = null;
+      try {
+        await fileMutations.createRemoteWorkspaceEntry(root, {
+          parentPath: "../",
+          name: "escape.txt",
+          kind: "file",
+        });
+      } catch (err) {
+        traversalError = err;
+      }
+      check(
+        "remote create cannot traverse outside its workspace",
+        Boolean(traversalError) && !fs.existsSync(path.join(path.dirname(root), "escape.txt")),
+        traversalError?.message,
+      );
+
+      let hiddenError = null;
+      try {
+        await fileMutations.createRemoteWorkspaceEntry(root, {
+          parentPath: ".git",
+          name: "phone-owned",
+          kind: "file",
+        });
+      } catch (err) {
+        hiddenError = err;
+      }
+      check(
+        "remote mutations cannot enter Explorer-hidden metadata trees",
+        /outside the phone Explorer/i.test(hiddenError?.message ?? "") &&
+          !fs.existsSync(path.join(root, ".git", "phone-owned")),
+        hiddenError?.message,
+      );
+
+      let reservedNameError = null;
+      try {
+        await fileMutations.createRemoteWorkspaceEntry(root, {
+          name: "CON.txt",
+          kind: "file",
+        });
+      } catch (err) {
+        reservedNameError = err;
+      }
+      check(
+        "remote entry names use a portable cross-platform policy",
+        /reserved/i.test(reservedNameError?.message ?? ""),
+        reservedNameError?.message,
+      );
+
+      fs.mkdirSync(path.join(root, "tree", "child"), { recursive: true });
+      let recursiveMoveError = null;
+      try {
+        await fileMutations.moveRemoteWorkspaceEntry(root, {
+          path: "tree",
+          destinationPath: "tree/child",
+        });
+      } catch (err) {
+        recursiveMoveError = err;
+      }
+      check(
+        "remote move refuses to put a folder inside itself",
+        /into itself/i.test(recursiveMoveError?.message ?? "") &&
+          fs.existsSync(path.join(root, "tree", "child")),
+        recursiveMoveError?.message,
+      );
+
+      if (process.platform !== "win32") {
+        fs.symlinkSync(outside, path.join(root, "outside-link"));
+        let symlinkMutationError = null;
+        try {
+          await fileMutations.deleteRemoteWorkspaceEntry(root, {
+            path: "outside-link/outside.txt",
+          });
+        } catch (err) {
+          symlinkMutationError = err;
+        }
+        check(
+          "remote delete rejects a symlink escape and preserves the outside target",
+          Boolean(symlinkMutationError) &&
+            fs.readFileSync(path.join(outside, "outside.txt"), "utf8") === "outside",
+          symlinkMutationError?.message,
+        );
+      }
+
+      let rootDeleteError = null;
+      try {
+        await fileMutations.deleteRemoteWorkspaceEntry(root, { path: "" });
+      } catch (err) {
+        rootDeleteError = err;
+      }
+      check(
+        "remote delete can never remove the workspace root",
+        /workspace root/i.test(rootDeleteError?.message ?? "") && fs.existsSync(root),
+        rootDeleteError?.message,
+      );
+
+      const deleted = await fileMutations.deleteRemoteWorkspaceEntry(root, {
+        path: "archive/renamed.ts",
+      });
+      check(
+        "remote delete reports its refresh parent and removes only the selected entry",
+        deleted.deletedPath === "archive/renamed.ts" &&
+          deleted.parentPath === "archive" &&
+          !fs.existsSync(path.join(root, "archive", "renamed.ts")) &&
+          fs.existsSync(path.join(root, "src", "existing.ts")),
+        deleted,
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  }
+
+  /* ---- Cora retry idempotency ------------------------------------------ */
+
+  {
+    const persistedRun = {
+      id: "run-persisted",
+      workspaceId: "ws1",
+      humanMessages: [{
+        id: "message-1",
+        clientMessageId: "phone-retry-1",
+        runId: "run-persisted",
+        author: "user",
+        kind: "note",
+        message: "Build the feature",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }],
+    };
+    const retry = coraPolicy.findRemoteCoraRetry([persistedRun], {
+      workspaceId: "ws1",
+      message: "Build the feature",
+      clientMessageId: "phone-retry-1",
+    });
+    check(
+      "a new-conversation retry finds its durable run without a run id",
+      retry === persistedRun,
+    );
+
+    let collision = null;
+    try {
+      coraPolicy.findRemoteCoraRetry([persistedRun], {
+        workspaceId: "ws1",
+        message: "A different request",
+        clientMessageId: "phone-retry-1",
+      });
+    } catch (err) {
+      collision = err;
+    }
+    check(
+      "a reused Cora retry key cannot silently replace different content",
+      /already used/i.test(collision?.message ?? ""),
+      collision?.message,
+    );
+
+    let wrongRun = null;
+    try {
+      coraPolicy.findRemoteCoraRetry([persistedRun], {
+        workspaceId: "ws1",
+        runId: "run-other",
+        message: "Build the feature",
+        clientMessageId: "phone-retry-1",
+      });
+    } catch (err) {
+      wrongRun = err;
+    }
+    check(
+      "an existing-run retry key cannot cross into another run",
+      /another Cora run/i.test(wrongRun?.message ?? ""),
+      wrongRun?.message,
+    );
+
+    const queue = new coraPolicy.KeyedSerialQueue();
+    const order = [];
+    let releaseFirst;
+    const gate = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = queue.run("ws1:phone-retry-2", async () => {
+      order.push("first-start");
+      await gate;
+      order.push("first-end");
+      return "first";
+    });
+    const second = queue.run("ws1:phone-retry-2", async () => {
+      order.push("second-start");
+      return "second";
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    check(
+      "same-key Cora deliveries do not start concurrently",
+      order.join(",") === "first-start",
+      order,
+    );
+    releaseFirst();
+    check(
+      "same-key Cora deliveries settle in order",
+      JSON.stringify(await Promise.all([first, second])) ===
+        JSON.stringify(["first", "second"]) &&
+        order.join(",") === "first-start,first-end,second-start",
+      order,
+    );
+    await Promise.resolve();
+    check("settled Cora retry keys leave no queue entry", queue.size() === 0, queue.size());
+
+    await queue.run("ws1:phone-retry-failed", async () => {
+      throw new Error("simulated first delivery failure");
+    }).catch(() => undefined);
+    const recovered = await queue.run(
+      "ws1:phone-retry-failed",
+      async () => "retry-ran",
+    );
+    check(
+      "a failed Cora delivery does not wedge its retry key",
+      recovered === "retry-ran",
+      recovered,
+    );
+  }
+
   /* ---- framing ---------------------------------------------------------- */
 
   const frameA = rpc.encodeFrame({ id: 1, method: "ping", params: { nonce: "n" } });
@@ -309,6 +1033,11 @@ async function main() {
         return this.writeAccepts;
       },
       destroyed: false,
+      ended: false,
+      end() {
+        this.ended = true;
+        for (const h of handlers.close) h();
+      },
       destroy() {
         this.destroyed = true;
         for (const h of handlers.close) h();
@@ -429,6 +1158,37 @@ async function main() {
   check("destroy closes all session terminals", madeTerminals.every((t) => t.closed));
   check("destroy tears the stream down", stream.destroyed === true);
 
+  // Revocation is an authenticated terminal condition, unlike an ordinary
+  // Studio shutdown. It removes session access synchronously but gracefully
+  // flushes one control event so the phone suppresses its reconnect loop.
+  {
+    const revokedStream = makeFakeStream();
+    const revokedSession = new rpc.RpcSession(revokedStream, services);
+    revokedStream.inject(
+      rpc.encodeFrame({
+        id: 1,
+        method: "hello",
+        params: { protocol: 0, device: services.device },
+      }),
+    );
+    await flush();
+    const before = revokedStream.outbox.length;
+    revokedSession.revoke();
+    check(
+      "revocation sends its authenticated terminal reason before closing",
+      revokedStream.outbox[before]?.event === "session.revoked" &&
+        revokedStream.ended === true,
+      revokedStream.outbox.slice(before),
+    );
+    revokedStream.inject(rpc.encodeFrame({ id: 2, method: "ping", params: { nonce: "late" } }));
+    await flush();
+    check(
+      "a revoked session cannot process another request while its notice flushes",
+      revokedStream.outbox.length === before + 1,
+      revokedStream.outbox.slice(before),
+    );
+  }
+
   // Oversized inbound frame drops the connection.
   const stream2 = makeFakeStream();
   void new rpc.RpcSession(stream2, services);
@@ -437,6 +1197,61 @@ async function main() {
   stream2.inject(evil);
   check("oversized inbound frame destroys the session", stream2.destroyed === true);
   check("no reply is sent for a framing violation", stream2.outbox.length === 0);
+
+  // Individually valid async requests still need a concurrency ceiling. A
+  // paired but compromised phone must not fan out unbounded filesystem/git/
+  // Cora work while earlier calls are still pending.
+  {
+    const held = [];
+    let started = 0;
+    const limitedStream = makeFakeStream();
+    const limitedSession = new rpc.RpcSession(limitedStream, {
+      ...services,
+      listWorkspaces: () => {
+        started += 1;
+        return new Promise((resolve) => held.push(resolve));
+      },
+    });
+    const limitedRequest = (id, method, params) =>
+      limitedStream.inject(rpc.encodeFrame({ id, method, params }));
+    limitedRequest(1, "hello", {
+      protocol: 0,
+      device: { publicKey: "phone", name: "Phone", role: "phone", version: "1" },
+    });
+    await flush();
+    for (let i = 0; i < rpc.MAX_IN_FLIGHT_REQUESTS + 1; i += 1) {
+      limitedRequest(100 + i, "workspaces.list", {});
+    }
+    await flush();
+    const overflowId = 100 + rpc.MAX_IN_FLIGHT_REQUESTS;
+    check(
+      "async RPC work is capped per connection",
+      started === rpc.MAX_IN_FLIGHT_REQUESTS,
+      started,
+    );
+    check(
+      "a request beyond the async-work cap receives a bounded error",
+      limitedStream.outbox.some(
+        (frame) =>
+          frame?.id === overflowId &&
+          frame?.ok === false &&
+          /already in progress/i.test(frame?.error?.message ?? ""),
+      ),
+      limitedStream.outbox.at(-1),
+    );
+    for (const release of held) release([]);
+    await flush();
+    limitedRequest(1000, "workspaces.list", {});
+    await flush();
+    check(
+      "the async-work slot is released when a request settles",
+      started === rpc.MAX_IN_FLIGHT_REQUESTS + 1,
+      started,
+    );
+    held.at(-1)([]);
+    await flush();
+    limitedSession.destroy();
+  }
 
   /* ---- fatal frame abandons the rest of its chunk (item 7) ------------- */
 
@@ -529,6 +1344,445 @@ async function main() {
     }
     await flush();
     check("a peer that will not drain replies has its session closed", g.destroyed === true, guard);
+  }
+
+  /* ---- additive desktop services + terminal event ordering ------------- */
+
+  {
+    const calls = [];
+    let sharedTerminal = null;
+    const extendedServices = {
+      ...services,
+      peerDevice: {
+        publicKey: "trusted-phone-key",
+        name: "Etienne's iPhone",
+        role: "phone",
+        version: "1",
+      },
+      listDirectories: async (requestedPath) => {
+        calls.push(["directories.list", requestedPath]);
+        return {
+          path: "/Users/e/Projects",
+          parentPath: "/Users/e",
+          rootPath: "/Users/e",
+          directories: [{ name: "Codara", path: "/Users/e/Projects/Codara" }],
+        };
+      },
+      addWorkspace: async (input) => {
+        calls.push(["workspaces.add", input]);
+        return {
+          id: "ws-added",
+          name: input.name ?? "Added",
+          path: input.path,
+          color: "#2AA298",
+          branch: "main",
+        };
+      },
+      listFiles: async (input) => {
+        calls.push(["files.list", input]);
+        return {
+          path: input.path ?? "",
+          parentPath: input.path ? "" : null,
+          entries: [{ name: "src", path: "src", isDir: true }],
+        };
+      },
+      readFile: async (input) => {
+        calls.push(["files.read", input]);
+        return {
+          path: input.path,
+          name: "index.ts",
+          content: "export {};",
+          size: 10,
+          mtimeMs: 12,
+        };
+      },
+      createFileEntry: async (input) => {
+        calls.push(["files.create", input]);
+        return {
+          name: input.name,
+          path: `${input.parentPath ? `${input.parentPath}/` : ""}${input.name}`,
+          isDir: input.kind === "directory",
+        };
+      },
+      renameFileEntry: async (input) => {
+        calls.push(["files.rename", input]);
+        const parent = input.path.includes("/")
+          ? input.path.slice(0, input.path.lastIndexOf("/") + 1)
+          : "";
+        return { name: input.name, path: `${parent}${input.name}`, isDir: false };
+      },
+      moveFileEntry: async (input) => {
+        calls.push(["files.move", input]);
+        const name = input.path.split("/").at(-1);
+        return {
+          name,
+          path: `${input.destinationPath ? `${input.destinationPath}/` : ""}${name}`,
+          isDir: false,
+        };
+      },
+      deleteFileEntry: async (input) => {
+        calls.push(["files.delete", input]);
+        return {
+          deletedPath: input.path,
+          parentPath: input.path.includes("/")
+            ? input.path.slice(0, input.path.lastIndexOf("/"))
+            : "",
+        };
+      },
+      getGitStatus: async (workspaceId) => {
+        calls.push(["git.status", workspaceId]);
+        return {
+          isRepo: true,
+          branch: "main",
+          detached: false,
+          ahead: 1,
+          behind: 0,
+          staged: [],
+          unstaged: [{ path: "src/index.ts", status: "modified" }],
+          hasConflicts: false,
+        };
+      },
+      getGitLog: async (input) => {
+        calls.push(["git.log", input]);
+        return {
+          isRepo: true,
+          commits: [{
+            hash: "a".repeat(40),
+            shortHash: "aaaaaaa",
+            subject: "Remote history",
+            author: "Codara",
+            relativeDate: "now",
+            parentHashes: [],
+            refs: ["main"],
+            isHead: true,
+          }],
+        };
+      },
+      getGitCommitDetail: async (input) => {
+        calls.push(["git.commitDetail", input]);
+        return {
+          hash: input.hash,
+          shortHash: input.hash.slice(0, 7),
+          subject: "Remote history",
+          body: "Commit body",
+          author: "Codara",
+          authorEmail: "codara@example.com",
+          relativeDate: "now",
+          isoDate: "2026-01-01T00:00:00.000Z",
+          parentHashes: [],
+          refs: ["main"],
+          isHead: true,
+          files: [{
+            path: "src/index.ts",
+            status: "modified",
+            additions: 2,
+            deletions: 1,
+          }],
+        };
+      },
+      listCoraHistory: async (workspaceId) => {
+        calls.push(["cora.history", workspaceId]);
+        return [{
+          id: "run-1",
+          workspaceId,
+          title: "Remote work",
+          status: "running",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:01:00.000Z",
+          messageCount: 1,
+          lastMessage: "hello",
+          activeWorkers: 1,
+        }];
+      },
+      getCoraRun: async (input) => {
+        calls.push(["cora.get", input]);
+        return {
+          id: input.runId,
+          workspaceId: input.workspaceId,
+          title: "Remote work",
+          status: "running",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:01:00.000Z",
+          messageCount: 1,
+          activeWorkers: 1,
+          messages: [{
+            id: "message-1",
+            author: "cora",
+            kind: "note",
+            message: "hello",
+            createdAt: "2026-01-01T00:01:00.000Z",
+          }],
+        };
+      },
+      sendCoraMessage: async (input) => {
+        calls.push(["cora.send", input]);
+        return {
+          id: input.runId ?? "run-new",
+          workspaceId: input.workspaceId,
+          title: "Remote work",
+          status: "planning",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:01:00.000Z",
+          messageCount: 1,
+          activeWorkers: 0,
+          messages: [{
+            id: "message-user",
+            author: "user",
+            kind: "note",
+            message: input.message,
+            createdAt: "2026-01-01T00:01:00.000Z",
+          }],
+        };
+      },
+      createTerminal: async (request) => {
+        calls.push(["terminal.create", request]);
+        // A renderer-backed shell can print its prompt before the awaited
+        // create service returns. RPC must hold this until the response tells
+        // the phone which terminalId owns it.
+        request.onData("opening prompt");
+        sharedTerminal = {
+          request,
+          closed: false,
+          detached: false,
+          write() {},
+          resize() {},
+          close() {
+            this.closed = true;
+          },
+          detach() {
+            this.detached = true;
+          },
+          desktopTabId: "term-desktop",
+          title: "Etienne's iPhone · Codex",
+        };
+        return sharedTerminal;
+      },
+    };
+    const ex = makeFakeStream();
+    const exSession = new rpc.RpcSession(ex, extendedServices);
+    const exReq = (id, method, params) => ex.inject(rpc.encodeFrame({ id, method, params }));
+    exReq(1, "hello", {
+      protocol: 0,
+      device: { publicKey: "forged", name: "Forged name", role: "phone", version: "1" },
+    });
+    await flush();
+
+    exReq(2, "directories.list", { path: "/Users/e/Projects" });
+    await flush();
+    check(
+      "directories.list delegates and returns the bounded listing shape",
+      ex.outbox.at(-1)?.result?.directories?.[0]?.name === "Codara",
+      ex.outbox.at(-1),
+    );
+    exReq(3, "workspaces.add", { path: "/Users/e/Projects/Codara", name: "  Mobile  " });
+    await flush();
+    check(
+      "workspaces.add trims its display name and returns appearance metadata",
+      calls.at(-1)?.[1]?.name === "Mobile" &&
+        ex.outbox.at(-1)?.result?.workspace?.color === "#2AA298",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(4, "files.list", { workspaceId: "ws1", path: "" });
+    await flush();
+    check("files.list returns workspace-relative entries", ex.outbox.at(-1)?.result?.entries?.[0]?.path === "src");
+    exReq(5, "files.read", { workspaceId: "ws1", path: "src/index.ts" });
+    await flush();
+    check("files.read wraps its file DTO", ex.outbox.at(-1)?.result?.file?.content === "export {};");
+    exReq(51, "files.create", {
+      workspaceId: "ws1",
+      parentPath: "src",
+      name: "mobile.ts",
+      kind: "file",
+    });
+    await flush();
+    check(
+      "files.create delegates a bounded leaf mutation and returns its entry",
+      calls.at(-1)?.[0] === "files.create" &&
+        ex.outbox.at(-1)?.result?.entry?.path === "src/mobile.ts",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(52, "files.rename", {
+      workspaceId: "ws1",
+      path: "src/mobile.ts",
+      name: "phone.ts",
+    });
+    await flush();
+    check(
+      "files.rename delegates one workspace-relative entry",
+      calls.at(-1)?.[0] === "files.rename" &&
+        ex.outbox.at(-1)?.result?.entry?.path === "src/phone.ts",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(53, "files.move", {
+      workspaceId: "ws1",
+      path: "src/phone.ts",
+      destinationPath: "archive",
+    });
+    await flush();
+    check(
+      "files.move delegates a destination folder instead of an arbitrary target path",
+      calls.at(-1)?.[1]?.destinationPath === "archive" &&
+        ex.outbox.at(-1)?.result?.entry?.path === "archive/phone.ts",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(54, "files.delete", { workspaceId: "ws1", path: "archive/phone.ts" });
+    await flush();
+    check(
+      "files.delete returns the parent that the phone should refresh",
+      ex.outbox.at(-1)?.result?.deleted?.parentPath === "archive",
+      ex.outbox.at(-1),
+    );
+    exReq(6, "git.status", { workspaceId: "ws1" });
+    await flush();
+    check("git.status returns source-control changes", ex.outbox.at(-1)?.result?.status?.unstaged?.length === 1);
+    exReq(61, "git.log", { workspaceId: "ws1", limit: 25 });
+    await flush();
+    check(
+      "git.log delegates a bounded history depth",
+      calls.at(-1)?.[1]?.limit === 25 &&
+        ex.outbox.at(-1)?.result?.log?.commits?.[0]?.isHead === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeOversizedLog = calls.length;
+    exReq(64, "git.log", { workspaceId: "ws1", limit: 1000 });
+    await flush();
+    check(
+      "git.log rejects an unbounded history request before spawning git",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeOversizedLog,
+      {
+        callsBeforeOversizedLog,
+        callsAfter: calls.length,
+        response: ex.outbox.at(-1),
+      },
+    );
+    exReq(62, "git.commitDetail", { workspaceId: "ws1", hash: "a".repeat(40) });
+    await flush();
+    check(
+      "git.commitDetail returns metadata and changed files",
+      ex.outbox.at(-1)?.result?.commit?.files?.[0]?.additions === 2,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeBadHash = calls.length;
+    exReq(63, "git.commitDetail", { workspaceId: "ws1", hash: "--help" });
+    await flush();
+    check(
+      "git.commitDetail rejects option-shaped hashes before spawning git",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeBadHash,
+      { callsBeforeBadHash, callsAfter: calls.length, response: ex.outbox.at(-1) },
+    );
+    exReq(7, "cora.history", { workspaceId: "ws1" });
+    await flush();
+    check("cora.history returns workspace runs", ex.outbox.at(-1)?.result?.runs?.[0]?.id === "run-1");
+    exReq(8, "cora.get", { workspaceId: "ws1", runId: "run-1" });
+    await flush();
+    check("cora.get returns bounded messages", ex.outbox.at(-1)?.result?.run?.messages?.[0]?.author === "cora");
+    exReq(9, "cora.send", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      message: "  keep going  ",
+      clientMessageId: "phone-message-1",
+    });
+    await flush();
+    check(
+      "cora.send trims and delegates a stable client message id",
+      calls.at(-1)?.[1]?.message === "keep going" &&
+        calls.at(-1)?.[1]?.clientMessageId === "phone-message-1",
+      calls.at(-1),
+    );
+
+    const beforeCreate = ex.outbox.length;
+    exReq(10, "terminal.create", {
+      workspaceId: "ws1",
+      cols: 92,
+      rows: 31,
+      profile: "codex",
+      title: "Phone worker",
+    });
+    await flush();
+    const createdFrames = ex.outbox.slice(beforeCreate);
+    const createResponse = createdFrames[0];
+    const createData = createdFrames[1];
+    check(
+      "terminal.create response precedes bootstrap terminal.data",
+      createResponse?.id === 10 &&
+        createResponse?.ok === true &&
+        createData?.event === "terminal.data" &&
+        createData?.payload?.terminalId === createResponse?.result?.terminalId,
+      createdFrames,
+    );
+    check(
+      "terminal.create exposes the visible desktop tab and trusted phone name",
+      createResponse?.result?.desktopTabId === "term-desktop" &&
+        calls.at(-1)?.[1]?.profile === "codex" &&
+        calls.at(-1)?.[1]?.origin?.deviceName === "Etienne's iPhone",
+      { response: createResponse, origin: calls.at(-1)?.[1]?.origin },
+    );
+
+    exSession.destroy();
+    check(
+      "disconnect closes a visible shared terminal instead of detaching it",
+      sharedTerminal?.closed === true && sharedTerminal?.detached === false,
+      sharedTerminal,
+    );
+  }
+
+  /* ---- early terminal exit and oversized outbound reply guards --------- */
+
+  {
+    const early = makeFakeStream();
+    const earlyServices = {
+      ...services,
+      createTerminal: async (request) => {
+        request.onExit();
+        return { write() {}, resize() {}, close() {} };
+      },
+    };
+    void new rpc.RpcSession(early, earlyServices);
+    early.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0 } }));
+    await flush();
+    const before = early.outbox.length;
+    early.inject(rpc.encodeFrame({
+      id: 2,
+      method: "terminal.create",
+      params: { workspaceId: "ws1", cols: 80, rows: 24 },
+    }));
+    await flush();
+    const frames = early.outbox.slice(before);
+    check(
+      "a terminal that exits before registration returns one create error",
+      frames.length === 1 && frames[0]?.id === 2 && frames[0]?.ok === false,
+      frames,
+    );
+    check(
+      "an early terminal exit never emits an unassociable terminal.exit",
+      !frames.some((frame) => frame?.event === "terminal.exit"),
+      frames,
+    );
+
+    const huge = makeFakeStream();
+    void new rpc.RpcSession(huge, {
+      ...services,
+      listWorkspaces: async () => [{
+        id: "huge",
+        name: "x".repeat(rpc.MAX_FRAME_BYTES + 100),
+        path: "/tmp",
+      }],
+    });
+    huge.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0 } }));
+    await flush();
+    huge.inject(rpc.encodeFrame({ id: 2, method: "workspaces.list", params: {} }));
+    await flush();
+    check(
+      "an oversized service response becomes a compact RPC error",
+      huge.outbox.at(-1)?.id === 2 &&
+        huge.outbox.at(-1)?.ok === false &&
+        /too large/i.test(huge.outbox.at(-1)?.error?.message ?? ""),
+      huge.outbox.at(-1),
+    );
   }
 
   if (failures > 0) {
