@@ -93,13 +93,20 @@ export default function MarkdownPreview({ text, basePath }: Props) {
         );
       },
       // Resolve relative paths and ensure links open externally instead of
-      // navigating away from the renderer.
+      // navigating away from the renderer. onClick preventDefaults and routes
+      // through the in-app browser, but dragging a link and dropping it back
+      // onto the window bypasses onClick entirely and would navigate the
+      // privileged renderer to the dragged URL. The main-process navigation
+      // guard now blocks that class regardless of vector; as defense in depth
+      // we also stop the anchor from initiating a URL drag in the first place.
       a(props: { href?: string; children?: React.ReactNode }) {
         const { href, children, ...rest } = props;
         const resolved = href ? resolveResource(href, baseDir) : "#";
         return (
           <a
             href={resolved}
+            draggable={false}
+            onDragStart={(event) => event.preventDefault()}
             onClick={(event) => {
               if (!href) return;
               if (href.startsWith("#")) return;

@@ -45,6 +45,10 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
 import { logMain } from "./file-log";
+import {
+  isAllowedMainWindowUrl,
+  resolveMainWindowAllowlistConfig,
+} from "./navigation-allowlist";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
@@ -384,12 +388,53 @@ export function broadcastPreferencesChanged<K extends PrefKey>(
   }
 }
 
+// ── Privileged-channel sender gating ────────────────────────────────────────
+// Some IPC channels can enable remote access, spawn processes, widen the
+// filesystem sandbox, write arbitrary paths, or mutate preferences. Those must
+// only ever be driven by the app's own trusted renderer, never by
+// attacker-controlled content that somehow became a frame of a window (or by a
+// preview <webview> guest). requireTrustedSender enforces three things:
+//   1. The sender is a real top-level BrowserWindow, not a <webview> guest
+//      (guests return null from fromWebContents).
+//   2. The sending frame is the window's top frame, not a subframe.
+//   3. The frame's current URL passes the SAME allowlist the main window's
+//      navigation guard uses (dev renderer origin or the packaged renderer
+//      entry file).
+// A failing check throws, which the renderer sees as a rejected promise, and
+// logs a single line with no URL, path, or key material.
+function mainWindowAllowlistConfig(): ReturnType<typeof resolveMainWindowAllowlistConfig> {
+  return resolveMainWindowAllowlistConfig({
+    isPackaged: app.isPackaged,
+    rendererDevUrl: process.env.ELECTRON_RENDERER_URL,
+    rendererEntryPath: join(__dirname, "../renderer/index.html"),
+  });
+}
+
+function requireTrustedSender(event: Electron.IpcMainInvokeEvent, channel: string): void {
+  const deny = (reason: string): never => {
+    // Deliberately no URL/path in the log line: a file:// sender URL can carry
+    // a user's home path, and we never want that in the logs.
+    logMain("security", `blocked privileged channel ${channel} from untrusted sender (${reason})`);
+    throw new Error(`Blocked: ${channel} is not available to this sender.`);
+  };
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) deny("not-a-window");
+  const frame = event.senderFrame;
+  if (!frame) deny("no-frame");
+  // Reject subframe senders: only the window's own top frame is trusted.
+  if (frame!.parent !== null) deny("subframe");
+  if (!isAllowedMainWindowUrl(frame!.url, mainWindowAllowlistConfig())) deny("url-not-allowlisted");
+}
+
 export function registerIpc(): void {
   ipcMain.handle("state:load", async (): Promise<AppState> => {
     return loadState();
   });
 
-  ipcMain.handle("state:save", async (_e, state: AppState): Promise<void> => {
+  ipcMain.handle("state:save", async (event, state: AppState): Promise<void> => {
+    // Persisting workspaces re-seeds the fs sandbox allowlist (below), so this
+    // channel can widen readable roots. Gate it to the trusted renderer.
+    requireTrustedSender(event, "state:save");
     await saveState(state);
     // Refresh the fs sandbox allowlist whenever workspaces change. The
     // renderer also pushes via ui:setAllowedRoots, but updating here means a
@@ -568,9 +613,10 @@ export function registerIpc(): void {
   ipcMain.handle(
     "preferences:set",
     async <K extends PrefKey>(
-      _e: Electron.IpcMainInvokeEvent,
+      event: Electron.IpcMainInvokeEvent,
       args: { key: K; value: AppPreferences[K] },
     ): Promise<AppPreferences> => {
+      requireTrustedSender(event, "preferences:set");
       const next = await setPreference(args.key, args.value);
       broadcastPreferencesChanged({ key: args.key, value: next[args.key] });
       // Reflect keepRunningInBackground changes in the tray immediately so the
@@ -896,9 +942,13 @@ export function registerIpc(): void {
   ipcMain.handle(
     "fs:writeText",
     async (
-      _e,
+      event,
       args: { path: string; content: string; expectedMtimeMs?: number },
     ): Promise<FsWriteResult> => {
+      // Write/create/delete/rename/import/move take arbitrary destination paths
+      // and are intentionally NOT read-sandboxed, so gate them to the trusted
+      // renderer instead.
+      requireTrustedSender(event, "fs:writeText");
       return writeTextFile(
         args.path,
         args.content,
@@ -907,19 +957,23 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("fs:renameFile", async (_e, args: RenameFileInput): Promise<FsEntry> => {
+  ipcMain.handle("fs:renameFile", async (event, args: RenameFileInput): Promise<FsEntry> => {
+    requireTrustedSender(event, "fs:renameFile");
     return renameFile(args.path, args.newName);
   });
 
-  ipcMain.handle("fs:deleteFile", async (_e, path: string): Promise<void> => {
+  ipcMain.handle("fs:deleteFile", async (event, path: string): Promise<void> => {
+    requireTrustedSender(event, "fs:deleteFile");
     await deleteFile(path);
   });
 
-  ipcMain.handle("fs:createFile", async (_e, args: CreateEntryInput): Promise<FsEntry> => {
+  ipcMain.handle("fs:createFile", async (event, args: CreateEntryInput): Promise<FsEntry> => {
+    requireTrustedSender(event, "fs:createFile");
     return createFile(args.parentPath, args.name);
   });
 
-  ipcMain.handle("fs:createFolder", async (_e, args: CreateEntryInput): Promise<FsEntry> => {
+  ipcMain.handle("fs:createFolder", async (event, args: CreateEntryInput): Promise<FsEntry> => {
+    requireTrustedSender(event, "fs:createFolder");
     return createFolder(args.parentPath, args.name);
   });
 
@@ -929,7 +983,8 @@ export function registerIpc(): void {
   // (that's the whole point of importing them in).
   ipcMain.handle(
     "fs:importEntries",
-    async (_e, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+    async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+      requireTrustedSender(event, "fs:importEntries");
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing import destination.");
       assertAllowedReadPath(destDir);
@@ -948,7 +1003,8 @@ export function registerIpc(): void {
   // already sit inside an allowed workspace root.
   ipcMain.handle(
     "fs:moveEntries",
-    async (_e, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+    async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+      requireTrustedSender(event, "fs:moveEntries");
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing move destination.");
       assertAllowedReadPath(destDir);
@@ -1003,7 +1059,10 @@ export function registerIpc(): void {
   // The renderer is authoritative about which workspaces are open, but the
   // sandbox lives in main. Renderer pushes the cwd list whenever it changes;
   // main treats the list as the source of truth for read-path checks.
-  ipcMain.handle("ui:setAllowedRoots", async (_e, roots: unknown): Promise<void> => {
+  ipcMain.handle("ui:setAllowedRoots", async (event, roots: unknown): Promise<void> => {
+    // This directly sets the fs read-sandbox allowlist, so only the trusted
+    // renderer may call it.
+    requireTrustedSender(event, "ui:setAllowedRoots");
     if (!Array.isArray(roots)) return;
     const cleaned = roots.filter((r): r is string => typeof r === "string" && r.length > 0);
     setAllowedRoots(cleaned);
@@ -1653,6 +1712,8 @@ export function registerIpc(): void {
         mirror?: boolean;
       },
     ) => {
+      // Spawning a pty starts a real OS process; only the trusted renderer may.
+      requireTrustedSender(e, "pty:spawn");
       return pty.spawn({
         id: args.id,
         shell: args.shell,
@@ -2180,13 +2241,15 @@ export function registerIpc(): void {
   // above, which are the SSH remote-workspace feature. The renderer only
   // ever sees status, device summaries, the pairing state, and the QR
   // payload string; key material and pairing secret internals stay in main.
-  ipcMain.handle("remoteAccess:getStatus", async (): Promise<RemoteAccessStatus> => {
+  ipcMain.handle("remoteAccess:getStatus", async (event): Promise<RemoteAccessStatus> => {
+    requireTrustedSender(event, "remoteAccess:getStatus");
     const service = await getRemoteAccess();
     return service.getStatus();
   });
   ipcMain.handle(
     "remoteAccess:setEnabled",
-    async (_e, enabled: boolean): Promise<RemoteAccessStatus> => {
+    async (event, enabled: boolean): Promise<RemoteAccessStatus> => {
+      requireTrustedSender(event, "remoteAccess:setEnabled");
       const on = enabled === true;
       // Persist first so a crash mid-start still remembers the intent, then
       // fan the preference out exactly like the preferences:set handler.
@@ -2196,21 +2259,25 @@ export function registerIpc(): void {
       return service.setEnabled(on);
     },
   );
-  ipcMain.handle("remoteAccess:startPairing", async (): Promise<RemotePairingSession> => {
+  ipcMain.handle("remoteAccess:startPairing", async (event): Promise<RemotePairingSession> => {
+    requireTrustedSender(event, "remoteAccess:startPairing");
     const service = await getRemoteAccess();
     return service.startPairing();
   });
-  ipcMain.handle("remoteAccess:cancelPairing", async (): Promise<void> => {
+  ipcMain.handle("remoteAccess:cancelPairing", async (event): Promise<void> => {
+    requireTrustedSender(event, "remoteAccess:cancelPairing");
     const service = await getRemoteAccess();
     service.cancelPairing();
   });
-  ipcMain.handle("remoteAccess:listDevices", async (): Promise<RemotePairedDevice[]> => {
+  ipcMain.handle("remoteAccess:listDevices", async (event): Promise<RemotePairedDevice[]> => {
+    requireTrustedSender(event, "remoteAccess:listDevices");
     const service = await getRemoteAccess();
     return service.listPairedDevices();
   });
   ipcMain.handle(
     "remoteAccess:revokeDevice",
-    async (_e, publicKey: string): Promise<RemotePairedDevice[]> => {
+    async (event, publicKey: string): Promise<RemotePairedDevice[]> => {
+      requireTrustedSender(event, "remoteAccess:revokeDevice");
       const service = await getRemoteAccess();
       // Awaited: the renderer's list must not repaint as "revoked" until the
       // removal is durable, so the UI can never claim a revocation that a

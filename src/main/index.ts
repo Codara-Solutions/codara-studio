@@ -11,6 +11,7 @@ import {
 } from "electron";
 import { logMain } from "./file-log";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { registerIpc, setTrayHook } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
@@ -38,6 +39,11 @@ import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry } from "./agent-session-registry";
 import { activeTerminalAgentPaneIds } from "./terminal-agent-notify";
+import {
+  isAllowedMainWindowUrl,
+  isSameResolvedPath,
+  resolveMainWindowAllowlistConfig,
+} from "./navigation-allowlist";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -580,10 +586,66 @@ function createWindow(): void {
     mainWindow?.webContents.send("app:open-browser-url", url);
   };
 
-  mainWindow.webContents.on("will-navigate", (e, url) => {
-    if (!url.startsWith("http://localhost") && !url.startsWith("file://")) {
-      e.preventDefault();
-      openBrowserUrlInSpark(url);
+  // Navigation guard for the privileged main window. The allowlist is derived
+  // from the SAME source of truth the loader below uses: the dev server URL in
+  // an unpackaged build, and the packaged renderer entry file. Only those two
+  // targets may become the document of this webContents (which carries the
+  // window.spark preload); everything else is prevented and handed to the
+  // in-app browser instead. Applied to every navigation-ish event, including
+  // subframes via will-frame-navigate, so a hostile iframe cannot navigate the
+  // top frame to an attacker origin. This does NOT govern preview <webview>
+  // guests: they are separate webContents and do not fire these events on the
+  // host, so the browser/preview panes keep navigating freely.
+  const navAllowlistConfig = resolveMainWindowAllowlistConfig({
+    isPackaged: app.isPackaged,
+    rendererDevUrl: process.env.ELECTRON_RENDERER_URL,
+    rendererEntryPath: join(__dirname, "../renderer/index.html"),
+  });
+  const guardNavigation = (details: Electron.Event, url: string) => {
+    if (isAllowedMainWindowUrl(url, navAllowlistConfig)) return;
+    details.preventDefault();
+    openBrowserUrlInSpark(url);
+  };
+  mainWindow.webContents.on("will-navigate", (details, url) => guardNavigation(details, url));
+  mainWindow.webContents.on("will-redirect", (details, url) => guardNavigation(details, url));
+  mainWindow.webContents.on("will-frame-navigate", (details) =>
+    guardNavigation(details, details.url),
+  );
+
+  // Deny-by-default hardening for embedded <webview> guests (preview/browser
+  // panes). The guest must never inherit Node or the privileged main-window
+  // preload: the only preload it may carry is the inspector preload, attached
+  // via the tag's `preload` attribute. Any other preload (notably the
+  // window.spark preload) is stripped, so a repointed guest cannot re-expose
+  // the privileged API. We do not preventDefault the attach itself: that would
+  // break the legitimate preview feature; we only sanitize its web preferences.
+  const inspectorPreloadPath = join(__dirname, "../preload/inspector-preload.js");
+  // We force only the guest's node/isolation posture (which already matches
+  // the app's existing preview config) and the preload restriction. We do NOT
+  // newly toggle sandbox here: that would change the guest's process model, and
+  // the hole is closed by denying node + stripping any non-inspector preload.
+  mainWindow.webContents.on("will-attach-webview", (_event, webPreferences, params) => {
+    webPreferences.nodeIntegration = false;
+    webPreferences.nodeIntegrationInSubFrames = false;
+    webPreferences.contextIsolation = true;
+    const requestedPreload = webPreferences.preload;
+    if (requestedPreload && !isSameResolvedPath(requestedPreload, inspectorPreloadPath)) {
+      delete webPreferences.preload;
+    }
+    // The `preload` attribute is also surfaced in params as a file:// URL.
+    // Strip it too when it is not the inspector preload so neither channel can
+    // smuggle the privileged preload into the guest.
+    const attrPreload = params.preload;
+    if (attrPreload) {
+      let attrPath = "";
+      try {
+        attrPath = attrPreload.startsWith("file:") ? fileURLToPath(attrPreload) : attrPreload;
+      } catch {
+        attrPath = "";
+      }
+      if (!attrPath || !isSameResolvedPath(attrPath, inspectorPreloadPath)) {
+        delete params.preload;
+      }
     }
   });
 
