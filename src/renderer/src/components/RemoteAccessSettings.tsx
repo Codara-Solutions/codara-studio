@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import QRCode from "qrcode";
 import type {
   RemoteAccessStatus,
@@ -228,13 +228,13 @@ function PairingModal({ onClose }: { onClose: () => void }) {
   const [phase, setPhase] = useState<RemotePairingState>({ phase: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const startedRef = useRef(false);
-
   useEffect(() => {
-    // React 18 StrictMode double-invokes effects in dev; one pairing window
-    // per modal, so guard the start.
-    if (startedRef.current) return;
-    startedRef.current = true;
+    // No mount guard here on purpose. Under StrictMode's dev double-invoke
+    // the sequence is start, cleanup-cancel, start again; a ref that latched
+    // on the first start would suppress the second one and leave the modal
+    // stuck on "Generating..." with no pairing window open. Starting twice
+    // is safe instead: startPairing replaces any existing window, so the
+    // steady state is still exactly one.
     let cancelled = false;
     void (async () => {
       try {

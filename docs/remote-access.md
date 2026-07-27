@@ -250,6 +250,28 @@ Revoking removes the key from `paired-devices.json` and destroys every live
 terminals. A revoked device's next connection attempt is met with the same
 silence as any unknown key.
 
+Revocation is durable, and it is deliberately the last word on disk. The
+trust file has two writers: the synchronous authoritative one (pairing and
+revoking) and an asynchronous cosmetic one (the coalesced last-seen flush).
+Without care the second can undo the first, which would let a revoked device
+be re-authorized on the next launch. The guarantee is that once
+`revokeDevice` returns, no scheduled or in-flight flush can put that device
+back, enforced by:
+
+- a generation counter bumped by every authoritative write, which a flush
+  carries and re-checks;
+- cancelling any pending flush timer when an authoritative write happens;
+- reading the payload at flush EXECUTION time rather than capturing it when
+  the flush was scheduled;
+- unique staging file names, so the two writers can never collide on a tmp
+  path;
+- and, for the one window the checks cannot pre-empt (a revoke landing while
+  the flush's rename is already on the threadpool), re-asserting the
+  authoritative state with a synchronous write once the rename returns.
+
+Pairing was never exposed to this, because `addDevice` mutates the cached
+array in place, so a stale flush would write identical content.
+
 ## Phases
 
 1. Studio foundation (this repo): identity, QR pairing over LAN, silent

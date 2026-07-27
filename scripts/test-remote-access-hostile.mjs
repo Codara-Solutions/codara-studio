@@ -70,6 +70,38 @@ async function loadService() {
   return require(outfile);
 }
 
+const PAIRED_DEVICES_FILE = "paired-devices.json";
+
+// The store on its own, without the service around it. Bundled separately
+// so the F4 test can drive PairedDeviceStore directly.
+async function loadPairing() {
+  const cacheDir = join(ROOT, "node_modules", ".cache");
+  mkdirSync(cacheDir, { recursive: true });
+  const outfile = join(cacheDir, "remote-access-hostile-pairing.cjs");
+  await build({
+    entryPoints: [join(ROOT, "src", "main", "remote-access", "pairing.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+    alias: { "@shared": join(ROOT, "src", "shared") },
+    external: ["sodium-native"],
+  });
+  delete require.cache[outfile];
+  return require(outfile);
+}
+
+// Reads the trust file the way a fresh app launch would.
+function readDevices(home) {
+  try {
+    const raw = require("node:fs").readFileSync(join(home, PAIRED_DEVICES_FILE), "utf8");
+    return JSON.parse(raw).devices ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function makeService(RemoteAccessService, home, extra = {}) {
   return new RemoteAccessService({
     remoteDir: join(home, "remote"),
@@ -356,6 +388,157 @@ async function main() {
     } finally {
       for (const s of opened) s.destroy();
       await service.setEnabled(false).catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  /* ====================================================================== */
+  /* F4: a revoke must never be undone by an in-flight last-seen flush      */
+  /* ====================================================================== */
+
+  {
+    // The store's cosmetic last-seen flush is async. A revoke is synchronous
+    // and is the security boundary of the feature, so it has to win no
+    // matter where the flush happens to be. This drives the REAL scheduled
+    // flush callback and fires the revoke inside the async write window by
+    // holding fs.promises.writeFile open, which makes the race deterministic
+    // instead of relying on timing luck.
+    const pairingModule = await loadPairing();
+    const nodeFs = require("node:fs");
+    const realWriteFile = nodeFs.promises.writeFile;
+
+    const home = mkdtempSync(join(tmpdir(), "codara-hostile-f4-"));
+    const deviceKey = Buffer.alloc(32, 9);
+    const deviceKeyB64 = deviceKey.toString("base64");
+    try {
+      const store = new pairingModule.PairedDeviceStore(home);
+      store.addDevice(deviceKey, "Doomed phone", Date.now());
+      check("F4 setup: the device is paired and on disk", readDevices(home).length === 1);
+
+      // Hold the flush inside its write, revoke while it is suspended, then
+      // let it finish. This is step 2-to-4 of the reported sequence.
+      let releaseWrite;
+      let writeEntered;
+      const entered = new Promise((r) => {
+        writeEntered = r;
+      });
+      const released = new Promise((r) => {
+        releaseWrite = r;
+      });
+      let intercepted = false;
+      nodeFs.promises.writeFile = async (...args) => {
+        if (!intercepted && String(args[0]).includes(PAIRED_DEVICES_FILE)) {
+          intercepted = true;
+          writeEntered();
+          await released;
+        }
+        return realWriteFile.apply(nodeFs.promises, args);
+      };
+
+      // Schedule the flush the way production does, then run it now rather
+      // than waiting out the coalescing delay.
+      store.touchLastSeen(deviceKey, Date.now());
+      const flushing = store.flushPendingWrites();
+      await entered;
+
+      // The revoke lands while the flush is suspended mid-write.
+      const revoked = store.revokeDevice(deviceKeyB64);
+      check("F4: revoke reports success during the flush window", revoked === true);
+      check("F4: revoke is durable immediately", readDevices(home).length === 0, readDevices(home));
+
+      releaseWrite();
+      await flushing;
+      await store.flushPendingWrites();
+
+      check(
+        "F4: the in-flight flush did not resurrect the revoked device on disk",
+        readDevices(home).length === 0,
+        readDevices(home),
+      );
+
+      // The real proof: a fresh store, as a new app launch would build it.
+      const reloaded = new pairingModule.PairedDeviceStore(home);
+      check(
+        "F4: a fresh store does not re-authorize the revoked device",
+        reloaded.isAuthorized(deviceKey) === false,
+        reloaded.list(),
+      );
+
+      // The hardest window: the revoke lands while the flush's RENAME is
+      // already on the threadpool, so the flush genuinely can clobber the
+      // authoritative file and the only cure is re-asserting the truth
+      // afterwards. Intercepting rename (not writeFile) is what puts the
+      // race in that exact window.
+      //
+      // Note on what this case does and does not prove. Unlike the F4 case
+      // above, it does NOT fail against the ORIGINAL code, because there
+      // both writers shared one tmp path: the synchronous revoke happened to
+      // overwrite and then rename away the very staging file the flush was
+      // about to publish, so the flush's rename failed with ENOENT and the
+      // revoke survived by accident. What this case guards is the deliberate
+      // repair in the CURRENT design, where unique tmp names remove that
+      // accident. Verified by deleting the post-rename repair: both
+      // assertions below fail without it.
+      nodeFs.promises.writeFile = realWriteFile;
+      const realRename = nodeFs.promises.rename;
+      const home2 = mkdtempSync(join(tmpdir(), "codara-hostile-f4b-"));
+      try {
+        const store3 = new pairingModule.PairedDeviceStore(home2);
+        store3.addDevice(deviceKey, "Doomed again", Date.now());
+
+        let releaseRename;
+        let renameEntered;
+        const enteredRename = new Promise((r) => {
+          renameEntered = r;
+        });
+        const releasedRename = new Promise((r) => {
+          releaseRename = r;
+        });
+        let renameIntercepted = false;
+        nodeFs.promises.rename = async (...args) => {
+          if (!renameIntercepted && String(args[1]).includes(PAIRED_DEVICES_FILE)) {
+            renameIntercepted = true;
+            renameEntered();
+            await releasedRename;
+          }
+          return realRename.apply(nodeFs.promises, args);
+        };
+
+        store3.touchLastSeen(deviceKey, Date.now());
+        const flushing3 = store3.flushPendingWrites();
+        await enteredRename;
+        check("F4b: revoke lands while the flush rename is in flight", store3.revokeDevice(deviceKeyB64) === true);
+        releaseRename();
+        await flushing3;
+        await store3.flushPendingWrites();
+
+        check(
+          "F4b: the clobbering rename is repaired, revoke is the last word",
+          readDevices(home2).length === 0,
+          readDevices(home2),
+        );
+        check(
+          "F4b: a fresh store still does not re-authorize",
+          new pairingModule.PairedDeviceStore(home2).isAuthorized(deviceKey) === false,
+        );
+      } finally {
+        nodeFs.promises.rename = realRename;
+        rmSync(home2, { recursive: true, force: true });
+      }
+
+      // A flush that is NOT racing a revoke must still persist lastSeen,
+      // otherwise the fix would have quietly broken the feature.
+      const store2 = new pairingModule.PairedDeviceStore(home);
+      store2.addDevice(deviceKey, "Second phone", 1000);
+      store2.touchLastSeen(deviceKey, 4242);
+      await store2.flushPendingWrites();
+      check(
+        "F4: an unraced last-seen flush still persists normally",
+        readDevices(home)[0]?.lastSeenAt === 4242,
+        readDevices(home)[0],
+      );
+    } finally {
+      nodeFs.promises.writeFile = realWriteFile;
       rmSync(home, { recursive: true, force: true });
     }
   }
