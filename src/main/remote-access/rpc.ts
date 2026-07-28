@@ -53,10 +53,23 @@ export interface RemoteWorkspaceInfo {
   name: string;
   // Absolute path on the computer. Display only on the phone.
   path: string;
+  groupId?: string;
   color?: string;
   branch?: string;
   sessionCount?: number;
   lastActiveAt?: number;
+}
+
+export interface RemoteWorkspaceGroupInfo {
+  id: string;
+  name: string;
+  collapsed: boolean;
+}
+
+export interface RemoteWorkspaceOrganization {
+  groups: RemoteWorkspaceGroupInfo[];
+  // Mixed top-level ordering for ungrouped workspaces and workspace groups.
+  railOrder: string[];
 }
 
 export interface RemoteDirectoryInfo {
@@ -427,8 +440,25 @@ export interface RemoteRpcServices {
   // cannot choose terminal origin metadata.
   peerDevice?: DeviceInfo;
   listWorkspaces(): Promise<RemoteWorkspaceInfo[]>;
+  listWorkspaceOrganization?(): Promise<RemoteWorkspaceOrganization>;
   listDirectories?(path?: string): Promise<RemoteDirectoryListing>;
   addWorkspace?(input: { path: string; name?: string }): Promise<RemoteWorkspaceInfo>;
+  createWorkspaceGroup?(name: string): Promise<RemoteWorkspaceGroupInfo>;
+  updateWorkspaceGroup?(input: {
+    groupId: string;
+    name?: string;
+    collapsed?: boolean;
+  }): Promise<RemoteWorkspaceGroupInfo>;
+  deleteWorkspaceGroup?(groupId: string): Promise<void>;
+  moveWorkspace?(input: {
+    workspaceId: string;
+    groupId: string | null;
+    beforeWorkspaceId?: string | null;
+  }): Promise<RemoteWorkspaceInfo>;
+  reorderWorkspaceRail?(input: {
+    itemId: string;
+    beforeItemId?: string | null;
+  }): Promise<void>;
   listFiles?(input: { workspaceId: string; path?: string }): Promise<RemoteFileListing>;
   readFile?(input: { workspaceId: string; path: string }): Promise<RemoteFileContent>;
   createFileEntry?(input: {
@@ -690,6 +720,10 @@ export class RpcSession {
     this.send({ event, payload });
   }
 
+  pushWorkspacesChanged(): void {
+    this.pushEvent("workspaces.changed", {});
+  }
+
   // Terminal output specifically: unsolicited, unbounded in volume, and the
   // one thing a slow peer can use to grow our memory. While the socket is
   // backed up we first try to stop the pty at the OS level; if the handle
@@ -797,7 +831,10 @@ export class RpcSession {
           return;
         case "workspaces.list": {
           const workspaces = await this.services.listWorkspaces();
-          this.reply(id, { workspaces });
+          const organization = this.services.listWorkspaceOrganization
+            ? await this.services.listWorkspaceOrganization()
+            : { groups: [], railOrder: workspaces.map((workspace) => workspace.id) };
+          this.reply(id, { workspaces, ...organization });
           return;
         }
         case "directories.list": {
@@ -835,6 +872,155 @@ export class RpcSession {
               : {}),
           });
           this.reply(id, { workspace });
+          return;
+        }
+        case "workspaces.group.create": {
+          if (!this.services.createWorkspaceGroup) {
+            this.replyError(id, "unknown-method", "Workspace folders are not available.");
+            return;
+          }
+          const p = (params ?? {}) as { name?: unknown };
+          if (
+            typeof p.name !== "string" ||
+            p.name.trim().length === 0 ||
+            p.name.length > 120
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "workspaces.group.create needs a folder name up to 120 characters.",
+            );
+            return;
+          }
+          const group = await this.services.createWorkspaceGroup(p.name.trim());
+          this.reply(id, { group });
+          return;
+        }
+        case "workspaces.group.update": {
+          if (!this.services.updateWorkspaceGroup) {
+            this.replyError(id, "unknown-method", "Workspace folders are not available.");
+            return;
+          }
+          const p = (params ?? {}) as {
+            groupId?: unknown;
+            name?: unknown;
+            collapsed?: unknown;
+          };
+          if (
+            typeof p.groupId !== "string" ||
+            p.groupId.length === 0 ||
+            p.groupId.length > 256 ||
+            (p.name === undefined && p.collapsed === undefined) ||
+            (p.name !== undefined &&
+              (typeof p.name !== "string" ||
+                p.name.trim().length === 0 ||
+                p.name.length > 120)) ||
+            (p.collapsed !== undefined && typeof p.collapsed !== "boolean")
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "workspaces.group.update needs a groupId and a valid name or collapsed state.",
+            );
+            return;
+          }
+          const group = await this.services.updateWorkspaceGroup({
+            groupId: p.groupId,
+            ...(typeof p.name === "string" ? { name: p.name.trim() } : {}),
+            ...(typeof p.collapsed === "boolean" ? { collapsed: p.collapsed } : {}),
+          });
+          this.reply(id, { group });
+          return;
+        }
+        case "workspaces.group.delete": {
+          if (!this.services.deleteWorkspaceGroup) {
+            this.replyError(id, "unknown-method", "Workspace folders are not available.");
+            return;
+          }
+          const p = (params ?? {}) as { groupId?: unknown };
+          if (
+            typeof p.groupId !== "string" ||
+            p.groupId.length === 0 ||
+            p.groupId.length > 256
+          ) {
+            this.replyError(id, "invalid-params", "workspaces.group.delete needs a groupId.");
+            return;
+          }
+          await this.services.deleteWorkspaceGroup(p.groupId);
+          this.reply(id, {});
+          return;
+        }
+        case "workspaces.move": {
+          if (!this.services.moveWorkspace) {
+            this.replyError(id, "unknown-method", "Workspace organization is not available.");
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            groupId?: unknown;
+            beforeWorkspaceId?: unknown;
+          };
+          if (
+            typeof p.workspaceId !== "string" ||
+            p.workspaceId.length === 0 ||
+            p.workspaceId.length > 256 ||
+            (p.groupId !== null &&
+              (typeof p.groupId !== "string" ||
+                p.groupId.length === 0 ||
+                p.groupId.length > 256)) ||
+            (p.beforeWorkspaceId !== undefined &&
+              p.beforeWorkspaceId !== null &&
+              (typeof p.beforeWorkspaceId !== "string" ||
+                p.beforeWorkspaceId.length === 0 ||
+                p.beforeWorkspaceId.length > 256))
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "workspaces.move needs workspaceId, groupId, and an optional beforeWorkspaceId.",
+            );
+            return;
+          }
+          const workspace = await this.services.moveWorkspace({
+            workspaceId: p.workspaceId,
+            groupId: p.groupId,
+            ...(p.beforeWorkspaceId !== undefined
+              ? { beforeWorkspaceId: p.beforeWorkspaceId as string | null }
+              : {}),
+          });
+          this.reply(id, { workspace });
+          return;
+        }
+        case "workspaces.rail.move": {
+          if (!this.services.reorderWorkspaceRail) {
+            this.replyError(id, "unknown-method", "Workspace organization is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { itemId?: unknown; beforeItemId?: unknown };
+          if (
+            typeof p.itemId !== "string" ||
+            p.itemId.length === 0 ||
+            p.itemId.length > 256 ||
+            (p.beforeItemId !== undefined &&
+              p.beforeItemId !== null &&
+              (typeof p.beforeItemId !== "string" ||
+                p.beforeItemId.length === 0 ||
+                p.beforeItemId.length > 256))
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "workspaces.rail.move needs itemId and an optional beforeItemId.",
+            );
+            return;
+          }
+          await this.services.reorderWorkspaceRail({
+            itemId: p.itemId,
+            ...(p.beforeItemId !== undefined
+              ? { beforeItemId: p.beforeItemId as string | null }
+              : {}),
+          });
+          this.reply(id, {});
           return;
         }
         case "files.list": {

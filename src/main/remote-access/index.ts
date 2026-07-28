@@ -72,8 +72,14 @@ export interface RemoteAccessDeps {
   // Studio version reported in hello.
   appVersion: string;
   listWorkspaces: RemoteRpcServices["listWorkspaces"];
+  listWorkspaceOrganization?: RemoteRpcServices["listWorkspaceOrganization"];
   listDirectories?: RemoteRpcServices["listDirectories"];
   addWorkspace?: RemoteRpcServices["addWorkspace"];
+  createWorkspaceGroup?: RemoteRpcServices["createWorkspaceGroup"];
+  updateWorkspaceGroup?: RemoteRpcServices["updateWorkspaceGroup"];
+  deleteWorkspaceGroup?: RemoteRpcServices["deleteWorkspaceGroup"];
+  moveWorkspace?: RemoteRpcServices["moveWorkspace"];
+  reorderWorkspaceRail?: RemoteRpcServices["reorderWorkspaceRail"];
   listFiles?: RemoteRpcServices["listFiles"];
   readFile?: RemoteRpcServices["readFile"];
   createFileEntry?: RemoteRpcServices["createFileEntry"];
@@ -167,6 +173,12 @@ export class RemoteAccessService {
   onPairingChanged(listener: (state: RemotePairingState) => void): () => void {
     this.pairingListeners.add(listener);
     return () => this.pairingListeners.delete(listener);
+  }
+
+  notifyWorkspacesChanged(): void {
+    for (const sessions of this.sessions.values()) {
+      for (const session of sessions) session.pushWorkspacesChanged();
+    }
   }
 
   private setStatus(status: RemoteAccessStatus): void {
@@ -527,8 +539,14 @@ export class RemoteAccessService {
         version: "",
       },
       listWorkspaces: this.deps.listWorkspaces,
+      listWorkspaceOrganization: this.deps.listWorkspaceOrganization,
       listDirectories: this.deps.listDirectories,
       addWorkspace: this.deps.addWorkspace,
+      createWorkspaceGroup: this.deps.createWorkspaceGroup,
+      updateWorkspaceGroup: this.deps.updateWorkspaceGroup,
+      deleteWorkspaceGroup: this.deps.deleteWorkspaceGroup,
+      moveWorkspace: this.deps.moveWorkspace,
+      reorderWorkspaceRail: this.deps.reorderWorkspaceRail,
       listFiles: this.deps.listFiles,
       readFile: this.deps.readFile,
       createFileEntry: this.deps.createFileEntry,

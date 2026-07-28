@@ -45,6 +45,7 @@ let cache: AppState | null = null;
 let settingsCache: AppSettings | null = null;
 let writing: Promise<void> = Promise.resolve();
 let settingsWriting: Promise<void> = Promise.resolve();
+const stateSavedListeners = new Set<(state: AppState) => void>();
 
 function statePath(): string {
   return join(sparkHome(), STATE_FILE);
@@ -271,6 +272,18 @@ export async function saveState(state: AppState): Promise<void> {
     console.error("[storage] write failed:", err);
   });
   await write;
+  for (const listener of stateSavedListeners) {
+    try {
+      listener(normalizedState);
+    } catch (err) {
+      console.error("[storage] state-saved listener failed:", err);
+    }
+  }
+}
+
+export function onStateSaved(listener: (state: AppState) => void): () => void {
+  stateSavedListeners.add(listener);
+  return () => stateSavedListeners.delete(listener);
 }
 
 export async function loadSettings(): Promise<AppSettings> {

@@ -1451,6 +1451,37 @@ async function main() {
           branch: "main",
         };
       },
+      listWorkspaceOrganization: async () => ({
+        groups: [{ id: "group-studio", name: "Studio", collapsed: false }],
+        railOrder: ["group-studio"],
+      }),
+      createWorkspaceGroup: async (name) => {
+        calls.push(["workspaces.group.create", name]);
+        return { id: "group-new", name, collapsed: false };
+      },
+      updateWorkspaceGroup: async (input) => {
+        calls.push(["workspaces.group.update", input]);
+        return {
+          id: input.groupId,
+          name: input.name ?? "Studio",
+          collapsed: input.collapsed ?? false,
+        };
+      },
+      deleteWorkspaceGroup: async (groupId) => {
+        calls.push(["workspaces.group.delete", groupId]);
+      },
+      moveWorkspace: async (input) => {
+        calls.push(["workspaces.move", input]);
+        return {
+          id: input.workspaceId,
+          name: "One",
+          path: "/tmp/one",
+          ...(input.groupId ? { groupId: input.groupId } : {}),
+        };
+      },
+      reorderWorkspaceRail: async (input) => {
+        calls.push(["workspaces.rail.move", input]);
+      },
       listFiles: async (input) => {
         calls.push(["files.list", input]);
         return {
@@ -1660,6 +1691,14 @@ async function main() {
     });
     await flush();
 
+    exReq(11, "workspaces.list", {});
+    await flush();
+    check(
+      "workspaces.list returns Studio workspace folders and top-level order",
+      ex.outbox.at(-1)?.result?.groups?.[0]?.name === "Studio" &&
+        ex.outbox.at(-1)?.result?.railOrder?.[0] === "group-studio",
+      ex.outbox.at(-1),
+    );
     exReq(2, "directories.list", { path: "/Users/e/Projects" });
     await flush();
     check(
@@ -1673,6 +1712,61 @@ async function main() {
       "workspaces.add trims its display name and returns appearance metadata",
       calls.at(-1)?.[1]?.name === "Mobile" &&
         ex.outbox.at(-1)?.result?.workspace?.color === "#2AA298",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(31, "workspaces.group.create", { name: "  Mobile folder  " });
+    await flush();
+    check(
+      "workspaces.group.create trims and delegates its bounded name",
+      calls.at(-1)?.[0] === "workspaces.group.create" &&
+        calls.at(-1)?.[1] === "Mobile folder" &&
+        ex.outbox.at(-1)?.result?.group?.id === "group-new",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(32, "workspaces.group.update", {
+      groupId: "group-studio",
+      name: "  Products  ",
+      collapsed: true,
+    });
+    await flush();
+    check(
+      "workspaces.group.update delegates name and collapsed state",
+      calls.at(-1)?.[0] === "workspaces.group.update" &&
+        calls.at(-1)?.[1]?.name === "Products" &&
+        calls.at(-1)?.[1]?.collapsed === true,
+      calls.at(-1),
+    );
+    exReq(33, "workspaces.move", {
+      workspaceId: "ws1",
+      groupId: "group-studio",
+      beforeWorkspaceId: null,
+    });
+    await flush();
+    check(
+      "workspaces.move delegates an explicit group destination",
+      calls.at(-1)?.[0] === "workspaces.move" &&
+        calls.at(-1)?.[1]?.groupId === "group-studio" &&
+        ex.outbox.at(-1)?.result?.workspace?.groupId === "group-studio",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(34, "workspaces.rail.move", {
+      itemId: "group-studio",
+      beforeItemId: null,
+    });
+    await flush();
+    check(
+      "workspaces.rail.move delegates top-level ordering",
+      calls.at(-1)?.[0] === "workspaces.rail.move" &&
+        calls.at(-1)?.[1]?.beforeItemId === null,
+      calls.at(-1),
+    );
+    exReq(35, "workspaces.group.delete", { groupId: "group-studio" });
+    await flush();
+    check(
+      "workspaces.group.delete delegates without deleting workspaces",
+      calls.at(-1)?.[0] === "workspaces.group.delete" &&
+        calls.at(-1)?.[1] === "group-studio" &&
+        ex.outbox.at(-1)?.ok === true,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
     exReq(4, "files.list", { workspaceId: "ws1", path: "" });

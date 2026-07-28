@@ -13,7 +13,7 @@ import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
 import { isRemotePath } from "@shared/remote";
-import type { AppState, RunState, Workspace } from "@shared/types";
+import type { AppState, RunState, Workspace, WorkspaceGroup } from "@shared/types";
 import { logMain } from "../file-log";
 import { setAllowedRoots } from "../fs-sandbox";
 import { getCommitDetail as readGitCommitDetail } from "../git-inspect";
@@ -31,7 +31,7 @@ import {
 import { getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
 import { sparkHome } from "../spark-home";
-import { loadState, saveState } from "../storage";
+import { loadState, onStateSaved, saveState } from "../storage";
 import { requestTerminalOp } from "../terminal-bridge";
 import {
   RemoteAccessService,
@@ -72,10 +72,13 @@ import type {
   RemoteGitCommitSummary,
   RemoteGitLog,
   RemoteGitStatus,
+  RemoteWorkspaceGroupInfo,
   RemoteWorkspaceInfo,
+  RemoteWorkspaceOrganization,
 } from "./rpc";
 
 let singleton: RemoteAccessService | null = null;
+let stateSavedSubscriptionInstalled = false;
 let workspaceMutation: Promise<void> = Promise.resolve();
 const coraMessageMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
@@ -98,6 +101,7 @@ const COLLECTION_BUDGET_BYTES = 384 * 1024;
 const REMOTE_FILE_MAX_BYTES = 384 * 1024;
 const CORA_MESSAGE_MAX_BYTES = 32 * 1024;
 const MAX_REMOTE_WORKSPACES = 200;
+const MAX_REMOTE_WORKSPACE_GROUPS = 100;
 const MAX_DIRECTORY_ENTRIES = 500;
 const MAX_FILE_ENTRIES = 750;
 const MAX_CORA_RUNS = 50;
@@ -121,29 +125,41 @@ const ACTIVE_WORKER_ATTEMPT_STATUSES = new Set([
 ]);
 
 export function getRemoteAccessService(): RemoteAccessService {
-  singleton ??= new RemoteAccessService({
-    remoteDir: join(sparkHome(), "remote"),
-    deviceName: hostname(),
-    appVersion: app.getVersion(),
-    listWorkspaces: listWorkspacesForRemote,
-    listDirectories: listDirectoriesForRemote,
-    addWorkspace: addWorkspaceForRemote,
-    listFiles: listFilesForRemote,
-    readFile: readFileForRemote,
-    createFileEntry: createFileEntryForRemote,
-    renameFileEntry: renameFileEntryForRemote,
-    moveFileEntry: moveFileEntryForRemote,
-    deleteFileEntry: deleteFileEntryForRemote,
-    getGitStatus: getGitStatusForRemote,
-    getGitLog: getGitLogForRemote,
-    getGitCommitDetail: getGitCommitDetailForRemote,
-    listCoraHistory: listCoraHistoryForRemote,
-    getCoraRun: getCoraRunForRemote,
-    sendCoraMessage: sendCoraMessageForRemote,
-    beginImageUpload: beginImageUploadForRemote,
-    createTerminal: createRemoteTerminal,
-    log: (line) => logMain("remote-access", line),
-  });
+  if (!singleton) {
+    singleton = new RemoteAccessService({
+      remoteDir: join(sparkHome(), "remote"),
+      deviceName: hostname(),
+      appVersion: app.getVersion(),
+      listWorkspaces: listWorkspacesForRemote,
+      listWorkspaceOrganization: listWorkspaceOrganizationForRemote,
+      listDirectories: listDirectoriesForRemote,
+      addWorkspace: addWorkspaceForRemote,
+      createWorkspaceGroup: createWorkspaceGroupForRemote,
+      updateWorkspaceGroup: updateWorkspaceGroupForRemote,
+      deleteWorkspaceGroup: deleteWorkspaceGroupForRemote,
+      moveWorkspace: moveWorkspaceForRemote,
+      reorderWorkspaceRail: reorderWorkspaceRailForRemote,
+      listFiles: listFilesForRemote,
+      readFile: readFileForRemote,
+      createFileEntry: createFileEntryForRemote,
+      renameFileEntry: renameFileEntryForRemote,
+      moveFileEntry: moveFileEntryForRemote,
+      deleteFileEntry: deleteFileEntryForRemote,
+      getGitStatus: getGitStatusForRemote,
+      getGitLog: getGitLogForRemote,
+      getGitCommitDetail: getGitCommitDetailForRemote,
+      listCoraHistory: listCoraHistoryForRemote,
+      getCoraRun: getCoraRunForRemote,
+      sendCoraMessage: sendCoraMessageForRemote,
+      beginImageUpload: beginImageUploadForRemote,
+      createTerminal: createRemoteTerminal,
+      log: (line) => logMain("remote-access", line),
+    });
+  }
+  if (!stateSavedSubscriptionInstalled) {
+    stateSavedSubscriptionInstalled = true;
+    onStateSaved(() => singleton?.notifyWorkspacesChanged());
+  }
   return singleton;
 }
 
@@ -180,6 +196,53 @@ async function listWorkspacesForRemote(): Promise<RemoteWorkspaceInfo[]> {
   return result;
 }
 
+async function listWorkspaceOrganizationForRemote(): Promise<RemoteWorkspaceOrganization> {
+  const state = await loadState();
+  const groups: RemoteWorkspaceGroupInfo[] = [];
+  let usedBytes = 2;
+  for (const group of state.workspaceGroups) {
+    if (groups.length >= MAX_REMOTE_WORKSPACE_GROUPS) break;
+    const info = workspaceGroupInfo(group);
+    const bytes = Buffer.byteLength(JSON.stringify(info), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    groups.push(info);
+    usedBytes += bytes;
+  }
+  const groupIds = new Set(groups.map((group) => group.id));
+  const localUngroupedIds = state.workspaces
+    .filter((workspace) => !workspace.groupId && !isRemotePath(workspace.cwd))
+    .map((workspace) => workspace.id);
+  const eligible = new Set([...localUngroupedIds, ...groupIds]);
+  const railOrder: string[] = [];
+  const seen = new Set<string>();
+  for (const itemId of state.workspaceRailOrder ?? []) {
+    if (!eligible.has(itemId) || seen.has(itemId)) continue;
+    seen.add(itemId);
+    railOrder.push(itemId);
+  }
+  for (const itemId of eligible) {
+    if (!seen.has(itemId)) railOrder.push(itemId);
+  }
+  return { groups, railOrder };
+}
+
+function workspaceGroupInfo(group: WorkspaceGroup): RemoteWorkspaceGroupInfo {
+  return {
+    id: group.id,
+    name: truncateUtf8(group.name, 512),
+    collapsed: group.collapsed,
+  };
+}
+
+function remoteWorkspaceGroupName(value: string): string {
+  const name = truncateUtf8(
+    value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim(),
+    512,
+  );
+  if (!name) throw new Error("Workspace folder names cannot be empty.");
+  return name;
+}
+
 async function workspaceInfo(workspace: Workspace): Promise<RemoteWorkspaceInfo> {
   let branch: string | undefined;
   try {
@@ -192,6 +255,7 @@ async function workspaceInfo(workspace: Workspace): Promise<RemoteWorkspaceInfo>
     id: workspace.id,
     name: truncateUtf8(workspace.name, 512),
     path: workspace.cwd,
+    ...(workspace.groupId ? { groupId: workspace.groupId } : {}),
     color: workspace.color,
     ...(branch ? { branch } : {}),
   };
@@ -271,6 +335,236 @@ async function addWorkspaceForRemote(input: {
     broadcastStateChanged(next);
     return workspaceInfo(workspace);
   });
+}
+
+async function createWorkspaceGroupForRemote(name: string): Promise<RemoteWorkspaceGroupInfo> {
+  return serializeWorkspaceMutation(async () => {
+    const state = await loadState();
+    if (state.workspaceGroups.length >= MAX_REMOTE_WORKSPACE_GROUPS) {
+      throw new Error(`Codara Studio supports at most ${MAX_REMOTE_WORKSPACE_GROUPS} remote workspace folders.`);
+    }
+    const group: WorkspaceGroup = {
+      id: `workspace-group-mobile-${randomUUID()}`,
+      name: remoteWorkspaceGroupName(name),
+      collapsed: false,
+    };
+    const next: AppState = {
+      ...state,
+      workspaceGroups: [...state.workspaceGroups, group],
+      workspaceRailOrder: normalizeWorkspaceRailOrderForRemote(
+        [...(state.workspaceRailOrder ?? []), group.id],
+        state.workspaces,
+        [...state.workspaceGroups, group],
+      ),
+    };
+    await persistRemoteWorkspaceState(next);
+    return workspaceGroupInfo(group);
+  });
+}
+
+async function updateWorkspaceGroupForRemote(input: {
+  groupId: string;
+  name?: string;
+  collapsed?: boolean;
+}): Promise<RemoteWorkspaceGroupInfo> {
+  return serializeWorkspaceMutation(async () => {
+    const state = await loadState();
+    const index = state.workspaceGroups.findIndex((group) => group.id === input.groupId);
+    if (index < 0) throw new Error("This workspace folder no longer exists.");
+    const current = state.workspaceGroups[index];
+    const updated: WorkspaceGroup = {
+      ...current,
+      ...(input.name !== undefined
+        ? { name: remoteWorkspaceGroupName(input.name) }
+        : {}),
+      ...(input.collapsed !== undefined ? { collapsed: input.collapsed } : {}),
+    };
+    const workspaceGroups = state.workspaceGroups.slice();
+    workspaceGroups[index] = updated;
+    await persistRemoteWorkspaceState({ ...state, workspaceGroups });
+    return workspaceGroupInfo(updated);
+  });
+}
+
+async function deleteWorkspaceGroupForRemote(groupId: string): Promise<void> {
+  return serializeWorkspaceMutation(async () => {
+    const state = await loadState();
+    const groupIndex = state.workspaceGroups.findIndex((group) => group.id === groupId);
+    if (groupIndex < 0) throw new Error("This workspace folder no longer exists.");
+    const workspaceGroups = state.workspaceGroups.filter((group) => group.id !== groupId);
+    const releasedIds: string[] = [];
+    const workspaces = state.workspaces.map((workspace) => {
+      if (workspace.groupId !== groupId) return workspace;
+      releasedIds.push(workspace.id);
+      const { groupId: _discarded, ...ungrouped } = workspace;
+      return ungrouped;
+    });
+    const oldOrder = state.workspaceRailOrder ?? [];
+    const oldIndex = oldOrder.indexOf(groupId);
+    const withoutGroup = oldOrder.filter(
+      (itemId) => itemId !== groupId && !releasedIds.includes(itemId),
+    );
+    withoutGroup.splice(
+      oldIndex >= 0 ? Math.min(oldIndex, withoutGroup.length) : withoutGroup.length,
+      0,
+      ...releasedIds,
+    );
+    await persistRemoteWorkspaceState({
+      ...state,
+      workspaces,
+      workspaceGroups,
+      workspaceRailOrder: normalizeWorkspaceRailOrderForRemote(
+        withoutGroup,
+        workspaces,
+        workspaceGroups,
+      ),
+    });
+  });
+}
+
+async function moveWorkspaceForRemote(input: {
+  workspaceId: string;
+  groupId: string | null;
+  beforeWorkspaceId?: string | null;
+}): Promise<RemoteWorkspaceInfo> {
+  return serializeWorkspaceMutation(async () => {
+    const state = await loadState();
+    const sourceIndex = state.workspaces.findIndex(
+      (workspace) => workspace.id === input.workspaceId,
+    );
+    if (sourceIndex < 0 || isRemotePath(state.workspaces[sourceIndex].cwd)) {
+      throw new Error("This local workspace no longer exists.");
+    }
+    if (
+      input.groupId !== null &&
+      !state.workspaceGroups.some((group) => group.id === input.groupId)
+    ) {
+      throw new Error("The destination workspace folder no longer exists.");
+    }
+    if (input.beforeWorkspaceId === input.workspaceId) {
+      return workspaceInfo(state.workspaces[sourceIndex]);
+    }
+    if (input.beforeWorkspaceId) {
+      const before = state.workspaces.find(
+        (workspace) => workspace.id === input.beforeWorkspaceId,
+      );
+      if (
+        !before ||
+        isRemotePath(before.cwd) ||
+        (before.groupId ?? null) !== input.groupId
+      ) {
+        throw new Error("The requested workspace position is no longer available.");
+      }
+    }
+
+    const source = state.workspaces[sourceIndex];
+    const remaining = state.workspaces.filter(
+      (workspace) => workspace.id !== input.workspaceId,
+    );
+    const moved: Workspace = input.groupId
+      ? { ...source, groupId: input.groupId }
+      : (() => {
+          const { groupId: _discarded, ...ungrouped } = source;
+          return ungrouped;
+        })();
+    let insertAt = input.beforeWorkspaceId
+      ? remaining.findIndex((workspace) => workspace.id === input.beforeWorkspaceId)
+      : -1;
+    if (insertAt < 0) {
+      let lastInDestination = -1;
+      for (let index = 0; index < remaining.length; index += 1) {
+        if ((remaining[index].groupId ?? null) === input.groupId) {
+          lastInDestination = index;
+        }
+      }
+      insertAt = lastInDestination >= 0 ? lastInDestination + 1 : remaining.length;
+    }
+    const workspaces = remaining.slice();
+    workspaces.splice(insertAt, 0, moved);
+
+    let railOrder = (state.workspaceRailOrder ?? []).filter(
+      (itemId) => itemId !== input.workspaceId,
+    );
+    if (input.groupId === null) railOrder = [...railOrder, input.workspaceId];
+    railOrder = normalizeWorkspaceRailOrderForRemote(
+      railOrder,
+      workspaces,
+      state.workspaceGroups,
+    );
+    await persistRemoteWorkspaceState({ ...state, workspaces, workspaceRailOrder: railOrder });
+    return workspaceInfo(moved);
+  });
+}
+
+async function reorderWorkspaceRailForRemote(input: {
+  itemId: string;
+  beforeItemId?: string | null;
+}): Promise<void> {
+  return serializeWorkspaceMutation(async () => {
+    const state = await loadState();
+    const isVisibleRailItem = (itemId: string): boolean =>
+      state.workspaceGroups.some((group) => group.id === itemId) ||
+      state.workspaces.some(
+        (workspace) =>
+          workspace.id === itemId &&
+          !workspace.groupId &&
+          !isRemotePath(workspace.cwd),
+      );
+    if (!isVisibleRailItem(input.itemId)) {
+      throw new Error("This workspace rail item no longer exists.");
+    }
+    if (
+      input.beforeItemId !== undefined &&
+      input.beforeItemId !== null &&
+      !isVisibleRailItem(input.beforeItemId)
+    ) {
+      throw new Error("The requested workspace rail position no longer exists.");
+    }
+    if (input.beforeItemId === input.itemId) return;
+    const current = normalizeWorkspaceRailOrderForRemote(
+      state.workspaceRailOrder ?? [],
+      state.workspaces,
+      state.workspaceGroups,
+    );
+    const remaining = current.filter((itemId) => itemId !== input.itemId);
+    const insertAt = input.beforeItemId
+      ? remaining.indexOf(input.beforeItemId)
+      : remaining.length;
+    if (input.beforeItemId && insertAt < 0) {
+      throw new Error("The requested workspace rail position no longer exists.");
+    }
+    const workspaceRailOrder = remaining.slice();
+    workspaceRailOrder.splice(insertAt, 0, input.itemId);
+    await persistRemoteWorkspaceState({ ...state, workspaceRailOrder });
+  });
+}
+
+function normalizeWorkspaceRailOrderForRemote(
+  order: readonly string[],
+  workspaces: readonly Workspace[],
+  groups: readonly WorkspaceGroup[],
+): string[] {
+  const eligible = new Set([
+    ...workspaces.filter((workspace) => !workspace.groupId).map((workspace) => workspace.id),
+    ...groups.map((group) => group.id),
+  ]);
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const itemId of order) {
+    if (!eligible.has(itemId) || seen.has(itemId)) continue;
+    seen.add(itemId);
+    result.push(itemId);
+  }
+  for (const itemId of eligible) {
+    if (!seen.has(itemId)) result.push(itemId);
+  }
+  return result;
+}
+
+async function persistRemoteWorkspaceState(state: AppState): Promise<void> {
+  await saveState(state);
+  setAllowedRoots(state.workspaces.map((workspace) => workspace.cwd));
+  broadcastStateChanged(state);
 }
 
 function serializeWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
