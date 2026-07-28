@@ -9,20 +9,29 @@
 // candidate. Everything here is read-only and best-effort: a vanished file or
 // unparseable line skips that entry, never fails the listing.
 //
-// Titles come from the first real user message. That read is head-only (fixed
-// byte budget) so multi-MB transcripts stay cheap to list.
+// Titles prefer Claude Code's own generated `ai-title` record (a short topic
+// label like "fix-claude-session-restore") and fall back to the first real
+// user message. Head reads are budgeted (fixed bytes) so multi-MB transcripts
+// stay cheap to list; the ai-title fallback scan is cached in
+// session-titles.ts.
 
 import { promises as fs } from "node:fs";
 import { basename, join } from "node:path";
 import { claudeProjectsDirForCwd } from "./orchestration/claude-paths";
 import { extractSessionUuid, sessionsDirFor } from "./orchestration/codex-sessions";
+import {
+  clampTitle,
+  findClaudeAiTitle,
+  parseClaudeHead,
+  parseCodexHead,
+} from "./session-titles";
 
 export interface AgentHistoryEntry {
   runtime: "claude" | "codex";
   sessionId: string;
   cwd: string;
-  // First real user message (whitespace-collapsed, capped) — or a runtime
-  // fallback label when no clean title could be extracted.
+  // Claude Code's generated ai-title when the transcript has one, else the
+  // first real user message (whitespace-collapsed, capped).
   title: string;
   // ISO timestamp of the transcript's last write (mtime) — "when this
   // conversation last had activity", which is what the menu sorts/labels by.
@@ -43,111 +52,24 @@ const CODEX_SCAN_DAYS = 30;
 // not turn one popover open into thousands of file reads.
 const CODEX_SCAN_FILE_CAP = 200;
 
-function collapseTitle(raw: string): string | null {
-  const text = raw.replace(/\s+/g, " ").trim();
-  if (!text) return null;
-  return text.length > TITLE_MAX_CHARS ? `${text.slice(0, TITLE_MAX_CHARS - 1)}…` : text;
-}
-
-// True for user-message payloads that are tooling noise, not conversation:
-// slash-command envelopes, command stdout echoes, caveat banners, and injected
-// context blocks (Codex environment/instructions wrappers start with '<').
-function isNoiseUserText(text: string): boolean {
-  const t = text.trimStart();
-  return (
-    t.length === 0 ||
-    t.startsWith("<command-name>") ||
-    t.startsWith("<local-command") ||
-    t.startsWith("<command-message>") ||
-    t.startsWith("<user_instructions>") ||
-    t.startsWith("<environment_context>") ||
-    t.startsWith("<system-reminder>") ||
-    t.startsWith("Caveat: ")
-  );
-}
-
 // Pull the first real user-message text out of a Claude transcript head.
 // Exported for scripts/test-agent-history.cjs. Returns null when the head
 // holds no usable user text (stillborn session, pure tool traffic) — and
 // `sidechain: true` when the file is a subagent transcript that should not be
-// listed at all.
+// listed at all. Sanitizing/parsing rules live in session-titles.ts.
 export function extractClaudeTitle(headText: string): { title: string | null; sidechain: boolean } {
-  let sidechain = false;
-  for (const line of headText.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let rec: unknown;
-    try {
-      rec = JSON.parse(trimmed);
-    } catch {
-      continue; // truncated tail of the fixed-size head read
-    }
-    const r = rec as {
-      type?: unknown;
-      isMeta?: unknown;
-      isSidechain?: unknown;
-      message?: { content?: unknown };
-    };
-    if (r.isSidechain === true) sidechain = true;
-    if (r.type !== "user" || r.isMeta === true) continue;
-    const content = r.message?.content;
-    if (typeof content === "string") {
-      if (isNoiseUserText(content)) continue;
-      const title = collapseTitle(content);
-      if (title) return { title, sidechain };
-      continue;
-    }
-    if (Array.isArray(content)) {
-      for (const block of content) {
-        const b = block as { type?: unknown; text?: unknown };
-        if (b.type !== "text" || typeof b.text !== "string") continue;
-        if (isNoiseUserText(b.text)) continue;
-        const title = collapseTitle(b.text);
-        if (title) return { title, sidechain };
-      }
-    }
-  }
-  return { title: null, sidechain };
+  const head = parseClaudeHead(headText);
+  return {
+    title: head.firstUserText === null ? null : clampTitle(head.firstUserText, TITLE_MAX_CHARS),
+    sidechain: head.sawSidechain,
+  };
 }
 
-// Codex rollout heads mix schema generations; accept the user-message shapes
-// Codex has used (response_item message with input_text blocks, event_msg
-// user_message) and skip injected '<...>' context wrappers. Exported for
-// scripts/test-agent-history.cjs.
+// First real Codex user message, schema-tolerant (see parseCodexHead).
+// Exported for scripts/test-agent-history.cjs.
 export function extractCodexTitle(headText: string): string | null {
-  for (const line of headText.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let rec: unknown;
-    try {
-      rec = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    const payload = (rec as { payload?: unknown }).payload ?? rec;
-    const p = payload as {
-      type?: unknown;
-      role?: unknown;
-      content?: unknown;
-      message?: unknown;
-    };
-    if (p.type === "message" && p.role === "user" && Array.isArray(p.content)) {
-      for (const block of p.content) {
-        const b = block as { type?: unknown; text?: unknown };
-        if ((b.type === "input_text" || b.type === "text") && typeof b.text === "string") {
-          if (isNoiseUserText(b.text)) continue;
-          const title = collapseTitle(b.text);
-          if (title) return title;
-        }
-      }
-    }
-    if (p.type === "user_message" && typeof p.message === "string") {
-      if (isNoiseUserText(p.message)) continue;
-      const title = collapseTitle(p.message);
-      if (title) return title;
-    }
-  }
-  return null;
+  const head = parseCodexHead(headText);
+  return head.firstUserText === null ? null : clampTitle(head.firstUserText, TITLE_MAX_CHARS);
 }
 
 async function readHead(path: string, bytes = TITLE_SCAN_BYTES): Promise<string | null> {
@@ -178,7 +100,8 @@ async function listClaudeHistory(
   } catch {
     return []; // no sessions for this cwd yet
   }
-  const candidates: Array<{ path: string; sessionId: string; mtimeMs: number }> = [];
+  const candidates: Array<{ path: string; sessionId: string; mtimeMs: number; size: number }> =
+    [];
   for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
     const sessionId = basename(name, ".jsonl");
@@ -187,7 +110,7 @@ async function listClaudeHistory(
     const path = join(dir, name);
     try {
       const stat = await fs.stat(path);
-      candidates.push({ path, sessionId, mtimeMs: stat.mtimeMs });
+      candidates.push({ path, sessionId, mtimeMs: stat.mtimeMs, size: stat.size });
     } catch {
       // vanished between readdir and stat
     }
@@ -198,15 +121,20 @@ async function listClaudeHistory(
     if (out.length >= limit) break;
     const head = await readHead(c.path);
     if (head === null) continue;
-    const { title, sidechain } = extractClaudeTitle(head);
+    const parsed = parseClaudeHead(head);
     // No user message in the head = stillborn (never messaged) or a transcript
     // of pure tool traffic — `claude --resume` would refuse it anyway.
-    if (sidechain || title === null) continue;
+    if (parsed.sawSidechain || parsed.firstUserText === null) continue;
+    // Prefer Claude Code's own generated topic label; big pasted-context
+    // lines can push that record past the head read, hence the cached
+    // deeper scan fallback.
+    const aiTitle =
+      parsed.aiTitle ?? (await findClaudeAiTitle(c.path, { mtimeMs: c.mtimeMs, size: c.size }));
     out.push({
       runtime: "claude",
       sessionId: c.sessionId,
       cwd,
-      title,
+      title: clampTitle(aiTitle ?? parsed.firstUserText, TITLE_MAX_CHARS),
       lastActivityAt: new Date(c.mtimeMs).toISOString(),
       transcriptPath: c.path,
     });

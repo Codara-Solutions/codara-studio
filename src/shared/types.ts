@@ -767,6 +767,10 @@ export interface WorkerSessionSummary {
   runtime: WorkerSessionRuntime;
   sessionId: string;
   title: string;
+  // First real user question, set when `title` is Claude Code's generated
+  // ai-title (the picker shows it as a dim second line). Null when the title
+  // already IS the first question, or none was found.
+  preview: string | null;
   cwd: string;
   cwdExists: boolean;
   updatedAt: string;

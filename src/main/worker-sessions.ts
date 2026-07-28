@@ -16,6 +16,12 @@ import {
 } from "./orchestration/claude-paths";
 import { codexHomeDir, extractSessionUuid } from "./orchestration/codex-sessions";
 import { codexProvider } from "./providers/codex";
+import {
+  clampTitle,
+  findClaudeAiTitle,
+  parseClaudeHead,
+  parseCodexHead,
+} from "./session-titles";
 
 const TRANSCRIPT_HEAD_BYTES = 256 * 1024;
 const SESSION_SCAN_CONCURRENCY = 16;
@@ -38,70 +44,25 @@ async function readHead(path: string): Promise<string> {
   }
 }
 
-function recordsFromHead(text: string): JsonRecord[] {
-  const records: JsonRecord[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const value: unknown = JSON.parse(trimmed);
-      if (isRecord(value)) records.push(value);
-    } catch {
-      // The fixed-size head can end halfway through a JSONL record.
-    }
-  }
-  return records;
-}
-
-function textFromContent(content: unknown): string | null {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return null;
-  const pieces: string[] = [];
-  for (const part of content) {
-    if (!isRecord(part)) continue;
-    if (part.type !== "text" && part.type !== "input_text") continue;
-    const text = typeof part.text === "string" ? part.text : null;
-    if (text) pieces.push(text);
-  }
-  return pieces.length > 0 ? pieces.join(" ") : null;
-}
-
-function sessionTitle(value: string | null): string | null {
-  if (!value) return null;
-  const cleaned = value
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, " ")
-    .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, " ")
-    .replace(/<command-(?:name|message)>[\s\S]*?<\/command-(?:name|message)>/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return null;
-  return cleaned.length <= TITLE_LIMIT
-    ? cleaned
-    : `${cleaned.slice(0, TITLE_LIMIT - 1).trimEnd()}…`;
-}
+// Thin clamped views over the shared parsers in session-titles.ts (the
+// sanitize/noise rules live there, shared with agent-history.ts). Exported
+// for scripts/test-worker-sessions.cjs.
 
 export function parseClaudeSessionHead(text: string): {
   cwd: string | null;
   startedAtMs: number | null;
   title: string | null;
+  aiTitle: string | null;
   hasUser: boolean;
 } {
-  let hasUser = false;
-  let cwd: string | null = null;
-  let startedAtMs: number | null = null;
-  for (const record of recordsFromHead(text)) {
-    if (record.type !== "user" || record.isSidechain === true) continue;
-    hasUser = true;
-    if (!cwd && typeof record.cwd === "string") cwd = record.cwd;
-    if (startedAtMs === null && typeof record.timestamp === "string") {
-      const parsed = Date.parse(record.timestamp);
-      if (Number.isFinite(parsed)) startedAtMs = parsed;
-    }
-    const message = isRecord(record.message) ? record.message : null;
-    const title = sessionTitle(textFromContent(message?.content));
-    if (title) return { cwd, startedAtMs, title, hasUser: true };
-  }
-  return { cwd, startedAtMs, title: null, hasUser };
+  const head = parseClaudeHead(text);
+  return {
+    cwd: head.cwd,
+    startedAtMs: head.startedAtMs,
+    title: head.firstUserText === null ? null : clampTitle(head.firstUserText, TITLE_LIMIT),
+    aiTitle: head.aiTitle === null ? null : clampTitle(head.aiTitle, TITLE_LIMIT),
+    hasUser: head.hasUser,
+  };
 }
 
 export function parseCodexSessionHead(text: string): {
@@ -109,43 +70,12 @@ export function parseCodexSessionHead(text: string): {
   startedAtMs: number | null;
   title: string | null;
 } {
-  let cwd: string | null = null;
-  let startedAtMs: number | null = null;
-  let fallbackTitle: string | null = null;
-
-  for (const record of recordsFromHead(text)) {
-    const payload = isRecord(record.payload) ? record.payload : null;
-    if (record.type === "session_meta" && payload) {
-      if (!cwd && typeof payload.cwd === "string") cwd = payload.cwd;
-      const timestamp =
-        typeof payload.timestamp === "string"
-          ? payload.timestamp
-          : typeof record.timestamp === "string"
-            ? record.timestamp
-            : null;
-      if (timestamp && startedAtMs === null) {
-        const parsed = Date.parse(timestamp);
-        if (Number.isFinite(parsed)) startedAtMs = parsed;
-      }
-      continue;
-    }
-
-    if (record.type === "event_msg" && payload?.type === "user_message") {
-      const title = sessionTitle(typeof payload.message === "string" ? payload.message : null);
-      if (title) return { cwd, startedAtMs, title };
-    }
-
-    if (
-      !fallbackTitle &&
-      record.type === "response_item" &&
-      payload?.type === "message" &&
-      payload.role === "user"
-    ) {
-      fallbackTitle = sessionTitle(textFromContent(payload.content));
-    }
-  }
-
-  return { cwd, startedAtMs, title: fallbackTitle };
+  const head = parseCodexHead(text);
+  return {
+    cwd: head.cwd,
+    startedAtMs: head.startedAtMs,
+    title: head.firstUserText === null ? null : clampTitle(head.firstUserText, TITLE_LIMIT),
+  };
 }
 
 function normalizedPath(path: string): string {
@@ -182,12 +112,21 @@ async function listClaudeSessions(cwd: string): Promise<WorkerSessionSummary[]> 
   return mapLimited(paths, async (path) => {
     try {
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
-      const preview = parseClaudeSessionHead(head);
-      if (!preview.hasUser) return null;
+      const parsed = parseClaudeSessionHead(head);
+      if (!parsed.hasUser) return null;
+      // Prefer Claude Code's generated topic label; when the head missed the
+      // record (giant pasted-context lines), fall back to a cached deeper
+      // scan. The first user question then becomes the row's second line.
+      const aiTitle =
+        parsed.aiTitle ??
+        (await findClaudeAiTitle(path, { mtimeMs: stat.mtimeMs, size: stat.size }).then(
+          (found) => (found === null ? null : clampTitle(found, TITLE_LIMIT)),
+        ));
       return {
         runtime: "claude",
         sessionId: basename(path, ".jsonl"),
-        title: preview.title ?? "Untitled session",
+        title: aiTitle ?? parsed.title ?? "Untitled session",
+        preview: aiTitle === null ? null : parsed.title,
         cwd,
         cwdExists: true,
         updatedAt: new Date(stat.mtimeMs).toISOString(),
@@ -227,15 +166,17 @@ async function listCodexSessions(cwd: string): Promise<WorkerSessionSummary[]> {
       const sessionId = extractSessionUuid(path);
       if (!sessionId) return null;
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
-      const preview = parseCodexSessionHead(head);
-      if (!preview.cwd || normalizedPath(preview.cwd) !== targetCwd) return null;
+      const parsed = parseCodexSessionHead(head);
+      if (!parsed.cwd || normalizedPath(parsed.cwd) !== targetCwd) return null;
       return {
         runtime: "codex",
         sessionId,
-        title: preview.title ?? "Untitled session",
+        title: parsed.title ?? "Untitled session",
+        // Codex has no ai-title equivalent — the title IS the first question.
+        preview: null,
         cwd,
         cwdExists: true,
-        updatedAt: new Date(Math.max(stat.mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
+        updatedAt: new Date(Math.max(stat.mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {
@@ -277,15 +218,19 @@ async function listAllClaudeSessions(): Promise<WorkerSessionSummary[]> {
   return mapLimited(paths, async (path) => {
     try {
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
-      const preview = parseClaudeSessionHead(head);
-      if (!preview.hasUser || !preview.cwd || !isAbsolute(preview.cwd)) return null;
+      const parsed = parseClaudeSessionHead(head);
+      if (!parsed.hasUser || !parsed.cwd || !isAbsolute(parsed.cwd)) return null;
+      // Head-only ai-title here: the cross-project sweep touches every
+      // transcript on the machine, so the deeper per-file scan is reserved
+      // for the per-cwd listing the picker uses.
       return {
         runtime: "claude",
         sessionId: basename(path, ".jsonl"),
-        title: preview.title ?? "Untitled session",
-        cwd: preview.cwd,
-        cwdExists: await pathIsDirectory(preview.cwd),
-        updatedAt: new Date(Math.max(stat.mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
+        title: parsed.aiTitle ?? parsed.title ?? "Untitled session",
+        preview: parsed.aiTitle === null ? null : parsed.title,
+        cwd: parsed.cwd,
+        cwdExists: await pathIsDirectory(parsed.cwd),
+        updatedAt: new Date(Math.max(stat.mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {
@@ -325,15 +270,16 @@ async function listAllCodexSessions(): Promise<WorkerSessionSummary[]> {
       const sessionId = extractSessionUuid(path);
       if (!sessionId) return null;
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
-      const preview = parseCodexSessionHead(head);
-      if (!preview.cwd || !isAbsolute(preview.cwd)) return null;
+      const parsed = parseCodexSessionHead(head);
+      if (!parsed.cwd || !isAbsolute(parsed.cwd)) return null;
       return {
         runtime: "codex",
         sessionId,
-        title: preview.title ?? "Untitled session",
-        cwd: preview.cwd,
-        cwdExists: await pathIsDirectory(preview.cwd),
-        updatedAt: new Date(Math.max(stat.mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
+        title: parsed.title ?? "Untitled session",
+        preview: null,
+        cwd: parsed.cwd,
+        cwdExists: await pathIsDirectory(parsed.cwd),
+        updatedAt: new Date(Math.max(stat.mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {

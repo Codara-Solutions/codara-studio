@@ -333,6 +333,7 @@ function SessionRow({
       onMouseEnter={onHover}
       onFocus={onHover}
       onClick={onOpen}
+      title={session.preview ? `${session.title}\n${session.preview}` : session.title}
       style={{
         appearance: "none",
         width: "100%",
@@ -367,18 +368,35 @@ function SessionRow({
         >
           {session.title}
         </span>
-        <span
-          style={{
-            display: "block",
-            marginTop: 4,
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 9,
-            letterSpacing: "0.02em",
-          }}
-        >
-          {shortSessionId(session.sessionId)}
-        </span>
+        {session.preview ? (
+          <span
+            style={{
+              display: "block",
+              marginTop: 4,
+              color: "var(--muted)",
+              fontSize: 10,
+              lineHeight: 1.35,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {session.preview}
+          </span>
+        ) : (
+          <span
+            style={{
+              display: "block",
+              marginTop: 4,
+              color: "var(--muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 9,
+              letterSpacing: "0.02em",
+            }}
+          >
+            {shortSessionId(session.sessionId)}
+          </span>
+        )}
       </span>
       <span
         style={{
