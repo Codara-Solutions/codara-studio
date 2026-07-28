@@ -1210,7 +1210,7 @@ export default function FileTree({
     const rows: FlatRow[] = [];
     if (root.open) {
       for (const child of root.children) {
-        rows.push(...flatten(child, 0));
+        flatten(child, 0, rows);
       }
     }
     if (pendingCreate) {
@@ -1767,11 +1767,14 @@ type FlatRow =
   | { kind: "node"; node: Node; depth: number }
   | { kind: "placeholder"; depth: number; parentPath: string; entryKind: "file" | "dir" };
 
-function flatten(node: Node, depth: number): FlatRow[] {
-  const out: FlatRow[] = [{ kind: "node", node, depth }];
+// Appends into a single caller-owned array — spreading a fresh array per node
+// copies the whole subtree once per level and can blow the spread arity limit
+// on very large directories.
+function flatten(node: Node, depth: number, out: FlatRow[] = []): FlatRow[] {
+  out.push({ kind: "node", node, depth });
   if (node.kind === "dir" && node.open) {
     for (const child of node.children) {
-      out.push(...flatten(child, depth + 1));
+      flatten(child, depth + 1, out);
     }
   }
   return out;

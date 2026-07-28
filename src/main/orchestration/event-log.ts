@@ -48,6 +48,23 @@ interface RunJournalState {
 const runAppendQueues = new Map<string, Promise<void>>();
 const runJournalStates = new Map<string, RunJournalState>();
 
+// Token-cadence stream events (chat.assistant_block) arrive tens-to-hundreds of
+// times a second. Appending each one individually costs a mkdir + appendFile and
+// a webContents.send per window per token. appendBufferedEvent parks them in a
+// per-run buffer that is drained as ONE appendEvents batch — one file append,
+// one IPC message — every STREAM_FLUSH_INTERVAL_MS.
+const STREAM_FLUSH_INTERVAL_MS = 50;
+// Hard ceiling so a burst that outruns the timer cannot grow the buffer without
+// bound (or produce a single multi-megabyte append).
+const MAX_BUFFERED_EVENTS = 256;
+
+interface PendingBuffer {
+  inputs: AppendEventInput[];
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+const pendingBuffers = new Map<string, PendingBuffer>();
+
 function validSequence(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0;
 }
@@ -93,25 +110,13 @@ function createEvent(input: AppendEventInput, sequence?: number): SparkEvent {
 }
 
 /**
- * Append one same-run event batch atomically with respect to all other appends.
- * The batch form lets run-store persist a domain event and its canonical
- * lifecycle event without a concurrent direct append slipping between them.
+ * Claim this run's next append-queue slot and persist `inputs` in it.
+ *
+ * The slot is claimed synchronously (runAppendQueues is updated before the
+ * first await), so callers that need a strict ordering between two appends only
+ * have to call this in the right order — they do not have to await the first.
  */
-export async function appendEvents(inputs: AppendEventInput[]): Promise<SparkEvent[]> {
-  if (inputs.length === 0) return [];
-  const runId = inputs[0].runId;
-  if (inputs.some((input) => input.runId !== runId)) {
-    throw new Error("appendEvents requires every event in a batch to share one runId");
-  }
-
-  // Events without a runId have no journal and therefore no per-run sequence;
-  // they remain live broadcast-only, in caller order.
-  if (!runId) {
-    const events = inputs.map((input) => createEvent(input));
-    for (const event of events) broadcast(event);
-    return events;
-  }
-
+function enqueueAppend(runId: string, inputs: AppendEventInput[]): Promise<SparkEvent[]> {
   let appended: SparkEvent[] = [];
   const previous = runAppendQueues.get(runId) ?? Promise.resolve();
   const next = previous
@@ -136,21 +141,123 @@ export async function appendEvents(inputs: AppendEventInput[]): Promise<SparkEve
       state.needsLeadingNewline = false;
       runJournalStates.set(runId, state);
       appended = events;
-      for (const event of events) broadcast(event);
+      broadcast(events);
     });
 
   runAppendQueues.set(runId, next);
-  try {
-    await next;
-  } finally {
-    if (runAppendQueues.get(runId) === next) runAppendQueues.delete(runId);
+  return next
+    .finally(() => {
+      if (runAppendQueues.get(runId) === next) runAppendQueues.delete(runId);
+    })
+    .then(() => appended);
+}
+
+/**
+ * Drain this run's buffered stream events onto the append queue. The queue slot
+ * is claimed synchronously, so a caller that invokes this before claiming its
+ * own slot is guaranteed the buffered events land first.
+ */
+function drainBuffer(runId: string): Promise<SparkEvent[]> {
+  const buffer = pendingBuffers.get(runId);
+  if (!buffer) return Promise.resolve([]);
+  if (buffer.timer) clearTimeout(buffer.timer);
+  pendingBuffers.delete(runId);
+  if (buffer.inputs.length === 0) return Promise.resolve([]);
+  return enqueueAppend(runId, buffer.inputs);
+}
+
+/**
+ * Append one same-run event batch atomically with respect to all other appends.
+ * The batch form lets run-store persist a domain event and its canonical
+ * lifecycle event without a concurrent direct append slipping between them.
+ */
+export async function appendEvents(inputs: AppendEventInput[]): Promise<SparkEvent[]> {
+  if (inputs.length === 0) return [];
+  const runId = inputs[0].runId;
+  if (inputs.some((input) => input.runId !== runId)) {
+    throw new Error("appendEvents requires every event in a batch to share one runId");
   }
-  return appended;
+
+  // Events without a runId have no journal and therefore no per-run sequence;
+  // they remain live broadcast-only, in caller order.
+  if (!runId) {
+    const events = inputs.map((input) => createEvent(input));
+    for (const event of events) broadcast([event]);
+    return events;
+  }
+
+  // Anything buffered for this run was emitted before this event, so it has to
+  // reach the journal first. Claiming its slot here (synchronously, before ours)
+  // is what preserves emission order across the buffered/unbuffered split.
+  void drainBuffer(runId).catch((err) => {
+    console.warn(`[spark] flushing buffered events for run ${runId} failed:`, err);
+  });
+
+  return enqueueAppend(runId, inputs);
 }
 
 export async function appendEvent(input: AppendEventInput): Promise<SparkEvent> {
   const [event] = await appendEvents([input]);
   return event;
+}
+
+/**
+ * Append a high-frequency stream event without paying a file append and an IPC
+ * send per event. The event is buffered and written as part of the run's next
+ * batch — within STREAM_FLUSH_INTERVAL_MS, or immediately ahead of the next
+ * ordinary appendEvent(s) call on the same run, whichever comes first.
+ *
+ * Fire-and-forget by design: the caller gets no SparkEvent back because the
+ * sequence number is only assigned at flush time.
+ */
+export function appendBufferedEvent(input: AppendEventInput): void {
+  const runId = input.runId;
+  // No journal, no batching to do — an unrouted event is broadcast-only anyway.
+  if (!runId) {
+    void appendEvents([input]).catch((err) => {
+      console.warn("[spark] broadcasting an unrouted stream event failed:", err);
+    });
+    return;
+  }
+
+  let buffer = pendingBuffers.get(runId);
+  if (!buffer) {
+    buffer = { inputs: [], timer: null };
+    pendingBuffers.set(runId, buffer);
+  }
+  buffer.inputs.push(input);
+
+  if (buffer.inputs.length >= MAX_BUFFERED_EVENTS) {
+    void drainBuffer(runId).catch((err) => {
+      console.warn(`[spark] flushing buffered events for run ${runId} failed:`, err);
+    });
+    return;
+  }
+  // Timer runs from the FIRST buffered event, so latency to the renderer is
+  // bounded by the interval rather than restarting with every new token.
+  if (!buffer.timer) {
+    buffer.timer = setTimeout(() => {
+      void drainBuffer(runId).catch((err) => {
+        console.warn(`[spark] flushing buffered events for run ${runId} failed:`, err);
+      });
+    }, STREAM_FLUSH_INTERVAL_MS);
+  }
+}
+
+/**
+ * Force buffered stream events to disk now. Called for one run when its manager
+ * turn ends, and for every run on shutdown, so a quit inside the flush window
+ * cannot drop the tail of a stream.
+ */
+export async function flushBufferedEvents(runId?: string): Promise<void> {
+  const runIds = runId ? [runId] : [...pendingBuffers.keys()];
+  await Promise.all(
+    runIds.map((id) =>
+      drainBuffer(id).catch((err) => {
+        console.warn(`[spark] flushing buffered events for run ${id} failed:`, err);
+      }),
+    ),
+  );
 }
 
 // --- Fan-out event helpers --------------------------------------------------
@@ -303,17 +410,27 @@ export function subscribeToEvents(handler: (event: SparkEvent) => void): () => v
   };
 }
 
-function broadcast(event: SparkEvent): void {
-  for (const handler of mainSubscribers) {
-    try {
-      handler(event);
-    } catch (err) {
-      console.warn("[spark] event subscriber threw:", err);
+// Main-process subscribers keep their one-event-per-call contract. Renderers get
+// a batch of more than one event as a single IPC message on
+// "orchestration:events-batch"; the preload wrapper fans it back out to the same
+// per-event callbacks, in order, so no renderer code has to know about batching.
+function broadcast(events: SparkEvent[]): void {
+  if (events.length === 0) return;
+  for (const event of events) {
+    for (const handler of mainSubscribers) {
+      try {
+        handler(event);
+      } catch (err) {
+        console.warn("[spark] event subscriber threw:", err);
+      }
     }
   }
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.webContents.isDestroyed()) {
-      win.webContents.send("orchestration:event", event);
+    if (win.webContents.isDestroyed()) continue;
+    if (events.length === 1) {
+      win.webContents.send("orchestration:event", events[0]);
+    } else {
+      win.webContents.send("orchestration:events-batch", events);
     }
   }
 }

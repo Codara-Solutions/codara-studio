@@ -548,6 +548,20 @@ function findRetiredPredecessorLeaf(
   );
 }
 
+// Value-equality for worker chip meta. The 1s reconcile loop in App passes a
+// freshly built literal on every tick, so Object.is inside setLeafField never
+// bails on its own — this is what lets a no-op re-ensure keep the previous
+// state reference (and skip the app-wide re-render it would otherwise cause).
+export function sameWorkerMeta(a: TerminalLeafWorker, b: TerminalLeafWorker): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<
+    keyof TerminalLeafWorker
+  >;
+  for (const key of keys) {
+    if (!Object.is(a[key], b[key])) return false;
+  }
+  return true;
+}
+
 // Swap the leaf `paneId` for `next`, preserving the surrounding split
 // structure so the replacement inherits the exact grid slot.
 function replaceLeafNode(node: PaneNode, paneId: string, next: TerminalLeaf): PaneNode {
@@ -1675,17 +1689,20 @@ export function useTabs(
             t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId,
         );
         if (existing) {
-          const hasPane = Boolean(findLeaf(existing.root, paneId));
+          const existingLeaf = findLeaf(existing.root, paneId);
+          const hasPane = Boolean(existingLeaf);
           let root: PaneNode;
-          if (hasPane) {
-            root = setLeafField(
-              cwd
-                ? setLeafField(existing.root, paneId, "cwd", cwd)
-                : existing.root,
-              paneId,
-              "worker",
-              worker,
-            );
+          if (existingLeaf) {
+            const rootWithCwd = cwd
+              ? setLeafField(existing.root, paneId, "cwd", cwd)
+              : existing.root;
+            // Skip the worker write when the meta is value-identical: the
+            // reconcile loop re-ensures every second with a fresh literal, and
+            // writing it through would republish the whole tab tree each tick.
+            root =
+              existingLeaf.worker && sameWorkerMeta(existingLeaf.worker, worker)
+                ? rootWithCwd
+                : setLeafField(rootWithCwd, paneId, "worker", worker);
           } else {
             const newLeaf = leaf(paneId, cwd);
             newLeaf.worker = worker;
@@ -1698,21 +1715,34 @@ export function useTabs(
           // the tab's pane selection — re-ensures from the 1s reconcile loop
           // and repeat envelope events must leave the user's click alone.
           const activate = options?.activate === true || !hasPane;
-          return curr.map((tab) =>
-            tab.id === existing.id && tab.kind === "terminal"
-              ? {
-                  ...tab,
-                  title: "workers",
-                  scope: { kind: "workers", runId },
-                  root,
-                  activePaneId: activate
-                    ? paneId
-                    : findLeaf(root, tab.activePaneId)
-                      ? tab.activePaneId
-                      : paneId,
-                }
-              : tab,
-          );
+          let changed = false;
+          const next = curr.map((tab) => {
+            if (tab.id !== existing.id || tab.kind !== "terminal") return tab;
+            const activePaneId = activate
+              ? paneId
+              : findLeaf(root, tab.activePaneId)
+                ? tab.activePaneId
+                : paneId;
+            // A steady-state re-ensure (same tree, same selection, already a
+            // workers tab) must keep the prior state reference so React can
+            // skip the commit entirely.
+            if (
+              root === tab.root &&
+              activePaneId === tab.activePaneId &&
+              tab.title === "workers"
+            ) {
+              return tab;
+            }
+            changed = true;
+            return {
+              ...tab,
+              title: "workers",
+              scope: { kind: "workers" as const, runId },
+              root,
+              activePaneId,
+            };
+          });
+          return changed ? next : curr;
         }
         const firstLeaf = leaf(paneId, cwd);
         firstLeaf.worker = worker;
@@ -2120,28 +2150,39 @@ export function useTabs(
 
   const setLeafCwd = useCallback(
     (tabId: TabId, paneId: string, cwd: string) => {
-      setTabs((curr) =>
-        curr.map((t) => {
+      setTabs((curr) => {
+        // Per-tab identity alone is not enough — the map itself allocates, so
+        // a no-op call (the 1s reconcile re-sends the same cwd) must hand back
+        // the prior array or every consumer of `tabs` re-renders anyway.
+        let changed = false;
+        const next = curr.map((t) => {
           if (t.id !== tabId || t.kind !== "terminal") return t;
           const existing = findLeaf(t.root, paneId);
           if (!existing || existing.cwd === cwd) return t;
           const root = setLeafField(t.root, paneId, "cwd", cwd);
-          return root === t.root ? t : { ...t, root };
-        }),
-      );
+          if (root === t.root) return t;
+          changed = true;
+          return { ...t, root };
+        });
+        return changed ? next : curr;
+      });
     },
     [],
   );
 
   const setLeafWorker = useCallback(
     (tabId: TabId, paneId: string, worker: TerminalLeafWorker | null) => {
-      setTabs((curr) =>
-        curr.map((t) => {
+      setTabs((curr) => {
+        let changed = false;
+        const next = curr.map((t) => {
           if (t.id !== tabId || t.kind !== "terminal") return t;
           const root = setLeafField(t.root, paneId, "worker", worker);
-          return root === t.root ? t : { ...t, root };
-        }),
-      );
+          if (root === t.root) return t;
+          changed = true;
+          return { ...t, root };
+        });
+        return changed ? next : curr;
+      });
     },
     [],
   );
@@ -2202,13 +2243,17 @@ export function useTabs(
 
   const setLeafAgentSession = useCallback(
     (tabId: TabId, paneId: string, session: TerminalAgentSession | null) => {
-      setTabs((curr) =>
-        curr.map((t) => {
+      setTabs((curr) => {
+        let changed = false;
+        const next = curr.map((t) => {
           if (t.id !== tabId || t.kind !== "terminal") return t;
           const root = setLeafField(t.root, paneId, "agentSession", session);
-          return root === t.root ? t : { ...t, root };
-        }),
-      );
+          if (root === t.root) return t;
+          changed = true;
+          return { ...t, root };
+        });
+        return changed ? next : curr;
+      });
     },
     [],
   );

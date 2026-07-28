@@ -9,6 +9,7 @@ import type { AutomationWorkerInfo } from "@shared/types";
 
 const LINGER_MS = 60_000;
 const POLL_MS = 5_000;
+const EVENT_DEBOUNCE_MS = 500;
 
 const TERMINAL_ATTEMPT = new Set(["succeeded", "failed", "timed_out", "cancelled"]);
 
@@ -73,6 +74,17 @@ export function useAutomationWorkers(active: boolean): AutomationWorkerInfo[] {
       }
     };
 
+    // An iterating loop emits these events far faster than the poll, so
+    // coalesce them into at most one refresh per EVENT_DEBOUNCE_MS.
+    let eventTimer: number | undefined;
+    const refreshSoon = (): void => {
+      if (eventTimer !== undefined) return;
+      eventTimer = window.setTimeout(() => {
+        eventTimer = undefined;
+        void refresh();
+      }, EVENT_DEBOUNCE_MS);
+    };
+
     void refresh();
     const unsubscribe = window.spark.orchestration.onEvent((event) => {
       if (
@@ -80,13 +92,14 @@ export function useAutomationWorkers(active: boolean): AutomationWorkerInfo[] {
         event.type === "automation.iteration" ||
         event.type === "automation.updated"
       ) {
-        void refresh();
+        refreshSoon();
       }
     });
     const interval = window.setInterval(() => void refresh(), POLL_MS);
     return () => {
       disposed = true;
       unsubscribe();
+      if (eventTimer !== undefined) window.clearTimeout(eventTimer);
       window.clearInterval(interval);
     };
   }, [active]);

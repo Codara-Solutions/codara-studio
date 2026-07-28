@@ -156,11 +156,22 @@ export default function ChatPanel({
     };
     void check();
     // 1s poll is cheap (Map.has() in main) and covers the gap between user
-    // sending the first message and the cli-session resolving its spawn.
-    const interval = window.setInterval(check, 1000);
+    // sending the first message and the cli-session resolving its spawn — but
+    // only while the window is visible; a hidden window would otherwise burn a
+    // round-trip per second forever. Refocus checks immediately so the
+    // placeholder flips to the real pane without waiting for the next tick.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void check();
+    }, 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       disposed = true;
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [backendSessionId, chatView, usingHoistedChatView]);
 

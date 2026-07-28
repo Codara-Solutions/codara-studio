@@ -4,13 +4,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Live end-to-end coverage for the restoreAgentSessions toggle and the
-// pane-toolbar conversation-history menu:
+// Live end-to-end coverage for the restoreAgentSessions toggle:
 //   1. The Settings switch round-trips into spark-preferences.json.
 //   2. With the toggle on, a real Claude conversation started in a pane
 //      survives quit → relaunch (the resumed CLI still knows the marker).
-//   3. The history clock menu lists that conversation for the workspace and
-//      picking it opens a pane that resumes it.
 // The conversation test drives the installed authenticated `claude` CLI, so
 // it is opt-in like the Codex live smoke.
 
@@ -142,7 +139,7 @@ test("settings switch persists restoreAgentSessions to disk", async () => {
   }
 });
 
-test("claude conversation resumes after relaunch and via the history menu", async () => {
+test("claude conversation resumes after relaunch", async () => {
   test.setTimeout(420_000);
   test.skip(
     process.env.SPARK_E2E_CLAUDE_LIVE !== "1",
@@ -217,26 +214,6 @@ test("claude conversation resumes after relaunch and via the history menu", asyn
       .poll(() => assistantHits(projectsDir, MARKER, relaunchAt), { timeout: 120_000 })
       .toBeGreaterThan(0);
 
-    // ---- history menu lists the conversation and resumes it in a new pane ----
-    await page.getByTitle("Previous conversations…").first().click();
-    const historyItem = page.getByRole("menuitem").filter({ hasText: MARKER }).first();
-    await expect(historyItem).toBeVisible({ timeout: 15_000 });
-    const beforePick = Date.now();
-    await historyItem.click();
-    await expect(page.locator(".xterm-helper-textarea:visible")).toHaveCount(3, {
-      timeout: 15_000,
-    });
-    // The picked pane relaunches the CLI on that session; asking again proves
-    // the resumed context, end to end, through the menu path.
-    await page.waitForTimeout(20_000);
-    const pickedPane = page.locator(".xterm-helper-textarea:visible").last();
-    await typeIntoTerminal(
-      pickedPane,
-      "One more time: repeat that exact marker string, nothing else.",
-    );
-    await expect
-      .poll(() => assistantHits(projectsDir, MARKER, beforePick), { timeout: 120_000 })
-      .toBeGreaterThan(0);
   } finally {
     await app?.close();
     // The workspace cwd is a mkdtemp dir, so its transcript bucket is test

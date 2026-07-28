@@ -584,15 +584,15 @@ function StructuredWorkerActivity({
     let disposed = false;
     const refresh = async () => {
       try {
-        const file = await window.spark.fs.readText(worker.stdoutLogPath!);
-        if (!disposed) setContent(file.content.slice(-80_000));
+        const file = await window.spark.fs.readTextTail(worker.stdoutLogPath!, 80_000);
+        if (!disposed) setContent(file.content);
       } catch {
         /* The file may not exist during the first launch tick. */
       }
     };
     void refresh();
     if (!visible || !live) return () => { disposed = true; };
-    const timer = window.setInterval(() => void refresh(), 500);
+    const timer = window.setInterval(() => void refresh(), 1000);
     return () => {
       disposed = true;
       window.clearInterval(timer);

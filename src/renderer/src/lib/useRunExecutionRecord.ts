@@ -119,16 +119,99 @@ export function useRunExecutionRecord(run: RunState | null): RunExecutionProject
   return useMemo(() => projectRunExecution(run, events, hydrated, loading, error), [run, events, hydrated, loading, error]);
 }
 
+/** Durable journal order: sequence, then timestamp, then id. Sequences are
+ * numbers, timestamps are `toISOString()`, and ids are `makeId()` output —
+ * all ASCII, so ordinal `<`/`>` agrees with collation here and costs a
+ * fraction of `localeCompare`, which is what made the per-flush sort hurt. */
+function compareExecutionEvents(left: SparkEvent, right: SparkEvent): number {
+  const leftSequence = typeof left.sequence === "number" ? left.sequence : Number.MAX_SAFE_INTEGER;
+  const rightSequence = typeof right.sequence === "number" ? right.sequence : Number.MAX_SAFE_INTEGER;
+  if (leftSequence !== rightSequence) return leftSequence - rightSequence;
+  if (left.timestamp !== right.timestamp) return left.timestamp < right.timestamp ? -1 : 1;
+  if (left.id === right.id) return 0;
+  return left.id < right.id ? -1 : 1;
+}
+
+// Arrays this module has already proven ordered and id-unique. Every merge
+// result is both, and the streaming accumulator is always a previous result,
+// so the O(N) validation below is paid once at hydration instead of on each of
+// the ~12 flushes a second a streaming backend drives. Only ever pass an array
+// that is not mutated afterwards as the accumulator — the hydration buffer,
+// which is appended to while history loads, is always a later group.
+const normalizedRecords = new WeakSet<readonly SparkEvent[]>();
+
+/**
+ * Merge event groups by id — later groups win — into durable journal order.
+ *
+ * The first group is the accumulator: the incoming groups are deduped, sorted
+ * among themselves, and spliced into it by a linear merge, so a flush costs
+ * O(N + M log M) over the record rather than a full re-sort. A replacement is
+ * removed and re-inserted rather than patched in place, because a live frame
+ * that is later re-delivered from the journal arrives carrying a sequence it
+ * did not have before — its sort key changes with it.
+ */
 export function mergeExecutionEvents(...groups: readonly SparkEvent[][]): SparkEvent[] {
-  const byId = new Map<string, SparkEvent>();
-  for (const group of groups) {
-    for (const event of group) byId.set(event.id, event);
+  const base = normalizeRecord(groups[0] ?? []);
+
+  const incoming = new Map<string, SparkEvent>();
+  for (let index = 1; index < groups.length; index += 1) {
+    for (const event of groups[index]) incoming.set(event.id, event);
   }
-  return [...byId.values()].sort((left, right) => {
-    const leftSequence = typeof left.sequence === "number" ? left.sequence : Number.MAX_SAFE_INTEGER;
-    const rightSequence = typeof right.sequence === "number" ? right.sequence : Number.MAX_SAFE_INTEGER;
-    return leftSequence - rightSequence || left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id);
-  });
+  if (incoming.size === 0) return base;
+
+  const kept: SparkEvent[] = [];
+  let matched = 0;
+  let changed = false;
+  for (const event of base) {
+    const replacement = incoming.get(event.id);
+    if (replacement === undefined) {
+      kept.push(event);
+      continue;
+    }
+    matched += 1;
+    if (replacement !== event) changed = true;
+  }
+  // Anything the accumulator did not already hold at that id is new.
+  if (matched < incoming.size) changed = true;
+  // Every incoming event was the very object already at its id, so the merge
+  // would rebuild the same order — keep the identity consumers memoize on.
+  if (!changed) return base;
+
+  const additions = [...incoming.values()].sort(compareExecutionEvents);
+  const merged: SparkEvent[] = new Array(kept.length + additions.length);
+  let keptIndex = 0;
+  let additionIndex = 0;
+  for (let index = 0; index < merged.length; index += 1) {
+    if (additionIndex >= additions.length) merged[index] = kept[keptIndex++];
+    else if (keptIndex >= kept.length) merged[index] = additions[additionIndex++];
+    else if (compareExecutionEvents(kept[keptIndex], additions[additionIndex]) <= 0) {
+      merged[index] = kept[keptIndex++];
+    } else merged[index] = additions[additionIndex++];
+  }
+  normalizedRecords.add(merged);
+  return merged;
+}
+
+/** The accumulator, ordered and deduped by id. Both properties are verified in
+ * one linear pass so a caller-supplied group — the hydration history, which
+ * this module did not build — can never put the splice merge out of order. */
+function normalizeRecord(events: readonly SparkEvent[]): SparkEvent[] {
+  if (normalizedRecords.has(events)) return events as SparkEvent[];
+  const ids = new Set<string>();
+  let ordered = true;
+  for (let index = 0; index < events.length; index += 1) {
+    if (index > 0 && compareExecutionEvents(events[index - 1], events[index]) > 0) ordered = false;
+    ids.add(events[index].id);
+  }
+  if (ordered && ids.size === events.length) {
+    normalizedRecords.add(events);
+    return events as SparkEvent[];
+  }
+  const byId = new Map<string, SparkEvent>();
+  for (const event of events) byId.set(event.id, event);
+  const normalized = [...byId.values()].sort(compareExecutionEvents);
+  normalizedRecords.add(normalized);
+  return normalized;
 }
 
 function projectRunExecution(

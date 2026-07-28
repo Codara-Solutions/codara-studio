@@ -111,8 +111,10 @@ import {
   taskWritesWorkspace,
 } from "./autopilot-wave";
 import {
+  appendBufferedEvent as appendBufferedEventRaw,
   appendEvent as appendEventRaw,
   appendEvents as appendEventsRaw,
+  flushBufferedEvents,
   appendFanOutDirectiveForcedEvent,
   appendFanOutDowngradedEvent,
   appendRegressionRevertEvent,
@@ -156,6 +158,8 @@ import {
 } from "./agent-config-shield";
 import {
   detectFatalWorkerRuntimeError,
+  FATAL_ERROR_GATE_OVERLAP,
+  mayContainFatalWorkerRuntimeError,
   pasteAndSubmit,
   waitForAgentTui,
   waitForCodexInputReady,
@@ -396,6 +400,13 @@ const appendEvents = (
 ): ReturnType<typeof appendEventsRaw> => {
   for (const input of args[0]) assertManagerDecisionMutationCurrent(input.runId);
   return appendEventsRaw(...args);
+};
+
+const appendBufferedEvent = (
+  ...args: Parameters<typeof appendBufferedEventRaw>
+): ReturnType<typeof appendBufferedEventRaw> => {
+  assertManagerDecisionMutationCurrent(args[0].runId);
+  return appendBufferedEventRaw(...args);
 };
 
 // One-shot per process: fired lazily from listRuns(). Keeps the runs/ dir
@@ -4504,7 +4515,7 @@ async function askManagerBackend(
           (call) => call.id === callId && call.status === "started" && !call.completedAt,
         )
       ) return;
-      await appendEvent({
+      const input = {
         timestamp: new Date().toISOString(),
         workspaceId: run.workspaceId,
         runId: run.id,
@@ -4514,7 +4525,18 @@ async function askManagerBackend(
           ...(event as unknown as Record<string, unknown>),
           conversationEpoch: preparedTurn.conversationEpoch,
         },
-      });
+      };
+      // assistant_block is the only stream kind emitted at token cadence (one
+      // per text delta: pi-turn, codex-backend, claude-backend). Buffer it so a
+      // streaming turn costs one journal append and one IPC send per ~50ms
+      // instead of per token. Every other kind (tool_use, tool_result,
+      // system_note, usage, error) is low-rate and appends directly — which also
+      // flushes whatever is buffered ahead of it, preserving emission order.
+      if (event.kind === "assistant_block") {
+        appendBufferedEvent(input);
+        return;
+      }
+      await appendEvent(input);
     })().catch((err) => {
       console.warn("[run-store] appendEvent for chat stream event failed:", err);
     });
@@ -4544,6 +4566,9 @@ async function askManagerBackend(
       onStream,
     );
     acceptingStreamEvents = false;
+    // The turn owns no more stream events, so land the buffered tail now rather
+    // than leaving up to one flush interval of the reply undurable.
+    await flushBufferedEvents(run.id);
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
@@ -4769,6 +4794,9 @@ async function askManagerBackend(
     return finalized;
   } catch (err) {
     acceptingStreamEvents = false;
+    // The turn owns no more stream events, so land the buffered tail now rather
+    // than leaving up to one flush interval of the reply undurable.
+    await flushBufferedEvents(run.id);
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
@@ -12747,6 +12775,10 @@ function scheduleRunCompletionTail(runId: string, completedRun?: RunState): void
  * so a quit cannot drop a half-written ledger.
  */
 export async function flushRunCompletionTails(runId?: string): Promise<void> {
+  // Shutdown funnels through here (main/index.ts flushAllStores), so it is also
+  // where a quit mid-stream drains any coalesced chat.assistant_block events
+  // that have not hit their flush timer yet.
+  await flushBufferedEvents(runId);
   const pending = runId
     ? [runCompletionTails.get(runId)].filter(Boolean)
     : [...runCompletionTails.values()];
@@ -14947,9 +14979,18 @@ async function runWorkerSession({
     } catch {
       /* best-effort; never let logging break the run loop */
     }
-    fatalErrorBuffer = (fatalErrorBuffer + chunk.toString("utf8")).slice(-8192);
+    const chunkText = chunk.toString("utf8");
+    // The fresh chunk plus a bounded carry overlap (a fatal banner can split
+    // across a chunk boundary) — the cheap hint gate below sees only this
+    // window, while a confirmed scan still runs on the full carry.
+    const gateWindow = fatalErrorBuffer.slice(-FATAL_ERROR_GATE_OVERLAP) + chunkText;
+    fatalErrorBuffer = (fatalErrorBuffer + chunkText).slice(-8192);
+    // Gate the full 8 KB strip + regex scan on the fresh window containing a
+    // fatal-error hint substring: for the overwhelming majority of chunks
+    // (ordinary agent output) this is a single small strip + a few includes.
+    if (fatalErrorTimer || !mayContainFatalWorkerRuntimeError(gateWindow)) return;
     const fatalReason = detectFatalWorkerRuntimeError(fatalErrorBuffer, task.runtimePreference);
-    if (fatalReason && !fatalErrorTimer) {
+    if (fatalReason) {
       fatalErrorTimer = setTimeout(() => {
         void (async () => {
           await recordWorkerOutput(

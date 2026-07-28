@@ -97,6 +97,58 @@ export async function readTextFile(path: string): Promise<FsFileContent> {
   };
 }
 
+// Tail read for the live log viewers, which poll a growing worker stdout log
+// and only ever render the last few tens of KB. Reading the whole file (up to
+// MAX_TEXT_FILE_BYTES) and shipping it over IPC every tick is wasteful, so we
+// positioned-read only the trailing window.
+//
+// Deliberately UNLIKE readTextFile, there is no NUL-byte binary rejection:
+// pty-derived logs can legitimately contain stray control bytes, and refusing
+// the whole tail over one of them would blank the activity view mid-run. Don't
+// assume the two functions are symmetric.
+const MAX_TAIL_READ_BYTES = 512 * 1024;
+
+export async function readTextFileTail(path: string, maxBytes: number): Promise<FsFileContent> {
+  const limit = Math.max(1, Math.min(Math.floor(maxBytes) || 0, MAX_TAIL_READ_BYTES));
+  // Remote reads have no positioned-read primitive; fetch and trim locally.
+  if (isRemotePath(path)) {
+    const file = await remoteFs.remoteReadText(path);
+    const truncated = file.content.length > limit;
+    return {
+      ...file,
+      content: trimTornFirstLine(truncated ? file.content.slice(-limit) : file.content, truncated),
+    };
+  }
+
+  const handle = await fs.open(path, "r");
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) {
+      throw new Error("Path is not a file.");
+    }
+    const length = Math.min(st.size, limit);
+    const buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, st.size - length);
+    const chunk = buffer.subarray(0, bytesRead);
+    return {
+      path,
+      content: trimTornFirstLine(chunk.toString("utf8"), st.size > length),
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+// A read that starts mid-file almost certainly lands inside a line (and inside
+// a multi-byte character), so drop everything up to the first newline.
+function trimTornFirstLine(text: string, truncated: boolean): string {
+  if (!truncated) return text;
+  const nl = text.indexOf("\n");
+  return nl === -1 ? "" : text.slice(nl + 1);
+}
+
 // Lightweight metadata probe for the file previewers (image/pdf/media):
 // they load content via file:// URLs, so all they need from IPC is size +
 // mtime for captions and cache-busting — never the buffer itself.

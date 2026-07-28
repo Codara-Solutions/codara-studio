@@ -278,10 +278,21 @@ function PersistentBackendTerminal({
       }
     };
     void check();
-    const interval = window.setInterval(check, 1000);
+    // Skip polling entirely while the window is hidden — a warm pane would
+    // otherwise burn one IPC round-trip per second forever. Refocus fires an
+    // immediate check so death detection catches up instantly.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void check();
+    }, 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       disposed = true;
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [sessionId]);
 

@@ -54,7 +54,7 @@ import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import RemoteConnectDialog from "./components/remote/RemoteConnectDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
-import { useTabs, isDraftChatTabId } from "./tabs/useTabs";
+import { useTabs, isDraftChatTabId, sameWorkerMeta } from "./tabs/useTabs";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
@@ -65,6 +65,7 @@ import type {
   TabId,
   TerminalAgentSession,
   TerminalLeaf,
+  TerminalLeafWorker,
   TerminalTab,
 } from "./tabs/types";
 import { isRunOwnedTab } from "./tabs/types";
@@ -250,6 +251,29 @@ function workerHarnessFromCommand(command: string | undefined): "pi" | "cli" | u
   return command.startsWith("Pi harness") ? "pi" : "cli";
 }
 
+// Value-equality proxy for the lifted runs list. Main bumps run.updatedAt on
+// every committed run change, so id + updatedAt (plus the cheap renderer-
+// visible scalars) identify an unchanged snapshot. Refresh paths use this to
+// keep the previous state reference when a poll found nothing new — otherwise
+// each 1s listRuns round-trip republishes a fresh array and re-renders the
+// whole app.
+function sameRunsList(a: RunState[], b: RunState[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.updatedAt !== y.updatedAt ||
+      x.status !== y.status ||
+      x.seen !== y.seen
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function forEachTerminalLeaf(node: PaneNode, fn: (leaf: TerminalLeaf) => void): void {
   if (node.kind === "leaf") {
     fn(node);
@@ -384,6 +408,11 @@ export default function App() {
   // lifecycle events → reviewing → complete); refreshing on every one would
   // fire dozens of IPC round-trips. We coalesce a burst into one refresh.
   const runRefreshTimer = useRef<number | null>(null);
+  // Absolute max-wait deadline for the burst currently being coalesced. A
+  // purely trailing debounce starves under a sustained event stream (events
+  // closer together than the debounce window re-arm the timer forever, so it
+  // never fires); the deadline guarantees a flush even mid-stream.
+  const runRefreshDeadline = useRef<number | null>(null);
   const processedSpawnTerminalEventsRef = useRef<Set<string>>(new Set());
   // Edge events close failed worker panes immediately, while the debounced run
   // snapshot can still describe the attempt as live for another render. Keep a
@@ -567,6 +596,31 @@ export default function App() {
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
 
+  // The useTabs API's methods are stable for the hook instance's lifetime
+  // (only its data fields re-key the memo). Destructure the ones the hoisted
+  // callbacks below need so those callbacks can depend on truly stable
+  // references instead of the whole `tabs` object, whose identity changes on
+  // every tab-state publish. Callbacks that read DATA off `tabs` (tabs.tabs,
+  // tabs.activeId, ...) must still list that data as a dep.
+  const {
+    setActiveTab: setActiveTabStable,
+    newTerminalTab,
+    newPreviewTab,
+    addDraftChatTab,
+    openAutomationsTab,
+    newWhiteboardTab,
+    hideRunsTabs,
+    closeChatTabForRun,
+    renameChatTab,
+    setPreviewUrl,
+    setDetectedUrl,
+    openEditorTab,
+    closeEditorByPath,
+    setEditorEntry,
+    moveTerminalPane,
+    detachTerminalPaneToNewTab,
+  } = tabs;
+
   // Mirror the runs list through a ref so run-selection callbacks can read
   // the latest chat titles without taking `runs` as a dependency.
   const runsRef = useRef(runs);
@@ -614,7 +668,9 @@ export default function App() {
           );
           const next = [run, ...withoutRun];
           next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-          return next;
+          // A redelivered snapshot (same run version, same order) must not
+          // republish the list — snapshots arrive on every daemon event.
+          return sameRunsList(current, next) ? current : next;
         });
       }
 
@@ -1153,7 +1209,10 @@ export default function App() {
       // chat tabs / RunsStack rows from materializing for them.
       runsWorkspaceIdRef.current = workspaceId;
       setRunsWorkspaceId(workspaceId);
-      setRuns(next.filter((run) => !run.automationId));
+      setRuns((current) => {
+        const filtered = next.filter((run) => !run.automationId);
+        return sameRunsList(current, filtered) ? current : filtered;
+      });
     } catch {
       /* Surface details elsewhere; this is opportunistic. */
     }
@@ -1219,6 +1278,11 @@ export default function App() {
     // planning → running → N worker events → complete) collapses into a
     // single refresh once events stop arriving for this long.
     const RUN_REFRESH_DEBOUNCE_MS = 250;
+    // Upper bound on how long a refresh can be deferred while events keep
+    // arriving. Without it, a stream of events spaced under the debounce
+    // window (a busy run's worker chatter) would postpone the flush forever
+    // and the runs list would go stale for the whole burst.
+    const RUN_REFRESH_MAX_WAIT_MS = 1_000;
 
     // Drain the pending-workspace set: refresh the run count for every
     // workspace that saw an event, and the lifted runs list if the currently
@@ -1227,6 +1291,7 @@ export default function App() {
     // was registered.
     const flushRunRefresh = (): void => {
       runRefreshTimer.current = null;
+      runRefreshDeadline.current = null;
       const pending = runRefreshPendingRef.current;
       if (pending.size === 0) return;
       const workspaceIds = Array.from(pending);
@@ -1239,16 +1304,30 @@ export default function App() {
       }
     };
 
+    // (Re)arm the coalescing timer: trailing-debounce by default, but never
+    // later than the burst's max-wait deadline (set when the burst started).
+    const armRunRefresh = (): void => {
+      const now = Date.now();
+      if (runRefreshDeadline.current === null) {
+        runRefreshDeadline.current = now + RUN_REFRESH_MAX_WAIT_MS;
+      }
+      const delay = Math.max(
+        0,
+        Math.min(RUN_REFRESH_DEBOUNCE_MS, runRefreshDeadline.current - now),
+      );
+      if (runRefreshTimer.current !== null) {
+        window.clearTimeout(runRefreshTimer.current);
+      }
+      runRefreshTimer.current = window.setTimeout(flushRunRefresh, delay);
+    };
+
     return window.spark.orchestration.onEvent((event) => {
       if (!event.workspaceId) return;
       // Record the affected workspace and (re)arm the trailing timer. The
       // active workspace's runs/counts still update — just batched into one
       // refresh per burst rather than one per event.
       runRefreshPendingRef.current.add(event.workspaceId);
-      if (runRefreshTimer.current !== null) {
-        window.clearTimeout(runRefreshTimer.current);
-      }
-      runRefreshTimer.current = window.setTimeout(flushRunRefresh, RUN_REFRESH_DEBOUNCE_MS);
+      armRunRefresh();
 
       // A deletion can race with the orchestration runner still flushing the
       // run file; a delayed second pass picks up the settled state. We just
@@ -1291,10 +1370,7 @@ export default function App() {
         const deletedWorkspaceId = event.workspaceId;
         window.setTimeout(() => {
           runRefreshPendingRef.current.add(deletedWorkspaceId);
-          if (runRefreshTimer.current !== null) {
-            window.clearTimeout(runRefreshTimer.current);
-          }
-          runRefreshTimer.current = window.setTimeout(flushRunRefresh, RUN_REFRESH_DEBOUNCE_MS);
+          armRunRefresh();
         }, 500);
       }
 
@@ -1369,6 +1445,7 @@ export default function App() {
         window.clearTimeout(runRefreshTimer.current);
         runRefreshTimer.current = null;
       }
+      runRefreshDeadline.current = null;
     };
   }, []);
 
@@ -1827,23 +1904,29 @@ export default function App() {
     if (!booted || !activeId) return;
 
     const workspaceId = activeId;
-    const liveAttempts = runs.flatMap((run) =>
-      run.workerAttempts
-        .filter((attempt) =>
-          ["preparing", "prompt_ready", "launching", "running", "finishing"].includes(
-            attempt.status,
-          ),
-        )
-        .map((attempt) => ({ run, attempt })),
-    );
-    if (liveAttempts.length === 0) return;
 
     let disposed = false;
     let reconciling = false;
+    // Last worker literal handed to useTabs per attempt. Re-passing the SAME
+    // reference on a no-change tick lets setLeafField's Object.is bail without
+    // even reaching the shallow meta compare.
+    const workerMetaByAttempt = new Map<string, TerminalLeafWorker>();
     const reconcile = async () => {
       if (reconciling) return;
       reconciling = true;
       try {
+        // Read runs through the ref: a `runs` dep would tear down and re-arm
+        // this interval (plus run an extra immediate reconcile) on every 1s
+        // refresh, even when nothing changed.
+        const liveAttempts = runsRef.current.flatMap((run) =>
+          run.workerAttempts
+            .filter((attempt) =>
+              ["preparing", "prompt_ready", "launching", "running", "finishing"].includes(
+                attempt.status,
+              ),
+            )
+            .map((attempt) => ({ run, attempt })),
+        );
         await Promise.all(
           liveAttempts.map(async ({ run, attempt }) => {
             // Loom/direct automation workers have their own durable Workers
@@ -1866,24 +1949,29 @@ export default function App() {
               attempt.cwd ||
               (typeof snapshotCwd === "string" ? snapshotCwd : undefined) ||
               workspacesRef.current.find((workspace) => workspace.id === workspaceId)?.cwd;
+            const candidateMeta: TerminalLeafWorker = {
+              runtime,
+              runId: run.id,
+              workerTaskId: attempt.workerTaskId,
+              attemptId: attempt.id,
+              source: "spark",
+              state: "running",
+              runtimeState: attempt.runtimeState,
+              title: task?.title,
+              attemptOrdinal: attempt.attemptNumber,
+              harness: workerHarnessFromCommand(attempt.command),
+              model: attempt.model ?? task?.modelHint,
+              startedAt: attempt.startedAt,
+            };
+            const cached = workerMetaByAttempt.get(attempt.id);
+            const workerMeta =
+              cached && sameWorkerMeta(cached, candidateMeta) ? cached : candidateMeta;
+            workerMetaByAttempt.set(attempt.id, workerMeta);
             const tabId = tabsRef.current.ensureWorkerTerminalTab(
               run.id,
               cwd,
               attempt.id,
-              {
-                runtime,
-                runId: run.id,
-                workerTaskId: attempt.workerTaskId,
-                attemptId: attempt.id,
-                source: "spark",
-                state: "running",
-                runtimeState: attempt.runtimeState,
-                title: task?.title,
-                attemptOrdinal: attempt.attemptNumber,
-                harness: workerHarnessFromCommand(attempt.command),
-                model: attempt.model ?? task?.modelHint,
-                startedAt: attempt.startedAt,
-              },
+              workerMeta,
               // Level-triggered re-ensures run every second; they must never
               // move the user's pane selection. (A pane the loop MATERIALIZES
               // still activates — creation, not re-ensure, drives focus, and
@@ -1893,6 +1981,14 @@ export default function App() {
             if (cwd) tabsRef.current.setLeafCwd(tabId, attempt.id, cwd);
           }),
         );
+        // The cache only serves live attempts; without pruning it would grow
+        // by one entry per attempt for the lifetime of the effect.
+        if (workerMetaByAttempt.size > liveAttempts.length) {
+          const live = new Set(liveAttempts.map(({ attempt }) => attempt.id));
+          for (const id of workerMetaByAttempt.keys()) {
+            if (!live.has(id)) workerMetaByAttempt.delete(id);
+          }
+        }
       } finally {
         reconciling = false;
       }
@@ -1904,7 +2000,7 @@ export default function App() {
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [booted, activeId, runs]);
+  }, [booted, activeId]);
 
   // Apply both live daemon events and level-triggered snapshots through one
   // idempotent path. Cold hydration intentionally strips transient worker
@@ -2166,10 +2262,22 @@ export default function App() {
         });
     };
     reconcile();
-    const interval = window.setInterval(reconcile, 1_500);
+    // Skip ticks while the window is hidden — the live onState channel above
+    // keeps delivering transitions either way, and a hidden window has no chip
+    // to correct. Returning to visible reconciles immediately so anything the
+    // renderer missed is repaired before the user reads the tabs.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      reconcile();
+    }, 1_500);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") reconcile();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       disposed = true;
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
       off?.();
     };
   }, [booted, reconcileTerminalAgentState]);
@@ -2629,6 +2737,18 @@ export default function App() {
         return;
       }
       setCreateCopyDialogWs(null);
+      // Same Part A race as createWs: push the worktree path onto the main
+      // read-sandbox allowlist BEFORE the workspace exists in state. The rail's
+      // missing-folder probe (fs:pathExists) and FileTree's fs:list fire from
+      // child effects ahead of the parent setAllowedRoots effect, and a
+      // sandbox-denied probe reports exists:false — striking the brand-new
+      // copy through as "folder not found" until the next re-check.
+      const existingCwds = workspacesRef.current
+        .map((w) => w.cwd)
+        .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+      await window.spark.ui?.setAllowedRoots([...existingCwds, res.path]).catch(() => {
+        /* sandbox push is best-effort; the parent effect re-sends on state change */
+      });
       setWorkspaces((list) => {
         const ws: Workspace = {
           id: makeId("ws"),
@@ -2659,7 +2779,7 @@ export default function App() {
             prefs.copyBranchSetupCommandByRepo?.[sourceWs.cwd] ??
             DEFAULT_COPY_BRANCH_SETUP_COMMAND
           ).trim();
-          if (cmd) tabs.newTerminalTab(res.path, cmd);
+          if (cmd) newTerminalTab(res.path, cmd);
         });
         // Insert directly below the source workspace (and any existing copy
         // branches of it) so it reads as an indented child of its parent.
@@ -2677,7 +2797,7 @@ export default function App() {
         return next;
       });
     },
-    [tabs],
+    [newTerminalTab],
   );
 
   const handleCreateCopyBranch = useCallback(
@@ -2690,6 +2810,10 @@ export default function App() {
     },
     [workspaces],
   );
+
+  // Stable identity: an inline arrow here would defeat WorkspaceRail's
+  // React.memo on both rails.
+  const handleCreateRemote = useCallback(() => setRemoteConnectOpen(true), []);
 
   const confirmCopyDelete = useCallback(
     async (opts: { deleteBranch: boolean; force: boolean }) => {
@@ -2719,9 +2843,9 @@ export default function App() {
 
   const openEditorFile = useCallback(
     (entry: FsEntry, options?: { preview?: boolean }) => {
-      tabs.openEditorTab(entry, options);
+      openEditorTab(entry, options);
     },
-    [tabs],
+    [openEditorTab],
   );
 
   // File/search panels: open the picked file then dismiss the panel.
@@ -2736,20 +2860,20 @@ export default function App() {
   );
 
   // Explorer prop callbacks. Hoisted to stable references (keyed on the
-  // now-stable `tabs` object) so the memoized side panels can skip re-renders
-  // when only unrelated App state changed.
+  // hook-lifetime-stable tab methods) so the memoized side panels can skip
+  // re-renders when only unrelated App state changed.
   const handleDeleteFile = useCallback(
     (path: string) => {
-      tabs.closeEditorByPath(path);
+      closeEditorByPath(path);
     },
-    [tabs],
+    [closeEditorByPath],
   );
 
   const handleRenameFile = useCallback(
     (oldPath: string, entry: FsEntry) => {
-      tabs.setEditorEntry(oldPath, entry);
+      setEditorEntry(oldPath, entry);
     },
-    [tabs],
+    [setEditorEntry],
   );
 
   // Right-click "Run plan" in the explorer: read the file and hand it to the
@@ -2859,7 +2983,7 @@ export default function App() {
 
   const handleDetectedUrl = useCallback(
     (tabId: string, paneId: string, url: string) => {
-      tabs.setDetectedUrl(tabId, paneId, url);
+      setDetectedUrl(tabId, paneId, url);
       // Re-broadcast so other listeners (status bar, agent bridge) can
       // react without coupling directly to the terminal stack.
       window.dispatchEvent(
@@ -2924,9 +3048,11 @@ export default function App() {
           : null;
       // focus:false — an auto-detected preview opens in the background so it
       // doesn't steal the active tab from a chat the user is working in.
-      tabs.newPreviewTab(url, { runId: ownerRunId, focus: false });
+      newPreviewTab(url, { runId: ownerRunId, focus: false });
     },
-    [AUTO_PREVIEW_PORTS, tabs],
+    // tabs.tabs is real data read above (worker-pane and existing-preview
+    // checks), so it stays a dep; the method references are stable.
+    [AUTO_PREVIEW_PORTS, setDetectedUrl, newPreviewTab, tabs.tabs],
   );
 
   // ── Tab toolbar handlers ───────────────────────────────────────────────────
@@ -3231,27 +3357,27 @@ export default function App() {
     // EmptyState plus the address bar at the top of AddressBar (which
     // auto-focuses on mount when the URL is empty) gives the user a place
     // to type without any modal.
-    tabs.newPreviewTab("");
-  }, [tabs]);
+    newPreviewTab("");
+  }, [newPreviewTab]);
 
   // Top tab strip "+" — append a fresh draft chat tab and focus it. The
   // composer renders in "new chat" mode; the first message will promote the
   // draft to a real run-backed chat tab via handleRunSnapshot.
   const handleNewChat = useCallback(() => {
-    tabs.addDraftChatTab();
-  }, [tabs]);
+    addDraftChatTab();
+  }, [addDraftChatTab]);
 
   // Top tab strip "+" → "New automations" — focus the workspace's single
   // Automations tab (scheduler + overnight queue), creating it if absent.
   const handleNewAutomations = useCallback(() => {
-    tabs.openAutomationsTab();
-  }, [tabs]);
+    openAutomationsTab();
+  }, [openAutomationsTab]);
 
   // Top tab strip "+" → "New whiteboard" — append a fresh untitled whiteboard
   // draft tab. The first Ctrl+S save binds it to a .coraboard file.
   const handleNewWhiteboard = useCallback(() => {
-    tabs.newWhiteboardTab();
-  }, [tabs]);
+    newWhiteboardTab();
+  }, [newWhiteboardTab]);
 
   // Chat-tab "×" — close-only, and it STICKS (no auto-respawn). Drafts dissolve
   // locally; run-backed chats only have their top-strip tab removed and a
@@ -3273,11 +3399,11 @@ export default function App() {
         if (workspaceId) activeRunIdsByWorkspaceRef.current[workspaceId] = null;
         activeRunIdRef.current = null;
         setActiveRunId(null);
-        tabs.hideRunsTabs();
+        hideRunsTabs();
       }
-      tabs.closeChatTabForRun(id);
+      closeChatTabForRun(id);
     },
-    [tabs],
+    [hideRunsTabs, closeChatTabForRun],
   );
 
   // Chat-tab "✎" — rename via IPC; update the tab title locally as well so
@@ -3286,7 +3412,7 @@ export default function App() {
     (id: TabId, title: string) => {
       const trimmed = title.trim();
       if (!trimmed) return;
-      tabs.renameChatTab(id, trimmed);
+      renameChatTab(id, trimmed);
       if (isDraftChatTabId(id)) return; // drafts have no backing run yet
       void window.spark.orchestration
         .renameRun({ runId: id, title: trimmed })
@@ -3294,27 +3420,28 @@ export default function App() {
           /* IPC failure — the local title may diverge until the next snapshot */
         });
     },
-    [tabs],
+    [renameChatTab],
   );
 
   const openInSparkBrowser = useCallback(
     (url: string, options?: { forceNew?: boolean }) => {
       if (!isBrowserUrl(url)) return;
       if (options?.forceNew) {
-        tabs.newPreviewTab(url);
+        newPreviewTab(url);
         return;
       }
       const existing = tabs.tabs.find(
         (t) => t.kind === "preview" && (t.url === url || sameOrigin(t.url, url)),
       );
       if (existing) {
-        tabs.setPreviewUrl(existing.id, url);
-        tabs.setActiveTab(existing.id);
+        setPreviewUrl(existing.id, url);
+        setActiveTabStable(existing.id);
         return;
       }
-      tabs.newPreviewTab(url);
+      newPreviewTab(url);
     },
-    [tabs],
+    // tabs.tabs is data (existing-preview dedupe); the methods are stable.
+    [newPreviewTab, setPreviewUrl, setActiveTabStable, tabs.tabs],
   );
 
   useEffect(() => {
@@ -3346,10 +3473,10 @@ export default function App() {
     // user off their chat mid-run. The bridge drives navigation by tab id, so
     // the preview need not be the active tab.
     setOpenPreviewTabFn((url: string, runId?: string | null) =>
-      tabs.newPreviewTab(url, { runId: runId ?? activeRunIdRef.current, focus: false }),
+      newPreviewTab(url, { runId: runId ?? activeRunIdRef.current, focus: false }),
     );
     return () => setOpenPreviewTabFn(null);
-  }, [tabs]);
+  }, [newPreviewTab]);
 
   // Shared terminal bridge: an MCP client or the Remote Access service asks
   // for a new terminal tab; we mint an origin-marked, UNFOCUSED tab
@@ -3488,21 +3615,21 @@ export default function App() {
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {
       if (targetTabId) {
-        tabs.moveTerminalPane(payload.tabId, payload.paneId, targetTabId);
+        moveTerminalPane(payload.tabId, payload.paneId, targetTabId);
         return;
       }
-      tabs.detachTerminalPaneToNewTab(payload.tabId, payload.paneId);
+      detachTerminalPaneToNewTab(payload.tabId, payload.paneId);
     },
-    [tabs],
+    [moveTerminalPane, detachTerminalPaneToNewTab],
   );
 
   const handlePreviewUrlChange = useCallback(
     (id: string, url: string) => {
       // Reflect navigation back into the persisted tab state so a reload
       // restores the user where they were.
-      tabs.setPreviewUrl(id, url);
+      setPreviewUrl(id, url);
     },
-    [tabs],
+    [setPreviewUrl],
   );
 
   // ── Global keyboard shortcuts ──────────────────────────────────────────────
@@ -4405,7 +4532,7 @@ export default function App() {
             onDeleteWorkspaceGroup={deleteWorkspaceGroup}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
-            onCreateRemote={() => setRemoteConnectOpen(true)}
+            onCreateRemote={handleCreateRemote}
             onCreateCopyBranch={handleCreateCopyBranch}
             onSplitChange={panels.setLeftSplit}
             onToggleSection={togglePanelSection}
@@ -4542,7 +4669,7 @@ export default function App() {
             onDeleteWorkspaceGroup={deleteWorkspaceGroup}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
-            onCreateRemote={() => setRemoteConnectOpen(true)}
+            onCreateRemote={handleCreateRemote}
             onCreateCopyBranch={handleCreateCopyBranch}
             onSplitChange={panels.setRightSplit}
             onToggleSection={togglePanelSection}
@@ -5056,6 +5183,9 @@ const Workspace = React.memo(function Workspace({
     toggleTerminalPaneZoom,
     openEditorTab,
     registerDispose,
+    setLeafAgentSession,
+    setLeafBootResumeConsumed,
+    flushWorkspaceScrollbackNow,
   } = tabs;
   const visibleTabs = useMemo(
     () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
@@ -5215,10 +5345,22 @@ const Workspace = React.memo(function Workspace({
       }
     };
     void check();
-    const interval = window.setInterval(check, 1000);
+    // Nothing observes the pill while the window is hidden, so skip the tick
+    // rather than spend an IPC round-trip per second on a state nobody reads.
+    // Refocus re-checks immediately so the view can't render against a stale
+    // existence bit.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void check();
+    }, 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       disposed = true;
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [backendSessionId]);
   // Escape a dead Terminal view: if the backend PTY is gone (or never
@@ -5408,6 +5550,26 @@ const Workspace = React.memo(function Workspace({
     (tabId: string, paneId: string) => toggleTerminalPaneZoom(tabId, paneId),
     [toggleTerminalPaneZoom],
   );
+  // Each hidden kept-alive terminal layer needs a flush callback bound to its
+  // own workspaceId. An inline arrow per layer would change identity every App
+  // render and defeat TerminalStack's memo, so cache one closure per workspace
+  // (flushWorkspaceScrollbackNow is stable, so cached closures never go stale;
+  // the map is bounded by the workspaces mounted this session).
+  const hiddenFlushScrollbackFnsRef = useRef(
+    new Map<
+      string,
+      (entries: Array<{ tabId: TabId; paneId: string; text: string }>) => void
+    >(),
+  );
+  const flushScrollbackForHiddenLayer = (workspaceId: string) => {
+    const cache = hiddenFlushScrollbackFnsRef.current;
+    let fn = cache.get(workspaceId);
+    if (!fn) {
+      fn = (entries) => flushWorkspaceScrollbackNow(workspaceId, entries);
+      cache.set(workspaceId, fn);
+    }
+    return fn;
+  };
   // A restored pane's `--resume` probe found no transcript on disk (pruned, or
   // the session id went stale). Clear the dead pointer so the pane stops trying
   // to resume it AND so a future launch in this pane can capture a fresh session
@@ -5415,9 +5577,9 @@ const Workspace = React.memo(function Workspace({
   // the pane could never self-heal.
   const handleLeafResumeUnavailable = useCallback(
     (tabId: string, paneId: string) => {
-      tabs.setLeafAgentSession(tabId, paneId, null);
+      setLeafAgentSession(tabId, paneId, null);
     },
-    [tabs],
+    [setLeafAgentSession],
   );
   // A failed Claude restore self-healed: the pane launched a FRESH forced-id
   // session (buildClaudeLaunch) in the same cwd. Persist the replacement
@@ -5425,18 +5587,18 @@ const Workspace = React.memo(function Workspace({
   // dead one.
   const handleLeafResumeFallback = useCallback(
     (tabId: string, paneId: string, session: TerminalAgentSession) => {
-      tabs.setLeafAgentSession(tabId, paneId, session);
+      setLeafAgentSession(tabId, paneId, session);
     },
-    [tabs],
+    [setLeafAgentSession],
   );
   // A restored pane's first mount made its boot-restore attempt (whatever the
   // outcome) — clear the one-shot hydration marker so no later remount of the
   // pane auto-resumes again.
   const handleLeafBootResumeConsumed = useCallback(
     (tabId: string, paneId: string) => {
-      tabs.setLeafBootResumeConsumed(tabId, paneId);
+      setLeafBootResumeConsumed(tabId, paneId);
     },
-    [tabs],
+    [setLeafBootResumeConsumed],
   );
   // First save of an untitled whiteboard draft: rebind by swapping the draft
   // tab for a regular editor tab on the saved .coraboard file (openEditorTab
@@ -5606,7 +5768,7 @@ const Workspace = React.memo(function Workspace({
                 onFlushScrollback={
                   isActive
                     ? tabs.flushScrollbackNow
-                    : (entries) => tabs.flushWorkspaceScrollbackNow(layer.workspaceId, entries)
+                    : flushScrollbackForHiddenLayer(layer.workspaceId)
                 }
                 onPaneAgentState={isActive ? onTerminalPaneAgentState : noopTerminalCb}
                 onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}

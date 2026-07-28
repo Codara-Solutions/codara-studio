@@ -54,6 +54,16 @@ import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 // detects turn boundaries and calls publish()/rearm().
 
 const RING_MAX = 8_192;
+// Banner-sniff window: while a pane has no detected runtime (every plain
+// shell, forever), each chunk is sniffed as fresh-decoded-text + this much
+// prior ring — NOT the whole 8 KB ring, whose per-chunk stripAnsi + 14-regex
+// scan was a dominant hot-path cost. A banner is detected the moment its
+// bytes arrive (attach() replays history through onChunk chunk-by-chunk, so
+// pre-attach banners are covered too); the overlap only needs to bridge a
+// banner split across a chunk boundary. Longest banner pattern source is 42
+// visible chars; 512 covers it even with Ink positioning every character via
+// cursor-move escapes (~5 raw bytes per visible char).
+const SNIFF_OVERLAP = 512;
 // Raw-text carry bridging escape sequences / footer phrases split across
 // chunk boundaries. Ink positions characters with cursor moves between
 // bytes, so a 16-char phrase can span several hundred raw bytes; 1 KB of
@@ -501,11 +511,12 @@ function regexEndsPast(re: RegExp, text: string, freshFrom: number): boolean {
   return false;
 }
 
+// `plain` is the ALREADY-STRIPPED carry+chunk text (onChunk strips once and
+// shares it across every detector); `freshFrom` is an offset into it.
 function detectTerminalProblem(
-  text: string,
+  plain: string,
   freshFrom: number,
 ): { kind: "blocked" | "failed"; body: string } | null {
-  const plain = stripAnsi(text);
   if (regexEndsPast(CREDENTIAL_PROBLEM_RE, plain, freshFrom)) {
     return {
       kind: "blocked",
@@ -651,7 +662,9 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   if (!w.runtime) {
     let sniffed: PublicAgentRuntime | null = launchedRuntime;
     if (!sniffed) {
-      const banner = sniffRuntime(w.ring);
+      // The ring was just updated above, so its tail is exactly the fresh
+      // decoded text plus the bounded overlap (see SNIFF_OVERLAP).
+      const banner = sniffRuntime(w.ring.slice(-(decoded.length + SNIFF_OVERLAP)));
       if (banner) sniffed = coercePublicRuntime(banner);
     }
     if (sniffed) {
@@ -679,6 +692,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // the newly arrived bytes count (see the classifyTail comment further
     // down).
     const fresh = carryLen === 0 ? 0 : stripAnsi(w.carry).length;
+    // Strip carry+chunk ONCE and share it: countTeammateEvents,
+    // detectTerminalProblem and classifyTail below all consume the same
+    // stripped text, and each used to re-run stripAnsi over it per chunk.
+    const plain = stripAnsi(text);
 
     // Activity sustain: while a turn is running, ANY pty output counts as
     // "still working". Codex (live-captured v0.138.0) repaints its full
@@ -716,7 +733,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     //   counter too LOW → the hold releases early and that one turn reverts to
     //     exactly the pre-fix behavior (a premature "finished"), never worse.
     if (w.runtime === "claude") {
-      const tm = countTeammateEvents(text, Math.max(0, fresh - 16));
+      const tm = countTeammateEvents(plain, Math.max(0, fresh - 16), { preStripped: true });
       if (tm.started || tm.finished) {
         w.teammatesActive = Math.max(0, w.teammatesActive + tm.started - tm.finished);
         tanLog(`pane=${w.paneId} teammates ${tm.started}+/${tm.finished}- -> ${w.teammatesActive}`);
@@ -797,7 +814,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       }
     }
 
-    const problem = detectTerminalProblem(text, fresh);
+    const problem = detectTerminalProblem(plain, fresh);
     if (problem) {
       const priorState = w.state;
       const shouldAlert =
@@ -818,7 +835,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // the carry exists to bridge phrases split across chunk boundaries, but
     // a footer merely sitting in it (painted seconds ago) must not keep
     // re-asserting "working" off the back of unrelated idle repaints.
-    const cls = problem ? null : classifyTail(w.runtime, text, fresh);
+    const cls = problem ? null : classifyTail(w.runtime, plain, fresh, { preStripped: true });
     if (cls === "blocked") {
       if (w.state !== "blocked") tanLog(`pane=${w.paneId} state -> blocked (was ${w.state})`);
       // Deliberately NOT gated on workedLongEnough: a permission prompt can

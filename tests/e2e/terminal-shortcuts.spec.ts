@@ -31,6 +31,8 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await expect(terminalTab).toHaveClass(/spark-tab--active/);
     const panes = page.locator(".spark-terminal-pane:visible");
     await expect(panes).toHaveCount(1);
+    await expect(page.getByTitle("Add pane…").first()).toBeVisible();
+    await expect(page.getByTitle("Previous conversations…")).toHaveCount(0);
     await focusTerminal(panes.first());
 
     await page.keyboard.press(modKey("d"));

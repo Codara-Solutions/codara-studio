@@ -54,14 +54,24 @@ function resultsReducer(state: ResultsState, action: ResultsAction): ResultsStat
       if (action.hits.length === 0) return state;
       const groups = state.groups.slice();
       const pathToIndex = new Map(state.pathToIndex);
+      // Each group touched by this batch is copied once, on first touch; later
+      // hits push into that batch-local copy. The previous state's arrays are
+      // never mutated.
+      const copied = new Set<number>();
       for (const hit of action.hits) {
         const existingIndex = pathToIndex.get(hit.path);
         if (existingIndex !== undefined) {
           const target = groups[existingIndex];
-          groups[existingIndex] = { path: target.path, hits: [...target.hits, hit] };
+          if (copied.has(existingIndex)) {
+            target.hits.push(hit);
+          } else {
+            groups[existingIndex] = { path: target.path, hits: [...target.hits, hit] };
+            copied.add(existingIndex);
+          }
         } else {
           groups.push({ path: hit.path, hits: [hit] });
           pathToIndex.set(hit.path, groups.length - 1);
+          copied.add(groups.length - 1);
         }
       }
       return { groups, pathToIndex, totalHits: state.totalHits + action.hits.length };

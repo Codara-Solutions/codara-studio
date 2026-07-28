@@ -2,13 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import {
-  Client,
-  utils as sshUtils,
-  type ClientChannel,
-  type ConnectConfig,
-  type SFTPWrapper,
-} from "ssh2";
+import type { Client, ClientChannel, ConnectConfig, SFTPWrapper } from "ssh2";
 import type {
   RemoteAuthPromptAnswer,
   RemoteAuthPromptRequest,
@@ -27,6 +21,37 @@ import { deleteSecret, getSecret, setSecret } from "./secret-store";
 // configured/default private keys (passphrase prompt when encrypted) → SSH
 // agent when present → stored password → interactive password prompt (with
 // opt-in remember via safeStorage).
+
+// ssh2 costs ~45 ms of require time (protocol tables, key parsers, crypto
+// bindings) and is only needed once a remote workspace is actually opened —
+// but this module is in the eager main-process graph because quit calls
+// disposeAllConnections(). So the module is pulled in on demand, at the two
+// points that need it as a *value* (new Client, utils.parseKey); everything
+// else here is `import type`, which costs nothing at runtime.
+// disposeAllConnections() stays synchronous and never touches this: with no
+// connections in the map there is nothing to dispose, and a connection can
+// only exist if ssh2 was already loaded to create it.
+//
+// Interop: ssh2 is CommonJS and Node's named-export detection does not see
+// its `utils` export, so we unwrap the namespace's `default` (the real
+// module.exports) when the loader gives us one, and fall back to the
+// namespace itself if a bundler compiled the import down to a require.
+type Ssh2Module = typeof import("ssh2");
+
+let ssh2Promise: Promise<Ssh2Module> | null = null;
+
+function loadSsh2(): Promise<Ssh2Module> {
+  if (!ssh2Promise) {
+    ssh2Promise = import("ssh2")
+      .then((mod) => (mod as { default?: Ssh2Module }).default ?? mod)
+      .catch((err: unknown) => {
+        // Don't cache a failed load — a later connect attempt should retry.
+        ssh2Promise = null;
+        throw err;
+      });
+  }
+  return ssh2Promise;
+}
 
 const READY_TIMEOUT_MS = 20_000;
 const KEEPALIVE_INTERVAL_MS = 15_000;
@@ -164,6 +189,7 @@ class RemoteConnection {
   private async connect(): Promise<Client> {
     const host = this.host;
     this.setState("connecting");
+    const { utils: sshUtils } = await loadSsh2();
 
     // Gather private keys up front (passphrase prompts must complete before
     // the TCP handshake starts consuming auth attempts).
@@ -287,8 +313,9 @@ class RemoteConnection {
 
   private keyPassphrases = new Map<Buffer, string>();
 
-  private tryConnect(auth: Partial<ConnectConfig>): Promise<Client> {
+  private async tryConnect(auth: Partial<ConnectConfig>): Promise<Client> {
     const host = this.host;
+    const { Client } = await loadSsh2();
     return new Promise((resolve, reject) => {
       const client = new Client();
       let settled = false;

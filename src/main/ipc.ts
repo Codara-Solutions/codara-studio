@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileBytes, readFileEx, readTextFile, renameFile, statFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
@@ -61,7 +61,6 @@ import {
 } from "./orchestration/claude-paths";
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
 import { latestSessionStart } from "./agent-session-registry";
-import { listAgentHistoryForCwd } from "./agent-history";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import {
   deleteWorkerSession,
@@ -888,6 +887,14 @@ export function registerIpc(): void {
     assertAllowedReadPath(path);
     return readTextFile(path);
   });
+
+  handle(
+    "fs:readTextTail",
+    async (_e, args: { path: string; maxBytes: number }): Promise<FsFileContent> => {
+      assertAllowedReadPath(args.path);
+      return readTextFileTail(args.path, args.maxBytes);
+    },
+  );
 
   handle("fs:readEx", async (_e, path: string): Promise<FsReadResult> => {
     assertAllowedReadPath(path);
@@ -1944,18 +1951,6 @@ export function registerIpc(): void {
         if (stat) return { exists: true, resumable: stat.size >= 1_024, transcriptPath: path };
       }
       return { exists: false };
-    },
-  );
-
-  // Per-workspace conversation history for the pane-toolbar history menu:
-  // every resumable Claude/Codex session recorded for this cwd, newest first.
-  // Read-only listing; the renderer resumes by injecting the CLI's own
-  // resume command into a pane, so no session state changes here.
-  handle(
-    "agentSession:history",
-    async (_e, args: { cwd: string; limit?: number }) => {
-      if (!args?.cwd || typeof args.cwd !== "string") return [];
-      return listAgentHistoryForCwd(args.cwd, { limit: args.limit }).catch(() => []);
     },
   );
 

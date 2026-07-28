@@ -1664,6 +1664,14 @@ export function useTerminalSession({
       // so agentUiPresent stays true and we leave the chip alone. Tracked here
       // so a fresh working signal or unmount can cancel it.
       let ctrlCExitTimer: number | null = null;
+      // While the document is hidden we drop ticks down to
+      // HIDDEN_STATE_POLL_MS — nobody is looking at the chip, and hidden-window
+      // NOTIFICATIONS are driven by main's terminal-agent-notify watcher, not
+      // this poller, so slower sampling here only delays the chip. (Do not
+      // rely on this poller for background notifications.) The next
+      // STATE_POLL_MS tick after refocus resumes full speed on its own, so the
+      // timer lifecycle is untouched.
+      let lastProcessedTickMs = 0;
       const clearCtrlCExitTimer = () => {
         if (ctrlCExitTimer !== null) {
           window.clearTimeout(ctrlCExitTimer);
@@ -1695,14 +1703,22 @@ export function useTerminalSession({
         uiGoneTicks = 0;
         lastWorkingTail = null;
         idleFrozenTail = null;
+        lastProcessedTickMs = 0;
         clearCtrlCExitTimer();
       };
       const tickStatePoller = () => {
         const t = termRef.current;
         if (!t || !activeRuntime) return;
+        const now = Date.now();
+        if (
+          document.visibilityState !== "visible" &&
+          now - lastProcessedTickMs < HIDDEN_STATE_POLL_MS
+        ) {
+          return;
+        }
+        lastProcessedTickMs = now;
         const tail = readTerminalTail(t, STATE_TAIL_ROWS);
         const raw = classifyTail(activeRuntime, tail);
-        const now = Date.now();
 
         // D4 (stale-footer false "working"). Once a turn is confirmed working,
         // a live turn keeps repainting its footer (the ticking elapsed-seconds
@@ -1887,6 +1903,7 @@ export function useTerminalSession({
         uiGoneTicks = 0;
         lastWorkingTail = null;
         idleFrozenTail = null;
+        lastProcessedTickMs = 0;
         clearCtrlCExitTimer();
         if (stateTimer !== null) window.clearInterval(stateTimer);
         stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
@@ -3537,6 +3554,11 @@ function readTerminalTail(term: Terminal, maxRows: number): string {
 // operation per row; reading 40 rows per tick across a dozen panes is well
 // under 1 ms of renderer work per second.
 const STATE_POLL_MS = 300;
+// Effective cadence while the app window is hidden. The poller keeps running
+// (background panes must still transition so turn-complete notifications fire)
+// but at a fraction of the cost — nobody is watching the chip, and the tick-
+// count backstops below only get more conservative when ticks are rarer.
+const HIDDEN_STATE_POLL_MS = 2_000;
 // How many post-arm bytes the runtime-promotion sniff will scan before giving
 // up on a generic/non-public arm. A first-party launch banner appears within
 // the first few KB of boot output, so 64 KB is far past any real banner while

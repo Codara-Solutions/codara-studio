@@ -183,18 +183,6 @@ interface AgentSessionStartRecord {
   timestamp: string;
 }
 
-// One past conversation for a workspace cwd (src/main/agent-history.ts).
-// Mirrors that module's AgentHistoryEntry; kept local so the preload stays
-// free of main-process imports.
-interface AgentHistoryEntry {
-  runtime: "claude" | "codex";
-  sessionId: string;
-  cwd: string;
-  title: string;
-  lastActivityAt: string;
-  transcriptPath: string;
-}
-
 const api = {
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
@@ -449,6 +437,10 @@ const api = {
     listFiles: (root: string): Promise<FileListResult> =>
       ipcRenderer.invoke("fs:listFiles", root),
     readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
+    // Trailing-window read for the live log tails, which poll a growing file
+    // and only render the last few tens of KB.
+    readTextTail: (path: string, maxBytes: number): Promise<FsFileContent> =>
+      ipcRenderer.invoke("fs:readTextTail", { path, maxBytes }),
     readEx: (path: string): Promise<FsReadResult> => ipcRenderer.invoke("fs:readEx", path),
     // Resolve a dropped File's absolute filesystem path. `File.path` was removed
     // under the sandbox in Electron 32; webUtils.getPathForFile is the supported
@@ -695,10 +687,21 @@ const api = {
       ipcRenderer.invoke("orchestration:readWorkerReport", path),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
+    // Main coalesces token-cadence stream events into one IPC message on
+    // "orchestration:events-batch" (see event-log.ts broadcast). Fan it back out
+    // one event at a time, in journal order, so subscribers keep the same
+    // per-event contract regardless of how the events crossed the boundary.
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: SparkEvent) => handler(event);
+      const batchListener = (_e: Electron.IpcRendererEvent, events: SparkEvent[]) => {
+        for (const event of events) handler(event);
+      };
       ipcRenderer.on("orchestration:event", listener);
-      return () => ipcRenderer.off("orchestration:event", listener);
+      ipcRenderer.on("orchestration:events-batch", batchListener);
+      return () => {
+        ipcRenderer.off("orchestration:event", listener);
+        ipcRenderer.off("orchestration:events-batch", batchListener);
+      };
     },
   },
   // Overnight run queue: a FIFO of pending autopilot runs drained under a
@@ -857,10 +860,6 @@ const api = {
     // the pane (hooks not installed / python missing / external launch).
     latestStart: (paneId: string): Promise<AgentSessionStartRecord | null> =>
       ipcRenderer.invoke("agentSession:latestStart", { paneId }),
-    // Every resumable Claude/Codex conversation recorded for a workspace cwd,
-    // newest activity first — the pane-toolbar history menu's data source.
-    history: (args: { cwd: string; limit?: number }): Promise<AgentHistoryEntry[]> =>
-      ipcRenderer.invoke("agentSession:history", args),
     // Live SessionStart events, fired as Claude sessions start / resume /
     // clear inside Codara panes. Returns an unsubscribe.
     onStarted: (handler: (rec: AgentSessionStartRecord) => void): (() => void) => {

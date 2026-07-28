@@ -1,61 +1,70 @@
 import React, { useEffect, useId, useMemo, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+
+// Hoisted so streaming re-renders reuse the same plugin arrays and component
+// map — a fresh object here re-runs the whole remark/rehype pipeline per render.
+const REMARK_PLUGINS = [remarkGfm];
+const REHYPE_PLUGINS = [rehypeHighlight];
+
+const COMPONENTS: Components = {
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      onClick={(event) => {
+        event.preventDefault();
+        if (href) void window.spark.openExternal(href);
+      }}
+      rel="noreferrer"
+      style={{ color: "var(--accent)", textDecoration: "none" }}
+    >
+      {children}
+    </a>
+  ),
+  code: ({ className, children, ...props }) => {
+    const content = String(children).replace(/\n$/, "");
+    if (/language-mermaid\b/.test(className ?? "")) {
+      return <MermaidDiagram source={content} />;
+    }
+    const block = Boolean(className) || content.includes("\n");
+    return block ? (
+      <code className={className} {...props}>{children}</code>
+    ) : (
+      <code style={INLINE_CODE_STYLE} {...props}>{children}</code>
+    );
+  },
+  pre: ({ children }) => <pre style={CODE_BLOCK_STYLE}>{children}</pre>,
+  table: ({ children }) => (
+    <div style={{ overflowX: "auto", maxWidth: "100%" }}>
+      <table style={TABLE_STYLE}>{children}</table>
+    </div>
+  ),
+  p: ({ children }) => <p style={PARA_STYLE}>{children}</p>,
+  ul: ({ children }) => <ul style={LIST_STYLE}>{children}</ul>,
+  ol: ({ children }) => <ol style={LIST_STYLE}>{children}</ol>,
+  blockquote: ({ children }) => <blockquote style={QUOTE_STYLE}>{children}</blockquote>,
+  h1: ({ children }) => <h1 style={HEADING_STYLE}>{children}</h1>,
+  h2: ({ children }) => <h2 style={HEADING_STYLE}>{children}</h2>,
+  h3: ({ children }) => <h3 style={HEADING_STYLE}>{children}</h3>,
+};
 
 /** Shared safe markdown renderer for chat and result prose. Raw HTML is not
  * enabled, so model output cannot inject DOM. GFM and highlight.js cover the
  * common tables/task-lists/code path; Mermaid runs in strict security mode. */
-export default function Markdown({ text }: { text: string }) {
+function Markdown({ text }: { text: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeHighlight]}
-      components={{
-        a: ({ href, children }) => (
-          <a
-            href={href}
-            onClick={(event) => {
-              event.preventDefault();
-              if (href) void window.spark.openExternal(href);
-            }}
-            rel="noreferrer"
-            style={{ color: "var(--accent)", textDecoration: "none" }}
-          >
-            {children}
-          </a>
-        ),
-        code: ({ className, children, ...props }) => {
-          const content = String(children).replace(/\n$/, "");
-          if (/language-mermaid\b/.test(className ?? "")) {
-            return <MermaidDiagram source={content} />;
-          }
-          const block = Boolean(className) || content.includes("\n");
-          return block ? (
-            <code className={className} {...props}>{children}</code>
-          ) : (
-            <code style={INLINE_CODE_STYLE} {...props}>{children}</code>
-          );
-        },
-        pre: ({ children }) => <pre style={CODE_BLOCK_STYLE}>{children}</pre>,
-        table: ({ children }) => (
-          <div style={{ overflowX: "auto", maxWidth: "100%" }}>
-            <table style={TABLE_STYLE}>{children}</table>
-          </div>
-        ),
-        p: ({ children }) => <p style={PARA_STYLE}>{children}</p>,
-        ul: ({ children }) => <ul style={LIST_STYLE}>{children}</ul>,
-        ol: ({ children }) => <ol style={LIST_STYLE}>{children}</ol>,
-        blockquote: ({ children }) => <blockquote style={QUOTE_STYLE}>{children}</blockquote>,
-        h1: ({ children }) => <h1 style={HEADING_STYLE}>{children}</h1>,
-        h2: ({ children }) => <h2 style={HEADING_STYLE}>{children}</h2>,
-        h3: ({ children }) => <h3 style={HEADING_STYLE}>{children}</h3>,
-      }}
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={COMPONENTS}
     >
       {text}
     </ReactMarkdown>
   );
 }
+
+export default React.memo(Markdown);
 
 function MermaidDiagram({ source }: { source: string }) {
   const reactId = useId();

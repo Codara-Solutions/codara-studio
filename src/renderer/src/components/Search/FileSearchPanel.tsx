@@ -15,14 +15,21 @@ interface Props {
 interface FileRow {
   entry: FsEntry;
   relativePath: string;
+  lowerPath: string;
   directory: string;
   score: number;
 }
 
 const DISPLAY_LIMIT = 500;
+const DEBOUNCE_MS = 200;
 
 export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
   const [query, setQuery] = useState("");
+  // The scoring pass below walks every file in the workspace (up to the
+  // listFiles cap of 10k) with a fuzzy character walk, so it must not run per
+  // keystroke. The input stays bound to `query` and repaints instantly; only
+  // the scoring waits for a pause in typing. Same window as SearchPanel.
+  const [scoredQuery, setScoredQuery] = useState("");
   const [files, setFiles] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [truncated, setTruncated] = useState(false);
@@ -31,10 +38,18 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
   const inputRef = useRef<HTMLInputElement | null>(null);
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const loadGenerationRef = useRef(0);
+  // Deferred Enter: the keydown handler flushed the scoring debounce and
+  // parked the query it wants opened; the effect below `openRow` completes
+  // the open on the first render where the rows reflect exactly that query.
+  // Any later keystroke re-parks or (via onChange) cancels, so a stale
+  // pending open can never fire.
+  const pendingOpenQueryRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    pendingOpenQueryRef.current = null;
     setQuery("");
+    setScoredQuery("");
     setSelectedIndex(0);
     const id = window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => window.clearTimeout(id);
@@ -64,9 +79,15 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
     );
   }, [open, cwd]);
 
+  useEffect(() => {
+    if (query === scoredQuery) return;
+    const id = window.setTimeout(() => setScoredQuery(query), DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [query, scoredQuery]);
+
   const rows = useMemo(() => {
     if (!cwd) return [];
-    const tokens = query
+    const tokens = scoredQuery
       .trim()
       .toLowerCase()
       .split(/\s+/)
@@ -75,12 +96,14 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
     const matched: FileRow[] = [];
     for (const entry of files) {
       const relativePath = relativePathFrom(cwd, entry.path);
-      const score = scoreFile(relativePath, entry.name, tokens);
+      const lowerPath = relativePath.toLowerCase();
+      const score = scoreFile(lowerPath, entry.name, tokens);
       if (score === null) continue;
       const dir = dirname(relativePath);
       matched.push({
         entry,
         relativePath,
+        lowerPath,
         directory: dir === relativePath ? "" : dir,
         score,
       });
@@ -92,18 +115,20 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
         if (a.relativePath.length !== b.relativePath.length) {
           return a.relativePath.length - b.relativePath.length;
         }
-        return a.relativePath.localeCompare(b.relativePath, undefined, {
-          sensitivity: "base",
-        });
+        // Case-insensitive ordinal on the already-lowered path: the same order
+        // localeCompare's "base" sensitivity gives for the ASCII paths this
+        // sees, without the collator on a tiebreak that runs per comparison.
+        if (a.lowerPath === b.lowerPath) return 0;
+        return a.lowerPath < b.lowerPath ? -1 : 1;
       });
     }
 
     return matched.slice(0, DISPLAY_LIMIT);
-  }, [cwd, files, query]);
+  }, [cwd, files, scoredQuery]);
 
   useEffect(() => {
     setSelectedIndex(0);
-  }, [query, cwd]);
+  }, [scoredQuery, cwd]);
 
   useEffect(() => {
     if (selectedIndex < 0) {
@@ -131,6 +156,15 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
     [onClose, onOpenFile],
   );
 
+  useEffect(() => {
+    if (pendingOpenQueryRef.current === null) return;
+    if (scoredQuery !== pendingOpenQueryRef.current) return;
+    pendingOpenQueryRef.current = null;
+    // Selection was reset to 0 by the scoredQuery-change effect, so this
+    // opens the best match for the query the user pressed Enter on.
+    openRow(rows[0]);
+  }, [scoredQuery, rows, openRow]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement | HTMLElement>) => {
       if (e.key === "Escape") {
@@ -151,10 +185,19 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
       }
       if (e.key === "Enter") {
         e.preventDefault();
+        // A fast Enter can land inside the scoring debounce window, when
+        // `rows` still reflects the PREVIOUS query — opening an arbitrary
+        // file. Flush the debounce and defer the open: the effect below fires
+        // it once the scoring memo has re-run against the real query.
+        if (query !== scoredQuery) {
+          pendingOpenQueryRef.current = query;
+          setScoredQuery(query);
+          return;
+        }
         openRow(rows[selectedIndex]);
       }
     },
-    [onClose, openRow, rows, selectedIndex],
+    [onClose, openRow, rows, selectedIndex, query, scoredQuery],
   );
 
   if (!open) return null;
@@ -221,7 +264,11 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
               ref={inputRef}
               type="text"
               value={query}
-              onChange={(e) => setQuery(e.currentTarget.value)}
+              onChange={(e) => {
+                // Typing after a deferred Enter supersedes it.
+                pendingOpenQueryRef.current = null;
+                setQuery(e.currentTarget.value);
+              }}
               onKeyDown={handleKeyDown}
               onFocus={(e) => {
                 e.currentTarget.style.borderColor = "var(--accent-edge)";
@@ -542,9 +589,10 @@ function relativePathFrom(cwd: string, target: string): string {
   return target;
 }
 
-function scoreFile(relativePath: string, name: string, tokens: string[]): number | null {
+// `path` is the relative path already lowered by the caller, which needs it for
+// the sort tiebreak anyway — lowering it once per file rather than twice.
+function scoreFile(path: string, name: string, tokens: string[]): number | null {
   if (tokens.length === 0) return 0;
-  const path = relativePath.toLowerCase();
   const lowerName = name.toLowerCase();
   let score = 0;
 

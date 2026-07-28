@@ -252,31 +252,80 @@ export async function waitForCodexInputReady(attemptId: string): Promise<void> {
   await delay(400);
 }
 
+// Hoisted to module scope: the per-attempt pty tap in run-store calls
+// detectFatalWorkerRuntimeError on every data chunk, and rebuilding this
+// array of regex literals per call was measurable across N concurrent
+// workers. None are /g, so sharing them carries no lastIndex state.
+const FATAL_RUNTIME_ERROR_CHECKS: ReadonlyArray<[RegExp, string]> = [
+  [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
+  // Auth rejections must not collapse into the generic "runtime API error"
+  // reason: the taxonomy classifies that as a transient provider failure and
+  // buys a doomed same-runtime retry on an expired credential. The reason
+  // wording here deliberately matches the taxonomy's auth pattern so the
+  // retry plan goes straight to the opposite runtime.
+  [
+    /API Error:.{0,160}?(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication|invalid api key|no api key|missing api key|oauth|token (?:has )?expired|please (?:run )?\/?login)/i,
+    "runtime authentication failed before final report",
+  ],
+  [/API Error:.{0,160}?(?:\b429\b|rate ?limit|too many requests)/i, "runtime rate limit before final report"],
+  [/API Error:/i, "runtime API error before final report"],
+  [/socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
+  [/fetch\(\)/i, "runtime network fetch failure before final report"],
+  [/rate limit/i, "runtime rate limit before final report"],
+  [/overloaded|temporarily unavailable/i, "runtime temporarily unavailable before final report"],
+];
+
+// Cheap per-chunk pre-filter for the tap: every regex above is /i and every
+// one of its alternations contains at least one of these lowercase literals
+// ("error" covers the four API Error: forms; the rest are verbatim). A chunk
+// window whose lowercased, ANSI-stripped text contains none of them cannot
+// make the full scan match, so the tap skips the 8 KB strip + 8-regex pass.
+// Keep this list in sync with FATAL_RUNTIME_ERROR_CHECKS: a new check whose
+// match text contains no hint here would be silently undetectable from the
+// live tap (the gate sees only the fresh window, never the whole carry).
+const FATAL_RUNTIME_ERROR_HINTS = [
+  "error",
+  "socket connection",
+  "fetch(",
+  "rate limit",
+  "ratelimit",
+  "overloaded",
+  "temporarily unavailable",
+] as const;
+
+// Chars of already-seen carry a gating caller must prepend to the fresh chunk
+// so a fatal banner split across a chunk boundary still trips a hint. Sizing:
+// the widest same-match span a hint must bridge is the auth/rate-limit checks'
+// `API Error:.{0,160}?` — "API Error:" (the "error" hint) up to 160 visible
+// chars before the qualifying keyword, where only the keyword lands in the
+// fresh chunk. `.` excludes newlines, so that span is one printed line; 1024
+// raw chars cover it with ample headroom for interleaved escapes. ACCEPTED
+// EDGE: a match whose only fresh evidence is hint-free (e.g. a bare "401"
+// arriving > overlap raw bytes after its "API Error:" line) is missed by the
+// live tap — unobserved in practice, the CLIs print these as one line.
+export const FATAL_ERROR_GATE_OVERLAP = 1_024;
+
+// True when `window` (fresh tap bytes + FATAL_ERROR_GATE_OVERLAP of carry)
+// could possibly contain a fatal-error match. Strips the small window first:
+// the hints, like the regexes, only match on visible text, and Ink can weave
+// escapes through a phrase. A window that starts mid-escape leaves partial-
+// escape residue behind, which can only ADD text — a false "maybe" costs one
+// full scan, never a missed detection.
+export function mayContainFatalWorkerRuntimeError(window: string): boolean {
+  const visible = stripAnsiWorkerTap(window).toLowerCase();
+  for (const hint of FATAL_RUNTIME_ERROR_HINTS) {
+    if (visible.includes(hint)) return true;
+  }
+  return false;
+}
+
 export function detectFatalWorkerRuntimeError(
   buffer: string,
   runtime: WorkerTask["runtimePreference"],
 ): string | null {
   if (runtime !== "claude" && runtime !== "codex") return null;
   const visible = stripAnsiWorkerTap(buffer);
-  const checks: Array<[RegExp, string]> = [
-    [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
-    // Auth rejections must not collapse into the generic "runtime API error"
-    // reason: the taxonomy classifies that as a transient provider failure and
-    // buys a doomed same-runtime retry on an expired credential. The reason
-    // wording here deliberately matches the taxonomy's auth pattern so the
-    // retry plan goes straight to the opposite runtime.
-    [
-      /API Error:.{0,160}?(?:\b401\b|\b403\b|unauthori[sz]ed|forbidden|authentication|invalid api key|no api key|missing api key|oauth|token (?:has )?expired|please (?:run )?\/?login)/i,
-      "runtime authentication failed before final report",
-    ],
-    [/API Error:.{0,160}?(?:\b429\b|rate ?limit|too many requests)/i, "runtime rate limit before final report"],
-    [/API Error:/i, "runtime API error before final report"],
-    [/socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
-    [/fetch\(\)/i, "runtime network fetch failure before final report"],
-    [/rate limit/i, "runtime rate limit before final report"],
-    [/overloaded|temporarily unavailable/i, "runtime temporarily unavailable before final report"],
-  ];
-  for (const [pattern, reason] of checks) {
+  for (const [pattern, reason] of FATAL_RUNTIME_ERROR_CHECKS) {
     if (pattern.test(visible)) return reason;
   }
   return null;

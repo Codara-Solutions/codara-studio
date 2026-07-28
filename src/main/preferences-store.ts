@@ -209,10 +209,6 @@ function normalize(
     inlineAutocompleteDelayMs: normalizeInlineDelay(src.inlineAutocompleteDelayMs),
     inlineAutocompleteModelId: inlineModel,
     keybindings: normalizeKeybindings(src.keybindings),
-    disableHardwareAcceleration:
-      typeof src.disableHardwareAcceleration === "boolean"
-        ? src.disableHardwareAcceleration
-        : DEFAULT_PREFERENCES.disableHardwareAcceleration,
     closeTabsOnMiddleClick:
       typeof src.closeTabsOnMiddleClick === "boolean"
         ? src.closeTabsOnMiddleClick
@@ -327,8 +323,8 @@ function readFromDiskSync(): AppPreferences {
 }
 
 // Synchronously read a single preference. Used before app.whenReady() to
-// honour flags Chromium can only consume during process startup (e.g.
-// app.disableHardwareAcceleration). Falls back to the default for the key
+// honour flags that must be known during process startup (e.g. whether to
+// start the Remote Access relay). Falls back to the default for the key
 // when the prefs file is absent (first launch) or unparseable.
 export function getPreferenceSync<K extends PrefKey>(key: K): AppPreferences[K] {
   if (!syncCache) {

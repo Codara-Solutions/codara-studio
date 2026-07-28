@@ -53,6 +53,21 @@ function recordsFromHead(text: string): JsonRecord[] {
   return records;
 }
 
+async function sessionIdsFromHistory(path: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  const text = await fs.readFile(path, "utf8").catch(() => "");
+  for (const record of recordsFromHead(text)) {
+    const id =
+      typeof record.sessionId === "string"
+        ? record.sessionId
+        : typeof record.session_id === "string"
+          ? record.session_id
+          : null;
+    if (id) ids.add(id.toLowerCase());
+  }
+  return ids;
+}
+
 function textFromContent(content: unknown): string | null {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
@@ -71,10 +86,11 @@ function sessionTitle(value: string | null): string | null {
   const cleaned = value
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, " ")
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, " ")
-    .replace(/<command-(?:name|message)>[\s\S]*?<\/command-(?:name|message)>/gi, " ")
+    .replace(/<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/gi, " ")
+    .replace(/<local-command-(?:caveat|stdout)>[\s\S]*?<\/local-command-(?:caveat|stdout)>/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (!cleaned) return null;
+  if (!cleaned || cleaned.startsWith("Caveat: The messages below were generated")) return null;
   return cleaned.length <= TITLE_LIMIT
     ? cleaned
     : `${cleaned.slice(0, TITLE_LIMIT - 1).trimEnd()}…`;
@@ -85,38 +101,65 @@ export function parseClaudeSessionHead(text: string): {
   startedAtMs: number | null;
   title: string | null;
   hasUser: boolean;
+  isSidechain: boolean;
 } {
   let hasUser = false;
+  let isSidechain = false;
   let cwd: string | null = null;
   let startedAtMs: number | null = null;
+  let title: string | null = null;
   for (const record of recordsFromHead(text)) {
-    if (record.type !== "user" || record.isSidechain === true) continue;
-    hasUser = true;
+    if (record.isSidechain === true) isSidechain = true;
+    if (
+      record.type !== "user" ||
+      record.isMeta === true ||
+      record.isSidechain === true
+    ) {
+      continue;
+    }
     if (!cwd && typeof record.cwd === "string") cwd = record.cwd;
     if (startedAtMs === null && typeof record.timestamp === "string") {
       const parsed = Date.parse(record.timestamp);
       if (Number.isFinite(parsed)) startedAtMs = parsed;
     }
     const message = isRecord(record.message) ? record.message : null;
-    const title = sessionTitle(textFromContent(message?.content));
-    if (title) return { cwd, startedAtMs, title, hasUser: true };
+    const candidate = sessionTitle(textFromContent(message?.content));
+    if (candidate) {
+      hasUser = true;
+      title ??= candidate;
+    }
   }
-  return { cwd, startedAtMs, title: null, hasUser };
+  return {
+    cwd,
+    startedAtMs,
+    title: isSidechain ? null : title,
+    hasUser: hasUser && !isSidechain,
+    isSidechain,
+  };
 }
 
 export function parseCodexSessionHead(text: string): {
   cwd: string | null;
   startedAtMs: number | null;
   title: string | null;
+  source: string | null;
+  isSubagent: boolean;
 } {
   let cwd: string | null = null;
   let startedAtMs: number | null = null;
   let fallbackTitle: string | null = null;
+  let source: string | null = null;
+  let isSubagent = false;
 
   for (const record of recordsFromHead(text)) {
     const payload = isRecord(record.payload) ? record.payload : null;
     if (record.type === "session_meta" && payload) {
       if (!cwd && typeof payload.cwd === "string") cwd = payload.cwd;
+      if (typeof payload.source === "string") {
+        source = payload.source;
+      } else if (isRecord(payload.source) && "subagent" in payload.source) {
+        isSubagent = true;
+      }
       const timestamp =
         typeof payload.timestamp === "string"
           ? payload.timestamp
@@ -132,7 +175,7 @@ export function parseCodexSessionHead(text: string): {
 
     if (record.type === "event_msg" && payload?.type === "user_message") {
       const title = sessionTitle(typeof payload.message === "string" ? payload.message : null);
-      if (title) return { cwd, startedAtMs, title };
+      if (title) fallbackTitle ??= title;
     }
 
     if (
@@ -145,7 +188,7 @@ export function parseCodexSessionHead(text: string): {
     }
   }
 
-  return { cwd, startedAtMs, title: fallbackTitle };
+  return { cwd, startedAtMs, title: fallbackTitle, source, isSubagent };
 }
 
 function normalizedPath(path: string): string {
@@ -176,8 +219,15 @@ async function mapLimited<T, R>(
 
 async function listClaudeSessions(cwd: string): Promise<WorkerSessionSummary[]> {
   const dir = claudeProjectsDirForCwd(cwd);
+  const interactiveIds = await sessionIdsFromHistory(join(claudeConfigDir(), "history.jsonl"));
   const names = await fs.readdir(dir).catch(() => [] as string[]);
-  const paths = names.filter((name) => name.endsWith(".jsonl")).map((name) => join(dir, name));
+  const paths = names
+    .filter(
+      (name) =>
+        name.endsWith(".jsonl") &&
+        interactiveIds.has(basename(name, ".jsonl").toLowerCase()),
+    )
+    .map((name) => join(dir, name));
 
   return mapLimited(paths, async (path) => {
     try {
@@ -219,16 +269,26 @@ async function collectCodexRollouts(root: string): Promise<string[]> {
 
 async function listCodexSessions(cwd: string): Promise<WorkerSessionSummary[]> {
   const root = join(codexHomeDir(), "sessions");
-  const paths = await collectCodexRollouts(root);
+  const [paths, interactiveIds] = await Promise.all([
+    collectCodexRollouts(root),
+    sessionIdsFromHistory(join(codexHomeDir(), "history.jsonl")),
+  ]);
   const targetCwd = normalizedPath(cwd);
 
   return mapLimited(paths, async (path) => {
     try {
       const sessionId = extractSessionUuid(path);
-      if (!sessionId) return null;
+      if (!sessionId || !interactiveIds.has(sessionId.toLowerCase())) return null;
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
       const preview = parseCodexSessionHead(head);
-      if (!preview.cwd || normalizedPath(preview.cwd) !== targetCwd) return null;
+      if (
+        preview.isSubagent ||
+        (preview.source !== null && preview.source !== "cli") ||
+        !preview.cwd ||
+        normalizedPath(preview.cwd) !== targetCwd
+      ) {
+        return null;
+      }
       return {
         runtime: "codex",
         sessionId,
@@ -260,7 +320,10 @@ async function pathIsDirectory(path: string): Promise<boolean> {
 
 async function listAllClaudeSessions(): Promise<WorkerSessionSummary[]> {
   const projectsRoot = join(claudeConfigDir(), "projects");
-  const projectDirs = await fs.readdir(projectsRoot, { withFileTypes: true }).catch(() => []);
+  const [projectDirs, interactiveIds] = await Promise.all([
+    fs.readdir(projectsRoot, { withFileTypes: true }).catch(() => []),
+    sessionIdsFromHistory(join(claudeConfigDir(), "history.jsonl")),
+  ]);
   const paths = (
     await Promise.all(
       projectDirs
@@ -269,7 +332,12 @@ async function listAllClaudeSessions(): Promise<WorkerSessionSummary[]> {
           const dir = join(projectsRoot, entry.name);
           const children = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
           return children
-            .filter((child) => child.isFile() && child.name.endsWith(".jsonl"))
+            .filter(
+              (child) =>
+                child.isFile() &&
+                child.name.endsWith(".jsonl") &&
+                interactiveIds.has(basename(child.name, ".jsonl").toLowerCase()),
+            )
             .map((child) => join(dir, child.name));
         }),
     )
@@ -316,17 +384,27 @@ async function collectJsonlFiles(
 }
 
 async function listAllCodexSessions(): Promise<WorkerSessionSummary[]> {
-  const paths = await collectJsonlFiles(
-    join(codexHomeDir(), "sessions"),
-    (name) => name.startsWith("rollout-"),
-  );
+  const [paths, interactiveIds] = await Promise.all([
+    collectJsonlFiles(
+      join(codexHomeDir(), "sessions"),
+      (name) => name.startsWith("rollout-"),
+    ),
+    sessionIdsFromHistory(join(codexHomeDir(), "history.jsonl")),
+  ]);
   return mapLimited(paths, async (path) => {
     try {
       const sessionId = extractSessionUuid(path);
-      if (!sessionId) return null;
+      if (!sessionId || !interactiveIds.has(sessionId.toLowerCase())) return null;
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
       const preview = parseCodexSessionHead(head);
-      if (!preview.cwd || !isAbsolute(preview.cwd)) return null;
+      if (
+        preview.isSubagent ||
+        (preview.source !== null && preview.source !== "cli") ||
+        !preview.cwd ||
+        !isAbsolute(preview.cwd)
+      ) {
+        return null;
+      }
       return {
         runtime: "codex",
         sessionId,

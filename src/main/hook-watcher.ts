@@ -123,6 +123,15 @@ const PROCESSED_PRUNE_BATCH = 200;
 // Let app boot settle before spending IO on the prune.
 const PROCESSED_PRUNE_DELAY_MS = 30_000;
 
+// The cold-start backlog sweep is deferred past first paint. startHookWatcher()
+// runs immediately before createWindow(), and a backlog of a few hundred files
+// (each a stat + read + parse + rename, and the first one with a paneId pulls
+// in the run-store chunk) is enough main-process work to visibly delay the
+// BrowserWindow and its renderer load. Nothing is lost by waiting: fs.watch is
+// still armed synchronously below, so live hook files are handled the moment
+// they land, and the backlog is by definition already stale.
+const INITIAL_SCAN_DELAY_MS = 3_000;
+
 interface WatcherState {
   hooksDir: string;
   processedDir: string;
@@ -136,6 +145,8 @@ interface WatcherState {
   stopped: boolean;
   // Rescan debounce timer for the directory-level fallback path.
   rescanTimer: NodeJS.Timeout | null;
+  // One-shot timer for the deferred cold-start backlog sweep.
+  initialScanTimer: NodeJS.Timeout | null;
   // One-shot timer for the deferred processed/ retention prune.
   pruneTimer: NodeJS.Timeout | null;
   // Lazy-resolved run-store. We use a Promise so concurrent dispatches
@@ -180,6 +191,7 @@ export async function startHookWatcher(): Promise<void> {
     inFlight: new Set(),
     stopped: false,
     rescanTimer: null,
+    initialScanTimer: null,
     pruneTimer: null,
     runStorePromise: null,
   };
@@ -187,10 +199,17 @@ export async function startHookWatcher(): Promise<void> {
 
   // Pick up any files that were dropped while Codara was shut down. Without
   // this, a long-running Claude session that emitted hooks during a crash
-  // would have those events lost forever.
-  void rescanDirectory(state).catch((err) =>
-    console.warn("[hook-watcher] initial rescan failed:", err),
-  );
+  // would have those events lost forever. Deferred past first paint — see
+  // INITIAL_SCAN_DELAY_MS. Files the live watcher already handled in the
+  // meantime are gone from hooks/ (moved to processed/) so the sweep won't
+  // see them, and one still in flight is held off by state.inFlight.
+  state.initialScanTimer = setTimeout(() => {
+    state.initialScanTimer = null;
+    void rescanDirectory(state).catch((err) =>
+      console.warn("[hook-watcher] initial rescan failed:", err),
+    );
+  }, INITIAL_SCAN_DELAY_MS);
+  state.initialScanTimer.unref?.();
 
   // Retention prune for processed/, deferred past boot so the (potentially
   // large) stat sweep never competes with startup IO.
@@ -242,6 +261,10 @@ export async function stopHookWatcher(): Promise<void> {
   if (state.rescanTimer !== null) {
     clearTimeout(state.rescanTimer);
     state.rescanTimer = null;
+  }
+  if (state.initialScanTimer !== null) {
+    clearTimeout(state.initialScanTimer);
+    state.initialScanTimer = null;
   }
   if (state.pruneTimer !== null) {
     clearTimeout(state.pruneTimer);

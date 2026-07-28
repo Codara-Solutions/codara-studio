@@ -1006,33 +1006,6 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <SectionTitle
-        title="Performance"
-        detail="Tune renderer resource usage. Some flags only apply after restart."
-      />
-      {hydrated ? (
-        <div style={{ display: "grid", gap: 6 }}>
-          <ToggleRow
-            title="Disable hardware acceleration (requires restart)"
-            desc="Reduces RAM ~60-90MB on integrated GPUs. Restart to apply."
-            checked={Boolean(preferences.disableHardwareAcceleration)}
-            onChange={(v) => void setPreference("disableHardwareAcceleration", v)}
-          />
-        </div>
-      ) : (
-        <div
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-          }}
-        >
-          Loading preferences…
-        </div>
-      )}
-
-      <hr className="spark-divider" style={{ margin: "2px 0" }} />
-
-      <SectionTitle
         title="Tabs"
         detail="How the workspace tab strip responds to the mouse."
       />

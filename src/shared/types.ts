@@ -426,11 +426,6 @@ export interface AppPreferences {
   // input — OpenRouter has hundreds of models, no dropdown.
   inlineAutocompleteModelId: string;
   keybindings: KeybindingOverridesPref;
-  // When true, the main process calls app.disableHardwareAcceleration()
-  // before app.whenReady() at next launch. Saves ~60-90 MB RAM on machines
-  // with integrated GPUs. Requires restart because Chromium only checks the
-  // flag once during process startup.
-  disableHardwareAcceleration?: boolean;
   // When true, middle-clicking (mouse wheel button) on a tab in the strip
   // closes it — same effect as clicking the tab's × button. Applies to every
   // tab kind (chat, terminal, editor, preview, automations). Defaults on.
@@ -601,7 +596,6 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   inlineAutocompleteDelayMs: DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   keybindings: {},
-  disableHardwareAcceleration: false,
   closeTabsOnMiddleClick: true,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
   notificationsDnd: false,

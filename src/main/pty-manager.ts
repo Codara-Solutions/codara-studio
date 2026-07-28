@@ -46,8 +46,20 @@ interface Session {
   // the agent-socket terminal.read RPC so a sibling sub-agent can peek at
   // another worker's output without going through the renderer's xterm
   // scrollback. Capped at TAIL_BUFFER_BYTES to keep RAM bounded.
-  tail: Buffer[];
+  //
+  // Eviction is head-index based, not shift() based: with ~44-byte pty chunks
+  // the array holds ~95k entries at the 4 MB cap, and Array.prototype.shift()
+  // re-indexes all of them on EVERY chunk once the cap is reached (measured
+  // 18-73 µs per chunk — the single largest per-chunk main-thread cost).
+  // Instead, entries below tailHead are consumed: they are nulled (releasing
+  // the Buffer) and skipped by every reader, and the array is compacted in one
+  // O(live) slice once tailHead grows past TAIL_COMPACT_HEAD. Invariants:
+  //   - live entries are exactly tail[tailHead .. tail.length-1], all non-null;
+  //   - tailBytes is the exact byte sum of the live entries;
+  //   - eviction never drops the newest chunk, so live count >= 1 after a push.
+  tail: Array<Buffer | null>;
   tailBytes: number;
+  tailHead: number;
   // Whether the renderer has a live IPC listener bound to this session. When
   // the renderer-side TerminalPane unmounts during a workspace switch, it
   // calls pause(id), which flips this to false. enqueueData then diverts
@@ -126,10 +138,7 @@ const STRANDED_BINDING_TTL_MS = 10_000;
 function stashWebContents(id: string, s: Session): void {
   const wc = s.webContents;
   if (!wc || wc.isDestroyed()) return;
-  let snapshot: Buffer | null = null;
-  if (s.tail.length > 0) {
-    snapshot = s.tail.length === 1 ? s.tail[0] : Buffer.concat(s.tail, s.tailBytes);
-  }
+  const snapshot = tailSnapshot(s);
   strandedBindings.set(id, {
     webContents: wc,
     expiresAt: Date.now() + STRANDED_BINDING_TTL_MS,
@@ -159,6 +168,31 @@ const MAX_BUFFER_BYTES = 96_000;
 // cursor-relative TUI frames, and the user explicitly prefers durability over
 // the few extra megabytes of RAM per busy terminal.
 const TAIL_BUFFER_BYTES = 4 * 1024 * 1024;
+// How far the tail's consumed-prefix head index may grow before the array is
+// compacted (one slice dropping the nulled prefix). 4096 amortizes the O(live)
+// copy down to a few array-slot moves per chunk while keeping at most ~4k dead
+// slots (the Buffers themselves are already nulled at eviction time).
+const TAIL_COMPACT_HEAD = 4096;
+
+// Number of live (unevicted) chunks in the session's tail ring.
+function tailLiveCount(s: Session): number {
+  return s.tail.length - s.tailHead;
+}
+
+// Full snapshot of the live tail bytes as one Buffer, or null when empty.
+// Only for the rare reattach/stash paths — per-chunk code must never call
+// this (it concats up to TAIL_BUFFER_BYTES).
+function tailSnapshot(s: Session): Buffer | null {
+  const live = tailLiveCount(s);
+  if (live === 0) return null;
+  if (live === 1) return s.tail[s.tailHead] ?? null;
+  // Live entries are non-null by the tail invariant; the filter only narrows
+  // the type. tailBytes is their exact sum.
+  return Buffer.concat(
+    s.tail.slice(s.tailHead).filter((c): c is Buffer => c !== null),
+    s.tailBytes,
+  );
+}
 // Per-session cap for bytes held while the renderer is detached (workspace
 // switched away or the host is locked/asleep). 16 MB covers long tool output
 // accumulated over an extended laptop sleep while remaining bounded. The
@@ -368,10 +402,8 @@ export async function spawn(
       existing.attached = true;
       existing.detachedBacklog = [];
       existing.detachedBacklogBytes = 0;
-      if (existing.tail.length > 0) {
-        const snapshot = existing.tail.length === 1
-          ? existing.tail[0]
-          : Buffer.concat(existing.tail, existing.tailBytes);
+      const snapshot = tailSnapshot(existing);
+      if (snapshot) {
         try {
           opts.webContents.send(existing.dataChannel, snapshot);
         } catch {
@@ -497,6 +529,7 @@ async function doSpawnRemote(
     exited: false,
     tail: [],
     tailBytes: 0,
+    tailHead: 0,
     attached: true,
     detachedBacklog: [],
     detachedBacklogBytes: 0,
@@ -796,6 +829,7 @@ function doSpawn(
     exited: false,
     tail: [],
     tailBytes: 0,
+    tailHead: 0,
     attached: true,
     detachedBacklog: [],
     detachedBacklogBytes: 0,
@@ -1005,12 +1039,23 @@ function enqueueData(id: string, data: string | Buffer): void {
   // Tail ring buffer for agent-socket terminal.read. Append, then trim from
   // the head until total bytes fit under TAIL_BUFFER_BYTES. Whole chunks are
   // dropped at a time to keep this O(1) per write — we accept a small amount
-  // of slop above the cap until the next write trims it again.
+  // of slop above the cap until the next write trims it again. Trimming
+  // advances tailHead (nulling the slot so the Buffer is released) instead of
+  // shift()ing, which would re-index every one of the ~95k live entries; the
+  // consumed prefix is compacted away in one slice once it grows large.
   s.tail.push(chunk);
   s.tailBytes += chunk.length;
-  while (s.tail.length > 1 && s.tailBytes - (s.tail[0]?.length ?? 0) > TAIL_BUFFER_BYTES) {
-    const dropped = s.tail.shift();
-    if (dropped) s.tailBytes -= dropped.length;
+  while (tailLiveCount(s) > 1) {
+    const head = s.tail[s.tailHead];
+    const headLen = head ? head.length : 0;
+    if (s.tailBytes - headLen <= TAIL_BUFFER_BYTES) break;
+    s.tail[s.tailHead] = null;
+    s.tailHead += 1;
+    s.tailBytes -= headLen;
+  }
+  if (s.tailHead > TAIL_COMPACT_HEAD) {
+    s.tail = s.tail.slice(s.tailHead);
+    s.tailHead = 0;
   }
   // Renderer is detached (workspace switched away) — divert into the backlog
   // instead of the pending flush queue. The backlog is replayed in one shot
@@ -1324,10 +1369,26 @@ export function readTail(id: string, maxBytes: number): Buffer | null {
   const s = sessions.get(id);
   if (!s) return null;
   const cap = Math.max(0, Math.min(maxBytes | 0, TAIL_BUFFER_BYTES));
-  if (cap === 0 || s.tail.length === 0) return Buffer.alloc(0);
-  const merged = s.tail.length === 1 ? s.tail[0] : Buffer.concat(s.tail, s.tailBytes);
-  if (merged.length <= cap) return merged;
-  return merged.subarray(merged.length - cap);
+  if (cap === 0 || tailLiveCount(s) === 0) return Buffer.alloc(0);
+  // Walk the ring backwards, collecting only the chunks needed to satisfy the
+  // cap, then concat that suffix. Concatenating the ENTIRE 4 MB ring to return
+  // its last 32-256 KB blocked the main thread for whole milliseconds.
+  const parts: Buffer[] = [];
+  let total = 0;
+  for (let index = s.tail.length - 1; index >= s.tailHead && total < cap; index -= 1) {
+    const chunk = s.tail[index];
+    if (!chunk) continue;
+    if (total + chunk.length <= cap) {
+      parts.push(chunk);
+      total += chunk.length;
+      continue;
+    }
+    parts.push(chunk.subarray(chunk.length - (cap - total)));
+    total = cap;
+  }
+  if (parts.length === 1) return parts[0];
+  parts.reverse();
+  return Buffer.concat(parts, total);
 }
 
 // Snapshot recent raw output while preserving the PTY's original chunk
@@ -1340,21 +1401,25 @@ export function readTailChunks(id: string, maxBytes: number): Buffer[] | null {
   const s = sessions.get(id);
   if (!s) return null;
   const cap = Math.max(0, Math.min(maxBytes | 0, TAIL_BUFFER_BYTES));
-  if (cap === 0 || s.tail.length === 0) return [];
+  if (cap === 0 || tailLiveCount(s) === 0) return [];
 
+  // Collected newest-first (push is O(1); unshift here was O(n²) across the
+  // thousands of small chunks a 256 KB request spans), then reversed once so
+  // the caller still receives oldest-first replay order.
   const out: Buffer[] = [];
   let remaining = cap;
-  for (let index = s.tail.length - 1; index >= 0 && remaining > 0; index -= 1) {
+  for (let index = s.tail.length - 1; index >= s.tailHead && remaining > 0; index -= 1) {
     const chunk = s.tail[index];
     if (!chunk) continue;
     if (chunk.length <= remaining) {
-      out.unshift(chunk);
+      out.push(chunk);
       remaining -= chunk.length;
       continue;
     }
-    out.unshift(chunk.subarray(chunk.length - remaining));
+    out.push(chunk.subarray(chunk.length - remaining));
     remaining = 0;
   }
+  out.reverse();
   return out;
 }
 
@@ -1584,6 +1649,7 @@ export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
     if (s.flushTimer) clearTimeout(s.flushTimer);
     s.tail = [];
     s.tailBytes = 0;
+    s.tailHead = 0;
     s.detachedBacklog = [];
     s.detachedBacklogBytes = 0;
     sessions.delete(id);
@@ -1676,6 +1742,7 @@ function killNow(id: string): void {
   if (s.flushTimer) clearTimeout(s.flushTimer);
   s.tail = [];
   s.tailBytes = 0;
+  s.tailHead = 0;
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
   sessions.delete(id);

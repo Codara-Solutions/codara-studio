@@ -393,14 +393,20 @@ function matchEndsPast(re: RegExp, text: string, freshFrom: number): boolean {
 // only pattern matches that end past it count. Stream callers pass
 // stripAnsi(carry).length so stale carry content can't re-classify; buffer
 // snapshot callers omit it.
+//
+// `opts.preStripped` declares that `tail` has ALREADY been through stripAnsi,
+// skipping the internal strip. Per-chunk stream callers that fan the same
+// text out to several detectors (the main-process notifier) strip once and
+// pass this; everyone else omits it and behavior is unchanged.
 export function classifyTail(
   runtime: PublicAgentRuntime,
   tail: string,
   freshFrom = 0,
+  opts?: { preStripped?: boolean },
 ): RuntimeState | null {
   const table = RUNTIME_PATTERNS[runtime];
   if (!table) return null;
-  const stripped = stripAnsi(tail);
+  const stripped = opts?.preStripped ? tail : stripAnsi(tail);
   for (const re of table.blocked) {
     if (matchEndsPast(re, stripped, freshFrom)) return "blocked";
   }
@@ -479,11 +485,14 @@ const TEAMMATE_STARTED_CAP = 32;
 // END strictly past `freshFrom` (an offset into the STRIPPED text) count —
 // stream callers pass stripAnsi(carry).length so an event merely sitting in
 // the carry can't be double-counted; freshFrom = 0 counts everything.
+// `opts.preStripped` mirrors classifyTail's: `text` is already stripped,
+// skip the internal strip.
 export function countTeammateEvents(
   text: string,
   freshFrom = 0,
+  opts?: { preStripped?: boolean },
 ): { started: number; finished: number } {
-  const stripped = stripAnsi(text);
+  const stripped = opts?.preStripped ? text : stripAnsi(text);
   let started = 0;
   let finished = 0;
   let m: RegExpExecArray | null;

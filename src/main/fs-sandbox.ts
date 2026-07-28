@@ -57,8 +57,13 @@ function home(seg: string): string {
   return path.join(os.homedir(), seg);
 }
 
+// Computed once on first use — every entry derives from paths that are fixed
+// for the process lifetime (homedir, userData, temp), and this runs on every
+// fs:* IPC call.
+let staticAllowedCache: string[] | null = null;
+
 function staticAllowed(): string[] {
-  return [
+  staticAllowedCache ??= [
     home(".claude"),
     home(".codex"),
     home(".cache/spark"),
@@ -73,6 +78,7 @@ function staticAllowed(): string[] {
     app.getPath("userData"),
     app.getPath("temp"),
   ].map((p) => path.resolve(p));
+  return staticAllowedCache;
 }
 
 export function isAllowedReadPath(target: string): boolean {

@@ -215,6 +215,13 @@ export default function DiffView({
     () => (diff && structure && !diff.binary ? computeRenderLines(diff, structure) : []),
     [diff, structure],
   );
+  // Hunk rows are keyed by line index; look the hunk up by index instead of
+  // scanning `structure.hunks` once per row.
+  const hunksByIndex = useMemo(() => {
+    const map = new Map<number, Hunk>();
+    for (const hunk of structure?.hunks ?? []) map.set(hunk.index, hunk);
+    return map;
+  }, [structure]);
 
   const conflicted = structure?.conflicted ?? false;
   const hunkCount = structure?.hunks.length ?? 0;
@@ -428,7 +435,7 @@ export default function DiffView({
               r.line.kind === "hunk" ? (
                 <HunkRow
                   key={r.index}
-                  hunk={structure!.hunks.find((h) => h.index === r.index)!}
+                  hunk={hunksByIndex.get(r.index)!}
                   staged={staged}
                   showActions={canPartialStage}
                   gutterWidth={gutterWidth}
@@ -458,7 +465,7 @@ export default function DiffView({
 
 const GUTTER_DIGIT = 7; // px per mono digit at 11px — keeps the gutter snug.
 
-function DiffLineRow({
+const DiffLineRow = React.memo(function DiffLineRow({
   render,
   gutterWidth,
 }: {
@@ -502,7 +509,7 @@ function DiffLineRow({
       </span>
     </div>
   );
-}
+});
 
 // Drop the leading +/-/space from a content line (we show the sign separately);
 // meta lines and `\ No newline` markers print verbatim.

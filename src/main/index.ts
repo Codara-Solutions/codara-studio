@@ -127,20 +127,6 @@ if (usesWaylandSoftwareFallback) {
   app.disableHardwareAcceleration();
 }
 
-// Honour the disable-hardware-acceleration preference at startup. Chromium
-// only reads this flag during process initialisation, so we have to consult
-// the prefs file synchronously — before app.whenReady() — every launch.
-// Wrapped in try/catch so a missing or corrupt prefs file (first run,
-// partial write) never blocks boot; the helper itself already returns the
-// default in those cases, but defence in depth is cheap here.
-try {
-  if (getPreferenceSync("disableHardwareAcceleration")) {
-    app.disableHardwareAcceleration();
-  }
-} catch (err) {
-  console.error("[main] failed to read disableHardwareAcceleration pref:", err);
-}
-
 // Surface any uncaught error in main so renderer-side "everything goes black"
 // crashes show up in the dev console instead of dying silently.
 process.on("uncaughtException", (err) => {
@@ -526,15 +512,6 @@ function ensureTray(): void {
     tray = new Tray(trayImage);
     tray.setToolTip("Codara Studio");
     const menu = Menu.buildFromTemplate([
-      { label: "Show Codara Studio", click: showMainWindow },
-      {
-        label: "Open Automations",
-        click: () => {
-          showMainWindow();
-          mainWindow?.webContents.send("window:open-automations");
-        },
-      },
-      { type: "separator" },
       {
         label: "Quit Codara Studio",
         click: () => {
@@ -543,8 +520,16 @@ function ensureTray(): void {
         },
       },
     ]);
-    tray.setContextMenu(menu);
-    tray.on("click", showMainWindow);
+    if (process.platform === "darwin") {
+      // No setContextMenu on macOS — with one attached, LEFT click also opens
+      // the menu and the "click" event never fires. Left click shows the app;
+      // the menu (Quit only) pops on right click.
+      tray.on("click", showMainWindow);
+      tray.on("right-click", () => tray?.popUpContextMenu(menu));
+    } else {
+      tray.setContextMenu(menu);
+      tray.on("click", showMainWindow);
+    }
   } catch (err) {
     console.warn("[main] failed to create tray:", err);
   }

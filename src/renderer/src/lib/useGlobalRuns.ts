@@ -56,16 +56,27 @@ export function useGlobalRuns(booted: boolean): {
     // planning → running → N worker events → complete) collapses into a single
     // refresh once events stop arriving for this long.
     const RUN_REFRESH_DEBOUNCE_MS = 250;
+    // Ceiling on how long a sustained stream may hold that trailing window
+    // open. A streaming backend emits chat.* deltas dozens of times a second,
+    // so events never fall 250 ms apart and a pure trailing debounce starved:
+    // the cockpit's fleet list froze for the whole turn and only caught up
+    // once the run went quiet. Past this age the pending refresh fires anyway.
+    const RUN_REFRESH_MAX_WAIT_MS = 1000;
     let refreshTimer: number | null = null;
+    let pendingSince = 0;
 
     const off = window.spark.orchestration.onEvent(() => {
-      if (refreshTimer !== null) {
+      const now = Date.now();
+      if (refreshTimer === null) {
+        pendingSince = now;
+      } else {
         window.clearTimeout(refreshTimer);
       }
+      const remaining = Math.max(0, RUN_REFRESH_MAX_WAIT_MS - (now - pendingSince));
       refreshTimer = window.setTimeout(() => {
         refreshTimer = null;
         void refresh();
-      }, RUN_REFRESH_DEBOUNCE_MS);
+      }, Math.min(RUN_REFRESH_DEBOUNCE_MS, remaining));
     });
 
     return () => {
