@@ -96,6 +96,10 @@ async function main() {
     path.join(ROOT, "src", "main", "remote-access", "file-mutations.ts"),
     "remote-access-file-mutations-test.cjs",
   );
+  const imageUpload = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "image-upload.ts"),
+    "remote-access-image-upload-test.cjs",
+  );
   const coraPolicy = await bundle(
     path.join(ROOT, "src", "main", "remote-access", "cora-policy.ts"),
     "remote-access-cora-policy-test.cjs",
@@ -829,6 +833,73 @@ async function main() {
     }
   }
 
+  /* ---- Remote terminal image uploads ---------------------------------- */
+
+  {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-image-test-"));
+    const imageDirectory = path.join(directory, "image dir");
+    try {
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+      const upload = await imageUpload.createRemoteImageUpload(
+        imageDirectory,
+        {
+          workspaceId: "ws1",
+          name: "../Holiday Photo.heic",
+          mimeType: "image/jpeg",
+          size: jpeg.length,
+        },
+        "darwin",
+      );
+      await upload.write(jpeg.subarray(0, 3));
+      await upload.write(jpeg.subarray(3));
+      const attachment = await upload.finish();
+      check(
+        "remote image upload uses a private server-selected path and a safe terminal token",
+        attachment.name === "Holiday Photo.jpg" &&
+          attachment.path.startsWith(`${imageDirectory}${path.sep}`) &&
+          attachment.inputToken.includes("\\ ") &&
+          fs.readFileSync(attachment.path).equals(jpeg),
+        attachment,
+      );
+
+      const partial = await imageUpload.createRemoteImageUpload(imageDirectory, {
+        workspaceId: "ws1",
+        name: "partial.jpg",
+        mimeType: "image/jpeg",
+        size: jpeg.length,
+      });
+      await partial.write(jpeg.subarray(0, 3));
+      const beforeAbort = fs.readdirSync(imageDirectory).length;
+      await partial.abort();
+      check(
+        "aborting an image upload removes its incomplete temp file",
+        fs.readdirSync(imageDirectory).length === beforeAbort - 1,
+      );
+
+      const forged = await imageUpload.createRemoteImageUpload(imageDirectory, {
+        workspaceId: "ws1",
+        name: "forged.jpg",
+        mimeType: "image/jpeg",
+        size: 6,
+      });
+      await forged.write(Buffer.from("NOTJPG"));
+      let forgedError = null;
+      try {
+        await forged.finish();
+      } catch (err) {
+        forgedError = err;
+      }
+      check(
+        "remote image upload rejects bytes that do not match the declared image type",
+        /valid supported image/i.test(forgedError?.message ?? "") &&
+          fs.readdirSync(imageDirectory).length === 1,
+        forgedError?.message,
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
   /* ---- Cora retry idempotency ------------------------------------------ */
 
   {
@@ -1351,6 +1422,8 @@ async function main() {
   {
     const calls = [];
     let sharedTerminal = null;
+    const uploadedImageChunks = [];
+    let imageUploadAborts = 0;
     const extendedServices = {
       ...services,
       peerDevice: {
@@ -1534,6 +1607,26 @@ async function main() {
           }],
         };
       },
+      beginImageUpload: async (input) => {
+        calls.push(["files.imageUpload.begin", input]);
+        return {
+          async write(data) {
+            uploadedImageChunks.push(Buffer.from(data));
+          },
+          async finish() {
+            return {
+              name: input.name,
+              mimeType: input.mimeType,
+              size: input.size,
+              path: "/tmp/phone-image.jpg",
+              inputToken: "/tmp/phone-image.jpg",
+            };
+          },
+          async abort() {
+            imageUploadAborts += 1;
+          },
+        };
+      },
       createTerminal: async (request) => {
         calls.push(["terminal.create", request]);
         // A renderer-backed shell can print its prompt before the awaited
@@ -1630,6 +1723,52 @@ async function main() {
     check(
       "files.delete returns the parent that the phone should refresh",
       ex.outbox.at(-1)?.result?.deleted?.parentPath === "archive",
+      ex.outbox.at(-1),
+    );
+    const imageBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+    exReq(55, "files.imageUpload.begin", {
+      workspaceId: "ws1",
+      name: "phone.jpg",
+      mimeType: "image/jpeg",
+      size: imageBytes.length,
+    });
+    await flush();
+    const imageUploadId = ex.outbox.at(-1)?.result?.uploadId;
+    check(
+      "files.imageUpload.begin returns a session-owned bounded chunk size",
+      typeof imageUploadId === "string" &&
+        ex.outbox.at(-1)?.result?.chunkBytes === imageUpload.REMOTE_IMAGE_CHUNK_BYTES,
+      ex.outbox.at(-1),
+    );
+    exReq(56, "files.imageUpload.chunk", {
+      uploadId: imageUploadId,
+      offset: 1,
+      data: imageBytes.toString("base64"),
+    });
+    await flush();
+    check(
+      "files.imageUpload.chunk rejects out-of-order offsets before writing",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" && uploadedImageChunks.length === 0,
+      ex.outbox.at(-1),
+    );
+    exReq(57, "files.imageUpload.chunk", {
+      uploadId: imageUploadId,
+      offset: 0,
+      data: imageBytes.toString("base64"),
+    });
+    await flush();
+    check(
+      "files.imageUpload.chunk acknowledges decoded bytes",
+      ex.outbox.at(-1)?.result?.received === imageBytes.length &&
+        Buffer.concat(uploadedImageChunks).equals(imageBytes),
+      ex.outbox.at(-1),
+    );
+    exReq(58, "files.imageUpload.finish", { uploadId: imageUploadId });
+    await flush();
+    check(
+      "files.imageUpload.finish exposes only the server-created attachment",
+      ex.outbox.at(-1)?.result?.attachment?.inputToken === "/tmp/phone-image.jpg" &&
+        imageUploadAborts === 0,
       ex.outbox.at(-1),
     );
     exReq(6, "git.status", { workspaceId: "ws1" });

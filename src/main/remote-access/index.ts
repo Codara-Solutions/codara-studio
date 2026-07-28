@@ -86,6 +86,7 @@ export interface RemoteAccessDeps {
   listCoraHistory?: RemoteRpcServices["listCoraHistory"];
   getCoraRun?: RemoteRpcServices["getCoraRun"];
   sendCoraMessage?: RemoteRpcServices["sendCoraMessage"];
+  beginImageUpload?: RemoteRpcServices["beginImageUpload"];
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
   log(line: string): void;
   // Test/harness overrides. Production leaves all of these unset.
@@ -540,6 +541,7 @@ export class RemoteAccessService {
       listCoraHistory: this.deps.listCoraHistory,
       getCoraRun: this.deps.getCoraRun,
       sendCoraMessage: this.deps.sendCoraMessage,
+      beginImageUpload: this.deps.beginImageUpload,
       createTerminal: (request) => this.deps.createTerminal(request),
     };
     const session = new RpcSession(stream, services, this.deps.log);

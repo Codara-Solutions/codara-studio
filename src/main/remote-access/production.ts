@@ -46,6 +46,12 @@ import {
   renameRemoteWorkspaceEntry,
 } from "./file-mutations";
 import {
+  createRemoteImageUpload,
+  pruneRemoteImageUploads,
+  type RemoteImageUploadHandle,
+  type RemoteImageUploadRequest,
+} from "./image-upload";
+import {
   isStudioExplorerIgnoredDirectory,
   resolveExistingInside,
   toWireRelative,
@@ -73,6 +79,7 @@ let singleton: RemoteAccessService | null = null;
 let workspaceMutation: Promise<void> = Promise.resolve();
 const coraMessageMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
+let lastRemoteImagePruneAt = 0;
 
 const WORKSPACE_COLORS = [
   "#2AA298",
@@ -133,6 +140,7 @@ export function getRemoteAccessService(): RemoteAccessService {
     listCoraHistory: listCoraHistoryForRemote,
     getCoraRun: getCoraRunForRemote,
     sendCoraMessage: sendCoraMessageForRemote,
+    beginImageUpload: beginImageUploadForRemote,
     createTerminal: createRemoteTerminal,
     log: (line) => logMain("remote-access", line),
   });
@@ -460,6 +468,22 @@ async function deleteFileEntryForRemote(input: {
       shell.trashItem(path),
     );
   });
+}
+
+async function beginImageUploadForRemote(
+  input: RemoteImageUploadRequest,
+): Promise<RemoteImageUploadHandle> {
+  // Image attachments are tied to a real local workspace even though the
+  // materialised file lives in the OS temp directory. This keeps the surface
+  // aligned with the rest of Remote Access and rejects stale workspace ids.
+  await requireLocalWorkspace(input.workspaceId);
+  const directory = join(app.getPath("temp"), "codara-remote-images");
+  const now = Date.now();
+  if (now - lastRemoteImagePruneAt > 60 * 60 * 1000) {
+    lastRemoteImagePruneAt = now;
+    void pruneRemoteImageUploads(directory, now).catch(() => undefined);
+  }
+  return createRemoteImageUpload(directory, input);
 }
 
 async function getGitStatusForRemote(workspaceId: string): Promise<RemoteGitStatus> {

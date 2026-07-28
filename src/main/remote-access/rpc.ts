@@ -22,6 +22,16 @@
 
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import {
+  isSupportedRemoteImageMimeType,
+  MAX_REMOTE_IMAGE_BYTES,
+  MAX_REMOTE_IMAGE_BYTES_PER_CONNECTION,
+  MAX_REMOTE_IMAGE_UPLOADS_PER_CONNECTION,
+  REMOTE_IMAGE_CHUNK_BYTES,
+  REMOTE_IMAGE_UPLOAD_IDLE_MS,
+  type RemoteImageUploadHandle,
+  type RemoteImageUploadRequest,
+} from "./image-upload";
 
 /* -------------------------------------------------------------------------- */
 /* Wire types (mirror of codara-mobile src/lib/remote/types.ts)               */
@@ -190,6 +200,7 @@ export type RpcErrorCode =
   | "unknown-method"
   | "invalid-params"
   | "unknown-terminal"
+  | "unknown-upload"
   | "unknown-workspace"
   | "internal";
 
@@ -454,6 +465,7 @@ export interface RemoteRpcServices {
     message: string;
     clientMessageId: string;
   }): Promise<RemoteCoraRun>;
+  beginImageUpload?(input: RemoteImageUploadRequest): Promise<RemoteImageUploadHandle>;
   // Rejects with an Error whose message is safe to send to the peer.
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
 }
@@ -495,6 +507,14 @@ const MAX_TERMINAL_EVENT_DATA_BYTES = 128 * 1024;
 // held until the terminal.create response gives the phone its terminalId.
 const MAX_TERMINAL_BOOTSTRAP_BYTES = 256 * 1024;
 
+interface SessionImageUpload {
+  handle: RemoteImageUploadHandle;
+  expectedSize: number;
+  received: number;
+  busy: boolean;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface DuplexLike {
   // Node's Writable contract: false means the internal buffer is over its
   // high water mark and the caller should stop until "drain".
@@ -519,6 +539,8 @@ const REVOKE_FLUSH_GRACE_MS = 1_000;
 export class RpcSession {
   private readonly decoder = new FrameDecoder();
   private readonly terminals = new Map<string, RemoteTerminalHandle>();
+  private readonly imageUploads = new Map<string, SessionImageUpload>();
+  private imageBytesAccepted = 0;
   // Creates that passed the cap check but whose pty is still spawning. The
   // cap counts these too, otherwise a burst of concurrent terminal.create
   // frames all read the map before any of them lands in it and the cap is
@@ -602,6 +624,11 @@ export class RpcSession {
       }
     }
     this.terminals.clear();
+    for (const upload of this.imageUploads.values()) {
+      clearTimeout(upload.timer);
+      void upload.handle.abort().catch(() => undefined);
+    }
+    this.imageUploads.clear();
   }
 
   private onData(chunk: Buffer): void {
@@ -961,6 +988,18 @@ export class RpcSession {
           this.reply(id, { deleted });
           return;
         }
+        case "files.imageUpload.begin":
+          await this.handleImageUploadBegin(id, params);
+          return;
+        case "files.imageUpload.chunk":
+          await this.handleImageUploadChunk(id, params);
+          return;
+        case "files.imageUpload.finish":
+          await this.handleImageUploadFinish(id, params);
+          return;
+        case "files.imageUpload.cancel":
+          await this.handleImageUploadCancel(id, params);
+          return;
         case "git.status": {
           if (!this.services.getGitStatus) {
             this.replyError(id, "unknown-method", "Source control is not available.");
@@ -1166,6 +1205,205 @@ export class RpcSession {
     this.reply(id, { nonce: typeof p.nonce === "string" ? p.nonce : "", at: Date.now() });
   }
 
+  private async handleImageUploadBegin(id: number, params: unknown): Promise<void> {
+    if (!this.services.beginImageUpload) {
+      this.replyError(id, "unknown-method", "Image attachments are not available.");
+      return;
+    }
+    const p = (params ?? {}) as {
+      workspaceId?: unknown;
+      name?: unknown;
+      mimeType?: unknown;
+      size?: unknown;
+    };
+    if (
+      typeof p.workspaceId !== "string" ||
+      !p.workspaceId ||
+      typeof p.name !== "string" ||
+      !p.name ||
+      Buffer.byteLength(p.name, "utf8") > 512 ||
+      typeof p.mimeType !== "string" ||
+      !isSupportedRemoteImageMimeType(p.mimeType) ||
+      typeof p.size !== "number" ||
+      !Number.isSafeInteger(p.size) ||
+      p.size < 1 ||
+      p.size > MAX_REMOTE_IMAGE_BYTES
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        `Image uploads need a workspace, supported image name/type, and size up to ${MAX_REMOTE_IMAGE_BYTES / 1024 / 1024} MB.`,
+      );
+      return;
+    }
+    if (this.imageUploads.size >= MAX_REMOTE_IMAGE_UPLOADS_PER_CONNECTION) {
+      this.replyError(id, "internal", "Too many image uploads are already in progress.");
+      return;
+    }
+    if (this.imageBytesAccepted + p.size > MAX_REMOTE_IMAGE_BYTES_PER_CONNECTION) {
+      this.replyError(
+        id,
+        "internal",
+        "This Remote Access session has reached its image upload allowance.",
+      );
+      return;
+    }
+
+    const handle = await this.services.beginImageUpload({
+      workspaceId: p.workspaceId,
+      name: p.name,
+      mimeType: p.mimeType,
+      size: p.size,
+    });
+    if (this.destroyed) {
+      await handle.abort().catch(() => undefined);
+      return;
+    }
+    const uploadId = `image-${randomUUID()}`;
+    const upload: SessionImageUpload = {
+      handle,
+      expectedSize: p.size,
+      received: 0,
+      busy: false,
+      timer: this.armImageUploadTimeout(uploadId),
+    };
+    this.imageUploads.set(uploadId, upload);
+    this.imageBytesAccepted += p.size;
+    this.reply(id, { uploadId, chunkBytes: REMOTE_IMAGE_CHUNK_BYTES });
+  }
+
+  private async handleImageUploadChunk(id: number, params: unknown): Promise<void> {
+    const p = (params ?? {}) as { uploadId?: unknown; offset?: unknown; data?: unknown };
+    if (
+      typeof p.uploadId !== "string" ||
+      typeof p.offset !== "number" ||
+      !Number.isSafeInteger(p.offset) ||
+      p.offset < 0 ||
+      typeof p.data !== "string"
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "Image chunks need an uploadId, byte offset, and base64 data.",
+      );
+      return;
+    }
+    const upload = this.imageUploads.get(p.uploadId);
+    if (!upload) {
+      this.replyError(id, "unknown-upload", "This image upload has expired or does not exist.");
+      return;
+    }
+    if (upload.busy) {
+      this.replyError(id, "invalid-params", "Wait for the previous image chunk to finish.");
+      return;
+    }
+    if (p.offset !== upload.received) {
+      this.replyError(id, "invalid-params", `The next image byte offset is ${upload.received}.`);
+      return;
+    }
+
+    let data: Buffer;
+    try {
+      data = decodeImageChunk(p.data);
+    } catch (err) {
+      this.replyError(id, "invalid-params", (err as Error).message);
+      return;
+    }
+    if (upload.received + data.length > upload.expectedSize) {
+      this.replyError(id, "invalid-params", "The image data exceeds its declared size.");
+      return;
+    }
+
+    upload.busy = true;
+    clearTimeout(upload.timer);
+    try {
+      await upload.handle.write(data);
+      upload.received += data.length;
+      upload.timer = this.armImageUploadTimeout(p.uploadId);
+      this.reply(id, { received: upload.received });
+    } catch (err) {
+      this.imageUploads.delete(p.uploadId);
+      await upload.handle.abort().catch(() => undefined);
+      throw err;
+    } finally {
+      upload.busy = false;
+    }
+  }
+
+  private async handleImageUploadFinish(id: number, params: unknown): Promise<void> {
+    const p = (params ?? {}) as { uploadId?: unknown };
+    if (typeof p.uploadId !== "string") {
+      this.replyError(id, "invalid-params", "An uploadId is required.");
+      return;
+    }
+    const upload = this.imageUploads.get(p.uploadId);
+    if (!upload) {
+      this.replyError(id, "unknown-upload", "This image upload has expired or does not exist.");
+      return;
+    }
+    if (upload.busy) {
+      this.replyError(id, "invalid-params", "Wait for the current image chunk to finish.");
+      return;
+    }
+    if (upload.received !== upload.expectedSize) {
+      this.replyError(
+        id,
+        "invalid-params",
+        `The image upload is incomplete (${upload.received} of ${upload.expectedSize} bytes).`,
+      );
+      return;
+    }
+
+    upload.busy = true;
+    clearTimeout(upload.timer);
+    this.imageUploads.delete(p.uploadId);
+    try {
+      const attachment = await upload.handle.finish();
+      this.reply(id, { attachment });
+    } catch (err) {
+      await upload.handle.abort().catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private async handleImageUploadCancel(id: number, params: unknown): Promise<void> {
+    const p = (params ?? {}) as { uploadId?: unknown };
+    if (typeof p.uploadId !== "string") {
+      this.replyError(id, "invalid-params", "An uploadId is required.");
+      return;
+    }
+    const upload = this.imageUploads.get(p.uploadId);
+    if (!upload) {
+      // Cancellation is deliberately idempotent: the phone can clean up after
+      // a timeout without having to know whether Studio already expired it.
+      this.reply(id, {});
+      return;
+    }
+    if (upload.busy) {
+      this.replyError(id, "invalid-params", "Wait for the current image chunk to finish.");
+      return;
+    }
+    clearTimeout(upload.timer);
+    this.imageUploads.delete(p.uploadId);
+    await upload.handle.abort();
+    this.reply(id, {});
+  }
+
+  private armImageUploadTimeout(uploadId: string): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => {
+      const upload = this.imageUploads.get(uploadId);
+      if (!upload || upload.busy) {
+        if (upload) upload.timer = this.armImageUploadTimeout(uploadId);
+        return;
+      }
+      this.imageUploads.delete(uploadId);
+      void upload.handle.abort().catch(() => undefined);
+      this.log(`expired incomplete image upload ${uploadId}`);
+    }, REMOTE_IMAGE_UPLOAD_IDLE_MS);
+    timer.unref?.();
+    return timer;
+  }
+
   private async handleTerminalCreate(id: number, params: unknown): Promise<void> {
     if (this.destroyed) return;
     const p = (params ?? {}) as {
@@ -1348,4 +1586,21 @@ function utf8Prefix(value: string, maxBytes: number): string {
   // StringDecoder withholds an incomplete multi-byte sequence at the boundary,
   // yielding a valid prefix without replacement glyphs.
   return new StringDecoder("utf8").write(bytes.subarray(0, maxBytes));
+}
+
+function decodeImageChunk(value: string): Buffer {
+  const maxBase64Bytes = Math.ceil(REMOTE_IMAGE_CHUNK_BYTES / 3) * 4;
+  if (
+    value.length < 4 ||
+    value.length > maxBase64Bytes ||
+    value.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
+    throw new Error("Image chunk data is not valid bounded base64.");
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length < 1 || decoded.length > REMOTE_IMAGE_CHUNK_BYTES) {
+    throw new Error(`Image chunks are limited to ${REMOTE_IMAGE_CHUNK_BYTES / 1024} KiB.`);
+  }
+  return decoded;
 }
