@@ -94,8 +94,7 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
     await expect(page.locator('[data-workspace-id="ws-beta"]')).toBeVisible();
 
     const alphaRow = page.locator('[data-workspace-id="ws-alpha"]');
-    await alphaRow.getByTitle("Workspace actions").click();
-    await page.getByRole("menuitem", { name: "Move to Client projects" }).click();
+    await dispatchWorkspaceDrag(page, alphaRow, group.getByText("Drop workspaces here"));
     await expect(group.locator('[data-workspace-id="ws-alpha"]')).toBeVisible();
 
     await group.getByTitle("Collapse Client projects").click();

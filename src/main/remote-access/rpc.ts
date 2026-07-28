@@ -454,6 +454,7 @@ export interface RemoteRpcServices {
     workspaceId: string;
     groupId: string | null;
     beforeWorkspaceId?: string | null;
+    beforeRailItemId?: string | null;
   }): Promise<RemoteWorkspaceInfo>;
   reorderWorkspaceRail?(input: {
     itemId: string;
@@ -959,6 +960,7 @@ export class RpcSession {
             workspaceId?: unknown;
             groupId?: unknown;
             beforeWorkspaceId?: unknown;
+            beforeRailItemId?: unknown;
           };
           if (
             typeof p.workspaceId !== "string" ||
@@ -972,12 +974,18 @@ export class RpcSession {
               p.beforeWorkspaceId !== null &&
               (typeof p.beforeWorkspaceId !== "string" ||
                 p.beforeWorkspaceId.length === 0 ||
-                p.beforeWorkspaceId.length > 256))
+                p.beforeWorkspaceId.length > 256)) ||
+            (p.beforeRailItemId !== undefined &&
+              p.beforeRailItemId !== null &&
+              (typeof p.beforeRailItemId !== "string" ||
+                p.beforeRailItemId.length === 0 ||
+                p.beforeRailItemId.length > 256)) ||
+            (p.groupId !== null && p.beforeRailItemId !== undefined)
           ) {
             this.replyError(
               id,
               "invalid-params",
-              "workspaces.move needs workspaceId, groupId, and an optional beforeWorkspaceId.",
+              "workspaces.move needs workspaceId, groupId, and one compatible optional position.",
             );
             return;
           }
@@ -986,6 +994,9 @@ export class RpcSession {
             groupId: p.groupId,
             ...(p.beforeWorkspaceId !== undefined
               ? { beforeWorkspaceId: p.beforeWorkspaceId as string | null }
+              : {}),
+            ...(p.beforeRailItemId !== undefined
+              ? { beforeRailItemId: p.beforeRailItemId as string | null }
               : {}),
           });
           this.reply(id, { workspace });

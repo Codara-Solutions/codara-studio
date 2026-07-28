@@ -426,6 +426,7 @@ async function moveWorkspaceForRemote(input: {
   workspaceId: string;
   groupId: string | null;
   beforeWorkspaceId?: string | null;
+  beforeRailItemId?: string | null;
 }): Promise<RemoteWorkspaceInfo> {
   return serializeWorkspaceMutation(async () => {
     const state = await loadState();
@@ -441,7 +442,14 @@ async function moveWorkspaceForRemote(input: {
     ) {
       throw new Error("The destination workspace folder no longer exists.");
     }
-    if (input.beforeWorkspaceId === input.workspaceId) {
+    if (input.groupId !== null && input.beforeRailItemId !== undefined) {
+      throw new Error("A workspace folder position cannot use a top-level destination.");
+    }
+    if (
+      input.beforeWorkspaceId === input.workspaceId ||
+      ((sourceIndex >= 0 && !state.workspaces[sourceIndex].groupId) &&
+        input.beforeRailItemId === input.workspaceId)
+    ) {
       return workspaceInfo(state.workspaces[sourceIndex]);
     }
     if (input.beforeWorkspaceId) {
@@ -482,10 +490,35 @@ async function moveWorkspaceForRemote(input: {
     const workspaces = remaining.slice();
     workspaces.splice(insertAt, 0, moved);
 
-    let railOrder = (state.workspaceRailOrder ?? []).filter(
-      (itemId) => itemId !== input.workspaceId,
-    );
-    if (input.groupId === null) railOrder = [...railOrder, input.workspaceId];
+    let railOrder = normalizeWorkspaceRailOrderForRemote(
+      state.workspaceRailOrder ?? [],
+      workspaces,
+      state.workspaceGroups,
+    ).filter((itemId) => itemId !== input.workspaceId);
+    if (input.groupId === null) {
+      if (
+        input.beforeRailItemId &&
+        !state.workspaceGroups.some((group) => group.id === input.beforeRailItemId) &&
+        !state.workspaces.some(
+          (workspace) =>
+            workspace.id === input.beforeRailItemId &&
+            !isRemotePath(workspace.cwd) &&
+            workspace.id !== input.workspaceId &&
+            !(workspace.groupId &&
+              state.workspaceGroups.some((group) => group.id === workspace.groupId)),
+        )
+      ) {
+        throw new Error("The requested top-level position is no longer available.");
+      }
+      const railInsertAt = input.beforeRailItemId
+        ? railOrder.indexOf(input.beforeRailItemId)
+        : railOrder.length;
+      railOrder.splice(
+        railInsertAt >= 0 ? railInsertAt : railOrder.length,
+        0,
+        input.workspaceId,
+      );
+    }
     railOrder = normalizeWorkspaceRailOrderForRemote(
       railOrder,
       workspaces,

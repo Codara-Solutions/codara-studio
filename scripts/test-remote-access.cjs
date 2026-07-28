@@ -1749,6 +1749,19 @@ async function main() {
         ex.outbox.at(-1)?.result?.workspace?.groupId === "group-studio",
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    exReq(331, "workspaces.move", {
+      workspaceId: "ws1",
+      groupId: null,
+      beforeRailItemId: "group-studio",
+    });
+    await flush();
+    check(
+      "workspaces.move delegates an atomic top-level drop position",
+      calls.at(-1)?.[0] === "workspaces.move" &&
+        calls.at(-1)?.[1]?.groupId === null &&
+        calls.at(-1)?.[1]?.beforeRailItemId === "group-studio",
+      calls.at(-1),
+    );
     exReq(34, "workspaces.rail.move", {
       itemId: "group-studio",
       beforeItemId: null,
