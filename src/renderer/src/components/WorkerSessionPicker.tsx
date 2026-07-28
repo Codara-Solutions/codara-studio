@@ -23,8 +23,8 @@ interface WorkerSessionPickerProps {
   onClose: () => void;
 }
 
-const ROW_HEIGHT = 66;
-const VISIBLE_ROWS = 4;
+const ROW_HEIGHT = 76;
+const VISIBLE_ROWS = 5;
 
 export default function WorkerSessionPicker({
   request,
@@ -148,7 +148,7 @@ export default function WorkerSessionPicker({
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
-        padding: "72px 22px 24px",
+        padding: "58px 22px 24px",
         fontFamily: "var(--font-sans)",
       }}
       className="spark-fade-in"
@@ -167,8 +167,8 @@ export default function WorkerSessionPicker({
         style={{
           position: "relative",
           zIndex: 1,
-          width: "min(580px, calc(100vw - 44px))",
-          maxHeight: "calc(100vh - 112px)",
+          width: "min(640px, calc(100vw - 44px))",
+          maxHeight: "calc(100vh - 88px)",
           display: "flex",
           flexDirection: "column",
           borderRadius: 14,
@@ -180,8 +180,8 @@ export default function WorkerSessionPicker({
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 11,
-            padding: "14px 15px",
+            gap: 12,
+            padding: "15px 16px",
             borderBottom: "1px solid var(--rule-soft)",
           }}
         >
@@ -190,7 +190,7 @@ export default function WorkerSessionPicker({
             <div
               style={{
                 color: "var(--ink)",
-                fontSize: 14,
+                fontSize: 15,
                 fontWeight: 700,
                 letterSpacing: "-0.01em",
               }}
@@ -203,7 +203,7 @@ export default function WorkerSessionPicker({
                 marginTop: 2,
                 color: "var(--muted)",
                 fontFamily: "var(--font-mono)",
-                fontSize: 10,
+                fontSize: 10.5,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -212,27 +212,6 @@ export default function WorkerSessionPicker({
               {workspaceLabel}
             </div>
           </div>
-          <button
-            type="button"
-            className="spark-btn is-primary"
-            onClick={() => void launchNew()}
-            disabled={launching}
-            style={{
-              minHeight: 28,
-              padding: "0 10px",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              color: "var(--accent)",
-              borderColor: "var(--accent-edge)",
-              background: "color-mix(in oklch, var(--accent) 8%, transparent)",
-              cursor: "default",
-              flex: "0 0 auto",
-            }}
-          >
-            <PlusIcon size={10} />
-            New session
-          </button>
           <button
             type="button"
             className="spark-icon-btn"
@@ -245,12 +224,142 @@ export default function WorkerSessionPicker({
           </button>
         </header>
 
-        <div style={{ padding: "12px 13px 13px", minHeight: 116 }}>
-          <div
-            className="spark-eyebrow"
-            style={{ margin: "0 3px 8px", color: "var(--muted)" }}
+        <div
+          style={{
+            padding: "14px 15px 15px",
+            minHeight: 176,
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => void launchNew()}
+            disabled={launching}
+            style={{
+              appearance: "none",
+              width: "100%",
+              minHeight: 72,
+              display: "grid",
+              gridTemplateColumns: "42px minmax(0, 1fr) auto",
+              alignItems: "center",
+              gap: 12,
+              padding: "11px 13px",
+              textAlign: "left",
+              color: "var(--ink)",
+              border: "1px solid var(--accent-edge)",
+              borderRadius: 11,
+              background:
+                "linear-gradient(135deg, color-mix(in oklch, var(--accent) 15%, transparent), color-mix(in oklab, var(--panel) 88%, transparent))",
+              boxShadow: "var(--lift-hi), inset 0 1px 0 color-mix(in oklab, white 5%, transparent)",
+              cursor: "default",
+            }}
           >
-            Recent sessions in this directory
+            <span
+              aria-hidden
+              style={{
+                width: 42,
+                height: 42,
+                display: "grid",
+                placeItems: "center",
+                color: "var(--accent-ink)",
+                borderRadius: 10,
+                background: "var(--accent)",
+                boxShadow: "0 8px 22px var(--accent-glow)",
+              }}
+            >
+              <PlusIcon size={13} />
+            </span>
+            <span style={{ minWidth: 0 }}>
+              <span
+                style={{
+                  display: "block",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  letterSpacing: "-0.01em",
+                }}
+              >
+                Start a new session
+              </span>
+              <span
+                style={{
+                  display: "block",
+                  marginTop: 4,
+                  color: "var(--muted)",
+                  fontSize: 10.5,
+                  lineHeight: 1.4,
+                }}
+              >
+                Open a fresh {runtimeLabel} worker in this workspace.
+              </span>
+            </span>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                color: "var(--accent)",
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+              }}
+            >
+              New
+              <span aria-hidden style={{ fontSize: 15, lineHeight: 1 }}>
+                →
+              </span>
+            </span>
+          </button>
+
+          <div
+            style={{
+              minHeight: 30,
+              display: "flex",
+              alignItems: "end",
+              justifyContent: "space-between",
+              gap: 12,
+              padding: "0 3px",
+            }}
+          >
+            <span>
+              <span
+                className="spark-eyebrow"
+                style={{ display: "block", color: "var(--ink-dim)" }}
+              >
+                Continue working
+              </span>
+              <span
+                style={{
+                  display: "block",
+                  marginTop: 3,
+                  color: "var(--muted)",
+                  fontSize: 10,
+                }}
+              >
+                Recent sessions in this workspace
+              </span>
+            </span>
+            {!loading && !error ? (
+              <span
+                style={{
+                  minWidth: 24,
+                  height: 20,
+                  display: "grid",
+                  placeItems: "center",
+                  padding: "0 7px",
+                  color: "var(--muted)",
+                  border: "1px solid var(--rule-soft)",
+                  borderRadius: 999,
+                  background: "var(--panel-2)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 9,
+                }}
+              >
+                {sessions.length}
+              </span>
+            ) : null}
           </div>
           {loading ? (
             <EmptyState title="Reading sessions" detail="Checking the local transcript history…" />
@@ -269,10 +378,10 @@ export default function WorkerSessionPicker({
               style={{
                 maxHeight: ROW_HEIGHT * VISIBLE_ROWS,
                 overflowY: sessions.length > VISIBLE_ROWS ? "auto" : "hidden",
-                border: "1px solid var(--rule-soft)",
-                borderRadius: 10,
-                background: "color-mix(in oklab, var(--bg) 72%, transparent)",
-                boxShadow: "var(--well)",
+                border: "1px solid var(--rule)",
+                borderRadius: 11,
+                background: "color-mix(in oklab, var(--panel) 88%, transparent)",
+                boxShadow: "var(--well), inset 0 1px 0 color-mix(in oklab, white 3%, transparent)",
               }}
             >
               {sessions.map((session, index) => (
@@ -291,7 +400,7 @@ export default function WorkerSessionPicker({
           {!loading && !error && sessions.length > VISIBLE_ROWS ? (
             <div
               style={{
-                margin: "8px 3px 0",
+                margin: "-6px 3px 0",
                 color: "var(--muted)",
                 fontSize: 10,
                 display: "flex",
@@ -340,19 +449,52 @@ function SessionRow({
         border: "none",
         borderBottom: "1px solid var(--rule-soft)",
         background: selected
-          ? "color-mix(in oklch, var(--accent) 10%, transparent)"
+          ? "color-mix(in oklch, var(--accent) 11%, var(--panel))"
           : "transparent",
         color: "var(--ink)",
         display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) auto",
-        gap: 14,
+        gridTemplateColumns: "18px minmax(0, 1fr) auto",
+        gap: 11,
         alignItems: "center",
-        padding: "9px 12px",
+        padding: "10px 12px",
         textAlign: "left",
         cursor: "default",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        boxShadow: selected ? "inset 2px 0 0 var(--accent)" : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
+      <span
+        aria-hidden
+        style={{
+          position: "relative",
+          width: 18,
+          alignSelf: "stretch",
+          display: "flex",
+          justifyContent: "center",
+        }}
+      >
+        <span
+          style={{
+            position: "absolute",
+            top: 17,
+            width: 8,
+            height: 8,
+            borderRadius: 999,
+            background: selected ? "var(--accent)" : "var(--muted-2)",
+            boxShadow: selected ? "0 0 0 3px var(--accent-soft)" : "none",
+          }}
+        />
+        <span
+          style={{
+            position: "absolute",
+            top: 29,
+            bottom: -11,
+            width: 1,
+            background: "var(--rule)",
+          }}
+        />
+      </span>
       <span style={{ minWidth: 0 }}>
         <span
           style={{
@@ -360,8 +502,8 @@ function SessionRow({
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            fontSize: 12,
-            fontWeight: 600,
+            fontSize: 12.5,
+            fontWeight: 650,
             lineHeight: 1.35,
           }}
         >
@@ -369,25 +511,55 @@ function SessionRow({
         </span>
         <span
           style={{
-            display: "block",
-            marginTop: 4,
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            marginTop: 6,
             color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 9,
-            letterSpacing: "0.02em",
+            fontSize: 9.5,
           }}
         >
-          {shortSessionId(session.sessionId)}
+          <span>{relativeTime(session.updatedAt)}</span>
+          <span aria-hidden style={{ color: "var(--rule-strong)" }}>
+            •
+          </span>
+          <span
+            style={{
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontFamily: "var(--font-mono)",
+              fontSize: 9,
+              letterSpacing: "0.02em",
+            }}
+          >
+            {shortSessionId(session.sessionId)}
+          </span>
         </span>
       </span>
       <span
         style={{
-          color: selected ? "var(--accent)" : "var(--muted)",
-          fontSize: 10,
+          minHeight: 26,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "0 8px",
+          color: selected ? "var(--accent)" : "var(--ink-dim)",
+          border: `1px solid ${selected ? "var(--accent-edge)" : "var(--rule-soft)"}`,
+          borderRadius: 7,
+          background: selected ? "var(--accent-soft)" : "var(--panel-2)",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
           whiteSpace: "nowrap",
         }}
       >
-        {relativeTime(session.updatedAt)}
+        Resume
+        <span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>
+          →
+        </span>
       </span>
     </button>
   );
@@ -400,9 +572,9 @@ function RuntimeMark({ runtime }: { runtime: WorkerSessionRuntime }) {
     <span
       aria-hidden
       style={{
-        width: 30,
-        height: 30,
-        borderRadius: 9,
+        width: 36,
+        height: 36,
+        borderRadius: 10,
         display: "grid",
         placeItems: "center",
         color,
@@ -410,9 +582,9 @@ function RuntimeMark({ runtime }: { runtime: WorkerSessionRuntime }) {
         border: `1px solid color-mix(in oklch, ${color} 34%, transparent)`,
         fontFamily: "var(--font-mono)",
         fontWeight: 800,
-        fontSize: 13,
-        boxShadow: "var(--lift-hi)",
-        flex: "0 0 30px",
+        fontSize: 14,
+        boxShadow: `0 8px 22px color-mix(in oklch, ${color} 16%, transparent), var(--lift-hi)`,
+        flex: "0 0 36px",
       }}
     >
       {codex ? "X" : "C"}
@@ -433,18 +605,19 @@ function EmptyState({
     <div
       style={{
         minHeight: 112,
-        border: "1px dashed var(--rule-soft)",
-        borderRadius: 10,
+        border: "1px dashed var(--rule)",
+        borderRadius: 11,
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 4,
-        padding: 18,
+        gap: 5,
+        padding: 20,
+        background: "color-mix(in oklab, var(--panel) 74%, transparent)",
         textAlign: "center",
       }}
     >
-      <span style={{ color: danger ? "var(--danger)" : "var(--ink-dim)", fontSize: 12, fontWeight: 650 }}>
+      <span style={{ color: danger ? "var(--danger)" : "var(--ink)", fontSize: 12, fontWeight: 650 }}>
         {title}
       </span>
       <span style={{ color: "var(--muted)", fontSize: 10, lineHeight: 1.45 }}>{detail}</span>

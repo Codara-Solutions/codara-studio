@@ -92,6 +92,7 @@ export interface RemoteAccessDeps {
   listCoraHistory?: RemoteRpcServices["listCoraHistory"];
   getCoraRun?: RemoteRpcServices["getCoraRun"];
   sendCoraMessage?: RemoteRpcServices["sendCoraMessage"];
+  listWorkerSessions?: RemoteRpcServices["listWorkerSessions"];
   beginImageUpload?: RemoteRpcServices["beginImageUpload"];
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
   log(line: string): void;
@@ -559,6 +560,7 @@ export class RemoteAccessService {
       listCoraHistory: this.deps.listCoraHistory,
       getCoraRun: this.deps.getCoraRun,
       sendCoraMessage: this.deps.sendCoraMessage,
+      listWorkerSessions: this.deps.listWorkerSessions,
       beginImageUpload: this.deps.beginImageUpload,
       createTerminal: (request) => this.deps.createTerminal(request),
     };

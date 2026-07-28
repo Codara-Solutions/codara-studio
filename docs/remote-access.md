@@ -181,7 +181,8 @@ The exposed surface is intentionally bounded:
 - workspace-bound directory and file operations;
 - Git status, commit history, and commit detail;
 - Cora run history and messages;
-- terminal create, write, resize, and close.
+- workspace-scoped Claude and Codex session history;
+- terminal create, resume, write, resize, and close.
 
 Every file path is resolved inside the selected local workspace. File payload,
 collection, terminal, session, and request sizes have explicit ceilings.

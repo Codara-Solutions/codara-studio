@@ -1638,6 +1638,15 @@ async function main() {
           }],
         };
       },
+      listWorkerSessions: async (input) => {
+        calls.push(["workerSessions.list", input]);
+        return [{
+          runtime: input.runtime,
+          sessionId: "session-codex-1",
+          title: "Continue the mobile terminal",
+          updatedAt: "2026-07-28T20:00:00.000Z",
+        }];
+      },
       beginImageUpload: async (input) => {
         calls.push(["files.imageUpload.begin", input]);
         return {
@@ -1940,12 +1949,26 @@ async function main() {
       calls.at(-1),
     );
 
+    exReq(95, "workerSessions.list", {
+      workspaceId: "ws1",
+      runtime: "codex",
+    });
+    await flush();
+    check(
+      "workerSessions.list returns workspace-scoped resumable workers",
+      calls.at(-1)?.[0] === "workerSessions.list" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        ex.outbox.at(-1)?.result?.sessions?.[0]?.sessionId === "session-codex-1",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+
     const beforeCreate = ex.outbox.length;
     exReq(10, "terminal.create", {
       workspaceId: "ws1",
       cols: 92,
       rows: 31,
       profile: "codex",
+      resumeSessionId: "session-codex-1",
       title: "Phone worker",
     });
     await flush();
@@ -1964,6 +1987,7 @@ async function main() {
       "terminal.create exposes the visible desktop tab and trusted phone name",
       createResponse?.result?.desktopTabId === "term-desktop" &&
         calls.at(-1)?.[1]?.profile === "codex" &&
+        calls.at(-1)?.[1]?.resumeSessionId === "session-codex-1" &&
         calls.at(-1)?.[1]?.origin?.deviceName === "Etienne's iPhone",
       { response: createResponse, origin: calls.at(-1)?.[1]?.origin },
     );

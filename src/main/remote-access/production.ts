@@ -28,11 +28,13 @@ import {
   listRuns,
   startAutopilot,
 } from "../orchestration/run-store";
+import { ensureCodexProjectTrust } from "../orchestration/codex-trust";
 import { getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
 import { sparkHome } from "../spark-home";
 import { loadState, onStateSaved, saveState } from "../storage";
 import { requestTerminalOp } from "../terminal-bridge";
+import { listWorkerSessions as listLocalWorkerSessions } from "../worker-sessions";
 import {
   RemoteAccessService,
   type RemoteTerminalCreateRequest,
@@ -75,6 +77,7 @@ import type {
   RemoteWorkspaceGroupInfo,
   RemoteWorkspaceInfo,
   RemoteWorkspaceOrganization,
+  RemoteWorkerSessionInfo,
 } from "./rpc";
 
 let singleton: RemoteAccessService | null = null;
@@ -108,6 +111,7 @@ const MAX_CORA_RUNS = 50;
 const MAX_CORA_MESSAGES = 200;
 const MAX_GIT_LOG_COMMITS = 100;
 const MAX_GIT_COMMIT_FILES = 500;
+const MAX_REMOTE_WORKER_SESSIONS = 40;
 const GIT_COMMIT_BODY_MAX_BYTES = 32 * 1024;
 const TERMINAL_SPAWN_WAIT_MS = 10_000;
 const TERMINAL_SPAWN_SETTLE_MS = 150;
@@ -151,6 +155,7 @@ export function getRemoteAccessService(): RemoteAccessService {
       listCoraHistory: listCoraHistoryForRemote,
       getCoraRun: getCoraRunForRemote,
       sendCoraMessage: sendCoraMessageForRemote,
+      listWorkerSessions: listWorkerSessionsForRemote,
       beginImageUpload: beginImageUploadForRemote,
       createTerminal: createRemoteTerminal,
       log: (line) => logMain("remote-access", line),
@@ -1057,6 +1062,20 @@ function toRemoteRun(run: RunState): RemoteCoraRun {
   return { ...toRemoteRunSummary(run), messages };
 }
 
+async function listWorkerSessionsForRemote(input: {
+  workspaceId: string;
+  runtime: "claude" | "codex";
+}): Promise<RemoteWorkerSessionInfo[]> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  const sessions = await listLocalWorkerSessions(input.runtime, root);
+  return sessions.slice(0, MAX_REMOTE_WORKER_SESSIONS).map((session) => ({
+    runtime: session.runtime,
+    sessionId: session.sessionId,
+    title: truncateUtf8(session.title, 512),
+    updatedAt: session.updatedAt,
+  }));
+}
+
 // Phone terminals are real renderer-owned tabs. The bridge mints the leaf,
 // TerminalPane spawns its PTY, and this service taps that same PTY for the
 // encrypted phone stream. The session remains the lifecycle owner: disconnect
@@ -1070,11 +1089,31 @@ async function createRemoteTerminal(
     directory: true,
     rejectSymlinks: true,
   });
+  const resumableRuntime =
+    request.profile === "claude" || request.profile === "codex"
+      ? request.profile
+      : null;
+  const resumeSession =
+    request.resumeSessionId && resumableRuntime
+      ? (
+          await listLocalWorkerSessions(resumableRuntime, cwd.path)
+        ).find((session) => session.sessionId === request.resumeSessionId)
+      : null;
+  if (request.resumeSessionId && !resumeSession) {
+    throw new Error("That worker session is no longer resumable in this workspace.");
+  }
+  if (request.profile === "codex") {
+    await ensureCodexProjectTrust(cwd.path).catch(() => undefined);
+  }
   const command =
     request.profile === "claude"
-      ? "claude --dangerously-skip-permissions"
+      ? resumeSession
+        ? `claude --dangerously-skip-permissions --resume ${resumeSession.sessionId}`
+        : "claude --dangerously-skip-permissions"
       : request.profile === "codex"
-        ? "codex --yolo"
+        ? resumeSession
+          ? `codex resume ${resumeSession.sessionId} --yolo`
+          : "codex --yolo"
         : undefined;
   const profileLabel =
     request.profile === "claude"

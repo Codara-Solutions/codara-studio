@@ -207,6 +207,13 @@ export interface RemoteCoraRun extends RemoteCoraRunSummary {
   messages: RemoteCoraMessage[];
 }
 
+export interface RemoteWorkerSessionInfo {
+  runtime: "claude" | "codex";
+  sessionId: string;
+  title: string;
+  updatedAt: string;
+}
+
 export type RpcErrorCode =
   | "not-connected"
   | "unsupported-protocol"
@@ -424,6 +431,7 @@ export interface RemoteTerminalCreateRequest {
   rows: number;
   cwd?: string;
   profile: "shell" | "claude" | "codex";
+  resumeSessionId?: string;
   title?: string;
   // Stamped by the authenticated desktop session; never supplied by the phone.
   origin: { kind: "phone"; deviceName: string };
@@ -496,6 +504,10 @@ export interface RemoteRpcServices {
     message: string;
     clientMessageId: string;
   }): Promise<RemoteCoraRun>;
+  listWorkerSessions?(input: {
+    workspaceId: string;
+    runtime: "claude" | "codex";
+  }): Promise<RemoteWorkerSessionInfo[]>;
   beginImageUpload?(input: RemoteImageUploadRequest): Promise<RemoteImageUploadHandle>;
   // Rejects with an Error whose message is safe to send to the peer.
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
@@ -1330,6 +1342,32 @@ export class RpcSession {
           this.reply(id, { run });
           return;
         }
+        case "workerSessions.list": {
+          if (!this.services.listWorkerSessions) {
+            this.replyError(id, "unknown-method", "Worker session history is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; runtime?: unknown };
+          if (
+            typeof p.workspaceId !== "string" ||
+            p.workspaceId.length === 0 ||
+            p.workspaceId.length > 256 ||
+            (p.runtime !== "claude" && p.runtime !== "codex")
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "workerSessions.list needs a workspaceId and Claude or Codex runtime.",
+            );
+            return;
+          }
+          const sessions = await this.services.listWorkerSessions({
+            workspaceId: p.workspaceId,
+            runtime: p.runtime,
+          });
+          this.reply(id, { sessions });
+          return;
+        }
         case "terminal.create":
           await this.handleTerminalCreate(id, params);
           return;
@@ -1609,6 +1647,7 @@ export class RpcSession {
       rows?: unknown;
       cwd?: unknown;
       profile?: unknown;
+      resumeSessionId?: unknown;
       title?: unknown;
     };
     const cols = normalizeDimension(p.cols);
@@ -1628,6 +1667,19 @@ export class RpcSession {
       p.profile !== "codex"
     ) {
       this.replyError(id, "invalid-params", "terminal.create profile is not supported.");
+      return;
+    }
+    if (
+      p.resumeSessionId !== undefined &&
+      (typeof p.resumeSessionId !== "string" ||
+        !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(p.resumeSessionId) ||
+        (p.profile !== "claude" && p.profile !== "codex"))
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "terminal.create resumeSessionId requires a Claude or Codex profile.",
+      );
       return;
     }
     if (p.title !== undefined && typeof p.title !== "string") {
@@ -1664,6 +1716,9 @@ export class RpcSession {
         rows,
         cwd: p.cwd,
         profile: p.profile ?? "shell",
+        ...(typeof p.resumeSessionId === "string"
+          ? { resumeSessionId: p.resumeSessionId }
+          : {}),
         title:
           typeof p.title === "string" && p.title.trim()
             ? p.title.trim().slice(0, 120)
