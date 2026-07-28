@@ -41,6 +41,8 @@ export type CommandId =
   | "tab.cyclePrev"
   | "worker.newClaude"
   | "worker.newCodex"
+  | "worker.claudeSessions"
+  | "worker.codexSessions"
   | "markdown.togglePreview";
 
 export type CommandGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal" | "Workers";
@@ -295,6 +297,11 @@ export const COMMANDS: Command[] = [
   // CLI worker spawners. No default chord — the chord-space we'd want
   // (Mod+Shift+C/Mod+Alt+C/…) all collide with built-in or browser
   // bindings. Users bind their own from Settings → Keybindings.
+  //
+  // "New … worker pane" launches a fresh session immediately; the
+  // "… worker sessions" variants open the resume picker over the recent
+  // sessions in the launch directory. Split on purpose — muscle-memory
+  // fresh-session bindings must not grow a dialog in front of them.
   {
     id: "worker.newClaude",
     label: "New Claude worker pane",
@@ -304,6 +311,18 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.newCodex",
     label: "New Codex worker pane",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.claudeSessions",
+    label: "Open Claude worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.codexSessions",
+    label: "Open Codex worker sessions…",
     group: "Workers",
     defaultChords: [],
   },

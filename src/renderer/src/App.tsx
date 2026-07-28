@@ -3511,8 +3511,13 @@ export default function App() {
       "tab.newEditor": handleNewEditorTab,
       "tab.newPreview": handleNewPreviewTab,
       "tab.newWhiteboard": handleNewWhiteboard,
-      "worker.newClaude": () => openShortcutWorkerSessions("claude"),
-      "worker.newCodex": () => openShortcutWorkerSessions("codex"),
+      // Fresh-launch commands bypass the session picker entirely — rebinding
+      // them to the picker broke existing muscle memory (Ctrl+Shift+ñ etc.).
+      // The picker lives on its own `worker.*Sessions` commands.
+      "worker.newClaude": () => handleNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
+      "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
+      "worker.claudeSessions": () => openShortcutWorkerSessions("claude"),
+      "worker.codexSessions": () => openShortcutWorkerSessions("codex"),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);

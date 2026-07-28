@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes only the active pane", async () => {
+  // Covers two full worker-shortcut flows (fresh launch + session picker) on
+  // top of the split/close/search assertions — the default 30s is too tight.
+  test.setTimeout(60_000);
   const fixture = await prepareFixture();
   let app: ElectronApplication | null = null;
   try {
@@ -80,7 +83,8 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await page.keyboard.press("Escape");
     await expect(searchDialog).toHaveCount(0);
 
-    // The custom worker shortcut must launch the exact public command. In
+    // The fresh-worker shortcut must launch the exact public command with no
+    // picker dialog in between — muscle-memory bindings spawn immediately. In
     // particular, interactive panes must not acquire a generated --session-id.
     await app.evaluate(({ ipcMain }) => {
       const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
@@ -93,6 +97,27 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await focusTerminal(panes.nth(1));
     await page.keyboard.press("Control+Alt+g");
     const claudeSessions = page.getByRole("dialog", { name: "Claude Code sessions" });
+    await expect.poll(
+      async () => app!.evaluate(() => {
+        const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
+        return state.__coraInjects ?? [];
+      }),
+      { timeout: 15_000 },
+    ).toEqual([{
+      id: expect.any(String),
+      text: "claude --dangerously-skip-permissions",
+      submit: true,
+    }]);
+    await expect(claudeSessions).toHaveCount(0);
+
+    // The session-picker shortcut is a separate command: it opens the recent
+    // sessions dialog, and "New session" from there launches the same
+    // public command.
+    await app.evaluate(() => {
+      const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
+      state.__coraInjects = [];
+    });
+    await page.keyboard.press("Control+Alt+h");
     await expect(claudeSessions).toBeVisible();
     await claudeSessions.getByRole("button", { name: "New session" }).dispatchEvent("click");
     await expect.poll(
@@ -151,7 +176,16 @@ async function prepareFixture(): Promise<{
   );
   await writeFile(
     join(userDataDir, "spark-preferences.json"),
-    JSON.stringify({ keybindings: { "worker.newClaude": "ctrl+alt+g" } }, null, 2),
+    JSON.stringify(
+      {
+        keybindings: {
+          "worker.newClaude": "ctrl+alt+g",
+          "worker.claudeSessions": "ctrl+alt+h",
+        },
+      },
+      null,
+      2,
+    ),
     "utf8",
   );
   return { userDataDir, workspaceDir };
