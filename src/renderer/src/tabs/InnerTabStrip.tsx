@@ -1,10 +1,14 @@
 import React from "react";
 import type { PreviewTab, RunsTab, TabId } from "./types";
 import type { CoraView } from "../components/chat/cora-view";
+import AutomationsStripButton from "../components/automations/AutomationsStripButton";
 
 // The strip below the top TabBar that gives every real Cora run a stable
-// workbench: Chat | Runs, plus the optional surfaces that exist for this run —
-// the backend Terminal, the Whiteboard, and agent-opened previews.
+// workbench: Chat | Runs | Board, plus the optional surfaces that exist for
+// this run — the backend Terminal, the Whiteboard, and agent-opened previews.
+// Board is per-chat (each run owns its kanban; a draft chat shows an empty
+// one whose first card mints the run), and its pill is unconditional — the
+// surface always exists.
 //
 // Sits at the workspace level (between TabBar and the Stack content area) so
 // it stays visible when the user navigates from the chat view into a worker
@@ -12,9 +16,11 @@ import type { CoraView } from "../components/chat/cora-view";
 // highlight as soon as activeId becomes a run-owned tab, but this strip
 // keeps the "you are inside Chat X" anchor.
 //
-// Visibility is decided by the parent: it appears as soon as a draft becomes
-// a real run. Chat and Runs never pop in late as planning or delegation
-// advances. The Whiteboard pill is deliberately conditional: it appears only
+// Visibility is decided by the parent: it renders for draft chats too (Chat +
+// Board — a draft's board starts empty and local), and the run-scoped pills join
+// as a draft becomes a real run. Chat and Runs never pop in late as planning
+// or delegation advances. The Whiteboard pill is deliberately conditional: it
+// appears only
 // while a board actually exists for this chat (or the user is creating one),
 // so chats that never use the whiteboard don't carry a dead destination.
 // A quiet "New whiteboard" affordance keeps manual creation reachable.
@@ -38,14 +44,25 @@ interface Props {
   // True when the active run has a persisted whiteboard. The pill hides when
   // no board exists so unused surfaces don't clutter the workbench.
   whiteboardAvailable: boolean;
+  // True when a whiteboard COULD be created here — i.e. the strip belongs to
+  // a real run. Draft chats (no run yet) show the strip for the workspace
+  // Board, but the run-scoped whiteboard can't exist for them, so the "New
+  // whiteboard" affordance hides rather than offering a dead surface.
+  whiteboardCreatable: boolean;
   // True when Cora updated the board while the user was looking elsewhere —
   // renders a small attention dot on the pill until the surface is visited.
   whiteboardAttention: boolean;
   runsTab: RunsTab | null;
   previews: PreviewTab[];
+  // Active workspace id for the strip's right-end Automations affordance (its
+  // live cue is workspace-scoped). Null hides the affordance entirely.
+  workspaceId: string | null;
   onChatClick: () => void;
   onTerminalClick: () => void;
   onWhiteboardClick: () => void;
+  // Flips the chat panel to this chat's Cora Board sub-view (chatView
+  // "board"). Sits next to Runs — cards and their workers are one workflow.
+  onBoardClick: () => void;
   onSelectTab: (id: TabId) => void;
 }
 
@@ -55,17 +72,21 @@ export default function InnerTabStrip({
   chatView,
   backendPtyExists,
   whiteboardAvailable,
+  whiteboardCreatable,
   whiteboardAttention,
   runsTab,
   previews,
+  workspaceId,
   onChatClick,
   onTerminalClick,
   onWhiteboardClick,
+  onBoardClick,
   onSelectTab,
 }: Props) {
   const chatActive = activeId === activeChatTabId && chatView === "chat";
   const terminalActive = activeId === activeChatTabId && chatView === "terminal";
   const runsActive = runsTab !== null && activeId === runsTab.id;
+  const boardActive = activeId === activeChatTabId && chatView === "board";
   const whiteboardActive = activeId === activeChatTabId && chatView === "whiteboard";
   // Keep the pill while the user is on the surface even before the first card
   // persists, so opening a fresh board doesn't leave the strip highlighting
@@ -93,12 +114,18 @@ export default function InnerTabStrip({
           onClick={() => onSelectTab(runsTab.id)}
         />
       )}
+      <Pill
+        label="Board"
+        active={boardActive}
+        onClick={onBoardClick}
+        title="This chat's Cora Board: queue cards and this chat's Cora works through them"
+      />
       {backendPtyExists && (
         <Pill
           label="Terminal"
           active={terminalActive}
           onClick={onTerminalClick}
-          title="Live xterm attached to the backend Claude/Codex PTY for this chat — read-only."
+          title="Live xterm attached to the backend Claude/Codex PTY for this chat. Read-only."
         />
       )}
       {showWhiteboardPill && (
@@ -119,7 +146,7 @@ export default function InnerTabStrip({
           title={preview.url}
         />
       ))}
-      {!showWhiteboardPill && (
+      {!showWhiteboardPill && whiteboardCreatable && (
         <NewWhiteboardButton onClick={onWhiteboardClick} />
       )}
       {/* Right-aligned slot the worker terminal guard portals its controls
@@ -129,6 +156,9 @@ export default function InnerTabStrip({
         data-cora-guard-slot
         style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}
       />
+      {/* Far-right door to the Automations tab: quiet clock when idle, live
+          cue (spinner / needs-you dot + name) while an automation runs. */}
+      {workspaceId && <AutomationsStripButton workspaceId={workspaceId} />}
     </div>
   );
 }
@@ -152,7 +182,7 @@ function Pill({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      title={attention ? `${title ?? label} — updated by Cora` : title ?? label}
+      title={attention ? `${title ?? label} (updated by Cora)` : title ?? label}
       style={{
         display: "inline-flex",
         alignItems: "center",

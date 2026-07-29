@@ -2,7 +2,8 @@ import React, { useMemo } from "react";
 import type { LoomNodeDef, ScheduledJob } from "@shared/types";
 import { triggerSummary } from "./presentation";
 import { graphForJob } from "./flow/model";
-import { ENGINE_TONE, LoomIcon } from "./flow/FlowNodes";
+import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
+import { workerModelLabel } from "./worker-models";
 
 // Read-only miniature of the loom's GRAPH for the detail view: the trigger
 // pinned at the left, then the worker/guard/merge nodes laid out left-to-right
@@ -107,16 +108,31 @@ export default function MiniFlow({
           const y2 = b.y + NODE_H / 2;
           const dx = Math.max(18, (x2 - x1) / 2);
           const stroke = e.branch === "pass" ? "var(--ok)" : e.branch === "fail" ? "var(--danger)" : "var(--rule-strong)";
+          const d = `M ${x1},${y1} C ${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
           return (
-            <path
-              key={i}
-              d={`M ${x1},${y1} C ${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`}
-              fill="none"
-              stroke={stroke}
-              strokeWidth={1.4}
-              strokeDasharray={e.back ? "4 3" : undefined}
-              vectorEffect="non-scaling-stroke"
-            />
+            <g key={i}>
+              <path
+                d={d}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={1.4}
+                strokeDasharray={e.back ? "4 3" : undefined}
+                vectorEffect="non-scaling-stroke"
+              />
+              {/* While the loom runs, its forward wires carry the house
+                  electricity — the same travelling dash as the LiveBoard. */}
+              {live && !e.back && (
+                <path
+                  className="spark-wire-flow"
+                  d={d}
+                  fill="none"
+                  stroke="var(--accent)"
+                  strokeWidth={1.6}
+                  strokeLinecap="round"
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
+            </g>
           );
         })}
       </svg>
@@ -171,7 +187,7 @@ export default function MiniFlow({
 }
 
 function toneFor(n: LoomNodeDef): string {
-  if (n.kind === "worker") return ENGINE_TONE[n.worker.engine] ?? "var(--muted)";
+  if (n.kind === "worker") return WORKER_TONE;
   if (n.kind === "guard") return "var(--ok)";
   return "var(--info)";
 }
@@ -179,7 +195,7 @@ function eyebrowFor(n: LoomNodeDef): string {
   return n.kind.charAt(0).toUpperCase() + n.kind.slice(1);
 }
 function textFor(n: LoomNodeDef): string {
-  if (n.kind === "worker") return n.label ?? (n.worker.engine === "auto" ? "Auto" : n.worker.engine);
+  if (n.kind === "worker") return n.label ?? workerModelLabel(n.worker.model);
   if (n.kind === "guard") return n.label ?? n.predicate.type;
   return n.label ?? n.joinMode;
 }

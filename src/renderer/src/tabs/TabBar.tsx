@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
-import { CloseIcon, FileIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
+import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
+import { AutomationsGlyph } from "../components/automations/useAutomationsStatus";
 import { collectLeaves } from "./paneTree";
 import {
   TAB_REORDER_DRAG_MIME,
@@ -40,17 +41,14 @@ interface Props {
   onClose: (id: TabId) => void;
   onNewTerminal: () => void;
   onNewPreview: () => void;
-  onNewEditor: () => void;
-  // Top-level "+" button now spawns a new chat tab. Spawning a terminal /
-  // editor / preview moved to keybinds — workspace tab kinds are still
-  // appended through the existing onNew* callbacks for those shortcuts. The
-  // strip's "+" dropdown advertises each action's resolved keybind via
-  // pickerHints (see below) instead of the old hard-coded mac glyphs.
+  // Open the worker session picker for a runtime: the picker lists this
+  // workspace's Claude / Codex history so a "+" row either starts a fresh
+  // worker or resumes (or deletes) an earlier session.
+  onNewClaudeWorker: () => void;
+  onNewCodexWorker: () => void;
+  // Starts a new draft Cora chat — the ✦ Cora button's action (identical to
+  // the chat.new chord). The new-chat welcome surface is Cora's landing page.
   onNewChat: () => void;
-  // Opens (or focuses) the workspace's Automations tab from the "+" dropdown.
-  onNewAutomations: () => void;
-  // Appends a fresh untitled whiteboard tab from the "+" dropdown.
-  onNewWhiteboard: () => void;
   // Chat-tab-specific affordances: hover-revealed rename and close. Generic
   // tabs continue to use the existing onClose path.
   onRenameChat: (id: TabId, title: string) => void;
@@ -70,12 +68,8 @@ interface Props {
 }
 
 export interface PickerHints {
-  newChat?: string;
   terminal?: string;
-  openFile?: string;
   preview?: string;
-  automations?: string;
-  whiteboard?: string;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -89,10 +83,9 @@ function TabBar({
   onClose,
   onNewTerminal,
   onNewPreview,
-  onNewEditor,
+  onNewClaudeWorker,
+  onNewCodexWorker,
   onNewChat,
-  onNewAutomations,
-  onNewWhiteboard,
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
@@ -439,6 +432,18 @@ function TabBar({
           />
         );
       })()}
+      {/* ✦ Cora — starts a new chat: Cora's landing surface is the new-chat
+          welcome (which also carries the door to Automations). */}
+      <button
+        type="button"
+        className="spark-tabbar-new spark-tabbar-cora"
+        onClick={onNewChat}
+        title="Cora: start a new chat"
+        aria-label="New Cora chat"
+      >
+        <SparkIcon size={11} />
+        <span>Cora</span>
+      </button>
       <div ref={pickerRef} style={{ position: "relative" }}>
         <button
           type="button"
@@ -453,57 +458,50 @@ function TabBar({
         </button>
         {pickerOpen && (
           <div className="spark-tabbar-picker spark-glass">
-            <PickerItem
-              label="New chat"
-              hint={pickerHints?.newChat}
-              primary
-              onClick={() => {
-                setPickerOpen(false);
-                onNewChat();
-              }}
-            />
-            <div
-              aria-hidden
-              style={{ height: 1, background: "var(--rule)", margin: "4px 2px" }}
-            />
+            {/* Workspace tab kinds only — everything Cora (new chat,
+                automations, older chats) lives in the Cora Hub tab, opened
+                from the dedicated ✦ Cora button to the left. */}
+            <PickerSectionLabel label="Workspace" />
             <PickerItem
               label="Terminal"
               hint={pickerHints?.terminal}
+              glyph={<PlusIcon size={11} />}
+              accent="shell"
               onClick={() => {
                 setPickerOpen(false);
                 onNewTerminal();
               }}
             />
             <PickerItem
-              label="Open file…"
-              hint={pickerHints?.openFile}
-              onClick={() => {
-                setPickerOpen(false);
-                onNewEditor();
-              }}
-            />
-            <PickerItem
-              label="Preview"
+              label="Browser"
               hint={pickerHints?.preview}
+              glyph={<GlobeIcon size={11} />}
+              accent="shell"
               onClick={() => {
                 setPickerOpen(false);
                 onNewPreview();
               }}
             />
+            {/* Workers open the session picker rather than a bare terminal:
+                the same surface that starts a fresh agent also lists this
+                workspace's history so it can be resumed or deleted. */}
+            <PickerSectionLabel label="Workers" />
             <PickerItem
-              label="New whiteboard"
-              hint={pickerHints?.whiteboard}
+              label="Claude worker"
+              glyph={<RuntimeGlyph letter="C" />}
+              accent="claude"
               onClick={() => {
                 setPickerOpen(false);
-                onNewWhiteboard();
+                onNewClaudeWorker();
               }}
             />
             <PickerItem
-              label="New automations"
-              hint={pickerHints?.automations}
+              label="Codex worker"
+              glyph={<RuntimeGlyph letter="X" />}
+              accent="codex"
               onClick={() => {
                 setPickerOpen(false);
-                onNewAutomations();
+                onNewCodexWorker();
               }}
             />
           </div>
@@ -1044,7 +1042,23 @@ function KindIcon({ tab }: { tab: Tab }) {
     return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent)"} />;
   }
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
-  if (tab.kind === "automations") return <GlyphIcon glyph="◷" color="var(--accent)" />;
+  if (tab.kind === "automations") {
+    return (
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 14,
+          flex: "0 0 14px",
+          color: "var(--accent)",
+        }}
+      >
+        <AutomationsGlyph size={12} />
+      </span>
+    );
+  }
   if (tab.kind === "whiteboard") {
     return (
       <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
@@ -1128,17 +1142,47 @@ function cssEscape(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }
 
+// Small muted uppercase section header inside the "+" picker — groups the
+// Cora-owned surfaces apart from the plain workspace tab kinds.
+function PickerSectionLabel({ label }: { label: string }) {
+  return (
+    <div
+      aria-hidden
+      style={{
+        padding: "6px 12px 2px",
+        color: "var(--muted)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: "0.08em",
+        textTransform: "uppercase",
+        userSelect: "none",
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
 function PickerItem({
   label,
   hint,
+  glyph,
+  accent = "shell",
   primary = false,
   onClick,
 }: {
   label: string;
   hint?: string;
+  // Optional leading swatch. Rows that carry one share the pane toolbar's
+  // add-pane menu vocabulary (22px tinted square, provider letter or icon);
+  // rows without one — the file context menu — keep the plain text layout.
+  glyph?: React.ReactNode;
+  accent?: PickerAccent;
   primary?: boolean;
   onClick: () => void;
 }) {
+  const tone = glyph ? pickerItemTone(accent) : null;
   return (
     <button
       type="button"
@@ -1162,6 +1206,25 @@ function PickerItem({
       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover-strong)")}
       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
     >
+      {tone && (
+        <span
+          aria-hidden
+          style={{
+            width: 22,
+            height: 22,
+            flex: "0 0 22px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: "var(--radius-control, 5px)",
+            background: tone.background,
+            color: tone.color,
+            border: `1px solid ${tone.border}`,
+          }}
+        >
+          {glyph}
+        </span>
+      )}
       <span style={{ flex: 1 }}>{label}</span>
       {hint && (
         <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
@@ -1169,6 +1232,51 @@ function PickerItem({
         </span>
       )}
     </button>
+  );
+}
+
+type PickerAccent = "shell" | "claude" | "codex";
+
+// Same three tints the pane toolbar's add-pane menu uses, so a Claude row
+// reads identically whether it is spawned from the strip or from a pane.
+function pickerItemTone(accent: PickerAccent): {
+  color: string;
+  background: string;
+  border: string;
+} {
+  if (accent === "claude") {
+    return {
+      color: "var(--accent)",
+      background: "color-mix(in oklch, var(--accent) 14%, transparent)",
+      border: "color-mix(in oklch, var(--accent) 30%, transparent)",
+    };
+  }
+  if (accent === "codex") {
+    return {
+      color: "var(--info)",
+      background: "color-mix(in oklch, var(--info) 14%, transparent)",
+      border: "color-mix(in oklch, var(--info) 30%, transparent)",
+    };
+  }
+  return {
+    color: "var(--ink-dim)",
+    background: "color-mix(in oklab, var(--ink) 7%, transparent)",
+    border: "color-mix(in oklab, var(--rule-soft) 90%, transparent)",
+  };
+}
+
+function RuntimeGlyph({ letter }: { letter: string }) {
+  return (
+    <span
+      style={{
+        fontSize: 12,
+        fontWeight: 700,
+        fontFamily: "var(--font-mono)",
+        letterSpacing: 0,
+      }}
+    >
+      {letter}
+    </span>
   );
 }
 

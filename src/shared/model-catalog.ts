@@ -94,3 +94,21 @@ export function normalizeCodexModelId(modelId: string): string {
           : undefined;
   return replacement ? `${replacement}${suffix}` : modelId;
 }
+
+// ── Looms on Pi ─────────────────────────────────────────────────────────────
+// Automation workers run exclusively on the bundled Pi runtime; the model id
+// alone selects the subscription provider, so the old per-worker engine choice
+// is gone. These helpers keep the model→provider mapping in one place for the
+// scheduler migration, the loop driver, and the automation editor.
+
+/** Default automation worker model when nothing usable was configured. */
+export const DEFAULT_LOOM_WORKER_MODEL = "claude-opus-5";
+/** Backfill for a legacy codex-engine loom that never pinned a model. */
+export const DEFAULT_LOOM_CODEX_WORKER_MODEL: CodexModelId = "gpt-5.6-sol";
+
+/** Which worker runtime family a loom model id belongs to. gpt-* ids run via
+ *  Pi's openai-codex provider (runtime "codex"); everything else — including
+ *  every claude-* id — runs via the anthropic provider (runtime "claude"). */
+export function loomRuntimeForModel(model: string | undefined): "claude" | "codex" {
+  return model?.trim().toLowerCase().startsWith("gpt-") ? "codex" : "claude";
+}

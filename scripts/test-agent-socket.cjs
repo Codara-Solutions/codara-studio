@@ -10,10 +10,11 @@
 //   npm run build && node scripts/test-agent-socket.cjs
 //
 // Covers: handshake discovery, auth rejection, unknown-method error, headless
-// Cora chat create/send/wait, workspace auto-registration, the automation-mode
-// gate (execute tools rejected on automation chats and vice versa), fabricated-
-// run reads, and preview op reachability (no-tab error — headless boot has no
-// preview tab, which is itself the assertion).
+// Cora chat create/send/wait, workspace auto-registration, the one-way
+// automation-mode gate (execute tools rejected on automation chats, while an
+// ordinary execute chat may manage automations), fabricated-run reads, and
+// preview op reachability (no-tab error — headless boot has no preview tab,
+// which is itself the assertion).
 //
 // Exits non-zero on any failed assertion.
 
@@ -227,6 +228,8 @@ async function main() {
     );
 
     // Automation-mode gate, side A: execute-roster tool on an automation chat.
+    // The gate is now ONE-WAY: an automation chat still may not drive workers,
+    // but an ordinary auto/execute chat MAY manage automations (side B below).
     // orchestrator.complete validates the run before any other params, so it
     // exercises the rejectIfAutomationRun gate directly.
     fabricateRun("run-automation-chat", { chatMode: "automation" });
@@ -237,12 +240,14 @@ async function main() {
       JSON.stringify(gateA).slice(0, 140),
     );
 
-    // Side B: automation tool on a non-automation run.
+    // Side B: automation tool on a non-automation run. Cora manages looms from
+    // the chat the user is already in, so this must ANSWER (workspace-scoped),
+    // not reject.
     fabricateRun("run-execute-chat", { chatMode: "execute" });
     const gateB = await rpc(handshake, "automation.list", { runId: "run-execute-chat" });
     check(
-      "automation tool rejected on execute chat",
-      Boolean(gateB.error),
+      "automation tool answers on execute chat",
+      Array.isArray(gateB.result?.automations),
       JSON.stringify(gateB).slice(0, 140),
     );
 
@@ -305,6 +310,81 @@ async function main() {
     );
     check("automation.list returns a jobs payload", Array.isArray(list.result?.automations ?? list.result?.jobs ?? (Array.isArray(list.result) ? list.result : null)), JSON.stringify(list.result ?? list.error).slice(0, 140));
 
+    // Looms on Pi: automation.create validation. The worker is model + effort
+    // only; a supplied engine field, a missing effort, and an off-family model
+    // are each rejected with instructive errors. Validation runs before the
+    // workspace binding, so these fire even on the fabricated run.
+    const createBase = {
+      runId: "run-automation-chat",
+      name: "validation probe",
+      trigger: { kind: "manual" },
+      loop: { kind: "once", stop: {} },
+      prompt_template: "do the thing",
+    };
+    const engineRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: { engine: "claude", model: "claude-opus-5", effort: "medium" },
+    });
+    check(
+      "automation.create rejects a worker that still picks an engine",
+      Boolean(engineRejected.error) && /automations run on Pi/i.test(engineRejected.error?.message ?? ""),
+      JSON.stringify(engineRejected.error ?? engineRejected.result).slice(0, 200),
+    );
+    const effortRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: { model: "claude-opus-5" },
+    });
+    check(
+      "automation.create rejects a worker without an effort",
+      Boolean(effortRejected.error) && /explicit effort/i.test(effortRejected.error?.message ?? ""),
+      JSON.stringify(effortRejected.error ?? effortRejected.result).slice(0, 200),
+    );
+    const modelRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: { model: "llama-3-70b", effort: "medium" },
+    });
+    check(
+      "automation.create rejects an off-family model id",
+      Boolean(modelRejected.error) && /claude-\* or gpt-\*/i.test(modelRejected.error?.message ?? ""),
+      JSON.stringify(modelRejected.error ?? modelRejected.result).slice(0, 200),
+    );
+    // A concrete model + effort worker passes validation; the fabricated run
+    // has no settingsSnapshot, so the NEXT gate (workspace binding) answers.
+    const workerAccepted = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: { model: "claude-opus-5", effort: "medium" },
+    });
+    check(
+      "automation.create accepts model+effort (fails later on the workspace gate)",
+      Boolean(workerAccepted.error) && /workspace directory/i.test(workerAccepted.error?.message ?? ""),
+      JSON.stringify(workerAccepted.error ?? workerAccepted.result).slice(0, 200),
+    );
+    // Mixed-case claude ids are accepted and normalized, never persisted
+    // verbatim (Pi's provider gate is case-sensitive, so a verbatim
+    // "Claude-Opus-5" would brick every launch of the loom).
+    const mixedCaseAccepted = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: { model: "Claude-Opus-5", effort: "medium" },
+    });
+    check(
+      "automation.create accepts a mixed-case claude id (validation passes to the workspace gate)",
+      Boolean(mixedCaseAccepted.error) && /workspace directory/i.test(mixedCaseAccepted.error?.message ?? ""),
+      JSON.stringify(mixedCaseAccepted.error ?? mixedCaseAccepted.result).slice(0, 200),
+    );
+
+    // The agent-loop handoff lowercases nextModel for the same reason; the
+    // accepted echo proves what the loop driver will consume.
+    const handoff = await rpc(handshake, "orchestrator.request_next_iteration", {
+      runId: "run-automation-chat",
+      done: false,
+      nextModel: "Claude-Opus-5",
+    });
+    check(
+      "request_next_iteration lowercases a mixed-case nextModel",
+      handoff.result?.accepted?.nextModel === "claude-opus-5",
+      JSON.stringify(handoff.result ?? handoff.error).slice(0, 200),
+    );
+
     // codara_complete guard: a coordinator must not complete a run while a
     // worker task it spawned is still pending/running (Bug 1 — a queued
     // corrective worker was stranded when codara_complete landed early). The
@@ -353,6 +433,32 @@ async function main() {
       "codara_complete accepted once all worker tasks are terminal",
       Boolean(completeOk.result?.ok) && !completeOk.error,
       JSON.stringify(completeOk).slice(0, 200),
+    );
+
+    // A MANUAL task at needs_review still blocks completion (its report is
+    // unreviewed and only the human-review escalation can settle it), but the
+    // rejection must name the REAL dependency — the user's accept/fail
+    // answer — instead of steering the model into a codara_wait_for_workers
+    // hold that can never terminalize a manual task.
+    fabricateRun("run-manual-review", {
+      status: "reviewing",
+      workerTasks: [
+        { id: "wt-manual", title: "Autopilot task 1", status: "needs_review", runtimePreference: "manual" },
+      ],
+    });
+    const manualBlocked = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-manual-review",
+      summary: "manual done",
+    });
+    check(
+      "codara_complete rejected while a manual report awaits the user",
+      Boolean(manualBlocked.error) && /await the user's accept\/fail answer/i.test(manualBlocked.error?.message ?? ""),
+      JSON.stringify(manualBlocked).slice(0, 240),
+    );
+    check(
+      "manual rejection does not steer to codara_wait_for_workers",
+      !/codara_wait_for_workers/i.test(manualBlocked.error?.message ?? ""),
+      JSON.stringify(manualBlocked.error?.message ?? "").slice(0, 240),
     );
 
     // The execute manager has no filesystem Read tool. wait_for_workers must

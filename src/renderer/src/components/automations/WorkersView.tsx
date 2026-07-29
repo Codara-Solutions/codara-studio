@@ -5,6 +5,8 @@ import type {
   ScheduledJob,
 } from "@shared/types";
 import { automationDotColor, fmtClock, fmtElapsed } from "./presentation";
+import { workerModelLabel } from "./worker-models";
+import { describeWorkerLogFailure } from "./worker-log-tail";
 
 // The Workers sub-tab: every live automation worker as an ordered activity
 // stream from Claude Agent SDK or Codex App Server. Ordinary Cora workers keep
@@ -226,7 +228,6 @@ function AutomationSection({
   const derivedStatus: AutomationStatus = anyBlocked ? "blocked" : anyLive ? "running" : "stopped";
   const dot = automationDotColor(derivedStatus);
   const pass = Math.max(...workers.map((w) => w.iteration)) + 1;
-  const engine = workers[0]?.engine ?? "auto";
   const model = workers[0]?.model;
   // Elapsed from the earliest still-live worker (ISO strings sort chronologically).
   const startTimes = workers
@@ -307,11 +308,11 @@ function AutomationSection({
             pass {pass}
           </span>
           <span
-            className={`spark-badge ${engine === "claude" ? "is-accent" : "is-info"}`}
+            className="spark-badge is-accent"
             style={{ flex: "0 0 auto" }}
-            title={model ?? "CLI default model"}
+            title={model ?? "Default model"}
           >
-            {engine.toUpperCase()}
+            {workerModelLabel(model)}
           </span>
           {anyLive && (
             <span
@@ -486,15 +487,9 @@ function WorkerPane({
         <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted)" }}>
           pass {worker.iteration + 1}
         </span>
-        <span
-          className={`spark-badge ${worker.engine === "claude" ? "is-accent" : "is-info"}`}
-          title={worker.model ?? "Default model"}
-        >
-          {worker.engine.toUpperCase()}
-          {worker.model ? ` · ${worker.model}` : ""}
-        </span>
-        <span className="spark-badge" title="Structured automation transport">
-          {worker.transport === "agent-sdk" ? "AGENT SDK" : "APP SERVER"}
+        <span className="spark-badge is-accent" title={worker.model ?? "Default model"}>
+          {workerModelLabel(worker.model)}
+          {worker.effort ? ` · ${worker.effort}` : ""}
         </span>
         <span style={{ flex: 1 }} />
         <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted-2)" }} title={`started ${fmtClock(worker.startedAt)}`}>
@@ -558,7 +553,7 @@ function WorkerPane({
             borderBottom: "1px solid color-mix(in oklch, var(--danger) 30%, transparent)",
           }}
         >
-          Waiting for you — answer via the question card in the loom's detail.
+          Waiting for you. Answer via the question card in this automation's detail.
         </div>
       )}
 
@@ -579,15 +574,22 @@ function StructuredWorkerActivity({
   live: boolean;
 }): React.ReactElement {
   const [content, setContent] = useState("");
+  const [failure, setFailure] = useState<string | null>(null);
   useEffect(() => {
     if (!worker.stdoutLogPath) return;
     let disposed = false;
     const refresh = async () => {
       try {
         const file = await window.spark.fs.readTextTail(worker.stdoutLogPath!, 80_000);
-        if (!disposed) setContent(file.content);
-      } catch {
-        /* The file may not exist during the first launch tick. */
+        if (disposed) return;
+        setContent(file.content);
+        setFailure(null);
+      } catch (err) {
+        // A log that has not been created yet is normal on the first tick;
+        // every other failure is shown instead of leaving a permanently empty
+        // pane that reads as "the worker never printed anything".
+        const described = describeWorkerLogFailure(err);
+        if (!disposed && described) setFailure(described);
       }
     };
     void refresh();
@@ -603,9 +605,18 @@ function StructuredWorkerActivity({
     return (
       <div
         className="spark-mono"
-        style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--muted-2)", fontSize: 11 }}
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "grid",
+          placeItems: "center",
+          padding: "0 16px",
+          textAlign: "center",
+          color: failure ? "var(--danger)" : "var(--muted-2)",
+          fontSize: 11,
+        }}
       >
-        {live ? `Starting ${worker.transport === "agent-sdk" ? "Claude Agent SDK" : "Codex App Server"}…` : "No activity was recorded."}
+        {failure ?? (live ? "Worker starting…" : "No activity was recorded.")}
       </div>
     );
   }
@@ -747,7 +758,7 @@ function EmptyWorkers({
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
       <div className="spark-empty" style={{ padding: "42px 16px 18px", gap: 8 }}>
         <div className="spark-eyebrow">No workers running</div>
-        <div className="spark-empty__body">When a loom fires, its worker runs here — live.</div>
+        <div className="spark-empty__body">When an automation fires, its worker runs here, live.</div>
         {jobs.length === 0 && (
           <button type="button" className="spark-btn is-primary" style={{ marginTop: 4 }} onClick={onNewLoom}>
             New loom

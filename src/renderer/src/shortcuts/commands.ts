@@ -15,6 +15,7 @@ export type CommandId =
   | "runSwitcher.open"
   | "settings.open"
   | "automations.open"
+  | "board.open"
   | "session.openInspector"
   | "composer.focus"
   | "chat.new"
@@ -101,6 +102,17 @@ export const COMMANDS: Command[] = [
     // browser binding collides with it). The same view is reachable from the
     // tray menu and a matching global accelerator in main.
     defaultChords: [mod("a", { shift: true })],
+  },
+  {
+    id: "board.open",
+    label: "Open Cora Board",
+    group: "Navigation",
+    // Mod+Shift+B — free chord: Mod+B is the left sidebar and Mod+Alt+B the
+    // right one (which deliberately vacated Mod+Shift+B, see sidebar.toggleRight).
+    // The board lives INSIDE the Cora chat now (a sub-view next to Runs): the
+    // chord focuses the active chat's Board view, surfacing a chat tab first
+    // if the user isn't on one (see the spark:open-cora-board listener).
+    defaultChords: [mod("b", { shift: true })],
   },
   {
     id: "session.openInspector",
@@ -250,7 +262,7 @@ export const COMMANDS: Command[] = [
   },
   {
     id: "tab.newPreview",
-    label: "New preview tab",
+    label: "New browser tab",
     group: "Tabs",
     // Mod+E — swapped with Open File (which took the standard Mod+P quick-open).
     defaultChords: [mod("e")],

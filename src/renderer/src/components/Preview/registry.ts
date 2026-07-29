@@ -76,7 +76,7 @@ export async function ensurePreviewTab(url: string, runId?: string | null): Prom
   if (existing) return existing;
   if (!openPreviewTabFn) {
     throw new Error(
-      "Codara is not ready to open preview tabs yet (renderer not mounted). Retry in a moment.",
+      "Codara is not ready to open browser tabs yet (renderer not mounted). Retry in a moment.",
     );
   }
   const id = await Promise.resolve(openPreviewTabFn(url, runId));

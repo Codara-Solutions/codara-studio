@@ -1203,6 +1203,24 @@ app.whenReady().then(async () => {
     } catch (err) {
       console.warn("[main] queue resume failed:", err);
     }
+    try {
+      // Cora Board. Purely event-driven: when cards are queued on a chat's
+      // board and that chat's manager is idle, the nudge hands them to the
+      // manager. Deliberately does nothing at boot — like the queue above, a
+      // restart is not consent to start agents; still-queued cards are picked
+      // up on the next board change or user interaction.
+      //
+      // ORDERING IS LOAD-BEARING: this must start AFTER every recovery pass
+      // above (manager-turn recovery, settled-run completion, restart pause,
+      // direct-run recovery, scheduler, queue reconcile). The nudge treats a
+      // run's first event of the session as a board check; started earlier,
+      // recovery's own status events would count as that first event and turn
+      // a restart into consent to nudge idle runs with queued cards.
+      const { startBoardNudge } = await import("./orchestration/board-nudge");
+      await startBoardNudge();
+    } catch (err) {
+      console.warn("[main] board nudge failed to start:", err);
+    }
   })();
 
   // macOS dock-click / app re-activation. In background mode the window still

@@ -31,6 +31,8 @@ import {
   encodeFrame,
   FrameDecoder,
   RpcSession,
+  type RemoteNotificationRegistration,
+  type RemotePhoneNotification,
   type RemoteRpcServices,
   type RemoteTerminalCreateRequest,
   type RemoteTerminalHandle,
@@ -92,7 +94,22 @@ export interface RemoteAccessDeps {
   listCoraHistory?: RemoteRpcServices["listCoraHistory"];
   getCoraRun?: RemoteRpcServices["getCoraRun"];
   sendCoraMessage?: RemoteRpcServices["sendCoraMessage"];
+  getCoraWhiteboard?: RemoteRpcServices["getCoraWhiteboard"];
+  getCoraBoard?: RemoteRpcServices["getCoraBoard"];
+  updateCoraBoard?: RemoteRpcServices["updateCoraBoard"];
   listWorkerSessions?: RemoteRpcServices["listWorkerSessions"];
+  deleteWorkerSession?: RemoteRpcServices["deleteWorkerSession"];
+  listAutomations?: RemoteRpcServices["listAutomations"];
+  getAutomation?: RemoteRpcServices["getAutomation"];
+  runAutomation?: RemoteRpcServices["runAutomation"];
+  pauseAutomation?: RemoteRpcServices["pauseAutomation"];
+  resumeAutomation?: RemoteRpcServices["resumeAutomation"];
+  setAutomationEnabled?: RemoteRpcServices["setAutomationEnabled"];
+  // Receives the trusted peer key alongside the phone's registration; the
+  // service binds it per connection so a phone can only register itself.
+  registerNotifications?: (
+    input: RemoteNotificationRegistration & { devicePublicKey: string },
+  ) => Promise<void>;
   beginImageUpload?: RemoteRpcServices["beginImageUpload"];
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
   log(line: string): void;
@@ -180,6 +197,34 @@ export class RemoteAccessService {
     for (const sessions of this.sessions.values()) {
       for (const session of sessions) session.pushWorkspacesChanged();
     }
+  }
+
+  // Live delivery of one desktop-mirrored notification to a specific paired
+  // phone. Returns whether at least one session counts as push-live (proven
+  // AND recently heard from — see rpc.ts PUSH_LIVENESS_WINDOW_MS), so the
+  // caller can fall back to Expo push for a phone that is not reachable. The
+  // event is still written to every proven session, stale ones included: a
+  // zombie write is lost harmlessly, and the phone dedupes by event id if
+  // both channels land.
+  pushPhoneNotificationToDevice(
+    publicKeyB64: string,
+    notification: RemotePhoneNotification,
+  ): boolean {
+    const sessions = this.sessions.get(publicKeyB64);
+    if (!sessions) return false;
+    const now = this.deps.now?.() ?? Date.now();
+    let live = false;
+    for (const session of sessions) {
+      if (!session.isProven()) continue;
+      session.pushPhoneNotification(notification);
+      if (session.isPushLive(now)) live = true;
+    }
+    return live;
+  }
+
+  // Public keys of every paired device, for notification fan-out.
+  pairedDeviceKeys(): string[] {
+    return this.devices.list().map((device) => device.publicKey);
   }
 
   private setStatus(status: RemoteAccessStatus): void {
@@ -560,11 +605,24 @@ export class RemoteAccessService {
       listCoraHistory: this.deps.listCoraHistory,
       getCoraRun: this.deps.getCoraRun,
       sendCoraMessage: this.deps.sendCoraMessage,
+      getCoraWhiteboard: this.deps.getCoraWhiteboard,
+      getCoraBoard: this.deps.getCoraBoard,
+      updateCoraBoard: this.deps.updateCoraBoard,
       listWorkerSessions: this.deps.listWorkerSessions,
+      deleteWorkerSession: this.deps.deleteWorkerSession,
+      listAutomations: this.deps.listAutomations,
+      getAutomation: this.deps.getAutomation,
+      runAutomation: this.deps.runAutomation,
+      pauseAutomation: this.deps.pauseAutomation,
+      resumeAutomation: this.deps.resumeAutomation,
+      setAutomationEnabled: this.deps.setAutomationEnabled,
+      registerNotifications: this.deps.registerNotifications
+        ? (input) => this.deps.registerNotifications!({ ...input, devicePublicKey: keyB64 })
+        : undefined,
       beginImageUpload: this.deps.beginImageUpload,
       createTerminal: (request) => this.deps.createTerminal(request),
     };
-    const session = new RpcSession(stream, services, this.deps.log);
+    const session = new RpcSession(stream, services, this.deps.log, this.deps.now);
     let set = this.sessions.get(keyB64);
     if (!set) {
       set = new Set();

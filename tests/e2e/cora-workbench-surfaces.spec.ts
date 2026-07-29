@@ -317,3 +317,120 @@ test("every Cora run exposes a stable Runs surface immediately and the Whiteboar
     await app?.close();
   }
 });
+
+test("a draft chat's Board promotes to an idle run on the first card without starting autopilot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codara-draft-board-"));
+  const userDataDir = join(root, "user-data");
+  const workspaceDir = join(root, "workspace");
+  await mkdir(userDataDir, { recursive: true });
+  await mkdir(workspaceDir, { recursive: true });
+  await writeFile(join(workspaceDir, "README.md"), "# Draft board fixture\n", "utf8");
+  await writeFile(
+    join(userDataDir, "spark-state.json"),
+    JSON.stringify({
+      workspaces: [{
+        id: "ws-draft-board",
+        name: "draft-board-fixture",
+        cwd: workspaceDir,
+        color: "#42D6C7",
+        workers: [],
+      }],
+      activeWorkspaceId: "ws-draft-board",
+    }, null, 2),
+    "utf8",
+  );
+
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: [".", "--ozone-platform=x11"],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: userDataDir,
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.waitForLoadState("domcontentloaded");
+
+    // ✦ Cora opens/focuses a draft chat: welcome + composer, no run yet.
+    await expect(page.getByRole("button", { name: "New Cora chat" })).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByRole("button", { name: "New Cora chat" }).click();
+    const composer = page.locator(
+      'textarea[placeholder="Tell Cora what to build, or describe a task."]:visible',
+    );
+    await expect(composer).toBeVisible();
+
+    // The sub-view strip is available immediately on the draft: Chat + Board.
+    // Run-scoped surfaces stay hidden — no Runs/Terminal/Whiteboard pill, and
+    // no "New whiteboard" affordance (a whiteboard needs a run to attach to).
+    const chatPill = page.getByRole("tab", { name: "Chat", exact: true });
+    const boardPill = page.getByRole("tab", { name: "Board", exact: true });
+    await expect(chatPill).toBeVisible();
+    await expect(boardPill).toBeVisible();
+    await expect(chatPill).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "Runs", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Whiteboard", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "New whiteboard" })).toHaveCount(0);
+
+    // Board opens the draft's empty per-chat kanban with no run and no
+    // message sent.
+    await boardPill.click();
+    await expect(boardPill).toHaveAttribute("aria-selected", "true");
+    await expect(chatPill).toHaveAttribute("aria-selected", "false");
+    await expect(page.getByText("Ideas", { exact: true })).toBeVisible();
+    await expect(page.getByText("Queued", { exact: true })).toBeVisible();
+
+    // Creating a card promotes the draft to a real run — WITHOUT starting
+    // autopilot. The card must land on that run's own board.
+    await page.getByRole("button", { name: "+ Add card" }).first().click();
+    const titleInput = page.locator('input[placeholder="New card in Ideas"]');
+    await expect(titleInput).toBeVisible();
+    await titleInput.fill("Card created from a draft chat");
+    await titleInput.press("Enter");
+    await expect(
+      page.getByText("Card created from a draft chat", { exact: true }),
+    ).toBeVisible();
+
+    await expect.poll(async () => page.evaluate(async () => {
+      const spark = (window as unknown as { spark: any }).spark;
+      const runs = await spark.orchestration.listRuns("ws-draft-board");
+      if (runs.length !== 1) return { runs: runs.length };
+      const run = await spark.orchestration.getRun(runs[0].id);
+      return {
+        runs: runs.length,
+        status: run?.status,
+        messages: run?.humanMessages?.length ?? -1,
+        hasCard: run?.board?.cards?.some(
+          (card: any) => card.title === "Card created from a draft chat",
+        ) ?? false,
+      };
+    })).toEqual({
+      // Exactly one run exists, idle, with no conversation — nothing was
+      // sent to a manager and no autopilot started.
+      runs: 1,
+      status: "idle",
+      messages: 0,
+      hasCard: true,
+    });
+
+    // The user stays on the Board sub-view through the promotion (the
+    // activeRunId change must not bounce them back to Chat).
+    await expect(boardPill).toHaveAttribute("aria-selected", "true");
+
+    // The Chat pill still shows the welcome + composer, ready for a first
+    // message into this same run.
+    await chatPill.click();
+    await expect(chatPill).toHaveAttribute("aria-selected", "true");
+    await expect(
+      page.getByText("Work with Cora on this project", { exact: true }),
+    ).toBeVisible();
+    await expect(composer).toBeVisible();
+  } finally {
+    await app?.close();
+  }
+});

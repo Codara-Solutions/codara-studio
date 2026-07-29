@@ -14,13 +14,16 @@
 //     worker, or verifier sees.
 //   - "worker": the studio roster minus whiteboard writes, plus the two
 //     run-lifecycle tools a headless automation pass needs (codara_ask_user,
-//     codara_request_next_iteration). Spawned by structured-worker.ts for
-//     automation workers, never the manager orchestration tools.
+//     codara_request_next_iteration). Automation workers run on the bundled Pi
+//     runtime, which loads this module in-process as the bridge with this
+//     mode; never the manager orchestration tools.
 //   - "execute": the studio roster + the Execute worker-orchestration tools
-//     (spawn/steer Cora workers, ask the user, complete the run). Written by
+//     (spawn/steer Cora workers, ask the user, complete the run) + the
+//     automation-management tools, so an ordinary auto/execute chat can create
+//     and manage looms in the conversation the user is already in. Written by
 //     the Claude/Codex backends into a per-run config for the manager CLI.
 //   - "automation": the studio roster + the automation-architect tools
-//     (list/create/run/test looms) + codara_ask_user.
+//     (list/create/run/test looms) + codara_ask_user + codara_name_chat.
 //
 // Design rules:
 //   - Zero npm deps. Pure Node stdlib. Bundled with Codara's extraResources.
@@ -601,6 +604,72 @@ const WHITEBOARD_TOOLS = [
   },
 ];
 
+// THIS CHAT's kanban board of task cards. The board belongs to the run, and
+// the run's own manager is the one who works it: the user drops terse idea
+// cards (sometimes just an image) and queues the ones they want done; the app
+// nudges the manager, who enriches each queued card into a proper worker
+// prompt, spawns workers, and moves the cards through the lanes. Available in
+// every mode: knowing what the user has planned is context for any
+// conversation, and capturing a new task as a card is often the right outcome
+// of one.
+const BOARD_TOOLS = [
+  {
+    name: "codara_board_get",
+    description:
+      "Read this chat's Cora Board: the kanban of task cards you manage for this conversation, their lanes, and the board's revision. Lanes are idea (not ready), queued (the user wants it done; the app nudges you when cards land here), running (a worker of yours is on it), blocked (needs the user), review (finished, awaiting the user's look), done, failed. Always call this immediately before codara_board_update: the user drags cards at any time.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_board_update",
+    description:
+      "Manage this chat's board: create cards in any lane, move or edit any card, and keep the lanes truthful as work progresses. Call codara_board_get first and pass its revision as baseRevision: the write is REJECTED if the board changed meanwhile (a human drag), and you must re-read and re-apply rather than retrying blindly. `cards` replaces the whole list, so send back every card you want to keep. " +
+      "Typical flow for a queued card: enrich it into a well scoped worker prompt, spawn the worker with codara_spawn_workers, then move the card to \"running\" and stamp its workerTaskId (must be a task id of this run); move it to \"review\" or \"done\" when the work is verified, or to \"blocked\" (with a short error note) together with codara_ask_user when you need the user. You may delete only cards you created yourself; a card the user wrote can only be deleted by the user, so ask them instead. createdBy, imagePaths, and the legacy runId field are owned by the app and ignored if you send them.",
+    inputSchema: {
+      type: "object",
+      required: ["baseRevision", "cards"],
+      properties: {
+        baseRevision: {
+          type: "number",
+          minimum: 0,
+          description: "Revision returned by the immediately preceding codara_board_get. The update is rejected if the board changed meanwhile.",
+        },
+        cards: {
+          type: "array",
+          maxItems: 500,
+          description: "The complete card list after your edit. Omitting one of your own cards deletes it; omitting a user card is rejected.",
+          items: {
+            type: "object",
+            required: ["id", "title", "status", "order"],
+            properties: {
+              id: { type: "string", description: "Stable card id. Use a fresh unique id for a new card; never change an existing one." },
+              title: { type: "string", description: "Short task title, a few words." },
+              description: { type: "string", description: "What the task involves. Keep it current: this is where your enriched scope lives for the user to read. Omitting it keeps the stored text; send new non-empty text to change it." },
+              status: {
+                type: "string",
+                enum: ["idea", "queued", "running", "blocked", "review", "done", "failed"],
+                description: "Lane. Keep it truthful: queued means waiting for you, running means a worker is on it, blocked means the user must act, review/done report verified outcomes.",
+              },
+              order: { type: "number", description: "Sort key within the lane." },
+              workerTaskId: { type: "string", description: "The worker task working this card. Must be an id returned by codara_spawn_workers on THIS run; drives the card's Open terminal button." },
+              error: { type: "string", description: "Short note surfaced on the card (why it is blocked or failed). Omitting it keeps the note while the card stays in its lane; changing the lane without a fresh note clears it." },
+              runId: { type: "string", description: "App-owned legacy field. Ignored if you send it." },
+              imagePaths: { type: "array", items: { type: "string" }, description: "App-owned image attachments. Ignored if you send it." },
+              createdAt: { type: "string" },
+              updatedAt: { type: "string" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
 const TERMINAL_TOOL_TO_RPC = {
   codara_terminal_create: "terminal.create",
   codara_terminal_write: "terminal.write",
@@ -608,8 +677,11 @@ const TERMINAL_TOOL_TO_RPC = {
 };
 
 // ===========================================================================
-// Automation-architect tool set (SPARK_MCP_MODE=automation only). Shared
-// JSON-schema fragments kept verbose + LLM-friendly so the architect model can
+// Automation-architect tool set. The whole set (including codara_name_chat)
+// ships in SPARK_MCP_MODE=automation; every tool except codara_name_chat also
+// ships in the execute roster, so an ordinary auto/execute chat can manage
+// automations without the user moving to the Hub's assist chat. Shared
+// JSON-schema fragments kept verbose + LLM-friendly so the authoring model can
 // author triggers / loops / workers / graphs without guessing the shape.
 // ===========================================================================
 const TRIGGER_SCHEMA = {
@@ -678,14 +750,13 @@ const LOOP_SCHEMA = {
 const WORKER_SCHEMA = {
   type: "object",
   description:
-    "Per-iteration worker (CLI agent) config. You MUST always set engine, model, AND effort explicitly, there is no 'auto' engine and no CLI-default model/effort; a worker missing any of the three is rejected.",
-  required: ["engine", "model", "effort"],
+    "Per-iteration worker config. Automation workers run on Codara's bundled Pi runtime, so there is no engine or CLI choice: the model id alone selects the provider (claude-* models run on the Anthropic subscription, gpt-* models on the Codex subscription). You MUST always set model AND effort explicitly; a worker missing either is rejected, and a worker that supplies an 'engine' field is rejected too.",
+  required: ["model", "effort"],
   properties: {
-    engine: { type: "string", enum: ["claude", "codex"], description: "Which CLI runs this worker, pick 'claude' or 'codex'." },
     model: {
       type: "string",
       description:
-        "Engine-native model id (REQUIRED). Worker roster, three models and only these three: 'claude-opus-5' (STANDARD workhorse) and 'claude-fable-5' (PREMIUM, strongest and most expensive) for claude; 'gpt-5.6-sol' (STANDARD frontier) for codex. There is no mid or cheap tier, turn EFFORT down for easy work instead of reaching for a weaker model. Reserve claude-fable-5 for genuinely hard work: subtle invariants, tricky concurrency, large refactors, algorithmic depth, or a bug a standard-tier worker already failed. Any other id is coerced onto this roster at spawn time.",
+        "Provider-native model id (REQUIRED). Automation roster: 'claude-opus-5' (STANDARD workhorse, the default choice), 'claude-fable-5' (PREMIUM, strongest and most expensive), 'gpt-5.6-sol' (STANDARD frontier from the Codex side), 'gpt-5.6-terra' (Codex mid tier, balanced for everyday well-scoped work), 'gpt-5.6-luna' (Codex cheap tier, fast execution for clear repeatable tasks). An automation is configured once for a job whose shape is already known, so the cheaper Codex tiers are a real choice here: pick terra or luna for mechanical recurring work, and turn EFFORT down before reaching for a weaker model on work that is not mechanical. Reserve claude-fable-5 for genuinely hard work: subtle invariants, tricky concurrency, large refactors, algorithmic depth, or a bug a standard-tier worker already failed.",
     },
     effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"], description: "Reasoning effort (REQUIRED)." },
     timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },
@@ -711,7 +782,7 @@ const GUARD_PREDICATE_SCHEMA = {
 const GRAPH_SCHEMA = {
   type: "object",
   description:
-    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a CLI agent on a prompt; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges).",
+    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a Pi worker on a prompt; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges).",
   required: ["version", "nodes", "edges", "entryNodeIds"],
   properties: {
     version: { type: "number", enum: [1] },
@@ -728,8 +799,8 @@ const GRAPH_SCHEMA = {
           worker: WORKER_SCHEMA,
           prompt: { type: "string", description: "worker only: the prompt template for this node (supports {{var}}/{{node:id}}/{{incoming}})." },
           isolate: { type: "boolean", description: "worker only: run this node in a fresh run lineage." },
-          access: { type: "string", enum: ["full", "edits", "readonly"], description: "worker only, optional (default full): tool-access preset. full = all tools; edits = file edits but no shell/web (codex: workspace-write sandbox). readonly = no edits to existing files, no shell/web (Claude can still create files via Write for its report). readonly is CLAUDE ONLY, rejected on codex workers, whose read-only sandbox cannot write the worker's final report; use edits for a fenced codex worker." },
-          blockedTools: { type: "array", items: { type: "string" }, description: "worker only, CLAUDE ONLY: extra BARE tool names hard-denied on top of the access preset (e.g. [\"WebSearch\",\"Bash\"]). Parenthesized/scoped forms like \"Bash(rm *)\" are rejected, the claude CLI silently ignores them. Rejected entirely on codex workers (no per-tool deny)." },
+          access: { type: "string", enum: ["full", "edits", "readonly"], description: "worker only, optional (default full): tool-access preset, enforced by the Pi worker harness for every model. full = all tools. edits = no shell/web (terminal tools and the preview JS evaluator included); file writes/edits are contained to the workspace plus the run's report dir. readonly = edits plus no edit tool and no mutating preview tools. The write tool survives both presets for the mandatory final report; it can still create or overwrite files inside the workspace, so readonly is a guardrail against casual mutation, not a jail." },
+          blockedTools: { type: "array", items: { type: "string" }, description: "worker only: extra BARE tool names hard-denied on top of the access preset, for any model (e.g. [\"WebSearch\",\"Bash\"]). Parenthesized/scoped forms like \"Bash(rm *)\" are rejected; only plain identifiers are allowed." },
           collab: { type: "object", additionalProperties: false, properties: { awareness: { type: "boolean" }, chat: { type: "boolean" } }, description: "worker only, optional: parallel-wave collaboration. awareness = list this node's same-wave peers in its prompt; chat = give peers a shared markdown board in the run folder. Only matter when 2+ workers run in one wave." },
           predicate: GUARD_PREDICATE_SCHEMA,
           joinMode: { type: "string", enum: ["all", "any"], description: "merge only: wait for ALL inbound branches or ANY." },
@@ -766,7 +837,7 @@ const GRAPH_SCHEMA = {
 const runIdProp = {
   runId: {
     type: "string",
-    description: "Codara run id. Defaults to process.env.SPARK_RUN_ID (the chat this architect was spawned for) when omitted.",
+    description: "Codara run id. Defaults to process.env.SPARK_RUN_ID (the chat this session was spawned for) when omitted.",
   },
 };
 
@@ -1221,7 +1292,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_request_next_iteration",
     description:
-      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort, honored for the next pass regardless of the loom's pinned engine, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
+      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextModel/nextEffort; workers run on Codara's bundled Pi runtime, so the model id alone selects the provider (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -1239,16 +1310,10 @@ const EXECUTE_TOOLS = [
           description:
             "Optional instruction for the NEXT iteration. When omitted, the automation's prompt template is used for the next pass.",
         },
-        nextEngine: {
-          type: "string",
-          enum: ["claude", "codex"],
-          description:
-            "Optional: which CLI agent runs the NEXT iteration. Honored for the next pass regardless of the loom's pinned engine; ignored (with a warning) when the requested engine is not installed.",
-        },
         nextModel: {
           type: "string",
           description:
-            "Optional engine-native model id for the NEXT iteration (e.g. claude-opus-5, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna). Requires nextEngine; unknown ids fall back to the CLI default.",
+            "Optional model id for the NEXT iteration: claude-opus-5 (standard workhorse), claude-fable-5 (premium, hardest work), gpt-5.6-sol (Codex frontier), gpt-5.6-terra (Codex balanced), or gpt-5.6-luna (Codex fast). Invalid ids are dropped with a warning and the loom keeps its own model.",
         },
         nextEffort: {
           type: "string",
@@ -1385,6 +1450,11 @@ const WHITEBOARD_TOOL_TO_RPC = {
   codara_whiteboard_update: "orchestrator.whiteboard_update",
 };
 
+const BOARD_TOOL_TO_RPC = {
+  codara_board_get: "orchestrator.board_get",
+  codara_board_update: "orchestrator.board_update",
+};
+
 const AUTOMATION_TOOL_TO_RPC = {
   codara_list_automations: "automation.list",
   codara_get_automation: "automation.get",
@@ -1406,18 +1476,25 @@ const AUTOMATION_TOOL_TO_RPC = {
 // studio (preview + terminal) tools are always present; the mode only adds the
 // orchestration layer on top.
 // ===========================================================================
-const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS];
-const STUDIO_TOOL_TO_RPC = { ...PREVIEW_TOOL_TO_RPC, ...TERMINAL_TOOL_TO_RPC, ...WHITEBOARD_TOOL_TO_RPC };
+const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
+const STUDIO_TOOL_TO_RPC = {
+  ...PREVIEW_TOOL_TO_RPC,
+  ...TERMINAL_TOOL_TO_RPC,
+  ...WHITEBOARD_TOOL_TO_RPC,
+  ...BOARD_TOOL_TO_RPC,
+};
 
 // Worker mode: the studio surface a headless automation worker may drive
-// (whiteboard stays read-only, edits are the manager's call) plus the two
-// run-lifecycle tools its loop prompt references: codara_ask_user (blocked on
-// a genuinely human decision) and codara_request_next_iteration (agent-loop
-// continuation). Deliberately NO manager orchestration tools, a worker never
-// spawns, steers, messages, or completes.
+// (whiteboard and board stay read-only; the board is the calling chat's own
+// kanban and its edits are the manager's call) plus
+// the two run-lifecycle tools its loop prompt references: codara_ask_user
+// (blocked on a genuinely human decision) and codara_request_next_iteration
+// (agent-loop continuation). Deliberately NO manager orchestration tools, a
+// worker never spawns, steers, messages, or completes.
+const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_board_update"];
 const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
 const WORKER_TOOLS = [
-  ...STUDIO_TOOLS.filter((tool) => tool.name !== "codara_whiteboard_update"),
+  ...STUDIO_TOOLS.filter((tool) => !WORKER_READ_ONLY_STUDIO_TOOL_NAMES.includes(tool.name)),
   ...EXECUTE_TOOLS.filter((tool) => WORKER_LIFECYCLE_TOOL_NAMES.includes(tool.name)),
 ];
 const WORKER_TOOL_TO_RPC = Object.fromEntries(
@@ -1426,15 +1503,36 @@ const WORKER_TOOL_TO_RPC = Object.fromEntries(
     .map((tool) => [tool.name, STUDIO_TOOL_TO_RPC[tool.name] ?? EXECUTE_TOOL_TO_RPC[tool.name]]),
 );
 
+// The automation tools an ordinary manager chat (auto/execute) also gets, so
+// the user can say "run the test suite every night" in the chat they are
+// already in instead of being sent to the Automations Hub's assist chat.
+// codara_name_chat is the one exclusion: the execute roster already owns that
+// name and maps it to orchestrator.name_chat, which is the correct verb for a
+// non-automation chat (automation.name_chat rejects anything else).
+const MANAGER_AUTOMATION_TOOL_NAMES = AUTOMATION_TOOLS
+  .map((tool) => tool.name)
+  .filter((name) => name !== "codara_name_chat");
+const MANAGER_AUTOMATION_TOOLS = AUTOMATION_TOOLS.filter((tool) =>
+  MANAGER_AUTOMATION_TOOL_NAMES.includes(tool.name),
+);
+const MANAGER_AUTOMATION_TOOL_TO_RPC = Object.fromEntries(
+  MANAGER_AUTOMATION_TOOL_NAMES.map((name) => [name, AUTOMATION_TOOL_TO_RPC[name]]),
+);
+
 let TOOLS;
 let TOOL_TO_RPC;
 if (IS_AUTOMATION_MODE) {
   TOOLS = [...STUDIO_TOOLS, ...AUTOMATION_TOOLS, ...(ASK_USER_TOOL ? [ASK_USER_TOOL] : [])];
   TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, ...AUTOMATION_TOOL_TO_RPC };
 } else if (IS_EXECUTE_MODE) {
-  // EXECUTE_TOOLS already contains codara_ask_user.
-  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS];
-  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, ...EXECUTE_TOOL_TO_RPC };
+  // EXECUTE_TOOLS already contains codara_ask_user and codara_name_chat, so the
+  // execute map is spread LAST and keeps orchestrator.name_chat.
+  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS, ...MANAGER_AUTOMATION_TOOLS];
+  TOOL_TO_RPC = {
+    ...STUDIO_TOOL_TO_RPC,
+    ...MANAGER_AUTOMATION_TOOL_TO_RPC,
+    ...EXECUTE_TOOL_TO_RPC,
+  };
 } else if (IS_WORKER_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
@@ -1639,6 +1737,18 @@ async function callTool(params) {
   const args = params && params.arguments && typeof params.arguments === "object" ? { ...params.arguments } : {};
 
   if (isOrchestrationRpc(rpc)) {
+    // The board belongs to the CALLING chat, and the model must not be able
+    // to address another run's board (a prompt-injected manager rewriting a
+    // sibling chat's kanban). The run identity comes exclusively from the env
+    // stamp: any model-supplied runId is discarded, and the schemas expose no
+    // runId field. Direct socket callers holding the bearer token can still
+    // pass any runId; that is a pre-existing trust class shared by every
+    // orchestrator RPC.
+    if (rpc === "orchestrator.board_get" || rpc === "orchestrator.board_update") {
+      const envRunId = (process.env.SPARK_RUN_ID || "").trim();
+      if (envRunId) args.runId = envRunId;
+      else delete args.runId;
+    }
     // Auto-inject runId from the env var pty-manager injected when the CLI was
     // spawned for this run, so the orchestrator prompt doesn't have to know its
     // own run id. Caller-supplied runId always wins.

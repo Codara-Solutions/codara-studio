@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, writeTextFile } from "./fs-tree";
-import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
+import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
 import { browseRemoteDir } from "./remote/browse";
@@ -183,6 +183,7 @@ async function getScheduler(): Promise<typeof import("./orchestration/scheduler"
   return schedulerMod;
 }
 
+
 // Remote Access (phone pairing + listener). Deferred like the git modules:
 // the hyperswarm stack only loads when the user first touches the feature.
 // Status and pairing pushes are wired to every webContents on first access
@@ -287,6 +288,9 @@ import type {
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
+  RunBoard,
+  RunBoardUpdateInput,
+  RunBoardUpdateResult,
   CoraMemoryScope,
   CoraMemoryStatus,
   MemoryClearInput,
@@ -874,30 +878,30 @@ export function registerIpc(): void {
   // have a different attack surface and broader internal use; future work can
   // extend the sandbox to those if needed.
   handle("fs:list", async (_e, dir: string) => {
-    assertAllowedReadPath(dir);
+    await assertAllowedReadPathResolved(dir);
     return listDir(dir);
   });
 
   handle("fs:listFiles", async (_e, root: string): Promise<FileListResult> => {
-    assertAllowedReadPath(root);
+    await assertAllowedReadPathResolved(root);
     return listFiles(root);
   });
 
   handle("fs:readText", async (_e, path: string): Promise<FsFileContent> => {
-    assertAllowedReadPath(path);
+    await assertAllowedReadPathResolved(path);
     return readTextFile(path);
   });
 
   handle(
     "fs:readTextTail",
     async (_e, args: { path: string; maxBytes: number }): Promise<FsFileContent> => {
-      assertAllowedReadPath(args.path);
+      await assertAllowedReadPathResolved(args.path);
       return readTextFileTail(args.path, args.maxBytes);
     },
   );
 
   handle("fs:readEx", async (_e, path: string): Promise<FsReadResult> => {
-    assertAllowedReadPath(path);
+    await assertAllowedReadPathResolved(path);
     return readFileEx(path);
   });
 
@@ -925,7 +929,7 @@ export function registerIpc(): void {
       }
       const resolved = base ? join(base, target) : target;
       try {
-        assertAllowedReadPath(resolved);
+        await assertAllowedReadPathResolved(resolved);
       } catch {
         return { exists: false, isFile: false, resolved };
       }
@@ -939,20 +943,20 @@ export function registerIpc(): void {
   );
 
   handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
-    assertAllowedReadPath(root);
+    await assertAllowedReadPathResolved(root);
     return listMarkdownFiles(root);
   });
 
   handle(
     "fs:statFile",
     async (_e, path: string): Promise<{ size: number; mtimeMs: number }> => {
-      assertAllowedReadPath(path);
+      await assertAllowedReadPathResolved(path);
       return statFile(path);
     },
   );
 
   handle("fs:readFileBytes", async (_e, path: string): Promise<Uint8Array> => {
-    assertAllowedReadPath(path);
+    await assertAllowedReadPathResolved(path);
     return readFileBytes(path);
   });
 
@@ -998,7 +1002,7 @@ export function registerIpc(): void {
     async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing import destination.");
-      assertAllowedReadPath(destDir);
+      await assertAllowedReadPathResolved(destDir);
       const sourcePaths = Array.isArray(args?.sourcePaths)
         ? args.sourcePaths.filter((p): p is string => typeof p === "string" && p.length > 0)
         : [];
@@ -1017,12 +1021,12 @@ export function registerIpc(): void {
     async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing move destination.");
-      assertAllowedReadPath(destDir);
+      await assertAllowedReadPathResolved(destDir);
       const sourcePaths = Array.isArray(args?.sourcePaths)
         ? args.sourcePaths.filter((p): p is string => typeof p === "string" && p.length > 0)
         : [];
       if (sourcePaths.length === 0) return [];
-      for (const src of sourcePaths) assertAllowedReadPath(src);
+      for (const src of sourcePaths) await assertAllowedReadPathResolved(src);
       return moveEntries(destDir, sourcePaths);
     },
   );
@@ -1065,7 +1069,7 @@ export function registerIpc(): void {
     }
     // Gate only the root path here; downstream watcher events do not need a
     // per-event check (they all fire inside the gated root).
-    if (root !== null) assertAllowedReadPath(root);
+    if (root !== null) await assertAllowedReadPathResolved(root);
     await fsWatcher.setWatchRoot(e.sender, root);
   });
 
@@ -1586,6 +1590,11 @@ export function registerIpc(): void {
   });
 
   handle("orchestration:readWorkerReport", async (_e, path: string) => {
+    // The renderer only ever passes an attempt's recorded finalReportPath,
+    // which lives under the runs root. Gating it keeps this from doubling as an
+    // arbitrary-path existence oracle, and matches the confinement its sibling
+    // orchestration:readWorkerPrompt already enforces internally.
+    await assertAllowedReadPathResolved(path);
     const { readWorkerReport } = await getRunStore();
     return readWorkerReport(path);
   });
@@ -1634,6 +1643,62 @@ export function registerIpc(): void {
     const { burnDown } = await getRunQueue();
     return burnDown();
   });
+
+  // ── Cora Board ──────────────────────────────────────────────────────────
+  // Thin IPC over the per-chat board on RunState.board (run-store). Two
+  // reads-and-writes plus a push: the board is also written by Cora over the
+  // agent socket and by the one-time legacy adoption, so the renderer cannot
+  // assume its own writes are the only ones and subscribes to "board:changed"
+  // for everything else. The read also triggers legacy adoption (see
+  // run-store.getRunBoard), which is why opening the surface goes through it.
+  handle("board:get", async (_e, runId: string): Promise<RunBoard> => {
+    if (typeof runId !== "string" || !runId.trim()) {
+      throw new Error("board:get requires a runId");
+    }
+    const { getRunBoard } = await getRunStore();
+    return getRunBoard(runId.trim());
+  });
+
+  // A stale baseRevision resolves with ok:false plus the current board rather
+  // than throwing — losing a race with Cora is an ordinary outcome the
+  // renderer rebases on, not an error to surface.
+  handle(
+    "board:update",
+    async (
+      _e,
+      input: RunBoardUpdateInput & { workspaceCwd?: string },
+    ): Promise<RunBoardUpdateResult> => {
+      if (!input || typeof input.runId !== "string" || !input.runId.trim()) {
+        throw new Error("board:update requires a runId");
+      }
+      const { updateRunBoard } = await getRunStore();
+      return updateRunBoard(input);
+    },
+  );
+
+  // Push accepted board writes at every window. Board commits ride the
+  // orchestration event bus (run.board_updated / run.board_nudged), so the
+  // push is derived from it rather than a second listener registry. Cadence is
+  // human-scale (drags, card edits, agent lane moves), so a plain
+  // getAllWindows fan-out is enough.
+  void (async () => {
+    const { subscribeToEvents } = await import("./orchestration/event-log");
+    const { getRun } = await getRunStore();
+    subscribeToEvents((event) => {
+      if (!event.runId) return;
+      if (event.type !== "run.board_updated" && event.type !== "run.board_nudged") return;
+      const runId = event.runId;
+      void getRun(runId)
+        .then((run) => {
+          if (!run?.board) return;
+          for (const win of BrowserWindow.getAllWindows()) {
+            if (win.webContents.isDestroyed()) continue;
+            win.webContents.send("board:changed", { runId, board: run.board });
+          }
+        })
+        .catch((err: unknown) => console.warn("[board] change push failed:", err));
+    });
+  })().catch((err: unknown) => console.error("[board] change push wiring failed:", err));
 
   // ── Scheduler ───────────────────────────────────────────────────────────
   // Thin IPC over the scheduler registry stub (scheduler.ts). Cron firing is
@@ -2121,7 +2186,7 @@ export function registerIpc(): void {
     async (e, opts: SearchOptions): Promise<StartSearchResponse> => {
       const sender = e.sender;
       const remote = isRemotePath(opts.root);
-      if (!remote) assertAllowedReadPath(opts.root);
+      if (!remote) await assertAllowedReadPathResolved(opts.root);
       const searchId = `search-${Date.now().toString(36)}-${(searchCounter++).toString(36)}`;
       const hitChannel = `search:hit:${searchId}`;
       const doneChannel = `search:done:${searchId}`;

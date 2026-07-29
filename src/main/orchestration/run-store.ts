@@ -16,8 +16,11 @@ import type {
   UndoToCheckpointResult,
   AgentRuntimeModel,
   AppSettings,
-  LoomEngine,
+  BoardCard,
   LoomWorkerConfig,
+  RunBoard,
+  RunBoardUpdateInput,
+  RunBoardUpdateResult,
   RunStatus,
   StartDirectWorkerRunInput,
   WorkerAttemptStatus,
@@ -92,14 +95,33 @@ import {
   PANE_RED,
   PANE_STREAM_CUT_NOTE,
 } from "@shared/pane-format";
-import { effectiveChatMode, normalizeChatFeatureFlags } from "@shared/chat-policy";
+import {
+  effectiveChatMode,
+  effectiveChatOneMillionContext,
+  normalizeChatFeatureFlags,
+} from "@shared/chat-policy";
+import { contextWindowForModel } from "@shared/context-window";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
 import {
   CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
   whiteboardNodeSizeLimits,
 } from "@shared/cora-whiteboard-file";
-import { CODEX_MODEL_BY_TIER, normalizeCodexModelId } from "@shared/model-catalog";
+import { CODEX_MODEL_BY_TIER, loomRuntimeForModel, normalizeCodexModelId } from "@shared/model-catalog";
+import {
+  applyUserBoardUpdate,
+  composeBoardNudgeMessage,
+  emptyRunBoard,
+  markLegacyBoardAdopted,
+  normalizeBoardCards,
+  normalizeStoredRunBoard,
+  readLegacyBoardForAdoption,
+} from "./board-store";
+import {
+  hasExplicitParallelAgentIntent,
+  isHeuristicUserMessage,
+  latestUserRunMessageText,
+} from "./user-intent";
 // Pure wave selection for pickAutopilotTasks, including manager-batch parallel
 // trust (tasks the execute-mode spawn RPC already launched simultaneously must
 // relaunch concurrently too) and the fan-out no-concrete-scope serial guard.
@@ -130,6 +152,17 @@ import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
+import {
+  isParkedManagerTurnAction,
+  managerTurnRetryDelayMs,
+  MAX_MANAGER_TRANSIENT_RETRIES,
+  planManagerTurnFailure,
+} from "./manager-turn-policy";
+import {
+  MANUAL_REVIEW_ACCEPT_OPTION_ID,
+  MANUAL_REVIEW_QUESTION_OPTIONS,
+  parseManualReviewVerdict,
+} from "./manual-review";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
 export { readWorkerReport } from "./worker-report";
 // Spawn-time batch shape guard. agent-socket's codara_spawn_workers handler is
@@ -1080,7 +1113,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
   run = await commitRunChange(run, {
     type: "direct_run.started",
     message: "Loom direct-worker run started",
-    payload: { automationId: input.automationId, engine: input.engine, model: input.model ?? null },
+    payload: { automationId: input.automationId, model: input.model ?? null },
     mutate: (draft, timestamp) => {
       draft.status = "running";
       draft.autopilot = {
@@ -1126,7 +1159,6 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     cwd: input.cwd,
     passNumber: 1,
     prompt: input.prompt,
-    engine: input.engine,
     model: input.model,
     effort: input.effort,
     loomNodeId: input.loomNodeId,
@@ -1138,8 +1170,8 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
 }
 
 // Same-run chaining (loop.isolate === false): iteration N+1 reuses the run so
-// cost accumulates and the transcript carries across passes. The engine/model
-// may differ per pass — buildLaunchCommandLine reads them per task.
+// cost accumulates and the transcript carries across passes. The model/effort
+// may differ per pass — the launcher reads them per task.
 export async function addDirectIteration(input: AddDirectIterationInput): Promise<RunState> {
   let run = await requireRun(input.runId);
   if (run.executionMode !== "direct") {
@@ -1172,7 +1204,7 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
     run = await commitRunChange(run, {
       type: "direct_run.iteration_started",
       message: `Loom iteration ${passNumberMulti} started`,
-      payload: { engine: input.engine, model: input.model ?? null, effort: input.effort ?? null },
+      payload: { model: input.model ?? null, effort: input.effort ?? null },
       mutate: (draft, timestamp) => {
         draft.status = "running";
         draft.autopilot = {
@@ -1202,7 +1234,7 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
   run = await commitRunChange(run, {
     type: "direct_run.iteration_started",
     message: `Loom iteration ${passNumber} started`,
-    payload: { engine: input.engine, model: input.model ?? null, effort: input.effort ?? null },
+    payload: { model: input.model ?? null, effort: input.effort ?? null },
     mutate: (draft, timestamp) => {
       draft.status = "running";
       draft.autopilot = {
@@ -1223,7 +1255,6 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
     cwd,
     passNumber,
     prompt: input.prompt,
-    engine: input.engine,
     model: input.model,
     effort: input.effort,
     loomNodeId: input.loomNodeId,
@@ -1265,8 +1296,7 @@ async function launchDirectIterationTask(opts: {
   cwd: string;
   passNumber: number; // 1-based
   prompt: string;
-  engine: LoomEngine;
-  model?: string;
+  model: string;
   effort?: AgentEffortLevel;
   loomNodeId?: string;
   access?: "full" | "edits" | "readonly";
@@ -1282,7 +1312,7 @@ async function launchDirectIterationTask(opts: {
       {
         nodeId: opts.loomNodeId ?? "w0",
         template: opts.prompt,
-        worker: { engine: opts.engine, model: opts.model, effort: opts.effort },
+        worker: { model: opts.model, effort: opts.effort ?? "medium" },
         access: opts.access,
         blockedTools: opts.blockedTools,
         // collab is intentionally omitted: a single-node launch has no peers.
@@ -1334,31 +1364,11 @@ async function launchDirectNodeTasks(
   const nodeOutputs = _opts?.nodeOutputs ?? {};
   const freshPass = _opts?.freshPass === true;
 
-  // FIX 7: resolve a node's "auto" engine against the INSTALLED set (claude-then-
-  // codex, mirroring resolveWorker) — NOT a hard-coded "claude". The entry wave
-  // already passes a concrete engine (automation-loop resolved it), but advance/
-  // relaunch waves carry the node's raw "auto", which on a Codex-only host would
-  // otherwise pin a missing Claude CLI and fail the pass. Detect ONCE per wave,
-  // and only when some node is actually "auto" (no extra probe on legacy paths).
-  let resolveAuto: (engine: LoomEngine | "auto") => LoomEngine = (engine) =>
-    engine === "auto" ? "claude" : engine;
-  if (nodes.some((n) => n.worker.engine === "auto")) {
-    const { detectAgentRuntimes } = await import("../agent-runtimes");
-    const runtimes = await detectAgentRuntimes();
-    const installed = new Set(
-      runtimes
-        .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed)
-        .map((r) => r.kind),
-    );
-    resolveAuto = (engine) =>
-      engine !== "auto"
-        ? engine
-        : installed.has("claude")
-          ? "claude"
-          : installed.has("codex")
-            ? "codex"
-            : "claude";
-  }
+  // Looms on Pi: a node's runtime family is derived from its model id (gpt-* →
+  // codex provider, everything else → claude provider). No install detection —
+  // the Pi runtime ships with the app.
+  const runtimeOf = (worker: LoomWorkerConfig): WorkerRuntime =>
+    loomRuntimeForModel(worker.model);
 
   // Render every launching node's prompt from its template through the pure
   // renderNodePrompt: pass vars + the {{node:<id>}} outputs map + this node's
@@ -1389,7 +1399,7 @@ async function launchDirectNodeTasks(
   const peerInfos: WavePeerInfo[] = nodes.map((node, i) => ({
     nodeId: node.nodeId,
     label: node.label,
-    engine: resolveAuto(node.worker.engine),
+    model: node.worker.model,
     prompt: rendered[i],
     collab: node.collab,
     access: node.access,
@@ -1436,7 +1446,7 @@ async function launchDirectNodeTasks(
     plannedAgents: nodes.map((node, i) => ({
       label: `worker ${passNumber}.${i + 1}`,
       summary: decorated[i].length > 200 ? `${decorated[i].slice(0, 200)}…` : decorated[i],
-      runtimePreference: resolveAuto(node.worker.engine),
+      runtimePreference: runtimeOf(node.worker),
       taskClass: "feature",
     })),
     acceptanceCriteria: [
@@ -1454,7 +1464,7 @@ async function launchDirectNodeTasks(
       stepId,
       title: `Loom pass ${passNumber}`,
       description: decorated[i],
-      runtimePreference: resolveAuto(node.worker.engine),
+      runtimePreference: runtimeOf(node.worker),
       modelHint: node.worker.model,
       effortHint: loomEffortToWorkerEffort(node.worker.effort),
       allowedPaths: [],
@@ -3630,10 +3640,19 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   const isExecuteModeCliManager = runHasMcpManager(latest);
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
+  const finishedTask = latest.workerTasks.find((t) => t.id === finishedTaskId);
   const shouldAutoAccept =
     isExecuteModeCliManager &&
-    Boolean(finishedTaskId) &&
-    latest.workerTasks.find((t) => t.id === finishedTaskId)?.status === "needs_review";
+    finishedTask?.status === "needs_review" &&
+    // ...but never for a manual-runtime task. Those exist precisely because
+    // the manager yielded no decision (createFallbackAutopilotTask after a
+    // failed manager startup): no CLI manager session spawned the task and
+    // none is blocked on codara_wait_for_workers for it, so the auto-accept's
+    // whole rationale is absent. Accepting here would launder an unreviewed
+    // (possibly partial) report into a settled run that the completion hop
+    // below then marks green; the classic needs_review escalation keeps the
+    // verdict with the human.
+    finishedTask.runtimePreference !== "manual";
 
   await commitRunChange(latest, {
     type: "autopilot.cycle_completed",
@@ -3702,6 +3721,22 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
         cwd: cwd || input.cwd,
         runId: settled.id,
       });
+      return;
+    }
+    // A manual task the auto-accept above deliberately excluded: no manager
+    // session reviews manual workers, no renderer surface accepts or rejects
+    // one, and the stalled-review failsafe counts needs_review as in-flight —
+    // so without this the run wedges at "reviewing" forever. Escalate to the
+    // human with the report in hand; the linked answer applies the verdict
+    // locally (maybeApplyManualReviewAnswer), so resolution needs no manager.
+    const manualNeedsReview =
+      isExecuteModeCliManager && finishedTask?.runtimePreference === "manual"
+        ? settled.workerTasks.find(
+            (task) => task.id === finishedTask.id && task.status === "needs_review",
+          )
+        : undefined;
+    if (manualNeedsReview) {
+      await escalateManualNeedsReview(settled, manualNeedsReview);
       return;
     }
     // Skip the autopilot's worker_result_review re-prompt when the chat
@@ -3928,6 +3963,17 @@ async function runAutopilotManagerReview(
     await startAutopilot({ ...input, cwd: cwd || input.cwd, runId: run.id });
     return;
   }
+  // A manual task at needs_review cannot be settled by any manager turn - it
+  // exists precisely because the manager yielded no decision - and an earlier
+  // escalation may have been abandoned by a force pause (the question message
+  // survives, but its ownership died with the pause). Post or re-post the
+  // human-review question instead of burning review turns that cannot act.
+  const manualPendingReview = run.workerTasks.find(
+    (task) => task.runtimePreference === "manual" && task.status === "needs_review",
+  );
+  if (manualPendingReview && !resolveOpenRunQuestionPure(run)) {
+    if (await escalateManualNeedsReview(run, manualPendingReview)) return;
+  }
   const REVIEW_REPROMPT_CAP = 3;
   for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
     run = await askManagerBackend(
@@ -4142,6 +4188,12 @@ function activeManagerCall(run: RunState): SparkCall | undefined {
   for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
     const call = run.sparkCalls[index];
     if ((call.conversationEpoch ?? 0) !== epoch) continue;
+    // The auto-compaction summarize call is maintenance, not a conversational
+    // turn: a message sent while it runs is an ordinary turn for the run's
+    // status, never steering targeted at it. Real-turn/compaction mutual
+    // exclusion does not rest on this predicate — it is enforced by the
+    // compaction commit's own other-started-call re-check (performAutoCompaction).
+    if (call.purpose === "compaction") continue;
     if (call.status === "started" && !call.completedAt) return call;
   }
   return undefined;
@@ -4163,6 +4215,12 @@ function interruptedManagerCall(run: RunState): SparkCall | undefined {
   for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
     const call = run.sparkCalls[index];
     if ((call.conversationEpoch ?? 0) !== epoch) continue;
+    // Auto-compaction summarize calls are maintenance: one cut off by a
+    // restart is settled by the orphan pass but is not unfinished conversation
+    // the user is owed, so it must not read as an interrupted turn (it would
+    // block completeSettledManagedRunsAfterRestart from settling a finished
+    // run). Walk past it to the newest real call.
+    if (call.purpose === "compaction") continue;
     if (call.status === "started" && !call.completedAt) return call;
     if (call.status === "failed" && call.error === MANAGER_TURN_INTERRUPTED_ERROR) return call;
     return undefined;
@@ -4286,6 +4344,7 @@ async function prepareManagerTurn(
     // ago is already live for the next turn.
     prompt: buildManagerTurnPrompt(prepared, inputMessages, {
       includeCanonicalReplay,
+      compactionSummary: includeCanonicalReplay ? compactionReplaySummary(prepared) : null,
       coraMemory,
       subscriptionHeadroom,
     }),
@@ -4451,6 +4510,10 @@ async function askManagerBackend(
   mode: SparkCall["mode"],
   managerResumeClaimId?: string,
   autonomyRetryCount = 0,
+  // Automatic same-turn retries already consumed after transient provider
+  // failures (see manager-turn-policy). Distinct from autonomyRetryCount,
+  // which counts question reprompts.
+  transientRetryCount = 0,
 ): Promise<RunState | null> {
   // Defense in depth: a direct (loom) run must never reach a manager LLM. If
   // a code path gets here anyway, surface it loudly instead of silently
@@ -4495,8 +4558,36 @@ async function askManagerBackend(
   // Once requestManagerDecision settles, that SparkCall owns no more stream
   // events. Every callback also checks the epoch before it can reach the log.
   let acceptingStreamEvents = true;
+  // Last context gauge seen on the stream. Pi returns the gauge on the
+  // ManagerCallResult itself, but Claude/Codex only ever report occupancy via
+  // usage stream events; Claude's carry no contextTokens at all, so occupancy
+  // is derived from the latest request's input + cache-read counts. Folded
+  // into the SparkCall at completion when the result left the fields empty —
+  // that persisted gauge re-seeds the composer meter on reopen and feeds the
+  // autocompaction trigger.
+  const streamGauge = { contextTokens: 0, contextWindowTokens: 0, sawExplicitContext: false };
   const onStream = (event: ChatStreamEvent): void => {
     if (!acceptingStreamEvents) return;
+    if (event.kind === "usage") {
+      if (typeof event.contextTokens === "number" && event.contextTokens > 0) {
+        streamGauge.contextTokens = event.contextTokens;
+        streamGauge.sawExplicitContext = true;
+      } else if (!streamGauge.sawExplicitContext) {
+        // Claude events never carry contextTokens; the latest request's
+        // input + cache-read counts are its occupancy. Codex events carry
+        // per-event deltas here instead, so once one explicit gauge arrived
+        // a delta-derived value must never replace it.
+        const derived = (event.inputTokens ?? 0) + (event.cacheReadTokens ?? 0);
+        if (Number.isFinite(derived) && derived > 0) streamGauge.contextTokens = derived;
+      }
+      if (
+        typeof event.contextWindowTokens === "number" &&
+        Number.isFinite(event.contextWindowTokens) &&
+        event.contextWindowTokens > 0
+      ) {
+        streamGauge.contextWindowTokens = event.contextWindowTokens;
+      }
+    }
     void (async () => {
       const current = await getRun(run.id);
       if (!current || conversationEpoch(current) !== preparedTurn.conversationEpoch) return;
@@ -4602,6 +4693,22 @@ async function askManagerBackend(
         targetCall.contextWindowTokens = result.contextWindowTokens;
         targetCall.contextWindowSource = "known";
       }
+      // Claude/Codex results leave the context gauge empty; fall back to the
+      // last stream-reported occupancy so reopened chats re-seed the composer
+      // meter and the autocompaction trigger sees a real number.
+      if (
+        !(typeof targetCall.promptTokens === "number" && targetCall.promptTokens > 0) &&
+        streamGauge.contextTokens > 0
+      ) {
+        targetCall.promptTokens = streamGauge.contextTokens;
+      }
+      if (
+        !(typeof targetCall.contextWindowTokens === "number" && targetCall.contextWindowTokens > 0) &&
+        streamGauge.contextWindowTokens > 0
+      ) {
+        targetCall.contextWindowTokens = streamGauge.contextWindowTokens;
+        targetCall.contextWindowSource = "known";
+      }
       if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
       if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
       if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
@@ -4680,6 +4787,127 @@ async function askManagerBackend(
           conversationEpoch: preparedTurn.conversationEpoch,
         });
       }
+
+      const failurePlan = planManagerTurnFailure({
+        error: failureMessage,
+        runStatus: failedRun.status,
+        mode,
+        transientRetryCount,
+      });
+
+      // The run already carries a state this dead turn must not rewrite: a
+      // terminal verdict that landed mid-turn (codara_complete, a user
+      // cancel, a worker-cycle failure), an open question the user can still
+      // answer (parking a blocked run would strand the answer, since
+      // answerRunQuestion rejects paused runs), or a user-held pause. The
+      // SparkCall keeps its failure for the audit trail; the run keeps its
+      // state and the failure lands as a quiet notice.
+      if (failurePlan.action === "keep_state") {
+        await appendEvent({
+          timestamp: completedAt,
+          workspaceId: failedRun.workspaceId,
+          runId: failedRun.id,
+          sparkCallId: callId,
+          type: "chat.backend_notice",
+          message: `Cora's manager turn failed while the run was ${failedRun.status} (${failureMessage}). The run keeps its state.`,
+          payload: { backend: chatConfig.backend, error: failureMessage, keptStatus: failedRun.status },
+        });
+        return failedRun;
+      }
+
+      if (failurePlan.action === "retry") {
+        const delayMs = managerTurnRetryDelayMs(failurePlan.attempt);
+        const attemptLabel = `attempt ${failurePlan.attempt + 1} of ${MAX_MANAGER_TRANSIENT_RETRIES + 1}`;
+        console.warn(
+          `[run-store] manager turn ${callId} (${chatConfig.backend}/${mode}) failed transiently (${failurePlan.kind}); retrying in ${delayMs}ms (${attemptLabel}): ${failureMessage}`,
+        );
+        await appendEvent({
+          timestamp: completedAt,
+          workspaceId: failedRun.workspaceId,
+          runId: failedRun.id,
+          sparkCallId: callId,
+          type: "run.chat_turn_retrying",
+          message: `Cora's provider hiccuped (${failurePlan.kind}); retrying the turn in ${Math.round(delayMs / 1000)}s (${attemptLabel})`,
+          payload: {
+            backend: chatConfig.backend,
+            mode,
+            error: failureMessage,
+            failureKind: failurePlan.kind,
+            attempt: failurePlan.attempt,
+            maxAttempts: MAX_MANAGER_TRANSIENT_RETRIES + 1,
+            delayMs,
+          },
+        });
+        // A trace note on the failed call so the conversation's "Technical
+        // details" explains the red row that a quiet retry follows.
+        await appendEvent({
+          timestamp: completedAt,
+          workspaceId: failedRun.workspaceId,
+          runId: failedRun.id,
+          sparkCallId: callId,
+          type: "chat.backend_notice",
+          message: `Provider issue (${failureMessage}). Cora is retrying this turn automatically (${attemptLabel}).`,
+          payload: { backend: chatConfig.backend, retrying: true },
+        });
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        // The world may have moved while we slept: only retry when this
+        // conversation is still current, nothing else took over the manager,
+        // and the run is still in a driving state (a user Stop, cancel, or a
+        // mid-sleep completion all abandon the retry).
+        const fresh = await getRun(run.id);
+        if (!fresh || conversationEpoch(fresh) !== preparedTurn.conversationEpoch) {
+          return fresh ?? failedRun;
+        }
+        if (fresh.status !== "planning" && fresh.status !== "running" && fresh.status !== "reviewing") {
+          return fresh;
+        }
+        if (fresh.sparkCalls.some((call) => call.status === "started" && !call.completedAt)) {
+          return fresh;
+        }
+        return askManagerBackend(
+          fresh,
+          cwd,
+          mode,
+          managerResumeClaimId,
+          autonomyRetryCount,
+          transientRetryCount + 1,
+        );
+      }
+
+      // Provider trouble that outlived the retries (or a rate limit, which a
+      // fast retry can never clear): park instead of failing. The work did
+      // not fail, the provider did. Input was already requeued above, so
+      // Resume re-delivers it; workers still in flight keep running and are
+      // reviewed on resume.
+      if (failurePlan.action === "park") {
+        console.warn(
+          `[run-store] manager turn ${callId} (${chatConfig.backend}/${mode}) parked after ${failurePlan.kind} failure: ${failureMessage}`,
+        );
+        return commitRunChange(failedRun, {
+          type: "run.chat_turn_parked",
+          message: `Cora's ${chatConfig.backend} chat turn hit provider trouble: ${failureMessage}`,
+          payload: {
+            backend: chatConfig.backend,
+            sparkCallId: callId,
+            mode,
+            error: failureMessage,
+            failureKind: failurePlan.kind,
+            reason: failurePlan.parkReason,
+          },
+          mutate: (draft, timestamp) => {
+            draft.status = "paused";
+            draft.autopilot = {
+              ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+              status: "paused",
+              lastAction: failurePlan.lastAction,
+              stopReason: failurePlan.parkReason,
+              updatedAt: timestamp,
+            };
+            draft.updatedAt = timestamp;
+          },
+        });
+      }
+
       return commitRunChange(failedRun, {
         type: "run.chat_turn_failed",
         message: `Cora's ${chatConfig.backend} chat turn failed: ${failureMessage}`,
@@ -4765,7 +4993,11 @@ async function askManagerBackend(
         await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
       }
       scheduleQueuedSteeringFollowup(finalized);
-      return finalized;
+      await maybeAutoCompactConversation(run.id, callId, cwd);
+      // Re-read: if compaction just cut the conversation over, callers that
+      // chain another manager turn off this state (step_planning, brake
+      // replans) need the new epoch or their prepareManagerTurn goes stale.
+      return (await getRun(run.id)) ?? finalized;
     }
     const applied = await applySparkManagerDecision(
       latest,
@@ -4791,7 +5023,11 @@ async function askManagerBackend(
       await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
     }
     scheduleQueuedSteeringFollowup(finalized);
-    return finalized;
+    await maybeAutoCompactConversation(run.id, callId, cwd);
+    // Re-read: if compaction just cut the conversation over, callers that
+    // chain another manager turn off this state (step_planning, brake
+    // replans) need the new epoch or their prepareManagerTurn goes stale.
+    return (await getRun(run.id)) ?? finalized;
   } catch (err) {
     acceptingStreamEvents = false;
     // The turn owns no more stream events, so land the buffered tail now rather
@@ -5176,29 +5412,9 @@ function planIntentTextForRun(run: RunState): string {
     ? run.plans.find((item) => item.id === run.planId)
     : run.plans.at(-1);
   const notes = run.humanMessages
-    .filter((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"))
+    .filter(isHeuristicUserMessage)
     .map((message) => message.message);
   return [plan?.rawContent ?? "", ...notes].join("\n");
-}
-
-function latestUserRunMessageText(run: RunState): string {
-  return (
-    [...run.humanMessages]
-      .reverse()
-      .find((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"))
-      ?.message ?? ""
-  );
-}
-
-function hasExplicitParallelAgentIntent(text: string): boolean {
-  const lower = text.toLowerCase();
-  const asksForAgents =
-    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude)s?\b/.test(lower) ||
-    /\b(agent|worker|codex|claude)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
-    /\bdifferent agent\b/.test(lower);
-  const asksForParallel = /\b(simultaneous|parallel|at the same time)\b/.test(lower);
-  const asksForCombine = /\b(combine|integrate|merge|assemble)\b/.test(lower);
-  return asksForAgents && (asksForParallel || asksForCombine);
 }
 
 function hasUiLogicSplitIntent(text: string): boolean {
@@ -5446,10 +5662,11 @@ function councilAlreadyFinalized(run: RunState): boolean {
 }
 
 // The original planning task for a council run (latest user message / note).
+// Board-nudge notes are synthetic and never the task the council should plan.
 function councilTaskFromRun(run: RunState): string {
   return (
     run.humanMessages
-      .filter((message) => message.author === "user")
+      .filter((message) => message.author === "user" && !message.boardNote)
       .at(-1)
       ?.message?.trim() ?? ""
   );
@@ -8030,8 +8247,147 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
     });
   }
 
+  // A manual-review escalation resolves HERE, not in a manager turn: the
+  // question exists precisely because no manager reviews manual workers. Any
+  // pending manager resume stamped by the answer is still scheduled below; its
+  // claim guard skips the terminal/blocked states this can produce.
+  const manualReview = await maybeApplyManualReviewAnswer(updated, questionMessageId, message);
+  if (manualReview) {
+    schedulePendingManagerResume(manualReview);
+    return manualReview;
+  }
+
   schedulePendingManagerResume(updated);
   return updated;
+}
+
+/**
+ * Post the human-review escalation for a manual task sitting at needs_review.
+ * Called by cycle completion when the report first lands, and by the
+ * autopilot review stage as a RE-escalation: a force pause abandons question
+ * ownership (the question message survives, but applyRunQuestionAnswer
+ * rejects answers off the blocked state), so without a fresh question after
+ * resume the manual review would be permanently stranded.
+ */
+async function escalateManualNeedsReview(run: RunState, task: WorkerTask): Promise<boolean> {
+  const attempt = [...run.workerAttempts]
+    .reverse()
+    .find((entry) => entry.workerTaskId === task.id);
+  const report = attempt?.finalReportPath
+    ? await readWorkerReport(attempt.finalReportPath).catch(() => null)
+    : null;
+  const summary = report?.summary?.trim();
+  const question = [
+    `The manual worker "${task.title}" finished and reported ${report?.status ?? "no parseable report"}.`,
+    summary ? `Report summary: ${summary}` : null,
+    "Manual workers have no manager to review them, so tell me whether to accept this report.",
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" ");
+  try {
+    await askHumanQuestion(run.id, question, MANUAL_REVIEW_QUESTION_OPTIONS, {
+      reason: "A manual worker's report needs a human verdict; no manager reviews manual workers.",
+      managerMode: "worker_result_review",
+    });
+    return true;
+  } catch (err) {
+    // Most likely another question is already open; that question is the
+    // run's active escalation and this one can wait for the next driver.
+    console.warn(`[run-store] manual review escalation for ${run.id} not posted:`, err);
+    return false;
+  }
+}
+
+/**
+ * Apply a manual-review escalation answer locally. Returns null when the
+ * answered question is not the manual-review escalation, when the answer is
+ * anything other than the CANNED accept/fail option (free text, including
+ * negations like "Don't accept this", falls through to the normal manager
+ * path - see parseManualReviewVerdict), or when no manual task still sits at
+ * needs_review.
+ *
+ * Accept mirrors the local review's accept transitions (task accepted, step
+ * complete once all its tasks are), then takes the same terminal hop
+ * codara_complete would: complete when settled and verification is fresh,
+ * else the standing unverified-completion question. Reject is the user's own
+ * verdict on the work, so the task, its step, and the run read failed.
+ *
+ * The verdict applies to EVERY manual task at needs_review, not just one.
+ * Today that is always exactly one task: createFallbackAutopilotTask is the
+ * only producer of manual-runtime tasks and creates a single task per run, so
+ * a batch where one answer would accept a report the user never saw cannot be
+ * constructed. If a second producer ever appears, scope this to the task the
+ * question was posted about before shipping it.
+ */
+async function maybeApplyManualReviewAnswer(
+  run: RunState,
+  questionMessageId: string,
+  answerText: string,
+): Promise<RunState | null> {
+  const question = run.humanMessages.find(
+    (entry) => entry.id === questionMessageId && entry.kind === "question",
+  );
+  const options = question?.questionOptions ?? [];
+  if (!options.some((option) => option.id === MANUAL_REVIEW_ACCEPT_OPTION_ID)) return null;
+  const verdict = parseManualReviewVerdict(answerText, options);
+  if (!verdict) return null;
+
+  let changed = false;
+  const applied = await commitRunChange(run, {
+    type: "manual_review.applied",
+    message:
+      verdict === "accept"
+        ? "User accepted the manual worker's report"
+        : "User rejected the manual worker's report; the task is failed",
+    payload: { questionMessageId, verdict },
+    mutate: (draft, timestamp) => {
+      for (const task of draft.workerTasks) {
+        if (task.runtimePreference !== "manual" || task.status !== "needs_review") continue;
+        task.status = verdict === "accept" ? "accepted" : "failed";
+        task.updatedAt = timestamp;
+        changed = true;
+        const step = task.stepId
+          ? draft.steps.find((entry) => entry.id === task.stepId)
+          : undefined;
+        if (!step) continue;
+        if (verdict === "fail") {
+          step.status = "failed";
+        } else {
+          const stepTasks = draft.workerTasks.filter((entry) => entry.stepId === step.id);
+          if (stepTasks.every((entry) => entry.status === "accepted")) {
+            step.status = "complete";
+            if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+          }
+        }
+        step.updatedAt = timestamp;
+      }
+      if (!changed) return false;
+      if (verdict === "fail") {
+        draft.status = "failed";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          status: "failed",
+          lastAction: "manual_review_rejected",
+          stopReason: "The user rejected the manual worker's report.",
+          updatedAt: timestamp,
+        };
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (!changed) return null;
+
+  if (verdict === "accept" && isRunSettled(applied)) {
+    const verification = await describeVerificationFreshness(applied);
+    if (verification.ok) {
+      return completeRunFromOrchestrator(applied.id);
+    }
+    return askHumanQuestion(applied.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+      reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
+      managerMode: "worker_result_review",
+    });
+  }
+  return applied;
 }
 
 /** Release a live RPC blocker after disconnect/timeout without fabricating an answer. */
@@ -8139,8 +8495,41 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const resumeInput = autopilotInputFromRun(run);
   const shouldScheduleManagerAfterResume = shouldResumeManagerPlanning(run);
-  if (activeWorkersForRun(run.id).length === 0 && shouldRoutePausedResumeToChat(run)) {
-    const chatDecision = await askManagerForChat(run, resumeInput.cwd);
+  // A run parked by the manager-turn failure policy (provider overload/rate
+  // limit) resumes by retrying the parked chat turn: the failed turn's input
+  // was requeued at park time, so a fresh chat turn re-delivers it.
+  const parkedChatTurn =
+    run.status === "paused" && run.autopilot?.lastAction === "chat_turn_parked";
+  if (
+    activeWorkersForRun(run.id).length === 0 &&
+    (parkedChatTurn || shouldRoutePausedResumeToChat(run))
+  ) {
+    // Leave "paused" BEFORE the turn dispatches. The turn-failure policy and
+    // its retry guards read run.status: a turn resumed while the run still
+    // says "paused" would forfeit its transient-retry budget (the post-sleep
+    // guard rejects non-driving states), and the header would keep the parked
+    // parked banner through a perfectly healthy resumed turn.
+    const driving = await commitRunChange(run, {
+      type: "run.resumed",
+      message: parkedChatTurn
+        ? "Run resumed to retry the parked chat turn"
+        : "Run resumed with a chat turn",
+      payload: { route: "chat", parkedChatTurn },
+      mutate: (draft, timestamp) => {
+        draft.status = "running";
+        draft.verificationRounds = 0;
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "running",
+          lastAction: "resumed_by_user",
+          stopReason: undefined,
+          resumedAt: timestamp,
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
+    const chatDecision = await askManagerForChat(driving, resumeInput.cwd);
     if (chatDecision) {
       if (
         chatDecision.status === "paused" ||
@@ -8201,8 +8590,12 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // and no scheduled manager, and nothing ever drove it again. That merely
   // moved the wedge from boot to the first Resume click.
   const parkedByRestart = resumed.autopilot?.lastAction === "paused_after_restart";
+  // A run parked by the manager-turn failure policy is in the same boat: the
+  // turn that would have driven it died with the provider, so the resume
+  // signals sent above have no live manager to land on. Schedule a driver.
+  const parkedManagerTurn = isParkedManagerTurnAction(run.autopilot?.lastAction);
   const shouldScheduleDriver =
-    (parkedByRestart || !isExecuteModeCliManager) &&
+    (parkedByRestart || parkedManagerTurn || !isExecuteModeCliManager) &&
     activeWorkersForRun(resumed.id).length === 0;
   if (shouldScheduleManagerAfterResume || shouldScheduleDriver) {
     if (resumed.workerAttempts.length > 0) {
@@ -9223,6 +9616,306 @@ export async function updateCoraWhiteboard(
   });
 }
 
+// ── Cora Board (the per-chat kanban) ────────────────────────────────────────
+// Persisted on RunState.board exactly like the whiteboard: every write is one
+// commitRunChange with the baseRevision guard evaluated inside the mutate (so
+// it validates against the state at the head of the per-run mutation queue,
+// not the caller's snapshot). The card model itself lives in board-store.ts.
+
+/** Conflict carrying the current board so the user path can resolve ok:false
+ * instead of throwing (the agent path rethrows it as an RPC error). */
+class BoardRevisionConflictError extends Error {
+  readonly board: RunBoard;
+  constructor(baseRevision: number, board: RunBoard) {
+    super(
+      `Board changed since revision ${baseRevision}. Read it again and apply the update to revision ${board.revision}.`,
+    );
+    this.name = "BoardRevisionConflictError";
+    this.board = board;
+  }
+}
+
+// One adoption attempt per workspace at a time: two chats opening empty boards
+// concurrently must not both adopt the legacy workspace board's cards.
+const legacyBoardAdoptionOps = new Map<string, Promise<void>>();
+
+function withLegacyBoardAdoption(workspaceId: string, fn: () => Promise<void>): Promise<void> {
+  const previous = legacyBoardAdoptionOps.get(workspaceId) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  legacyBoardAdoptionOps.set(
+    workspaceId,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
+/**
+ * One-time migration: a run opening its empty board adopts the retired
+ * per-workspace board's cards (see board-store.ts for the lane mapping).
+ * Returns whether any cards were adopted by THIS call.
+ *
+ * Crash-safety ordering: the merge is idempotent (dedup by card id), so the
+ * sidecar marker is written AFTER the successful commit. A crash between the
+ * two leaves the marker missing and the worst case is a harmless re-adoption
+ * merge on the next open, never a permanent loss of the legacy cards. The
+ * per-workspace mutex keeps two concurrent chats from double-adopting within
+ * a session; the marker keeps later sessions out.
+ */
+async function adoptLegacyBoardIfPending(run: RunState): Promise<boolean> {
+  const workspaceId = run.workspaceId;
+  if (!workspaceId) return false;
+  let adopted = false;
+  await withLegacyBoardAdoption(workspaceId, async () => {
+    const latest = await getRun(run.id);
+    // Only a chat with an EMPTY board inherits the legacy cards — a board the
+    // user or Cora already populated keeps its content, and the legacy cards
+    // stay available for the next empty-board chat.
+    if (!latest || (latest.board && latest.board.cards.length > 0)) return;
+    const adoption = await readLegacyBoardForAdoption(workspaceId);
+    if (!adoption) return;
+    await commitRunChange(latest, {
+      type: "run.board_updated",
+      message: `Adopted ${adoption.cards.length} card(s) from the legacy workspace board`,
+      payload: { editor: "system", action: "adopt_legacy", cardCount: adoption.cards.length },
+      mutate: (draft, timestamp) => {
+        const current = draft.board ?? emptyRunBoard();
+        const have = new Set(current.cards.map((card) => card.id));
+        const merged = [...current.cards, ...adoption.cards.filter((card) => !have.has(card.id))];
+        if (merged.length === current.cards.length && draft.board) return false;
+        draft.board = { revision: current.revision + 1, cards: merged };
+        draft.updatedAt = timestamp;
+        adopted = true;
+      },
+    });
+    if (adopted) await markLegacyBoardAdopted(workspaceId, run.id);
+  });
+  return adopted;
+}
+
+/**
+ * This chat's board, or an empty default (never persisted until the first
+ * write). Opening the board is what triggers legacy adoption, so the first
+ * chat to look at an empty board in a workspace that still has the old
+ * per-workspace kanban inherits its cards.
+ */
+export async function getRunBoard(runId: string): Promise<RunBoard> {
+  const run = await requireRun(runId);
+  // An EMPTY board (absent or zero cards) re-checks adoption: the marker
+  // makes the check a single stat once a board has been adopted. A crash
+  // between the adopting commit and its marker leaves the legacy file
+  // unmarked; the adopting run's board is non-empty so IT never re-enters
+  // this path, and the next chat that opens an empty board in the workspace
+  // adopts a duplicate copy. Deliberate trade: duplicated cards are
+  // recoverable, silently orphaned ones are not.
+  if (run.board && run.board.cards.length > 0) return run.board;
+  await adoptLegacyBoardIfPending(run);
+  const fresh = await requireRun(runId);
+  return fresh.board ?? emptyRunBoard();
+}
+
+/**
+ * Guarded USER write from the renderer (full card powers; new cards stamped
+ * createdBy "user"). A stale baseRevision resolves ok:false with the current
+ * board so the caller rebases rather than treating it as an exception.
+ */
+export async function updateRunBoard(
+  input: RunBoardUpdateInput & { workspaceCwd?: string },
+): Promise<RunBoardUpdateResult> {
+  const run = await requireRun(input.runId);
+  // Materialize adoption first so this chat's very first write can't strand
+  // the legacy cards behind a board that is no longer empty. The merge branch
+  // below fires only when adoption ACTUALLY ran in this call — an empty but
+  // already-initialized board must still conflict normally.
+  const adoptionRace =
+    run.board && run.board.cards.length > 0 ? false : await adoptLegacyBoardIfPending(run);
+  const baseRevision = Math.max(0, Math.floor(input.baseRevision));
+  try {
+    const updated = await commitRunChange(await requireRun(input.runId), {
+      type: "run.board_updated",
+      message: "Updated Cora Board",
+      payload: {
+        editor: "user",
+        baseRevision,
+        cardCount: Array.isArray(input.cards) ? input.cards.length : 0,
+      },
+      mutate: (draft, timestamp) => {
+        const current = draft.board ?? emptyRunBoard();
+        let nextCards: BoardCard[];
+        if (adoptionRace && baseRevision === 0 && current.revision > 0) {
+          // The write was composed against the empty board this chat had
+          // before legacy adoption landed mid-call. Its cards are new by
+          // construction, so append them to the adopted set instead of
+          // bouncing the user's very first card as a conflict.
+          const incoming = applyUserBoardUpdate(current, input.cards, input.workspaceCwd).filter(
+            (card) => !current.cards.some((existing) => existing.id === card.id),
+          );
+          nextCards = [...current.cards, ...incoming];
+        } else {
+          if (baseRevision !== current.revision) {
+            throw new BoardRevisionConflictError(baseRevision, current);
+          }
+          nextCards = applyUserBoardUpdate(current, input.cards, input.workspaceCwd);
+        }
+        draft.board = { revision: current.revision + 1, cards: nextCards };
+        draft.updatedAt = timestamp;
+      },
+    });
+    return { ok: true, board: updated.board ?? emptyRunBoard() };
+  } catch (err) {
+    if (err instanceof BoardRevisionConflictError) {
+      return { ok: false, error: err.message, board: err.board };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Guarded AGENT write. `cards` must already have passed agent-socket's
+ * authorizeAgentBoardWrite (which enforces the permission matrix and strips
+ * what the model may not touch); this commit re-normalizes them against the
+ * live board so server-owned fields still come from stored state even if the
+ * authorization snapshot was a hair old. Throws on a stale baseRevision so the
+ * RPC surfaces a re-read instruction to the model.
+ */
+export async function updateRunBoardFromAgent(input: {
+  runId: string;
+  baseRevision: number;
+  cards: BoardCard[];
+}): Promise<RunBoard> {
+  const run = await requireRun(input.runId);
+  const baseRevision = Math.max(0, Math.floor(input.baseRevision));
+  const updated = await commitRunChange(run, {
+    type: "run.board_updated",
+    message: "Cora updated the board",
+    payload: { editor: "agent", baseRevision, cardCount: input.cards.length },
+    mutate: (draft, timestamp) => {
+      const current = draft.board ?? emptyRunBoard();
+      if (baseRevision !== current.revision) {
+        throw new Error(
+          `Board changed since revision ${baseRevision}. Read it again with codara_board_get and apply the update to revision ${current.revision}.`,
+        );
+      }
+      const validTaskIds = new Set(draft.workerTasks.map((task) => task.id));
+      draft.board = {
+        revision: current.revision + 1,
+        cards: normalizeBoardCards(input.cards, {
+          existingById: new Map(current.cards.map((card) => [card.id, card])),
+          stampAuthor: "agent",
+          acceptWorkerTaskIds: validTaskIds,
+        }),
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  return updated.board ?? emptyRunBoard();
+}
+
+// ── Board nudge ─────────────────────────────────────────────────────────────
+// When cards are queued on a run's board and that run's manager is idle, the
+// board-nudge module asks this function to hand the queued cards to the
+// manager: it injects one synthetic queued user note describing them (the
+// house pattern for synthetic conversation input; flagged boardNote so the
+// renderer can label it) and schedules a chat decision, exactly like the
+// terminal-revive path in addRunMessage. It never touches automation runs and
+// never interrupts an active manager.
+
+export type BoardNudgeOutcome = "nudged" | "busy" | "no_queued" | "ineligible";
+
+export async function nudgeBoardManager(runId: string): Promise<BoardNudgeOutcome> {
+  const run = await getRun(runId);
+  if (!run) return "ineligible";
+  if (run.automationId || run.executionMode === "direct") return "ineligible";
+  // paused/blocked wait for the user; cancelled is terminal-by-choice. All
+  // three come back through the nudge module's pending set when the run's
+  // status next changes.
+  if (run.status === "blocked" || run.status === "paused" || run.status === "cancelled") {
+    return "busy";
+  }
+  const queued = (run.board?.cards ?? []).filter((card) => card.status === "queued");
+  if (queued.length === 0) return "no_queued";
+  if (
+    isRunMidAutoCompaction(runId) ||
+    activeManagerCall(run) ||
+    activeWorkersForRun(runId).length > 0 ||
+    activeAutopilotPlans.has(runId) ||
+    activeAutopilotReviews.has(runId) ||
+    [...activeAutopilotCycles.keys()].some((key) => key.startsWith(`${runId}:`))
+  ) {
+    // The manager (or its workers) is mid-flight; it will either read the
+    // board itself or get nudged when the run settles.
+    return "busy";
+  }
+
+  const noteId = makeId("msg");
+  let injected = false;
+  let alreadyPending = false;
+  const updated = await commitRunChange(run, {
+    type: "run.board_nudged",
+    message: `Cora Board: ${queued.length} queued card(s) handed to the manager`,
+    payload: { noteMessageId: noteId, cardIds: queued.map((card) => card.id) },
+    mutate: (draft, timestamp) => {
+      // Re-check everything the pre-read validated: the commit runs behind
+      // whatever else was in the mutation queue.
+      if (draft.automationId || draft.executionMode === "direct") return false;
+      if (draft.status === "blocked" || draft.status === "paused" || draft.status === "cancelled") {
+        return false;
+      }
+      const stillQueued = (draft.board?.cards ?? []).filter((card) => card.status === "queued");
+      if (stillQueued.length === 0) return false;
+      // One undelivered nudge at a time: if an earlier board note is still
+      // queued in this conversation epoch, the manager will see the board
+      // anyway — stacking a second note would double-prompt the same work.
+      const epoch = draft.conversationEpoch ?? 0;
+      const undeliveredNudge = draft.humanMessages.some(
+        (message) =>
+          message.boardNote === true &&
+          message.deliveryState === "queued" &&
+          (message.conversationEpoch ?? 0) === epoch,
+      );
+      if (undeliveredNudge) {
+        alreadyPending = true;
+        return false;
+      }
+      draft.humanMessages.push({
+        id: noteId,
+        runId: draft.id,
+        author: "user",
+        kind: "note",
+        boardNote: true,
+        message: composeBoardNudgeMessage(stillQueued),
+        intent: "turn",
+        // "queued" (not acknowledged) is what makes the next manager turn
+        // consume this as its new input (see queuedManagerInputMessages).
+        deliveryState: "queued",
+        conversationEpoch: draft.conversationEpoch ?? 0,
+        createdAt: timestamp,
+      });
+      if (draft.status === "idle" || draft.status === "complete" || draft.status === "failed") {
+        // Mirror the terminal-revive path: flip to planning so surfaces show
+        // the manager is about to act.
+        draft.status = "planning";
+        if (draft.autopilot) {
+          draft.autopilot.lastAction = "board_nudge";
+          draft.autopilot.updatedAt = timestamp;
+        }
+      }
+      draft.updatedAt = timestamp;
+      injected = true;
+    },
+  });
+  if (injected) {
+    scheduleInitialChatDecision(updated.id, autopilotInputFromRun(updated), { afterCurrent: true });
+    return "nudged";
+  }
+  // An earlier note is still queued: the cards are already handed over, so
+  // report "nudged" (the caller's ledger marks them) without stacking a
+  // second note or a second decision.
+  return alreadyPending ? "nudged" : "busy";
+}
+
 function sanitizeWhiteboardId(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.trim().replace(/[^a-zA-Z0-9._:-]+/g, "-").slice(0, 80);
@@ -9980,15 +10673,16 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   }
   // A direct run bound to an automationId is the automation (loom) worker
   // path: it launches on a pinned/handoff model the automation engine already
-  // validated, so buildLaunchCommandLine passes its hint verbatim instead of
-  // running the Cora-worker sanitize backstop.
+  // validated, so the launcher passes its hint verbatim instead of running the
+  // Cora-worker roster coercion. Automation workers run on the SAME Pi harness
+  // as ordinary Cora workers (the legacy structured transports below survive
+  // only behind the SPARK_E2E_LEGACY_WORKER_HARNESS escape hatch).
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const usePiWorkerHarness =
     process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
-    !isAutomationRun &&
     (task.runtimePreference === "claude" || task.runtimePreference === "codex");
   const piWorkerModel = usePiWorkerHarness
-    ? piModelForWorker(task)
+    ? piModelForWorker(task, isAutomationRun)
     : undefined;
   // Dirs a sandboxed codex worker must be able to WRITE despite them living
   // outside the workspace: the attempt dir (holds final-report.json + logs) and,
@@ -10006,9 +10700,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   const command = usePiWorkerHarness
     ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
     : isAutomationRun && task.runtimePreference === "claude"
-    ? "Claude Agent SDK (headless automation worker)"
+    ? "Claude Agent SDK (legacy e2e automation worker)"
     : isAutomationRun && task.runtimePreference === "codex"
-      ? "Codex App Server (headless automation worker)"
+      ? "Codex App Server (legacy e2e automation worker)"
       : launchCommand
         ? `pwsh -> ${launchCommand}`
         : "pwsh (manual)";
@@ -10371,6 +11065,383 @@ function disposeManagerSessions(runId: string): Promise<void> {
       }
     }),
   ).then(() => undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Automatic conversation compaction.
+//
+// When a completed manager turn reports context occupancy at or above the
+// ratio below, the conversation is compacted: the OUTGOING provider session
+// (which still holds the full dialogue) is asked for a dense summary, then one
+// atomic commit appends that summary as a marked spark note, bumps the
+// conversation epoch, and drops the provider session ids — the same fresh-
+// session barrier the rewind machinery uses. The next manager turn spawns a
+// new session whose canonical replay is the stored summary instead of the raw
+// last-N-messages window (see buildManagerTurnInput / compactionReplaySummary).
+
+/**
+ * Fraction of the model's context window at which a completed manager turn
+ * triggers automatic compaction. 0.8 leaves headroom for the summarize turn
+ * itself while cutting over before long-context quality degradation.
+ * Hardcoded in v1 — no settings UI.
+ */
+const AUTO_COMPACTION_CONTEXT_RATIO = 0.8;
+
+/** Header of the compaction note; stripped again when the summary is replayed
+ * into the next epoch's first turn. */
+const AUTO_COMPACTION_NOTE_PREFIX =
+  "**Conversation compacted.** Older history was summarized to stay within the model's context window:\n\n";
+
+const AUTO_COMPACTION_SUMMARY_PROMPT = [
+  "Summarize this entire conversation so a fresh session can continue seamlessly:",
+  "capture the user's goals, all decisions and constraints, the current state of the",
+  "work (files, branches, outstanding tasks), and unresolved questions. Be dense and",
+  "complete; this summary replaces the conversation history for the next session.",
+  "Reply with the summary text only — do not call any tools and do not start new work.",
+].join(" ");
+
+/** A compaction summary shorter than this is a refusal, an error string, or a
+ * throwaway reply — not a usable replacement for the conversation history.
+ * Reject it and leave the conversation untouched. */
+const MIN_AUTO_COMPACTION_SUMMARY_CHARS = 200;
+
+/** Runs currently summarizing/cutting over. Both the trigger and
+ * performAutoCompaction itself bail on re-entry. */
+const runsMidAutoCompaction = new Set<string>();
+
+/**
+ * True while performAutoCompaction owns this run's manager session (from
+ * before the summarize SparkCall is recorded until the cutover commit — or its
+ * clean abort — has settled). Exported for agent-socket, which rejects
+ * run-mutating orchestrator.* RPCs during the window so a summarize turn that
+ * ignores its "do not call tools" instruction cannot spawn workers, complete
+ * the run, or post questions mid-compaction.
+ */
+export function isRunMidAutoCompaction(runId: string): boolean {
+  return runsMidAutoCompaction.has(runId);
+}
+
+/**
+ * The stored compaction summary a fresh session's first turn should replay,
+ * or null when this epoch was not seeded by compaction. Guarded on the epoch:
+ * a later rewind moves the run past the compaction generation, and its replay
+ * must fall back to the retained message window (which contains the summary
+ * note itself as ordinary dialogue).
+ */
+function compactionReplaySummary(run: RunState): string | null {
+  if (!run.compactionSummaryMessageId) return null;
+  if (run.compactionEpoch !== conversationEpoch(run)) return null;
+  const note = run.humanMessages.find(
+    (message) => message.id === run.compactionSummaryMessageId,
+  );
+  if (!note) return null;
+  const text = note.message.startsWith(AUTO_COMPACTION_NOTE_PREFIX)
+    ? note.message.slice(AUTO_COMPACTION_NOTE_PREFIX.length)
+    : note.message;
+  return text.trim() || null;
+}
+
+/**
+ * Post-turn compaction trigger. Called (and awaited) at the tail of a
+ * SUCCESSFUL askManagerBackend turn, which keeps the whole compaction inside
+ * the same activeAutopilotPlans / activeAutopilotReviews cycle that ran the
+ * turn — every scheduler that starts the next manager turn chains behind those
+ * maps, so a queued user message cannot open a new turn until the compaction
+ * commit (or its clean abort) has landed. Entry points outside the maps
+ * (resumeRun's direct chat call) are covered by the atomic guards inside
+ * performAutoCompaction's final commit instead.
+ */
+async function maybeAutoCompactConversation(
+  runId: string,
+  callId: string,
+  cwd: string,
+): Promise<void> {
+  try {
+    const run = await getRun(runId);
+    if (!run) return;
+    const call = run.sparkCalls.find((entry) => entry.id === callId);
+    // Never compact off the summarize call itself.
+    if (!call || call.purpose === "compaction") return;
+    if (!isManagerTurnCurrent(run, callId, call.conversationEpoch ?? 0)) return;
+    const contextTokens = typeof call.promptTokens === "number" ? call.promptTokens : 0;
+    if (contextTokens <= 0) return;
+    // Window fallback MUST mirror the composer's ContextPill budget
+    // (ChatComposer.tsx, `activeOneMillionContext && activeChatBackend ===
+    // "claude" ? 1_000_000 : contextWindowForModel(...)`): Claude chats are
+    // normalized to 1M context by effectiveChatOneMillionContext, and pricing
+    // the trigger off the 200k per-model default while the meter shows a 1M
+    // budget would compact a Claude conversation at 16% of displayed budget.
+    const chatBackend = run.chatBackend ?? "pi";
+    const windowTokens =
+      typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0
+        ? call.contextWindowTokens
+        : effectiveChatOneMillionContext(chatBackend) && chatBackend === "claude"
+          ? 1_000_000
+          : contextWindowForModel(call.model).tokens;
+    if (contextTokens / windowTokens < AUTO_COMPACTION_CONTEXT_RATIO) return;
+    if (runsMidAutoCompaction.has(runId)) return;
+    if (run.executionMode === "direct") return;
+    if (
+      run.status === "paused" ||
+      run.status === "blocked" ||
+      run.status === "cancelled" ||
+      run.status === "failed"
+    ) {
+      return;
+    }
+    if (run.pendingConversationRewind || activeConversationRewinds.has(runId)) return;
+    if (run.pendingManagerResume) return;
+    if (activeManagerCall(run)) return;
+    // A queued message or unfinished worker wave means another manager turn is
+    // owed imminently; let it run on the current session and re-check after it.
+    if (queuedManagerInputMessages(run).length > 0) return;
+    if (activeWorkersForRun(runId).length > 0) return;
+    const pendingTaskStatuses = new Set([
+      "created",
+      "queued",
+      "claimed",
+      "running",
+      "needs_review",
+      "retry_queued",
+    ]);
+    if (run.workerTasks.some((task) => pendingTaskStatuses.has(task.status))) return;
+    // Frontier resends the full user-contract document each turn, so a fresh
+    // session loses nothing and a summary would shadow the contract.
+    if (effectiveRunExecutionPolicy(run) === "frontier") {
+      console.warn(
+        `[run-store] auto-compaction skipped for run ${runId}: pi-frontier policy resends its user contract each turn`,
+      );
+      return;
+    }
+    await performAutoCompaction(runId, cwd);
+  } catch (err) {
+    console.warn("[run-store] auto-compaction failed:", err);
+  }
+}
+
+/** Settle a compaction summarize call that did not end in a cutover. */
+async function settleAutoCompactionCall(
+  runId: string,
+  callId: string,
+  epoch: number,
+  error: string,
+): Promise<void> {
+  const run = await getRun(runId);
+  if (!run) return;
+  await commitRunChange(run, {
+    type: "run.conversation_compaction_skipped",
+    message: `Conversation compaction did not complete: ${error}`,
+    sparkCallId: callId,
+    payload: { sparkCallId: callId, conversationEpoch: epoch, error },
+    mutate: (draft, timestamp) => {
+      const call = draft.sparkCalls.find((entry) => entry.id === callId);
+      if (!call || call.status !== "started" || call.completedAt) return false;
+      call.status = "failed";
+      call.error = error;
+      call.completedAt = timestamp;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+/**
+ * Summarize the conversation with the outgoing session, then cut over to a
+ * fresh epoch in one atomic commit. Any failure or race aborts cleanly: the
+ * conversation, session ids and queued input are left exactly as they were,
+ * and the summarize call is settled as failed for the audit trail.
+ */
+async function performAutoCompaction(runId: string, cwd: string): Promise<void> {
+  if (runsMidAutoCompaction.has(runId)) return;
+  runsMidAutoCompaction.add(runId);
+  try {
+    let run = await requireRun(runId);
+    const epoch = conversationEpoch(run);
+    const settings = await loadSettings();
+    const chatConfig = resolveChatBackendConfig(run);
+    // No provider session means there is no held context to summarize — the
+    // backend would spawn a FRESH session and "summarize" nothing. Skip;
+    // nothing durable has been recorded yet.
+    if (!chatConfig.sessionUuid) {
+      console.warn(
+        `[run-store] auto-compaction skipped for run ${runId}: no provider session to summarize`,
+      );
+      return;
+    }
+    const backend = getBackend(chatConfig.backend);
+    const callId = makeId("spark");
+    const summarizeCall: SparkCall = {
+      id: callId,
+      runId: run.id,
+      stepId: run.currentStepId,
+      mode: "chat",
+      purpose: "compaction",
+      model: chatConfig.model,
+      status: "started",
+      inputMessageIds: [],
+      conversationEpoch: epoch,
+      createdAt: new Date().toISOString(),
+    };
+    // Unlike prepareManagerTurn, this deliberately selects NO queued user
+    // messages: the summarize turn is maintenance, not conversation, and input
+    // arriving while it runs must stay queued for the next real turn.
+    const prepared = await commitRunChange(run, {
+      type: "spark_call.started",
+      message: `Cora compaction summary call started: ${summarizeCall.model}`,
+      sparkCallId: callId,
+      payload: {
+        mode: "chat",
+        purpose: "compaction",
+        model: summarizeCall.model,
+        conversationEpoch: epoch,
+      },
+      mutate: (draft, timestamp) => {
+        if (conversationEpoch(draft) !== epoch) return false;
+        if (activeManagerCall(draft)) return false;
+        if (
+          draft.status === "paused" ||
+          draft.status === "blocked" ||
+          draft.status === "cancelled" ||
+          draft.status === "failed"
+        ) {
+          return false;
+        }
+        summarizeCall.createdAt = timestamp;
+        draft.sparkCalls.push(summarizeCall);
+        draft.updatedAt = timestamp;
+      },
+    });
+    if (!prepared.sparkCalls.some((entry) => entry.id === callId)) return;
+    run = prepared;
+
+    const startedMs = Date.now();
+    let result: Awaited<ReturnType<typeof backend.requestManagerDecision>>;
+    try {
+      result = await backend.requestManagerDecision({
+        run: structuredClone(run),
+        cwd,
+        mode: "chat",
+        settings,
+        chat: { ...chatConfig },
+        prompt: AUTO_COMPACTION_SUMMARY_PROMPT,
+        inputMessageIds: [],
+        conversationEpoch: epoch,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      await settleAutoCompactionCall(
+        runId,
+        callId,
+        epoch,
+        `Compaction summary call failed: ${error}`,
+      );
+      return;
+    }
+    const durationMs = result.durationMs ?? Date.now() - startedMs;
+    const summary =
+      !result.turnFailed && !result.turnAborted
+        ? result.decision.chatReply?.trim()
+        : undefined;
+    if (!summary || summary.length < MIN_AUTO_COMPACTION_SUMMARY_CHARS) {
+      const reason = result.turnAborted
+        ? "Compaction summary turn was interrupted."
+        : !summary
+          ? result.notice ?? "Compaction summary turn produced no summary text."
+          : `Compaction summary too short to replace the conversation (${summary.length} chars).`;
+      console.warn(`[run-store] auto-compaction aborted for run ${runId}: ${reason}`);
+      await settleAutoCompactionCall(runId, callId, epoch, reason);
+      return;
+    }
+
+    const noteId = makeId("msg");
+    let compacted = false;
+    await commitRunChange(await requireRun(runId), {
+      type: "run.conversation_compacted",
+      message: "Conversation compacted: history summarized, cutting over to a fresh session",
+      sparkCallId: callId,
+      payload: {
+        sparkCallId: callId,
+        oldEpoch: epoch,
+        newEpoch: epoch + 1,
+        summaryMessageId: noteId,
+      },
+      mutate: (draft, timestamp) => {
+        const call = draft.sparkCalls.find((entry) => entry.id === callId);
+        if (!call || call.status !== "started" || call.completedAt) return false;
+        if (conversationEpoch(draft) !== epoch) return false;
+        if (draft.pendingConversationRewind) return false;
+        if (
+          draft.status === "paused" ||
+          draft.status === "blocked" ||
+          draft.status === "cancelled" ||
+          draft.status === "failed"
+        ) {
+          return false;
+        }
+        // A real turn raced the summarize; its session/input ownership wins.
+        if (
+          draft.sparkCalls.some(
+            (entry) => entry.id !== callId && entry.status === "started" && !entry.completedAt,
+          )
+        ) {
+          return false;
+        }
+        // Undelivered input queued while summarizing belongs to the old epoch;
+        // cutting over would strand it, so abort and let its turn run first —
+        // the ratio is still high after that turn, so compaction re-triggers.
+        if (queuedManagerInputMessages(draft).length > 0) return false;
+        call.status = "completed";
+        call.completedAt = timestamp;
+        call.durationMs = durationMs;
+        if (result.model) call.model = result.model;
+        if (typeof result.costUsd === "number") call.costUsd = result.costUsd;
+        if (typeof result.inputTokens === "number") call.inputTokens = result.inputTokens;
+        if (typeof result.outputTokens === "number") call.outputTokens = result.outputTokens;
+        if (typeof result.cacheReadTokens === "number") call.cacheReadTokens = result.cacheReadTokens;
+        if (typeof result.promptTokens === "number") call.promptTokens = result.promptTokens;
+        if (typeof result.contextWindowTokens === "number" && result.contextWindowTokens > 0) {
+          call.contextWindowTokens = result.contextWindowTokens;
+          call.contextWindowSource = "known";
+        }
+        draft.humanMessages.push({
+          id: noteId,
+          runId: draft.id,
+          author: "spark",
+          kind: "note",
+          compaction: true,
+          message: `${AUTO_COMPACTION_NOTE_PREFIX}${summary}`,
+          intent: "answer",
+          deliveryState: "acknowledged",
+          targetTurnId: callId,
+          backendTurnId: callId,
+          conversationEpoch: epoch + 1,
+          createdAt: timestamp,
+        });
+        draft.conversationEpoch = epoch + 1;
+        delete draft.chatSessionUuid;
+        delete draft.chatSessionMode;
+        draft.compactionSummaryMessageId = noteId;
+        draft.compactionEpoch = epoch + 1;
+        recomputeRunCostRollups(draft);
+        draft.updatedAt = timestamp;
+        compacted = true;
+      },
+    });
+    if (!compacted) {
+      await settleAutoCompactionCall(
+        runId,
+        callId,
+        epoch,
+        "Compaction abandoned: a newer turn arrived before the cutover could apply.",
+      );
+      return;
+    }
+    // The epoch barrier is durable, so stale provider callbacks are already
+    // blocked; disposing the outgoing sessions is best-effort cleanup, same as
+    // the rewind path.
+    await disposeManagerSessions(runId);
+  } finally {
+    runsMidAutoCompaction.delete(runId);
+  }
 }
 
 async function markConversationRewindFailed(
@@ -12433,6 +13504,22 @@ function normalizeRun(run: RunState): RunState {
       updatedAt: run.whiteboard.updatedAt || run.updatedAt,
     };
   }
+  if (run.board !== undefined) {
+    // Same defensive rebuild as the whiteboard: a hand-edited or older-build
+    // board degrades card by card instead of losing the run.
+    const board = normalizeStoredRunBoard(run.board);
+    if (board) run.board = board;
+    else delete run.board;
+    // Link hygiene: a card whose worker task no longer exists on the run
+    // (conversation rewind, hand-edited state) must not keep offering a dead
+    // "Open terminal" target. Cleared here so both read and write edges heal.
+    if (run.board) {
+      const taskIds = new Set((run.workerTasks ?? []).map((task) => task.id));
+      for (const card of run.board.cards) {
+        if (card.workerTaskId && !taskIds.has(card.workerTaskId)) delete card.workerTaskId;
+      }
+    }
+  }
   const seenAssumptionSignatures = new Set<string>();
   run.assumptions = (run.assumptions ?? []).filter((assumption) => {
     if (!assumption?.question?.trim() || !assumption.selectedAnswer?.trim()) return false;
@@ -13623,9 +14710,7 @@ function shouldResumeManagerPlanning(run: RunState): boolean {
 
 function shouldRoutePausedResumeToChat(run: RunState): boolean {
   if (run.status !== "paused" && run.status !== "blocked") return false;
-  const latest = [...run.humanMessages]
-    .reverse()
-    .find((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"));
+  const latest = [...run.humanMessages].reverse().find(isHeuristicUserMessage);
   return Boolean(latest && parseInlineFileMentionTokens(latest.message).length > 0);
 }
 
@@ -14428,14 +15513,23 @@ function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
   return "high";
 }
 
-function piModelForWorker(task: WorkerTask): string | undefined {
-  // The roster is enforced HERE, at the spawn chokepoint, not only in the
-  // planner's prompt. A manager session keeps the system prompt it was born
-  // with for the whole run, so a prompt-only rule cannot bind an in-flight
-  // run (and cannot bind a resumed one at all). Coercion never rejects: an
-  // off-roster hint lands on the nearest allowed model instead of failing the
-  // spawn, and an omitted one pins the standard tier rather than delegating
-  // the choice to the subscription default (which can be the premium tier).
+function piModelForWorker(task: WorkerTask, isAutomationRun = false): string | undefined {
+  // Automation (loom) workers launch on a pinned/handoff model the automation
+  // validation layer already vetted (agent-socket's validateConcreteWorker +
+  // the scheduler migration), so their hint goes through verbatim — only the
+  // superseded-id remaps apply. Coercing them onto the Cora chat-worker roster
+  // would silently rewrite a model the user explicitly pinned.
+  if (isAutomationRun) {
+    return sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
+  }
+  // For Cora-spawned workers the roster is enforced HERE, at the spawn
+  // chokepoint, not only in the planner's prompt. A manager session keeps the
+  // system prompt it was born with for the whole run, so a prompt-only rule
+  // cannot bind an in-flight run (and cannot bind a resumed one at all).
+  // Coercion never rejects: an off-roster hint lands on the nearest allowed
+  // model instead of failing the spawn, and an omitted one pins the standard
+  // tier rather than delegating the choice to the subscription default (which
+  // can be the premium tier).
   return coerceWorkerModelToRoster(task.runtimePreference, task.modelHint);
 }
 
@@ -14651,9 +15745,19 @@ const PI_WORKER_FALLBACK_ROWS = 32;
  * attaches to this same session and receives its tail, so background
  * workspaces and missed envelope events keep running instead of failing a
  * provider that was never launched.
+ *
+ * Automation (loom) attempts pass rendererGraceMs 0: the renderer never
+ * proactively creates panes for direct runs (LiveBoard/WorkersView attach to
+ * the existing session on demand), so waiting the grace would only add dead
+ * time to every iteration.
  */
-async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise<boolean> {
-  if (await pty.waitForSpawn(attemptId, PI_WORKER_RENDERER_PTY_GRACE_MS)) return false;
+async function ensurePiWorkerDisplayPty(
+  attemptId: string,
+  cwd: string,
+  rendererGraceMs: number = PI_WORKER_RENDERER_PTY_GRACE_MS,
+): Promise<boolean> {
+  if (rendererGraceMs > 0 && (await pty.waitForSpawn(attemptId, rendererGraceMs))) return false;
+  if (pty.exists(attemptId)) return false;
   const shell = await defaultShell();
   if (!shell) throw new Error("No default shell is available for the Cora worker display.");
   await pty.spawn({
@@ -14693,7 +15797,12 @@ async function runPiWorkerSession({
   promptText: string;
   command: string;
 }): Promise<{ exitCode: number; error?: string }> {
-  const displayPtyRecovered = await ensurePiWorkerDisplayPty(attemptId, cwd);
+  const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
+  const displayPtyRecovered = await ensurePiWorkerDisplayPty(
+    attemptId,
+    cwd,
+    isAutomationRun ? 0 : undefined,
+  );
   if (displayPtyRecovered) {
     await appendEvent({
       workspaceId: run.workspaceId,
@@ -14709,7 +15818,7 @@ async function runPiWorkerSession({
   await pty.waitForResize(attemptId, 5_000);
 
   const provider = piProviderForWorker(task);
-  const model = piModelForWorker(task);
+  const model = piModelForWorker(task, isAutomationRun);
   const thinking = piThinkingForWorker(task);
   const modelLabel = model ?? (provider === "anthropic" ? "Claude subscription default" : "Codex subscription default");
   pty.publishOutput(
@@ -14765,6 +15874,24 @@ async function runPiWorkerSession({
       // run's mailbox natively. Same gate as the prompt-side guidance.
       peerCommsDir: peerCommsEnabled ? paths.peerCommsDir : undefined,
       peerSelfId: peerCommsEnabled ? task.id : undefined,
+      // Automation (loom) workers: flips the bridge roster to SPARK_MCP_MODE
+      // "worker" (ask_user + request_next_iteration), stamps the automation/
+      // node identity, and arms the extension's tool-access fence. A fenced
+      // worker's writes are contained to the workspace plus these dirs (the
+      // attempt dir carries the mandatory final report; the mail dir is the
+      // chat board for collab participants).
+      automation: isAutomationRun
+        ? {
+            automationId: run.automationId as string,
+            nodeId: task.loomNodeId,
+            access: task.accessHint,
+            blockedTools: task.blockedToolsHint,
+            writeAllowDirs: [
+              paths.attemptDir,
+              ...(task.collabMailDirHint ? [task.collabMailDirHint] : []),
+            ],
+          }
+        : undefined,
     });
     mcpConfigPath = plan.mcpConfigPath;
     client = new PiRpcClient(plan, {

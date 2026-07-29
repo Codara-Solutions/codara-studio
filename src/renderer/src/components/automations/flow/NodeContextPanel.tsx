@@ -1,20 +1,16 @@
 import React, { useCallback, useMemo, useRef } from "react";
 import type {
   AgentEffortLevel,
-  AgentRuntimeDiagnostic,
   AutomationTrigger,
   FolderTriggerEvent,
   GuardPredicate,
-  LoomEngine,
   LoomWorkerConfig,
   ScheduledJob,
 } from "@shared/types";
 import { DEFAULT_ITERATION_TIMEOUT_MINUTES } from "@shared/types";
 import { Check, Field, Segmented } from "../FormKit";
+import { EFFORT_LABELS, WORKER_MODELS, workerEffortsFor } from "../worker-models";
 import {
-  DEFAULT_ENGINE_MODEL,
-  DEFAULT_WORKER_EFFORT,
-  installedEngines,
   upstreamNodeIds,
   TRIGGER_ID,
   type FlowEdge,
@@ -29,29 +25,13 @@ import {
 // panel owns its header (kind glyph + label + close) and a footer Delete for
 // non-trigger nodes.
 
-const ACCESS_OPTIONS: { value: "full" | "edits" | "readonly"; label: string }[] = [
-  { value: "full", label: "Full" },
-  { value: "edits", label: "Edits" },
-  { value: "readonly", label: "Read-only" },
-];
-
-// One-line, engine-specific description of what the access presets map to, so the
-// picker shows the real fence (claude disallowed-tools vs codex sandbox). Honest
-// about the caveats: claude read-only still allows Write (the worker needs it for
-// its own report), and codex has no read-only preset at all.
-function accessHintFor(engine: LoomEngine): string {
-  return engine === "codex"
-    ? "Full: --yolo. Edits: workspace-write sandbox (adds -a never). Read-only isn't available for Codex — its read-only sandbox can't write the run's report."
-    : "Full: all tools. Edits: no shell or web. Read-only: edit tools, shell, and web denied — but Write stays available (it can create or overwrite files; needed for its final report). A guardrail, not a jail.";
-}
-
 const TRIGGER_KINDS: { value: AutomationTrigger["kind"]; label: string }[] = [
   { value: "manual", label: "Manual" },
   { value: "cron", label: "Cron" },
   { value: "interval", label: "Interval" },
   { value: "folder", label: "Folder" },
   { value: "continuous", label: "Continuous" },
-  { value: "onFinishOf", label: "After loom" },
+  { value: "onFinishOf", label: "After automation" },
 ];
 
 const FOLDER_EVENTS: FolderTriggerEvent[] = ["add", "change", "unlink"];
@@ -109,7 +89,6 @@ export interface NodeContextPanelProps {
   onTriggerChange: (next: TriggerDraft) => void;
   cwd: string;
   chainableJobs: ScheduledJob[];
-  runtimes: AgentRuntimeDiagnostic[];
 }
 
 // Kind → glyph + amber/accent/mixed/info tint for the header chip.
@@ -120,7 +99,7 @@ function kindGlyph(node: FlowNode): { glyph: string; eyebrow: string; color: str
       return { glyph: "⚡", eyebrow: "Trigger", color: "var(--warn)", tint: "color-mix(in oklch, var(--warn) 16%, var(--panel-2))" };
     case "worker":
       return {
-        glyph: d.worker.engine === "codex" ? "◆" : d.worker.engine === "claude" ? "◇" : "⟲",
+        glyph: "◇",
         eyebrow: "Worker",
         color: "var(--accent)",
         tint: "color-mix(in oklch, var(--accent) 14%, var(--panel-2))",
@@ -300,7 +279,7 @@ function TriggerForm({
         <Segmented options={TRIGGER_KINDS} value={t.kind} onChange={(v) => set({ kind: v })} wrap />
       </Group>
       {t.kind === "manual" && (
-        <Hint>Fires only when you press Run now — or when another loom chains into it.</Hint>
+        <Hint>Fires only when you press Run now, or when another automation chains into it.</Hint>
       )}
       {t.kind === "cron" && (
         <Group>
@@ -367,10 +346,10 @@ function TriggerForm({
         </Group>
       )}
       {t.kind === "continuous" && (
-        <Hint>Starts looping the moment the loom is enabled — bound it with the Loop caps.</Hint>
+        <Hint>Starts looping the moment the automation is armed. Bound it with the Loop caps.</Hint>
       )}
       {t.kind === "onFinishOf" && (
-        <Field label="Start after this loom finishes">
+        <Field label="Start after this automation finishes">
           {chainableJobs.length === 0 ? (
             <span style={{ fontSize: 11, color: "var(--muted-2)" }}>
               No other automations in this workspace to chain off yet.
@@ -401,24 +380,12 @@ function WorkerForm({
   node,
   edges,
   onPatchNodeData,
-  runtimes,
 }: NodeContextPanelProps & { node: FlowNode }): React.ReactElement {
   const d = node.data;
   if (d.kind !== "worker") return <></>;
   const w = d.worker;
   const setWorker = (patch: Partial<LoomWorkerConfig>): void =>
     onPatchNodeData(node.id, { worker: { ...w, ...patch } });
-
-  const installed = installedEngines(runtimes);
-  // Engine is claude|codex only — "auto" is gone. Always offer both so an
-  // uninstalled engine can still be selected (a badge warns it isn't installed).
-  const engineOptions: { value: LoomEngine; label: string }[] = (["claude", "codex"] as LoomEngine[]).map(
-    (e) => ({ value: e, label: e === "claude" ? "Claude" : "Codex" }),
-  );
-  const runtime = runtimes.find((r) => r.kind === w.engine);
-  const models = runtime?.models ?? [];
-  const selectedModel = models.find((m) => m.id === w.model);
-  const effortLevels: AgentEffortLevel[] = selectedModel?.effortLevels ?? ["low", "medium", "high", "xhigh"];
 
   // {{node:<id>}} chips come from UPSTREAM nodes only.
   const upstream = useMemo(() => upstreamNodeIds(node.id, edges), [node.id, edges]);
@@ -455,60 +422,34 @@ function WorkerForm({
         />
       </Field>
 
-      <Group label="Engine — who runs this node">
-        <Segmented
-          options={engineOptions}
-          // Node data is concretized on load, so engine is always claude|codex
-          // here; the cast just drops the vestigial "auto" from the stored type.
-          value={w.engine as LoomEngine}
-          onChange={(v) =>
-            setWorker({ engine: v, model: DEFAULT_ENGINE_MODEL[v], effort: w.effort ?? DEFAULT_WORKER_EFFORT })
-          }
-        />
-        {installed.size === 0 ? (
-          <span className="spark-badge is-danger" style={{ alignSelf: "flex-start" }}>
-            Install Claude Code or Codex to run looms
-          </span>
-        ) : !installed.has(w.engine as LoomEngine) ? (
-          // The engine picked for THIS node isn't on this machine — the loom
-          // would die with engine-missing at run time. Warn here, at selection.
-          <span className="spark-badge is-danger" style={{ alignSelf: "flex-start" }}>
-            {w.engine === "claude" ? "Claude Code" : "Codex"} isn't installed — this node can't run
-          </span>
-        ) : runtime?.authenticated === false ? (
-          // Advisory only — the probe can miss env/helper credentials, so this
-          // never blocks saving or running; the CLI may well be signed in.
-          <span className="spark-badge is-warn" style={{ alignSelf: "flex-start" }}>
-            {w.engine === "claude" ? "Claude Code" : "Codex"} may not be signed in
-            {runtime.authHint ? ` — ${runtime.authHint}` : ""}
-          </span>
-        ) : null}
-        {/* Model + effort are required — every worker carries a concrete value,
-            never blank ("CLI default"/"default" no longer exist). A stored
-            value the current catalog doesn't offer (fable with the pref off,
-            an effort the model lacks) renders as an explicit "(unavailable)"
-            option instead of silently displaying the wrong selection. */}
+      <Group hint="Workers run on Cora's bundled runtime with your connected subscriptions.">
+        {/* Model + effort are required — every worker carries a concrete value.
+            A stored model outside the current roster renders as an explicit
+            "(unavailable)" option instead of silently showing the wrong pick. */}
         <div style={{ display: "flex", gap: 10 }}>
           <Field label="Model" grow>
             <select className="spark-select" value={w.model ?? ""} onChange={(e) => setWorker({ model: e.target.value })}>
-              {w.model && !models.some((m) => m.id === w.model) && (
+              {w.model && !WORKER_MODELS.some((m) => m.id === w.model) && (
                 <option value={w.model}>{w.model} (unavailable)</option>
               )}
-              {models.map((m) => (
+              {WORKER_MODELS.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.label}
+                  {m.label} ({m.note})
                 </option>
               ))}
             </select>
           </Field>
           <Field label="Effort" grow>
+            {/* Ladder gated per model (no GPT-5.6 variant takes minimal). A stored effort
+                outside the current model's ladder renders as an explicit
+                "(unavailable)" option rather than silently moving the pick. */}
             <select className="spark-select" value={w.effort ?? ""} onChange={(e) => setWorker({ effort: e.target.value as AgentEffortLevel })}>
-              {w.effort && !effortLevels.includes(w.effort) && (
+              {w.effort && !workerEffortsFor(w.model).includes(w.effort) && (
                 <option value={w.effort}>{w.effort} (unavailable)</option>
               )}
-              {effortLevels.map((lvl) => (
+              {workerEffortsFor(w.model).map((lvl) => (
                 <option key={lvl} value={lvl}>
-                  {lvl}
+                  {EFFORT_LABELS[lvl]}
                 </option>
               ))}
             </select>
@@ -551,7 +492,7 @@ function WorkerForm({
         </div>
         {upstream.length > 0 && (
           <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)", marginTop: -2 }}>
-            This node automatically receives its upstream output — place {"{{incoming}}"} in the
+            This node automatically receives its upstream output: place {"{{incoming}}"} in the
             prompt to control where it appears, or {"{{node:…}}"} to pull ONE specific parent
             (other parents are then omitted).
           </span>
@@ -575,43 +516,12 @@ function WorkerForm({
         />
       </Group>
 
-      <Group label="Access — what this worker may touch" hint={accessHintFor(w.engine as LoomEngine)}>
-        <Segmented
-          // Codex has no read-only preset (its read-only sandbox can't write the
-          // worker's final report), so drop that segment for codex and coerce a
-          // stored/flipped "readonly" to "edits" for display — matching what
-          // graphFromFlow persists.
-          options={w.engine === "codex" ? ACCESS_OPTIONS.filter((o) => o.value !== "readonly") : ACCESS_OPTIONS}
-          value={w.engine === "codex" && (d.access ?? "full") === "readonly" ? "edits" : d.access ?? "full"}
-          onChange={(v) => onPatchNodeData(node.id, { access: v })}
-        />
-        {w.engine === "claude" && (
-          <Field label="Blocked tools (comma-separated)">
-            <input
-              className="spark-input spark-mono"
-              value={(d.blockedTools ?? []).join(", ")}
-              placeholder="e.g. WebSearch, Bash"
-              onChange={(e) => {
-                const list = e.target.value
-                  .split(",")
-                  .map((t) => t.trim())
-                  .filter((t) => t.length > 0);
-                onPatchNodeData(node.id, { blockedTools: list.length > 0 ? list : undefined });
-              }}
-            />
-            <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)", marginTop: -2 }}>
-              Hard-denied on top of the preset (Claude only — Codex has no per-tool deny).
-            </span>
-          </Field>
-        )}
-      </Group>
-
       <Group
         label="Collaboration"
         hint="Only matters when 2+ workers run in the same parallel wave."
       >
         <Check
-          label="Knows its siblings — peers listed in the prompt"
+          label="Knows its siblings: peers listed in the prompt"
           checked={Boolean(d.collab?.awareness)}
           onToggle={() =>
             onPatchNodeData(node.id, {
@@ -620,7 +530,7 @@ function WorkerForm({
           }
         />
         <Check
-          label="Can message siblings — shared board in the run folder"
+          label="Can message siblings: shared board in the run folder"
           checked={Boolean(d.collab?.chat)}
           onToggle={() =>
             onPatchNodeData(node.id, {
@@ -628,13 +538,6 @@ function WorkerForm({
             })
           }
         />
-        {d.collab?.chat &&
-          w.engine === "claude" &&
-          (d.blockedTools ?? []).some((t) => t.trim() === "Write") && (
-            <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)", marginTop: -2 }}>
-              Write is blocked for this worker: it can read peers' notes but cannot post to the board.
-            </span>
-          )}
       </Group>
 
       {/* Retry */}
@@ -689,7 +592,7 @@ function GuardForm({
           placeholder="Guard"
         />
       </Field>
-      <Group label="Condition — routes to pass or fail">
+      <Group label="Condition: routes to pass or fail">
         <PredicatePicker value={d.predicate} onChange={(p) => onPatchNodeData(node.id, { predicate: p })} />
       </Group>
       <Hint>
@@ -765,7 +668,7 @@ function PredicatePicker({
           className="spark-input spark-mono"
           value={value.command}
           onChange={(e) => onChange({ type: "command", command: e.target.value })}
-          placeholder="./check.sh — exit 0 = pass"
+          placeholder="./check.sh (exit 0 = pass)"
           style={{ maxWidth: compact ? 220 : undefined, height: 28 }}
         />
       )}

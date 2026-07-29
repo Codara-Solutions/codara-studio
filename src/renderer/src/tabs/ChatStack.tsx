@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef } from "react";
-import type { RunState, Workspace } from "@shared/types";
+import type { BoardCard, RunState, Workspace } from "@shared/types";
 import OrchestrationSidebar from "../components/OrchestrationSidebar";
 import type { ChatTab, Tab, TabId } from "./types";
 import type { CoraView } from "../components/chat/cora-view";
@@ -21,6 +21,13 @@ interface Props {
   // drive it without ChatPanel keeping a duplicate state.
   chatView: CoraView;
   onChatViewChange: (view: CoraView) => void;
+  // "Open chat" on a LEGACY card of the chat panel's embedded Cora Board.
+  onOpenBoardCardRun: (runId: string) => void;
+  // "Open terminal" on a board card with a worker (App's worker-pane focus).
+  // Returns false when no pane could be focused (worker gone after restart).
+  onOpenBoardWorkerTerminal: (workerTaskId: string) => boolean;
+  // First card mutation on a draft chat's board (App's draft-promotion path).
+  onCreateBoardRun: (cards: BoardCard[]) => Promise<void>;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -40,6 +47,9 @@ function ChatStack({
   terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
+  onOpenBoardCardRun,
+  onOpenBoardWorkerTerminal,
+  onCreateBoardRun,
   onSelectRun,
   onRunSnapshot,
 }: Props) {
@@ -115,6 +125,9 @@ function ChatStack({
               terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               chatView={chatView}
               onChatViewChange={onChatViewChange}
+              onOpenBoardCardRun={onOpenBoardCardRun}
+              onOpenBoardWorkerTerminal={onOpenBoardWorkerTerminal}
+              onCreateBoardRun={onCreateBoardRun}
               onSelectRun={onSelectRun}
               onRunSnapshot={onRunSnapshot}
               collapsed={false}

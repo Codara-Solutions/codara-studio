@@ -1570,6 +1570,12 @@ export interface RunState {
    */
   whiteboard?: CoraWhiteboard;
   /**
+   * This chat's kanban. Stored in run.json like the whiteboard so it survives
+   * reloads and is shared by the renderer, this run's Cora manager (over the
+   * agent socket), and remote surfaces. Absent until the first card lands.
+   */
+  board?: RunBoard;
+  /**
    * Monotonic Cora-owned conversation generation. Reliable rewind increments
    * this value before a fresh provider session is started; callbacks, stream
    * events, checkpoints, and manager decisions from an older generation are
@@ -1584,6 +1590,17 @@ export interface RunState {
   pendingManagerResume?: PendingManagerResume;
   /** Crash-recoverable conversation rewind currently crossing its durable seam. */
   pendingConversationRewind?: PendingConversationRewind;
+  /**
+   * Id of the spark note holding the auto-compaction summary that seeded the
+   * current conversation epoch. The first manager turn of that epoch replays
+   * this summary instead of the raw last-N-messages window. Only meaningful
+   * while `compactionEpoch` still equals the run's conversationEpoch — a later
+   * rewind bumps the epoch past it and the replay falls back to the message
+   * window (which includes the summary note itself).
+   */
+  compactionSummaryMessageId?: string;
+  /** Conversation epoch that `compactionSummaryMessageId` seeded. */
+  compactionEpoch?: number;
   /** Reversible defaults Cora selected without blocking the user. */
   assumptions?: RunAssumption[];
   /** Evidence-backed completion record. Generated from the run-start baseline,
@@ -1703,6 +1720,13 @@ export interface RunState {
    * runs list — they live inside the Automations tab instead.
    */
   automationId?: string;
+  /**
+   * LEGACY: set on runs the retired per-card board engine started (one run per
+   * queued card). No new runs are ever created with it; it survives so those
+   * existing runs stay suppressed from ordinary chat surfaces (like automation
+   * runs) until explicitly opened from their adopted card.
+   */
+  boardCardId?: string;
   /**
    * undefined/"managed" = manager-LLM orchestration (the normal Codara run).
    * "direct" = Looms v2: a single CLI worker per iteration, no manager ever;
@@ -2139,6 +2163,14 @@ export interface HumanRunMessage {
   /** For kind "answer": the id of the question message this answers (set by
    *  every question-card/toast answer path). Consent gates match on it. */
   answersMessageId?: string;
+  /** Marks the spark note that carries an auto-compaction summary. Currently
+   *  informational — the note's "**Conversation compacted.**" header is what
+   *  labels it in the timeline; no renderer styling reads this flag yet. */
+  compaction?: true;
+  /** Marks the synthetic note the board nudge injects when queued cards are
+   *  waiting for this chat's manager (see board-nudge.ts). Informational, like
+   *  `compaction` — the note's header labels it in the timeline. */
+  boardNote?: true;
 }
 
 export interface RunArtifactPaths {
@@ -2605,6 +2637,13 @@ export interface SparkCall {
   conversationEpoch?: number;
   /** Links a manager call to the durable answer-resume launch that registered it. */
   managerResumeClaimId?: string;
+  /**
+   * Internal bookkeeping turns that are not part of the user conversation.
+   * "compaction" marks the summarize call auto-compaction sends to the
+   * outgoing session; it consumes no queued user input and applies no
+   * decision, and the timeline styles it as maintenance rather than a reply.
+   */
+  purpose?: "compaction";
   contextPacketId?: string;
   requestPath?: string;
   responsePath?: string;
@@ -2786,6 +2825,104 @@ export interface ExportCoraWhiteboardFileInput {
 export interface ImportedCoraWhiteboardFile {
   path: string;
   board: CoraWhiteboard;
+}
+
+// ── Cora Board ──────────────────────────────────────────────────────────────
+// A per-chat kanban of task cards. Like the whiteboard, the board belongs to
+// ONE run and is persisted on RunState (run.json), so it survives reloads and
+// is shared by the renderer, the run's own Cora manager, and remote surfaces.
+// The user drops terse idea cards (sometimes just an image); queueing a card
+// asks THIS chat's Cora to work it — a main-process nudge
+// (src/main/orchestration/board-nudge.ts) wakes the idle manager, which reads
+// the board, enriches each queued card into a proper worker prompt, spawns
+// workers via codara_spawn_workers, and moves cards through the lanes as the
+// work progresses. No separate run is ever created per card.
+
+/**
+ * Lane a card sits in. "queued" is the user's go signal for this chat's Cora;
+ * "running" means a worker is on it, "blocked" means it needs the user,
+ * "review"/"done" report the outcome, "failed" is kept for legacy cards (the
+ * retired per-card engine wrote it) and for work Cora gave up on.
+ */
+export type BoardCardStatus =
+  | "idea"
+  | "queued"
+  | "running"
+  | "blocked"
+  | "review"
+  | "done"
+  | "failed";
+
+/** Who created a card. Server-stamped; absent (legacy cards) reads as "user". */
+export type BoardCardAuthor = "user" | "agent";
+
+export interface BoardCard {
+  id: string;
+  title: string;
+  description?: string;
+  /** Absolute paths to images attached to the card; forwarded to workers. */
+  imagePaths?: string[];
+  status: BoardCardStatus;
+  /**
+   * Server-stamped provenance: "user" for cards created over the renderer IPC,
+   * "agent" for cards the run's manager created over the agent socket. Agents
+   * may never delete a card whose author is not "agent".
+   */
+  createdBy?: BoardCardAuthor;
+  /**
+   * The worker task this chat's manager spawned for the card, stamped by the
+   * manager via codara_board_update and validated server-side to belong to
+   * this run. Drives the card's "Open terminal" button.
+   */
+  workerTaskId?: string;
+  /**
+   * LEGACY: the retired per-card board engine started a separate run for each
+   * queued card and stamped it here. Kept so adopted cards can still link to
+   * those existing runs ("Open chat"); never written for new cards.
+   */
+  runId?: string;
+  /** Short note surfaced on the card (blocked reason, failure, etc.). */
+  error?: string;
+  /** Sort key within a lane. */
+  order: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The kanban persisted on RunState.board. */
+export interface RunBoard {
+  /**
+   * Monotonic edit revision. Every accepted write bumps it; writers pass the
+   * revision they read as `baseRevision` so a human drag and a Cora edit can't
+   * silently overwrite each other.
+   */
+  revision: number;
+  cards: BoardCard[];
+}
+
+export interface RunBoardUpdateInput {
+  runId: string;
+  /** Revision the caller read; the write is rejected as stale if it moved on. */
+  baseRevision: number;
+  /** Replaces the card list wholesale (server-owned fields are preserved). */
+  cards: BoardCard[];
+}
+
+/**
+ * Result of a guarded board write. A stale write is NOT an exception — it
+ * resolves with ok:false plus the current board so the caller can rebase and
+ * retry against fresh state.
+ */
+export interface RunBoardUpdateResult {
+  ok: boolean;
+  error?: string;
+  board: RunBoard;
+}
+
+/** Payload pushed on the "board:changed" channel after any accepted write. */
+export interface RunBoardChangedPayload {
+  runId: string;
+  board: RunBoard;
 }
 
 /**
@@ -3204,7 +3341,7 @@ export interface AutomationLoop {
   stop: StopConditions;
   // false (default) = chain iterations IN THE SAME run (carry context, via
   // addRunMessage). true = a fresh run per iteration (isolation; per-automation
-  // model re-applies each pass). Same-run loops pin the engine at run creation.
+  // model re-applies each pass).
   isolate?: boolean;
 }
 
@@ -3217,26 +3354,22 @@ export interface AutomationPrompt {
 
 // ── Looms v2: direct-worker execution ──────────────────────────────────────
 // Automations no longer launch manager-orchestrated runs. Each iteration runs
-// ONE claude/codex CLI worker directly (RunState.executionMode === "direct").
+// ONE worker directly (RunState.executionMode === "direct") on the bundled Pi
+// runtime — the same harness Cora chats use. There is no engine choice: the
+// model id alone selects the subscription provider (claude-* runs on Pi's
+// anthropic provider, gpt-* on openai-codex), so a worker is fully described
+// by MODEL and EFFORT. Legacy persisted jobs that still carry an `engine`
+// field are migrated by scheduler.normalizeJob (the field is dropped; a
+// missing model backfills from the legacy engine).
 
-/** Engines an automation may run: the CLI workers, and only those. Cora's Pi
- *  manager runtime is intentionally NOT a member, looms bypass the manager
- *  and drive one worker directly. */
-export type LoomEngine = "claude" | "codex";
-
-/** Per-loom worker configuration (the Worker node in the flow editor). */
+/** Per-loom worker configuration (the Worker node in the flow editor).
+ *  Runs on the bundled Pi runtime; model + effort are the only knobs. */
 export interface LoomWorkerConfig {
-  /** The CLI engine that runs this worker. New looms always pin a concrete
-   *  engine ("claude"|"codex") — the editor and the architect never emit "auto".
-   *  "auto" is retained ONLY for runtime tolerance of looms persisted before that
-   *  change; resolveWorker maps a legacy "auto" to claude-if-installed, else
-   *  codex. Model/effort are likewise concrete on new looms; undefined means a
-   *  legacy blank that resolveWorker treats as the CLI default. */
-  engine: LoomEngine | "auto";
-  /** Engine-native model id (AgentRuntimeModel.id). Undefined = legacy blank
-   *  (CLI default); new looms always set a concrete id. */
-  model?: string;
-  effort?: AgentEffortLevel;
+  /** Provider-native model id. claude-* ids run via Pi's anthropic provider,
+   *  gpt-* ids via openai-codex. Always concrete post-normalize. */
+  model: string;
+  /** Reasoning effort (Pi thinking level). Always concrete post-normalize. */
+  effort: AgentEffortLevel;
   /** Hard per-iteration wall-clock ceiling enforced by the loop watchdog,
    *  in minutes. Default DEFAULT_ITERATION_TIMEOUT_MINUTES. */
   timeoutMinutes?: number;
@@ -3265,7 +3398,7 @@ export type GuardPredicate =
   | { type: "command"; command: string }
   | { type: "agentSignal"; want: "continue" | "done" };
 
-/** A node that runs ONE CLI worker (the legacy Worker). For a degenerate
+/** A node that runs ONE Pi worker (the legacy Worker). For a degenerate
  *  single-node loom this is `w0`, whose `prompt` equals the legacy template so
  *  rendering it yields the same launched string as the pre-graph driver. */
 export interface LoomWorkerNode {
@@ -3280,13 +3413,20 @@ export interface LoomWorkerNode {
   /** Bounded per-node retry: re-attempt up to maxAttempts until the predicate
    *  holds. Reserved for a later slice — defined now, not executed. */
   retry?: { maxAttempts: number; until?: GuardPredicate };
-  /** Tool-access preset. Absent/"full" = today's behavior (no fence): claude
-   *  runs with --dangerously-skip-permissions, codex with --yolo. "edits" keeps
-   *  file edits but removes shell + web; "readonly" leaves only inspection. */
+  /** Tool-access preset, enforced by the Pi worker harness (tool_call fence).
+   *  Absent/"full" = no fence. "edits" removes shell + web (including the
+   *  terminal bridge tools and the preview JS evaluator); "readonly"
+   *  additionally removes the edit tool and mutating preview tools. The write
+   *  tool survives BOTH presets so the worker can produce its mandatory final
+   *  report — it can still create or overwrite files, so readonly is a
+   *  guardrail against casual mutation, not a jail. Fenced writes/edits are
+   *  contained to the workspace cwd plus the run's report (and chat-board)
+   *  dirs. */
   access?: "full" | "edits" | "readonly";
-  /** Claude-only extra hard-denies appended (de-duped) to the preset's
-   *  disallowed-tools list — applies to ANY preset incl. "full". Ignored for
-   *  codex (its sandbox is the mechanism; there is no per-tool deny). */
+  /** Extra hard-denied tools appended (de-duped) on top of the preset —
+   *  applies to ANY preset incl. "full". Names use the familiar bare tool
+   *  vocabulary (Bash, WebSearch, Edit, Write, ...); the Pi harness maps them
+   *  onto its real tool names. */
   blockedTools?: string[];
   /** Parallel-wave collaboration. awareness lists this node's same-wave peers in
    *  its prompt; chat gives peers a shared markdown board in the run folder. Both
@@ -3345,7 +3485,6 @@ export interface LoomGraph {
 export interface AgentLoopSignal {
   continue: boolean;
   prompt?: string;
-  nextEngine?: LoomEngine;
   nextModel?: string;
   nextEffort?: AgentEffortLevel;
   /**
@@ -3367,7 +3506,6 @@ export interface AutomationWorkerInfo {
   workerTaskId: string;
   attemptId: string;
   iteration: number; // 0-based
-  engine: LoomEngine;
   model?: string;
   effort?: AgentEffortLevel;
   cwd: string;
@@ -3381,8 +3519,10 @@ export interface AutomationWorkerInfo {
    *  leaves them undefined, which renders identically to today). */
   nodeId?: string;
   nodeLabel?: string;
-  /** Structured transport used by unattended automation workers. */
-  transport?: "agent-sdk" | "app-server";
+  /** Transport running this worker: "pi-rpc" (the bundled Pi harness, the
+   *  only production path) or the legacy structured transports kept for the
+   *  e2e escape hatch (SPARK_E2E_LEGACY_WORKER_HARNESS). */
+  transport?: "pi-rpc" | "agent-sdk" | "app-server";
   /** Ordered human-readable activity and raw provider event logs. */
   stdoutLogPath?: string;
   rawLogPath?: string;
@@ -3403,8 +3543,7 @@ export interface StartDirectWorkerRunInput {
   automationId: string;
   title: string; // `Loom: ${name} — pass ${n}`
   prompt: string; // fully rendered loop prompt
-  engine: LoomEngine; // already resolved — never "auto" here
-  model?: string;
+  model: string; // provider-native id; selects the Pi provider (claude-*/gpt-*)
   effort?: AgentEffortLevel;
   /** Looms v2.5: the graph node this pass's single worker executes (its prompt
    *  IS the rendered `prompt` above). Defaults to "w0" when omitted, so a
@@ -3461,8 +3600,7 @@ export interface DirectNodeLaunch {
 export interface AddDirectIterationInput {
   runId: string;
   prompt: string;
-  engine: LoomEngine;
-  model?: string;
+  model: string; // provider-native id; selects the Pi provider (claude-*/gpt-*)
   effort?: AgentEffortLevel;
   /** `loom-${jobId}-${iter}` — reuses addRunMessage's dedupe machinery. */
   clientMessageId?: string;
@@ -3505,8 +3643,9 @@ export type AutomationStopReason =
   | "once"
   | "iteration-failed"
   | "user-stop"
-  // Looms v2: the loom's engine (or every engine, for "auto") is not
-  // installed/enabled — the Hub renders the runtime's installHint.
+  // Legacy: pre-Pi builds recorded this when the loom's CLI engine was not
+  // installed. Never produced anymore (Pi is bundled with the app); kept so
+  // persisted history records still typecheck and render.
   | "engine-missing";
 
 // What caused an iteration to start (for the history timeline).
@@ -3541,11 +3680,11 @@ export interface AutomationState {
   nextFireAt?: string; // cadence/cron: ISO; drives the left-list sub-line
   lastStopReason?: AutomationStopReason;
   pendingNextPrompt?: string; // agent-supplied next instruction (from the tool)
-  /** Validated agent handoff for the next iteration, honored regardless of the
-   *  pinned engine ("auto" no longer exists as a gate). Consumed once. `engine`
-   *  may be absent for an effort-only handoff — the loom's own engine is kept and
-   *  only effort/model are steered. */
-  pendingNextWorker?: { engine?: LoomEngine; model?: string; effort?: AgentEffortLevel };
+  /** Validated agent handoff for the next iteration. Consumed once. Either
+   *  field may be absent for a partial handoff — the loom's own model/effort
+   *  fill the gaps. (Legacy persisted handoffs may carry a stray `engine`
+   *  field; it is ignored.) */
+  pendingNextWorker?: { model?: string; effort?: AgentEffortLevel };
   /** Persisted mirror of the in-memory agent signal — survives a restart
    *  that lands between worker-finish and onTerminal. Read-once. */
   pendingAgentSignal?: AgentLoopSignal;
@@ -3565,11 +3704,11 @@ export interface ScheduledJob {
   input: StartAutopilotInput; // pinned workspace/cwd payload (legacy chat* fields unread)
   loop: AutomationLoop; // backfilled to {kind:"once",stop:{}} on read
   prompt?: AutomationPrompt; // template overrides input.initialUserNote per iter
-  /** Looms v2 worker config. Backfilled by scheduler.normalizeJob (a legacy
-   *  chatBackend of claude/codex carries over; anything else, pi, the retired
-   *  "openrouter", or undefined, becomes "auto", which resolveWorker maps to
-   *  claude-if-installed else codex).
-   *  Required post-normalize, like loop/state/history. */
+  /** Looms worker config (Pi runtime; model + effort only). Migrated and
+   *  backfilled by scheduler.normalizeJob: a legacy `engine` field is dropped,
+   *  a missing model backfills from the legacy engine (claude -> claude-opus-5,
+   *  codex -> gpt-5.6-sol, anything else -> claude-opus-5), a missing effort
+   *  becomes "medium". Required post-normalize, like loop/state/history. */
   worker: LoomWorkerConfig;
   /** Looms v2.5 node graph. Backfilled by scheduler.normalizeJob from the flat
    *  worker/prompt/loop fields (a single `w0` worker node) when absent, so it is
@@ -3584,10 +3723,11 @@ export interface ScheduledJob {
   lastRunId?: string; // runId produced by the most recent firing
   lastFiredPath?: string; // folder triggers: the path whose change last fired it
   createdAt: string; // ISO timestamp
-  /** The assist ("Create with Cora") run that authored this loom, when it was
-   *  created via the architect chat. Lets the Hub's loom detail jump back to
-   *  that conversation. Optional — manual-editor looms and pre-existing
-   *  persisted jobs have none. */
+  /** The chat run that authored this loom: the Hub's assist ("Create with
+   *  Cora") chat, or an ordinary auto/execute chat that created it with
+   *  codara_create_automation. Lets the Hub's loom detail jump back to that
+   *  conversation. Optional — manual-editor looms, looms authored from inside a
+   *  loom run, and pre-existing persisted jobs have none. */
   createdByRunId?: string;
 }
 
@@ -3599,10 +3739,10 @@ export interface CreateScheduledJobInput {
   input: StartAutopilotInput;
   loop?: AutomationLoop;
   prompt?: AutomationPrompt;
-  worker?: LoomWorkerConfig; // defaulted from input.chatBackend mapping when omitted
+  worker?: LoomWorkerConfig; // backfilled by normalizeJob when omitted (legacy inputs)
   graph?: LoomGraph; // backfilled by normalizeJob when omitted (single w0 node)
   enabled?: boolean;
-  createdByRunId?: string; // the assist run that authored this loom (architect chat only)
+  createdByRunId?: string; // the chat run that authored this loom (assist or ordinary chat, never a loom run)
 }
 
 // Edit payload (scheduler:update). Partial; id required. enabled/state/history

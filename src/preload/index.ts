@@ -33,6 +33,10 @@ import type {
   AppState,
   AutomationDetail,
   AutomationWorkerInfo,
+  RunBoard,
+  RunBoardChangedPayload,
+  RunBoardUpdateInput,
+  RunBoardUpdateResult,
   CoraMemoryScope,
   CoraMemoryStatus,
   CreateEntryInput,
@@ -718,6 +722,25 @@ const api = {
     // burnDown drains the queue in place and resolves with the post-drain
     // snapshot (mirrors the queue:burnDown IPC handler's return).
     burnDown: (): Promise<RunQueueState> => ipcRenderer.invoke("queue:burnDown"),
+  },
+  // Cora Board: the per-chat kanban of task cards, persisted on
+  // RunState.board (run-store). Two writers share one board — this renderer
+  // and the chat's Cora (over the agent socket) — so every update carries the
+  // revision it read and onChanged is the only reliable way to stay current.
+  // get() also triggers the one-time legacy workspace-board adoption.
+  board: {
+    get: (runId: string): Promise<RunBoard> => ipcRenderer.invoke("board:get", runId),
+    // Resolves ok:false with the current board when baseRevision went stale;
+    // rebase onto result.board and re-send rather than treating it as an error.
+    update: (
+      input: RunBoardUpdateInput & { workspaceCwd?: string },
+    ): Promise<RunBoardUpdateResult> => ipcRenderer.invoke("board:update", input),
+    onChanged: (handler: (payload: RunBoardChangedPayload) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, payload: RunBoardChangedPayload) =>
+        handler(payload);
+      ipcRenderer.on("board:changed", listener);
+      return () => ipcRenderer.off("board:changed", listener);
+    },
   },
   // Scheduler registry: cron-style jobs that enqueue autopilot runs on a
   // schedule. Channels registered in main (T4); backed by the scheduler

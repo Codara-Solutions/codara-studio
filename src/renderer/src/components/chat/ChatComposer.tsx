@@ -18,6 +18,7 @@ import {
   normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
 import { findOpenQuestion } from "./timeline";
+import { isUnstartedChatRun } from "./cora-view";
 import { workerModelLabel } from "../runs/run-format";
 import ContextPill from "./composer/ContextPill";
 import ModelPicker from "./composer/ModelPicker";
@@ -155,6 +156,27 @@ function rememberChatComposerDraft(key: string, snapshot: ChatComposerDraftSnaps
   }
 }
 
+// Live chip selections of MOUNTED draft composers, keyed by draftKey. The
+// draft cache above is deliberately written only on unmount, but the board's
+// draft-promotion path (App.handleCreateBoardRun) needs the chip's current
+// backend/model/effort at the moment a card mints the run — otherwise the
+// promoted chat silently flips back to the Pi defaults the user steered away
+// from. Written each render under the mount-time key; removed on unmount.
+export interface ChatComposerChipConfig {
+  backend: ChatBackendKind;
+  model: string;
+  effort: AgentEffortLevel;
+  fastMode: boolean;
+  oneMillionContext: boolean;
+}
+const liveDraftChipByKey = new Map<string, ChatComposerChipConfig>();
+
+export function peekChatComposerChipConfig(
+  draftKey: string,
+): ChatComposerChipConfig | undefined {
+  return liveDraftChipByKey.get(draftKey);
+}
+
 export default function ChatComposer({
   run,
   cwd,
@@ -253,8 +275,21 @@ export default function ChatComposer({
     return () => {
       const snapshot = draftSnapshotRef.current;
       if (snapshot) rememberChatComposerDraft(key, snapshot);
+      liveDraftChipByKey.delete(key);
     };
   }, [draftKey]);
+  // Publish the live chip config for the board's draft-promotion path. Only
+  // while this composer is a DRAFT (run === null) and only under its own
+  // mount-time key, mirroring the guard on the unmount snapshot above.
+  if (!run && draftKey && draftKey === boundDraftKeyRef.current) {
+    liveDraftChipByKey.set(draftKey, {
+      backend: draftChatBackend,
+      model: draftChatModel,
+      effort: draftChatEffort,
+      fastMode: draftFastMode,
+      oneMillionContext: draftOneMillionContext,
+    });
+  }
 
   // Existing runs are authoritative, but mirror their selector fields into
   // the local fallback too. The visible chips normally read `run` directly;
@@ -483,6 +518,13 @@ export default function ChatComposer({
   const isActive =
     status === "running" || status === "planning" || status === "reviewing";
   const isPaused = status === "paused" || status === "blocked";
+  // Parked by the manager-turn failure policy (provider overload/rate limit):
+  // Resume retries the failed turn, so the button says what it does. The two
+  // lastAction strings mirror manager-turn-policy.ts in the main process.
+  const isParkedTurn =
+    status === "paused" &&
+    (run?.autopilot?.lastAction === "chat_turn_parked" ||
+      run?.autopilot?.lastAction === "manager_turn_parked");
   const isTerminal =
     status === "complete" || status === "failed" || status === "cancelled";
 
@@ -575,7 +617,11 @@ export default function ChatComposer({
       const attachments = await attachmentsForCurrentDraft();
       const message = messageForSend(draft, attachments.length);
       if (!message) return;
-      if (!run_) {
+      if (!run_ || isUnstartedChatRun(run_)) {
+        // No run yet, or a run the board's draft promotion minted that has
+        // never had a conversation: both are "first send" — onStartChat
+        // (OrchestrationSidebar.startChat) starts autopilot, reusing the
+        // unstarted run's id instead of minting a sibling.
         const chatConfig: ChatComposerStartConfig = {
           backend: draftChatBackend,
           model: draftChatModel,
@@ -942,7 +988,9 @@ export default function ChatComposer({
   // ModelPicker component itself — the thinking pill is click-to-cycle and
   // has no popover, so no global listener is needed here anymore.
 
-  const placeholder = !run_
+  // An unstarted board-minted run still reads like a fresh chat: its first
+  // send is a first message (see the isUnstartedChatRun branch in send()).
+  const placeholder = !run_ || isUnstartedChatRun(run_)
     ? lockedMode === "automation"
       ? "Describe the loom you want — trigger, loop, and worker."
       : "Tell Cora what to build, or describe a task."
@@ -950,7 +998,9 @@ export default function ChatComposer({
       ? "Answer Cora, and it keeps going."
       : isTerminal
         ? "Send a follow-up. Cora picks the work back up."
-        : isPaused
+        : isParkedTurn
+          ? run?.autopilot?.stopReason ?? "Cora's provider is unavailable. Retry runs the turn again."
+          : isPaused
           ? "Add a note, then resume."
           : isActive
             ? "Queue steering for Cora's next manager turn."
@@ -1162,7 +1212,7 @@ export default function ChatComposer({
             </IconButton>
             {isPaused && (
               <TextButton onClick={resume} disabled={busy} tone="accent">
-                Resume
+                {isParkedTurn ? "Retry" : "Resume"}
               </TextButton>
             )}
             <SendButton

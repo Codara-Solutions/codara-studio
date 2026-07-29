@@ -11,7 +11,6 @@ import {
 import type { Edge, EdgeProps, Node, NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type {
-  AgentRuntimeDiagnostic,
   AutomationWorkerInfo,
   RunState,
   ScheduledJob,
@@ -27,8 +26,10 @@ import {
   triggerSummary,
   jobWorkerSummary,
 } from "./presentation";
-import { TRIGGER_ID, flowFromGraph, graphForJob, installedEngines } from "./flow/model";
-import { ENGINE_TONE, LoomIcon, Medallion, TopRule } from "./flow/FlowNodes";
+import { TRIGGER_ID, flowFromGraph, graphForJob } from "./flow/model";
+import { LoomIcon, Medallion, TopRule, WORKER_TONE } from "./flow/FlowNodes";
+import { workerModelLabel } from "./worker-models";
+import { describeWorkerLogFailure } from "./worker-log-tail";
 
 // LiveBoard — the "whiteboard" view of ONE running loom: the loom graph on a
 // full read-only ReactFlow canvas with LIVE execution state. Live edges carry
@@ -70,8 +71,6 @@ interface LiveNodeDatum extends Record<string, unknown> {
   title: string;
   sub: string;
   status: LiveNodeStatus;
-  // Worker-only: which engine runs it (drives the runtime-colored card edge).
-  engine?: "claude" | "codex" | "auto";
   // Trigger-only: the loom is mid-pass, so the trigger has fired.
   fired?: boolean;
   // This node's worker is the one focused in the terminal sheet.
@@ -80,9 +79,6 @@ interface LiveNodeDatum extends Record<string, unknown> {
 
 export interface LiveBoardProps {
   job: ScheduledJob;
-  // Installed CLI runtimes — resolves a legacy "auto"/blank worker to the same
-  // concrete engine/model the run actually uses, so the board never mislabels it.
-  runtimes: AgentRuntimeDiagnostic[];
   // The loom's live run (job.state.currentRunId). Null once the pass settles —
   // the board retains the last-seen run so the final state stays viewable.
   liveRun: RunState | null;
@@ -106,7 +102,6 @@ export interface LiveBoardProps {
 
 export default function LiveBoard({
   job,
-  runtimes,
   liveRun,
   workers,
   initialFocusWorkerId,
@@ -228,9 +223,8 @@ export default function LiveBoard({
     [job, run, workers],
   );
 
-  const installed = useMemo(() => installedEngines(runtimes), [runtimes]);
   const { nodes, edges } = useMemo(() => {
-    const flow = flowFromGraph(job, installed);
+    const flow = flowFromGraph(job);
     const liveNodes: Node<LiveNodeDatum>[] = flow.nodes.map((n) => {
       const d = n.data;
       let datum: LiveNodeDatum;
@@ -246,20 +240,14 @@ export default function LiveBoard({
         };
       } else if (d.kind === "worker") {
         const w = d.worker;
-        const engineLine =
-          w.engine === "auto"
-            ? "Auto · agent picks"
-            : [w.engine === "claude" ? "Claude" : "Codex", w.model, w.effort]
-                .filter(Boolean)
-                .join(" · ");
+        const modelLine = [workerModelLabel(w.model), w.effort].filter(Boolean).join(" · ");
         datum = {
           kind: "worker",
-          glyph: w.engine === "codex" ? "◆" : w.engine === "claude" ? "◇" : "⟲",
+          glyph: "◇",
           eyebrow: "Worker",
           title: d.label || "Worker",
-          sub: engineLine,
+          sub: modelLine,
           status: statuses.get(n.id) ?? "pending",
-          engine: w.engine,
           docked: current?.nodeId === n.id,
         };
       } else if (d.kind === "guard") {
@@ -324,7 +312,7 @@ export default function LiveBoard({
     });
 
     return { nodes: liveNodes, edges: liveEdges };
-  }, [job, statuses, loomLive, current?.nodeId, installed]);
+  }, [job, statuses, loomLive, current?.nodeId]);
 
   // Clicking a running node opens its worker's mirror terminal in the sheet.
   const workersRef = useRef(workers);
@@ -654,7 +642,7 @@ export default function LiveBoard({
                         maxWidth: 180,
                       }}
                     >
-                      {w.nodeLabel ?? (w.engine === "codex" ? "Codex" : "Claude")} · p{w.iteration + 1}
+                      {w.nodeLabel ?? workerModelLabel(w.model)} · p{w.iteration + 1}
                     </span>
                     {w.blocked && (
                       <span className="spark-badge is-danger" style={{ height: 14, fontSize: 8.5 }}>
@@ -683,7 +671,7 @@ export default function LiveBoard({
               type="button"
               className="spark-icon-btn"
               aria-label="Close the worker terminal"
-              title="Close — whiteboard unobstructed (Esc)"
+              title="Close the worker activity (Esc)"
               style={{ ["--spark-icon-btn-size"]: "22px", flex: "0 0 auto" } as React.CSSProperties}
               onClick={() => setSheetOpen(false)}
             >
@@ -718,7 +706,7 @@ export default function LiveBoard({
                   color: "var(--muted-2)",
                 }}
               >
-                {loomLive ? "Worker starting…" : "No live worker — run the loom to see it here."}
+                {loomLive ? "Worker starting…" : "No live worker. Run the automation to see it here."}
               </div>
             ) : (
               workers.map((w) => (
@@ -757,15 +745,21 @@ function WorkerActivityLog({
 }): React.ReactElement {
   const live = LIVE_ATTEMPT.has(worker.status);
   const [content, setContent] = useState("");
+  const [failure, setFailure] = useState<string | null>(null);
   useEffect(() => {
     if (!worker.stdoutLogPath) return;
     let disposed = false;
     const refresh = async () => {
       try {
         const file = await window.spark.fs.readTextTail(worker.stdoutLogPath!, 80_000);
-        if (!disposed) setContent(file.content);
-      } catch {
-        /* Launch can precede log creation by one render. */
+        if (disposed) return;
+        setContent(file.content);
+        setFailure(null);
+      } catch (err) {
+        // Launch can precede log creation by one render, which is the only
+        // failure worth hiding; anything else surfaces in the pane.
+        const described = describeWorkerLogFailure(err);
+        if (!disposed && described) setFailure(described);
       }
     };
     void refresh();
@@ -787,11 +781,13 @@ function WorkerActivityLog({
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
+          padding: "0 16px",
+          textAlign: "center",
           fontSize: 11,
-          color: "var(--muted-2)",
+          color: failure ? "var(--danger)" : "var(--muted-2)",
         }}
       >
-        {live ? `Starting ${worker.transport === "agent-sdk" ? "Claude Agent SDK" : "Codex App Server"}…` : "No activity was recorded."}
+        {failure ?? (live ? "Worker starting…" : "No activity was recorded.")}
       </div>
     );
   }
@@ -1016,12 +1012,6 @@ function statusShadow(look: StatusLook, docked?: boolean): string {
   return parts.join(", ");
 }
 
-// Engine identity tone for worker tiles / top rules (the same coral/cyan the
-// editor's cards wear); a legacy "auto" worker stays neutral.
-function liveEngineTone(engine: LiveNodeDatum["engine"]): string {
-  if (engine === "claude" || engine === "codex") return ENGINE_TONE[engine];
-  return "var(--muted)";
-}
 
 function NodeBadge({ badge }: { badge: { text: string; color: string } }): React.ReactElement {
   return (
@@ -1149,10 +1139,10 @@ function TriggerCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
   );
 }
 
-// Worker — the engine's card: icon tile + engine-toned top rule.
+// Worker — icon tile + role-toned top rule (same silhouette as the editor).
 function WorkerCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
   const look = lookFor(d.status);
-  const tone = liveEngineTone(d.engine);
+  const tone = WORKER_TONE;
   return (
     <div style={{ ...cardBase(look, d.docked), width: 232 }}>
       <TopRule tone={tone} />

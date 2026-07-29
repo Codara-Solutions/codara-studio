@@ -132,8 +132,8 @@ async function main() {
 
   // ── 4) wave decoration: default is a no-op ─────────────────────────────────
   {
-    const self = { nodeId: "a", label: "A", engine: "claude", prompt: "do A" };
-    const peer = { nodeId: "b", label: "B", engine: "codex", prompt: "do B" };
+    const self = { nodeId: "a", label: "A", model: "claude-opus-5", prompt: "do A" };
+    const peer = { nodeId: "b", label: "B", model: "gpt-5.6-sol", prompt: "do B" };
     ok(
       "lone worker (no peers) is byte-identical",
       wa.decorateWavePrompt("do A", { self, peers: [], collab: { awareness: true, chat: true }, runDir: "/r" }) === "do A",
@@ -146,10 +146,10 @@ async function main() {
 
   // ── 5) awareness: only with >=1 peer + toggle on; lists every OTHER node ────
   {
-    const self = { nodeId: "a", label: "Alpha", engine: "claude", prompt: "build the API" };
+    const self = { nodeId: "a", label: "Alpha", model: "claude-opus-5", prompt: "build the API" };
     const peers = [
-      { nodeId: "b", label: "Beta", engine: "codex", prompt: "b".repeat(150) },
-      { nodeId: "c", engine: "claude", prompt: "write docs" },
+      { nodeId: "b", label: "Beta", model: "gpt-5.6-sol", prompt: "b".repeat(150) },
+      { nodeId: "c", model: "claude-opus-5", prompt: "write docs" },
     ];
     const out = wa.decorateWavePrompt("build the API", {
       self,
@@ -158,8 +158,8 @@ async function main() {
       runDir: "/r",
     });
     ok("awareness block prepended", out.startsWith("You are one of 3 workers running in parallel"));
-    ok("awareness lists peer Beta with its engine", out.includes("- Beta (codex):"));
-    ok("awareness falls back to nodeId when a peer has no label", out.includes("- c (claude): write docs"));
+    ok("awareness lists peer Beta with its model", out.includes("- Beta (gpt-5.6-sol):"));
+    ok("awareness falls back to nodeId when a peer has no label", out.includes("- c (claude-opus-5): write docs"));
     ok("awareness snippet truncates a long prompt with an ellipsis", out.includes("…"));
     ok("awareness keeps the rendered prompt after the block", out.includes("\n\nbuild the API"));
     ok("awareness does NOT add a chat board", !out.includes("Shared message board"));
@@ -175,9 +175,9 @@ async function main() {
 
   // ── 6) chat: needs a peer that ALSO has chat on; lists peer board files ─────
   {
-    const self = { nodeId: "a", label: "Alpha", engine: "claude", prompt: "p", collab: { chat: true } };
-    const chatPeer = { nodeId: "b", label: "Beta", engine: "codex", prompt: "p", collab: { chat: true } };
-    const silentPeer = { nodeId: "c", label: "Gamma", engine: "claude", prompt: "p" };
+    const self = { nodeId: "a", label: "Alpha", model: "claude-opus-5", prompt: "p", collab: { chat: true } };
+    const chatPeer = { nodeId: "b", label: "Beta", model: "gpt-5.6-sol", prompt: "p", collab: { chat: true } };
+    const silentPeer = { nodeId: "c", label: "Gamma", model: "claude-opus-5", prompt: "p" };
 
     ok(
       "waveHasChat false when no OTHER peer has chat on",
@@ -213,22 +213,21 @@ async function main() {
 
   // ── 7) canPost matrix + Write-blocked chat caveat ──────────────────────────
   {
-    // workerCanPost: claude can post unless Write is blocked; codex always can.
-    ok("claude full canPost", wa.workerCanPost({ engine: "claude" }) === true);
+    // workerCanPost: every Pi worker can post unless Write is blocked.
+    ok("full canPost", wa.workerCanPost({}) === true);
     ok(
-      "claude readonly canPost (Write still allowed)",
-      wa.workerCanPost({ engine: "claude", access: "readonly" }) === true,
+      "readonly canPost (Write still allowed)",
+      wa.workerCanPost({ access: "readonly" }) === true,
     );
     ok(
-      "claude with Write blocked CANNOT post",
-      wa.workerCanPost({ engine: "claude", blockedTools: ["Write"] }) === false,
+      "Write blocked CANNOT post",
+      wa.workerCanPost({ blockedTools: ["Write"] }) === false,
     );
-    ok("codex edits canPost", wa.workerCanPost({ engine: "codex", access: "edits" }) === true);
-    ok("codex full canPost", wa.workerCanPost({ engine: "codex" }) === true);
+    ok("edits canPost", wa.workerCanPost({ access: "edits" }) === true);
 
     // A claude self that blocked Write: chat block gives the read-only caveat.
-    const blockedSelf = { nodeId: "a", label: "Alpha", engine: "claude", prompt: "p", collab: { chat: true }, blockedTools: ["Write"] };
-    const chatPeer = { nodeId: "b", label: "Beta", engine: "codex", prompt: "p", collab: { chat: true } };
+    const blockedSelf = { nodeId: "a", label: "Alpha", model: "claude-opus-5", prompt: "p", collab: { chat: true }, blockedTools: ["Write"] };
+    const chatPeer = { nodeId: "b", label: "Beta", model: "gpt-5.6-sol", prompt: "p", collab: { chat: true } };
     const blockedOut = wa.decorateWavePrompt("p", {
       self: blockedSelf,
       peers: [chatPeer],
@@ -239,20 +238,20 @@ async function main() {
     ok("Write-blocked self states it cannot post", blockedOut.includes("You cannot post (Write is blocked"));
     ok("Write-blocked self does NOT tell it to append notes", !blockedOut.includes("append your notes"));
 
-    // A claude readonly self (Write NOT blocked) CAN post.
-    const roSelf = { nodeId: "a", label: "Alpha", engine: "claude", prompt: "p", collab: { chat: true }, access: "readonly" };
+    // A readonly self (Write NOT blocked) CAN post.
+    const roSelf = { nodeId: "a", label: "Alpha", model: "claude-opus-5", prompt: "p", collab: { chat: true }, access: "readonly" };
     const roOut = wa.decorateWavePrompt("p", {
       self: roSelf,
       peers: [chatPeer],
       collab: { chat: true },
       runDir: "/runs/r1",
     });
-    ok("readonly (Write-allowed) claude self CAN post", roOut.includes("append your notes"));
+    ok("readonly (Write-allowed) self CAN post", roOut.includes("append your notes"));
 
     // A peer that blocked Write is a reader — omitted from the "post to" list.
-    const readerPeer = { nodeId: "c", label: "Gamma", engine: "claude", prompt: "p", collab: { chat: true }, blockedTools: ["Write"] };
+    const readerPeer = { nodeId: "c", label: "Gamma", model: "claude-opus-5", prompt: "p", collab: { chat: true }, blockedTools: ["Write"] };
     const filteredOut = wa.decorateWavePrompt("p", {
-      self: { nodeId: "a", label: "Alpha", engine: "claude", prompt: "p", collab: { chat: true } },
+      self: { nodeId: "a", label: "Alpha", model: "claude-opus-5", prompt: "p", collab: { chat: true } },
       peers: [chatPeer, readerPeer],
       collab: { chat: true },
       runDir: "/runs/r1",
@@ -263,8 +262,8 @@ async function main() {
 
   // ── 8) awareness + chat compose: awareness first, prompt, then chat ─────────
   {
-    const self = { nodeId: "a", label: "Alpha", engine: "claude", prompt: "PROMPT", collab: { awareness: true, chat: true } };
-    const peer = { nodeId: "b", label: "Beta", engine: "codex", prompt: "p", collab: { awareness: true, chat: true } };
+    const self = { nodeId: "a", label: "Alpha", model: "claude-opus-5", prompt: "PROMPT", collab: { awareness: true, chat: true } };
+    const peer = { nodeId: "b", label: "Beta", model: "gpt-5.6-sol", prompt: "p", collab: { awareness: true, chat: true } };
     const out = wa.decorateWavePrompt("PROMPT", {
       self,
       peers: [peer],
@@ -280,34 +279,26 @@ async function main() {
   // ── 9) validateWorkerAccessFields: accept + reject ─────────────────────────
   {
     const V = wa.validateWorkerAccessFields;
-    ok("empty node accepted", V({}, "claude", "w") === null);
-    ok("access full accepted", V({ access: "full" }, "claude", "w") === null);
-    ok("access edits accepted", V({ access: "edits" }, "codex", "w") === null);
-    ok("access readonly accepted on claude", V({ access: "readonly" }, "claude", "w") === null);
+    ok("empty node accepted", V({}, "w") === null);
+    ok("access full accepted", V({ access: "full" }, "w") === null);
+    ok("access edits accepted", V({ access: "edits" }, "w") === null);
+    ok("access readonly accepted (any model; Pi enforces the fence)", V({ access: "readonly" }, "w") === null);
+    ok("bad access rejected", typeof V({ access: "write" }, "w") === "string");
+    ok("blockedTools accepted for any worker", V({ blockedTools: ["Bash"] }, "w") === null);
+    ok("blockedTools non-array rejected", typeof V({ blockedTools: "Bash" }, "w") === "string");
+    ok("blockedTools with a blank entry rejected", typeof V({ blockedTools: [""] }, "w") === "string");
     ok(
-      "access readonly REJECTED on codex with an instructive message",
-      /read-only sandbox cannot write/.test(V({ access: "readonly" }, "codex", "w") || ""),
+      "blockedTools scoped form 'Bash(rm *)' rejected (only bare names are honored)",
+      /bare tool name/.test(V({ blockedTools: ["Bash(rm *)"] }, "w") || ""),
     );
-    ok("bad access rejected", typeof V({ access: "write" }, "claude", "w") === "string");
-    ok("blockedTools on claude accepted", V({ blockedTools: ["Bash"] }, "claude", "w") === null);
+    ok("blockedTools bare name 'WebSearch' accepted", V({ blockedTools: ["WebSearch"] }, "w") === null);
     ok(
-      "blockedTools on codex rejected with an instructive message",
-      /Claude-only/.test(V({ blockedTools: ["Bash"] }, "codex", "w") || ""),
+      "blockedTools entry starting with '-' rejected (never a valid identifier)",
+      typeof V({ blockedTools: ["--dangerously"] }, "w") === "string",
     );
-    ok("blockedTools non-array rejected", typeof V({ blockedTools: "Bash" }, "claude", "w") === "string");
-    ok("blockedTools with a blank entry rejected", typeof V({ blockedTools: [""] }, "claude", "w") === "string");
-    ok(
-      "blockedTools scoped form 'Bash(rm *)' rejected (CLI silently ignores it)",
-      /bare tool name/.test(V({ blockedTools: ["Bash(rm *)"] }, "claude", "w") || ""),
-    );
-    ok("blockedTools bare name 'WebSearch' accepted", V({ blockedTools: ["WebSearch"] }, "claude", "w") === null);
-    ok(
-      "blockedTools entry starting with '-' rejected (would parse as a CLI flag)",
-      typeof V({ blockedTools: ["--dangerously"] }, "claude", "w") === "string",
-    );
-    ok("collab object accepted", V({ collab: { awareness: true, chat: false } }, "claude", "w") === null);
-    ok("collab non-object rejected", typeof V({ collab: true }, "claude", "w") === "string");
-    ok("collab.chat non-boolean rejected", typeof V({ collab: { chat: "yes" } }, "claude", "w") === "string");
+    ok("collab object accepted", V({ collab: { awareness: true, chat: false } }, "w") === null);
+    ok("collab non-object rejected", typeof V({ collab: true }, "w") === "string");
+    ok("collab.chat non-boolean rejected", typeof V({ collab: { chat: "yes" } }, "w") === "string");
   }
 
   console.log(`\nAll ${passed} worker-access checks PASSED.`);

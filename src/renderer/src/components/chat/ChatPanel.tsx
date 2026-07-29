@@ -1,6 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AddRunMessageAttachmentInput, RunState, ShellInfo, Workspace } from "@shared/types";
+import type {
+  AddRunMessageAttachmentInput,
+  BoardCard,
+  RunState,
+  ShellInfo,
+  Workspace,
+} from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { CloseIcon, HistoryIcon } from "../icons";
@@ -10,7 +16,19 @@ import CopyBranchWelcome from "./CopyBranchWelcome";
 import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "./timeline";
 import CoraWhiteboardSurface from "./CoraWhiteboard";
-import type { CoraView } from "./cora-view";
+import WelcomeAutomations from "./WelcomeAutomations";
+import { isUnstartedChatRun, type CoraView } from "./cora-view";
+
+// The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
+// kanban chunk stays out of the startup bundle until the user opens the view.
+const BoardView = lazy(() => import("../board/BoardView"));
+
+// Fallbacks for callers that don't thread the board callbacks (tests,
+// isolated mounts). Module-level so their identities are stable across
+// renders.
+const noopOpenCardRun = () => undefined;
+const noopOpenWorkerTerminal = () => false;
+const noopCreateBoardRun = async () => undefined;
 
 // Placeholder ShellInfo passed to TerminalPane when the underlying PTY was
 // already spawned by main-process backend code (claude-backend, codex-backend).
@@ -49,6 +67,20 @@ interface Props {
   // strip drives the mode, the legacy strip stays hidden.
   chatView?: CoraView;
   onChatViewChange?: (view: CoraView) => void;
+  // "Open chat" on a LEGACY Cora Board card whose retired engine spawned a
+  // separate run — App's run-selection path. Optional: without it the embedded
+  // board's buttons no-op (tests).
+  onOpenBoardCardRun?: (runId: string) => void;
+  // "Open terminal" on a board card Cora put a worker on — focuses that
+  // worker's pane in the run's workers terminal tab (App's
+  // handleOpenWorkerTerminal path). Returns false when no pane could be
+  // focused (a finished worker's pane does not survive a restart). Optional
+  // like onOpenBoardCardRun.
+  onOpenBoardWorkerTerminal?: (workerTaskId: string) => boolean;
+  // First card mutation on a DRAFT chat's board: mint the run (without
+  // starting autopilot), persist the cards on its board, and promote the
+  // draft tab. Optional; without it a draft board stays local-only.
+  onCreateBoardRun?: (cards: BoardCard[]) => Promise<void>;
   onStartChat: (
     message: string,
     clientMessageId: string,
@@ -82,6 +114,9 @@ export default function ChatPanel({
   headerDrag,
   chatView: chatViewProp,
   onChatViewChange,
+  onOpenBoardCardRun,
+  onOpenBoardWorkerTerminal,
+  onCreateBoardRun,
   onStartChat,
   onForcePauseRun,
   onSelectChat,
@@ -175,6 +210,32 @@ export default function ChatPanel({
     };
   }, [backendSessionId, chatView, usingHoistedChatView]);
 
+  // The Cora Board sub-view. Per-chat: each run owns its board (a draft chat
+  // shows an empty local board whose first card mints the run). Unlike the
+  // chat/terminal/whiteboard layers (kept mounted + visibility-hidden to
+  // preserve in-flight DOM state), the board mounts only while actually on
+  // screen: its whole state lives on the run in main, so a remount rehydrates
+  // fully — and conditional mounting keeps exactly one live board:changed
+  // subscription (the visible instance's); hidden retained chat panels hold
+  // none and never re-sync.
+  const boardSurface =
+    chatView === "board" && workspace && suspendGlobalEvents !== true ? (
+      <Suspense fallback={null}>
+        <BoardView
+          // Keyed by run (or the workspace's draft slot) so a chat switch can
+          // never bleed one board's optimistic write-chain state into
+          // another's — and so draft promotion remounts onto the new run.
+          key={activeRun ? `run:${activeRun.id}` : `draft:${workspace.id}`}
+          run={activeRun}
+          workspaceCwd={workspace.cwd}
+          active
+          onOpenCardRun={onOpenBoardCardRun ?? noopOpenCardRun}
+          onOpenWorkerTerminal={onOpenBoardWorkerTerminal ?? noopOpenWorkerTerminal}
+          onCreateBoardRun={onCreateBoardRun ?? noopCreateBoardRun}
+        />
+      </Suspense>
+    ) : null;
+
   return (
     <div
       style={{
@@ -242,10 +303,19 @@ export default function ChatPanel({
                   pointerEvents: chatView === "chat" ? undefined : "none",
                 }}
               >
-                <ChatConversation
-                  key={`conversation:${activeRun.id}`}
-                  run={activeRun}
-                />
+                {isUnstartedChatRun(activeRun) ? (
+                  // A run minted by the board's draft promotion (or a bare
+                  // createRun) that has never had a conversation: keep showing
+                  // the welcome so the Chat pill reads like the draft it
+                  // replaced. The composer below routes the first send into
+                  // THIS run (see ChatComposer's unstarted-run branch).
+                  <WelcomeState workspace={workspace} />
+                ) : (
+                  <ChatConversation
+                    key={`conversation:${activeRun.id}`}
+                    run={activeRun}
+                  />
+                )}
               </div>
               {backendSessionId && (
                 <div
@@ -341,6 +411,33 @@ export default function ChatPanel({
                   }}
                 />
               </div>
+              {boardSurface && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                  }}
+                >
+                  {boardSurface}
+                </div>
+              )}
+            </div>
+          ) : boardSurface ? (
+            // Draft chat (no run yet) showing its empty board — e.g. the
+            // board.open chord landing in a workspace with no chats. The first
+            // card mutation mints the run, so render it instead of the
+            // welcome state.
+            <div
+              style={{
+                flex: 1,
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              {boardSurface}
             </div>
           ) : workspace?.copyBranch ? (
             <CopyBranchWelcome copyBranch={workspace.copyBranch} />
@@ -1100,6 +1197,8 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
           </button>
         ))}
       </div>
+      {/* The door to Automations, doubling as the live cue while one runs. */}
+      {workspace && <WelcomeAutomations workspaceId={workspace.id} />}
     </div>
   );
 }

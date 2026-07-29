@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  AgentRuntimeDiagnostic,
   AutomationRunRecord,
   AutomationWorkerInfo,
   CreateScheduledJobInput,
@@ -28,110 +27,66 @@ import {
   jobWorkerSummary,
   workerSummary,
 } from "./presentation";
-import { ENGINE_TONE, LoomIcon } from "./flow/FlowNodes";
+import { consumePendingAutomationFocus } from "./focus-request";
+import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
 import { graphForJob } from "./flow/model";
 import { useAutomationWorkers } from "./useAutomationWorkers";
 import WorkersView from "./WorkersView";
 import RunPeek from "./RunPeek";
 import MiniFlow from "./MiniFlow";
 import LiveBoard from "./LiveBoard";
+import LiveRunHero from "./LiveRunHero";
 import NodeFlowEditor from "./flow/NodeFlowEditor";
-import AssistChat from "./AssistChat";
 
-// AutomationsHub — the dedicated home for "Looms": automations that are a
-// TRIGGER (when to start) + a LOOP (how it repeats) + a WORKER (which CLI
-// agent runs each pass — no API manager anywhere). Layout: a permanent looms
-// RAIL on the left (every loom with its armed/paused state and a quick
-// toggle), and a STAGE on the right that swaps between the loom detail, the
-// node-flow editor, the Cora architect chat, and the global workers grid
-// (reached from the rail footer). Built on the shared .spark-* kit + design
-// tokens. Loom runs never open chat/terminal tabs — everything renders here.
+// AutomationsPage — the operations console for this workspace's automations.
+// An automation is a TRIGGER (when to start) + a LOOP (how it repeats) +
+// WORKER nodes that run on the bundled Pi runtime (model + effort are the only
+// worker knobs). Layout: a permanent rail on the left (every automation with
+// its armed/paused state and a quick toggle), and a STAGE on the right that
+// swaps between the detail, the node-flow editor, and the live workers grid.
+// Automations are CREATED by asking Cora in any normal chat, or manually via
+// the flow editor here; there is no separate design-with-Cora surface.
 
 export interface Props {
   workspaceId: string;
   workspaceName: string;
   cwd: string;
   // Whether the Automations tab is the active top-level tab (drives the
-  // workers poll + terminal pane visibility).
+  // workers poll + activity-stream visibility).
   active: boolean;
   terminalScrollbackLineLimit: number;
+  // Opens a run's ordinary chat surface, used by "Open chat" on an
+  // automation's creator run.
+  onOpenRunChat?: (runId: string) => void;
 }
 
-// view — list + detail; create/edit — the manual node-flow editor; assist —
-// the "Create with Cora" split: live loom list on the left, an architect chat
-// (chatMode "automation") on the right.
-type Mode =
-  | { kind: "view" }
-  | { kind: "create" }
-  | { kind: "edit"; job: ScheduledJob }
-  | { kind: "assist" };
+// view: rail + detail. create/edit: the node-flow editor owns the stage.
+type Mode = { kind: "view" } | { kind: "create" } | { kind: "edit"; job: ScheduledJob };
 type SubTab = "looms" | "workers";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
-const VIEW_MEMORY_STORAGE_PREFIX = "spark.automations.view:";
-
-interface AutomationViewMemory {
-  assistOpen: boolean;
-  assistRunId: string | null;
-}
-
-function viewMemoryKey(workspaceId: string): string {
-  return `${VIEW_MEMORY_STORAGE_PREFIX}${workspaceId}`;
-}
 
 function subTabStorageKey(workspaceId: string): string {
   return `${SUBTAB_STORAGE_KEY}:${workspaceId}`;
 }
 
-function readViewMemory(workspaceId: string): AutomationViewMemory {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(viewMemoryKey(workspaceId)) ?? "null") as
-      | Partial<AutomationViewMemory>
-      | null;
-    return {
-      assistOpen: parsed?.assistOpen === true,
-      assistRunId: typeof parsed?.assistRunId === "string" ? parsed.assistRunId : null,
-    };
-  } catch {
-    return { assistOpen: false, assistRunId: null };
-  }
-}
-
-function updateViewMemory(workspaceId: string, patch: Partial<AutomationViewMemory>): void {
-  try {
-    window.localStorage.setItem(
-      viewMemoryKey(workspaceId),
-      JSON.stringify({ ...readViewMemory(workspaceId), ...patch }),
-    );
-  } catch {
-    /* persistence is best-effort; the live hub still works without it */
-  }
-}
-
 // Attempt statuses that mean the worker process is still going. Mirrors the
-// module-private set in WorkersView / LiveBoard — one live-vs-done rule.
+// module-private set in WorkersView / LiveBoard, one live-vs-done rule.
 const LIVE_ATTEMPT = new Set(["preparing", "prompt_ready", "launching", "running", "finishing"]);
 
-export default function AutomationsHub({
+export default function AutomationsPage({
   workspaceId,
   workspaceName,
   cwd,
   active,
   terminalScrollbackLineLimit,
+  onOpenRunChat,
 }: Props): React.ReactElement {
-  const restoredViewMemory = useRef(readViewMemory(workspaceId)).current;
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>(
-    restoredViewMemory.assistOpen ? { kind: "assist" } : { kind: "view" },
-  );
-  // The architect run "Open chat" jumps to. Cleared whenever we leave assist
-  // mode (below) so re-opening the SAME creator run re-fires AssistChat's
-  // value-guarded focus effect (null → runId is a change; runId → runId isn't).
-  const [focusAssistRunId, setFocusAssistRunId] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>({ kind: "view" });
   const [liveRun, setLiveRun] = useState<RunState | null>(null);
-  const [runtimes, setRuntimes] = useState<AgentRuntimeDiagnostic[]>([]);
   const [subTab, setSubTab] = useState<SubTab>(() => {
     try {
       const remembered =
@@ -142,18 +97,16 @@ export default function AutomationsHub({
       return "looms";
     }
   });
-  // Inline feedback when an action (Run now / Pause / Save / …) fails — there is
-  // no renderer-callable toast API, so we surface errors locally.
+  // Inline feedback when an action (Run now / Pause / Save) fails; there is no
+  // renderer-callable toast API, so errors surface locally.
   const [actionError, setActionError] = useState<string | null>(null);
-  // Live board — the "whiteboard" view of the selected loom's run (full flow
-  // canvas + in-canvas worker terminals). NEVER auto-opens (user feedback:
-  // "I should go to it myself") — only the explicit affordances (the Board /
-  // Live board buttons) open it, and closing it is always manual too.
+  // Live board: the whiteboard view of the selected automation's run. Never
+  // auto-opens; only the explicit Board buttons open it, and closing it is
+  // always manual too.
   const [boardOpen, setBoardOpen] = useState(false);
-  // When the board is opened by clicking a worker row in the loom detail, the
-  // attemptId to focus the board's terminal sheet on. Null for a plain "Board"
-  // open (whiteboard opens clean). Cleared on close / selection change so the
-  // same worker clicked twice re-fires LiveBoard's focus effect.
+  // When the board is opened from a worker row, the attemptId to focus the
+  // board's activity sheet on. Cleared on close / selection change so the same
+  // worker clicked twice re-fires LiveBoard's focus effect.
   const [boardFocusWorkerId, setBoardFocusWorkerId] = useState<string | null>(null);
 
   const workers = useAutomationWorkers(active);
@@ -163,34 +116,28 @@ export default function AutomationsHub({
   );
   const anyBlocked = workspaceWorkers.some((w) => w.blocked);
   // Holds the Workers overlay mounted across top-level tab switches while any
-  // of this workspace's workers is still running — see the gate below.
+  // of this workspace's workers is still running (see the overlay gate below).
   const anyLiveWorkspaceWorker = workspaceWorkers.some((w) => LIVE_ATTEMPT.has(w.status));
 
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
 
-  // The tab store remembers which top-level tab belongs to each workspace.
-  // Remember the hub's inner surface too: otherwise switching workspaces
-  // remounts this component and strands an in-flight architect chat behind the
-  // launchpad. Create/edit drafts remain intentionally ephemeral; only the
-  // durable architect conversation is restored.
-  useEffect(() => {
-    updateViewMemory(workspaceId, { assistOpen: mode.kind === "assist" });
-  }, [workspaceId, mode.kind]);
-
-  const switchSubTab = useCallback((next: SubTab) => {
-    setSubTab(next);
-    try {
-      window.localStorage.setItem(subTabStorageKey(workspaceId), next);
-    } catch {
-      /* persistence is a nicety */
-    }
-  }, [workspaceId]);
+  const switchSubTab = useCallback(
+    (next: SubTab) => {
+      setSubTab(next);
+      try {
+        window.localStorage.setItem(subTabStorageKey(workspaceId), next);
+      } catch {
+        /* persistence is a nicety */
+      }
+    },
+    [workspaceId],
+  );
 
   const refresh = useCallback(async () => {
     try {
       const list = await window.spark.scheduler.list();
-      // Only this workspace's looms.
+      // Only this workspace's automations.
       setJobs(list.filter((j) => j.input.workspaceId === workspaceId));
     } catch {
       /* best-effort: keep last good view */
@@ -229,23 +176,8 @@ export default function AutomationsHub({
     return () => unsubscribe();
   }, [refresh, refreshDetail, liveRun?.id]);
 
-  // Installed CLI runtimes for the Worker node + handoff explainers.
-  useEffect(() => {
-    let disposed = false;
-    void (async () => {
-      try {
-        const list = await window.spark.agents.runtimes();
-        if (!disposed) setRuntimes(list);
-      } catch {
-        /* editor falls back to Auto-only */
-      }
-    })();
-    return () => {
-      disposed = true;
-    };
-  }, []);
-
-  // Keep the selection valid; auto-select the first loom when nothing is chosen.
+  // Keep the selection valid; auto-select the first automation when nothing is
+  // chosen.
   useEffect(() => {
     if (jobs.length === 0) {
       if (selectedId !== null) setSelectedId(null);
@@ -261,11 +193,44 @@ export default function AutomationsHub({
     void refreshDetail();
   }, [selectedId, refreshDetail]);
 
+  // "Jump to this automation" from the Cora Hub. Two arrival paths (see
+  // focus-request.ts): the live spark:open-automation event when this page is
+  // already mounted, and the pending slot consumed on mount when the click had
+  // to create the tab first. The request is staged, not applied inline: on a
+  // fresh mount jobs is still [] and the selection-keeper effect would wipe a
+  // premature setSelectedId, so it waits for the first list load below.
+  const [focusRequest, setFocusRequest] = useState<string | null>(null);
+  useEffect(() => {
+    const pending = consumePendingAutomationFocus();
+    if (pending !== null) setFocusRequest(pending);
+    const handler = (event: Event) => {
+      // Clear the one-shot slot too; it holds this same id, and leaving it
+      // would replay the jump on the page's next mount.
+      consumePendingAutomationFocus();
+      const id = (event as CustomEvent<{ automationId?: unknown }>).detail?.automationId;
+      if (typeof id === "string") setFocusRequest(id);
+    };
+    window.addEventListener("spark:open-automation", handler);
+    return () => window.removeEventListener("spark:open-automation", handler);
+  }, []);
+  useEffect(() => {
+    if (focusRequest === null || loading) return;
+    setFocusRequest(null);
+    // Deleted (or another workspace's) automation: nothing to focus.
+    if (!jobs.some((j) => j.id === focusRequest)) return;
+    // Leaving an in-flight create/edit draft is deliberate: the user
+    // explicitly asked for this automation. Drafts are ephemeral by design.
+    switchSubTab("looms");
+    setMode({ kind: "view" });
+    setSelectedId(focusRequest);
+  }, [focusRequest, loading, jobs, switchSubTab]);
+
   const selected = useMemo(() => jobs.find((j) => j.id === selectedId) ?? null, [jobs, selectedId]);
 
   // ── live board open/close ───────────────────────────────────────────────
-  // Selection change always closes the board (a different loom's board is a
-  // different surface); the new selection's board waits for an explicit open.
+  // Selection change always closes the board (a different automation's board
+  // is a different surface); the new selection's board waits for an explicit
+  // open.
   useEffect(() => {
     setBoardOpen(false);
     setBoardFocusWorkerId(null);
@@ -277,8 +242,7 @@ export default function AutomationsHub({
     setBoardOpen(true);
   }, [switchSubTab]);
 
-  // Open the board AND focus its terminal sheet on one specific worker — the
-  // affordance the loom detail's Workers rows use.
+  // Open the board AND focus its activity sheet on one specific worker.
   const openBoardFocused = useCallback(
     (attemptId: string) => {
       switchSubTab("looms");
@@ -308,7 +272,7 @@ export default function AutomationsHub({
         setMode({ kind: "view" });
       } catch (e) {
         // Keep the form so the user can retry; tell them why it failed.
-        setActionError(e instanceof Error ? e.message : "Couldn't create the automation — try again.");
+        setActionError(e instanceof Error ? e.message : "Couldn't create the automation. Try again.");
       }
     },
     [refresh],
@@ -322,7 +286,7 @@ export default function AutomationsHub({
         await refresh();
         setMode({ kind: "view" });
       } catch (e) {
-        setActionError(e instanceof Error ? e.message : "Couldn't save the automation — try again.");
+        setActionError(e instanceof Error ? e.message : "Couldn't save the automation. Try again.");
       }
     },
     [refresh],
@@ -334,7 +298,7 @@ export default function AutomationsHub({
       try {
         await fn();
       } catch (e) {
-        setActionError(e instanceof Error ? e.message : "Action failed — try again.");
+        setActionError(e instanceof Error ? e.message : "Action failed. Try again.");
       } finally {
         await refresh();
         await refreshDetail();
@@ -343,61 +307,51 @@ export default function AutomationsHub({
     [refresh, refreshDetail],
   );
 
-  const openLoomDetail = useCallback(
+  const openDetail = useCallback(
     (automationId: string) => {
       setSelectedId(automationId);
       switchSubTab("looms");
-      // Preserve an in-progress editor draft: only drop to the view list when
-      // nothing is being authored. Mirrors the onNewLoom guard — unconditionally
-      // setting {kind:"view"} here would clobber an open create/edit draft (this
-      // is reachable while editing via a Workers-pane loom button / armed row).
-      // The assist chat is NOT a draft (its run persists and resumes), so an
-      // explicit "show me this loom" wins over it and reveals the detail pane.
+      // Preserve an in-progress editor draft: only drop to the view when
+      // nothing is being authored (this is reachable while editing via a
+      // Workers-pane automation button).
       setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "view" }));
     },
     [switchSubTab],
   );
 
-  const stopLoom = useCallback(
+  const startCreate = useCallback(() => {
+    setActionError(null);
+    switchSubTab("looms");
+    setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "create" }));
+  }, [switchSubTab]);
+
+  const stopAutomation = useCallback(
     (automationId: string) => {
       void act(() => window.spark.scheduler.stop!(automationId));
     },
     [act],
   );
 
-  // Jump from a loom's detail back to the architect chat that authored it. The
-  // session isn't a draft (its run persists and resumes), so swapping to the
-  // assist pane is safe; AssistChat picks the run via focusAssistRunId.
+  // Jump from an automation's detail to the chat that created it.
   const openCreatorChat = useCallback(
     (runId: string) => {
       setActionError(null);
-      setFocusAssistRunId(runId);
-      switchSubTab("looms");
-      setMode({ kind: "assist" });
+      onOpenRunChat?.(runId);
     },
-    [switchSubTab],
+    [onOpenRunChat],
   );
 
-  // Reset the focus target whenever we leave assist mode so a later "Open chat"
-  // for the same run is seen as a fresh change by AssistChat's focus effect.
-  useEffect(() => {
-    if (mode.kind !== "assist") setFocusAssistRunId(null);
-  }, [mode.kind]);
-
-  // "editing" = the node-flow editor owns the body (create/edit draft).
-  // "assisting" = the Cora architect chat replaces the detail pane.
+  // "editing" = the node-flow editor owns the stage (create/edit draft).
   const editing = mode.kind === "create" || mode.kind === "edit";
-  const assisting = mode.kind === "assist";
-  // Live board on screen: it owns the Looms body while open, but yields to the
-  // editor/assist overlays and to the Workers sub-tab (kept mounted under the
-  // same visibility contract so the canvas viewport + dock mirrors survive).
-  const boardShowing = boardOpen && selected !== null && subTab === "looms" && !editing && !assisting;
+  // Live board on screen: it owns the detail area while open, but yields to
+  // the editor overlay and to the Workers sub-tab (kept mounted under the same
+  // visibility contract so the canvas viewport survives).
+  const boardShowing = boardOpen && selected !== null && subTab === "looms" && !editing;
 
-  // The looms rail — ALWAYS on screen ("the looms live on the left; the right
-  // side is the part that changes"). The header carries the create actions,
-  // each row carries its armed/paused state + a quick toggle, and the footer
-  // swaps the stage to the global workers grid (the old Workers sub-tab).
-  const loomRail = (
+  // The rail: always on screen. The header carries the create action, each row
+  // carries its armed/paused state + a quick toggle, and the footer swaps the
+  // stage to the global workers grid.
+  const rail = (
     <aside
       style={{
         flex: "0 0 300px",
@@ -418,50 +372,28 @@ export default function AutomationsHub({
           borderBottom: "1px solid var(--rule)",
         }}
       >
-        <span className="spark-eyebrow" style={{ flex: "0 0 auto" }}>
-          Looms
+        <span
+          style={{
+            flex: "0 0 auto",
+            fontSize: 12,
+            fontWeight: 650,
+            color: "var(--ink)",
+          }}
+        >
+          Automations
         </span>
         <span className="spark-mono spark-num" style={{ flex: 1, fontSize: 10, color: "var(--muted-2)" }}>
           {String(jobs.length).padStart(2, "0")}
         </span>
         <button
           type="button"
-          className="spark-btn"
-          style={{
-            height: 24,
-            padding: "0 9px",
-            fontSize: 11,
-            ...(assisting
-              ? { borderColor: "var(--accent-edge)", background: "var(--accent-soft)" }
-              : {}),
-          }}
-          disabled={editing}
-          onClick={() => {
-            setActionError(null);
-            switchSubTab("looms");
-            setMode({ kind: "assist" });
-          }}
-          title={
-            editing
-              ? "Finish or cancel the open editor first"
-              : "Chat with Cora — she designs, creates, and test-runs the loom for you"
-          }
-        >
-          ✦ Cora
-        </button>
-        <button
-          type="button"
           className="spark-btn is-primary"
           style={{ height: 24, padding: "0 9px", fontSize: 11 }}
           disabled={editing}
-          onClick={() => {
-            setActionError(null);
-            switchSubTab("looms");
-            setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "create" }));
-          }}
-          title={editing ? "The editor is already open" : "New loom — open the flow editor"}
+          onClick={startCreate}
+          title={editing ? "The editor is already open" : "Open the flow editor"}
         >
-          + New
+          + New automation
         </button>
       </div>
 
@@ -469,27 +401,20 @@ export default function AutomationsHub({
         {loading ? (
           <div style={{ padding: "10px 8px", color: "var(--muted-2)", fontSize: 11 }}>Loading…</div>
         ) : jobs.length === 0 ? (
-          <div className="spark-empty" style={{ padding: "26px 8px", gap: 8 }}>
-            <div className="spark-eyebrow">No looms yet</div>
-            <div className="spark-empty__body">
-              Author a loop that prompts Claude or Codex on your schedule.
-            </div>
+          <div style={{ padding: "26px 10px", fontSize: 11.5, lineHeight: 1.6, color: "var(--muted)" }}>
+            Nothing here yet. Ask Cora in any chat to automate something recurring, or create one
+            with the button above.
           </div>
         ) : (
           jobs.map((job) => (
             <AutomationRow
               key={job.id}
               job={job}
-              selected={job.id === selectedId && subTab === "looms" && !assisting}
+              selected={job.id === selectedId && subTab === "looms"}
               onSelect={() => {
                 setActionError(null);
                 setSelectedId(job.id);
                 switchSubTab("looms");
-                // Picking a loom while the assist chat is up means "show
-                // me this loom" — swap the chat for the detail pane. The
-                // session isn't lost: its run persists and "Create with
-                // Cora" resumes it.
-                setMode((m) => (m.kind === "assist" ? { kind: "view" } : m));
               }}
               onToggleEnabled={(enabled) =>
                 void act(() => window.spark.scheduler.setEnabled(job.id, enabled))
@@ -499,8 +424,8 @@ export default function AutomationsHub({
         )}
       </div>
 
-      {/* Footer: the global workers grid (was the Workers sub-tab). Click to
-          flip the stage there and back — never automatic. */}
+      {/* Footer: the global workers grid. Click to flip the stage there and
+          back; never automatic. */}
       <button
         type="button"
         onClick={() => switchSubTab(subTab === "workers" ? "looms" : "workers")}
@@ -524,9 +449,16 @@ export default function AutomationsHub({
         onMouseLeave={(e) => {
           if (subTab !== "workers") e.currentTarget.style.background = "transparent";
         }}
-        title={subTab === "workers" ? "Back to the loom detail" : "Every live worker as a real terminal"}
+        title={subTab === "workers" ? "Back to the automation detail" : "Every live worker's activity, live"}
       >
-        <span className="spark-eyebrow" style={{ flex: 1, color: subTab === "workers" ? "var(--ink)" : undefined }}>
+        <span
+          style={{
+            flex: 1,
+            fontSize: 12,
+            fontWeight: 650,
+            color: subTab === "workers" ? "var(--ink)" : "var(--muted)",
+          }}
+        >
           Workers
         </span>
         {workspaceWorkers.length > 0 && (
@@ -597,193 +529,208 @@ export default function AutomationsHub({
 
       {/* ── Body: rail + stage ───────────────────────────────────────────── */}
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex" }}>
-        {loomRail}
+        {rail}
 
-        {/* The STAGE — a position:relative flex container to the right of the
-            rail. Editor / workers grid / assist chat mount here as absolute
-            overlays kept MOUNTED while hidden, using visibility:hidden +
-            pointer-events:none — NEVER display:none — because the ReactFlow
-            canvas (editor) and xterm panes (workers) measure their containers
-            and would collapse or garble under display:none. visibility:hidden
-            survives the round-trip so drafts, zoom/pan, and terminal state
-            stay intact while another stage face is up. */}
+        {/* The STAGE: a position:relative flex container to the right of the
+            rail. Editor / workers grid mount here as absolute overlays kept
+            MOUNTED while hidden, using visibility:hidden + pointer-events:none
+            (never display:none) because the ReactFlow canvas measures its
+            container and would collapse under display:none. */}
         <div style={{ flex: 1, minHeight: 0, minWidth: 0, position: "relative", display: "flex" }}>
-        {editing && (
-          <div
-            aria-hidden={subTab !== "looms"}
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              flexDirection: "column",
-              // "inherit", not "visible"/"auto": an explicit visible/auto child
-              // punches through the visibility:hidden + pointer-events:none the
-              // tab stack puts on this hub when another top-level tab is active,
-              // leaking the editor's floating controls over that tab.
-              visibility: subTab === "looms" ? "inherit" : "hidden",
-              pointerEvents: subTab === "looms" ? "inherit" : "none",
-            }}
-          >
-            <NodeFlowEditor
-              initial={mode.kind === "edit" ? mode.job : undefined}
-              jobs={jobs}
-              runtimes={runtimes}
-              workspaceId={workspaceId}
-              workspaceName={workspaceName}
-              cwd={cwd}
-              onCreate={mode.kind === "create" ? handleCreate : undefined}
-              onSave={mode.kind === "edit" ? handleSaveEdit : undefined}
-              onCancel={() => setMode({ kind: "view" })}
-            />
-          </div>
-        )}
-
-        {/* Workers sub-tab: kept MOUNTED behind the Looms sub-tab (same
-            visibility contract as the editor/assist overlays above) so a
-            Looms ↔ Workers flip no longer unmounts every live worker terminal
-            and forces a garble-prone TUI reattach. Each WorkerPane's `visible`
-            prop stays accurate (below) so useTerminalSession's reveal-refit
-            re-fits + resizes the pty when the panes come back on screen.
-
-            Gated on `active` OR a live workspace worker: gating on `active`
-            alone unmounted every canonical WorkerPane on a top-level tab
-            switch — and, because LiveBoard's mirrors mount only while a
-            canonical pane is registered (worker-pane-registry), the board's
-            mirror xterms too — so returning to a RUNNING worker forced a
-            garble-prone raw-tail replay / mid-frame mirror attach (the "leave
-            and come back breaks the terminal" bug). Keeping the overlay
-            mounted while any workspace worker is live preserves the xterm
-            buffers across the round-trip; each WorkerPane's `visible` prop
-            (below) stays false meanwhile, so hidden panes never take focus
-            or reveal-refit (a window resize can still re-fit them at their
-            real kept-layout dimensions — same regime as the hidden sub-tab
-            case), and writeWhileHidden keeps their buffers complete. While the tab
-            is INACTIVE the workers poll pauses and this gate rides the last
-            snapshot (a worker that exits while we're away holds it up until
-            return, when the poll reconciles). Once nothing is live — the
-            60s-lingering exited workers don't count — an inactive tab still
-            tears the terminals down, matching the original intent that a
-            closed Automations tab shouldn't keep xterms mounted forever.
-            `inherit` (not visible/auto) for the same punch-through reason
-            documented on the editor overlay. */}
-        {(active || anyLiveWorkspaceWorker) && (
-          <div
-            aria-hidden={subTab !== "workers"}
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              visibility: subTab === "workers" ? "inherit" : "hidden",
-              pointerEvents: subTab === "workers" ? "inherit" : "none",
-            }}
-          >
-            <WorkersView
-              workers={workspaceWorkers}
-              jobs={jobs}
-              scrollbackLineLimit={terminalScrollbackLineLimit}
-              visible={active && subTab === "workers"}
-              onStopLoom={stopLoom}
-              onSelectLoom={openLoomDetail}
-              onNewLoom={() => {
-                // Switching back to Looms must reveal whatever editor is already
-                // open. Only start a fresh create when nothing is being authored;
-                // if an edit draft is open, just unhide it (don't double-mount or
-                // clobber the in-progress edit with a blank create form). An
-                // assist chat is not a draft — an explicit "new loom" opens the
-                // manual editor over it (the session persists and resumes).
-                switchSubTab("looms");
-                setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "create" }));
+          {editing && (
+            <div
+              aria-hidden={subTab !== "looms"}
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                flexDirection: "column",
+                // "inherit", not "visible"/"auto": an explicit visible/auto
+                // child punches through the visibility:hidden the tab stack
+                // puts on this page when another top-level tab is active.
+                visibility: subTab === "looms" ? "inherit" : "hidden",
+                pointerEvents: subTab === "looms" ? "inherit" : "none",
               }}
-            />
-          </div>
-        )}
+            >
+              <NodeFlowEditor
+                initial={mode.kind === "edit" ? mode.job : undefined}
+                jobs={jobs}
+                workspaceId={workspaceId}
+                workspaceName={workspaceName}
+                cwd={cwd}
+                onCreate={mode.kind === "create" ? handleCreate : undefined}
+                onSave={mode.kind === "edit" ? handleSaveEdit : undefined}
+                onCancel={() => setMode({ kind: "view" })}
+              />
+            </div>
+          )}
 
-        {/* Assist view: live loom list + the Cora architect chat. Kept MOUNTED
-            behind the Workers sub-tab (same visibility contract as the editor
-            above) so the chat's composer draft, session selection, and live
-            stream buffer survive a Looms ↔ Workers flip. `inherit` (not
-            visible/auto) for the same punch-through reason documented on the
-            editor overlay. */}
-        {assisting && (
-          <div
-            aria-hidden={subTab !== "looms"}
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              visibility: subTab === "looms" ? "inherit" : "hidden",
-              pointerEvents: subTab === "looms" ? "inherit" : "none",
-            }}
-          >
-            {/* The chat takes the full STAGE (everything right of the rail —
-                still the "bigger window" the user asked for, and the rail
-                means looms Cora creates appear in the list live, while the
-                chat is open). */}
-            <AssistChat
-              workspaceId={workspaceId}
-              workspaceName={workspaceName}
-              cwd={cwd}
-              runtimes={runtimes}
-              active={active && subTab === "looms"}
-              focusRunId={focusAssistRunId ?? undefined}
-              initialRunId={restoredViewMemory.assistRunId}
-              onSelectedRunIdChange={(runId) =>
-                updateViewMemory(workspaceId, { assistRunId: runId })
-              }
-              onClose={() => setMode({ kind: "view" })}
-            />
-          </div>
-        )}
+          {/* Workers sub-tab: kept MOUNTED behind the looms sub-tab (same
+              visibility contract as the editor overlay) so a flip never tears
+              down the live activity streams. Gated on `active` OR a live
+              workspace worker so returning to a running worker never forces a
+              cold re-read; once nothing is live an inactive tab still tears
+              the overlay down. */}
+          {(active || anyLiveWorkspaceWorker) && (
+            <div
+              aria-hidden={subTab !== "workers"}
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                visibility: subTab === "workers" ? "inherit" : "hidden",
+                pointerEvents: subTab === "workers" ? "inherit" : "none",
+              }}
+            >
+              <WorkersView
+                workers={workspaceWorkers}
+                jobs={jobs}
+                scrollbackLineLimit={terminalScrollbackLineLimit}
+                visible={active && subTab === "workers"}
+                onStopLoom={stopAutomation}
+                onSelectLoom={openDetail}
+                onNewLoom={startCreate}
+              />
+            </div>
+          )}
 
-        {!editing && !assisting && subTab === "looms" && (
-          <section style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
-            {!selected ? (
-              <div className="spark-empty" style={{ flex: 1, gap: 8 }}>
-                {loading ? null : jobs.length === 0 ? (
-                  <AutomationEmptyState
-                    onAssist={() => {
-                      setActionError(null);
-                      setMode({ kind: "assist" });
-                    }}
-                    onManual={() => {
-                      setActionError(null);
-                      setMode({ kind: "create" });
-                    }}
-                  />
+          {!editing && subTab === "looms" && (
+            <section style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+              {/* Another automation just went live while you look at this one:
+                  a slim jump strip so a running machine is never off-screen
+                  without a signpost. */}
+              {(() => {
+                const runningElsewhere = jobs.find(
+                  (j) =>
+                    (j.state.status === "running" || j.state.status === "blocked") &&
+                    j.id !== (selected?.id ?? ""),
+                );
+                if (!runningElsewhere) return null;
+                const heldUp = runningElsewhere.state.status === "blocked";
+                return (
+                  <button
+                    type="button"
+                    className={`loom-live-strip${heldUp ? " is-blocked" : ""}`}
+                    onClick={() => openDetail(runningElsewhere.id)}
+                    title={`Show ${runningElsewhere.name}`}
+                  >
+                    <span className="loom-live-strip__glyph" aria-hidden>
+                      {heldUp ? (
+                        <span
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: 999,
+                            background: "var(--danger)",
+                            boxShadow: "0 0 7px color-mix(in oklch, var(--danger) 55%, transparent)",
+                          }}
+                        />
+                      ) : (
+                        <span
+                          className="spark-activity-spin"
+                          style={{
+                            width: 11,
+                            height: 11,
+                            borderRadius: 999,
+                            background:
+                              "conic-gradient(from 0deg, transparent 0deg 90deg, var(--accent) 360deg)",
+                            WebkitMask:
+                              "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+                            mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+                          }}
+                        />
+                      )}
+                    </span>
+                    <span className="loom-live-strip__text">
+                      <strong>{runningElsewhere.name}</strong>{" "}
+                      {heldUp ? "needs you" : "is running"}
+                    </span>
+                    <span className="loom-live-strip__action">Watch</span>
+                  </button>
+                );
+              })()}
+              {!selected ? (
+                loading ? null : jobs.length === 0 ? (
+                  <AutomationsEmptyState onCreate={startCreate} />
                 ) : (
-                  <>
-                    <div className="spark-eyebrow">Select a loom</div>
-                    <div className="spark-empty__body">Pick a loom on the left to see its worker and history.</div>
-                  </>
-                )}
-              </div>
-            ) : (
-              <AutomationDetail
+                  <div className="spark-empty" style={{ flex: 1, gap: 8 }}>
+                    <div style={{ fontSize: 13, fontWeight: 650, color: "var(--ink-dim)" }}>
+                      Select an automation
+                    </div>
+                    <div className="spark-empty__body">
+                      Pick one on the left to see its state, workers, and history.
+                    </div>
+                  </div>
+                )
+              ) : (
+                <AutomationDetail
+                  job={selected}
+                  liveRun={liveRun}
+                  workers={boardWorkers}
+                  heroShown={active && !boardOpen}
+                  onEdit={() => setMode({ kind: "edit", job: selected })}
+                  onOpenCreatorChat={
+                    selected.createdByRunId && onOpenRunChat
+                      ? () => openCreatorChat(selected.createdByRunId as string)
+                      : undefined
+                  }
+                  onRunNow={() => void act(() => window.spark.scheduler.runNow(selected.id))}
+                  onPause={() => void act(() => window.spark.scheduler.pause!(selected.id))}
+                  onResume={() => void act(() => window.spark.scheduler.resume!(selected.id))}
+                  onStop={() => stopAutomation(selected.id)}
+                  onToggleEnabled={(enabled) =>
+                    void act(() => window.spark.scheduler.setEnabled(selected.id, enabled))
+                  }
+                  onDelete={() =>
+                    void act(async () => {
+                      await window.spark.scheduler.remove(selected.id);
+                      setSelectedId(null);
+                    })
+                  }
+                  onOpenLiveBoard={openLiveBoard}
+                  onOpenBoardFocused={openBoardFocused}
+                  onAnswer={(runId, questionMessageId, answer) =>
+                    void act(() =>
+                      window.spark.orchestration.answerRunQuestion({
+                        runId,
+                        questionMessageId,
+                        message: answer,
+                      }),
+                    )
+                  }
+                />
+              )}
+            </section>
+          )}
+
+          {/* Live board overlay: the automation's run as a full whiteboard.
+              Kept MOUNTED across sub-tab flips and editor excursions (same
+              visibility contract as the other overlays). Painted last so it
+              sits above the in-flow detail while showing. */}
+          {boardOpen && selected && (
+            <div
+              aria-hidden={!boardShowing}
+              style={{
+                position: "absolute",
+                inset: 0,
+                // Above the detail's sticky header (zIndex 2).
+                zIndex: 5,
+                display: "flex",
+                visibility: boardShowing ? "inherit" : "hidden",
+                pointerEvents: boardShowing ? "inherit" : "none",
+              }}
+            >
+              <LiveBoard
+                key={selected.id}
                 job={selected}
                 liveRun={liveRun}
-                runtimes={runtimes}
                 workers={boardWorkers}
-                onEdit={() => setMode({ kind: "edit", job: selected })}
-                onOpenCreatorChat={
-                  selected.createdByRunId
-                    ? () => openCreatorChat(selected.createdByRunId as string)
-                    : undefined
-                }
-                onRunNow={() => void act(() => window.spark.scheduler.runNow(selected.id))}
-                onPause={() => void act(() => window.spark.scheduler.pause!(selected.id))}
-                onResume={() => void act(() => window.spark.scheduler.resume!(selected.id))}
-                onStop={() => stopLoom(selected.id)}
-                onToggleEnabled={(enabled) =>
-                  void act(() => window.spark.scheduler.setEnabled(selected.id, enabled))
-                }
-                onDelete={() =>
-                  void act(async () => {
-                    await window.spark.scheduler.remove(selected.id);
-                    setSelectedId(null);
-                  })
-                }
-                onOpenLiveBoard={openLiveBoard}
-                onOpenBoardFocused={openBoardFocused}
+                initialFocusWorkerId={boardFocusWorkerId}
+                shown={active && boardShowing}
+                scrollbackLineLimit={terminalScrollbackLineLimit}
+                onClose={closeLiveBoard}
+                onOpenWorkersGrid={() => switchSubTab("workers")}
+                onStop={() => stopAutomation(selected.id)}
                 onAnswer={(runId, questionMessageId, answer) =>
                   void act(() =>
                     window.spark.orchestration.answerRunQuestion({
@@ -794,116 +741,43 @@ export default function AutomationsHub({
                   )
                 }
               />
-            )}
-          </section>
-        )}
-
-        {/* Live board overlay: the loom run as a full "whiteboard" — the flow
-            canvas with live node state and the worker terminal docked INSIDE
-            the canvas. Kept MOUNTED across Looms ↔ Workers flips and
-            editor/assist excursions (same visibility contract as the other
-            overlays — ReactFlow must never sit under display:none, and the
-            dock's mirror xterms must never remount on a view flip). Rendered
-            LAST so it paints above the in-flow detail while showing. */}
-        {boardOpen && selected && (
-          <div
-            aria-hidden={!boardShowing}
-            style={{
-              position: "absolute",
-              inset: 0,
-              // Above the detail pane's sticky header (zIndex 2) — without
-              // this the detail header paints THROUGH the board's header (the
-              // "two headers fighting" overlap the user reported).
-              zIndex: 5,
-              display: "flex",
-              // "inherit", not visible/auto — same punch-through reason as the
-              // editor overlay above.
-              visibility: boardShowing ? "inherit" : "hidden",
-              pointerEvents: boardShowing ? "inherit" : "none",
-            }}
-          >
-            <LiveBoard
-              key={selected.id}
-              job={selected}
-              runtimes={runtimes}
-              liveRun={liveRun}
-              workers={boardWorkers}
-              initialFocusWorkerId={boardFocusWorkerId}
-              shown={active && boardShowing}
-              scrollbackLineLimit={terminalScrollbackLineLimit}
-              onClose={closeLiveBoard}
-              onOpenWorkersGrid={() => switchSubTab("workers")}
-              onStop={() => stopLoom(selected.id)}
-              onAnswer={(runId, questionMessageId, answer) =>
-                void act(() =>
-                  window.spark.orchestration.answerRunQuestion({
-                    runId,
-                    questionMessageId,
-                    message: answer,
-                  }),
-                )
-              }
-            />
-          </div>
-        )}
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function AutomationEmptyState({
-  onAssist,
-  onManual,
-}: {
-  onAssist: () => void;
-  onManual: () => void;
-}): React.ReactElement {
+// ── Empty state ──────────────────────────────────────────────────────────────
+
+// The zero-automations stage. An invitation, not a shrug: it teaches that
+// automations grow out of ordinary Cora chats, with manual creation as the
+// secondary path. Deliberately quiet; one primary action.
+function AutomationsEmptyState({ onCreate }: { onCreate: () => void }): React.ReactElement {
   return (
-    <div className="automation-launchpad">
-      <div className="automation-launchpad__eyebrow">Automation studio</div>
-      <div className="automation-launchpad__title">Make this project keep working for you</div>
-      <div className="automation-launchpad__body">
-        Looms combine a trigger, bounded repetition, and real Claude or Codex
-        workers. Start from the outcome with Cora, or wire the flow yourself.
-      </div>
-      <div className="automation-launchpad__actions">
-        <button type="button" className="automation-launch-card is-cora" onClick={onAssist}>
-          <span className="automation-launch-card__icon" aria-hidden>✦</span>
-          <span className="automation-launch-card__copy">
-            <span className="automation-launch-card__label">Recommended</span>
-            <span className="automation-launch-card__title">Design with Cora</span>
-            <span className="automation-launch-card__body">
-              Describe the result. Cora designs the schedule, safety limits,
-              models, and worker graph, then test-runs it with you.
-            </span>
-          </span>
-          <span className="automation-launch-card__arrow" aria-hidden>→</span>
+    <div className="automations-empty spark-fade-in">
+      <span className="automations-empty__mark" aria-hidden>
+        <LoomIcon kind="trigger" tone="var(--warn)" size={18} />
+      </span>
+      <h2 className="automations-empty__title">This project can keep working while you're away</h2>
+      <p className="automations-empty__body">
+        Ask Cora in any chat to automate something recurring, like "run the tests every night and
+        fix what breaks". She sets up the trigger, the loop, and the workers, and it appears here,
+        running on your schedule.
+      </p>
+      <div className="automations-empty__actions">
+        <button type="button" className="spark-btn is-primary" onClick={onCreate}>
+          New automation
         </button>
-        <button type="button" className="automation-launch-card" onClick={onManual}>
-          <span className="automation-launch-card__icon" aria-hidden>⌘</span>
-          <span className="automation-launch-card__copy">
-            <span className="automation-launch-card__label">Visual builder</span>
-            <span className="automation-launch-card__title">Build a flow</span>
-            <span className="automation-launch-card__body">
-              Start from a proven template, then tune triggers, loops, guards,
-              parallel workers, access, and model effort directly.
-            </span>
-          </span>
-          <span className="automation-launch-card__arrow" aria-hidden>→</span>
-        </button>
+        <span className="automations-empty__alt">or wire the flow yourself in the editor</span>
       </div>
-      <div className="automation-launchpad__capabilities" aria-label="Automation capabilities">
-        <span>Schedules & folders</span>
-        <span>Bounded agent loops</span>
-        <span>Parallel workers</span>
-        <span>Guards & retries</span>
-      </div>
+      <p className="automations-empty__anatomy spark-mono">trigger · loop · workers · guards</p>
     </div>
   );
 }
 
-// ── Left-list row ────────────────────────────────────────────────────────────
+// ── Rail row ─────────────────────────────────────────────────────────────────
 
 // Two-bar pause mark, sized to sit inside the row's state tile.
 function PauseBars({ color, size = 10 }: { color: string; size?: number }): React.ReactElement {
@@ -915,11 +789,11 @@ function PauseBars({ color, size = 10 }: { color: string; size?: number }): Reac
   );
 }
 
-// The row's 18px state tile — the shape tells you the loom's disposition at a
-// glance: amber bolt = armed (trigger live, will fire), muted bars = paused
-// (disarmed), accent pulse = running, red = needs you, info bars = the live
-// pass is held. Status is COLOR + GLYPH here, never a moving box.
-function LoomStateTile({ job }: { job: ScheduledJob }): React.ReactElement {
+// The row's 18px state tile. The shape tells the automation's disposition at a
+// glance: amber bolt = armed (trigger live, will fire), muted bars = paused,
+// accent pulse = running, red = needs you, info bars = the live pass is held.
+// Status is COLOR + GLYPH here, never a moving box.
+function StateTile({ job }: { job: ScheduledJob }): React.ReactElement {
   const st = loomState(job);
   const tile: React.CSSProperties = {
     flex: "0 0 18px",
@@ -933,7 +807,27 @@ function LoomStateTile({ job }: { job: ScheduledJob }): React.ReactElement {
     border: `1px solid color-mix(in oklch, ${st.color} 26%, var(--rule-soft))`,
     background: `color-mix(in oklch, ${st.color} 9%, var(--panel-2))`,
   };
-  if (st.kind === "running" || st.kind === "blocked") {
+  if (st.kind === "running") {
+    // The comet arc: the same rotation the live surfaces use, so "running"
+    // reads identically from rail glance to detail hero.
+    return (
+      <span aria-hidden style={tile}>
+        <span
+          className="spark-activity-spin"
+          style={{
+            width: 11,
+            height: 11,
+            borderRadius: 999,
+            background: `conic-gradient(from 0deg, transparent 0deg 90deg, ${st.color} 360deg)`,
+            WebkitMask:
+              "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+            mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+          }}
+        />
+      </span>
+    );
+  }
+  if (st.kind === "blocked") {
     return (
       <span aria-hidden style={tile}>
         <span
@@ -943,7 +837,6 @@ function LoomStateTile({ job }: { job: ScheduledJob }): React.ReactElement {
             borderRadius: 999,
             background: st.color,
             boxShadow: `0 0 6px color-mix(in oklch, ${st.color} 55%, transparent)`,
-            animation: st.kind === "running" ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
           }}
         />
       </span>
@@ -956,7 +849,7 @@ function LoomStateTile({ job }: { job: ScheduledJob }): React.ReactElement {
       </span>
     );
   }
-  // armed — the trigger's own bolt, in its warm trigger amber.
+  // armed: the trigger's own bolt, in its warm trigger amber.
   return (
     <span aria-hidden style={tile}>
       <LoomIcon kind="trigger" tone={st.color} size={11} />
@@ -976,14 +869,15 @@ const AutomationRow = React.memo(function AutomationRow({
   onToggleEnabled: (enabled: boolean) => void;
 }): React.ReactElement {
   const st = loomState(job);
-  const loomPaused = st.kind === "paused";
+  const paused = st.kind === "paused";
+  const live = st.kind === "running";
   const [hover, setHover] = useState(false);
   const cue = liveCue(job);
   return (
     <button
       type="button"
       onClick={onSelect}
-      className="spark-fade-in"
+      className={`spark-fade-in automation-row${live ? " is-live" : ""}`}
       onMouseEnter={(e) => {
         setHover(true);
         if (!selected) e.currentTarget.style.background = "var(--hover)";
@@ -994,6 +888,8 @@ const AutomationRow = React.memo(function AutomationRow({
       }}
       style={{
         appearance: "none",
+        position: "relative",
+        overflow: "hidden",
         textAlign: "left",
         width: "100%",
         display: "flex",
@@ -1006,17 +902,17 @@ const AutomationRow = React.memo(function AutomationRow({
         background: selected ? "color-mix(in oklch, var(--accent) 13%, var(--panel))" : "transparent",
         boxShadow: selected ? "var(--lift-hi)" : "none",
         cursor: "default",
-        // A paused loom recedes — dimmer as a WHOLE row, so armed vs paused
-        // reads even in peripheral vision. spark-fade-in's fill-forwards
-        // animation would override an inline opacity (animations win the
-        // cascade), so the entrance animation is dropped while paused.
-        opacity: loomPaused ? 0.68 : 1,
-        animation: loomPaused ? "none" : undefined,
+        // A paused automation recedes as a WHOLE row, so armed vs paused reads
+        // even in peripheral vision. spark-fade-in's fill-forwards animation
+        // would override an inline opacity, so the entrance is dropped while
+        // paused.
+        opacity: paused ? 0.68 : 1,
+        animation: paused ? "none" : undefined,
         transition:
           "background var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
-      <LoomStateTile job={job} />
+      <StateTile job={job} />
       <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
         <span style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
           <span
@@ -1054,21 +950,21 @@ const AutomationRow = React.memo(function AutomationRow({
           </span>
         )}
       </span>
-      {/* Quick arm/pause — revealed on hover (and always for a paused loom so
-          re-arming never needs discovery). A span with role=button because the
-          row itself is already a <button>. */}
+      {/* Quick arm/pause, revealed on hover (and always for a paused
+          automation so re-arming never needs discovery). A span with
+          role=button because the row itself is already a <button>. */}
       <span
         role="button"
         tabIndex={0}
-        aria-label={job.enabled ? "Pause this loom (disarm its trigger)" : "Arm this loom"}
-        title={job.enabled ? "Pause — the trigger stops firing" : "Arm — the trigger fires again"}
+        aria-label={job.enabled ? "Pause this automation" : "Arm this automation"}
+        title={job.enabled ? "Pause: the trigger stops firing" : "Arm: the trigger fires again"}
         className="spark-icon-btn"
         style={{
           ["--spark-icon-btn-size"]: "20px",
           flex: "0 0 auto",
           marginTop: 0,
-          opacity: hover || loomPaused ? 1 : 0,
-          pointerEvents: hover || loomPaused ? "auto" : "none",
+          opacity: hover || paused ? 1 : 0,
+          pointerEvents: hover || paused ? "auto" : "none",
           transition: "opacity var(--motion-fast) var(--ease-out)",
         } as React.CSSProperties}
         onClick={(e) => {
@@ -1082,7 +978,7 @@ const AutomationRow = React.memo(function AutomationRow({
             onToggleEnabled(!job.enabled);
           }
         }}
-        // Keyboard focus must reveal the control — otherwise tab lands on an
+        // Keyboard focus must reveal the control; otherwise tab lands on an
         // invisible, still-operable toggle.
         onFocus={() => setHover(true)}
         onBlur={() => setHover(false)}
@@ -1097,13 +993,13 @@ const AutomationRow = React.memo(function AutomationRow({
   );
 });
 
-// ── Right detail ─────────────────────────────────────────────────────────────
+// ── Detail ───────────────────────────────────────────────────────────────────
 
 function AutomationDetail({
   job,
   liveRun,
-  runtimes,
   workers,
+  heroShown,
   onEdit,
   onOpenCreatorChat,
   onRunNow,
@@ -1118,12 +1014,14 @@ function AutomationDetail({
 }: {
   job: ScheduledJob;
   liveRun: RunState | null;
-  runtimes: AgentRuntimeDiagnostic[];
-  // This loom's workers only (live + briefly-lingering exited ones).
+  // This automation's workers only (live + briefly-lingering exited ones).
   workers: AutomationWorkerInfo[];
+  // The detail is on screen and unobstructed (tab active, board closed) —
+  // gates the live hero's 1s clock and activity poll.
+  heroShown: boolean;
   onEdit: () => void;
-  // Present only when this loom carries a createdByRunId; the button is further
-  // gated below on the run still existing.
+  // Present only when this automation carries a createdByRunId; the button is
+  // further gated below on the run still existing.
   onOpenCreatorChat?: () => void;
   onRunNow: () => void;
   onPause: () => void;
@@ -1131,25 +1029,24 @@ function AutomationDetail({
   onStop: () => void;
   onToggleEnabled: (enabled: boolean) => void;
   onDelete: () => void;
-  // Opens the live board — the flow canvas with the worker terminal docked in.
+  // Opens the live board, the flow canvas with live worker activity docked in.
   onOpenLiveBoard: () => void;
-  // Opens the board with its terminal sheet focused on one worker (by attemptId).
+  // Opens the board focused on one worker (by attemptId).
   onOpenBoardFocused: (attemptId: string) => void;
   onAnswer: (runId: string, questionMessageId: string, answer: string) => void;
 }): React.ReactElement {
   const status = job.state.status;
   const running = status === "running" || status === "blocked";
   const st = loomState(job);
-  // Resolve whether the authoring architect run still exists so a deleted
-  // session doesn't leave a dead "Open chat" button. One cheap getRun per loom
-  // that has a back-pointer; re-checked when the pointer changes.
+  // Resolve whether the creator chat still exists so a deleted run doesn't
+  // leave a dead "Open chat" button. One cheap getRun per automation that has
+  // a back-pointer; re-checked when the pointer changes.
   const creatorRunId = job.createdByRunId;
   const [creatorRunExists, setCreatorRunExists] = useState(false);
-  // Keyed on the run id ONLY — onOpenCreatorChat is a fresh closure each hub
-  // render (which is frequent while a run streams), so depending on it would
-  // re-fire getRun every render. The button is separately gated on
-  // onOpenCreatorChat below, and the two always move together (both derive from
-  // job.createdByRunId), so the id alone is a faithful trigger.
+  // Keyed on the run id ONLY: onOpenCreatorChat is a fresh closure each render
+  // (frequent while a run streams), so depending on it would re-fire getRun
+  // every render. The button is separately gated on onOpenCreatorChat below,
+  // and the two always move together (both derive from job.createdByRunId).
   useEffect(() => {
     if (!creatorRunId) {
       setCreatorRunExists(false);
@@ -1169,14 +1066,8 @@ function AutomationDetail({
     };
   }, [creatorRunId]);
   const canOpenCreatorChat = creatorRunExists && !!onOpenCreatorChat;
-  // Install hint when the loop stopped because no engine is available.
-  const installHint =
-    job.state.lastStopReason === "engine-missing"
-      ? runtimes.find((r) => r.kind === "claude")?.installHint ??
-        "Install Claude Code or Codex, then run the loom again."
-      : null;
   return (
-    // flex:"1 0 auto" — fill the scroll pane's height so the last section's
+    // flex:"1 0 auto": fill the scroll pane's height so the last section's
     // background runs to the bottom instead of leaving a dead void.
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: "1 0 auto" }}>
       {/* Sticky header */}
@@ -1193,7 +1084,7 @@ function AutomationDetail({
           borderBottom: "1px solid var(--rule)",
         }}
       >
-        <LoomStateTile job={job} />
+        <StateTile job={job} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
             <span style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -1215,9 +1106,9 @@ function AutomationDetail({
             {triggerSummary(job.trigger)} · {loopSummary(job.loop)} · {jobWorkerSummary(job)}
           </div>
         </div>
-        {/* The board's ONLY entry points are explicit clicks like this one —
-            it never auto-opens. Glowing while live so a running loom invites
-            you in; plain "Board" otherwise (the board shows the last run). */}
+        {/* The board's ONLY entry points are explicit clicks like this one; it
+            never auto-opens. Glowing while live so a running automation
+            invites you in; plain "Board" otherwise. */}
         <button
           type="button"
           className="spark-btn"
@@ -1236,8 +1127,8 @@ function AutomationDetail({
           onClick={onOpenLiveBoard}
           title={
             running
-              ? "Watch this run on the whiteboard — live graph + worker terminals"
-              : "Open the whiteboard — the loom graph with its last run's state"
+              ? "Watch this run on the whiteboard: live graph and worker activity"
+              : "Open the whiteboard with the last run's state"
           }
         >
           {running ? (
@@ -1253,9 +1144,8 @@ function AutomationDetail({
         </button>
       </div>
 
-      {/* Action bar — every control in ONE place, run-scoped first, then
-          loom-scoped, destructive last. (Previously scattered across the
-          worker card and the config footer.) */}
+      {/* Action bar: every control in ONE place, run-scoped first, then
+          automation-scoped, destructive last. */}
       <ActionBar
         job={job}
         onRunNow={onRunNow}
@@ -1268,28 +1158,40 @@ function AutomationDetail({
         onDelete={onDelete}
       />
 
+      {/* THE LIVE MOMENT: while a pass is in flight the detail leads with the
+          machine actually working — wire electricity, comet arc, ticking
+          readout, and the worker's live activity stream. Idle automations get
+          the quieter status card below instead. */}
+      {running ? (
+        <div style={{ padding: "12px 16px 2px" }}>
+          <LiveRunHero
+            job={job}
+            liveRun={liveRun}
+            workers={workers}
+            shown={heroShown}
+            onOpenLiveBoard={onOpenLiveBoard}
+            onAnswer={onAnswer}
+          />
+        </div>
+      ) : null}
+
       {/* Pipeline strip */}
       <div style={{ padding: "10px 16px 4px" }}>
         <MiniFlow job={job} onOpenEditor={onEdit} />
       </div>
 
-      {installHint && (
-        <div style={{ padding: "8px 16px 0" }}>
-          <span className="spark-badge is-danger">engine not installed</span>
-          <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>{installHint}</span>
-        </div>
+      {/* Status card only while idle — the hero above owns the live state. */}
+      {!running && (
+        <Section label="Last pass">
+          <LivePassCard job={job} liveRun={liveRun} onOpenLiveBoard={onOpenLiveBoard} onAnswer={onAnswer} />
+        </Section>
       )}
 
-      {/* Live worker */}
-      <Section label="Worker">
-        <LiveWorkerCard job={job} liveRun={liveRun} onOpenLiveBoard={onOpenLiveBoard} onAnswer={onAnswer} />
-      </Section>
-
-      {/* Workers — THIS loom's live/lingering workers, surfaced inside the loom
-          (not only on the global Workers grid). Hidden entirely when none. */}
+      {/* Workers: THIS automation's live/lingering workers, surfaced inside
+          the detail (not only on the global Workers grid). Hidden when none. */}
       {workers.length > 0 && (
         <Section label="Workers" count={workers.length}>
-          <LoomWorkersList workers={workers} onOpenBoardFocused={onOpenBoardFocused} />
+          <DetailWorkersList workers={workers} onOpenBoardFocused={onOpenBoardFocused} />
         </Section>
       )}
 
@@ -1298,11 +1200,11 @@ function AutomationDetail({
         <HistoryTimeline history={job.history} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
       </Section>
 
-      {/* Read-only configuration — the actions for it (Edit / Delete) live in
+      {/* Read-only configuration; the actions for it (Edit / Delete) live in
           the action bar up top with everything else. Grows to absorb the
           leftover height so the page reads as one composed surface. */}
       <Section label="Configuration" grow>
-        <LoopConfigSummary job={job} />
+        <ConfigSummary job={job} />
       </Section>
     </div>
   );
@@ -1359,8 +1261,8 @@ function ActionBar({
         onClick={onRunNow}
         title={
           running
-            ? "Stop the current pass and start the loom over from pass 1"
-            : "Start a fresh run of this loom now"
+            ? "Stop the current pass and start over from pass 1"
+            : "Start a fresh run now"
         }
       >
         {running ? "Restart" : "Run now"}
@@ -1370,7 +1272,7 @@ function ActionBar({
           Resume
         </button>
       ) : running ? (
-        <button type="button" className="spark-btn" style={btn} onClick={onPause} title="Hold the live pass — resume it any time">
+        <button type="button" className="spark-btn" style={btn} onClick={onPause} title="Hold the live pass; resume it any time">
           Pause pass
         </button>
       ) : null}
@@ -1396,7 +1298,7 @@ function ActionBar({
 
       {divider}
 
-      {/* Loom-scoped controls */}
+      {/* Automation-scoped controls */}
       <button
         type="button"
         className="spark-btn"
@@ -1413,13 +1315,13 @@ function ActionBar({
         onClick={() => onToggleEnabled(!job.enabled)}
         title={
           job.enabled
-            ? "Pause the loom — its trigger stops firing (a live pass keeps going)"
-            : "Arm the loom — its trigger fires again"
+            ? "Pause the automation: its trigger stops firing (a live pass keeps going)"
+            : "Arm the automation: its trigger fires again"
         }
       >
-        {job.enabled ? "Pause loom" : "⚡ Arm loom"}
+        {job.enabled ? "Pause automation" : "⚡ Arm automation"}
       </button>
-      <button type="button" className="spark-btn" style={btn} onClick={onEdit} title="Open this loom in the flow editor">
+      <button type="button" className="spark-btn" style={btn} onClick={onEdit} title="Open this automation in the flow editor">
         Edit
       </button>
       {onOpenCreatorChat && (
@@ -1428,7 +1330,7 @@ function ActionBar({
           className="spark-btn"
           style={btn}
           onClick={onOpenCreatorChat}
-          title="Open the Cora chat that created this loom"
+          title="Open the Cora chat that created this automation"
         >
           ✦ Open chat
         </button>
@@ -1449,7 +1351,7 @@ function ActionBar({
           }
         }}
         onMouseLeave={() => setConfirmDelete(false)}
-        title="Delete this loom (its run history stays on disk)"
+        title="Delete this automation (its run history stays on disk)"
       >
         {confirmDelete ? "Confirm delete" : "Delete"}
       </button>
@@ -1478,8 +1380,8 @@ function Section({
           : { borderBottom: "1px solid var(--rule-soft)" }
       }
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px 4px" }}>
-        <span className="spark-eyebrow">{label}</span>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "12px 16px 4px" }}>
+        <span style={{ fontSize: 12, fontWeight: 650, color: "var(--ink-dim)" }}>{label}</span>
         {typeof count === "number" && (
           <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted-2)" }}>
             {String(count).padStart(2, "0")}
@@ -1491,14 +1393,9 @@ function Section({
   );
 }
 
-// ── This loom's workers (inside the detail) ──────────────────────────────────
+// ── This automation's workers (inside the detail) ────────────────────────────
 
-// The Workers section of a loom's detail: its own live/lingering workers as
-// compact rows. Live rows are clickable — they open this loom's board with the
-// terminal sheet focused on that worker. Reads from the same
-// useAutomationWorkers source as the global Workers grid, filtered to this loom
-// upstream; this is the "inside the loom" surfacing of that same inventory.
-function LoomWorkersList({
+function DetailWorkersList({
   workers,
   onOpenBoardFocused,
 }: {
@@ -1518,13 +1415,13 @@ function LoomWorkersList({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {workers.map((w) => (
-        <LoomWorkerRow key={w.attemptId} worker={w} now={now} onOpenBoardFocused={onOpenBoardFocused} />
+        <DetailWorkerRow key={w.attemptId} worker={w} now={now} onOpenBoardFocused={onOpenBoardFocused} />
       ))}
     </div>
   );
 }
 
-function LoomWorkerRow({
+function DetailWorkerRow({
   worker,
   now,
   onOpenBoardFocused,
@@ -1535,14 +1432,9 @@ function LoomWorkerRow({
 }): React.ReactElement {
   const live = LIVE_ATTEMPT.has(worker.status);
   const blocked = worker.blocked;
-  // Steady dot — accent live, danger blocked, muted otherwise. No pulse.
+  // Steady dot: accent live, danger blocked, muted otherwise. No pulse.
   const dot = blocked ? "var(--danger)" : live ? "var(--accent)" : "var(--muted)";
-  // Runtime tint edge — the engine's coral/cyan (matches the flow cards); a
-  // legacy "auto" worker stays neutral.
-  const tone = ENGINE_TONE[worker.engine] ?? "var(--rule-strong)";
-  const engineWord =
-    worker.engine === "claude" ? "Claude" : worker.engine === "codex" ? "Codex" : "Auto";
-  const meta = worker.model ? `${engineWord} · ${worker.model}` : engineWord;
+  const meta = workerSummary(worker);
   const title = worker.nodeLabel ?? "Worker";
 
   const body = (
@@ -1578,7 +1470,7 @@ function LoomWorkerRow({
         <span
           className="spark-mono"
           style={{ fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-          title={worker.model ?? "CLI default model"}
+          title={worker.model ?? "Default model"}
         >
           {meta}
         </span>
@@ -1606,12 +1498,11 @@ function LoomWorkerRow({
     borderRadius: "var(--radius-control)",
     border: "1px solid var(--rule-soft)",
     background: "var(--panel)",
-    boxShadow: `inset 3px 0 0 ${tone}`,
     textAlign: "left",
   };
 
   // Live rows open the board focused on this worker; a lingering exited row is
-  // not interactive (its terminal is released — nothing to focus on the board).
+  // not interactive (its activity stream is released).
   if (!live) {
     return <div style={shared}>{body}</div>;
   }
@@ -1619,7 +1510,7 @@ function LoomWorkerRow({
     <button
       type="button"
       onClick={() => onOpenBoardFocused(worker.attemptId)}
-      title="Open this loom's board on this worker's terminal"
+      title="Open the board on this worker's activity"
       style={{ ...shared, appearance: "none", width: "100%", cursor: "default" }}
       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover)")}
       onMouseLeave={(e) => (e.currentTarget.style.background = "var(--panel)")}
@@ -1629,11 +1520,12 @@ function LoomWorkerRow({
   );
 }
 
-// ── Live worker card ─────────────────────────────────────────────────────────
+// ── Live pass card ───────────────────────────────────────────────────────────
 
-// Status-only now: what the loom is doing this instant (iteration, live run,
-// spend, a blocked worker's question). Every BUTTON lives in the ActionBar.
-function LiveWorkerCard({
+// Status-only: what the automation is doing this instant (iteration, live
+// run, spend, a blocked worker's question). Every BUTTON lives in the
+// ActionBar.
+function LivePassCard({
   job,
   liveRun,
   onOpenLiveBoard,
@@ -1654,9 +1546,9 @@ function LiveWorkerCard({
   // every answer; a historical same-text question is not interchangeable.
   const pendingQuestion = liveRun ? resolveOpenRunQuestion(liveRun) : null;
   const answerDraftScope = runQuestionDraftScopeKey(liveRun?.id, pendingQuestion?.id);
-  // The card stays mounted while runs/questions change. Clear local text on both
-  // identity boundaries, including question -> undefined when LiveBoard, a toast,
-  // or another surface answers the currently displayed question.
+  // The card stays mounted while runs/questions change. Clear local text on
+  // both identity boundaries, including question -> undefined when another
+  // surface answers the currently displayed question.
   useEffect(() => {
     setAnswerDraft("");
   }, [answerDraftScope]);
@@ -1691,7 +1583,7 @@ function LiveWorkerCard({
       {liveRun ? (
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="spark-mono" style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--ink-dim)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            <span style={{ color: runStatusColor(liveRun.status) }}>●</span> {liveRun.title || "run"} —{" "}
+            <span style={{ color: runStatusColor(liveRun.status) }}>●</span> {liveRun.title || "run"}:{" "}
             {liveRun.status}
           </span>
           {running && (
@@ -1700,7 +1592,7 @@ function LiveWorkerCard({
               className="spark-btn"
               style={{ height: 24, padding: "0 10px", fontSize: 11 }}
               onClick={onOpenLiveBoard}
-              title="Watch this run on the whiteboard — live graph + worker terminal"
+              title="Watch this run on the whiteboard"
             >
               Live board →
             </button>
@@ -1756,7 +1648,6 @@ function LiveWorkerCard({
           </div>
         </div>
       )}
-
     </div>
   );
 }
@@ -1772,7 +1663,7 @@ function HistoryTimeline({
   liveRunId?: string;
   onOpenLiveBoard: () => void;
 }): React.ReactElement {
-  // Keyed iteration+runId — iteration alone collides across loop cycles
+  // Keyed iteration+runId: iteration alone collides across loop cycles
   // ("Run now" resets the counter while history is retained), which would
   // expand both records together.
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -1890,7 +1781,7 @@ function HistoryTimeline({
   );
 }
 
-// ── Loop config summary ──────────────────────────────────────────────────────
+// ── Configuration summary ────────────────────────────────────────────────────
 
 // Entry-first walk (BFS along forward edges, back-edges skipped, unreachable
 // leftovers appended) so the config cards read in execution order.
@@ -1928,15 +1819,11 @@ function predicateSummary(p: GuardPredicate): string {
   }
 }
 
-// One card per graph node — a multi-worker loom has one prompt and one engine
-// PER worker, so a single flat "Prompt" row would lie about what runs.
+// One card per graph node: a multi-worker automation has one prompt and one
+// model PER worker, so a single flat "Prompt" row would lie about what runs.
 function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
   const tone =
-    node.kind === "worker"
-      ? ENGINE_TONE[node.worker.engine] ?? "var(--rule-strong)"
-      : node.kind === "guard"
-        ? "var(--ok)"
-        : "var(--info)";
+    node.kind === "worker" ? WORKER_TONE : node.kind === "guard" ? "var(--ok)" : "var(--info)";
   const title =
     node.label || (node.kind === "worker" ? "Worker" : node.kind === "guard" ? "Guard" : "Merge");
   const meta =
@@ -1957,7 +1844,6 @@ function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
         borderRadius: "var(--radius-surface)",
         border: "1px solid var(--rule-soft)",
         background: "var(--panel)",
-        boxShadow: `inset 3px 0 0 ${tone}`,
       }}
     >
       <span
@@ -1994,7 +1880,7 @@ function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
             className="spark-mono"
             style={{ fontSize: 11, color: "var(--ink-dim)", whiteSpace: "pre-wrap", maxHeight: 132, overflow: "auto" }}
           >
-            {node.prompt || <span style={{ color: "var(--muted-2)" }}>—</span>}
+            {node.prompt || <span style={{ color: "var(--muted-2)" }}>none</span>}
           </div>
         )}
       </div>
@@ -2002,8 +1888,8 @@ function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
   );
 }
 
-function LoopConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
-  // Tolerate malformed persisted jobs (loop without stop) — the scheduler
+function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
+  // Tolerate malformed persisted jobs (loop without stop): the scheduler
   // backfills on read, but a bad record must never take down the renderer.
   const stop = job.loop?.stop ?? {};
   const chips: string[] = [];
@@ -2019,9 +1905,7 @@ function LoopConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
       <KeyVal k="Trigger" v={triggerSummary(job.trigger)} />
       <KeyVal k="Loop" v={loopSummary(job.loop)} />
       <div style={{ display: "flex", gap: 8 }}>
-        <span className="spark-eyebrow" style={{ flex: "0 0 72px", paddingTop: 3 }}>
-          Stops
-        </span>
+        <ConfigKey label="Stops" />
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {chips.length === 0 ? (
             <span style={{ fontSize: 11, color: "var(--muted-2)" }}>safety caps only</span>
@@ -2034,13 +1918,10 @@ function LoopConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
           )}
         </div>
       </div>
-      {/* The pipeline, node by node in execution order — each worker with ITS
-          engine and ITS prompt (the old flat Worker/Prompt rows collapsed a
-          multi-worker loom into one misleading line). */}
+      {/* The pipeline, node by node in execution order, each worker with ITS
+          model and ITS prompt. */}
       <div style={{ display: "flex", gap: 8 }}>
-        <span className="spark-eyebrow" style={{ flex: "0 0 72px", paddingTop: 3 }}>
-          Pipeline
-        </span>
+        <ConfigKey label="Pipeline" />
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
           {nodes.map((n) => (
             <NodeConfigCard key={n.id} node={n} />
@@ -2051,12 +1932,26 @@ function LoopConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   );
 }
 
+function ConfigKey({ label }: { label: string }): React.ReactElement {
+  return (
+    <span
+      style={{
+        flex: "0 0 72px",
+        paddingTop: 3,
+        fontSize: 11,
+        fontWeight: 600,
+        color: "var(--muted)",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 function KeyVal({ k, v }: { k: string; v: string }): React.ReactElement {
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-      <span className="spark-eyebrow" style={{ flex: "0 0 72px" }}>
-        {k}
-      </span>
+      <ConfigKey label={k} />
       <span className="spark-mono" style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--ink-dim)", wordBreak: "break-word" }}>
         {v}
       </span>

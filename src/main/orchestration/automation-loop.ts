@@ -5,12 +5,15 @@ import type {
   AutomationRunRecord,
   AutomationStatus,
   AutomationStopReason,
-  LoomEngine,
   RunState,
   RunStatus,
   ScheduledJob,
 } from "@shared/types";
-import { normalizeCodexModelId } from "@shared/model-catalog";
+import {
+  DEFAULT_LOOM_WORKER_MODEL,
+  loomRuntimeForModel,
+  normalizeCodexModelId,
+} from "@shared/model-catalog";
 import {
   AUTOMATION_HISTORY_CAP,
   DEFAULT_AGENT_MAX_ITERATIONS,
@@ -51,7 +54,14 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>(["complete", "failed
 // "w0" worker node, no edges — planLoomLayers yields {layers:[["w0"]]}.
 const FALLBACK_GRAPH: import("@shared/types").LoomGraph = {
   version: 1,
-  nodes: [{ id: "w0", kind: "worker", worker: { engine: "auto" }, prompt: "" }],
+  nodes: [
+    {
+      id: "w0",
+      kind: "worker",
+      worker: { model: DEFAULT_LOOM_WORKER_MODEL, effort: "medium" },
+      prompt: "",
+    },
+  ],
   edges: [],
   entryNodeIds: ["w0"],
 };
@@ -329,11 +339,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
             incoming: [],
           }),
       );
-      const resolved = await resolveWorker(job);
-      if (!resolved.ok) {
-        await finalize(id, "engine-missing");
-        return;
-      }
+      const resolved = resolveWorker(job);
       // Per-worker tool access lives on the graph node (not job.worker), so the
       // single-node path reads it off the entry node and threads it down. collab
       // is skipped — a lone worker has no peers.
@@ -346,7 +352,6 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           runId: job.state.currentRunId as string,
           clientMessageId: `loop-${id}-${passIter}`,
           prompt,
-          engine: resolved.engine,
           model: resolved.model,
           effort: resolved.effort,
           loomNodeId: entryNodeId,
@@ -364,7 +369,6 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           automationId: id,
           title: `Loom: ${job.name} — pass ${passIter + 1}`,
           prompt,
-          engine: resolved.engine,
           model: resolved.model,
           effort: resolved.effort,
           loomNodeId: entryNodeId,
@@ -392,15 +396,10 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         return;
       }
 
-      // Resolve each entry node's worker against the installed set; a single
-      // missing engine fails the pass exactly as the single-node path does.
+      // Resolve each entry node's own pinned worker (model + effort).
       const launches: import("@shared/types").DirectNodeLaunch[] = [];
       for (const node of workerEntries) {
-        const resolved = await resolveWorker(job, node.worker);
-        if (!resolved.ok) {
-          await finalize(id, "engine-missing");
-          return;
-        }
+        const resolved = resolveWorker(job, node.worker);
         const rendered = decoratePrompt(
           renderNodePrompt(node.prompt, { vars: passVars, nodeOutputs: {}, incoming: [] }),
           false,
@@ -408,7 +407,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         launches.push({
           nodeId: node.id,
           template: rendered,
-          worker: { engine: resolved.engine, model: resolved.model, effort: resolved.effort },
+          worker: { model: resolved.model, effort: resolved.effort },
           label: node.label,
           access: node.access,
           blockedTools: node.blockedTools,
@@ -421,10 +420,9 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         run = await addDirectIteration({
           runId: job.state.currentRunId as string,
           clientMessageId: `loop-${id}-${passIter}`,
-          // prompt/engine kept for the iteration_started event payload + type; the
+          // prompt/model kept for the iteration_started event payload + type; the
           // actual launch uses `nodes`. Use the first entry's resolved values.
           prompt: launches[0].template,
-          engine: launches[0].worker.engine as LoomEngine,
           model: launches[0].worker.model,
           effort: launches[0].worker.effort,
           vars: passVars,
@@ -440,7 +438,6 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           automationId: id,
           title: `Loom: ${job.name} — pass ${passIter + 1}`,
           prompt: launches[0].template,
-          engine: launches[0].worker.engine as LoomEngine,
           model: launches[0].worker.model,
           effort: launches[0].worker.effort,
           vars: passVars,
@@ -739,77 +736,27 @@ export function recordAgentSignal(runId: string, signal: AgentLoopSignal): void 
   })();
 }
 
-// ── Worker resolution (Looms v2) ─────────────────────────────────────────────
-// Which CLI engine/model/effort runs the NEXT pass. Precedence:
-//   1. a validated agent handoff (state.pendingNextWorker, consumed once) — now
-//      honored even on a pinned engine, since "auto" no longer exists;
-//   2. the loom's own pinned engine/model/effort;
-//   3. a legacy "auto" spec (persisted before the auto→concrete change) still
-//      resolves claude-when-installed, else codex.
-// A model id unknown to the resolved runtime falls back to the CLI default
-// rather than failing the pass.
-async function resolveWorker(
+// ── Worker resolution (Looms on Pi) ──────────────────────────────────────────
+// Which model/effort runs the NEXT pass. Every worker runs on the bundled Pi
+// runtime, so there is no engine choice and no install detection: resolution is
+// pure precedence:
+//   1. a validated agent handoff (state.pendingNextWorker, consumed once) —
+//      only on the job-level worker (degenerate single-node passes + answer
+//      resumes), never on a graph entry node's own pinned worker;
+//   2. the config's own pinned model/effort;
+//   3. the migration defaults, for tolerance of a job that somehow bypassed
+//      normalizeJob (claude-opus-5 / medium).
+// gpt-* ids are normalized onto the current Codex catalog at this chokepoint so
+// a stale handoff id cannot pin a deprecated model.
+function resolveWorker(
   job: ScheduledJob,
   workerConfig: import("@shared/types").LoomWorkerConfig = job.worker,
-): Promise<
-  | { ok: true; engine: LoomEngine; model?: string; effort?: AgentEffortLevel }
-  | { ok: false }
-> {
-  const { detectAgentRuntimes } = await import("../agent-runtimes");
-  const runtimes = await detectAgentRuntimes();
-  const installed = new Set(
-    runtimes
-      .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed)
-      .map((r) => r.kind as LoomEngine),
-  );
-
-  // Resolve against the GIVEN worker config (defaults to job.worker so every
-  // existing call is byte-identical). A multi-node entry frontier resolves each
-  // entry node's OWN worker via resolveWorker(job, node.worker); the agent
-  // handoff stays keyed off job.worker (the loom-level engine policy) — only the
-  // job-level config carries a pending handoff. A handoff steers the NEXT pass's
-  // engine/model/effort even when the engine is pinned: "auto" no longer exists,
-  // so gating on it would silently drop every handoff (the socket already
-  // validated the fields against installed runtimes before recording them).
+): { model: string; effort: AgentEffortLevel } {
   const handoff = workerConfig === job.worker ? job.state.pendingNextWorker : undefined;
-
-  const want = handoff?.engine ?? workerConfig.engine;
-  const engine: LoomEngine | null =
-    want !== "auto"
-      ? installed.has(want)
-        ? want
-        : null
-      : installed.has("claude")
-        ? "claude"
-        : installed.has("codex")
-          ? "codex"
-          : null;
-  if (!engine) return { ok: false };
-
-  let model = handoff?.model ?? (engine === workerConfig.engine ? workerConfig.model : undefined);
-  if (model && engine === "codex") model = normalizeCodexModelId(model);
-  const known = runtimes.find((r) => r.kind === engine)?.models.map((m) => m.id) ?? [];
-  if (model && known.length > 0 && !known.includes(model)) {
-    void emitLoopNote("automation.model_fallback", {
-      automationId: job.id,
-      engine,
-      requested: model,
-    });
-    model = undefined;
-  }
-  const effort =
-    handoff?.effort ?? (engine === workerConfig.engine ? workerConfig.effort : undefined);
-  return { ok: true, engine, model, effort };
-}
-
-// Broadcast-only observability ping (same shape as automation.iteration).
-async function emitLoopNote(type: string, payload: Record<string, unknown>): Promise<void> {
-  try {
-    const { appendEvent } = await import("./event-log");
-    await appendEvent({ workspaceId: "", type, payload });
-  } catch {
-    /* best-effort */
-  }
+  let model = handoff?.model?.trim() || workerConfig.model?.trim() || DEFAULT_LOOM_WORKER_MODEL;
+  if (loomRuntimeForModel(model) === "codex") model = normalizeCodexModelId(model);
+  const effort = handoff?.effort ?? workerConfig.effort ?? "medium";
+  return { model, effort };
 }
 
 // ── Per-attempt watchdog (slice 7) ───────────────────────────────────────────
@@ -1004,15 +951,14 @@ const ATTEMPT_TERMINAL = new Set(["succeeded", "failed", "timed_out", "cancelled
 const answerResumes = new Set<string>();
 
 // The agent-loop continuation instructions appended to every agent-driven
-// pass's prompt (and to answer-resume continuations). A handoff is honored even
-// on a pinned engine ("auto" no longer exists), but ONLY on the job-level
-// worker (degenerate single-node passes + answer resumes) — resolveWorker never
-// consumes a handoff for a graph entry node's own worker, so steerable=false
-// there keeps the prompt honest.
+// pass's prompt (and to answer-resume continuations). A handoff is honored
+// ONLY on the job-level worker (degenerate single-node passes + answer
+// resumes) — resolveWorker never consumes a handoff for a graph entry node's
+// own worker, so steerable=false there keeps the prompt honest.
 function agentLoopFooter(job: ScheduledJob, steerable = true): string {
   if (job.loop.kind !== "agent") return "";
   const handoffNote = steerable
-    ? ` You may also pass nextEngine ("claude"|"codex"), nextModel, and nextEffort to codara_request_next_iteration to pick the next pass's worker; only installed engines are honored.`
+    ? ` You may also pass nextModel (claude-opus-5, claude-fable-5, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) and nextEffort to codara_request_next_iteration to pick the next pass's worker.`
     : "";
   return `\n\n---\nThis is an automation loop. When you finish this pass, decide whether to continue: call the codara_request_next_iteration tool (done=false to run another iteration, done=true to stop), or end your final summary with ${SPARK_LOOP_CONTINUE} or ${SPARK_LOOP_DONE} on its own last line.${handoffNote} If you give no signal the loop stops. Your safety caps always stop it regardless.`;
 }
@@ -1120,8 +1066,15 @@ async function maybeResumeAnsweredPass(id: string, run: RunState): Promise<void>
       const job = await getJob(id);
       if (!job || job.state.status === "paused" || job.state.status === "stopped") return;
       if (job.state.currentRunId !== run.id) return;
-      const resolved = await resolveWorker(job);
-      if (!resolved.ok) return; // no engine to resume with; the loom stays answerable
+      const resolved = resolveWorker(job);
+      // The resumed attempt is a continuation of the SAME node, so it must
+      // keep the node's tool-access fence — dropping access/blockedTools here
+      // would let a fenced worker run its answer-resume unfenced.
+      const resumeNode = (job.graph ?? FALLBACK_GRAPH).nodes.find(
+        (n) => n.id === (nodeId ?? "w0"),
+      );
+      const access = resumeNode?.kind === "worker" ? resumeNode.access : undefined;
+      const blockedTools = resumeNode?.kind === "worker" ? resumeNode.blockedTools : undefined;
 
       const prompt =
         `The previous worker on this pass stopped because it needed input:\n\n${matched.question}\n\n` +
@@ -1132,10 +1085,11 @@ async function maybeResumeAnsweredPass(id: string, run: RunState): Promise<void>
         runId: run.id,
         clientMessageId: `loop-${id}-answer-${nodeId ?? "w"}-${run.workerAttempts.length}`,
         prompt,
-        engine: resolved.engine,
         model: resolved.model,
         effort: resolved.effort,
         loomNodeId: nodeId,
+        access,
+        blockedTools,
       });
       armWatchdog(id, run.id, job.worker.timeoutMinutes);
       void emitIteration(id, Math.max(0, job.state.iteration - 1), run.id, "running");
@@ -1256,14 +1210,13 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
     case "agent": {
       const sig = await readAgentSignal(fresh, run, summary);
       if (sig.continue) {
-        // Record a worker handoff for the next pass regardless of the pinned
-        // engine — "auto" no longer exists, so a handoff steers the next pass's
-        // engine/model/effort directly (the socket already validated the fields
-        // against installed runtimes). Effort-only steering (no nextEngine) is a
-        // valid handoff too. resolveWorker consumes it on the job-level worker.
-        const wantsHandoff = Boolean(sig.nextEngine || sig.nextModel || sig.nextEffort);
+        // Record a worker handoff for the next pass: the agent may steer the
+        // next pass's model/effort (the socket already validated the fields).
+        // Effort-only steering is a valid handoff too. resolveWorker consumes
+        // it on the job-level worker.
+        const wantsHandoff = Boolean(sig.nextModel || sig.nextEffort);
         const handoff = wantsHandoff
-          ? { engine: sig.nextEngine, model: sig.nextModel, effort: sig.nextEffort }
+          ? { model: sig.nextModel, effort: sig.nextEffort }
           : undefined;
         await patchJob(id, (j) => ({
           ...j,

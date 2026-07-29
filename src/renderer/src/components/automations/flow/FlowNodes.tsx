@@ -2,6 +2,7 @@ import React from "react";
 import { BaseEdge, getBezierPath, Handle, Position } from "@xyflow/react";
 import type { EdgeProps, NodeProps } from "@xyflow/react";
 import type { GuardPredicate, LoomWorkerConfig } from "@shared/types";
+import { workerModelLabel } from "../worker-models";
 import type { FlowNodeData } from "./model";
 
 // Custom ReactFlow node + edge renderers for the loom canvas, painted with
@@ -24,16 +25,9 @@ type NodeData = FlowNodeData & { summary?: string; onAddFrom?: NodeCallbacks["on
     unknown
   >;
 
-// Engine identity — shared with the LiveBoard and run graph so a Claude
-// worker is warm coral and a Codex worker cool cyan on every surface.
-export const ENGINE_TONE: Record<string, string> = {
-  claude: "var(--engine-claude)",
-  codex: "var(--engine-codex)",
-};
-
-export function engineTone(engine: LoomWorkerConfig["engine"]): string {
-  return ENGINE_TONE[engine] ?? "var(--accent)";
-}
+// Role identity: every worker runs on the same bundled Pi runtime now, so
+// worker cards wear the house accent (role tone) rather than a per-engine hue.
+export const WORKER_TONE = "var(--accent)";
 
 // ── crisp 16px line icons (stroke 1.5, round caps) ──────────────────────────
 
@@ -313,27 +307,18 @@ export function TriggerNode({ id, data, selected }: NodeProps): React.ReactEleme
   );
 }
 
-// ── worker node — the engine's card ──────────────────────────────────────────
+// ── worker node — one agent pass ─────────────────────────────────────────────
 
 function workerLine(w: LoomWorkerConfig): string {
-  if (w.engine === "auto") return "auto · agent picks";
-  const parts = [w.engine === "claude" ? "Claude" : "Codex"];
-  if (w.model) parts.push(w.model);
+  const parts = [workerModelLabel(w.model)];
   if (w.effort) parts.push(w.effort);
   return parts.join(" · ");
-}
-
-// Subtle access suffix on the worker meta line — only when the node is fenced.
-function accessSuffix(access?: "full" | "edits" | "readonly"): string {
-  if (access === "edits") return " · edits-only";
-  if (access === "readonly") return " · read-only";
-  return "";
 }
 
 export function WorkerNode({ id, data, selected }: NodeProps): React.ReactElement {
   const d = data as NodeData;
   if (d.kind !== "worker") return <div />;
-  const tone = engineTone(d.worker.engine);
+  const tone = WORKER_TONE;
   const promptPreview = d.prompt.trim() || "no prompt yet";
   return (
     <div className="loom-node" style={cardStyle(selected, { width: 248, alignItems: "flex-start" })}>
@@ -353,7 +338,7 @@ export function WorkerNode({ id, data, selected }: NodeProps): React.ReactElemen
           )}
         </div>
         <Title text={d.label || "Worker"} />
-        <Meta text={workerLine(d.worker) + accessSuffix(d.access)} />
+        <Meta text={workerLine(d.worker)} />
         <span
           title={d.prompt}
           style={{

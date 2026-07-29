@@ -189,46 +189,39 @@ async function main() {
     }
     {
       const g = M.graphFromFlow([triggerNode, mkWorker("w0", { access: "readonly" })], [fEdge("e", TRIGGER, "w0")]);
-      ok("access 'readonly' persists on a claude worker", g.nodes.find((x) => x.id === "w0").access === "readonly");
+      ok("access 'readonly' persists", g.nodes.find((x) => x.id === "w0").access === "readonly");
     }
-    // codex has no read-only preset — a readonly value on a codex worker (e.g.
-    // after an engine flip) is persisted as edits, never as an unrunnable spec.
+    // Looms on Pi: readonly is valid for every model (the Pi harness enforces
+    // the fence and the worker keeps write for its final report), so a gpt
+    // worker's readonly persists as-is instead of the old codex edits flip.
     {
-      const codexRo = {
+      const gptRo = {
         id: "w0",
         type: "worker",
         position: { x: 100, y: 0 },
-        data: { kind: "worker", label: "Worker", worker: { engine: "codex" }, prompt: "do work", access: "readonly" },
+        data: { kind: "worker", label: "Worker", worker: { model: "gpt-5.6-sol", effort: "medium" }, prompt: "do work", access: "readonly" },
       };
-      const g = M.graphFromFlow([triggerNode, codexRo], [fEdge("e", TRIGGER, "w0")]);
-      ok("codex 'readonly' is flipped to 'edits' on persist", g.nodes.find((x) => x.id === "w0").access === "edits");
+      const g = M.graphFromFlow([triggerNode, gptRo], [fEdge("e", TRIGGER, "w0")]);
+      ok("gpt 'readonly' persists (no edits flip on Pi)", g.nodes.find((x) => x.id === "w0").access === "readonly");
     }
 
-    // blockedTools: trimmed + blanks dropped; an all-blank list persists nothing.
+    // blockedTools: the rebuilt editor persists the list as authored; the
+    // scheduler's normalizeJob is the enforcement backstop that drops scoped
+    // and blank entries on every persisted write (see test-automations.cjs).
     {
       const g = M.graphFromFlow(
-        [triggerNode, mkWorker("w0", { blockedTools: [" WebSearch ", "", "Bash"] })],
+        [triggerNode, mkWorker("w0", { blockedTools: ["WebSearch", "Bash"] })],
         [fEdge("e", TRIGGER, "w0")],
       );
       const n = g.nodes.find((x) => x.id === "w0");
-      ok("blockedTools trimmed + blanks dropped", JSON.stringify(n.blockedTools) === JSON.stringify(["WebSearch", "Bash"]));
-    }
-    // Scoped/parenthesized forms are dropped (claude CLI silently ignores them),
-    // so only bare tool names survive the persist.
-    {
-      const g = M.graphFromFlow(
-        [triggerNode, mkWorker("w0", { blockedTools: ["Bash(rm *)", "WebSearch", "Write "] })],
-        [fEdge("e", TRIGGER, "w0")],
-      );
-      const n = g.nodes.find((x) => x.id === "w0");
-      ok("scoped blockedTools dropped, bare names kept", JSON.stringify(n.blockedTools) === JSON.stringify(["WebSearch", "Write"]));
+      ok("blockedTools persist on the node", JSON.stringify(n.blockedTools) === JSON.stringify(["WebSearch", "Bash"]));
     }
     {
       const g = M.graphFromFlow(
-        [triggerNode, mkWorker("w0", { blockedTools: ["", "   "] })],
+        [triggerNode, mkWorker("w0", { blockedTools: [] })],
         [fEdge("e", TRIGGER, "w0")],
       );
-      ok("all-blank blockedTools persists nothing", g.nodes.find((x) => x.id === "w0").blockedTools === undefined);
+      ok("an empty blockedTools list persists nothing", g.nodes.find((x) => x.id === "w0").blockedTools === undefined);
     }
 
     // collab: an all-false object drops; only the true flags persist.

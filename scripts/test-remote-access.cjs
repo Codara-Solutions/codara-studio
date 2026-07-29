@@ -188,6 +188,45 @@ async function main() {
     );
   }
   check(
+    "the phone can never name the files a session delete touches",
+    // RemoteWorkerSessionInfo deliberately omits cwd and transcriptPath, so the
+    // delete has to rebuild both from the computer's own workspace listing.
+    !/export interface RemoteWorkerSessionInfo \{[^}]*(cwd|transcriptPath)/.test(rpcSource) &&
+      productionSource.includes("const sessions = await listLocalWorkerSessions(input.runtime, root)") &&
+      productionSource.includes("cwd: match.cwd") &&
+      productionSource.includes("transcriptPath: match.transcriptPath"),
+  );
+  check(
+    "a phone board write goes through the guarded user path at the revision it read",
+    productionSource.includes("if (current.revision !== input.baseRevision)") &&
+      productionSource.includes("baseRevision: current.revision") &&
+      productionSource.includes("workspaceCwd: root"),
+  );
+  check(
+    "queueing is refused on an automation's chat, where the nudge never runs",
+    // board-nudge drops any run carrying an automationId, so the queue lane
+    // there would be a promise nothing keeps. The phone hides the action; the
+    // server must not accept it either.
+    productionSource.includes("if (run.automationId) {") &&
+      productionSource.includes("cannot be queued from the phone") &&
+      // and the phone is told which runs those are
+      productionSource.includes("...(run.automationId ? { automated: true } : {})"),
+  );
+  check(
+    "concurrent session deletes serialize per runtime, not per session",
+    // Two deletes of different sessions still rewrite the same provider
+    // history file, so a per-session key would let one clobber the other.
+    productionSource.includes(
+      'JSON.stringify(["workerSession.delete", input.workspaceId, input.runtime])',
+    ),
+  );
+  check(
+    "remote run detail reports plan progress over the WHOLE plan, not the capped list",
+    productionSource.includes("stepsTotal: plan.total") &&
+      productionSource.includes("stepsFinished: plan.finished") &&
+      productionSource.includes("MAX_CORA_RUN_STEPS"),
+  );
+  check(
     "production serializes and persistently looks up Cora retry keys",
     productionSource.includes("coraMessageMutations.run") &&
       productionSource.includes("findRemoteCoraRetry(await listRuns(workspace.id)"),
@@ -1647,6 +1686,86 @@ async function main() {
           updatedAt: "2026-07-28T20:00:00.000Z",
         }];
       },
+      deleteWorkerSession: async (input) => {
+        calls.push(["workerSessions.delete", input]);
+        return {
+          deleted: true,
+          memoryDeleted: input.memoryScope !== "none",
+          memoryScope: input.memoryScope,
+          warnings: ["Codex's delete command failed"],
+        };
+      },
+      getAutomation: async (input) => {
+        calls.push(["automations.get", input]);
+        return {
+          id: input.automationId,
+          name: "Nightly sweep",
+          enabled: true,
+          status: "idle",
+          triggerKind: "cron",
+          triggerSummary: "Every night at 02:00",
+          iteration: 3,
+          model: "claude-opus-5",
+          effort: "high",
+          prompt: "Review yesterday's diffs",
+          history: [{
+            iteration: 2,
+            runId: "run-loom-2",
+            startedAt: "2026-07-29T02:00:00.000Z",
+            finishedAt: "2026-07-29T02:11:00.000Z",
+            status: "complete",
+            summary: "Nothing to fix",
+            costUsd: 0.42,
+            stopReason: "agent-done",
+          }],
+        };
+      },
+      getCoraWhiteboard: async (input) => {
+        calls.push(["cora.whiteboard.get", input]);
+        if (input.runId === "run-blank") return null;
+        return {
+          title: "How the phone reads a run",
+          summary: "Flattened for the phone",
+          nodes: [
+            { id: "n1", kind: "topic", title: "Remote access" },
+            { id: "n2", kind: "risk", title: "Frame budget", tone: "warning" },
+          ],
+          edges: [{ id: "e1", from: "n1", to: "n2", label: "bounded by" }],
+          updatedAt: "2026-07-29T10:00:00.000Z",
+        };
+      },
+      getCoraBoard: async (input) => {
+        calls.push(["cora.board.get", input]);
+        return {
+          revision: 4,
+          cards: [{
+            id: "card-1",
+            title: "Ship the phone board",
+            status: "idea",
+            order: 1,
+            updatedAt: "2026-07-29T09:00:00.000Z",
+          }],
+        };
+      },
+      updateCoraBoard: async (input) => {
+        calls.push(["cora.board.update", input]);
+        // Stand in for the real revision guard: a write composed against an
+        // older revision is reported back, not applied.
+        const applied = input.baseRevision === 4;
+        return {
+          applied,
+          board: {
+            revision: applied ? 5 : 4,
+            cards: [{
+              id: "card-1",
+              title: "Ship the phone board",
+              status: applied && input.action === "queue" ? "queued" : "idea",
+              order: 1,
+              updatedAt: "2026-07-29T09:05:00.000Z",
+            }],
+          },
+        };
+      },
       beginImageUpload: async (input) => {
         calls.push(["files.imageUpload.begin", input]);
         return {
@@ -1962,6 +2081,237 @@ async function main() {
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
 
+    /* ---- worker session delete ---------------------------------------- */
+
+    exReq(96, "workerSessions.delete", {
+      workspaceId: "ws1",
+      runtime: "codex",
+      sessionId: "session-codex-1",
+    });
+    await flush();
+    check(
+      "workerSessions.delete delegates only a workspace, runtime, session id and scope",
+      calls.at(-1)?.[0] === "workerSessions.delete" &&
+        JSON.stringify(Object.keys(calls.at(-1)?.[1] ?? {}).sort()) ===
+          JSON.stringify(["memoryScope", "runtime", "sessionId", "workspaceId"]) &&
+        // An omitted scope is the narrow one, never a wider delete.
+        calls.at(-1)?.[1]?.memoryScope === "none" &&
+        ex.outbox.at(-1)?.result?.deleted === true &&
+        ex.outbox.at(-1)?.result?.memoryDeleted === false &&
+        ex.outbox.at(-1)?.result?.warnings?.length === 1,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(961, "workerSessions.delete", {
+      workspaceId: "ws1",
+      runtime: "codex",
+      sessionId: "session-codex-1",
+      memoryScope: "codex-all",
+    });
+    await flush();
+    check(
+      "workerSessions.delete carries an explicit memory scope and reports what it removed",
+      calls.at(-1)?.[1]?.memoryScope === "codex-all" &&
+        ex.outbox.at(-1)?.result?.memoryDeleted === true &&
+        ex.outbox.at(-1)?.result?.memoryScope === "codex-all",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    {
+      // A memory scope belongs to exactly one runtime. Codex's scope wipes
+      // every local Codex memory on the machine, so it must never be reachable
+      // through a Claude delete, and vice versa.
+      const callsBefore = calls.length;
+      const mismatched = [
+        { runtime: "claude", memoryScope: "codex-all" },
+        { runtime: "codex", memoryScope: "claude-project" },
+        { runtime: "claude", memoryScope: "everything" },
+        { runtime: "codex", memoryScope: 1 },
+      ];
+      for (const params of mismatched) {
+        exReq(962, "workerSessions.delete", {
+          workspaceId: "ws1",
+          sessionId: "session-codex-1",
+          ...params,
+        });
+      }
+      await flush();
+      const refusals = ex.outbox
+        .slice(-mismatched.length)
+        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+      check(
+        "a memory scope from the other runtime is refused, never widened",
+        refusals.length === mismatched.length && calls.length === callsBefore,
+        { refusals: refusals.length, newCalls: calls.length - callsBefore },
+      );
+    }
+    {
+      // A phone cannot name a path here, so the only injection surface left is
+      // the session id itself; it must be refused before any service runs.
+      const callsBefore = calls.length;
+      for (const sessionId of ["../../etc/passwd", "", "-leading-dash", "a".repeat(200)]) {
+        exReq(97, "workerSessions.delete", {
+          workspaceId: "ws1",
+          runtime: "codex",
+          sessionId,
+        });
+      }
+      exReq(98, "workerSessions.delete", {
+        workspaceId: "ws1",
+        runtime: "shell",
+        sessionId: "session-codex-1",
+      });
+      await flush();
+      const refusals = ex.outbox
+        .slice(-5)
+        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+      check(
+        "workerSessions.delete refuses a malformed session id or runtime without calling the service",
+        refusals.length === 5 && calls.length === callsBefore,
+        { refusals: refusals.length, newCalls: calls.length - callsBefore },
+      );
+    }
+
+    /* ---- automation detail --------------------------------------------- */
+
+    exReq(97, "automations.get", { workspaceId: "ws1", automationId: "loom-1" });
+    await flush();
+    check(
+      "automations.get returns the loom's worker, prompt and pass history",
+      calls.at(-1)?.[0] === "automations.get" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        ex.outbox.at(-1)?.result?.automation?.model === "claude-opus-5" &&
+        ex.outbox.at(-1)?.result?.automation?.history?.[0]?.stopReason === "agent-done" &&
+        ex.outbox.at(-1)?.result?.automation?.history?.[0]?.costUsd === 0.42,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    {
+      const callsBefore = calls.length;
+      for (const params of [null, { workspaceId: "ws1" }, { automationId: "loom-1" }]) {
+        exReq(971, "automations.get", params);
+      }
+      await flush();
+      const refusals = ex.outbox
+        .slice(-3)
+        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+      check(
+        "automations.get refuses a request that does not name both the workspace and the loom",
+        refusals.length === 3 && calls.length === callsBefore,
+        { refusals: refusals.length, newCalls: calls.length - callsBefore },
+      );
+    }
+
+    /* ---- Cora whiteboard ------------------------------------------------ */
+
+    exReq(99, "cora.whiteboard.get", { workspaceId: "ws1", runId: "run-1" });
+    await flush();
+    check(
+      "cora.whiteboard.get returns nodes and edges without canvas geometry",
+      calls.at(-1)?.[0] === "cora.whiteboard.get" &&
+        ex.outbox.at(-1)?.result?.whiteboard?.nodes?.length === 2 &&
+        ex.outbox.at(-1)?.result?.whiteboard?.edges?.[0]?.label === "bounded by" &&
+        !("x" in (ex.outbox.at(-1)?.result?.whiteboard?.nodes?.[0] ?? {})),
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(991, "cora.whiteboard.get", { workspaceId: "ws1", runId: "run-blank" });
+    await flush();
+    check(
+      "a chat with no whiteboard answers null rather than an error",
+      ex.outbox.at(-1)?.ok === true && ex.outbox.at(-1)?.result?.whiteboard === null,
+      ex.outbox.at(-1),
+    );
+
+    /* ---- Cora Board ---------------------------------------------------- */
+
+    exReq(100, "cora.board.get", { workspaceId: "ws1", runId: "run-1" });
+    await flush();
+    check(
+      "cora.board.get returns the chat's revisioned card list",
+      calls.at(-1)?.[0] === "cora.board.get" &&
+        ex.outbox.at(-1)?.result?.board?.revision === 4 &&
+        ex.outbox.at(-1)?.result?.board?.cards?.[0]?.id === "card-1",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(101, "cora.board.update", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      baseRevision: 4,
+      action: "add-idea",
+      title: "  Try the board on the phone  ",
+      description: "  with a body  ",
+    });
+    await flush();
+    check(
+      "cora.board.update add-idea trims its card text and carries the read revision",
+      calls.at(-1)?.[1]?.title === "Try the board on the phone" &&
+        calls.at(-1)?.[1]?.description === "with a body" &&
+        calls.at(-1)?.[1]?.baseRevision === 4 &&
+        ex.outbox.at(-1)?.result?.applied === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(102, "cora.board.update", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      baseRevision: 4,
+      action: "queue",
+      cardId: "card-1",
+    });
+    await flush();
+    check(
+      "cora.board.update queue names one card and returns the advanced board",
+      calls.at(-1)?.[1]?.action === "queue" &&
+        calls.at(-1)?.[1]?.cardId === "card-1" &&
+        ex.outbox.at(-1)?.result?.board?.revision === 5 &&
+        ex.outbox.at(-1)?.result?.board?.cards?.[0]?.status === "queued",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(103, "cora.board.update", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      baseRevision: 2,
+      action: "delete",
+      cardId: "card-1",
+    });
+    await flush();
+    check(
+      "a stale board write is reported unapplied with the current board, not an error",
+      ex.outbox.at(-1)?.ok === true &&
+        ex.outbox.at(-1)?.result?.applied === false &&
+        ex.outbox.at(-1)?.result?.board?.revision === 4,
+      ex.outbox.at(-1),
+    );
+    {
+      const callsBefore = calls.length;
+      const badWrites = [
+        // add-idea without a usable title
+        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "add-idea" },
+        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "add-idea", title: "   " },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 4,
+          action: "add-idea",
+          title: "x".repeat(rpc.MAX_BOARD_CARD_TITLE_LENGTH + 1),
+        },
+        // card actions without a card
+        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "queue" },
+        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "delete", cardId: "" },
+        // lanes the phone may not assign, and revisions that are not one
+        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "done", cardId: "card-1" },
+        { workspaceId: "ws1", runId: "run-1", baseRevision: -1, action: "queue", cardId: "card-1" },
+        { workspaceId: "ws1", runId: "run-1", baseRevision: 1.5, action: "queue", cardId: "card-1" },
+        { workspaceId: "ws1", baseRevision: 4, action: "queue", cardId: "card-1" },
+      ];
+      for (const params of badWrites) exReq(104, "cora.board.update", params);
+      await flush();
+      const refusals = ex.outbox
+        .slice(-badWrites.length)
+        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+      check(
+        "cora.board.update refuses every malformed write before the board is touched",
+        refusals.length === badWrites.length && calls.length === callsBefore,
+        { refusals: refusals.length, newCalls: calls.length - callsBefore },
+      );
+    }
+
     const beforeCreate = ex.outbox.length;
     exReq(10, "terminal.create", {
       workspaceId: "ws1",
@@ -1997,6 +2347,49 @@ async function main() {
       "disconnect closes a visible shared terminal instead of detaching it",
       sharedTerminal?.closed === true && sharedTerminal?.detached === false,
       sharedTerminal,
+    );
+  }
+
+  /* ---- old-Studio degradation for the optional surfaces ---------------- */
+
+  {
+    // The base services object has no board and no session delete, exactly
+    // like a Studio that predates them. The phone must be told the method is
+    // unknown so it hides the affordance instead of showing a dead control.
+    const old = makeFakeStream();
+    void new rpc.RpcSession(old, services);
+    old.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0 } }));
+    await flush();
+    const before = old.outbox.length;
+    old.inject(rpc.encodeFrame({
+      id: 2,
+      method: "cora.board.get",
+      params: { workspaceId: "ws1", runId: "run-1" },
+    }));
+    old.inject(rpc.encodeFrame({
+      id: 5,
+      method: "cora.whiteboard.get",
+      params: { workspaceId: "ws1", runId: "run-1" },
+    }));
+    old.inject(rpc.encodeFrame({
+      id: 3,
+      method: "cora.board.update",
+      params: { workspaceId: "ws1", runId: "run-1", baseRevision: 0, action: "queue", cardId: "c" },
+    }));
+    old.inject(rpc.encodeFrame({
+      id: 4,
+      method: "workerSessions.delete",
+      params: { workspaceId: "ws1", runtime: "claude", sessionId: "abc" },
+    }));
+    await flush();
+    const answers = old.outbox.slice(before);
+    check(
+      "an older Studio answers unknown-method for the board, whiteboard and session delete",
+      answers.length === 4 &&
+        answers.every(
+          (frame) => frame?.ok === false && frame?.error?.code === "unknown-method",
+        ),
+      answers,
     );
   }
 

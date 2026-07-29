@@ -978,8 +978,8 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
             onChange={(v) => void setPreference("keepRunningInBackground", v)}
           />
           <ToggleRow
-            title="Auto-open preview for local dev servers"
-            desc="When an agent or terminal prints a localhost URL (e.g. a Vite/Next dev server), automatically open it in a preview tab. When off, a clickable chip appears instead."
+            title="Auto-open browser for local dev servers"
+            desc="When an agent or terminal prints a localhost URL (e.g. a Vite/Next dev server), automatically open it in a browser tab. When off, a clickable chip appears instead."
             checked={Boolean(preferences.autoOpenPreview)}
             onChange={(v) => void setPreference("autoOpenPreview", v)}
           />

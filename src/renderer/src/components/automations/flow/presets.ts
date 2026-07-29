@@ -2,10 +2,8 @@ import type { AutomationLoop, AutomationTrigger, LoomGraph, LoomWorkerConfig } f
 
 // Preset gallery for the node-flow editor. Each preset stamps the whole draft
 // (trigger + loop + worker + prompt) so a new loom is one click + one prompt
-// tweak away. Workers carry a concrete engine/model/effort default (Claude +
-// claude-sonnet-5 + medium) — "auto"/blank no longer exist. On a Codex-only
-// machine the engine select shows an "not installed" badge and the user
-// switches it to Codex.
+// tweak away. Workers run on the bundled Pi runtime and carry a concrete
+// model/effort default (Opus 5 at medium) — blank no longer exists.
 
 export interface LoomPreset {
   id: string;
@@ -20,7 +18,7 @@ export interface LoomPreset {
   graph?: LoomGraph;
 }
 
-const DEFAULT_WORKER: LoomWorkerConfig = { engine: "claude", model: "claude-sonnet-5", effort: "medium" };
+const DEFAULT_WORKER: LoomWorkerConfig = { model: "claude-opus-5", effort: "medium" };
 
 // ── example graphs ───────────────────────────────────────────────────────────
 
@@ -103,7 +101,7 @@ export const PRESETS: LoomPreset[] = [
   {
     id: "agent",
     title: "Agent decides",
-    blurb: "The model keeps looping until it says it's done — bounded by your caps.",
+    blurb: "The model keeps looping until it says it's done, bounded by your caps.",
     trigger: { kind: "manual" },
     loop: { kind: "agent", stop: { maxIterations: 20, budgetUsd: 5 } },
     worker: DEFAULT_WORKER,

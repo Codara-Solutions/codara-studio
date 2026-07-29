@@ -214,6 +214,14 @@ export type ChatTimelineItem =
       kind: "tool";
       id: string;
       activity: "context" | "manager" | "worker";
+      // The SparkCall a manager row belongs to. Set on every manager row so
+      // consumers stop deriving it from the id, which is no longer 1:1 with
+      // calls once a mid-turn question splits a turn into segments.
+      sparkCallId?: string;
+      // The slice of the manager turn's execution trace this row renders,
+      // as a half-open [from, to) window over block timestamps. Absent on
+      // unsegmented rows, which render the whole trace.
+      traceWindow?: { from?: string; to?: string };
       title: string;
       detail: string;
       // "queued" is a worker-only state: the lineage is between attempts, so
@@ -259,6 +267,29 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   for (const message of run.humanMessages) {
     const text = message.message.trim();
     if (!text) continue;
+    // The synthetic board-nudge note is authored "user" only so delivery
+    // treats it as manager input — rendering it as the user's own bubble
+    // (full of tool names) would misattribute it. Surface it like the other
+    // system activity rows: a quiet labeled entry, card count as the detail.
+    if (message.boardNote) {
+      const cardCount = (text.match(/^- /gm) ?? []).length;
+      items.push({
+        kind: "tool",
+        id: `board-note:${message.id}`,
+        activity: "context",
+        title: "Cora Board",
+        detail:
+          cardCount === 1
+            ? "1 queued card handed to Cora"
+            : `${cardCount} queued cards handed to Cora`,
+        status: "completed",
+        tone: "done",
+        at: message.createdAt,
+        meta: cardCount > 0 ? [{ label: "Cards", value: String(cardCount) }] : [],
+        files: [],
+      });
+      continue;
+    }
     messageItems.push({
       kind: "message",
       id: message.id,
@@ -301,7 +332,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   items.push(...collapseDuplicateMessages(messageItems));
 
   for (const call of run.sparkCalls) {
-    items.push(sparkCallTimelineItem(call));
+    items.push(...sparkCallTimelineItems(call, run));
   }
 
   // One row per logical worker (task collapsed over its supersedes chain),
@@ -393,45 +424,152 @@ function timelineItemOrder(item: ChatTimelineItem): number {
   return 2;
 }
 
-function sparkCallTimelineItem(call: SparkCall): Extract<ChatTimelineItem, { kind: "tool" }> {
-  const failed = call.status === "failed";
-  const live = call.status === "started";
+// One manager turn can span a blocking ask_user call: the provider keeps the
+// SAME streaming turn open across the question, so everything the manager does
+// after the user's answer (spawning workers, waiting, closing prose) still
+// belongs to a call anchored at the turn's START. Rendered as a single row,
+// that activity sits ABOVE the question and answer bubbles, which is exactly
+// backwards. Split such a call into segments at each mid-turn question: the
+// slice before the question keeps the turn's anchor, and each following slice
+// re-anchors at the answer (so it sorts right below it). The trace window on
+// each segment tells the renderer which execution blocks belong to it; the
+// LAST segment carries the turn's verdict (status, error, duration, tokens).
+function sparkCallTimelineItems(
+  call: SparkCall,
+  run: RunState,
+): Extract<ChatTimelineItem, { kind: "tool" }>[] {
+  // Compaction is maintenance, never conversational: it cannot ask questions.
+  if (call.purpose === "compaction") return [sparkCallTimelineItem(call)];
+  const callEnd = call.completedAt;
+  const questions = run.humanMessages
+    .filter(
+      (message) =>
+        message.author === "spark" &&
+        message.kind === "question" &&
+        message.createdAt > call.createdAt &&
+        (!callEnd || message.createdAt < callEnd),
+    )
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  if (questions.length === 0) return [sparkCallTimelineItem(call)];
+
+  const segments: Extract<ChatTimelineItem, { kind: "tool" }>[] = [];
+  const count = questions.length + 1;
+  let from: string | undefined;
+  let anchor = call.createdAt;
+  questions.forEach((question, index) => {
+    segments.push(
+      sparkCallTimelineItem(call, {
+        index,
+        count,
+        at: anchor,
+        window: { from, to: question.createdAt },
+      }),
+    );
+    // The continuation re-anchors at the answer when one exists (sorting just
+    // below it; messages win kind-order ties), else at the question itself —
+    // an open question blocks the manager, so nothing streams before the
+    // answer arrives and re-anchors the rebuild.
+    const answer = run.humanMessages.find(
+      (message) =>
+        message.author === "user" &&
+        message.kind === "answer" &&
+        message.createdAt >= question.createdAt &&
+        (message.answersMessageId === question.id ||
+          message.targetTurnId === `question:${question.id}` ||
+          !message.answersMessageId),
+    );
+    from = question.createdAt;
+    anchor = answer?.createdAt ?? question.createdAt;
+  });
+  segments.push(
+    sparkCallTimelineItem(call, {
+      index: questions.length,
+      count,
+      at: anchor,
+      window: { from },
+    }),
+  );
+  return segments;
+}
+
+// One slice of a (possibly segmented) manager turn. Without a segment the row
+// is the whole call, exactly as before segmentation existed.
+interface SparkCallSegment {
+  index: number;
+  count: number;
+  at: string;
+  window: { from?: string; to?: string };
+}
+
+function sparkCallTimelineItem(
+  call: SparkCall,
+  segment?: SparkCallSegment,
+): Extract<ChatTimelineItem, { kind: "tool" }> {
+  const isLast = !segment || segment.index === segment.count - 1;
+  // Non-final segments are settled history whatever the call's fate: the turn
+  // was still alive when their slice ended (it went on to ask the question),
+  // so a failure or live pulse belongs only to the final slice.
+  const failed = call.status === "failed" && isLast;
+  const live = call.status === "started" && isLast;
   const meta: ChatToolMeta[] = [
     { label: "Mode", value: managerModeLabel(call.mode) },
     { label: "Model", value: call.model || "manager" },
   ];
 
   const duration = formatDurationShort(call.durationMs);
-  if (duration) meta.push({ label: "Duration", value: duration });
+  // Duration/token/context gauges describe the WHOLE turn; on a segmented
+  // call they ride the final slice only, so two rows never claim the same
+  // six minutes.
+  if (isLast) {
+    if (duration) meta.push({ label: "Duration", value: duration });
 
-  const tokens = formatTokenUsage(call);
-  if (tokens) meta.push({ label: "Tokens", value: tokens });
+    const tokens = formatTokenUsage(call);
+    if (tokens) meta.push({ label: "Tokens", value: tokens });
 
-  const context = formatContextUsage(call);
-  if (context) meta.push({ label: "Context", value: context });
+    const context = formatContextUsage(call);
+    if (context) meta.push({ label: "Context", value: context });
+  }
 
+  // Auto-compaction's summarize call is maintenance, not a conversational
+  // turn — label it as such instead of "Cora is working".
+  const compaction = call.purpose === "compaction";
   return {
     kind: "tool",
-    id: `spark-call:${call.id}`,
+    // The first slice keeps the call's historic id so the virtualized row
+    // holds its identity when a live turn asks its first question and splits.
+    id: segment && segment.index > 0 ? `spark-call:${call.id}:seg${segment.index}` : `spark-call:${call.id}`,
     activity: "manager",
-    title:
-      call.mode === "chat"
+    sparkCallId: call.id,
+    traceWindow: segment?.window,
+    title: compaction
+      ? live
+        ? "Compacting conversation"
+        : failed
+          ? "Compaction skipped"
+          : "Compacted conversation"
+      : call.mode === "chat"
         ? live
           ? "Cora is working"
           : failed
             ? "Turn failed"
-            : duration
+            : isLast && duration
               ? `Worked for ${duration}`
               : "Worked"
         : managerModeTitle(call.mode),
     detail: failed
       ? call.error || "Manager call failed."
-      : live
-        ? "Following the thread and choosing the next useful action"
-        : managerModeCompletedDetail(call),
-    status: call.status,
+      : compaction
+        ? live
+          ? "Summarizing the conversation to stay within the model's context window"
+          : "Older history was summarized into a fresh session"
+        : live
+          ? "Following the thread and choosing the next useful action"
+          : isLast
+            ? managerModeCompletedDetail(call)
+            : "",
+    status: isLast ? call.status : "completed",
     tone: failed ? "failed" : live ? "live" : "done",
-    at: call.createdAt,
+    at: segment?.at ?? call.createdAt,
     meta,
     files: [],
   };
@@ -886,8 +1024,17 @@ export function describeRunStatus(run: RunState): ChatStatus {
       return { label: "Working", tone: "live", detail: stepDetail };
     case "reviewing":
       return { label: "Reviewing", tone: "live", detail: stepDetail };
-    case "paused":
-      return { label: "Paused", tone: "paused", detail: stepDetail };
+    case "paused": {
+      // A run parked by the manager-turn failure policy (provider overload or
+      // rate limit) carries its park reason; surface it so the header reads
+      // "Paused · Cora's provider is overloaded. Retry runs the turn again."
+      // instead of a bare step count. Mirrors manager-turn-policy's lastAction
+      // strings and speaks the same voice as the composer's Retry button.
+      const lastAction = run.autopilot?.lastAction;
+      const parked = lastAction === "chat_turn_parked" || lastAction === "manager_turn_parked";
+      const parkReason = parked ? run.autopilot?.stopReason : undefined;
+      return { label: "Paused", tone: "paused", detail: parkReason ?? stepDetail };
+    }
     case "blocked":
       return { label: "Needs you", tone: "blocked", detail: "waiting on a reply" };
     case "complete": {

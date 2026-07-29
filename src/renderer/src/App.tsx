@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import type {
   AppSettings,
   AppState,
+  BoardCard,
   ChatBackendKind,
   FsEntry,
   GitFileChange,
@@ -42,6 +43,8 @@ import CreateCopyDialog from "./components/CreateCopyDialog";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
+import { boardBackend } from "./components/board/board-backend";
+import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
 import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
@@ -54,7 +57,7 @@ import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import RemoteConnectDialog from "./components/remote/RemoteConnectDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
-import { useTabs, isDraftChatTabId, sameWorkerMeta } from "./tabs/useTabs";
+import { useTabs, isDraftChatTabId, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
@@ -69,6 +72,11 @@ import type {
   TerminalTab,
 } from "./tabs/types";
 import { isRunOwnedTab } from "./tabs/types";
+import {
+  resolveEffectiveActiveId,
+  resolveTopStripActiveId,
+  runOwnedTabRunId,
+} from "./tabs/workbenchRouting";
 import type { CoraView } from "./components/chat/cora-view";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
@@ -184,6 +192,14 @@ function isBrowserUrl(url: string): boolean {
 // Every real Cora chat owns stable run surfaces from its first snapshot. Runs
 // and Whiteboard must not pop into the navigation several seconds later just
 // because planning or delegation finally produced an artifact.
+// Runs the board engine started for a Cora Board card. Like loom-owned runs
+// (automationId) they never auto-materialize chat tabs or cockpit rows — their
+// surface is the board — except where a site deliberately resurfaces blocked
+// runs ("needs you" must still reach the user).
+function isBoardCardRun(run: RunState): boolean {
+  return Boolean(run.boardCardId);
+}
+
 function runHasWorkbench(run: RunState): boolean {
   return Boolean(run.id);
 }
@@ -607,7 +623,6 @@ export default function App() {
     newTerminalTab,
     newPreviewTab,
     addDraftChatTab,
-    openAutomationsTab,
     newWhiteboardTab,
     hideRunsTabs,
     closeChatTabForRun,
@@ -655,9 +670,11 @@ export default function App() {
       run: RunState,
       options?: { select?: boolean; focusRuns?: boolean },
     ) => {
-      // Loom-owned runs never enter the lifted chat state (defensive — the
-      // listRuns filter is the primary gate).
+      // Loom-owned and board-card runs never enter the lifted chat state
+      // (defensive — the listRuns filter is the primary gate). Board runs the
+      // user explicitly opened from their card are exempt.
       if (run.automationId) return;
+      if (isBoardCardRun(run) && !openedBoardRunIdsRef.current.has(run.id)) return;
       if (run.workspaceId === activeIdRef.current) {
         const sameWorkspace = runsWorkspaceIdRef.current === run.workspaceId;
         runsWorkspaceIdRef.current = run.workspaceId;
@@ -791,6 +808,12 @@ export default function App() {
   // workspace first when the chosen run belongs to another project. The
   // per-workspace remembered-selection plumbing then restores this run once the
   // new workspace's runs load.
+  // Board-card runs a user explicitly opened from a card's "Open chat". Runs
+  // in this set are exempt from the board-run suppression below — without the
+  // exemption the lifted runs list never contains the run and the chat tab
+  // handleSelectRun focuses would render empty.
+  const openedBoardRunIdsRef = useRef<Set<string>>(new Set());
+
   const handleSelectRunAnywhere = useCallback(
     (runId: string, workspaceId?: string) => {
       if (workspaceId && workspaceId !== activeIdRef.current) {
@@ -808,6 +831,16 @@ export default function App() {
       if (target?.automationId) {
         tabsRef.current.openAutomationsTab();
         return;
+      }
+      // Board-card runs are suppressed from the lifted list until explicitly
+      // opened (openedBoardRunIdsRef). A RunSwitcher / away-digest /
+      // notification click IS such an explicit open — without the exemption
+      // the selected chat tab renders empty and syncChatTabsToRuns prunes it.
+      // handleSelectRun's own refreshRunsFor pass runs after this, so the
+      // exemption is already registered when the list is rebuilt (mirrors
+      // handleOpenBoardCardRun).
+      if (target && isBoardCardRun(target)) {
+        openedBoardRunIdsRef.current.add(runId);
       }
       handleSelectRun(runId, workspaceId);
     },
@@ -1209,8 +1242,24 @@ export default function App() {
       // chat tabs / RunsStack rows from materializing for them.
       runsWorkspaceIdRef.current = workspaceId;
       setRunsWorkspaceId(workspaceId);
+      // Board-card exemptions survive a relaunch by DERIVATION: a board run
+      // whose chat tab sat in this workspace's persisted layout was explicitly
+      // opened by the user last session, so it re-registers here before the
+      // filter runs (the exemption set itself is session-scoped).
+      const restored = restoredChatRunIds(workspaceId);
+      if (restored.size > 0) {
+        for (const run of next) {
+          if (isBoardCardRun(run) && restored.has(run.id)) {
+            openedBoardRunIdsRef.current.add(run.id);
+          }
+        }
+      }
       setRuns((current) => {
-        const filtered = next.filter((run) => !run.automationId);
+        const filtered = next.filter(
+          (run) =>
+            !run.automationId &&
+            (!isBoardCardRun(run) || openedBoardRunIdsRef.current.has(run.id)),
+        );
         return sameRunsList(current, filtered) ? current : filtered;
       });
     } catch {
@@ -1493,7 +1542,9 @@ export default function App() {
       // blocked (clicks route to the Automations Hub); their per-pass
       // completions never enter done-unseen.
       const digest = buildAwayDigest(
-        globalRuns.runsRef.current.filter((r) => !r.automationId || r.status === "blocked"),
+        globalRuns.runsRef.current.filter(
+          (r) => (!r.automationId && !isBoardCardRun(r)) || r.status === "blocked",
+        ),
       );
       if (digest.total === 0) return;
       setAwayDigest(digest);
@@ -1581,7 +1632,15 @@ export default function App() {
     const off = window.spark.windowControls.onOpenAutomations(() => {
       tabsRef.current.openAutomationsTab();
     });
-    return () => off();
+    // Renderer-side twin of the same intent: surfaces without tab-store access
+    // (the new-chat welcome's Automations row) broadcast this instead of prop
+    // drilling through the chat stack.
+    const onOpenTab = () => tabsRef.current.openAutomationsTab();
+    window.addEventListener("spark:open-automations-tab", onOpenTab);
+    return () => {
+      off();
+      window.removeEventListener("spark:open-automations-tab", onOpenTab);
+    };
   }, []);
 
   // Main signals a quit is starting BEFORE it kills the PTYs (before-quit /
@@ -3236,6 +3295,18 @@ export default function App() {
     [handleNewWorkerTab, resolveWorkerLaunchCwd],
   );
 
+  // Bound per-runtime so the tab strip's "+" rows get referentially stable
+  // callbacks (TabBar is memoized). Both land on the same picker the
+  // worker.newClaude / worker.newCodex commands open.
+  const openClaudeWorkerSessions = useCallback(
+    () => openShortcutWorkerSessions("claude"),
+    [openShortcutWorkerSessions],
+  );
+  const openCodexWorkerSessions = useCallback(
+    () => openShortcutWorkerSessions("codex"),
+    [openShortcutWorkerSessions],
+  );
+
   const openPaneWorkerSessions = useCallback(
     (
       runtime: WorkerSessionRuntime,
@@ -3367,14 +3438,21 @@ export default function App() {
     addDraftChatTab();
   }, [addDraftChatTab]);
 
-  // Top tab strip "+" → "New automations" — focus the workspace's single
-  // Automations tab (scheduler + overnight queue), creating it if absent.
-  const handleNewAutomations = useCallback(() => {
-    openAutomationsTab();
-  }, [openAutomationsTab]);
+  // "Open chat" on a board card whose run has started: exempt the run from
+  // board-run suppression (see openedBoardRunIdsRef), pull it into the lifted
+  // list, then route through the same run-selection path the run switcher /
+  // toasts use.
+  const handleOpenBoardCardRun = useCallback(
+    (runId: string) => {
+      openedBoardRunIdsRef.current.add(runId);
+      void refreshRunsForRef.current?.(activeIdRef.current);
+      handleSelectRunAnywhere(runId);
+    },
+    [handleSelectRunAnywhere],
+  );
 
-  // Top tab strip "+" → "New whiteboard" — append a fresh untitled whiteboard
-  // draft tab. The first Ctrl+S save binds it to a .coraboard file.
+  // Kept for the tab.newWhiteboard chord — the "+" picker row was folded into
+  // Cora chats (whiteboards are created from the chat's inner strip now).
   const handleNewWhiteboard = useCallback(() => {
     newWhiteboardTab();
   }, [newWhiteboardTab]);
@@ -3649,6 +3727,12 @@ export default function App() {
       },
       "session.openInspector": () => setInspectorOpen((open) => !open),
       "automations.open": () => tabs.openAutomationsTab(),
+      // The Cora Board is a chat sub-view now (no top-level tab). The chord
+      // focuses the active chat's Board view; the chatView state lives inside
+      // the Workspace component, so this is broadcast like the other
+      // cross-module chords and handled there.
+      "board.open": () =>
+        window.dispatchEvent(new CustomEvent("spark:open-cora-board")),
       "composer.focus": () => {
         // Composer shortcut focuses the active chat if any, otherwise opens
         // (or creates) a draft so the user has somewhere to type.
@@ -3839,12 +3923,8 @@ export default function App() {
   // command that performs the SAME action as its onNew* handler.
   const pickerHints = useMemo<PickerHints>(
     () => ({
-      newChat: hintForCommand(bindingTable, "chat.new"),
       terminal: hintForCommand(bindingTable, "tab.newTerminal"),
-      openFile: hintForCommand(bindingTable, "tab.newEditor"),
       preview: hintForCommand(bindingTable, "tab.newPreview"),
-      automations: hintForCommand(bindingTable, "automations.open"),
-      whiteboard: hintForCommand(bindingTable, "tab.newWhiteboard"),
     }),
     [bindingTable],
   );
@@ -4599,11 +4679,11 @@ export default function App() {
               onTerminalPaneRuntimeState={onTerminalPaneRuntimeState}
               onOpenWorkerSessionPicker={openPaneWorkerSessions}
               onNewTerminalTab={handleNewTerminalTab}
-              onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
+              onNewClaudeWorker={openClaudeWorkerSessions}
+              onNewCodexWorker={openCodexWorkerSessions}
               onNewChat={handleNewChat}
-              onNewAutomations={handleNewAutomations}
-              onNewWhiteboard={handleNewWhiteboard}
+              onOpenBoardCardRun={handleOpenBoardCardRun}
               onRenameChat={handleRenameChatTab}
               onCloseChat={handleCloseChatTab}
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
@@ -4746,7 +4826,9 @@ export default function App() {
 
         <RunSwitcher
           open={runSwitcherOpen}
-          runs={globalRuns.runs.filter((r) => !r.automationId || r.status === "blocked")}
+          runs={globalRuns.runs.filter(
+            (r) => (!r.automationId && !isBoardCardRun(r)) || r.status === "blocked",
+          )}
           workspaces={workspaces}
           onClose={() => setRunSwitcherOpen(false)}
           onSelectRun={handleSelectRunAnywhere}
@@ -5041,19 +5123,6 @@ function isTopStripTab(tab: Tab): boolean {
   return !isRunOwnedTab(tab);
 }
 
-// The run a run-owned tab belongs to, or null for non-run-owned tabs. Unlike
-// isRunOwnedTab (which is run-agnostic), this lets callers reject a run-owned
-// tab that belongs to a DIFFERENT run than the one on screen — the run-scoped
-// runs canvas and previews are not filtered out of visibleTabs, so keyboard
-// tab-cycling can land on another run's preview/Runs tab, and only the owning
-// run's inner strip should follow.
-function runOwnedTabRunId(tab: Tab): string | null {
-  if (tab.kind === "terminal" && tab.scope?.kind === "workers") return tab.scope.runId;
-  if (tab.kind === "runs") return tab.runId;
-  if (tab.kind === "preview" && tab.runId) return tab.runId;
-  return null;
-}
-
 interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
@@ -5102,11 +5171,16 @@ interface WorkspaceProps {
     launch: WorkerSessionPickerRequest["launch"],
   ) => void;
   onNewTerminalTab: () => void;
-  onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
+  // Tab-strip "+" worker rows. They open the worker session picker for the
+  // resolved workspace cwd, so the same row starts a new agent or resumes /
+  // deletes one from this workspace's history.
+  onNewClaudeWorker: () => void;
+  onNewCodexWorker: () => void;
   onNewChat: () => void;
-  onNewAutomations: () => void;
-  onNewWhiteboard: () => void;
+  // "Open chat" on a Cora Board card with a live run — App's run-selection
+  // path, threaded down to the chat panel's embedded board sub-view.
+  onOpenBoardCardRun: (runId: string) => void;
   onRenameChat: (id: TabId, title: string) => void;
   onCloseChat: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
@@ -5153,11 +5227,11 @@ const Workspace = React.memo(function Workspace({
   onTerminalPaneRuntimeState,
   onOpenWorkerSessionPicker,
   onNewTerminalTab,
-  onNewEditorTab,
   onNewPreviewTab,
+  onNewClaudeWorker,
+  onNewCodexWorker,
   onNewChat,
-  onNewAutomations,
-  onNewWhiteboard,
+  onOpenBoardCardRun,
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
@@ -5175,6 +5249,8 @@ const Workspace = React.memo(function Workspace({
     setActiveTab,
     closeTab,
     setDirty,
+    addDraftChatTab,
+    openAutomationsTab,
     setActiveTerminalPane,
     setTerminalSplitRatio,
     splitTerminalPane,
@@ -5191,12 +5267,10 @@ const Workspace = React.memo(function Workspace({
     () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
     [tabs.tabs, activeRunId],
   );
-  const effectiveActiveId = useMemo(() => {
-    if (tabs.activeId && visibleTabs.some((tab) => tab.id === tabs.activeId)) {
-      return tabs.activeId;
-    }
-    return visibleTabs[0]?.id ?? null;
-  }, [tabs.activeId, visibleTabs]);
+  const effectiveActiveId = useMemo(
+    () => resolveEffectiveActiveId(tabs.activeId, visibleTabs),
+    [tabs.activeId, visibleTabs],
+  );
   useEffect(() => {
     if (!effectiveActiveId || tabs.activeId === effectiveActiveId) return;
     setActiveTab(effectiveActiveId);
@@ -5258,7 +5332,19 @@ const Workspace = React.memo(function Workspace({
   // backend-PTY view toggle without ChatPanel keeping a separate state.
   // Resets when the active run changes (a fresh chat starts in "chat" view).
   const [chatView, setChatView] = useState<CoraView>("chat");
+  // One-shot override for that reset: board.open may have to focus a
+  // DIFFERENT chat tab (or a fresh draft) first, and that tab switch changes
+  // activeRunId a commit later — without the marker, the reset below would
+  // stomp the just-requested "board" view back to "chat". The marker is set
+  // ONLY when the handler knows an activeRunId change is coming, so it is
+  // always consumed by exactly that reset pass.
+  const pendingBoardViewRef = useRef(false);
   useEffect(() => {
+    if (pendingBoardViewRef.current) {
+      pendingBoardViewRef.current = false;
+      setChatView("board");
+      return;
+    }
     setChatView("chat");
   }, [activeRunId]);
 
@@ -5372,6 +5458,16 @@ const Workspace = React.memo(function Workspace({
       setChatView("chat");
     }
   }, [chatView, backendSessionId, backendPtyExists]);
+  // Same escape for the Whiteboard view: it is run-scoped, so on a draft chat
+  // (no run) it would render the welcome state with the composer hidden. The
+  // strip hides the whiteboard affordances on drafts (whiteboardCreatable),
+  // so this is a safety net for stale state, e.g. a run deleted from history
+  // while its whiteboard was open. Bounce to chat.
+  useEffect(() => {
+    if (chatView === "whiteboard" && !activeRunForStrip) {
+      setChatView("chat");
+    }
+  }, [chatView, activeRunForStrip]);
   const activeTabForStrip = useMemo(
     () => visibleTabs.find((tab) => tab.id === effectiveActiveId) ?? null,
     [visibleTabs, effectiveActiveId],
@@ -5382,7 +5478,17 @@ const Workspace = React.memo(function Workspace({
     (runOwnedTabRunId(activeTabForStrip) === activeRunId ||
       (activeTabForStrip.kind === "chat" &&
         activeTabForStrip.id === activeRunId));
-  const innerStripVisible = activeViewBelongsToRun;
+  // A DRAFT chat (no run yet) shows the strip too: the Board sub-view is
+  // workspace-scoped, so the Board pill must be reachable before the first
+  // message ever sends — the user can start a chat purely to work the kanban.
+  // Run-scoped pills (Runs / Terminal / Whiteboard) hide themselves on drafts
+  // through their own availability gates, so the strip stays honest. The
+  // chatView === "board" clause covers the one non-draft gap: board.open
+  // landing on a run-backed chat tab whose activeRunId hasn't committed yet.
+  const innerStripVisible =
+    activeViewBelongsToRun ||
+    (activeTabForStrip?.kind === "chat" &&
+      (chatView === "board" || isDraftChatTabId(activeTabForStrip.id)));
   const handleInnerChatClick = useCallback(() => {
     if (activeChatTabId) setActiveTab(activeChatTabId);
     setChatView("chat");
@@ -5403,6 +5509,90 @@ const Workspace = React.memo(function Workspace({
     if (activeChatTabId) setActiveTab(activeChatTabId);
     setChatView("whiteboard");
   }, [activeChatTabId, setActiveTab]);
+  const handleInnerBoardClick = useCallback(() => {
+    if (activeChatTabId) setActiveTab(activeChatTabId);
+    setChatView("board");
+  }, [activeChatTabId, setActiveTab]);
+  // board.open chord (broadcast from App's shortcut handler): focus the active
+  // chat's Board sub-view. When the active tab isn't a chat, surface one first
+  // — the selected run's own chat tab if it exists, else the most recent chat
+  // tab in the strip, else a fresh draft — then land it on Board. When that
+  // focus will change activeRunId (a later commit), arm pendingBoardViewRef so
+  // the run-change reset lands on "board" instead of stomping it.
+  useEffect(() => {
+    const handler = () => {
+      if (activeTabForStrip?.kind === "chat") {
+        setChatView("board");
+        return;
+      }
+      const chatTabs = topStripTabs.filter((tab) => tab.kind === "chat");
+      const target =
+        (activeRunId && chatTabs.find((tab) => tab.id === activeRunId)) ||
+        chatTabs[chatTabs.length - 1] ||
+        null;
+      const nextRunId =
+        target && !isDraftChatTabId(target.id) ? target.id : null;
+      if (nextRunId !== activeRunId) pendingBoardViewRef.current = true;
+      setChatView("board");
+      if (target) setActiveTab(target.id);
+      else addDraftChatTab();
+    };
+    window.addEventListener("spark:open-cora-board", handler);
+    return () => window.removeEventListener("spark:open-cora-board", handler);
+  }, [activeTabForStrip, topStripTabs, activeRunId, setActiveTab, addDraftChatTab]);
+  // "Open chat" from a card of the embedded board: leave the Board sub-view
+  // for the run's conversation ourselves — when the card's run is ALREADY the
+  // active one, activeRunId doesn't change and the run-change reset would
+  // never fire, leaving the user staring at the board they just left.
+  const handleOpenBoardCardRunInChat = useCallback(
+    (runId: string) => {
+      setChatView("chat");
+      onOpenBoardCardRun(runId);
+    },
+    [onOpenBoardCardRun],
+  );
+  // First card mutation on a DRAFT chat's board: mint the run WITHOUT starting
+  // autopilot, persist the cards on its board, then promote the draft tab via
+  // the same snapshot path a first message uses. The user is looking at the
+  // board, so the activeRunId-change chatView reset must land back on "board"
+  // (pendingBoardViewRef) instead of bouncing them to the welcome chat.
+  const handleCreateBoardRun = useCallback(
+    async (cards: BoardCard[]) => {
+      if (!workspace) throw new Error("No workspace is active.");
+      const api = boardBackend();
+      if (!api) throw new Error("The board backend isn't available in this build.");
+      // Carry the draft composer's live chip selections onto the minted run,
+      // exactly like a first send would — without this the promoted chat
+      // silently flips back to the backend defaults. The draft key mirrors
+      // ChatStack's composerDraftKey ("workspaceId:tabId").
+      const activeTab = tabs.tabs.find((tab) => tab.id === tabs.activeId);
+      const chip =
+        activeTab && activeTab.kind === "chat"
+          ? peekChatComposerChipConfig(`${workspace.id}:${activeTab.id}`)
+          : undefined;
+      const run = await window.spark.orchestration.createRun({
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        cwd: workspace.cwd,
+        title: cards[0]?.title ? cards[0].title.slice(0, 52) : undefined,
+        chatBackend: chip?.backend,
+        chatModel: chip?.model,
+        chatEffort: chip?.effort,
+        chatFastMode: chip?.fastMode,
+        chat1mContext: chip?.oneMillionContext,
+      });
+      await api.update({
+        runId: run.id,
+        baseRevision: 0,
+        cards,
+        workspaceCwd: workspace.cwd,
+      });
+      const fresh = await window.spark.orchestration.getRun(run.id).catch(() => null);
+      pendingBoardViewRef.current = true;
+      onRunSnapshot(fresh ?? run, { select: true, focusRuns: false });
+    },
+    [workspace, onRunSnapshot, tabs.tabs, tabs.activeId],
+  );
   // The Whiteboard pill exists only while this chat actually has a board —
   // an unused surface must not clutter the workbench strip.
   const whiteboardAvailable = Boolean(activeRunForStrip?.whiteboard);
@@ -5462,35 +5652,35 @@ const Workspace = React.memo(function Workspace({
     (id: TabId) => setActiveTab(id),
     [setActiveTab],
   );
+  // Returns whether a pane was actually focused, so callers with their own
+  // notice surface (the board's card button) can explain a miss — a finished
+  // worker's pane does not survive an app restart. The Runs Inspector ignores
+  // the return value.
   const handleOpenWorkerTerminal = useCallback(
-    (workerTaskId: string) => {
-      if (!activeRunId) return;
+    (workerTaskId: string): boolean => {
+      if (!activeRunId) return false;
       const workerTab = tabs.tabs.find(
         (tab): tab is TerminalTab =>
           tab.kind === "terminal" &&
           tab.scope?.kind === "workers" &&
           tab.scope.runId === activeRunId,
       );
-      if (!workerTab) return;
+      if (!workerTab) return false;
       const leaf = findWorkerLeafByTaskId(workerTab.root, workerTaskId);
-      if (!leaf) return;
+      if (!leaf) return false;
       setActiveTerminalPane(workerTab.id, leaf.paneId);
       setActiveTab(workerTab.id);
+      return true;
     },
     [activeRunId, tabs.tabs, setActiveTab, setActiveTerminalPane],
   );
   // When the underlying active tab is run-owned, the top strip should still
   // highlight the chat that owns it so the user keeps a "you're inside this
   // chat" anchor while viewing a worker / Runs / preview.
-  const topStripActiveId = useMemo(() => {
-    if (!effectiveActiveId) return null;
-    const active = visibleTabs.find((tab) => tab.id === effectiveActiveId);
-    if (active && isRunOwnedTab(active)) {
-      const chatTab = topStripTabs.find((tab) => tab.kind === "chat");
-      return chatTab?.id ?? null;
-    }
-    return effectiveActiveId;
-  }, [effectiveActiveId, visibleTabs, topStripTabs]);
+  const topStripActiveId = useMemo(
+    () => resolveTopStripActiveId(effectiveActiveId, visibleTabs, topStripTabs),
+    [effectiveActiveId, visibleTabs, topStripTabs],
+  );
 
   const handleTabSelect = useCallback(
     (id: TabId) => setActiveTab(id),
@@ -5635,11 +5825,10 @@ const Workspace = React.memo(function Workspace({
         onSelect={handleTabSelect}
         onClose={handleTabClose}
         onNewTerminal={onNewTerminalTab}
-        onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
+        onNewClaudeWorker={onNewClaudeWorker}
+        onNewCodexWorker={onNewCodexWorker}
         onNewChat={onNewChat}
-        onNewAutomations={onNewAutomations}
-        onNewWhiteboard={onNewWhiteboard}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}
         onTerminalPaneDrop={onTerminalPaneDrop}
@@ -5655,17 +5844,23 @@ const Workspace = React.memo(function Workspace({
           chatView={chatView}
           backendPtyExists={backendPtyExists}
           whiteboardAvailable={whiteboardAvailable}
+          whiteboardCreatable={Boolean(activeRunForStrip)}
           whiteboardAttention={whiteboardAttention}
           runsTab={runOwnedTabs.runs}
           previews={runOwnedTabs.previews}
+          workspaceId={workspace?.id ?? null}
           onChatClick={handleInnerChatClick}
           onTerminalClick={handleInnerTerminalClick}
           onWhiteboardClick={handleInnerWhiteboardClick}
+          onBoardClick={handleInnerBoardClick}
           onSelectTab={handleInnerSelectTab}
         />
       )}
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
-        {visibleTabs.length === 0 && (
+        {/* Also when effectiveActiveId is null with tabs present: every
+            remaining tab is run-owned with no owning chat open (nothing is
+            eligible to activate), and the empty state beats a blank void. */}
+        {(visibleTabs.length === 0 || !effectiveActiveId) && (
           <EmptyWorkbench onNewChat={onNewChat} onNewTerminal={onNewTerminalTab} />
         )}
         <ChatStack
@@ -5680,6 +5875,9 @@ const Workspace = React.memo(function Workspace({
           terminalScrollbackLineLimit={terminalScrollbackLineLimit}
           chatView={chatView}
           onChatViewChange={setChatView}
+          onOpenBoardCardRun={handleOpenBoardCardRunInChat}
+          onOpenBoardWorkerTerminal={handleOpenWorkerTerminal}
+          onCreateBoardRun={handleCreateBoardRun}
           onSelectRun={onSelectRun}
           onRunSnapshot={onRunSnapshot}
         />
@@ -5809,6 +6007,7 @@ const Workspace = React.memo(function Workspace({
               activeId={effectiveActiveId}
               workspace={workspace}
               terminalScrollbackLineLimit={terminalScrollbackLineLimit}
+              onOpenRunChat={handleOpenBoardCardRunInChat}
             />
           </Suspense>
         )}

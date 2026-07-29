@@ -387,6 +387,148 @@ async function main() {
     assert.equal(T.summarizeWorkerWait(state, ["task-unknown"]), null);
   });
 
+  // Fixture distilled from run-ms61c4lt-5bmkjt: one manager turn spans a
+  // blocking question (asked 16:45:30, answered 16:45:34), keeps working
+  // (workers at :40/:44), and dies at :50 with a provider overload. Rendered
+  // as a single row anchored at the turn's start, everything after the answer
+  // sat ABOVE the question and answer bubbles.
+  function questionSpanningRun() {
+    const call = {
+      id: "spark-1",
+      runId: "run-1",
+      mode: "chat",
+      model: "gpt-5.6-sol",
+      status: "failed",
+      error: "Codex error: Our servers are currently overloaded. Please try again later.",
+      durationMs: 391_849,
+      promptTokens: 26_971,
+      createdAt: at(26),
+      completedAt: at(50),
+      conversationEpoch: 0,
+    };
+    const messages = [
+      {
+        id: "msg-user",
+        runId: "run-1",
+        author: "user",
+        kind: "note",
+        message: "make the translation automation",
+        deliveryState: "queued",
+        intent: "turn",
+        conversationEpoch: 0,
+        createdAt: at(25),
+      },
+      {
+        id: "msg-question",
+        runId: "run-1",
+        author: "spark",
+        kind: "question",
+        message: "Approve this folder translation automation?",
+        questionOptions: [],
+        intent: "answer",
+        deliveryState: "acknowledged",
+        conversationEpoch: 0,
+        createdAt: at(30),
+      },
+      {
+        id: "msg-answer",
+        runId: "run-1",
+        author: "user",
+        kind: "answer",
+        message: "Approve and create.",
+        answersMessageId: "msg-question",
+        targetTurnId: "question:msg-question",
+        intent: "answer",
+        deliveryState: "acknowledged",
+        conversationEpoch: 0,
+        createdAt: at(34),
+      },
+      {
+        id: "msg-final",
+        runId: "run-1",
+        author: "spark",
+        kind: "note",
+        message: "Automation created and enabled.",
+        intent: "answer",
+        deliveryState: "acknowledged",
+        targetTurnId: "spark-1",
+        backendTurnId: "spark-1",
+        conversationEpoch: 0,
+        createdAt: at(50),
+      },
+    ];
+    return run([], { sparkCalls: [call], humanMessages: messages, steps: [] });
+  }
+
+  test("a mid-turn question splits the manager turn at the answer", () => {
+    const timeline = T.buildChatTimeline(questionSpanningRun());
+    const order = timeline.map((item) => item.id);
+    // True chronology: the question renders where it was asked, the answer
+    // right after it, and the turn's post-answer slice below them both.
+    assert.deepEqual(order, [
+      "msg-user",
+      "spark-call:spark-1",
+      "msg-question",
+      "msg-answer",
+      "spark-call:spark-1:seg1",
+      "msg-final",
+    ]);
+
+    const head = timeline.find((item) => item.id === "spark-call:spark-1");
+    assert.equal(head.sparkCallId, "spark-1");
+    // The pre-question slice is settled history, not the turn's failure.
+    assert.equal(head.status, "completed");
+    assert.equal(head.tone, "done");
+    assert.equal(head.title, "Worked");
+    assert.deepEqual(head.traceWindow, { from: undefined, to: at(30) });
+    // Whole-turn gauges ride the final slice only.
+    assert.equal(head.meta.some((meta) => meta.label === "Duration"), false);
+
+    const tail = timeline.find((item) => item.id === "spark-call:spark-1:seg1");
+    assert.equal(tail.sparkCallId, "spark-1");
+    assert.equal(tail.status, "failed");
+    assert.equal(tail.tone, "failed");
+    assert.equal(tail.title, "Turn failed");
+    assert.match(tail.detail, /currently overloaded/);
+    assert.deepEqual(tail.traceWindow, { from: at(30) });
+    assert.equal(tail.at, at(34), "the continuation re-anchors at the answer");
+    assert.equal(tail.meta.some((meta) => meta.label === "Duration"), true);
+  });
+
+  test("an open question still holds the turn's continuation below it", () => {
+    const state = questionSpanningRun();
+    // The user has not answered yet and the turn is still streaming.
+    state.humanMessages = state.humanMessages.filter((message) => message.id !== "msg-answer" && message.id !== "msg-final");
+    state.sparkCalls[0].status = "started";
+    delete state.sparkCalls[0].completedAt;
+    delete state.sparkCalls[0].error;
+    const timeline = T.buildChatTimeline(state);
+    assert.deepEqual(
+      timeline.map((item) => item.id),
+      ["msg-user", "spark-call:spark-1", "msg-question", "spark-call:spark-1:seg1"],
+    );
+    const head = timeline.find((item) => item.id === "spark-call:spark-1");
+    assert.equal(head.status, "completed", "the pre-question slice reads settled while the turn lives on");
+    const tail = timeline.find((item) => item.id === "spark-call:spark-1:seg1");
+    assert.equal(tail.status, "started");
+    assert.equal(tail.tone, "live");
+    assert.equal(tail.at, at(30), "unanswered questions anchor the continuation at the ask");
+  });
+
+  test("a turn without questions stays one unsplit row", () => {
+    const state = questionSpanningRun();
+    state.humanMessages = state.humanMessages.filter(
+      (message) => message.id === "msg-user" || message.id === "msg-final",
+    );
+    const timeline = T.buildChatTimeline(state);
+    const rows = timeline.filter((item) => item.kind === "tool" && item.activity === "manager");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, "spark-call:spark-1");
+    assert.equal(rows[0].sparkCallId, "spark-1");
+    assert.equal(rows[0].traceWindow, undefined);
+    assert.equal(rows[0].title, "Turn failed");
+  });
+
   test("wait task ids are read only off the wait tool", () => {
     assert.deepEqual(
       T.waitForWorkersTaskIds("mcp__codara-studio__codara_wait_for_workers", {

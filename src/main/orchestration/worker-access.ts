@@ -89,33 +89,22 @@ const BARE_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /** Validate the optional per-worker tool-access + collaboration fields
  *  (access / blockedTools / collab) off an untrusted (LLM-authored) node. All
- *  absent = full access, no collaboration. blockedTools is claude-only — set on
- *  a codex node it is a meaningful mistake (codex has no per-tool deny; its
- *  sandbox is the fence), so it is rejected with an instructive error rather
- *  than silently dropped. `engine` is the node's already-validated engine.
+ *  absent = full access, no collaboration. Workers run on the bundled Pi
+ *  runtime, which enforces both presets and blockedTools in its tool fence, so
+ *  every field applies to every worker regardless of model.
  *  Returns null when the fields are valid (or absent), else a fixable message. */
 export function validateWorkerAccessFields(
   node: { access?: unknown; blockedTools?: unknown; collab?: unknown },
-  engine: unknown,
   label: string,
 ): string | null {
   if (node.access !== undefined) {
     if (typeof node.access !== "string" || !WORKER_ACCESS_PRESETS.has(node.access)) {
       return `${label} has invalid access '${String(node.access)}' (expected full, edits, or readonly)`;
     }
-    // codex's read-only sandbox cannot write the worker's final report (it lives
-    // outside the workspace), so a readonly codex worker can never report — a
-    // guaranteed-dead run. Steer the author to 'edits' (workspace-write).
-    if (node.access === "readonly" && engine === "codex") {
-      return `${label} sets access 'readonly' but engine is 'codex' — codex's read-only sandbox cannot write the worker's final report; use 'edits' (workspace-write sandbox) instead`;
-    }
   }
   if (node.blockedTools !== undefined) {
     if (!Array.isArray(node.blockedTools)) {
       return `${label} blockedTools must be an array of tool-name strings`;
-    }
-    if (engine !== "claude") {
-      return `${label} sets blockedTools but engine is '${String(engine)}' — blockedTools is Claude-only (Codex has no per-tool deny; use access edits/readonly for its sandbox instead)`;
     }
     for (const tool of node.blockedTools) {
       if (typeof tool !== "string" || tool.trim().length === 0) {
@@ -148,12 +137,12 @@ export interface WorkerCollab {
 }
 
 /** One member of a launching wave, as the decorator sees it. `prompt` is the
- *  already-rendered prompt; `engine` is the resolved concrete engine; `access`
+ *  already-rendered prompt; `model` is the worker's pinned model id; `access`
  *  and `blockedTools` decide whether this member can WRITE to the board. */
 export interface WavePeerInfo {
   nodeId: string;
   label?: string;
-  engine: string;
+  model: string;
   prompt: string;
   collab?: WorkerCollab;
   access?: WorkerAccessPreset;
@@ -170,22 +159,15 @@ export interface WaveDecorationInput {
   runDir: string;
 }
 
-/** Whether a worker can WRITE to the shared chat board. A claude worker can
- *  always post — readonly still ALLOWS Write (it needs it for its own
- *  final-report.json) — UNLESS the node hard-denied Write via blockedTools. A
- *  codex worker can always post: readonly is flipped to edits (workspace-write),
- *  and every codex chat participant gets the mail dir made writable via
- *  --add-dir. So the only worker that cannot post is a claude one that blocked
- *  Write. */
+/** Whether a worker can WRITE to the shared chat board. Every Pi worker keeps
+ *  its write tool even under readonly (it needs it for its own
+ *  final-report.json), so the only worker that cannot post is one whose node
+ *  hard-denied Write via blockedTools. */
 export function workerCanPost(info: {
-  engine: string;
   access?: WorkerAccessPreset;
   blockedTools?: string[];
 }): boolean {
-  if (info.engine === "claude") {
-    return !(info.blockedTools ?? []).some((tool) => tool.trim() === "Write");
-  }
-  return true;
+  return !(info.blockedTools ?? []).some((tool) => tool.trim() === "Write");
 }
 
 function promptSnippet(prompt: string): string {
@@ -194,7 +176,7 @@ function promptSnippet(prompt: string): string {
 }
 
 function awarenessBlock(self: WavePeerInfo, peers: WavePeerInfo[]): string {
-  const lines = peers.map((p) => `- ${p.label || p.nodeId} (${p.engine}): ${promptSnippet(p.prompt)}`);
+  const lines = peers.map((p) => `- ${p.label || p.nodeId} (${p.model}): ${promptSnippet(p.prompt)}`);
   return (
     `You are one of ${peers.length + 1} workers running in parallel in this pass. ` +
     `Your peers:\n${lines.join("\n")}`

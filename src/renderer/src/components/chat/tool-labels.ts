@@ -18,6 +18,19 @@ export function toolDisplayName(toolName: string): string {
     codara_remember: "Save to memory",
     codara_whiteboard_get: "Read whiteboard",
     codara_whiteboard_update: "Update whiteboard",
+    codara_board_get: "Read board",
+    codara_board_update: "Update board",
+    codara_list_automations: "List automations",
+    codara_get_automation: "Read automation",
+    codara_create_automation: "Create automation",
+    codara_update_automation: "Update automation",
+    codara_run_automation: "Run automation",
+    codara_wait_for_automation: "Wait for automation",
+    codara_set_automation_enabled: "Toggle automation",
+    codara_pause_automation: "Pause automation",
+    codara_resume_automation: "Resume automation",
+    codara_stop_automation: "Stop automation",
+    codara_delete_automation: "Delete automation",
   };
   const knownName = known[normalized];
   if (knownName) return knownName;

@@ -8,6 +8,7 @@ import type {
   ScheduledJob,
 } from "@shared/types";
 import { DEFAULT_AGENT_MAX_ITERATIONS } from "@shared/types";
+import { workerModelLabel } from "./worker-models";
 
 // Shared presentation vocabulary for the Automations surfaces (Hub list +
 // detail, Workers sub-tab, MiniFlow strip, node-flow editor). One place so a
@@ -108,42 +109,31 @@ export function capLabel(job: ScheduledJob): string {
   return capLabelForLoop(job.loop);
 }
 
-const ENGINE_WORD: Record<LoomWorkerConfig["engine"], string> = {
-  claude: "Claude",
-  codex: "Codex",
-  auto: "Auto",
-};
-
-// The Worker node's one-line identity: "Claude · claude-opus-5 · high".
-export function workerSummary(worker: LoomWorkerConfig | undefined): string {
-  if (!worker) return "Auto";
-  const parts: string[] = [ENGINE_WORD[worker.engine] ?? worker.engine];
-  if (worker.engine !== "auto") {
-    parts.push(worker.model ?? "default model");
-    if (worker.effort) parts.push(worker.effort);
-  } else {
-    parts.push("agent picks");
-  }
+// The Worker node's one-line identity: "Opus 5 · high". Accepts any carrier of
+// model/effort (worker configs, live AutomationWorkerInfo rows).
+export function workerSummary(worker: Partial<LoomWorkerConfig> | undefined): string {
+  if (!worker) return "Worker";
+  const parts: string[] = [workerModelLabel(worker.model)];
+  if (worker.effort) parts.push(worker.effort);
   return parts.join(" · ");
 }
 
 // The JOB's worker identity for headers/list rows. Graph looms summarize
-// their actual worker nodes — the legacy flat job.worker is meaningless there
-// and reads "Auto · agent picks". Single-worker graphs keep the full
-// engine · model · effort line; wider graphs count per engine.
+// their actual worker nodes. Single-worker graphs keep the full
+// model · effort line; wider graphs count per model.
 export function jobWorkerSummary(job: ScheduledJob): string {
   const workers = (job.graph?.nodes ?? []).filter((n): n is LoomWorkerNode => n.kind === "worker");
   if (workers.length === 0) return workerSummary(job.worker);
   if (workers.length === 1) return workerSummary(workers[0].worker);
   const counts = new Map<string, number>();
   for (const w of workers) {
-    const word = ENGINE_WORD[w.worker.engine] ?? w.worker.engine;
+    const word = workerModelLabel(w.worker.model);
     counts.set(word, (counts.get(word) ?? 0) + 1);
   }
-  const engines = [...counts.entries()]
+  const models = [...counts.entries()]
     .map(([word, n]) => (n > 1 ? `${word} ×${n}` : word))
     .join(" + ");
-  return `${workers.length} workers · ${engines}`;
+  return `${workers.length} workers · ${models}`;
 }
 
 export function fmtTime(value: string | undefined): string {

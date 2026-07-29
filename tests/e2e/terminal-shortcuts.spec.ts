@@ -82,6 +82,23 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await page.keyboard.press("Escape");
     await expect(searchDialog).toHaveCount(0);
 
+    // The tab strip's "+" carries the two worker rows beside Terminal and
+    // Browser, and picking one opens the same session picker the worker
+    // chords open — the surface that lists this workspace's history.
+    await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
+    const tabPicker = page.locator(".spark-tabbar-picker");
+    await expect(tabPicker.getByRole("button", { name: "Claude worker" })).toBeVisible();
+    const codexRow = tabPicker.getByRole("button", { name: "Codex worker" });
+    await expect(codexRow).toBeVisible();
+    await codexRow.dispatchEvent("click");
+    const codexSessions = page.getByRole("dialog", { name: "Codex sessions" });
+    await expect(codexSessions).toBeVisible();
+    // The dialog takes focus on a rAF callback; wait for that before Escape,
+    // otherwise the key can still land in the terminal underneath.
+    await expect(codexSessions).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(codexSessions).toHaveCount(0);
+
     // The custom worker shortcut must launch the exact public command. In
     // particular, interactive panes must not acquire a generated --session-id.
     await app.evaluate(({ ipcMain }) => {

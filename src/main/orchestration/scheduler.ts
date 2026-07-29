@@ -2,6 +2,7 @@ import { promises as fs, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { Cron } from "croner";
 import type {
+  AgentEffortLevel,
   AutomationDetail,
   AutomationRunRecord,
   AutomationState,
@@ -14,6 +15,12 @@ import type {
   UpdateScheduledJobInput,
 } from "@shared/types";
 import { AUTOMATION_HISTORY_CAP } from "@shared/types";
+import {
+  DEFAULT_LOOM_CODEX_WORKER_MODEL,
+  DEFAULT_LOOM_WORKER_MODEL,
+  loomRuntimeForModel,
+  normalizeCodexModelId,
+} from "@shared/model-catalog";
 import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
 import { sparkHome } from "../spark-home";
@@ -76,8 +83,33 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
   if (!Array.isArray(next.history)) {
     next = { ...next, history: [] };
   }
-  if (!next.worker) {
-    next = { ...next, worker: backfillWorker(next) };
+  // Looms on Pi: migrate the worker config on EVERY read, not only when it is
+  // absent — persisted jobs from pre-Pi builds carry an `engine` field and may
+  // lack a model/effort. migrateWorker is idempotent for the current shape.
+  if (workerNeedsMigration(next.worker as LegacyLoomWorkerConfig | undefined)) {
+    next = {
+      ...next,
+      worker: migrateWorker(next.worker as LegacyLoomWorkerConfig | undefined, next.input),
+    };
+  }
+  // Same rewrite for every persisted graph worker node (multi-node looms pin a
+  // worker per node; those configs predate the Pi migration too).
+  if (
+    next.graph?.nodes.some(
+      (n) => n.kind === "worker" && workerNeedsMigration(n.worker as LegacyLoomWorkerConfig),
+    )
+  ) {
+    next = {
+      ...next,
+      graph: {
+        ...next.graph!,
+        nodes: next.graph!.nodes.map((n) =>
+          n.kind === "worker" && workerNeedsMigration(n.worker as LegacyLoomWorkerConfig)
+            ? { ...n, worker: migrateWorker(n.worker as LegacyLoomWorkerConfig) }
+            : n,
+        ),
+      },
+    };
   }
   // Looms v2.5: backfill the node graph LAST — after worker is guaranteed
   // defined — from the flat trigger/loop/prompt/worker fields. A pre-graph loom
@@ -129,21 +161,81 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
   return next;
 }
 
-// Looms v2 migration: pre-worker jobs pinned an engine via input.chatBackend.
-// claude/codex carry over with their model/effort; openrouter (the removed API
-// manager) and undefined become "auto" — resolves to claude-when-installed but
-// survives codex-only machines instead of dying engine-missing. The legacy
-// chat* fields stay on the pinned input untouched (the driver never reads them).
-function backfillWorker(job: ScheduledJob): LoomWorkerConfig {
-  const legacy = job.input?.chatBackend;
-  if (legacy === "claude" || legacy === "codex") {
-    return {
-      engine: legacy,
-      model: job.input.chatModel?.trim() || undefined,
-      effort: job.input.chatEffort,
-    };
+// Looms-on-Pi migration. Every worker config funnels through here on read:
+//   - a legacy `engine` field is DROPPED (Pi is the only runtime; the model id
+//     selects the provider);
+//   - a job that kept its model keeps it (gpt-* ids are normalized onto the
+//     current Codex catalog); a model-less job backfills from its legacy
+//     engine: "codex" -> gpt-5.6-sol, "claude"/"auto"/absent -> claude-opus-5;
+//   - a missing/invalid effort becomes "medium";
+//   - pre-worker jobs (no worker at all) still honor the even older
+//     input.chatBackend pin, carrying chatModel/chatEffort over.
+// Idempotent for the current {model, effort, timeoutMinutes?} shape.
+interface LegacyLoomWorkerConfig {
+  engine?: string;
+  model?: string;
+  effort?: string;
+  timeoutMinutes?: number;
+}
+
+const EFFORT_LADDER = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function migrateWorker(
+  worker: LegacyLoomWorkerConfig | undefined,
+  input?: StartAutopilotInput,
+): LoomWorkerConfig {
+  let engine: string | undefined;
+  let model: string | undefined;
+  let effort: string | undefined;
+  let timeoutMinutes: number | undefined;
+  if (worker && typeof worker === "object") {
+    engine = typeof worker.engine === "string" ? worker.engine : undefined;
+    model = typeof worker.model === "string" ? worker.model.trim() || undefined : undefined;
+    effort = typeof worker.effort === "string" ? worker.effort : undefined;
+    timeoutMinutes = worker.timeoutMinutes;
+  } else {
+    const legacy = input?.chatBackend;
+    if (legacy === "claude" || legacy === "codex") {
+      engine = legacy;
+      model = input?.chatModel?.trim() || undefined;
+      effort = input?.chatEffort;
+    }
   }
-  return { engine: "auto" };
+  if (!model) {
+    model = engine === "codex" ? DEFAULT_LOOM_CODEX_WORKER_MODEL : DEFAULT_LOOM_WORKER_MODEL;
+  } else if (loomRuntimeForModel(model) === "codex") {
+    model = normalizeCodexModelId(model).toLowerCase();
+  } else {
+    // Lowercase claude ids too: Pi's provider gate is case-sensitive, so a
+    // mixed-case id persisted by an older build would brick every launch.
+    model = model.toLowerCase();
+  }
+  // Note: a legacy { engine: "auto", model: "gpt-*" } spec now HONORS its
+  // model and runs on the Codex subscription. The old resolver ignored the
+  // model whenever "auto" landed on claude; keeping the user's pinned model is
+  // the intended behavior, not an accident of the rewrite.
+  return {
+    model,
+    effort: EFFORT_LADDER.has(effort ?? "") ? (effort as AgentEffortLevel) : "medium",
+    ...(typeof timeoutMinutes === "number" && Number.isFinite(timeoutMinutes)
+      ? { timeoutMinutes }
+      : {}),
+  };
+}
+
+/** True when a persisted worker config needs the Pi migration rewrite. */
+function workerNeedsMigration(worker: LegacyLoomWorkerConfig | undefined): boolean {
+  if (!worker || typeof worker !== "object") return true;
+  return (
+    worker.engine !== undefined ||
+    typeof worker.model !== "string" ||
+    worker.model.trim().length === 0 ||
+    // Self-heal mixed-case / padded ids on read: Pi's provider gate is
+    // case-sensitive, so "Claude-Opus-5" persisted by an older build would
+    // otherwise throw at every launch.
+    worker.model !== worker.model.trim().toLowerCase() ||
+    !EFFORT_LADDER.has(worker.effort ?? "")
+  );
 }
 
 async function readFromDisk(): Promise<ScheduledJob[]> {
@@ -221,14 +313,15 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
     state: { status: "idle", iteration: 0 },
     history: [],
     createdAt: new Date().toISOString(),
-    worker: input.worker ?? { engine: "auto" },
+    // Callers that omit the worker (legacy IPC surfaces) get the Pi-migration
+    // backfill; normalizeJob below re-runs the same rewrite idempotently.
+    worker: input.worker ?? migrateWorker(undefined, input.input),
     // Back-pointer to the architect chat that authored this loom (set by the
     // automation.create RPC for assist runs). Optional — undefined for
     // manual-editor looms; JSON.stringify drops it so the persisted shape is
     // unchanged for those.
     createdByRunId: input.createdByRunId,
   };
-  if (!input.worker) job.worker = backfillWorker(job);
   // Re-normalize so a freshly created job lands in the cache with the same
   // backfilled shape it would have after a disk round-trip (graph in
   // particular). Idempotent for the already-set fields above.
@@ -542,25 +635,42 @@ function watchFolder(
   const matches = globMatcher(trigger.glob);
 
   let baseline = new Map<string, number>(); // filename -> mtimeMs
+  // False until a snapshot has actually succeeded. An unreadable folder must
+  // never leave an EMPTY baseline behind: the next successful scan would then
+  // report every pre-existing file as a fresh "add" and run the automation on
+  // work nobody asked for. While this is false the first good scan silently
+  // adopts the directory as the baseline instead of firing on it.
+  let baselineReady = false;
   let watcher: FSWatcher | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
 
-  async function snapshot(): Promise<Map<string, number>> {
-    const out = new Map<string, number>();
+  // null means "the folder could not be read", which is NOT the same as "the
+  // folder is empty" — callers keep the previous baseline rather than treating
+  // a failed read as a mass deletion followed by a mass add.
+  async function snapshot(): Promise<Map<string, number> | null> {
+    let entries;
     try {
-      const entries = await fs.readdir(folder, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isFile() || !matches(entry.name)) continue;
-        try {
-          const info = await fs.stat(join(folder, entry.name));
-          out.set(entry.name, info.mtimeMs);
-        } catch {
-          /* file vanished between readdir and stat — skip */
-        }
-      }
+      entries = await fs.readdir(folder, { withFileTypes: true });
     } catch (err) {
       console.warn("[scheduler] folder snapshot failed:", folder, err);
+      return null;
+    }
+    const out = new Map<string, number>();
+    for (const entry of entries) {
+      if (!entry.isFile() || !matches(entry.name)) continue;
+      try {
+        const info = await fs.stat(join(folder, entry.name));
+        out.set(entry.name, info.mtimeMs);
+      } catch {
+        // readdir listed it but its mtime is momentarily unreadable. Carry the
+        // known value so a transient stat failure cannot drop a file from the
+        // baseline and make the NEXT scan announce it as new. A file we have
+        // never seen is left out: it fires as an add once it settles, which
+        // also avoids firing before the writer has committed it.
+        const known = baseline.get(entry.name);
+        if (known !== undefined) out.set(entry.name, known);
+      }
     }
     return out;
   }
@@ -568,6 +678,14 @@ function watchFolder(
   async function rescan(): Promise<void> {
     if (stopped) return;
     const current = await snapshot();
+    if (!current) return; // unreadable right now; decide nothing, keep the baseline
+    if (!baselineReady) {
+      // First trustworthy read (the arm-time snapshot failed). Adopt it as the
+      // starting point; files that predate the watch are not events.
+      baseline = current;
+      baselineReady = true;
+      return;
+    }
     for (const [name, mtime] of current) {
       const prev = baseline.get(name);
       if (prev === undefined) {
@@ -593,9 +711,14 @@ function watchFolder(
   }
 
   // Take the baseline BEFORE watching so pre-existing files don't fire as adds.
+  // If that read fails we still arm the watcher, but leave baselineReady false
+  // so the first successful rescan adopts the folder instead of firing on it.
   void snapshot().then((base) => {
     if (stopped) return;
-    baseline = base;
+    if (base) {
+      baseline = base;
+      baselineReady = true;
+    }
     try {
       watcher = fsWatch(folder, { persistent: false }, () => schedule());
       watcher.on("error", (err) => console.warn("[scheduler] folder watch error:", folder, err));

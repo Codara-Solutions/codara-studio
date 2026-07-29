@@ -139,11 +139,13 @@ export function shouldUsePeerComms(
 // Mirror of run-store's usePiWorkerHarness gate (kept local to avoid an import
 // cycle; keep the two predicates in sync). Pi-harness workers load
 // resources/pi-cora/worker.ts, which registers the codara-studio bridge tools
-// (preview/terminal/whiteboard-read) in-process, no CLI config file involved.
+// (preview/terminal/whiteboard-read, plus the automation lifecycle pair for
+// loom workers) in-process, no CLI config file involved. Automation runs use
+// the same harness; only the SPARK_E2E_LEGACY_WORKER_HARNESS escape hatch
+// falls back to the legacy transports.
 function usesPiWorkerHarness(run: RunState, task: WorkerTask): boolean {
   return (
     process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
-    !(run.executionMode === "direct" && Boolean(run.automationId)) &&
     (task.runtimePreference === "claude" || task.runtimePreference === "codex")
   );
 }

@@ -93,6 +93,26 @@ async function loadPairing() {
   return require(outfile);
 }
 
+// The RPC state machine on its own, so the F10 hostile-payload test can fire
+// malformed method params at a real RpcSession without a socket.
+async function loadRpc() {
+  const cacheDir = join(ROOT, "node_modules", ".cache");
+  mkdirSync(cacheDir, { recursive: true });
+  const outfile = join(cacheDir, "remote-access-hostile-rpc.cjs");
+  await build({
+    entryPoints: [join(ROOT, "src", "main", "remote-access", "rpc.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+    alias: { "@shared": join(ROOT, "src", "shared") },
+    external: ["sodium-native"],
+  });
+  delete require.cache[outfile];
+  return require(outfile);
+}
+
 // The identity/storage helpers on their own, so the F7 storage-hardening
 // test can drive writeStagingFileSync and ensureRemoteDir directly.
 async function loadIdentity() {
@@ -980,6 +1000,176 @@ async function main() {
       await service.setEnabled(false).catch(() => undefined);
       rmSync(home, { recursive: true, force: true });
     }
+  }
+
+  /* ====================================================================== */
+  /* F10: hostile params for the mutating board and session-delete methods  */
+  /* ====================================================================== */
+
+  // The board write and the session delete are the two methods a paired phone
+  // can use to destroy state on the computer, so their params are the most
+  // valuable thing to fuzz. Every service below is a TRIPWIRE: reaching one at
+  // all is the failure. This runs over the in-process duplex because the
+  // target is the parameter validator, not the socket.
+  {
+    const rpc = await loadRpc();
+    let tripped = null;
+    const tripwire = (name) => async (input) => {
+      tripped = { name, input };
+      throw new Error(`hostile payload reached ${name}`);
+    };
+    const services = {
+      device: { publicKey: "pk", name: "Studio", role: "computer", version: "0.0.0" },
+      listWorkspaces: async () => [],
+      getCoraBoard: tripwire("getCoraBoard"),
+      updateCoraBoard: tripwire("updateCoraBoard"),
+      deleteWorkerSession: tripwire("deleteWorkerSession"),
+      createTerminal: async () => {
+        throw new Error("not used");
+      },
+    };
+
+    const frames = [];
+    const decoder = new rpc.FrameDecoder();
+    let destroyed = false;
+    const duplex = {
+      write(buf) {
+        for (const frame of decoder.push(buf)) frames.push(frame);
+        return true;
+      },
+      end() {},
+      destroy() {
+        destroyed = true;
+      },
+      on() {},
+    };
+    const handlers = [];
+    duplex.on = (event, handler) => {
+      if (event === "data") handlers.push(handler);
+    };
+    void new rpc.RpcSession(duplex, services);
+    const send = (id, method, params) => {
+      for (const handler of handlers) handler(rpc.encodeFrame({ id, method, params }));
+    };
+    const settle = () => new Promise((r) => setImmediate(r));
+
+    send(1, "hello", { protocol: 0, device: services.device });
+    await settle();
+
+    const bigString = "x".repeat(64 * 1024);
+    const deep = JSON.parse(`{"a":${"[".repeat(200)}1${"]".repeat(200)}}`);
+    const hostileBoardWrites = [
+      null,
+      [],
+      "not-an-object",
+      { workspaceId: {}, runId: "r", baseRevision: 0, action: "queue", cardId: "c" },
+      { workspaceId: "w", runId: [], baseRevision: 0, action: "queue", cardId: "c" },
+      { workspaceId: "w", runId: "r", baseRevision: "0", action: "queue", cardId: "c" },
+      { workspaceId: "w", runId: "r", baseRevision: NaN, action: "queue", cardId: "c" },
+      { workspaceId: "w", runId: "r", baseRevision: Infinity, action: "queue", cardId: "c" },
+      { workspaceId: "w", runId: "r", baseRevision: -0.5, action: "queue", cardId: "c" },
+      {
+        workspaceId: "w",
+        runId: "r",
+        baseRevision: Number.MAX_SAFE_INTEGER + 2,
+        action: "queue",
+        cardId: "c",
+      },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "__proto__", cardId: "c" },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "constructor", cardId: "c" },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "add-idea", title: bigString },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "add-idea", title: ["t"] },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "add-idea", title: "t", description: {} },
+      {
+        workspaceId: "w",
+        runId: "r",
+        baseRevision: 0,
+        action: "add-idea",
+        title: "t",
+        description: bigString,
+      },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "delete", cardId: bigString },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "delete", cardId: deep },
+      { workspaceId: "w".repeat(300), runId: "r", baseRevision: 0, action: "delete", cardId: "c" },
+      { workspaceId: "w", runId: "r", baseRevision: 0, action: "delete", cardId: null },
+    ];
+    let before = frames.length;
+    for (const params of hostileBoardWrites) send(2, "cora.board.update", params);
+    await settle();
+    let answers = frames.slice(before);
+    check(
+      "F10: every hostile cora.board.update payload is refused before the board is reached",
+      tripped === null &&
+        answers.length === hostileBoardWrites.length &&
+        answers.every((f) => f?.ok === false && f?.error?.code === "invalid-params"),
+      { tripped, answered: answers.length, expected: hostileBoardWrites.length },
+    );
+
+    const hostileBoardReads = [
+      null,
+      { workspaceId: "w" },
+      { workspaceId: "w", runId: 5 },
+      { workspaceId: "", runId: "r" },
+      { workspaceId: "w", runId: "r".repeat(300) },
+      { workspaceId: { toString: 1 }, runId: "r" },
+    ];
+    tripped = null;
+    before = frames.length;
+    for (const params of hostileBoardReads) send(3, "cora.board.get", params);
+    await settle();
+    answers = frames.slice(before);
+    check(
+      "F10: every hostile cora.board.get payload is refused before the board is reached",
+      tripped === null &&
+        answers.length === hostileBoardReads.length &&
+        answers.every((f) => f?.ok === false && f?.error?.code === "invalid-params"),
+      { tripped, answered: answers.length, expected: hostileBoardReads.length },
+    );
+
+    // The delete's danger is the memory scope: "codex-all" wipes every local
+    // Codex memory on the machine, so it must be unreachable through a Claude
+    // session, and the session id must never carry a path.
+    const hostileDeletes = [
+      null,
+      { workspaceId: "w", runtime: "claude" },
+      { workspaceId: "w", runtime: "claude", sessionId: "../../../etc/passwd" },
+      { workspaceId: "w", runtime: "claude", sessionId: "a/b" },
+      { workspaceId: "w", runtime: "claude", sessionId: "a b" },
+      { workspaceId: "w", runtime: "claude", sessionId: "" },
+      { workspaceId: "w", runtime: "claude", sessionId: "_leading-underscore" },
+      { workspaceId: "w", runtime: "claude", sessionId: "a".repeat(129) },
+      { workspaceId: "w", runtime: "shell", sessionId: "abc" },
+      { workspaceId: "w", runtime: ["claude"], sessionId: "abc" },
+      { workspaceId: "w", runtime: "claude", sessionId: "abc", memoryScope: "codex-all" },
+      { workspaceId: "w", runtime: "codex", sessionId: "abc", memoryScope: "claude-project" },
+      { workspaceId: "w", runtime: "claude", sessionId: "abc", memoryScope: "all" },
+      { workspaceId: "w", runtime: "claude", sessionId: "abc", memoryScope: null },
+      { workspaceId: "w", runtime: "claude", sessionId: "abc", memoryScope: {} },
+    ];
+    tripped = null;
+    before = frames.length;
+    for (const params of hostileDeletes) send(4, "workerSessions.delete", params);
+    await settle();
+    answers = frames.slice(before);
+    check(
+      "F10: every hostile workerSessions.delete payload is refused before any file is touched",
+      tripped === null &&
+        answers.length === hostileDeletes.length &&
+        answers.every((f) => f?.ok === false && f?.error?.code === "invalid-params"),
+      { tripped, answered: answers.length, expected: hostileDeletes.length },
+    );
+
+    check(
+      "F10: the session survives the whole hostile corpus and keeps answering",
+      destroyed === false,
+    );
+    send(5, "ping", { nonce: "after-fuzz" });
+    await settle();
+    check(
+      "F10: a well-formed request still works after the hostile corpus",
+      frames.at(-1)?.ok === true && frames.at(-1)?.result?.nonce === "after-fuzz",
+      frames.at(-1),
+    );
   }
 
   if (failures > 0) {

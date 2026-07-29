@@ -6,7 +6,7 @@ import type { LoomGraphNodeKind } from "./model";
 // (centered). Picking a kind inserts it already wired.
 
 const KINDS: { kind: LoomGraphNodeKind; glyph: string; title: string; blurb: string; color: string; tint: string }[] = [
-  { kind: "worker", glyph: "◇", title: "Worker", blurb: "Run one CLI agent pass.", color: "var(--accent)", tint: "color-mix(in oklch, var(--accent) 14%, var(--panel-3))" },
+  { kind: "worker", glyph: "◇", title: "Worker", blurb: "Run one agent pass.", color: "var(--accent)", tint: "color-mix(in oklch, var(--accent) 14%, var(--panel-3))" },
   { kind: "guard", glyph: "◈", title: "Guard", blurb: "Branch on a condition (pass / fail).", color: "var(--ok)", tint: "color-mix(in oklch, var(--ok) 14%, var(--panel-3))" },
   { kind: "merge", glyph: "⊕", title: "Merge", blurb: "Join parallel branches.", color: "var(--info)", tint: "color-mix(in oklch, var(--info) 16%, var(--panel-3))" },
 ];

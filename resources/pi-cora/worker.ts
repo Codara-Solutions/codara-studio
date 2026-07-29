@@ -5,6 +5,12 @@ import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { createRepeatedCallGuard } from "./repeat-guard";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
+import {
+  fenceDecision,
+  fencedToolNames,
+  isAutomationWorker,
+  isWorkerSafeBridgeTool,
+} from "./worker-policy";
 
 interface BridgeTool {
   name: string;
@@ -35,18 +41,9 @@ function loadBridge(): CodaraBridge {
   return loaded as CodaraBridge;
 }
 
-// The worker launch plan runs with SPARK_MCP_MODE=talk, so the bridge already
-// exposes only the studio roster, but this allowlist, not the env-selected
-// roster, is what keeps manager orchestration tools (spawn_workers, complete,
-// message_workers, …) out of workers even if a future launch plan changes the
-// mode. Whiteboard stays read-only for workers; edits are the manager's call.
-function isWorkerSafeBridgeTool(name: string): boolean {
-  return (
-    name.startsWith("codara_preview_") ||
-    name.startsWith("codara_terminal_") ||
-    name === "codara_whiteboard_get"
-  );
-}
+// Tool allowlist + automation access fence live in worker-policy.ts (pure,
+// import-free) so they stay unit-testable outside Pi's jiti loader. See that
+// module for the full rationale.
 
 function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string {
   const texts = (result.content ?? [])
@@ -63,6 +60,7 @@ function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string 
 export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   const bridge = loadBridge();
   const peerComms = activePeerCommsContext();
+  const fence = fencedToolNames();
   let mcp: McpBridgeHandle | null = null;
 
   pi.on("before_agent_start", async (event) => ({
@@ -115,12 +113,27 @@ Worker contract:
   that report before ending, even when blocked or failed. Cora accepts the work
   from the report, not from an optimistic prose claim.
 - Keep prose concise while working; the live Workers surface already explains
-  the lifecycle to the user.
+  the lifecycle to the user.${fence.size > 0 ? `
+- Some tools are disabled for this worker by its access policy. A blocked call
+  returns an explanation instead of running; work within the remaining tools
+  and record the limitation in your final report if it blocks the task.` : ""}
 ${mcp?.promptSuffix() ?? ""}`,
   }));
 
+  // Tool-access fence: veto blocked tools (and out-of-workspace write/edit
+  // targets) before they execute. Registered before the repeat guard so a
+  // blocked call never counts as a loop.
+  if (fence.size > 0) {
+    pi.on("tool_call", (event) => fenceDecision(event.toolName, event.input, fence));
+  }
+
+  const automationWorker = isAutomationWorker();
   for (const tool of bridge.listTools()) {
-    if (!isWorkerSafeBridgeTool(tool.name)) continue;
+    if (!isWorkerSafeBridgeTool(tool.name, automationWorker)) continue;
+    // Fenced bridge tools (terminal/evaluate for any preset, mutating preview
+    // tools for readonly) are not offered at all: the roster stays honest and
+    // the tool_call veto below remains the belt if one is invoked anyway.
+    if (fence.has(tool.name.toLowerCase())) continue;
     pi.registerTool({
       name: tool.name,
       label: tool.name.replace(/^codara_/, "Codara · ").replaceAll("_", " "),

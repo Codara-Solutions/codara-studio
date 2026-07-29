@@ -95,7 +95,7 @@ function titleFromUrl(url: string): string {
     const u = new URL(url);
     return u.host || url;
   } catch {
-    return url || "preview";
+    return url || "Browser";
   }
 }
 
@@ -232,6 +232,20 @@ function defaultTabs(cwd?: string): Tab[] {
   return [createDraftChatTab(), createTerminalTab(cwd)];
 }
 
+// Run ids of the chat tabs found in each workspace's persisted blob, captured
+// as loadPersisted strips them. Chat tabs are rebuilt from the run store, but
+// SESSION-scoped state that depended on those tabs existing needs a seed after
+// a relaunch — concretely, a board-card chat the user had explicitly opened
+// must stay exempt from App's board-run suppression, or its restored tab
+// renders empty and gets pruned. Pure derivation from the existing blob; the
+// persistence format is unchanged.
+const restoredChatRunIdsByWorkspace = new Map<string, Set<string>>();
+
+export function restoredChatRunIds(workspaceId: string | null): ReadonlySet<string> {
+  return (workspaceId && restoredChatRunIdsByWorkspace.get(workspaceId)) || EMPTY_RUN_ID_SET;
+}
+const EMPTY_RUN_ID_SET: ReadonlySet<string> = new Set();
+
 function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number): PersistedShape | null {
   const key = storageKey(workspaceId);
   if (!key) return null;
@@ -241,6 +255,19 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
     const parsed = JSON.parse(raw) as PersistedShape;
     if (!parsed || parsed.v !== TAB_VERSION || !Array.isArray(parsed.tabs)) {
       return null;
+    }
+    // Record run-backed chat tabs before they are stripped below (a chat tab's
+    // id IS its run id; drafts are session-local and excluded). Additive so a
+    // re-hydration never forgets ids from an earlier load this session.
+    if (workspaceId) {
+      const chatRunIds = parsed.tabs
+        .filter((tab) => tab.kind === "chat" && !isDraftChatTabId(tab.id))
+        .map((tab) => tab.id);
+      if (chatRunIds.length > 0) {
+        const set = restoredChatRunIdsByWorkspace.get(workspaceId) ?? new Set<string>();
+        for (const id of chatRunIds) set.add(id);
+        restoredChatRunIdsByWorkspace.set(workspaceId, set);
+      }
     }
     // Terminal processes are session-local. Preserve tabs, splits, and cwd, but
     // never replay output or resume an agent after a full app relaunch.
@@ -266,6 +293,16 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
             // Runs), not durable layout — they re-open on demand via the "+"
             // picker rather than restoring from a persisted blob.
             tab.kind !== "automations" &&
+            // Stale shells from the short-lived Cora Hub tab: the kind no
+            // longer exists (the ✦ Cora button opens a draft chat now), but
+            // blobs persisted by builds that had it may still carry one — drop
+            // it rather than restore a ghost tab no stack renders.
+            (tab.kind as string) !== "cora" &&
+            // Stale shells from the short-lived top-level Cora Board tab: the
+            // kind no longer exists (the board is a chat sub-view now), but
+            // blobs persisted by builds that had it may still carry one — drop
+            // it rather than restore a ghost tab no stack renders.
+            (tab.kind as string) !== "board" &&
             // Untitled whiteboard drafts hold their board in renderer memory
             // only; restoring the tab shell after a relaunch would open an
             // empty husk. Saved boards come back as editor tabs instead.
@@ -2546,23 +2583,38 @@ export function useTabs(
     setTabs((curr) => {
       const target = curr.find((t) => t.kind === "chat" && t.id === runId);
       if (!target) return curr;
-      // Close-only and it STICKS: no ensureAnyChatTab re-seed. Closing the last
-      // chat tab leaves the workspace with only its other tabs (terminals,
-      // editors, previews) — or zero tabs, which renders the empty-workspace
-      // state. The run stays on disk and reachable via the chat-history
-      // popover; the closedChatRunIds marker added above keeps
+      // Close-only for the RUN and it STICKS: no ensureAnyChatTab re-seed.
+      // Closing the last chat tab leaves the workspace with only its other
+      // tabs (terminals, editors, previews) — or zero tabs, which renders the
+      // empty-workspace state. The run stays on disk and reachable via the
+      // chat-history popover; the closedChatRunIds marker added above keeps
       // syncChatTabsToRuns from resurrecting the tab on the next runs refresh.
-      const next = curr.filter((t) => t.id !== runId);
+      //
+      // The run's PREVIEW tabs close WITH the chat tab: their only pills live
+      // in this chat's inner strip, so once the chat is gone each one is an
+      // invisible, uncloseable <webview> whose Chromium renderer (~40-80MB,
+      // background throttling off) keeps running forever — and if one was (or
+      // later became) the active tab, the user stared at a fullscreen browser
+      // with no tab anywhere (the reported leak). The run's ephemeral Runs tab
+      // goes the same way; both re-materialize when the run is reopened from
+      // history (openRunsTab / Cora reopening its preview). Worker TERMINAL
+      // tabs stay: they host live PTYs of possibly still-running workers, are
+      // hidden by the run-visibility filter, and resurface on reopen.
+      const doomedIds = new Set<TabId>(
+        curr
+          .filter(
+            (t) =>
+              (t.kind === "preview" && t.runId === runId) ||
+              (t.kind === "runs" && t.runId === runId),
+          )
+          .map((t) => t.id),
+      );
+      const next = curr.filter((t) => t.id !== runId && !doomedIds.has(t.id));
+      for (const id of doomedIds) fireDispose(id);
       // Reroute the active selection away from anything this close just made
-      // unreachable. Run-owned tabs (workers terminal, Runs canvas, run-tagged
-      // previews) are listed ONLY in the chat panel's inner tab strip — the top
-      // strip filters them out — so once the owning chat tab is gone they have
-      // no pill anywhere. If one of them stayed (or became) active, the user
-      // would be stranded on a fullscreen surface with no way to leave or close
-      // it (the reported "browser stays open and there is no way to close it").
-      // They remain in the tab list per the close-only contract — reopening the
-      // run from history surfaces them again — they just can't be the active
-      // tab while orphaned, and can never be the fallback target either.
+      // unreachable — the closed tabs themselves, or the run's remaining
+      // worker terminals (pill-less once the owning chat is gone). NEVER fall
+      // back onto a run-owned tab either; empty state beats a stranding.
       // Scoped to THIS run's tabs: closing an unrelated chat while viewing
       // another (still-open) run's worker/preview must not yank the view.
       const ownedByClosedRun = (t: Tab) =>
@@ -2570,9 +2622,9 @@ export function useTabs(
         (t.kind === "runs" && t.runId === runId) ||
         (t.kind === "preview" && t.runId === runId);
       setActiveId((active) => {
-        const activeTab = active ? next.find((t) => t.id === active) : undefined;
-        const stranded =
-          active === runId || (activeTab ? ownedByClosedRun(activeTab) : false);
+        if (!active) return active;
+        const activeTab = next.find((t) => t.id === active);
+        const stranded = !activeTab || ownedByClosedRun(activeTab);
         if (!stranded) return active;
         const fallbackChat = next.find((t) => t.kind === "chat");
         const fallbackFree = next.find((t) => !isRunOwnedTab(t));
@@ -2580,7 +2632,7 @@ export function useTabs(
       });
       return next;
     });
-  }, []);
+  }, [fireDispose]);
 
   const renameChatTab = useCallback((id: TabId, title: string) => {
     const trimmed = title.trim();

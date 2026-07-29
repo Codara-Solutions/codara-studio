@@ -40,6 +40,8 @@ import type {
   AppPreferences,
   AppState,
   AgentEffortLevel,
+  BoardCard,
+  BoardCardStatus,
   ChatBackendKind,
   ChatMode,
   InAppNotificationTone,
@@ -76,12 +78,12 @@ const ERR_INVALID_REQUEST = -32600;
 const ERR_METHOD_NOT_FOUND = -32601;
 const ERR_INVALID_PARAMS = -32602;
 const ERR_INTERNAL = -32603;
-// Custom code reserved for "verb exists in the spec but not wired up yet" —
+// Custom code reserved for "verb exists in the spec but not wired up yet" -
 // distinct from ERR_METHOD_NOT_FOUND so clients can branch on
 // "implementable today" vs "typo in method name".
 const ERR_NOT_IMPLEMENTED = -32004;
 // Custom code for "method exists but is disabled in this build" (the app.*
-// dev-tools gate). Not ERR_INVALID_REQUEST — the envelope is well-formed —
+// dev-tools gate). Not ERR_INVALID_REQUEST - the envelope is well-formed -
 // so clients can branch without string-matching the message.
 const ERR_FORBIDDEN = -32003;
 // Custom code for "terminal.create's PTY failed to come online" (usually a bad
@@ -96,14 +98,14 @@ const TERMINAL_READ_MAX_LINES = 2000;
 // How long terminal.create waits for the renderer-spawned PTY to come online
 // before returning, so the paneId it hands back is immediately writable.
 const TERMINAL_SPAWN_WAIT_MS = 10_000;
-// Grace after the PTY comes online before terminal.create trusts it — long
+// Grace after the PTY comes online before terminal.create trusts it - long
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
 // Pane ids minted by terminal.create in this process. terminal.write is
 // restricted to this set so an agent can't inject keystrokes into a sibling
 // worker's or the user's own terminal (whose paneIds are discoverable via the
-// intentionally-broad terminal.read). Process-session scoped — see
+// intentionally-broad terminal.read). Process-session scoped - see
 // handleTerminalWrite for why per-run scoping isn't available here.
 const agentCreatedPaneIds = new Set<string>();
 // Cap on chat.append message length. Big enough for a verifier verdict
@@ -142,7 +144,7 @@ async function getRunStore(): Promise<typeof import("./orchestration/run-store")
   return runStoreMod;
 }
 
-// Same lazy-load trick for the scheduler — the Automation-mode architect's
+// Same lazy-load trick for the scheduler - the Automation-mode architect's
 // automation.* RPCs proxy straight into these. createJob/updateJob/deleteJob/
 // setEnabled already emit the `automation.updated` event from inside scheduler,
 // so the Automations Hub refreshes live without us re-emitting here.
@@ -162,7 +164,7 @@ let currentHandle: ServerHandle | null = null;
 
 /**
  * Start the JSON-RPC server. Binds 127.0.0.1 on a random ephemeral port and
- * mints a fresh per-process token. Idempotent — repeated calls return the
+ * mints a fresh per-process token. Idempotent - repeated calls return the
  * existing handle.
  */
 export async function startAgentSocket(): Promise<ServerHandle> {
@@ -171,7 +173,7 @@ export async function startAgentSocket(): Promise<ServerHandle> {
   const token = randomBytes(32).toString("hex");
   const server = createServer((req, res) => {
     handleRequest(req, res, token).catch((err) => {
-      // handleRequest only rejects on unexpected errors — log so we can see
+      // handleRequest only rejects on unexpected errors - log so we can see
       // them and respond with a generic 500 so the client doesn't hang.
       console.error("[agent-socket] unhandled handler error", err);
       if (!res.headersSent) {
@@ -214,7 +216,7 @@ export async function startAgentSocket(): Promise<ServerHandle> {
   currentHandle = { server, url, token };
   pty.setAgentSocketEnv({ url, token });
   // Persist a handshake file so MCP servers spawned by external runtimes
-  // (Claude Code, Codex) — which do not inherit Codara's pty env — can pick
+  // (Claude Code, Codex) - which do not inherit Codara's pty env - can pick
   // up the current URL + token. Best-effort: a failed write only means the
   // codara-studio MCP server has to back off and retry.
   void writeHandshakeFile({ url, token }).catch((err) =>
@@ -235,7 +237,7 @@ export async function stopAgentSocket(): Promise<void> {
   await fsp.rm(handshakeFilePath(), { force: true }).catch(() => undefined);
   await new Promise<void>((resolve) => {
     handle.server.close(() => resolve());
-    // close() waits for all open connections — force the issue so quit
+    // close() waits for all open connections - force the issue so quit
     // doesn't hang behind a long-poll from a stuck sub-agent.
     handle.server.closeAllConnections?.();
   });
@@ -256,7 +258,7 @@ async function writeHandshakeFile(input: { url: string; token: string }): Promis
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse, expectedToken: string): Promise<void> {
-  // Method/path gate before any work — we only speak POST /rpc.
+  // Method/path gate before any work - we only speak POST /rpc.
   if (req.method !== "POST" || req.url !== "/rpc") {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
@@ -284,7 +286,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
   }
 
   // Batch requests are part of JSON-RPC 2.0 but we don't need them for the
-  // initial set of verbs — keep the surface small until a real caller asks.
+  // initial set of verbs - keep the surface small until a real caller asks.
   if (Array.isArray(parsed)) {
     writeJsonRpc(res, errorResponse(null, ERR_INVALID_REQUEST, "batch requests are not supported"));
     return;
@@ -358,6 +360,41 @@ function readBody(req: IncomingMessage): Promise<string | null> {
   });
 }
 
+// Orchestrator RPCs that mutate the run. While auto-compaction is summarizing
+// a run's conversation (run-store's isRunMidAutoCompaction window), these are
+// rejected: the summarize turn runs against the live manager session with its
+// MCP tools attached, and only a prompt instruction stops the model from
+// calling them - a stray codara_spawn_workers / codara_complete / codara_ask_user
+// mid-compaction would mutate a run whose conversation is about to cut over.
+// Read-only methods (get_worker_status, wait_for_workers, check_messages,
+// whiteboard_get, board_get) and codara_remember (writes memory files, not run
+// state) stay available. spawn_terminals is absent because it carries no runId
+// and opens desktop terminals via the terminal bridge without touching RunState.
+// The automation.* mutators join them for the same reason, now that an ordinary
+// auto/execute chat carries the automation roster: creating, editing, firing, or
+// deleting a loom mid-compaction would mutate durable scheduler state (and the
+// consent gate would post a blocking question) against a conversation that is
+// about to cut over. The read-only verbs (list/get/wait) stay available.
+const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
+  "orchestrator.spawn_workers",
+  "orchestrator.ask_user",
+  "orchestrator.complete",
+  "orchestrator.request_next_iteration",
+  "orchestrator.message_workers",
+  "orchestrator.name_chat",
+  "orchestrator.whiteboard_update",
+  "orchestrator.board_update",
+  "automation.create",
+  "automation.update",
+  "automation.run_now",
+  "automation.set_enabled",
+  "automation.pause",
+  "automation.resume",
+  "automation.stop",
+  "automation.delete",
+  "automation.name_chat",
+]);
+
 async function dispatch(
   method: string,
   rawParams: unknown,
@@ -367,6 +404,16 @@ async function dispatch(
   const params = rawParams && typeof rawParams === "object" ? (rawParams as Record<string, unknown>) : {};
 
   try {
+    if (MID_COMPACTION_BLOCKED_METHODS.has(method)) {
+      const runId = stringParam(params, "runId");
+      if (runId && (await getRunStore()).isRunMidAutoCompaction(runId)) {
+        return errorResponse(
+          id,
+          ERR_INVALID_PARAMS,
+          "conversation compaction is in progress for this run; retry shortly",
+        );
+      }
+    }
     switch (method) {
       case "terminal.read":
         return await handleTerminalRead(params, id);
@@ -449,6 +496,10 @@ async function dispatch(
         return await handleOrchestratorWhiteboardGet(params, id);
       case "orchestrator.whiteboard_update":
         return await handleOrchestratorWhiteboardUpdate(params, id);
+      case "orchestrator.board_get":
+        return await handleOrchestratorBoardGet(params, id);
+      case "orchestrator.board_update":
+        return await handleOrchestratorBoardUpdate(params, id);
       case "orchestrator.remember":
         return await handleOrchestratorRemember(params, id);
       case "automation.list":
@@ -513,7 +564,7 @@ async function handleTerminalRead(
     return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
   }
 
-  // Decode raw bytes as UTF-8 (lossy on partial code points at the head —
+  // Decode raw bytes as UTF-8 (lossy on partial code points at the head -
   // acceptable for a tail read), then strip ANSI/VT control sequences so a
   // grader sub-agent gets clean text instead of escape codes.
   const text = stripVTControlCharacters(tail.toString("utf8"));
@@ -544,7 +595,7 @@ async function handleTerminalCreate(
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
   // The MCP server stamps SPARK_RUN_ID onto terminal.create so a background
-  // run's terminal lands in — and defaults its cwd to — the RUN's workspace,
+  // run's terminal lands in - and defaults its cwd to - the RUN's workspace,
   // not whichever workspace the user happens to be viewing. Resolution is
   // best-effort: no runId (user-facing/non-run agents) or an unknown run keeps
   // the active-workspace behavior.
@@ -599,7 +650,7 @@ async function handleTerminalCreate(
       alive = pty.exists(result.paneId);
     }
     if (!alive) {
-      // The PTY never came online, or came online and immediately exited —
+      // The PTY never came online, or came online and immediately exited -
       // almost always a nonexistent/permission-denied cwd. Don't report success
       // with a dead paneId, and don't leave the orphan amber tab behind: ask the
       // renderer to close the tab we just created, then surface a clear error.
@@ -643,10 +694,10 @@ async function handleTerminalWrite(
   if (typeof text !== "string") return errorResponse(id, ERR_INVALID_PARAMS, "text is required");
   // Ownership gate: writing INJECTS keystrokes (and, by default, Enter) into a
   // live PTY. terminal.read intentionally lets an agent sample sibling worker
-  // panes, so their paneIds are discoverable — without this check an agent could
+  // panes, so their paneIds are discoverable - without this check an agent could
   // type into another worker's Claude/Codex TUI (a confused-deputy). Restrict
   // writes to panes THIS process created via terminal.create. Scope is the
-  // process session (the socket carries no per-run identity — orchestrator RPCs
+  // process session (the socket carries no per-run identity - orchestrator RPCs
   // pass runId explicitly in params, and these terminal panes are not run-
   // scoped), so an agent can only reach terminals it (or a co-resident agent)
   // spawned as agent-owned, never a worker's or the user's own terminal.
@@ -707,7 +758,7 @@ async function handleChatAppend(
     ? rawContent.slice(0, CHAT_APPEND_MAX_CHARS)
     : rawContent;
 
-  // chat.append posts on behalf of the sub-agent itself, not the user — record
+  // chat.append posts on behalf of the sub-agent itself, not the user - record
   // it as a system note so the manager's replanning logic doesn't treat it as
   // a fresh user follow-up that should re-engage the autopilot loop.
   const runStore = await getRunStore();
@@ -1013,7 +1064,7 @@ const CHAT_EVENTS_DEFAULT_WAIT_MS = 25_000;
 // policy could sever it mid-response; the client simply re-polls.
 const CHAT_EVENTS_MAX_WAIT_MS = 55_000;
 
-// Cursor-based long-poll over a run's event journal — the CLI's substitute for
+// Cursor-based long-poll over a run's event journal - the CLI's substitute for
 // the renderer's live push channel (mirrors daemon-host's subscribeDaemonEvents
 // seam, but over the wire). Without afterSequence it answers immediately with
 // the current cursor ("follow from now" bootstrap); with one it returns journal
@@ -1114,14 +1165,14 @@ async function handleChatCancel(
   }
 }
 
-// ── app.* — dev/test surface for the `cora` CLI (bin/cora.cjs) ──────────────
+// ── app.* - dev/test surface for the `cora` CLI (bin/cora.cjs) ──────────────
 //
 // These drive the APP ITSELF (main window pixels, renderer JS, preferences,
 // the notify pipeline) rather than a preview tab, so a feature can be
 // exercised and observed from a terminal without a Playwright harness.
 // Everything except app.info is dev-gated: always available in unpackaged
 // builds (npm run dev / npm start), and in packaged builds only when
-// CODARA_DEV_TOOLS=1 — a shipped app's socket must not let another local
+// CODARA_DEV_TOOLS=1 - a shipped app's socket must not let another local
 // process screenshot the user's terminals or rewrite their preferences.
 
 function devToolsEnabled(): boolean {
@@ -1264,7 +1315,7 @@ async function handleAppNotify(
   if (!NOTIFY_SOUNDS.has(sound)) {
     return errorResponse(id, ERR_INVALID_PARAMS, `unknown sound: ${sound}`);
   }
-  // Unique sourceKey per call unless the caller pins one — the policy dedupes
+  // Unique sourceKey per call unless the caller pins one - the policy dedupes
   // repeated same-kind alerts per source, which a "fire a test notification"
   // command must not silently hit. Pass an explicit sourceKey to exercise the
   // dedup/rearm behavior itself.
@@ -1330,14 +1381,14 @@ async function handleAppPrefsSet(
   // out-of-range values are clamped, not stored raw. The broadcast makes the
   // renderer apply it live (glass sliders, theme, notification prefs). The one
   // side effect not replayed here is ipc.ts's tray ensure/destroy hook for
-  // keepRunningInBackground — a dev-only gap; the tray catches up on restart.
+  // keepRunningInBackground - a dev-only gap; the tray catches up on restart.
   const next = await setPreference(prefKey, params.value as AppPreferences[PrefKey]);
   const { broadcastPreferencesChanged } = await import("./ipc");
   broadcastPreferencesChanged({ key: prefKey, value: next[prefKey] });
   return successResponse(id, { key, value: next[prefKey] });
 }
 
-// ── orchestrator.* — Execute-mode tools called by Claude/Codex via the
+// ── orchestrator.* - Execute-mode tools called by Claude/Codex via the
 // codara-studio MCP server (orchestration roster). The CLI is acting as Codara's manager; these
 // tools let it spawn Cora workers, ask the user a clarifying question, and
 // mark the run complete. Each call carries `runId` (the MCP server forwards
@@ -1348,7 +1399,7 @@ async function handleAppPrefsSet(
 // can `await` completion via codara_wait_for_workers.
 
 const ASK_USER_POLL_MS = 500;
-const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers the user being AFK
+const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min - covers the user being AFK
 // A plan approval is read-then-decide: the user reads a whole proposed plan
 // before answering, so the manager waits longer than for a one-line blocker.
 // Hard bound: the MCP client (and the in-process Pi bridge) abort every
@@ -1451,8 +1502,8 @@ function handleOrchestratorSpawnTerminals(
 // execute-mode runs, and prose policy alone does not stop a hedging verifier
 // from being re-requested forever (run-mrz25z39-9ffs4w chained Build → Verify
 // → Reverify → Final verification → DOM regression verifier on a one-file
-// task). The cap is enforced here — the spawn chokepoint shared by
-// Claude/Codex/Pi managers — as an actual limit, extending the reuse guards
+// task). The cap is enforced here - the spawn chokepoint shared by
+// Claude/Codex/Pi managers - as an actual limit, extending the reuse guards
 // below which only dedupe.
 
 function normalizeScopePath(path: string): string {
@@ -1466,7 +1517,7 @@ function normalizeScopePath(path: string): string {
 // a verifier that began before the most recent finished implementation
 // attempt examined code that has since changed (same finishedAt >
 // verifierBeganAt idiom as the live-verifier reuse guard below), so it must
-// not consume the budget for verifying the new work — otherwise turn 1's
+// not consume the budget for verifying the new work - otherwise turn 1's
 // verifier would starve turn 2's first-ever verification in a long-lived
 // chat run.
 function countVerifierRoundsForScope(
@@ -1517,11 +1568,11 @@ function verifierRoundCapForRun(run: RunState): number {
 }
 
 // Backstop on manager-minted steps: every spawn RPC creates one synthetic
-// worker_batch step, and a runaway manager can chain them without limit —
+// worker_batch step, and a runaway manager can chain them without limit -
 // chat autopilot has no automation-loop hardCap. Generous on purpose: it
 // bounds pathological loops, not normal runs. Scoped to the current user
 // turn (batches minted since the latest user-authored message) because chat
-// runs are long-lived — legitimate batches spread across many turns must
+// runs are long-lived - legitimate batches spread across many turns must
 // never accumulate into a force-land.
 const SYNTHETIC_STEP_CEILING = 20;
 
@@ -1641,7 +1692,7 @@ async function handleOrchestratorSpawnWorkers(
       const capNote =
         `Verification cap reached: ${verifierRoundsUsed} verifier round(s) already ran against this scope ` +
         `(cap ${verifierRoundCap} for the ${policy} policy). Do not spawn another verifier. Either accept ` +
-        "the implementation now — it lands as completed_unverified carrying the existing verifier caveats — " +
+        "the implementation now (it lands as completed_unverified carrying the existing verifier caveats) " +
         "or ask the user one concrete question. If a verifier could not run because tooling was unavailable, " +
         "treat that as an environmental caveat, not a code failure.";
       if (requestedVerifiers.length === workerEntries.length) {
@@ -1694,7 +1745,7 @@ async function handleOrchestratorSpawnWorkers(
       const runtimes = await detectAgentRuntimes();
       // Cross-provider verification is valuable only when that provider is
       // healthy: it must be installed and must not have already failed
-      // environmentally in this run (expired OAuth, launch failure, etc.) —
+      // environmentally in this run (expired OAuth, launch failure, etc.) -
       // rerouting into a provider that just failed sent workers into the same
       // broken subscription twice in run-mrwp6vfh-wkticw. The sign-in probe is
       // deliberately NOT consulted: `authenticated === false` is advisory (the
@@ -1755,7 +1806,7 @@ async function handleOrchestratorSpawnWorkers(
   // Execute-mode workers don't belong to a planned step; the manager
   // spawns them ad-hoc. RunGraph.tsx renders FROM run.steps, so without a
   // step entry the graph falls through to OutcomeGraph's "No steps run"
-  // card and the worker is invisible — observed in run-mpodz3i7-fs8o7f
+  // card and the worker is invisible - observed in run-mpodz3i7-fs8o7f
   // even though the worker actually ran and edited files. Create one
   // synthetic worker_batch step per spawn_workers RPC call so the graph
   // can render the worker rows via the existing agentRowsForStep path.
@@ -1788,7 +1839,7 @@ async function handleOrchestratorSpawnWorkers(
       note:
         `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
         `(cap ${SYNTHETIC_STEP_CEILING}). Codara has landed the run with the work completed so far. ` +
-        "Summarize the outcome for the user and end the turn — do not spawn more workers.",
+        "Summarize the outcome for the user and end the turn. Do not spawn more workers.",
     });
   }
   const workerTitles = workersToCreate
@@ -1891,7 +1942,7 @@ async function handleOrchestratorSpawnWorkers(
       // worker CLI. Before the execute-mode autopilot-review-skip landed
       // (run-store.ts:741+), this happened indirectly via the eventual
       // worker_result_review pickup. Now nobody calls launchWorkerAttempt
-      // unless we do it here — without this, CC's manager turn spawns
+      // unless we do it here - without this, CC's manager turn spawns
       // workers that sit forever in prompt_ready, blocks on
       // codara_wait_for_workers until the 90s turn timeout fires, and
       // reports back "Worker was cancelled before execution."
@@ -1899,7 +1950,7 @@ async function handleOrchestratorSpawnWorkers(
     } catch (err) {
       // prepareWorkerTask failures shouldn't block subsequent queueings; the
       // worker stays in 'created' state and the autopilot will retry. Not
-      // silent though — a stuck-in-created worker is otherwise undiagnosable.
+      // silent though - a stuck-in-created worker is otherwise undiagnosable.
       console.warn(
         `[agent-socket] prepareWorkerTask failed for ${workerTaskId} (run ${runId}); autopilot will retry:`,
         err instanceof Error ? err.message : err,
@@ -1909,7 +1960,7 @@ async function handleOrchestratorSpawnWorkers(
   if (attemptIdsToLaunch.length > 0) {
     runStore.scheduleAutopilotCycles(runId, attemptIdsToLaunch);
   }
-  // Echo policy back to the manager LLM through the tool result — it never
+  // Echo policy back to the manager LLM through the tool result - it never
   // sees run system notes, and its system prompt is frozen at run start, so
   // this response is the ONLY channel that reaches managers of long-lived
   // runs when fleet/model policy evolves underneath them.
@@ -1938,9 +1989,9 @@ async function handleOrchestratorSpawnWorkers(
         "as a deliberate premium pin and is never rerouted.",
     );
   }
-  // Solo-spawn advisory. Legitimate solo spawns exist — a lone verifier or
+  // Solo-spawn advisory. Legitimate solo spawns exist - a lone verifier or
   // leaf, a skeleton before a fan-out (the prompts' own endorsed pattern), a
-  // targeted corrective fix after a failed verify — so the note names them as
+  // targeted corrective fix after a failed verify - so the note names them as
   // fine and only nudges the under-decomposed-build case. Derive the class
   // from the tasks actually CREATED (rawWorkers entries can be silently
   // dropped above, so rawWorkers[0] may not be the surviving worker).
@@ -1967,7 +2018,7 @@ async function handleOrchestratorSpawnWorkers(
   );
 }
 
-// A long-poll loop should give up the moment the MCP client hangs up —
+// A long-poll loop should give up the moment the MCP client hangs up -
 // otherwise a dropped connection keeps the main-process loop polling blind
 // for the full 15-20 min deadline.
 function clientGone(res: ServerResponse): boolean {
@@ -2064,7 +2115,7 @@ async function handleOrchestratorAskUser(
     (category === "plan_approval" ? PLAN_APPROVAL_TIMEOUT_MS : ASK_USER_TIMEOUT_MS);
   while (Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, ASK_USER_POLL_MS));
-    // Client hung up — stop polling; writeJsonRpc on a dead socket is a no-op.
+    // Client hung up - stop polling; writeJsonRpc on a dead socket is a no-op.
     if (clientGone(res)) {
       await releaseQuestion();
       return errorResponse(id, ERR_INTERNAL, "ask_user aborted: client disconnected");
@@ -2102,8 +2153,8 @@ async function handleOrchestratorAskUser(
 // wait_for_workers to report is_terminal.
 const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
 
-// Worker task statuses that represent REAL in-flight work — an attempt is
-// scheduled, running, awaiting review, or queued to retry — so completing the
+// Worker task statuses that represent REAL in-flight work - an attempt is
+// scheduled, running, awaiting review, or queued to retry - so completing the
 // run now would strand it (the reproduced bug: a QUEUED corrective worker was
 // cancelled when codara_complete landed early). This is what gates codara_complete.
 //
@@ -2111,17 +2162,17 @@ const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "ca
 // terminal", so the guard fails OPEN (allows completion) on statuses that are
 // NOT live work and must never deadlock the coordinator:
 //   - `created`: a task only lingers here when prepareWorkerTask never
-//     succeeded (codara_spawn_workers' prepare threw — see ~L859) or a user
+//     succeeded (codara_spawn_workers' prepare threw - see ~L859) or a user
 //     hand-added a task via the UI that was never launched. Such a task never
 //     reaches a terminal state on its own, and NO coordinator RPC can launch,
-//     retry, or cancel it — so blocking on it would make the run permanently
+//     retry, or cancel it - so blocking on it would make the run permanently
 //     uncompletable (codara_wait_for_workers on a `created` task can only time
 //     out). createWorkerTask stamps `created`; prepareWorkerTask advances to
 //     `queued`, so a healthy just-spawned task is already past `created` by the
 //     time the model can call codara_complete.
 //   - `blocked`: only ever set on the loom-pass path (run-store), and
 //     loom/automation runs are rejected by rejectIfAutomationRun before this
-//     guard — so it cannot legitimately reach here.
+//     guard - so it cannot legitimately reach here.
 //   - any future/unknown status: fail-open beats a mystery deadlock.
 const IN_FLIGHT_WORKER_TASK_STATUSES = new Set<string>([
   "queued",
@@ -2161,7 +2212,7 @@ async function handleOrchestratorComplete(
   }
   // Guard: never complete the run while a worker task the coordinator spawned is
   // still in-flight. Completing here flips the run to `complete`, which fires the
-  // "done" toast and tears the run down mid-flight — observed live: a corrective
+  // "done" toast and tears the run down mid-flight - observed live: a corrective
   // worker was QUEUED after a failed attempt, then codara_complete landed and the
   // queued worker was left stranded/cancelled. Reject with an instructive,
   // structured error so the CLI coordinator waits on the stragglers first
@@ -2169,22 +2220,47 @@ async function handleOrchestratorComplete(
   // JSON-RPC error `message` back to the model as an isError tool result
   // (server.js callTool), so this reaches the model and course-corrects it. We
   // deliberately do NOT auto-cancel the stragglers here. Only genuinely in-flight
-  // statuses block (see IN_FLIGHT_WORKER_TASK_STATUSES) — a never-launched
+  // statuses block (see IN_FLIGHT_WORKER_TASK_STATUSES) - a never-launched
   // `created` task must not deadlock completion.
   const pendingTasks = (run.workerTasks ?? []).filter(
     (wt) => IN_FLIGHT_WORKER_TASK_STATUSES.has(wt.status),
   );
   if (pendingTasks.length > 0) {
-    const detail = pendingTasks
+    // A MANUAL task at needs_review deliberately still blocks completion (its
+    // report is unreviewed, and only the human-review escalation question can
+    // settle it), but sending the model back to codara_wait_for_workers for it
+    // would be a lie: waiting can never terminalize a manual task. Name the
+    // real dependency - the user's accept/fail answer - so the coordinator
+    // stops burning its turn on a wait that cannot succeed.
+    const manualAwaitingUser = pendingTasks.filter(
+      (wt) => wt.runtimePreference === "manual" && wt.status === "needs_review",
+    );
+    const waitableTasks = pendingTasks.filter((wt) => !manualAwaitingUser.includes(wt));
+    const manualDetail = manualAwaitingUser
+      .map((wt) => `"${wt.title}" (${wt.id})`)
+      .join(", ");
+    if (waitableTasks.length === 0) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `Cannot complete: ${manualAwaitingUser.length} manual worker report(s) await the user's accept/fail answer: ${manualDetail}. ` +
+          "Manual reports are reviewed by the user through the human-review question, not by waiting on workers. " +
+          "The task leaves needs_review when the user answers; if the decision is urgent, surface it via codara_ask_user.",
+      );
+    }
+    const detail = waitableTasks
       .map((wt) => `"${wt.title}" (${wt.id}, ${wt.status})`)
       .join(", ");
-    const ids = pendingTasks.map((wt) => wt.id).join(", ");
+    const ids = waitableTasks.map((wt) => wt.id).join(", ");
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      `Cannot complete: ${pendingTasks.length} worker task(s) still pending/running: ${detail}. ` +
+      `Cannot complete: ${waitableTasks.length} worker task(s) still pending/running: ${detail}. ` +
       `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
-        `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).`,
+        `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).` +
+        (manualAwaitingUser.length > 0
+          ? ` Additionally, ${manualAwaitingUser.length} manual worker report(s) await the user's accept/fail answer and will not settle via waiting: ${manualDetail}.`
+          : ""),
     );
   }
   // Verification freshness invariant: an earlier green verifier does not cover
@@ -2219,7 +2295,7 @@ async function handleOrchestratorComplete(
 
 // Agent-driven automation loops: the orchestrator records whether the loop
 // should run another iteration. The loop driver reads this in onTerminal. Has
-// no effect on a normal (non-automation) run — the signal is simply unread.
+// no effect on a normal (non-automation) run - the signal is simply unread.
 async function handleOrchestratorRequestNextIteration(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -2233,58 +2309,41 @@ async function handleOrchestratorRequestNextIteration(
   // signal in a multi-node wave; undefined for single-node looms.
   const nodeId = stringParam(params, "nodeId") ?? undefined;
 
-  // Looms v2 handoff: the agent may steer the NEXT pass's worker. Invalid
-  // fields are dropped (never an error response — the continue/stop signal must
-  // always be recorded; killing the loop over a typo'd model id would be worse
-  // than ignoring the steering). Whatever survives validation is honored by the
-  // loop driver for the next pass regardless of the pinned engine ("auto" no
-  // longer exists as a gate).
+  // Looms-on-Pi handoff: the agent may steer the NEXT pass's model/effort.
+  // Invalid fields are dropped (never an error response - the continue/stop
+  // signal must always be recorded; killing the loop over a typo'd model id
+  // would be worse than ignoring the steering). Whatever survives validation
+  // is honored by the loop driver for the next pass. A legacy `nextEngine`
+  // from an old transcript is tolerated and ignored - the model id alone
+  // selects the Pi provider.
   const requestedEngine = stringParam(params, "nextEngine") ?? undefined;
   const requestedModel = stringParam(params, "nextModel") ?? undefined;
   const requestedEffort = stringParam(params, "nextEffort") ?? undefined;
-  let nextEngine: "claude" | "codex" | undefined;
   let nextModel: string | undefined;
   let nextEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined;
   let warning: string | undefined;
-  // Non-blocking caveat attached to an ACCEPTED handoff (vs `warning`, which
-  // marks steering that was rejected and feeds the handoff_rejected event).
-  let advisory: string | undefined;
   if (requestedEngine !== undefined || requestedModel !== undefined || requestedEffort !== undefined) {
     try {
-      const { detectAgentRuntimes } = await import("./agent-runtimes");
-      const runtimes = await detectAgentRuntimes();
-      if (requestedEngine === "claude" || requestedEngine === "codex") {
-        const runtime = runtimes.find((r) => r.kind === requestedEngine);
-        if (runtime?.installed) {
-          nextEngine = requestedEngine;
-          if (runtime.authenticated === false) {
-            // Advisory, never a refusal: the sign-in probe cannot see
-            // shell-exported credentials from a Finder-launched app, so "no
-            // credential detected" must not veto the handoff.
-            advisory =
-              `nextEngine "${requestedEngine}" may not be signed in on this machine` +
-              `${runtime.authHint ? ` (${runtime.authHint})` : ""} — proceeding anyway.`;
-          }
-          if (requestedModel) {
-            const known = runtime.models.map((m) => m.id);
-            if (known.length === 0 || known.includes(requestedModel)) {
-              nextModel = requestedModel;
-            } else {
-              warning = `nextModel "${requestedModel}" is not a known ${requestedEngine} model id — the CLI default will be used.`;
-            }
-          }
+      if (requestedModel) {
+        // Trim + lowercase both families: Pi's provider gate is
+        // case-sensitive, so a mixed-case handoff id would throw at the next
+        // launch instead of steering it.
+        const trimmed = /^gpt-/i.test(requestedModel)
+          ? normalizeCodexModelId(requestedModel.trim()).toLowerCase()
+          : requestedModel.trim().toLowerCase();
+        if (/^(claude|gpt)-[a-z0-9.\-]+$/.test(trimmed)) {
+          nextModel = trimmed;
         } else {
-          warning = `nextEngine "${requestedEngine}" is not installed — keeping the current engine.`;
+          warning = `nextModel "${requestedModel}" is not a claude-* or gpt-* model id; keeping the loom's own model.`;
         }
-      } else if (requestedEngine !== undefined) {
-        warning = `nextEngine must be "claude" or "codex" — got "${requestedEngine}".`;
-      } else if (requestedModel) {
-        warning = "nextModel requires nextEngine — ignored.";
+      }
+      if (requestedEngine !== undefined && !nextModel) {
+        warning = warning ?? "nextEngine is no longer supported: automations run on Pi; steer with nextModel instead.";
       }
       if (["minimal", "low", "medium", "high", "xhigh", "max"].includes(requestedEffort ?? "")) {
         nextEffort = requestedEffort as typeof nextEffort;
       } else if (requestedEffort !== undefined) {
-        warning = warning ?? `nextEffort "${requestedEffort}" is not a valid effort level — ignored.`;
+        warning = warning ?? `nextEffort "${requestedEffort}" is not a valid effort level; ignored.`;
       }
       if (warning) {
         const { appendEvent } = await import("./orchestration/event-log");
@@ -2296,20 +2355,16 @@ async function handleOrchestratorRequestNextIteration(
       }
     } catch {
       // Validation failing must never block the continue signal.
-      nextEngine = undefined;
       nextModel = undefined;
       nextEffort = undefined;
-      advisory = undefined;
     }
   }
 
   try {
     const { recordAgentSignal } = await import("./orchestration/automation-loop");
-    recordAgentSignal(runId, { continue: !done, prompt, nextEngine, nextModel, nextEffort, nodeId });
-    const accepted =
-      nextEngine || nextModel || nextEffort ? { nextEngine, nextModel, nextEffort } : undefined;
-    const responseWarning = [warning, advisory].filter(Boolean).join(" ") || undefined;
-    return successResponse(id, { ok: true, continue: !done, accepted, warning: responseWarning });
+    recordAgentSignal(runId, { continue: !done, prompt, nextModel, nextEffort, nodeId });
+    const accepted = nextModel || nextEffort ? { nextModel, nextEffort } : undefined;
+    return successResponse(id, { ok: true, continue: !done, accepted, warning });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, (err as Error).message);
   }
@@ -2408,7 +2463,16 @@ async function handleOrchestratorWaitForWorkers(
                 : null,
             }
           : null,
-        is_terminal: taskStatus !== null && TERMINAL_WORKER_TASK_STATUSES.has(taskStatus),
+        // A MANUAL task never advances past needs_review on its own: no
+        // manager session reviews it, and its resolution comes from the
+        // human-review escalation question (run-store's cycle completion). A
+        // waiting coordinator must not hold to the timeout ceiling on a state
+        // only the user can move; return with the report and the honest
+        // needs_review status so the manager can read it and act.
+        is_terminal:
+          taskStatus !== null &&
+          (TERMINAL_WORKER_TASK_STATUSES.has(taskStatus) ||
+            (taskStatus === "needs_review" && task?.runtimePreference === "manual")),
       };
     }));
   const firstRun = await runStore.getRun(runId);
@@ -2426,7 +2490,7 @@ async function handleOrchestratorWaitForWorkers(
     );
   }
   while (Date.now() < deadline) {
-    // Client hung up — stop polling rather than block the loop for ~20 min.
+    // Client hung up - stop polling rather than block the loop for ~20 min.
     if (clientGone(res)) {
       return errorResponse(id, ERR_INTERNAL, "wait_for_workers aborted: client disconnected");
     }
@@ -2465,7 +2529,7 @@ async function handleOrchestratorWaitForWorkers(
 // a destructive read there would silently swallow a blocked worker's question
 // forever. Messages therefore re-surface on later waits until the manager
 // acknowledges them via codara_check_messages (the only mark-read reader).
-// Failures are swallowed — a mailbox hiccup must never fail the wait.
+// Failures are swallowed - a mailbox hiccup must never fail the wait.
 async function peekManagerInbox(
   runStore: Awaited<ReturnType<typeof getRunStore>>,
   runId: string,
@@ -2502,13 +2566,13 @@ async function handleOrchestratorMessageWorkers(
   // Deliver regardless, but warn when the recipient will likely never read it:
   // solo-spawned workers were never briefed on the mailbox (no peer-comms
   // guidance in their prompt), and terminal workers are gone. Without the
-  // warning the ok:true reads as "steering landed" — false confidence.
+  // warning the ok:true reads as "steering landed" - false confidence.
   let warning: string | undefined;
   if (recipient) {
     if (TERMINAL_WORKER_TASK_STATUSES.has(recipient.status)) {
       warning = `recipient ${to} is already terminal (${recipient.status}); the message will not be read`;
     } else if (!recipient.canRunParallel) {
-      warning = `recipient ${to} was spawned solo and is not briefed on the mailbox; it is unlikely to read this — its prompt already contains its full task`;
+      warning = `recipient ${to} was spawned solo and is not briefed on the mailbox; it is unlikely to read this (its prompt already contains its full task)`;
     }
   }
   try {
@@ -2576,24 +2640,27 @@ async function handleOrchestratorGetWorkerStatus(
 }
 
 // ---------------------------------------------------------------------------
-// Automation (loom) architect handlers — reachable only from an Automation-mode
-// chat. The MCP server proxies spark_*_automation tools to these automation.*
-// RPCs. Defense in depth: EVERY handler loads the run by runId and rejects
-// unless run.chatMode === "automation", so even if a stray socket caller hits
-// these verbs they can't mutate the scheduler from a non-automation chat.
+// Automation (loom) handlers. The MCP server proxies the codara_*_automation
+// tools to these automation.* RPCs, and both the Automations Hub assist chat
+// (SPARK_MCP_MODE=automation) and an ordinary auto/execute chat carry them, so
+// the user can have Cora build and manage a loom in the conversation they are
+// already in. What still fences them: the roster keeps them away from workers
+// and studio sub-agents, every handler resolves the run by runId, loadJobForRun
+// pins each loom to the calling chat's workspace, and requestUserConsent gates
+// every mutation of an existing loom on an explicit in-chat approval.
 // ---------------------------------------------------------------------------
 
 const AUTOMATION_WAIT_POLL_MS = 2000;
 const AUTOMATION_WAIT_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
 // 19 min, deliberately UNDER the MCP server's 20-min transport timeout in
-// postJsonRpc — so a max-length wait still returns a clean reason:"timeout"
+// postJsonRpc - so a max-length wait still returns a clean reason:"timeout"
 // snapshot instead of the client tearing the socket down first.
 const AUTOMATION_WAIT_MAX_TIMEOUT_MS = 19 * 60 * 1000;
 
 /**
  * Whether an automation has reached a state worth returning to a waiting
  * architect. "stopped"/"blocked" are unambiguously terminal. "idle" is
- * overloaded — it is BOTH the pre-run resting state (iteration 0, never fired)
+ * overloaded - it is BOTH the pre-run resting state (iteration 0, never fired)
  * AND the between-iterations parking state of a cadence loop (nextFireAt
  * armed). We must only treat "idle" as "this run settled" when at least one
  * iteration has completed AND the loop is not waiting to fire again, otherwise
@@ -2617,12 +2684,12 @@ function isAutomationSettled(job: ScheduledJob): boolean {
 
 /**
  * Symmetric guard for the worker-orchestration RPCs (spawn/complete/wait/
- * get_status). Automation mode is sold as read-only on the workspace — it may
- * only manage automations — so a chat in that mode must not be able to spawn,
+ * get_status). Automation mode is sold as read-only on the workspace - it may
+ * only manage automations - so a chat in that mode must not be able to spawn,
  * complete, or steer execute-mode workers. On the Codex backend the globally-
  * installed MCP has no per-run env, so a Codex automation chat still SEES the
  * execute roster; this is the enforcement boundary for it (Claude automation
- * chats never see these tools — their per-run MCP config is mode-scoped).
+ * chats never see these tools - their per-run MCP config is mode-scoped).
  * Returns an error response to short-circuit, or null when the run may proceed.
  */
 function rejectIfAutomationRun(
@@ -2639,11 +2706,24 @@ function rejectIfAutomationRun(
 }
 
 /**
- * Shared guard for every automation.* handler. Resolves the run and enforces
- * that the calling chat is in Automation mode. Returns the loaded run on
- * success, or a ready-to-return error response.
+ * Shared guard for every automation.* handler. Resolves the calling run.
+ *
+ * There is deliberately NO chat-mode check here any more: Cora manages
+ * automations from an ordinary auto/execute chat, which is the whole point of
+ * shipping the automation roster outside Automation mode. The remaining fences
+ * are the ones that still mean something:
+ *   - the ROSTER: only the automation and execute MCP modes carry these tools,
+ *     so a worker (SPARK_MCP_MODE=worker) and a plain studio sub-agent never see
+ *     them. Same shape as board_update / whiteboard_update, and it is the only
+ *     worker fence available: a structured worker inherits its loom run's
+ *     SPARK_RUN_ID, so a worker call is indistinguishable from its manager's
+ *     here.
+ *   - loadJobForRun: a chat may only touch looms in its OWN workspace.
+ *   - requestUserConsent: every mutation of an EXISTING loom needs the user's
+ *     explicit in-chat approval.
+ * Returns the loaded run on success, or a ready-to-return error response.
  */
-async function requireAutomationRun(
+async function resolveAutomationCallerRun(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<{ run: RunState } | { error: JsonRpcResponse }> {
@@ -2652,15 +2732,6 @@ async function requireAutomationRun(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return { error: errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`) };
-  if (run.chatMode !== "automation") {
-    return {
-      error: errorResponse(
-        id,
-        ERR_INVALID_PARAMS,
-        "Automation tools are only available when the chat is in Automation mode. Ask the user to switch the composer mode pill to \"Automation\" and try again.",
-      ),
-    };
-  }
   return { run };
 }
 
@@ -2668,7 +2739,7 @@ async function requireAutomationRun(
  * Resolve an automation by id AND enforce that it belongs to the calling
  * chat's workspace. The Automations Hub only ever shows looms whose
  * `input.workspaceId` matches the active workspace (AutomationsHub filters on
- * exactly this field), so an architect chat must see and mutate the same set —
+ * exactly this field), so an architect chat must see and mutate the same set -
  * otherwise it "sees" (and could edit/delete) looms from other workspaces the
  * user can't even see in the panel, which produced the phantom-duplicate report.
  * Returns the loaded job on success, or a ready-to-return error response
@@ -2690,7 +2761,7 @@ async function loadJobForRun(
         id,
         ERR_INVALID_PARAMS,
         `automation "${job.name}" (${automationId}) belongs to a different workspace and can't be accessed or changed from this chat. ` +
-          `Only automations in this chat's workspace are available — call codara_list_automations to see them.`,
+          `Only automations in this chat's workspace are available; call codara_list_automations to see them.`,
       ),
     };
   }
@@ -2699,15 +2770,15 @@ async function loadJobForRun(
 
 // ── Consent gate for destructive automation edits ───────────────────────────
 // The architect model may freely CREATE looms, but it must not modify or delete
-// an EXISTING loom without the user's explicit approval — enforced here on the
+// an EXISTING loom without the user's explicit approval - enforced here on the
 // server so the model cannot bypass it via prompt injection. Mechanism mirrors
 // handleOrchestratorAskUser: post a blocking `question` message with quick-pick
 // options, then long-poll the run's humanMessages for the user's answer, giving
 // up if the MCP client disconnects (clientGone) or the deadline passes.
 const CONSENT_POLL_MS = 500;
-const CONSENT_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — matches ask_user's AFK budget
+const CONSENT_TIMEOUT_MS = 15 * 60 * 1000; // 15 min - matches ask_user's AFK budget
 // Explicit affirmatives only. Anything else (including "Deny", "Not now", a
-// stray chat message, or free-form text) FAILS SAFE to a decline — a consent
+// stray chat message, or free-form text) FAILS SAFE to a decline - a consent
 // gate must never treat ambiguity as approval.
 const CONSENT_ALLOW_ANSWERS: ReadonlySet<string> = new Set([
   "allow",
@@ -2734,7 +2805,7 @@ const CONSENT_ALLOW_ANSWERS: ReadonlySet<string> = new Set([
  */
 // One consent gate per run at a time. Claude/Codex issue parallel tool_use
 // blocks, and the MCP server services each tools/call as an independent HTTP
-// request — without serialization, two gates could poll concurrently and a
+// request - without serialization, two gates could poll concurrently and a
 // single Allow click would approve BOTH (the UI only surfaces the latest open
 // question, so the user would never even see the second one).
 const pendingConsentRuns = new Set<string>();
@@ -2755,7 +2826,7 @@ async function requestUserConsent(opts: {
         approved: false,
         message:
           "Another change is already awaiting the user's approval in this chat. " +
-          "Wait for that answer before requesting a new one — do not retry immediately.",
+          "Wait for that answer before requesting a new one. Do not retry immediately.",
       }),
     };
   }
@@ -2825,10 +2896,10 @@ async function requestUserConsent(opts: {
         };
       }
       // ONLY answers explicitly linked to THIS question count. An unlinked
-      // affirmative — the user answering some other question the model asked
-      // in the same turn, or typing a casual "ok" into the chat — must never
+      // affirmative - the user answering some other question the model asked
+      // in the same turn, or typing a casual "ok" into the chat - must never
       // approve a change. (Without the link, codara_ask_user("…yes/no?") fired
-      // alongside the gated call could harvest the user's "yes" — a live
+      // alongside the gated call could harvest the user's "yes" - a live
       // bypass found in adversarial review.)
       const answer = [...run.humanMessages]
         .reverse()
@@ -2842,7 +2913,7 @@ async function requestUserConsent(opts: {
         const normalized = answer.message.trim().toLowerCase();
         if (CONSENT_ALLOW_ANSWERS.has(normalized)) return { approved: true };
         // Linked but not an affirmative: Deny, Not now, or free-form typed
-        // into this question's card — all fail safe to a decline.
+        // into this question's card - all fail safe to a decline.
         return { approved: false, response: successResponse(id, { approved: false, message: denyMessage }) };
       }
       if (
@@ -2977,7 +3048,7 @@ function validateGraph(graph: LoomGraph): string | null {
       if (typeof ptype !== "string" || !GUARD_PREDICATE_TYPES.has(ptype)) {
         return `guard node ${node.id} has invalid predicate.type '${String(ptype)}' (expected phrase|tests|gitClean|command|agentSignal)`;
       }
-      // Per-type required payload — the engine dereferences these directly, so a
+      // Per-type required payload - the engine dereferences these directly, so a
       // missing field (e.g. a "phrase" predicate with no `phrase`) crashes guard
       // evaluation mid-pass. Catch it here as a fixable error instead.
       if (ptype === "phrase" && (typeof node.predicate.phrase !== "string" || node.predicate.phrase.length === 0)) {
@@ -2996,15 +3067,15 @@ function validateGraph(graph: LoomGraph): string | null {
         // is NOT inherited per-node), so an empty prompt is a real defect.
         return `worker node ${node.id} requires a non-empty prompt`;
       }
-      // node.worker is dereferenced (n.worker.engine) by advance/relaunch waves;
-      // a missing/garbage worker crashes the pass mid-flight. Require it — and
-      // require it CONCRETE (engine claude|codex + explicit model + effort): the
-      // architect must pin all three per worker, "auto"/blank no longer exist.
+      // node.worker is dereferenced (n.worker.model) by advance/relaunch waves;
+      // a missing/garbage worker crashes the pass mid-flight. Require it - and
+      // require it CONCRETE (explicit model + effort): the architect must pin
+      // both per worker, a blank model/effort no longer exists.
       const werr = validateConcreteWorker(node.worker, `worker node ${node.id}`);
       if (werr) return werr;
       // Optional per-worker tool access + collaboration (Looms v2.5). All absent
       // = full access, no collaboration (the pre-feature default).
-      const aerr = validateWorkerAccessFields(node, node.worker?.engine, `worker node ${node.id}`);
+      const aerr = validateWorkerAccessFields(node, `worker node ${node.id}`);
       if (aerr) return aerr;
     }
   }
@@ -3043,53 +3114,56 @@ function validateGraph(graph: LoomGraph): string | null {
   return null;
 }
 
-// The engines/efforts an architect-supplied worker MUST pin. "auto" and an
-// unset model/effort no longer exist — the architect always chooses a concrete
-// engine, model, and effort per worker. (Runtime resolution still tolerates a
-// legacy "auto"/blank spec loaded from disk; this strictness is only on the
-// create/update path so the architect corrects itself.)
-const CONCRETE_ENGINES = new Set(["claude", "codex"]);
+// The model/effort an architect-supplied worker MUST pin. Automations run on
+// the bundled Pi runtime, so there is no engine choice: the model id alone
+// selects the provider (claude-* → anthropic, gpt-* → openai-codex). (Runtime
+// resolution still tolerates a legacy spec loaded from disk; this strictness
+// is only on the create/update path so the architect corrects itself.)
 const WORKER_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
 
-/** Reject any worker that fails to pin a concrete engine ∈ {claude, codex}, a
- *  non-blank model, and a valid effort. Returns an instructive error naming the
- *  offending worker (so the architect fixes it), or null when concrete. */
+/** Reject any worker that fails to pin a non-blank claude-* or gpt-* model and
+ *  a valid effort, or that still tries to pick an engine. Returns an
+ *  instructive error naming the offending worker (so the architect fixes it),
+ *  or null when concrete. */
 function validateConcreteWorker(
   worker: { engine?: unknown; model?: unknown; effort?: unknown } | undefined,
   label: string,
 ): string | null {
   if (!worker || typeof worker !== "object") {
-    return `${label} requires a worker config with an explicit engine, model, and effort`;
+    return `${label} requires a worker config with an explicit model and effort`;
   }
-  if (typeof worker.engine !== "string" || !CONCRETE_ENGINES.has(worker.engine)) {
-    return `${label} has engine '${String(worker.engine)}' — it must be 'claude' or 'codex' ('auto' and an unset engine are no longer allowed; choose one explicitly)`;
+  if (worker.engine !== undefined) {
+    return `${label} sets 'engine', but automations run on Pi; pick model and effort only (drop the engine field; claude-* models use the Anthropic subscription, gpt-* models use the Codex subscription)`;
   }
   if (typeof worker.model !== "string" || worker.model.trim().length === 0) {
-    return `${label} must set an explicit model (${ALLOWED_WORKER_MODELS.join(", ")}), a CLI-default/blank model is no longer allowed`;
+    return `${label} must set an explicit model (${ALLOWED_WORKER_MODELS.join(", ")}), a blank/default model is not allowed`;
   }
-  if (worker.engine === "codex") {
+  const trimmed = worker.model.trim();
+  if (/^gpt-/i.test(trimmed)) {
     // Lowercase before validating AND persisting: OpenAI model ids are
-    // lowercase, so "GPT-5.6-Sol" would otherwise be stored as-is, match no
-    // picker row in NodeContextPanel, and reach the codex CLI verbatim as an
-    // unusable `-m` value. Loom workers launch the codex CLI directly via
-    // buildLaunchCommandLine (usePiWorkerHarness excludes automation runs), so
-    // there is NO downstream validation on this path — this normalization is
-    // the only gate before the id hits the CLI.
-    const normalized = normalizeCodexModelId(worker.model.trim()).toLowerCase();
-    // Shape check, not an allow-list. This used to reject anything outside the
-    // three curated ids, which meant a model released after this build could
-    // not be used in an automation until someone shipped a catalog edit. A
-    // typo that breaks the gpt-* shape is still caught here while a genuinely
-    // new GPT model goes through.
+    // lowercase, so "GPT-5.6-Sol" would otherwise be stored as-is and match no
+    // picker row in NodeContextPanel. Also migrates legacy ids from a
+    // long-lived architect session onto the current Codex catalog.
+    const normalized = normalizeCodexModelId(trimmed).toLowerCase();
+    // Shape check, not an allow-list: a typo that breaks the gpt-* shape is
+    // caught while a genuinely new GPT model goes through.
     if (!/^gpt-[a-z0-9.\-]+$/.test(normalized)) {
-      return `${label} has an invalid Codex model '${worker.model}' — expected a gpt-* model id such as ${CODEX_MODEL_CATALOG.map((model) => model.id).join(", ")}`;
+      return `${label} has an invalid model '${worker.model}': expected a gpt-* id such as ${CODEX_MODEL_CATALOG.map((model) => model.id).join(", ")}`;
     }
-    // Migrate legacy model ids from a long-lived architect session before the
-    // automation is persisted, so the saved loom opens on a real picker row.
     worker.model = normalized;
+  } else {
+    // Lowercase claude ids too: Pi's provider gate (validateProviderModel)
+    // does a case-SENSITIVE startsWith("claude-"), so a persisted
+    // "Claude-Opus-5" would throw at every launch and permanently brick the
+    // loom. Anthropic ids are lowercase-only, so this loses nothing.
+    const lowered = trimmed.toLowerCase();
+    if (!/^claude-[a-z0-9.\-]+$/.test(lowered)) {
+      return `${label} has an invalid model '${worker.model}': expected a claude-* or gpt-* model id (recommended: ${ALLOWED_WORKER_MODELS.join(", ")})`;
+    }
+    worker.model = lowered;
   }
   if (typeof worker.effort !== "string" || !WORKER_EFFORTS.has(worker.effort)) {
-    return `${label} must set an explicit effort — one of minimal, low, medium, high, xhigh, max (a blank/default effort is no longer allowed)`;
+    return `${label} must set an explicit effort: one of minimal, low, medium, high, xhigh, max (a blank/default effort is not allowed)`;
   }
   return null;
 }
@@ -3127,7 +3201,7 @@ async function validateTriggerLoopWorker(opts: {
     if (typeof t.kind !== "string" || !TRIGGER_KINDS.has(t.kind)) {
       return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf)`;
     }
-    // Per-kind required payload — the scheduler arms these directly, so a bad
+    // Per-kind required payload - the scheduler arms these directly, so a bad
     // payload becomes a hot loop / crash at arm time rather than a fixable error.
     if (t.kind === "interval") {
       if (typeof t.everyMs !== "number" || !Number.isFinite(t.everyMs) || t.everyMs < MIN_TRIGGER_EVERY_MS) {
@@ -3178,7 +3252,7 @@ async function validateTriggerLoopWorker(opts: {
       }
     }
     // A count loop's iteration target IS stop.maxIterations; without it the
-    // engine's hardCap silently collapses the loop to a single pass — reject
+    // engine's hardCap silently collapses the loop to a single pass - reject
     // instead so the architect fixes the config rather than shipping a
     // one-shot "loop".
     if (l.kind === "count") {
@@ -3217,7 +3291,7 @@ async function handleAutomationList(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const { run } = guard;
   try {
@@ -3238,7 +3312,7 @@ async function handleAutomationGet(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
@@ -3261,7 +3335,7 @@ async function handleAutomationCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const { run } = guard;
   const name = stringParam(params, "name");
@@ -3271,7 +3345,7 @@ async function handleAutomationCreate(
   const loop = paramLoop(params);
   if (!loop) return errorResponse(id, ERR_INVALID_PARAMS, "loop (with a 'kind' and 'stop') is required");
   if (!loop.stop || typeof loop.stop !== "object") {
-    // Normalize a missing stop block to an empty cap set rather than rejecting —
+    // Normalize a missing stop block to an empty cap set rather than rejecting -
     // the scheduler treats {} as "rely on engine defaults".
     loop.stop = {};
   }
@@ -3280,7 +3354,7 @@ async function handleAutomationCreate(
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "worker is required — set an explicit engine ('claude'|'codex'), model, and effort",
+      "worker is required: set an explicit model and effort (automations run on the bundled Pi runtime)",
     );
   }
   const tlwErr = await validateTriggerLoopWorker({ trigger, loop, worker });
@@ -3293,12 +3367,12 @@ async function handleAutomationCreate(
     if (graphErr) return errorResponse(id, ERR_INVALID_PARAMS, `invalid graph: ${graphErr}`);
   }
   // Resolve workspace binding server-side from the calling run. The architect
-  // never supplies paths — the automation runs in the same workspace as the
+  // never supplies paths - the automation runs in the same workspace as the
   // chat that created it. Unlike the one-shot spawn_workers analog we do NOT
   // fall back to process.cwd(): this cwd is persisted into a RECURRING job, and
   // a guessed path (process.cwd() is "/" in a packaged macOS app) would silently
   // bind the loom to the wrong directory. createRun always stamps
-  // settingsSnapshot.workspaceCwd, so a missing value is a real anomaly — fail
+  // settingsSnapshot.workspaceCwd, so a missing value is a real anomaly - fail
   // loudly with a message the architect can relay.
   const cwd =
     typeof run.settingsSnapshot?.workspaceCwd === "string"
@@ -3332,10 +3406,11 @@ async function handleAutomationCreate(
       cwd,
       initialUserNote: promptTemplate,
     },
-    // Record the authoring conversation ONLY for assist runs (an architect chat:
-    // automation mode + not itself owned by a loom). requireAutomationRun already
-    // guarantees chatMode === "automation"; run.automationId being set would mean
-    // a loom-owned iteration run, which we don't back-link.
+    // Record the authoring conversation whenever a real chat authored the loom,
+    // whether that was the Hub's assist chat or an ordinary auto/execute chat
+    // (the Hub's "Open chat" button follows this pointer). run.automationId being
+    // set means a loom-owned iteration run, which we don't back-link: that would
+    // point the button at a machine run rather than a conversation.
     createdByRunId: run.automationId ? undefined : run.id,
   };
   try {
@@ -3349,7 +3424,7 @@ async function handleAutomationCreate(
 
 /**
  * Human-readable one-liners describing what an update patch changes, relative to
- * the loom's current state — fed into the consent question so the user knows
+ * the loom's current state - fed into the consent question so the user knows
  * exactly what they're approving. Only fields the patch actually carries are
  * listed; unchanged fields are omitted.
  */
@@ -3365,7 +3440,7 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
     lines.push(`loop: ${summarizeLoop(existing.loop)} → ${summarizeLoop(update.loop)}`);
   }
   if (update.prompt !== undefined) {
-    // Show actual content, not just "updated" — the user is approving a
+    // Show actual content, not just "updated" - the user is approving a
     // prompt rewrite and must be able to see what it becomes (a blind
     // "prompt template updated" line makes malicious rewrites invisible).
     const clip = (s: string | undefined): string => {
@@ -3381,7 +3456,7 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
     const w = update.worker;
     const ew = existing.worker;
     const fmt = (x?: LoomWorkerConfig): string =>
-      x ? [x.engine, x.model, x.effort].filter(Boolean).join("/") : "auto";
+      x ? [x.model, x.effort].filter(Boolean).join("/") : "(unset)";
     lines.push(`worker: ${fmt(ew)} → ${fmt(w)}`);
   }
   if (update.graph !== undefined) {
@@ -3397,7 +3472,7 @@ async function handleAutomationUpdate(
   id: JsonRpcId,
   res: ServerResponse,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const { run } = guard;
   const automationId = stringParam(params, "automation_id");
@@ -3407,7 +3482,7 @@ async function handleAutomationUpdate(
     const graphErr = validateGraph(graph);
     if (graphErr) return errorResponse(id, ERR_INVALID_PARAMS, `invalid graph: ${graphErr}`);
   }
-  // Validate ONLY the structural fields actually supplied — update is a patch,
+  // Validate ONLY the structural fields actually supplied - update is a patch,
   // so an omitted trigger/loop/worker keeps the existing one. This matches the
   // strictness create applies, so a bad patch is rejected, not persisted.
   const tlwErr = await validateTriggerLoopWorker({
@@ -3467,7 +3542,7 @@ async function handleAutomationRunNow(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
@@ -3487,7 +3562,7 @@ async function handleAutomationWait(
   id: JsonRpcId,
   res: ServerResponse,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
@@ -3540,7 +3615,7 @@ async function handleAutomationSetEnabled(
   id: JsonRpcId,
   res: ServerResponse,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
@@ -3550,8 +3625,8 @@ async function handleAutomationSetEnabled(
   const jobGuard = await loadJobForRun(automationId, guard.run, id);
   if ("error" in jobGuard) return jobGuard.error;
   // Enabling/disabling is a state change the user relies on (silently
-  // disabling a loom they depend on — or re-arming one they deliberately
-  // turned off — is a modification), so it takes the same consent gate as
+  // disabling a loom they depend on - or re-arming one they deliberately
+  // turned off - is a modification), so it takes the same consent gate as
   // update/delete. No-op toggles skip the ask.
   if (jobGuard.job.enabled !== params.enabled) {
     const runStore = await getRunStore();
@@ -3579,7 +3654,7 @@ async function handleAutomationPause(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
@@ -3598,7 +3673,7 @@ async function handleAutomationResume(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
@@ -3617,7 +3692,7 @@ async function handleAutomationStop(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
@@ -3637,7 +3712,7 @@ async function handleAutomationDelete(
   id: JsonRpcId,
   res: ServerResponse,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const { run } = guard;
   const automationId = stringParam(params, "automation_id");
@@ -3684,7 +3759,7 @@ const NAME_CHAT_MAX_CHARS = 60;
 
 // Sanitize a proposed chat title from a *_name_chat tool call: strip newlines /
 // control chars (they would break the single-line header and history rows) and
-// truncate on CODE POINTS — a naive .slice() can bisect a surrogate pair,
+// truncate on CODE POINTS - a naive .slice() can bisect a surrogate pair,
 // leaving a lone "�" in the UI. renameRun trims + rejects empty as a backstop.
 // Shared by handleAutomationNameChat and handleOrchestratorNameChat so both
 // name-chat surfaces sanitize identically.
@@ -3696,13 +3771,25 @@ function sanitizeChatTitle(rawTitle: string): string {
     : cleaned;
 }
 
+// automation.name_chat stays Automation-mode only, unlike the automation
+// MANAGEMENT verbs above: it is the architect chat's half of the naming pair and
+// orchestrator.name_chat is the auto/execute half, so an ordinary chat renaming
+// itself must keep going through that one (it is also the only name_chat the
+// execute MCP roster exposes).
 async function handleAutomationNameChat(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const guard = await requireAutomationRun(params, id);
+  const guard = await resolveAutomationCallerRun(params, id);
   if ("error" in guard) return guard.error;
   const { run } = guard;
+  if (run.chatMode !== "automation") {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `automation.name_chat is only available for automation chats (this run's chatMode is "${run.chatMode ?? "unset"}"). Auto and Execute chats use orchestrator.name_chat.`,
+    );
+  }
   const rawTitle = stringParam(params, "title");
   if (!rawTitle) {
     return errorResponse(id, ERR_INVALID_PARAMS, "title is required (a short 3-6 word chat name)");
@@ -3720,7 +3807,7 @@ async function handleAutomationNameChat(
   }
 }
 
-// orchestrator.name_chat — the Execute/Auto manager's counterpart to
+// orchestrator.name_chat - the Execute/Auto manager's counterpart to
 // automation.name_chat: give an ordinary chat an AI-authored title. Mirrors how
 // the other orchestrator.* handlers load the run (getRun + not-found guard) and
 // restricts to execute/auto chats: an automation chat must go through
@@ -3813,6 +3900,229 @@ async function handleOrchestratorWhiteboardUpdate(
       ok: true,
       run_id: updated.id,
       whiteboard: updated.whiteboard ?? null,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// orchestrator.board_get / board_update, the Cora Board RPCs. The board
+// belongs to the RUN: both handlers resolve the calling run's own board, so a
+// run can never reach another chat's board (cross-run access is structurally
+// impossible, not just forbidden). Available in every chat mode - a Talk-mode
+// conversation about what to do next is exactly when reading and adding cards
+// is useful - so unlike the automation RPCs there is no mode gate here.
+// board_get also triggers the one-time legacy workspace-board adoption (see
+// run-store.getRunBoard).
+async function handleOrchestratorBoardGet(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  try {
+    const board = await runStore.getRunBoard(run.id);
+    return successResponse(id, {
+      run_id: run.id,
+      board,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// What an AGENT may do to its own chat's board, enforced here rather than in
+// the store - the renderer's board:update IPC is the user acting directly and
+// keeps full control, while this path is a model whose input includes whatever
+// it just read from the repo, the web, or a tool result.
+//
+// Under the per-chat model the run's manager WORKS the board, so it holds full
+// card powers on its own board:
+//   - It may CREATE cards in any lane and MOVE or EDIT any card (title,
+//     description, order, status, error note) - moving the user's queued card
+//     to "running" when its worker launches is the whole point.
+//   - It may stamp workerTaskId, but only with a worker task that actually
+//     belongs to this run (context.workerTaskIds) - the card→terminal link
+//     must never point into another chat's workers.
+//   - It may DELETE only cards it created itself (createdBy "agent"). A card
+//     the user wrote is the user's: Cora asks instead of deleting.
+//   - runId (the legacy link), createdBy, and imagePaths are never taken from
+//     the payload; the stored values are preserved (the store enforces the
+//     same carry-over, so this is belt and braces).
+//
+// Returns the sanitized card list to persist, or a message explaining the
+// refusal in terms the model can act on.
+type AgentBoardWriteResult = { cards: BoardCard[] } | { error: string };
+
+export interface AgentBoardWriteContext {
+  /** Worker-task ids belonging to the calling run - the only values a card's
+   * workerTaskId may be set to. */
+  workerTaskIds: ReadonlySet<string>;
+}
+
+const AGENT_BOARD_STATUSES: ReadonlySet<string> = new Set<BoardCardStatus>([
+  "idea",
+  "queued",
+  "running",
+  "blocked",
+  "review",
+  "done",
+  "failed",
+]);
+
+// Exported for scripts/test-board-agent-writes.cjs - this is the boundary that
+// keeps a prompt-injected model from deleting the user's cards or pointing a
+// card at another run's worker, so it is worth testing directly rather than
+// only through the socket.
+export function authorizeAgentBoardWrite(
+  currentCards: BoardCard[],
+  incoming: unknown[],
+  context: AgentBoardWriteContext,
+): AgentBoardWriteResult {
+  const currentById = new Map(currentCards.map((card) => [card.id, card]));
+  const seen = new Set<string>();
+  const cards: BoardCard[] = [];
+  const now = new Date().toISOString();
+
+  for (const entry of incoming) {
+    if (!entry || typeof entry !== "object") {
+      return { error: "Every item in cards must be a card object." };
+    }
+    const source = entry as Record<string, unknown>;
+    const cardId = typeof source.id === "string" ? source.id.trim() : "";
+    if (!cardId) return { error: "Every card needs a non-empty string id." };
+    if (seen.has(cardId)) return { error: `Duplicate card id in the update: ${cardId}` };
+    seen.add(cardId);
+
+    const title = typeof source.title === "string" ? source.title.trim() : "";
+    if (!title) return { error: `Card ${cardId} needs a non-empty title.` };
+    const status = typeof source.status === "string" ? source.status : "";
+    if (status && !AGENT_BOARD_STATUSES.has(status)) {
+      return {
+        error: `Card ${cardId} has unknown status "${status}". Valid lanes: idea, queued, running, blocked, review, done, failed.`,
+      };
+    }
+    const description =
+      typeof source.description === "string" ? source.description.trim() : undefined;
+    const order =
+      typeof source.order === "number" && Number.isFinite(source.order) ? source.order : undefined;
+    const errorNote = typeof source.error === "string" ? source.error.trim() : undefined;
+
+    const workerTaskIdRaw = source.workerTaskId;
+    let workerTaskId: string | undefined;
+    if (typeof workerTaskIdRaw === "string" && workerTaskIdRaw.trim()) {
+      workerTaskId = workerTaskIdRaw.trim();
+      const existing = currentById.get(cardId);
+      if (workerTaskId !== existing?.workerTaskId && !context.workerTaskIds.has(workerTaskId)) {
+        return {
+          error: `Card ${cardId} names workerTaskId "${workerTaskId}", which is not a worker task of this run. Use an id returned by codara_spawn_workers.`,
+        };
+      }
+    }
+
+    const existing = currentById.get(cardId);
+    if (!existing) {
+      const created: BoardCard = {
+        id: cardId,
+        title,
+        status: (status || "idea") as BoardCardStatus,
+        createdBy: "agent",
+        order: order ?? currentCards.length + cards.length,
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (description) created.description = description;
+      if (errorNote) created.error = errorNote;
+      if (workerTaskId) created.workerTaskId = workerTaskId;
+      cards.push(created);
+      continue;
+    }
+
+    // Server-owned fields (runId, createdBy, imagePaths, createdAt) always
+    // come from the stored card; the store's normalize re-enforces this.
+    const next: BoardCard = { ...existing };
+    next.title = title;
+    // Omitted or empty description keeps the stored one: the schema only
+    // requires id/title/status/order, so a minimally compliant round-trip
+    // must never strip a card's body. Edits send new non-empty text.
+    if (description) next.description = description;
+    if (order !== undefined) next.order = order;
+    const statusChanged = Boolean(status) && status !== existing.status;
+    if (status) next.status = status as BoardCardStatus;
+    // The error note follows the lane it described: a fresh note wins, an
+    // omitted note survives while the lane is unchanged, and a lane change
+    // without a fresh note clears the stale one.
+    if (errorNote) next.error = errorNote;
+    else if (statusChanged) delete next.error;
+    if (workerTaskId) next.workerTaskId = workerTaskId;
+    next.updatedAt = now;
+    cards.push(next);
+  }
+
+  // Deletion by omission is allowed only for the agent's own cards. A card the
+  // user authored (createdBy "user", or a legacy card with no provenance) can
+  // only be removed by the user.
+  const removedUserCards = currentCards.filter(
+    (card) => !seen.has(card.id) && card.createdBy !== "agent",
+  );
+  if (removedUserCards.length > 0) {
+    return {
+      error: `You may not delete cards the user created (missing: ${removedUserCards
+        .map((card) => card.title)
+        .slice(0, 5)
+        .join(", ")}). Send them back unchanged, or ask the user to delete them.`,
+    };
+  }
+
+  return { cards };
+}
+
+async function handleOrchestratorBoardUpdate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  if (!Array.isArray(params.cards)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "cards must be an array of board cards");
+  }
+  if (typeof params.baseRevision !== "number" || !Number.isFinite(params.baseRevision)) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "baseRevision is required: call codara_board_get first and pass the revision it returned",
+    );
+  }
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+
+  try {
+    // getRunBoard (not run.board) so a first write on a legacy workspace
+    // adopts the old cards before the authorization snapshot is taken.
+    const current = await runStore.getRunBoard(run.id);
+    const authorized = authorizeAgentBoardWrite(current.cards, params.cards, {
+      workerTaskIds: new Set(run.workerTasks.map((task) => task.id)),
+    });
+    if ("error" in authorized) {
+      return errorResponse(id, ERR_INVALID_PARAMS, authorized.error);
+    }
+    // A stale revision means a human drag landed first. updateRunBoardFromAgent
+    // throws (mirroring the whiteboard's conflict) so the model re-reads
+    // instead of treating a dropped write as success; the current revision
+    // travels in the message so the retry can succeed.
+    const board = await runStore.updateRunBoardFromAgent({
+      runId: run.id,
+      baseRevision: Math.max(0, Math.floor(params.baseRevision)),
+      cards: authorized.cards,
+    });
+    return successResponse(id, {
+      ok: true,
+      run_id: run.id,
+      board,
     });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);

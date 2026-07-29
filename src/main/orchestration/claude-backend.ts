@@ -1470,6 +1470,8 @@ function createClaudePrintParser(emit: ChatStreamHandler) {
         if (usage) state.usage = usage;
       } else if (message.type === "system" && message.subtype === "api_retry") {
         emit({ kind: "system_note", message: `Claude is retrying the request (attempt ${String(message.attempt ?? "?")}).` });
+      } else if (message.type === "system" && message.subtype === "compact_boundary") {
+        emit({ kind: "system_note", message: CC_COMPACT_BOUNDARY_NOTE });
       }
     },
     finish() {
@@ -2025,6 +2027,10 @@ function translateAndEmit(
     // content payload, which is where CC puts things the user should see
     // (e.g. local_command output, info banners).
     const subtype = typeof obj.subtype === "string" ? obj.subtype : null;
+    if (subtype === "compact_boundary") {
+      emit({ kind: "system_note", message: CC_COMPACT_BOUNDARY_NOTE });
+      return;
+    }
     if (subtype && CC_SYSTEM_NOISE_SUBTYPES.has(subtype)) return;
     let text = "";
     if (typeof obj.message === "string") {
@@ -2076,9 +2082,13 @@ const CC_SYSTEM_NOISE_SUBTYPES = new Set<string>([
   "init",
   "turn_duration",
   "stop_hook_summary",
-  "compact_boundary",
   "tool_use_count",
 ]);
+
+// CC compacted its own context mid-session. Surfaced (not swallowed as noise)
+// so the timeline records it and a divergence between CC's real occupancy and
+// Codara's persisted gauge is visible to the user.
+const CC_COMPACT_BOUNDARY_NOTE = "Claude Code compacted its context.";
 
 function extractUsage(usage: Record<string, unknown>): {
   inputTokens?: number;

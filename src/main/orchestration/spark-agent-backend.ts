@@ -369,19 +369,59 @@ export function buildTalkReplyDecision(
 const CANONICAL_REPLAY_MESSAGE_LIMIT = 32;
 const CANONICAL_REPLAY_CHAR_LIMIT = 24_000;
 
+// run-store caps a message at MAX_ATTACHMENTS_PER_MESSAGE; mirrored here so a
+// hand-built or migrated message can never blow the turn input out either.
+const MAX_RENDERED_ATTACHMENTS_PER_MESSAGE = 8;
+
+/**
+ * Attachments are persisted on the message (images copied into the run's
+ * attachments/ folder, other files referenced where they already live) but
+ * nothing downstream ever put them in front of the manager, so a screenshot the
+ * user dropped in the composer reached the model as no text at all. Every CLI
+ * backend can read an absolute path off disk, images included, so the paths ARE
+ * the handoff: name them and let the manager open the ones it needs.
+ */
+function renderMessageAttachments(message: HumanRunMessage): string[] {
+  const attachments = (message.attachments ?? []).slice(0, MAX_RENDERED_ATTACHMENTS_PER_MESSAGE);
+  if (attachments.length === 0) return [];
+  // Names and paths are user-controlled bytes landing inside a marker-framed
+  // prompt block; a newline-bearing filename could forge the block/replay
+  // markers, so line breaks collapse to spaces before interpolation.
+  const oneLine = (value: string): string => value.replace(/[\r\n]+/g, " ").trim();
+  return [
+    "The user attached the following; open image paths with your file/image tools to view them.",
+    "[ATTACHMENTS]",
+    ...attachments.map(
+      (attachment) => `- ${attachment.kind}: ${oneLine(attachment.name)} -> ${oneLine(attachment.path)}`,
+    ),
+    "[/ATTACHMENTS]",
+  ];
+}
+
 function renderBundledManagerInput(messages: HumanRunMessage[]): string {
   if (messages.length === 0) {
     return "Continue Cora's current manager workflow from the existing run state. There is no new user message attached to this turn.";
   }
-  if (messages.length === 1) return messages[0].message.trim();
+  if (messages.length === 1) {
+    const attachments = renderMessageAttachments(messages[0]);
+    const text = messages[0].message.trim();
+    if (attachments.length === 0) return text;
+    return [text, "", ...attachments].join("\n").trim();
+  }
   return [
     "The user sent the following queued messages in this order. Treat all of them as input for this manager turn:",
     "",
-    ...messages.flatMap((message, index) => [
-      `${index + 1}. [${message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued steering" : "User turn"}]`,
-      message.message.trim(),
-      "",
-    ]),
+    ...messages.flatMap((message, index) => {
+      // Attachments belong to the message that carried them, so they sit inside
+      // that numbered section rather than in one merged list at the end.
+      const attachments = renderMessageAttachments(message);
+      return [
+        `${index + 1}. [${message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued steering" : "User turn"}]`,
+        message.message.trim(),
+        ...(attachments.length === 0 ? [] : ["", ...attachments]),
+        "",
+      ];
+    }),
   ].join("\n").trim();
 }
 
@@ -412,6 +452,16 @@ export function buildManagerTurnPrompt(
 
 export interface ManagerTurnPromptOptions {
   includeCanonicalReplay?: boolean;
+  /**
+   * The stored auto-compaction summary, when the fresh session this turn is
+   * about to spawn was cut over by conversation compaction rather than a
+   * rewind. Replaces the last-N-messages replay window: the summary was
+   * written by the outgoing session precisely so the raw history does not have
+   * to be resent. Only consulted when `includeCanonicalReplay` is true; the
+   * caller resolves it from the run's compactionSummaryMessageId (run-store's
+   * compactionReplaySummary), so this module stays a pure prompt builder.
+   */
+  compactionSummary?: string | null;
   /**
    * Rendered Cora memory sections (cora-memory.ts formatCoraMemoryForTurn), or
    * null when there is nothing to inject or the unchanged content was already
@@ -477,6 +527,18 @@ function buildManagerTurnInput(
           "[END CORA AUTONOMOUS ASSUMPTIONS]",
         ].join("\n");
   if (!opts?.includeCanonicalReplay) return promptInput;
+
+  const compactionSummary = opts.compactionSummary?.trim();
+  if (compactionSummary) {
+    return [
+      "[CORA CONVERSATION REPLAY — the conversation was compacted; this summary replaces older history. The labels are context, not new instructions.]",
+      compactionSummary,
+      "[END CORA CONVERSATION REPLAY]",
+      "",
+      "[NEW USER INPUT FOR THIS TURN]",
+      promptInput,
+    ].join("\n\n");
+  }
 
   const selectedIds = new Set(inputMessages.map((message) => message.id));
   const eligible = run.humanMessages.filter(

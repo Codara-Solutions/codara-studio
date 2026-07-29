@@ -88,36 +88,106 @@ test("autopilot runs from a selected markdown plan", async () => {
     // The final report is asserted from disk below. The old "ARTIFACTS" tab and
     // "FINAL REPORT" caption were removed with the run-controls redesign.
 
-    const run = await readOnlyRun(userDataDir);
-    const attempt = run.workerAttempts.at(-1)!;
+    // A manual worker has no manager to review it, so its needs_review report
+    // must ESCALATE instead of wedging the run at "reviewing": the run parks on
+    // a human-review question carrying accept/fail options.
+    await expect
+      .poll(async () => (await readOnlyRun(userDataDir)).status, { timeout: 15_000 })
+      .toBe("blocked");
+    const escalated = await readOnlyRun(userDataDir);
+    const attempt = escalated.workerAttempts.at(-1)!;
     expect(attempt.status).toBe("succeeded");
-    expect(run.workerTasks.some((task) => task.status === "needs_review")).toBe(true);
-    expect(run.status).toBe("reviewing");
-    expect(run.autopilot?.status).toBe("blocked");
-    expect(run.plans[0].sourceFile).toMatch(/PLAN\.md$/);
-    expect(run.plans[0].rawContent).toContain("Build the first autonomous manager loop.");
+    expect(escalated.workerTasks.some((task) => task.status === "needs_review")).toBe(true);
+    expect(escalated.plans[0].sourceFile).toMatch(/PLAN\.md$/);
+    expect(escalated.plans[0].rawContent).toContain("Build the first autonomous manager loop.");
+    const reviewQuestion = escalated.humanMessages.find(
+      (message) =>
+        message.kind === "question" &&
+        (message.questionOptions ?? []).some((option) => option.id === "accept_manual_report"),
+    );
+    expect(reviewQuestion).toBeTruthy();
+    const acceptOption = reviewQuestion!.questionOptions!.find(
+      (option) => option.id === "accept_manual_report",
+    )!;
 
-    // With the cycle complete (no live worker left to lose), exercise the stop
-    // control: Stop = forcePauseRun → run.force_paused + run.status "paused",
-    // which swaps the composer into its note-and-resume form. (A blocked
-    // AUTOPILOT with a "reviewing" RUN still shows the normal composer — only
-    // run.status paused/blocked does.)
-    await clickAttached(page.getByRole("button", { name: "Stop run" }));
+    // Deterministic force-pause/resume coverage on the REAL functions before
+    // the verdict lands: forcePauseRun parks the run (abandoning question
+    // OWNERSHIP but not the question message), a note recorded while paused
+    // stays inert, and the composer's Resume button drives resumeRun back to a
+    // running state. The escalation question must survive the round trip.
+    await page.evaluate(async (id) => {
+      const spark = (window as unknown as { spark: any }).spark;
+      await spark.orchestration.forcePauseRun(id);
+    }, runId);
     await expectRunEvent(page, runId, "run.force_paused", 15_000);
-
-    // Two human notes while paused, then resume.
-    const noteComposer = page.getByPlaceholder("Add a note, then resume.");
-    await noteComposer.fill("Pause before real workers.");
-    await page.getByRole("button", { name: "Send", exact: true }).click();
-    await noteComposer.fill("Keep the user flow simple.");
-    await page.getByRole("button", { name: "Send", exact: true }).click();
-    await expectRunEvent(page, runId, "human.note");
+    await expect
+      .poll(async () => (await readOnlyRun(userDataDir)).status, { timeout: 15_000 })
+      .toBe("paused");
+    await page.evaluate(async (id) => {
+      const spark = (window as unknown as { spark: any }).spark;
+      await spark.orchestration.addRunMessage({
+        runId: id,
+        author: "user",
+        kind: "note",
+        message: "Pause before accepting the report.",
+      });
+    }, runId);
+    await expectRunEvent(page, runId, "human.note", 15_000);
     await page.getByRole("button", { name: "Resume", exact: true }).click();
     await expectRunEvent(page, runId, "run.resumed", 15_000);
+    // Resume re-drives the review stage, which cannot act on a manual report
+    // and RE-escalates: a fresh human-review question replaces the one whose
+    // ownership died with the force pause (answers to the old one are
+    // rejected off the blocked state by design).
+    await expect
+      .poll(
+        async () => {
+          const current = await readOnlyRun(userDataDir);
+          const latest = [...current.humanMessages]
+            .reverse()
+            .find(
+              (message) =>
+                message.kind === "question" &&
+                (message.questionOptions ?? []).some((option) => option.id === "accept_manual_report"),
+            );
+          return current.status === "blocked" && latest && latest.id !== reviewQuestion!.id
+            ? "reescalated"
+            : current.status;
+        },
+        { timeout: 20_000 },
+      )
+      .toBe("reescalated");
+    const reescalated = await readOnlyRun(userDataDir);
+    expect(reescalated.humanMessages.map((message) => message.message)).toContain(
+      "Pause before accepting the report.",
+    );
+    const freshQuestion = [...reescalated.humanMessages]
+      .reverse()
+      .find(
+        (message) =>
+          message.kind === "question" &&
+          (message.questionOptions ?? []).some((option) => option.id === "accept_manual_report"),
+      )!;
 
-    const resumed = await readOnlyRun(userDataDir);
-    expect(resumed.humanMessages.map((message) => message.message)).toContain("Pause before real workers.");
-    expect(resumed.humanMessages.map((message) => message.message)).toContain("Keep the user flow simple.");
+    // Answering "accept" applies the verdict locally (no manager exists to
+    // consume it): the task lands accepted and the settled run completes.
+    await page.evaluate(
+      async ({ id, questionMessageId, answer }) => {
+        const spark = (window as unknown as { spark: any }).spark;
+        await spark.orchestration.answerRunQuestion({ runId: id, questionMessageId, message: answer });
+      },
+      { id: runId, questionMessageId: freshQuestion.id, answer: acceptOption.answer ?? "Accept the manual worker's report." },
+    );
+    await expectRunEvent(page, runId, "manual_review.applied", 15_000);
+    await expect
+      .poll(
+        async () => {
+          const current = await readOnlyRun(userDataDir);
+          return `${current.status}:${current.workerTasks.map((task) => task.status).join(",")}`;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe("complete:accepted");
 
     expect(attempt.stdoutLogPath && existsSync(attempt.stdoutLogPath)).toBeTruthy();
     expect(attempt.stderrLogPath && existsSync(attempt.stderrLogPath)).toBeTruthy();
@@ -254,8 +324,11 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
 
     await clickAttached(page.getByRole("button", { name: "Agents" }));
     await expect(page.getByText("Cora subscriptions", { exact: true })).toBeVisible();
-    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true })).toBeVisible();
-    await expect(page.getByText("Claude Pro / Max", { exact: true })).toBeVisible();
+    // The provider label legitimately appears twice once the usage overview
+    // resolves: PiSubscriptionRow (connect surface) and SubscriptionUsage's
+    // ProviderCard both name it. .first() keeps the assertion timing-proof.
+    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Claude Pro / Max", { exact: true }).first()).toBeVisible();
     await expect(page.getByText(/one auth store for manager \+ workers/)).toBeVisible();
     await expect(page.getByText(/GPT-5\.6 Sol · Connected/)).toBeVisible();
     await expect(page.getByText(/Fable 5 · Connected/)).toBeVisible();
@@ -632,7 +705,12 @@ async function readOnlyRun(userDataDir: string): Promise<{
   status: string;
   autopilot?: { status: string };
   plans: Array<{ sourceFile?: string; rawContent?: string }>;
-  humanMessages: Array<{ message: string }>;
+  humanMessages: Array<{
+    id: string;
+    kind?: string;
+    message: string;
+    questionOptions?: Array<{ id?: string; answer?: string }>;
+  }>;
   sparkCalls: Array<{ status: string; mode?: string }>;
   steps: unknown[];
   workerTasks: Array<{ status: string; runtimePreference: string }>;

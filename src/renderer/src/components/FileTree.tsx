@@ -1686,7 +1686,7 @@ export default function FileTree({
                 }
               : null
           }
-          revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Preview" : "Reveal in OS"}
+          revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Browser" : "Reveal in OS"}
           onOpenChanges={
             onOpenChanges &&
             contextMenuEntries.length === 1 &&

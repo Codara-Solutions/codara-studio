@@ -193,6 +193,12 @@ export interface RemoteCoraRunSummary {
   messageCount: number;
   lastMessage?: string;
   activeWorkers: number;
+  // Combined manager + estimated worker spend in USD. Absent until the run
+  // has at least one priced call.
+  costUsd?: number;
+  // True when an automation owns this run. Board cards on such a chat are
+  // never handed to a manager, so the phone hides the queue action there.
+  automated?: boolean;
 }
 
 export interface RemoteCoraMessage {
@@ -203,8 +209,240 @@ export interface RemoteCoraMessage {
   createdAt: string;
 }
 
+export type RemoteCoraWorkerStatus =
+  | "preparing"
+  | "prompt_ready"
+  | "launching"
+  | "running"
+  | "finishing"
+  | "succeeded"
+  | "failed"
+  | "timed_out"
+  | "cancelled";
+
+export interface RemoteCoraWorker {
+  id: string;
+  title: string;
+  runtime: string;
+  model?: string;
+  status: RemoteCoraWorkerStatus;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+// The one question currently blocking a run. cora.send to a blocked run
+// already answers it desktop-side; this exists so the phone can show what is
+// being asked instead of a bare "blocked" pill.
+export interface RemoteCoraBlockedQuestion {
+  messageId: string;
+  message: string;
+}
+
+export type RemoteCoraStepStatus =
+  | "queued"
+  | "planning"
+  | "ready"
+  | "running"
+  | "reviewing"
+  | "complete"
+  | "completed_unverified"
+  | "blocked"
+  | "failed"
+  | "skipped";
+
+// One line of the run's plan. Deliberately thin: the phone shows progress
+// ("3 of 5 steps"), not the goal, acceptance criteria or verification commands
+// the desktop step inspector carries.
+export interface RemoteCoraStep {
+  title: string;
+  status: RemoteCoraStepStatus;
+}
+
 export interface RemoteCoraRun extends RemoteCoraRunSummary {
   messages: RemoteCoraMessage[];
+  workers?: RemoteCoraWorker[];
+  blockedQuestion?: RemoteCoraBlockedQuestion;
+  // The run's plan in step order, capped. Absent when the run has no plan.
+  steps?: RemoteCoraStep[];
+  // Totals over the WHOLE plan, so a truncated `steps` list can never make the
+  // phone's progress line lie. "Finished" counts complete, completed_unverified
+  // and skipped: all three mean the step will not run again.
+  stepsTotal?: number;
+  stepsFinished?: number;
+  // Cards on this chat's board, so the phone can badge the Board tab without
+  // fetching the board itself on every poll.
+  boardCards?: number;
+  // Nodes on this chat's whiteboard. Only the count rides the run poll; the
+  // diagram itself is fetched on demand through cora.whiteboard.get.
+  whiteboardNodes?: number;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Cora whiteboard (this chat's diagram, flattened for a phone)               */
+/* -------------------------------------------------------------------------- */
+
+export type RemoteWhiteboardNodeKind =
+  | "topic"
+  | "group"
+  | "file"
+  | "symbol"
+  | "flow"
+  | "condition"
+  | "decision"
+  | "risk"
+  | "note";
+
+export type RemoteWhiteboardTone = "default" | "accent" | "success" | "warning" | "danger";
+
+// The canvas coordinates are deliberately dropped: the phone renders the
+// whiteboard as a grouped list, never as a diagram, so x/y/width/height would
+// be bytes it can do nothing with.
+export interface RemoteWhiteboardNode {
+  id: string;
+  kind: RemoteWhiteboardNodeKind;
+  title: string;
+  body?: string;
+  tone?: RemoteWhiteboardTone;
+}
+
+export interface RemoteWhiteboardEdge {
+  id: string;
+  from: string;
+  to: string;
+  label?: string;
+  tone?: RemoteWhiteboardTone;
+  // "dashed" marks a soft or optional relation, as on the desktop canvas.
+  style?: "solid" | "dashed";
+}
+
+export interface RemoteWhiteboard {
+  title: string;
+  summary?: string;
+  nodes: RemoteWhiteboardNode[];
+  edges: RemoteWhiteboardEdge[];
+  updatedAt: string;
+  // True when the caps below dropped part of the diagram, so the phone can say
+  // so instead of quietly showing a partial picture.
+  truncated?: boolean;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Cora Board (this chat's kanban)                                            */
+/* -------------------------------------------------------------------------- */
+
+export type RemoteBoardCardStatus =
+  | "idea"
+  | "queued"
+  | "running"
+  | "blocked"
+  | "review"
+  | "done"
+  | "failed";
+
+export interface RemoteBoardCard {
+  id: string;
+  title: string;
+  description?: string;
+  status: RemoteBoardCardStatus;
+  // In-lane sort key. The computer already returns the cards in lane and order
+  // sequence; this is carried so the phone can keep a stable key on re-render.
+  order: number;
+  // Present once this chat's Cora put a worker on the card. The phone shows a
+  // "worker" marker; it never resolves the id (worker terminals are desktop).
+  workerTaskId?: string;
+  createdBy?: "user" | "agent";
+  // Short note on the card: why it is blocked, or why it failed.
+  error?: string;
+  // Images attached on the computer. The phone shows the count, not the files.
+  imageCount?: number;
+  updatedAt: string;
+}
+
+export interface RemoteBoard {
+  // Monotonic edit revision. Every write passes back the revision it read as
+  // baseRevision so a phone edit and a Cora edit cannot silently overwrite
+  // each other.
+  revision: number;
+  cards: RemoteBoardCard[];
+}
+
+// The three card actions the phone may take. Authoring beyond this (drag,
+// reorder, edit, images) stays on the desktop.
+export type RemoteBoardAction = "add-idea" | "queue" | "delete";
+
+// Card text caps applied at the wire edge. They restate board-store's
+// BOARD_MAX_TITLE_LENGTH / BOARD_MAX_DESCRIPTION_LENGTH rather than import
+// them, because this module deliberately depends on nothing else in main; the
+// board itself normalizes again behind them, so these only keep a hostile
+// payload from reaching the store at all.
+export const MAX_BOARD_CARD_ID_LENGTH = 200;
+export const MAX_BOARD_CARD_TITLE_LENGTH = 300;
+export const MAX_BOARD_CARD_DESCRIPTION_LENGTH = 8000;
+
+export interface RemoteBoardUpdateResult {
+  board: RemoteBoard;
+  // False when the board moved on before the write landed: nothing was
+  // applied and `board` is the fresh state to re-render.
+  applied: boolean;
+}
+
+export type RemoteAutomationStatus =
+  | "idle"
+  | "running"
+  | "paused"
+  | "stopped"
+  | "blocked";
+
+export type RemoteAutomationTriggerKind =
+  | "cron"
+  | "interval"
+  | "folder"
+  | "manual"
+  | "continuous"
+  | "chain";
+
+export interface RemoteAutomationInfo {
+  id: string;
+  name: string;
+  enabled: boolean;
+  status: RemoteAutomationStatus;
+  triggerKind: RemoteAutomationTriggerKind;
+  // Short human-readable trigger description, built on the computer so the
+  // phone never re-implements cron/interval formatting.
+  triggerSummary: string;
+  // Count of iterations started for the current loop cycle.
+  iteration: number;
+  nextFireAt?: string;
+  lastRunAt?: string;
+  lastRunStatus?: RemoteCoraRunStatus;
+  lastRunSummary?: string;
+  spentUsd?: number;
+}
+
+// One completed (or live) pass of an automation's loop.
+export interface RemoteAutomationRunRecord {
+  iteration: number;
+  runId: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: RemoteCoraRunStatus;
+  summary?: string;
+  costUsd?: number;
+  // Free-form on the wire on purpose: the phone renders it as text, and a new
+  // stop reason on the computer must not need a phone update to display.
+  stopReason?: string;
+}
+
+export interface RemoteAutomationDetail extends RemoteAutomationInfo {
+  model?: string;
+  effort?: string;
+  timeoutMinutes?: number;
+  // Opening of the prompt template. The phone shows what the loom is asking
+  // for; editing it stays on the desktop.
+  prompt?: string;
+  promptTruncated?: boolean;
+  // Most recent pass first, capped.
+  history: RemoteAutomationRunRecord[];
 }
 
 export interface RemoteWorkerSessionInfo {
@@ -212,6 +450,75 @@ export interface RemoteWorkerSessionInfo {
   sessionId: string;
   title: string;
   updatedAt: string;
+}
+
+// How far a session delete reaches beyond the transcript, mirroring the
+// desktop picker's one checkbox. "claude-project" is only legal for Claude and
+// "codex-all" only for Codex; the pairing is checked here AND again in
+// worker-sessions' own validator.
+export type RemoteWorkerSessionMemoryScope = "none" | "claude-project" | "codex-all";
+
+export const WORKER_SESSION_MEMORY_SCOPES: Readonly<
+  Record<"claude" | "codex", readonly RemoteWorkerSessionMemoryScope[]>
+> = {
+  claude: ["none", "claude-project"],
+  codex: ["none", "codex-all"],
+};
+
+// A phone can name a session but never its files: the cwd and transcript path
+// are deliberately absent from RemoteWorkerSessionInfo, so the computer
+// re-derives both from its own workspace listing before deleting anything.
+export interface RemoteWorkerSessionDeleteResult {
+  deleted: boolean;
+  // True when the requested memory scope was actually removed, so the phone
+  // reports what happened rather than what it asked for.
+  memoryDeleted: boolean;
+  memoryScope: RemoteWorkerSessionMemoryScope;
+  // Non-fatal problems worth telling the user about, for example the Codex CLI
+  // refusing the delete so Codara removed the validated rollout itself.
+  warnings: string[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phone notifications                                                        */
+/* -------------------------------------------------------------------------- */
+
+// Mirrors the desktop notify pipeline's run/automation alerts for the phone:
+// blocked = a run needs an answer, completed/failed = run outcomes, and
+// automation = loom lifecycle (needs an answer, finished, failed).
+export type RemotePhoneNotificationKind = "blocked" | "completed" | "failed" | "automation";
+
+export interface RemotePhoneNotification {
+  // Journal event id; the phone dedupes on it because a device briefly
+  // holding two sessions receives the event on both.
+  id: string;
+  kind: RemotePhoneNotificationKind;
+  title: string;
+  body: string;
+  workspaceId: string;
+  workspaceName?: string;
+  runId?: string;
+  automationId?: string;
+  createdAt: string;
+}
+
+// Per-kind delivery preferences a phone registers alongside its optional
+// Expo push token. They gate server-initiated push only; live relay events
+// are always sent and filtered on the phone, so a stale registration can
+// never mute the in-app experience.
+export interface RemotePhoneNotificationPrefs {
+  needsAnswer: boolean;
+  completed: boolean;
+  automations: boolean;
+}
+
+export interface RemoteNotificationRegistration {
+  enabled: boolean;
+  prefs: RemotePhoneNotificationPrefs;
+  // Expo push token (ExponentPushToken[...]) when the build is provisioned
+  // for APNs; absent otherwise, which disables true push but not relay events.
+  token?: string;
+  deviceName?: string;
 }
 
 export type RpcErrorCode =
@@ -504,10 +811,58 @@ export interface RemoteRpcServices {
     message: string;
     clientMessageId: string;
   }): Promise<RemoteCoraRun>;
+  // Resolves null when the chat has no whiteboard yet.
+  getCoraWhiteboard?(input: {
+    workspaceId: string;
+    runId: string;
+  }): Promise<RemoteWhiteboard | null>;
+  getCoraBoard?(input: { workspaceId: string; runId: string }): Promise<RemoteBoard>;
+  // Card title/description arrive pre-trimmed and length-checked; the service
+  // still owns the revision guard and every board invariant.
+  updateCoraBoard?(input: {
+    workspaceId: string;
+    runId: string;
+    baseRevision: number;
+    action: RemoteBoardAction;
+    cardId?: string;
+    title?: string;
+    description?: string;
+  }): Promise<RemoteBoardUpdateResult>;
   listWorkerSessions?(input: {
     workspaceId: string;
     runtime: "claude" | "codex";
   }): Promise<RemoteWorkerSessionInfo[]>;
+  deleteWorkerSession?(input: {
+    workspaceId: string;
+    runtime: "claude" | "codex";
+    sessionId: string;
+    memoryScope: RemoteWorkerSessionMemoryScope;
+  }): Promise<RemoteWorkerSessionDeleteResult>;
+  listAutomations?(workspaceId: string): Promise<RemoteAutomationInfo[]>;
+  getAutomation?(input: {
+    workspaceId: string;
+    automationId: string;
+  }): Promise<RemoteAutomationDetail>;
+  runAutomation?(input: {
+    workspaceId: string;
+    automationId: string;
+  }): Promise<{ automation: RemoteAutomationInfo; runId: string }>;
+  pauseAutomation?(input: {
+    workspaceId: string;
+    automationId: string;
+  }): Promise<RemoteAutomationInfo>;
+  resumeAutomation?(input: {
+    workspaceId: string;
+    automationId: string;
+  }): Promise<RemoteAutomationInfo>;
+  setAutomationEnabled?(input: {
+    workspaceId: string;
+    automationId: string;
+    enabled: boolean;
+  }): Promise<RemoteAutomationInfo>;
+  // The session's peer identity is bound by the service wiring (index.ts), so
+  // a registration can never name another device.
+  registerNotifications?(input: RemoteNotificationRegistration): Promise<void>;
   beginImageUpload?(input: RemoteImageUploadRequest): Promise<RemoteImageUploadHandle>;
   // Rejects with an Error whose message is safe to send to the peer.
   createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
@@ -576,6 +931,14 @@ interface DuplexLike {
 // forcibly destroying a peer that does not complete the graceful close.
 const REVOKE_FLUSH_GRACE_MS = 1_000;
 
+// How recently the phone must have SPOKEN for this session to count as a live
+// notification target. An ESTABLISHED socket proves nothing here: a suspended
+// phone's worklet dies without a FIN and only the listener's 60s TCP keepalive
+// eventually reaps it, so writes into such a socket vanish for minutes. The
+// phone pings every ~10s while its JS is running; two missed pings mean it is
+// suspended and Expo push is the only channel that still reaches it.
+export const PUSH_LIVENESS_WINDOW_MS = 25_000;
+
 // One authenticated connection's RPC state machine. Every terminal remains
 // owned by the authenticated session: disconnect and revoke close it, including
 // production terminals that also have a visible renderer tab.
@@ -600,12 +963,17 @@ export class RpcSession {
   // every outbound frame. Reset on drain; a session that lets this cross
   // MAX_PENDING_WRITE_BYTES is destroyed. See send().
   private pendingWriteBytes = 0;
+  // When the peer last sent us anything (any decrypted inbound chunk counts —
+  // pings, requests, terminal keystrokes). Drives isPushLive().
+  private lastInboundAtMs: number;
 
   constructor(
     private readonly stream: DuplexLike,
     private readonly services: RemoteRpcServices,
     private readonly log: (line: string) => void = () => {},
+    private readonly now: () => number = Date.now,
   ) {
+    this.lastInboundAtMs = now();
     stream.on("data", (chunk) => this.onData(chunk));
     stream.on("close", () => this.teardown());
     stream.on("error", () => this.teardown());
@@ -656,6 +1024,13 @@ export class RpcSession {
     return this.helloDone;
   }
 
+  // Whether a cora.notify written to this session plausibly reaches the phone
+  // right now: proven, and the phone has spoken within the liveness window.
+  // See PUSH_LIVENESS_WINDOW_MS for why writability alone is not enough.
+  isPushLive(nowMs: number): boolean {
+    return this.helloDone && nowMs - this.lastInboundAtMs <= PUSH_LIVENESS_WINDOW_MS;
+  }
+
   private teardown(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -676,6 +1051,7 @@ export class RpcSession {
 
   private onData(chunk: Buffer): void {
     if (this.destroyed) return;
+    this.lastInboundAtMs = this.now();
     let frames: unknown[];
     try {
       frames = this.decoder.push(chunk);
@@ -735,6 +1111,12 @@ export class RpcSession {
 
   pushWorkspacesChanged(): void {
     this.pushEvent("workspaces.changed", {});
+  }
+
+  // Live-mirror of a desktop notification for this phone. Small, unsolicited,
+  // and rare, so it needs none of the terminal-output backpressure handling.
+  pushPhoneNotification(payload: RemotePhoneNotification): void {
+    this.pushEvent("cora.notify", payload);
   }
 
   // Terminal output specifically: unsolicited, unbounded in volume, and the
@@ -1342,6 +1724,69 @@ export class RpcSession {
           this.reply(id, { run });
           return;
         }
+        case "cora.whiteboard.get": {
+          if (!this.services.getCoraWhiteboard) {
+            this.replyError(id, "unknown-method", "The Cora whiteboard is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; runId?: unknown };
+          if (!isBoundedString(p.workspaceId, 256) || !isBoundedString(p.runId, 256)) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.whiteboard.get needs workspaceId and runId.",
+            );
+            return;
+          }
+          const whiteboard = await this.services.getCoraWhiteboard({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+          });
+          this.reply(id, { whiteboard });
+          return;
+        }
+        case "cora.board.get": {
+          if (!this.services.getCoraBoard) {
+            this.replyError(id, "unknown-method", "The Cora Board is not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; runId?: unknown };
+          if (
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.runId, 256)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.board.get needs workspaceId and runId.",
+            );
+            return;
+          }
+          const board = await this.services.getCoraBoard({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+          });
+          this.reply(id, { board });
+          return;
+        }
+        case "cora.board.update": {
+          if (!this.services.updateCoraBoard) {
+            this.replyError(id, "unknown-method", "The Cora Board is not available.");
+            return;
+          }
+          const p = boardUpdateParams(params);
+          if (!p) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.board.update needs workspaceId, runId, baseRevision and a card action.",
+            );
+            return;
+          }
+          const result = await this.services.updateCoraBoard(p);
+          this.reply(id, result);
+          return;
+        }
         case "workerSessions.list": {
           if (!this.services.listWorkerSessions) {
             this.replyError(id, "unknown-method", "Worker session history is not available.");
@@ -1366,6 +1811,187 @@ export class RpcSession {
             runtime: p.runtime,
           });
           this.reply(id, { sessions });
+          return;
+        }
+        case "workerSessions.delete": {
+          if (!this.services.deleteWorkerSession) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Deleting worker sessions is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runtime?: unknown;
+            sessionId?: unknown;
+            memoryScope?: unknown;
+          };
+          // The session id shape is pinned here as well as in worker-sessions'
+          // own validator: a malformed id is the phone's mistake, and it must
+          // read as invalid-params rather than an internal failure.
+          if (
+            !isBoundedString(p.workspaceId, 256) ||
+            (p.runtime !== "claude" && p.runtime !== "codex") ||
+            typeof p.sessionId !== "string" ||
+            !WORKER_SESSION_ID_PATTERN.test(p.sessionId)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "workerSessions.delete needs a workspaceId, Claude or Codex runtime, and a session id.",
+            );
+            return;
+          }
+          // A scope belongs to exactly one runtime, so "codex-all" arriving on
+          // a Claude delete is a malformed request, not a wider delete.
+          const memoryScope: RemoteWorkerSessionMemoryScope =
+            p.memoryScope === undefined ? "none" : (p.memoryScope as never);
+          if (!WORKER_SESSION_MEMORY_SCOPES[p.runtime].includes(memoryScope)) {
+            this.replyError(
+              id,
+              "invalid-params",
+              `workerSessions.delete memoryScope must be one of ${WORKER_SESSION_MEMORY_SCOPES[
+                p.runtime
+              ].join(", ")} for a ${p.runtime} session.`,
+            );
+            return;
+          }
+          const result = await this.services.deleteWorkerSession({
+            workspaceId: p.workspaceId,
+            runtime: p.runtime,
+            sessionId: p.sessionId,
+            memoryScope,
+          });
+          this.reply(id, result);
+          return;
+        }
+        case "automations.list": {
+          if (!this.services.listAutomations) {
+            this.replyError(id, "unknown-method", "Automations are not available.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown };
+          if (
+            typeof p.workspaceId !== "string" ||
+            p.workspaceId.length === 0 ||
+            p.workspaceId.length > 256
+          ) {
+            this.replyError(id, "invalid-params", "automations.list needs workspaceId.");
+            return;
+          }
+          const automations = await this.services.listAutomations(p.workspaceId);
+          this.reply(id, { automations });
+          return;
+        }
+        case "automations.get": {
+          if (!this.services.getAutomation) {
+            this.replyError(id, "unknown-method", "Automation detail is not available.");
+            return;
+          }
+          const p = automationActionParams(params);
+          if (!p) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.get needs workspaceId and automationId.",
+            );
+            return;
+          }
+          const automation = await this.services.getAutomation(p);
+          this.reply(id, { automation });
+          return;
+        }
+        case "automations.run": {
+          if (!this.services.runAutomation) {
+            this.replyError(id, "unknown-method", "Automations are not available.");
+            return;
+          }
+          const p = automationActionParams(params);
+          if (!p) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.run needs workspaceId and automationId.",
+            );
+            return;
+          }
+          const result = await this.services.runAutomation(p);
+          this.reply(id, result);
+          return;
+        }
+        case "automations.pause": {
+          if (!this.services.pauseAutomation) {
+            this.replyError(id, "unknown-method", "Automations are not available.");
+            return;
+          }
+          const p = automationActionParams(params);
+          if (!p) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.pause needs workspaceId and automationId.",
+            );
+            return;
+          }
+          const automation = await this.services.pauseAutomation(p);
+          this.reply(id, { automation });
+          return;
+        }
+        case "automations.resume": {
+          if (!this.services.resumeAutomation) {
+            this.replyError(id, "unknown-method", "Automations are not available.");
+            return;
+          }
+          const p = automationActionParams(params);
+          if (!p) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.resume needs workspaceId and automationId.",
+            );
+            return;
+          }
+          const automation = await this.services.resumeAutomation(p);
+          this.reply(id, { automation });
+          return;
+        }
+        case "automations.setEnabled": {
+          if (!this.services.setAutomationEnabled) {
+            this.replyError(id, "unknown-method", "Automations are not available.");
+            return;
+          }
+          const base = automationActionParams(params);
+          const enabled = ((params ?? {}) as { enabled?: unknown }).enabled;
+          if (!base || typeof enabled !== "boolean") {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.setEnabled needs workspaceId, automationId and enabled.",
+            );
+            return;
+          }
+          const automation = await this.services.setAutomationEnabled({ ...base, enabled });
+          this.reply(id, { automation });
+          return;
+        }
+        case "notifications.register": {
+          if (!this.services.registerNotifications) {
+            this.replyError(id, "unknown-method", "Phone notifications are not available.");
+            return;
+          }
+          const registration = parseNotificationRegistration(params);
+          if (!registration) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "notifications.register needs enabled, per-kind prefs, and an optional token.",
+            );
+            return;
+          }
+          await this.services.registerNotifications(registration);
+          this.reply(id, {});
           return;
         }
         case "terminal.create":
@@ -1415,6 +2041,15 @@ export class RpcSession {
           return;
       }
     } catch (err) {
+      // KNOWN COARSENESS: every service rejection lands here as "internal",
+      // including ordinary user-level outcomes the phone could act on more
+      // precisely — a board card that was already deleted, a worker session
+      // that left the workspace's history, a queue refused on an automation's
+      // chat. The message is written to be shown verbatim, so the phone reads
+      // correctly today; it just cannot branch on the code. If a future change
+      // splits these out (a "conflict" or "gone" code), it belongs here, and
+      // the phone's catch blocks in board-panel.tsx and terminal.tsx are the
+      // consumers to update alongside it.
       this.replyError(id, "internal", (err as Error).message || "Internal error.");
     } finally {
       this.inFlightRequests = Math.max(0, this.inFlightRequests - 1);
@@ -1823,6 +2458,129 @@ export class RpcSession {
     }
     fn(terminal, p);
   }
+}
+
+function parseNotificationRegistration(
+  params: unknown,
+): RemoteNotificationRegistration | null {
+  const p = (params ?? {}) as {
+    enabled?: unknown;
+    prefs?: unknown;
+    token?: unknown;
+    deviceName?: unknown;
+  };
+  const prefs = (p.prefs ?? {}) as {
+    needsAnswer?: unknown;
+    completed?: unknown;
+    automations?: unknown;
+  };
+  if (
+    typeof p.enabled !== "boolean" ||
+    typeof prefs.needsAnswer !== "boolean" ||
+    typeof prefs.completed !== "boolean" ||
+    typeof prefs.automations !== "boolean" ||
+    (p.token !== undefined &&
+      (typeof p.token !== "string" || p.token.length === 0 || p.token.length > 512)) ||
+    (p.deviceName !== undefined &&
+      (typeof p.deviceName !== "string" || p.deviceName.length > 120))
+  ) {
+    return null;
+  }
+  return {
+    enabled: p.enabled,
+    prefs: {
+      needsAnswer: prefs.needsAnswer,
+      completed: prefs.completed,
+      automations: prefs.automations,
+    },
+    ...(typeof p.token === "string" ? { token: p.token } : {}),
+    ...(typeof p.deviceName === "string" && p.deviceName.trim()
+      ? { deviceName: p.deviceName.trim() }
+      : {}),
+  };
+}
+
+/** Mirrors worker-sessions' own session-id validator. */
+const WORKER_SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+
+function isBoundedString(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+/**
+ * Validate one phone board write. Each action carries exactly the fields it
+ * needs and nothing else: "add-idea" a title (plus optional body), the two
+ * card actions a card id. Text is trimmed here so an all-whitespace title is
+ * refused rather than silently normalized into an untitled card.
+ */
+function boardUpdateParams(params: unknown): {
+  workspaceId: string;
+  runId: string;
+  baseRevision: number;
+  action: RemoteBoardAction;
+  cardId?: string;
+  title?: string;
+  description?: string;
+} | null {
+  const p = (params ?? {}) as {
+    workspaceId?: unknown;
+    runId?: unknown;
+    baseRevision?: unknown;
+    action?: unknown;
+    cardId?: unknown;
+    title?: unknown;
+    description?: unknown;
+  };
+  if (!isBoundedString(p.workspaceId, 256) || !isBoundedString(p.runId, 256)) return null;
+  // isSafeInteger, not isInteger: past 2^53 the doubles stop being distinct,
+  // so Number.MAX_SAFE_INTEGER + 2 is an "integer" that no longer compares
+  // meaningfully against a real revision. A revision counts accepted writes,
+  // so anything up there is nonsense the store should never see.
+  if (
+    typeof p.baseRevision !== "number" ||
+    !Number.isSafeInteger(p.baseRevision) ||
+    p.baseRevision < 0
+  ) {
+    return null;
+  }
+  if (p.action !== "add-idea" && p.action !== "queue" && p.action !== "delete") return null;
+  const action: RemoteBoardAction = p.action;
+  const base = {
+    workspaceId: p.workspaceId,
+    runId: p.runId,
+    baseRevision: p.baseRevision,
+    action,
+  };
+
+  if (action === "add-idea") {
+    if (typeof p.title !== "string") return null;
+    const title = p.title.trim();
+    if (!title || title.length > MAX_BOARD_CARD_TITLE_LENGTH) return null;
+    if (p.description !== undefined && typeof p.description !== "string") return null;
+    const description = typeof p.description === "string" ? p.description.trim() : "";
+    if (description.length > MAX_BOARD_CARD_DESCRIPTION_LENGTH) return null;
+    return { ...base, title, ...(description ? { description } : {}) };
+  }
+
+  if (!isBoundedString(p.cardId, MAX_BOARD_CARD_ID_LENGTH)) return null;
+  return { ...base, cardId: p.cardId };
+}
+
+function automationActionParams(
+  params: unknown,
+): { workspaceId: string; automationId: string } | null {
+  const p = (params ?? {}) as { workspaceId?: unknown; automationId?: unknown };
+  if (
+    typeof p.workspaceId !== "string" ||
+    p.workspaceId.length === 0 ||
+    p.workspaceId.length > 256 ||
+    typeof p.automationId !== "string" ||
+    p.automationId.length === 0 ||
+    p.automationId.length > 256
+  ) {
+    return null;
+  }
+  return { workspaceId: p.workspaceId, automationId: p.automationId };
 }
 
 function normalizeDimension(value: unknown): number | null {

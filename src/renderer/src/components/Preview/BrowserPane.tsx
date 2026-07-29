@@ -832,14 +832,14 @@ function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
           gap: 6,
         }}
       >
-        <div className="spark-eyebrow">Preview</div>
+        <div className="spark-eyebrow">Browser</div>
         <div style={{ color: "var(--ink)", fontSize: 14, fontWeight: 600 }}>
-          Nothing to preview yet
+          Nothing to show yet
         </div>
       </div>
       <div className="spark-empty__body" style={{ maxWidth: 360 }}>
         Type a URL or pick a dev-server port. Detected URLs from your terminal
-        auto-open a preview here.
+        auto-open a browser tab here.
       </div>
       <button
         type="button"

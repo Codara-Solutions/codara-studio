@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
+import type { AddRunMessageAttachmentInput, BoardCard, RunState, Workspace } from "@shared/types";
 import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
 import type { ChatComposerStartConfig } from "./chat/ChatComposer";
-import type { CoraView } from "./chat/cora-view";
+import { isUnstartedChatRun, type CoraView } from "./chat/cora-view";
 
 interface Props {
   workspace: Workspace | null;
@@ -18,6 +18,15 @@ interface Props {
   // local state when this is not provided.
   chatView?: CoraView;
   onChatViewChange?: (view: CoraView) => void;
+  // "Open chat" on a LEGACY card of the embedded Cora Board (the chat panel's
+  // "board" sub-view) — App's run-selection path, threaded to ChatPanel.
+  onOpenBoardCardRun?: (runId: string) => void;
+  // "Open terminal" on a board card with a worker — App's worker-terminal
+  // focus path, threaded to ChatPanel. Returns false when no pane exists.
+  onOpenBoardWorkerTerminal?: (workerTaskId: string) => boolean;
+  // First card mutation on a draft chat's board — App's draft-promotion path
+  // (mint the run without autopilot), threaded to ChatPanel.
+  onCreateBoardRun?: (cards: BoardCard[]) => Promise<void>;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -43,6 +52,9 @@ export default function OrchestrationSidebar({
   terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
+  onOpenBoardCardRun,
+  onOpenBoardWorkerTerminal,
+  onCreateBoardRun,
   onSelectRun,
   onRunSnapshot,
   collapsed,
@@ -156,8 +168,15 @@ export default function OrchestrationSidebar({
             chatConfig.fastMode !== undefined ||
             chatConfig.oneMillionContext !== undefined),
       );
-      let runId: string | undefined;
-      if (hasChatConfig) {
+      // A board-minted run that never had a conversation is reused for the
+      // first send instead of minting a sibling chat: the welcome the user is
+      // typing under belongs to THAT run (its board may already hold cards).
+      // Chip selections were already persisted onto it via updateChatBackend,
+      // so the chatConfig path below is skipped for it.
+      const reuseUnstartedRunId =
+        activeRun && isUnstartedChatRun(activeRun) ? activeRun.id : undefined;
+      let runId: string | undefined = reuseUnstartedRunId;
+      if (!runId && hasChatConfig) {
         const created = await window.spark.orchestration.createRun({
           workspaceId: workspace.id,
           workspaceName: workspace.name,
@@ -185,7 +204,7 @@ export default function OrchestrationSidebar({
       onRunSnapshot(run, { select: true, focusRuns: false });
       return run;
     },
-    [workspace, onRunSnapshot],
+    [workspace, activeRun, onRunSnapshot],
   );
 
   const mutate = useCallback(async (action: () => Promise<unknown>) => {
@@ -233,6 +252,9 @@ export default function OrchestrationSidebar({
       headerDrag={headerDrag}
       chatView={chatView}
       onChatViewChange={onChatViewChange}
+      onOpenBoardCardRun={onOpenBoardCardRun}
+      onOpenBoardWorkerTerminal={onOpenBoardWorkerTerminal}
+      onCreateBoardRun={onCreateBoardRun}
       onStartChat={startChat}
       onForcePauseRun={forcePauseRun}
       onSelectChat={handleSelectRun}

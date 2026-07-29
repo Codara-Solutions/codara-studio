@@ -63,6 +63,7 @@
     "test:navigation-allowlist": "node scripts/test-navigation-allowlist.cjs",
     "test:hook-installer": "node scripts/test-hook-installer.cjs",
     "test:ipc-gate": "node scripts/test-ipc-gate-default.cjs",
+    "test:fs-sandbox": "node scripts/test-fs-sandbox.cjs",
     "test:declared-deps": "node scripts/test-declared-deps.cjs",
     "test:trusted-sender": "node scripts/test-trusted-sender.cjs",
     "test:remote-access": "node scripts/test-remote-access.cjs",

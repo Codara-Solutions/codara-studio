@@ -1,12 +1,12 @@
 import React, { useMemo } from "react";
-import AutomationsHub from "../components/automations/AutomationsHub";
+import AutomationsPage from "../components/automations/AutomationsPage";
 import type { Workspace } from "@shared/types";
 import type { AutomationsTab, Tab, TabId } from "./types";
 
-// AutomationsStack mirrors RunsStack: a single AutomationsHub mounted
+// AutomationsStack mirrors RunsStack: a single AutomationsPage mounted
 // absolutely at inset 0 per automations tab (there is generally only one). We
 // keep the same mount-always / visibility-toggle contract as the other stacks
-// so the hub's local state (selection, create/edit drafts, live worker panes)
+// so the page's local state (selection, create/edit drafts, live worker panes)
 // survives tab switches instead of being torn down and rebuilt.
 
 interface Props {
@@ -14,12 +14,21 @@ interface Props {
   activeId: TabId | null;
   workspace: Workspace | null;
   terminalScrollbackLineLimit: number;
+  // Opens a run's chat surface (chat tab + chat sub-view). Used by the page's
+  // "Open chat" on an automation's creator run.
+  onOpenRunChat?: (runId: string) => void;
 }
 
 // React.memo so AutomationsStack only re-renders when its real inputs change
 // (tab list, active id, workspace). With the useTabs API object memoized, an
 // unrelated App state change no longer drags the panel through a re-render.
-function AutomationsStack({ tabs, activeId, workspace, terminalScrollbackLineLimit }: Props) {
+function AutomationsStack({
+  tabs,
+  activeId,
+  workspace,
+  terminalScrollbackLineLimit,
+  onOpenRunChat,
+}: Props) {
   // Memoize the filtered list so it isn't reallocated on every render.
   const automationsTabs = useMemo(
     () => tabs.filter((t): t is AutomationsTab => t.kind === "automations"),
@@ -47,13 +56,14 @@ function AutomationsStack({ tabs, activeId, workspace, terminalScrollbackLineLim
             }}
           >
             {workspace ? (
-              <AutomationsHub
+              <AutomationsPage
                 key={workspace.id}
                 workspaceId={workspace.id}
                 workspaceName={workspace.name}
                 cwd={workspace.cwd}
                 active={visible}
                 terminalScrollbackLineLimit={terminalScrollbackLineLimit}
+                onOpenRunChat={onOpenRunChat}
               />
             ) : (
               <div

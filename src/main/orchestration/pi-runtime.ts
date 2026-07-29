@@ -250,7 +250,8 @@ export function buildPiSubscriptionEnvironment(
     if (typeof value !== "string") continue;
     const upper = key.toUpperCase();
     if (API_CREDENTIAL_NAMES.has(upper) || upper.endsWith("_API_KEY") || upper.endsWith("_API_KEY_FILE") ||
-      upper.startsWith("CODARA_PI_") || upper === "SPARK_MCP_MODE" || upper === "SPARK_RUN_ID") continue;
+      upper.startsWith("CODARA_PI_") || upper === "SPARK_MCP_MODE" || upper === "SPARK_RUN_ID" ||
+      upper === "SPARK_AUTOMATION_ID" || upper === "SPARK_NODE_ID") continue;
     env[key] = value;
   }
   env.ELECTRON_RUN_AS_NODE = "1";

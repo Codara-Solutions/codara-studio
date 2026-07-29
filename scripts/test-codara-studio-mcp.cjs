@@ -47,7 +47,8 @@ const PREVIEW_TOOLS = [
 ];
 const TERMINAL_TOOLS = ["codara_terminal_create", "codara_terminal_write", "codara_terminal_read"];
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update"];
-const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS];
+const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
+const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -140,9 +141,20 @@ function sortedEqual(actual, expected, label) {
     const studio2 = await listTools("studio");
     sortedEqual(studio2.tools, STUDIO_TOOLS, "studio ('studio') roster mismatch");
 
-    // Execute mode.
+    // Execute mode. Carries the automation-management tools too (Cora creates
+    // and manages looms from an ordinary auto/execute chat), minus
+    // codara_name_chat, which the execute roster already owns and maps to
+    // orchestrator.name_chat.
     const execute = await listTools("execute");
-    sortedEqual(execute.tools, [...STUDIO_TOOLS, ...EXECUTE_TOOLS], "execute roster mismatch");
+    sortedEqual(
+      execute.tools,
+      [
+        ...STUDIO_TOOLS,
+        ...EXECUTE_TOOLS,
+        ...AUTOMATION_TOOLS.filter((name) => !EXECUTE_TOOLS.includes(name)),
+      ],
+      "execute roster mismatch",
+    );
     const askUser = execute.definitions.find((tool) => tool.name === "codara_ask_user");
     assert.ok(askUser, "execute roster must expose codara_ask_user");
     sortedEqual(
@@ -220,6 +232,44 @@ function sortedEqual(actual, expected, label) {
     const automation = await listTools("automation");
     sortedEqual(automation.tools, [...STUDIO_TOOLS, ...AUTOMATION_TOOLS], "automation roster mismatch");
 
+    // Looms on Pi: the worker schema is model + effort only. No engine choice
+    // exists anywhere in the automation surface.
+    const createAutomation = automation.definitions.find(
+      (tool) => tool.name === "codara_create_automation",
+    );
+    assert.ok(createAutomation, "automation roster must expose codara_create_automation");
+    const workerSchema = createAutomation.inputSchema.properties.worker;
+    sortedEqual(
+      workerSchema.required,
+      ["model", "effort"],
+      "worker schema must require exactly model + effort",
+    );
+    assert.ok(
+      !("engine" in workerSchema.properties),
+      "worker schema must not expose an engine property",
+    );
+    sortedEqual(
+      Object.keys(workerSchema.properties),
+      ["model", "effort", "timeoutMinutes"],
+      "worker schema property set mismatch",
+    );
+    assert.match(
+      workerSchema.description,
+      /bundled Pi runtime/,
+      "worker schema must state that automation workers run on the bundled Pi runtime",
+    );
+    for (const modelId of ["claude-opus-5", "claude-fable-5", "gpt-5.6-sol"]) {
+      assert.ok(
+        workerSchema.properties.model.description.includes(modelId),
+        `worker model description must name ${modelId}`,
+      );
+    }
+    assert.deepStrictEqual(
+      workerSchema.properties.effort.enum,
+      ["minimal", "low", "medium", "high", "xhigh", "max"],
+      "worker effort ladder mismatch",
+    );
+
     // Worker mode: workers must NOT be able to write memory. The manager is the
     // only writer, which is what makes "copy the line into the description"
     // load-bearing rather than a convenience.
@@ -227,6 +277,19 @@ function sortedEqual(actual, expected, label) {
     assert.ok(
       !worker.tools.includes("codara_remember"),
       "worker roster must not expose codara_remember",
+    );
+    // The agent-loop handoff steers by model only; nextEngine is gone.
+    const nextIteration = worker.definitions.find(
+      (tool) => tool.name === "codara_request_next_iteration",
+    );
+    assert.ok(nextIteration, "worker roster must expose codara_request_next_iteration");
+    assert.ok(
+      !("nextEngine" in nextIteration.inputSchema.properties),
+      "codara_request_next_iteration must not expose nextEngine",
+    );
+    assert.ok(
+      nextIteration.inputSchema.properties.nextModel,
+      "codara_request_next_iteration must keep nextModel steering",
     );
 
     console.log("PASS: codara-studio MCP roster matrix");

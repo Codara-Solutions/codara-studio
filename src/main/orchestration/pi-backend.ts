@@ -78,6 +78,24 @@ function hasFrontierContractDrift(value: unknown): boolean {
   catch { return false; }
 }
 
+// Marks an error thrown before any provider turn started (ensureSession).
+// Startup failures must escape requestPiDecision as THROWS at every recursion
+// depth so run-store can degrade instead of failing the run; the symbol lets
+// the outer turn-failure catch recognize one arriving from the Frontier
+// contract-restart recursion.
+const PI_SESSION_STARTUP_FAILURE = Symbol("piSessionStartupFailure");
+
+function markPiSessionStartupFailure(error: Error): void {
+  (error as Error & { [PI_SESSION_STARTUP_FAILURE]?: true })[PI_SESSION_STARTUP_FAILURE] = true;
+}
+
+function isPiSessionStartupFailure(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as Error & { [PI_SESSION_STARTUP_FAILURE]?: true })[PI_SESSION_STARTUP_FAILURE] === true
+  );
+}
+
 export function piProviderForModel(model: string): PiSubscriptionProvider {
   if (model.startsWith("claude-")) return "anthropic";
   if (model.startsWith("gpt-")) return "openai-codex";
@@ -190,7 +208,16 @@ async function ensureSession(
     requestTimeoutMs: 120_000,
     shutdownGraceMs: 2_000,
   });
-  const state = await client.start();
+  let state;
+  try {
+    state = await client.start();
+  } catch (error) {
+    // The launch plan already wrote the MCP bridge config, and without a
+    // stored session there is no stopSession to clean it up, so a failed
+    // start would otherwise leak one bridge file per attempt.
+    await cleanupPiMcpBridgeConfig(plan).catch(() => undefined);
+    throw error;
+  }
   const reportedSessionId = typeof state.sessionId === "string" && state.sessionId
     ? state.sessionId
     : sessionId;
@@ -241,8 +268,27 @@ async function requestPiDecision(
   const runId = input.run.id;
   let session: PiBackendSession | undefined;
   let unsubscribe: (() => void) | undefined;
+  // Session STARTUP is outside the turn-failure envelope on purpose. A missing
+  // or expired subscription auth, an uninstalled pinned runtime, or an RPC
+  // process that never came up all mean NO provider turn ever started —
+  // reporting them as turnFailed made run-store brand the run failed, which
+  // bypassed the degradation its callers own for a manager that yields no
+  // decision (SPARK_ENABLE_MANUAL_FALLBACK's manual worker task, or parking
+  // the run on an accurate question). Throw instead: askManagerBackend's catch
+  // records the spark_call failure and returns null, and the caller degrades.
+  // The marker keeps that contract at every recursion depth: a Frontier
+  // contract-restart re-runs this function INSIDE the parent's turn envelope,
+  // and without it the restart's own startup failure would decay to turnFailed.
   try {
     session = await ensureSession(input, onStream);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    onStream?.({ kind: "error", message });
+    const startupError = error instanceof Error ? error : new Error(message);
+    markPiSessionStartupFailure(startupError);
+    throw startupError;
+  }
+  try {
     const generation = session.generation;
     session.interrupted = false;
     const turn = new PiTurnAccumulator(onStream);
@@ -408,6 +454,10 @@ async function requestPiDecision(
       notice: contractBlocked ? "Cora Frontier found a machine-validated contract blocker; repository mutation remained locked." : undefined,
     };
   } catch (error) {
+    // A marked error is a session-STARTUP failure surfacing from the Frontier
+    // contract-restart recursion above; rethrow so the startup contract holds
+    // instead of decaying into a turnFailed result one level up.
+    if (isPiSessionStartupFailure(error)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     const diagnostic = session?.client.diagnostics().stderr.trim();
     const detail = diagnostic ? `${message}\n${diagnostic}` : message;

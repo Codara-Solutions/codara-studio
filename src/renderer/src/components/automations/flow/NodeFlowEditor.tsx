@@ -14,7 +14,6 @@ import {
 import type { Connection, EdgeChange, NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type {
-  AgentRuntimeDiagnostic,
   CreateScheduledJobInput,
   ScheduledJob,
   UpdateScheduledJobInput,
@@ -38,7 +37,6 @@ import {
   freshId,
   graphForJob,
   graphFromFlow,
-  installedEngines,
   sinkWorkerNode,
   validateGraph,
   type FlowEdge,
@@ -51,7 +49,6 @@ import {
 export interface NodeFlowEditorProps {
   initial?: ScheduledJob;
   jobs: ScheduledJob[];
-  runtimes: AgentRuntimeDiagnostic[];
   workspaceId: string;
   workspaceName: string;
   cwd: string;
@@ -73,7 +70,6 @@ export default function NodeFlowEditor(props: NodeFlowEditorProps): React.ReactE
 function Editor({
   initial,
   jobs,
-  runtimes,
   workspaceId,
   workspaceName,
   cwd,
@@ -83,20 +79,15 @@ function Editor({
 }: NodeFlowEditorProps): React.ReactElement {
   const editing = Boolean(initial);
 
-  // Installed engines drive every worker's concrete engine/model/effort defaults
-  // (a fresh node, a legacy "auto"/blank one loaded for editing, or a preset all
-  // resolve against this). "auto" and blank no longer exist as worker choices.
-  const installed = useMemo(() => installedEngines(runtimes), [runtimes]);
-
   // The draft holds name + trigger + loop + (worker defaults). The GRAPH lives
   // in ReactFlow state. Worker node data carries its own LoomWorkerConfig.
   const [draft, setDraft] = useState<LoomDraft>(() =>
-    initial ? draftFromJob(initial, installed) : emptyDraft(installed),
+    initial ? draftFromJob(initial) : emptyDraft(),
   );
 
   const initialFlow = useMemo(() => {
     if (initial) {
-      const flow = flowFromGraph(initial, installed);
+      const flow = flowFromGraph(initial);
       // Open with the trigger selected so its config panel is showing.
       flow.nodes = flow.nodes.map((n) => ({ ...n, selected: n.id === TRIGGER_ID }));
       return flow;
@@ -116,7 +107,7 @@ function Editor({
         id: wid,
         type: "worker",
         position: { x: 340, y: 120 },
-        data: defaultNodeData("worker", installed) as FlowNodeData & Record<string, unknown>,
+        data: defaultNodeData("worker") as FlowNodeData & Record<string, unknown>,
       },
     ];
     const edges: FlowEdge[] = [{ id: `e-trigger-${wid}`, source: TRIGGER_ID, target: wid, type: "loom" }];
@@ -282,7 +273,7 @@ function Editor({
         id: newId,
         type: kind,
         position: pos,
-        data: defaultNodeData(kind, installed) as FlowNodeData & Record<string, unknown>,
+        data: defaultNodeData(kind) as FlowNodeData & Record<string, unknown>,
         selected: true,
       };
       // Append the new node selected; clear selection from everything else so
@@ -308,21 +299,20 @@ function Editor({
       setPalette(null);
       markDirty();
     },
-    [palette, nodes, rf, setNodes, setEdges, markDirty, installed],
+    [palette, nodes, rf, setNodes, setEdges, markDirty],
   );
 
   // ── presets ──────────────────────────────────────────────────────────────────
   const applyPreset = useCallback(
     (preset: LoomPreset) => {
       // Stamp trigger + loop into the draft, and the graph into the canvas.
-      const pw = concreteWorker(preset.worker, installed);
+      const pw = concreteWorker(preset.worker);
       setDraft((d) => {
         const next: LoomDraft = {
           ...d,
           trigger: { ...d.trigger, kind: preset.trigger.kind },
           loop: { ...d.loop, kind: preset.loop.kind },
           worker: {
-            engine: pw.engine,
             model: pw.model,
             effort: pw.effort,
             timeoutMin: preset.worker.timeoutMinutes !== undefined ? String(preset.worker.timeoutMinutes) : "",
@@ -347,7 +337,7 @@ function Editor({
         prompt: { template: preset.promptHint },
         input: { initialUserNote: preset.promptHint },
       } as unknown as ScheduledJob;
-      const flow = flowFromGraph(presetJob, installed);
+      const flow = flowFromGraph(presetJob);
       setNodes(flow.nodes.map((n) => ({ ...n, selected: n.id === TRIGGER_ID })));
       setEdges(flow.edges);
       setPresetsOpen(false);
@@ -356,7 +346,7 @@ function Editor({
       setLoopOpen(false);
       requestAnimationFrame(() => rf.fitView?.({ padding: 0.2, duration: 200 }));
     },
-    [cwd, rf, setNodes, setEdges, installed],
+    [cwd, rf, setNodes, setEdges],
   );
 
   // ── validation ────────────────────────────────────────────────────────────
@@ -365,7 +355,7 @@ function Editor({
   const graphProblem = useMemo(() => validateGraph(nodes, edges), [nodes, edges]);
   const triggerInvalid = !triggerBuilt;
   const firstProblem: { message: string; focusNodeId?: string } | null = nameMissing
-    ? { message: "Name the loom." }
+    ? { message: "Name the automation." }
     : triggerInvalid
       ? { message: "Finish the trigger setup.", focusNodeId: TRIGGER_ID }
       : graphProblem;
@@ -547,7 +537,7 @@ function Editor({
         }}
       >
         <span className="spark-eyebrow" style={{ flex: "0 0 auto" }}>
-          {editing ? "Edit loom" : "New loom"}
+          {editing ? "Edit automation" : "New automation"}
         </span>
         <input
           className="spark-input"
@@ -556,7 +546,7 @@ function Editor({
             setDraft((d) => ({ ...d, name: e.target.value }));
             markDirty();
           }}
-          placeholder="What is this loom for?"
+          placeholder="What is this automation for?"
           style={{ flex: 1, maxWidth: 360, height: 28 }}
         />
         <span style={{ flex: 1 }} />
@@ -571,7 +561,7 @@ function Editor({
           onClick={handleSubmit}
           title="Cmd/Ctrl+Enter"
         >
-          {editing ? "Save loom" : "Create loom"}
+          {editing ? "Save automation" : "Create automation"}
         </button>
       </div>
 
@@ -656,7 +646,7 @@ function Editor({
             selectNode(null);
             setLoopOpen(true);
           }}
-          title="Loop & stops — how the whole graph repeats"
+          title="Loop & stops: how the whole graph repeats"
           style={{
             position: "absolute",
             top: 10,
@@ -792,7 +782,6 @@ function Editor({
                   }}
                   cwd={cwd}
                   chainableJobs={jobs.filter((j) => j.id !== initial?.id)}
-                  runtimes={runtimes}
                 />
               )
             )}
@@ -822,7 +811,7 @@ function Editor({
           </button>
         ) : (
           <span className="spark-mono" style={{ fontSize: 10, color: "var(--muted-2)" }}>
-            Ready — Cmd/Ctrl+Enter to {editing ? "save" : "create"}.
+            Ready. Cmd/Ctrl+Enter to {editing ? "save" : "create"}.
           </span>
         )}
       </div>

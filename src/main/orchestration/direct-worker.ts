@@ -1,16 +1,16 @@
-// Looms v2 — structured direct-worker (automation) inventory and recovery.
+// Looms — direct-worker (automation) inventory and recovery.
 //
-// Automation workers run through Claude Agent SDK or Codex App Server in
-// run-store. Ordinary Cora implementation workers retain their visible CLI
-// panes; looms are unattended jobs and expose their ordered activity logs in
-// the Automations Hub instead of fabricating a terminal UI.
+// Automation workers run on the bundled Pi runtime through run-store's Pi
+// worker harness (the legacy Agent SDK / App Server transports survive only
+// behind the SPARK_E2E_LEGACY_WORKER_HARNESS escape hatch). Their pty is a
+// durable activity display; the Automations Hub also reads the ordered
+// activity logs.
 //
 // Also owns: boot recovery for direct runs (the report-first decision table)
 // and the live-worker inventory behind `automations:listActiveWorkers`.
 
 import type {
   AutomationWorkerInfo,
-  LoomEngine,
   LoomGraph,
   RunState,
   ScheduledJob,
@@ -352,7 +352,6 @@ async function describeWorker(
     : run.workerAttempts.at(-1);
   if (!attempt) return null;
   const task = run.workerTasks.find((t) => t.id === attempt.workerTaskId);
-  const engine: LoomEngine = task?.runtimePreference === "codex" ? "codex" : "claude";
   const nodeId = task?.loomNodeId;
   // Resolve THIS attempt's still-open question, not merely the run's newest
   // historical question. Live attempts may own an active-RPC blocker; terminal
@@ -383,7 +382,6 @@ async function describeWorker(
     workerTaskId: attempt.workerTaskId,
     attemptId: attempt.id,
     iteration,
-    engine,
     model: task?.modelHint,
     effort: task?.effortHint,
     cwd: attempt.cwd,
@@ -394,7 +392,12 @@ async function describeWorker(
     questionMessageId: openQuestion?.id,
     nodeId,
     nodeLabel: nodeLabelFor(job?.graph, nodeId),
-    transport: engine === "claude" ? "agent-sdk" : "app-server",
+    transport:
+      process.env.SPARK_E2E_LEGACY_WORKER_HARNESS === "1"
+        ? task?.runtimePreference === "codex"
+          ? "app-server"
+          : "agent-sdk"
+        : "pi-rpc",
     stdoutLogPath: attempt.stdoutLogPath,
     rawLogPath: attempt.rawLogPath,
   };

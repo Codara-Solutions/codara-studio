@@ -1,13 +1,11 @@
 import type {
   AgentEffortLevel,
-  AgentRuntimeDiagnostic,
   AutomationLoop,
   AutomationLoopKind,
   AutomationTrigger,
   FolderTriggerEvent,
   GuardPredicate,
   LoomEdgeDef,
-  LoomEngine,
   LoomGraph,
   LoomGuardNode,
   LoomMergeNode,
@@ -17,11 +15,8 @@ import type {
   ScheduledJob,
   StopConditions,
 } from "@shared/types";
-import {
-  DEFAULT_CODEX_WORKER_MODEL,
-  normalizeCodexModelId,
-} from "@shared/model-catalog";
 import type { Edge, Node } from "@xyflow/react";
+import { DEFAULT_WORKER_EFFORT, DEFAULT_WORKER_MODEL } from "../worker-models";
 import type { LoomPreset } from "./presets";
 
 // The node-flow editor's data model. The TRIGGER + LOOP live OFF the graph
@@ -60,70 +55,36 @@ export interface LoopDraft {
 }
 
 export interface WorkerDraft {
-  engine: LoomEngine;
-  model: string; // concrete engine-native model id — never blank
+  model: string; // concrete model id — never blank
   effort: AgentEffortLevel; // concrete — never blank
-  timeoutMin: string; // "" = engine default (60)
+  timeoutMin: string; // "" = runtime default (60)
 }
 
-// Every worker must carry a concrete engine, model, and effort — "auto" and
-// blank ("CLI default"/"default") no longer exist as choices. These are the
-// pre-selections a fresh worker (or a legacy "auto"/blank one loaded for
-// editing) resolves to, mirroring automation-loop's runtime resolution so what
-// the editor shows matches what would run.
-export const DEFAULT_ENGINE_MODEL: Record<LoomEngine, string> = {
-  claude: "claude-sonnet-5",
-  codex: DEFAULT_CODEX_WORKER_MODEL,
-};
-export const DEFAULT_WORKER_EFFORT: AgentEffortLevel = "medium";
-
-/** A worker config guaranteed concrete: a real engine (never "auto") and a
- *  non-blank model/effort. */
+/** A worker config guaranteed concrete: a non-blank model and effort. */
 export type ConcreteWorkerConfig = LoomWorkerConfig & {
-  engine: LoomEngine;
   model: string;
   effort: AgentEffortLevel;
 };
 
-/** Resolve a possibly-legacy worker config (engine "auto", or a blank
- *  model/effort) to concrete display values. Mirrors automation-loop.resolveWorker:
- *  "auto" → claude when installed, else codex (else claude as a last resort so
- *  the select is never blank); a blank model/effort fills the engine's concrete
- *  default. The returned config never has engine "auto" nor a blank model/effort. */
-export function concreteWorker(
-  worker: LoomWorkerConfig,
-  installed: Set<LoomEngine>,
-): ConcreteWorkerConfig {
-  const engine: LoomEngine =
-    worker.engine === "claude" || worker.engine === "codex"
-      ? worker.engine
-      : installed.has("claude")
-        ? "claude"
-        : installed.has("codex")
-          ? "codex"
-          : "claude";
+/** Resolve a possibly-legacy worker config (blank model/effort from a loom
+ *  persisted before workers moved to the bundled Pi runtime) to concrete
+ *  display values, so what the editor shows matches what would run. */
+export function concreteWorker(worker: Partial<LoomWorkerConfig>): ConcreteWorkerConfig {
   return {
     ...worker,
-    engine,
-    model:
-      worker.model && worker.model.trim()
-        ? engine === "codex"
-          ? normalizeCodexModelId(worker.model)
-          : worker.model
-        : DEFAULT_ENGINE_MODEL[engine],
+    model: worker.model && worker.model.trim() ? worker.model : DEFAULT_WORKER_MODEL,
     effort: worker.effort ?? DEFAULT_WORKER_EFFORT,
   };
 }
 
-/** The concrete default worker for a fresh node/loom, engine chosen from what's
- *  installed (claude-if-installed, else codex). */
-export function defaultWorker(installed: Set<LoomEngine>): ConcreteWorkerConfig {
-  return concreteWorker({ engine: "auto" }, installed);
+/** The concrete default worker for a fresh node/loom. */
+export function defaultWorker(): ConcreteWorkerConfig {
+  return { model: DEFAULT_WORKER_MODEL, effort: DEFAULT_WORKER_EFFORT };
 }
 
-function workerDraftFrom(worker: LoomWorkerConfig, installed: Set<LoomEngine>): Pick<WorkerDraft, "engine" | "model" | "effort"> {
-  const c = concreteWorker(worker, installed);
-  return { engine: c.engine, model: c.model, effort: c.effort };
+function workerDraftFrom(worker: Partial<LoomWorkerConfig>): Pick<WorkerDraft, "model" | "effort"> {
+  const c = concreteWorker(worker);
+  return { model: c.model, effort: c.effort };
 }
 
 export interface LoomDraft {
@@ -133,8 +94,8 @@ export interface LoomDraft {
   worker: WorkerDraft;
 }
 
-export function emptyDraft(installed: Set<LoomEngine> = new Set()): LoomDraft {
-  const w = workerDraftFrom({ engine: "auto" }, installed);
+export function emptyDraft(): LoomDraft {
+  const w = defaultWorker();
   return {
     name: "",
     trigger: {
@@ -161,12 +122,12 @@ export function emptyDraft(installed: Set<LoomEngine> = new Set()): LoomDraft {
       untilCommand: "",
       template: "",
     },
-    worker: { engine: w.engine, model: w.model, effort: w.effort, timeoutMin: "" },
+    worker: { model: w.model, effort: w.effort, timeoutMin: "" },
   };
 }
 
-export function draftFromJob(job: ScheduledJob, installed: Set<LoomEngine> = new Set()): LoomDraft {
-  const d = emptyDraft(installed);
+export function draftFromJob(job: ScheduledJob): LoomDraft {
+  const d = emptyDraft();
   d.name = job.name;
   d.trigger.kind = job.trigger.kind;
   if (job.trigger.kind === "cron") {
@@ -204,8 +165,7 @@ export function draftFromJob(job: ScheduledJob, installed: Set<LoomEngine> = new
   d.loop.untilCommand = stop.untilCommand ?? "";
   d.loop.template = job.prompt?.template ?? job.input.initialUserNote ?? "";
 
-  const jw = workerDraftFrom(job.worker ?? { engine: "auto" }, installed);
-  d.worker.engine = jw.engine;
+  const jw = workerDraftFrom(job.worker ?? {});
   d.worker.model = jw.model;
   d.worker.effort = jw.effort;
   d.worker.timeoutMin =
@@ -217,15 +177,13 @@ export function applyPresetToDraft(
   draft: LoomDraft,
   preset: LoomPreset,
   cwd: string,
-  installed: Set<LoomEngine> = new Set(),
 ): LoomDraft {
-  const pw = workerDraftFrom(preset.worker, installed);
+  const pw = workerDraftFrom(preset.worker);
   const next: LoomDraft = {
     ...draft,
     trigger: { ...draft.trigger, kind: preset.trigger.kind },
     loop: { ...draft.loop, kind: preset.loop.kind },
     worker: {
-      engine: pw.engine,
       model: pw.model,
       effort: pw.effort,
       timeoutMin: preset.worker.timeoutMinutes !== undefined ? String(preset.worker.timeoutMinutes) : "",
@@ -314,8 +272,8 @@ export function buildLoop(d: LoopDraft): AutomationLoop {
 }
 
 export function buildWorker(d: WorkerDraft): LoomWorkerConfig {
-  // engine/model/effort are always concrete in the draft — persist them all.
-  const worker: LoomWorkerConfig = { engine: d.engine, model: d.model.trim(), effort: d.effort };
+  // model/effort are always concrete in the draft — persist them both.
+  const worker: LoomWorkerConfig = { model: d.model.trim(), effort: d.effort };
   const t = Number(d.timeoutMin);
   if (d.timeoutMin.trim() && Number.isFinite(t) && t > 0) worker.timeoutMinutes = Math.round(t);
   return worker;
@@ -327,7 +285,7 @@ export function buildWorker(d: WorkerDraft): LoomWorkerConfig {
 export function validateNode(
   kind: LoomNodeKind,
   draft: LoomDraft,
-  ctx: { chainableCount: number; runtimes: AgentRuntimeDiagnostic[] },
+  ctx: { chainableCount: number },
 ): string | null {
   if (kind === "trigger") {
     const t = draft.trigger;
@@ -343,8 +301,8 @@ export function validateNode(
       }
     }
     if (t.kind === "onFinishOf") {
-      if (ctx.chainableCount === 0) return "No other loom to chain after yet.";
-      if (!t.chainSourceId.trim()) return "Pick the loom to chain after.";
+      if (ctx.chainableCount === 0) return "No other automation to chain after yet.";
+      if (!t.chainSourceId.trim()) return "Pick the automation to chain after.";
     }
     return null;
   }
@@ -359,33 +317,9 @@ export function validateNode(
     }
     return null;
   }
-  // worker
-  //
-  // Only a missing binary blocks. `authenticated === false` is advisory (the
-  // probe cannot see shell-exported credentials from a Finder-launched app),
-  // so a possibly-signed-out engine still validates — the sign-in doubt is
-  // surfaced as a warning badge in NodeContextPanel instead.
-  const usable = installedEngines(ctx.runtimes);
-  if (usable.size === 0) {
-    return "Install Claude Code or Codex to run looms.";
-  }
-  if (!usable.has(draft.worker.engine)) {
-    const label = draft.worker.engine === "claude" ? "Claude Code" : "Codex";
-    return `${label} is not installed.`;
-  }
+  // worker — runs on the bundled Pi runtime, so there is nothing to gate on:
+  // model and effort are always concrete in the draft.
   return null;
-}
-
-// Engines a loom can actually run on: exactly the ones whose CLI binary is
-// present. Sign-in state is deliberately NOT consulted — `authenticated` is an
-// advisory signal (the probe can miss env/helper credentials), and treating it
-// as a gate wrongly bricked looms for users with a working CLI.
-export function installedEngines(runtimes: AgentRuntimeDiagnostic[]): Set<LoomEngine> {
-  return new Set(
-    runtimes
-      .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed)
-      .map((r) => r.kind as LoomEngine),
-  );
 }
 
 // ── ReactFlow node/edge payloads ─────────────────────────────────────────────
@@ -408,6 +342,9 @@ export type FlowNodeData =
       prompt: string;
       isolate?: boolean;
       retry?: { maxAttempts: number; until?: GuardPredicate };
+      // Tool-access fields have no editor UI anymore (workers run on the
+      // bundled Pi runtime), but a persisted value must round-trip an
+      // edit-save untouched, so the flow data still carries them.
       access?: "full" | "edits" | "readonly";
       blockedTools?: string[];
       collab?: { awareness?: boolean; chat?: boolean };
@@ -435,13 +372,13 @@ export function freshId(prefix: string): string {
   return `${prefix}${Date.now().toString(36).slice(-4)}${(idSeq % 1000).toString(36)}`;
 }
 
-export function defaultNodeData(kind: LoomGraphNodeKind, installed: Set<LoomEngine> = new Set()): FlowNodeData {
+export function defaultNodeData(kind: LoomGraphNodeKind): FlowNodeData {
   switch (kind) {
     case "worker":
       return {
         kind: "worker",
         label: "Worker",
-        worker: defaultWorker(installed),
+        worker: defaultWorker(),
         prompt: "",
       };
     case "guard":
@@ -465,10 +402,7 @@ const ORIGIN_Y = 40;
 /** Build the ReactFlow nodes/edges for a job. The trigger is rendered as a
  *  pinned read-only node wired to each entry node. Positions come from
  *  node.ui when present; missing ones get a simple layered auto-layout. */
-export function flowFromGraph(
-  job: ScheduledJob,
-  installed: Set<LoomEngine> = new Set(),
-): { nodes: FlowNode[]; edges: FlowEdge[] } {
+export function flowFromGraph(job: ScheduledJob): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const graph = graphForJob(job);
   const layout = layeredPositions(graph);
 
@@ -497,7 +431,7 @@ export function flowFromGraph(
       id: n.id,
       type: n.kind,
       position: pos,
-      data: nodeDataFromDef(n, installed),
+      data: nodeDataFromDef(n),
     });
   }
 
@@ -526,18 +460,15 @@ export function flowFromGraph(
   return { nodes, edges };
 }
 
-function nodeDataFromDef(
-  n: LoomNodeDef,
-  installed: Set<LoomEngine> = new Set(),
-): FlowNodeData & Record<string, unknown> {
+function nodeDataFromDef(n: LoomNodeDef): FlowNodeData & Record<string, unknown> {
   switch (n.kind) {
     case "worker":
       return {
         kind: "worker",
         label: n.label ?? "Worker",
-        // Concretize legacy "auto"/blank workers for display so what the editor
+        // Concretize legacy blank workers for display so what the editor
         // shows matches what would run. Persisted only when the user next saves.
-        worker: concreteWorker(n.worker, installed),
+        worker: concreteWorker(n.worker),
         prompt: n.prompt,
         isolate: n.isolate,
         retry: n.retry,
@@ -560,7 +491,7 @@ export function graphForJob(job: ScheduledJob): LoomGraph {
     id: "w0",
     kind: "worker",
     label: "Worker",
-    worker: job.worker ?? { engine: "auto" },
+    worker: concreteWorker(job.worker ?? {}),
     prompt: job.prompt?.template ?? job.input?.initialUserNote ?? "",
   };
   return { version: 1, nodes: [w0], edges: [], entryNodeIds: ["w0"] };
@@ -651,28 +582,9 @@ export function graphFromFlow(nodes: FlowNode[], edges: FlowEdge[]): LoomGraph {
       if (d.label && d.label !== "Worker") def.label = d.label;
       if (d.isolate) def.isolate = true;
       if (d.retry && d.retry.maxAttempts > 0) def.retry = d.retry;
-      // Keep specs minimal: persist access/blockedTools/collab only when they
-      // differ from the default (full access, no blocks, no collaboration), so an
-      // untouched worker's saved spec is byte-identical to before this feature.
-      // codex has no read-only preset (its read-only sandbox can't write the
-      // worker's final report), so a readonly value on a codex worker is flipped
-      // to edits here — the same engine-flip protection blockedTools gets below,
-      // so a draft that toggled engine after picking Read-only never persists an
-      // unrunnable spec.
-      if (d.access && d.access !== "full") {
-        def.access = d.access === "readonly" && d.worker.engine === "codex" ? "edits" : d.access;
-      }
-      // blockedTools is claude-only (the form hides it for codex, but the draft
-      // keeps typed values across an engine flip — don't persist them onto a
-      // codex node, where the validator would rightly reject them). Only bare
-      // tool names survive: the claude CLI silently ignores parenthesized/scoped
-      // forms like "Bash(rm *)", so a scoped entry is dropped rather than saved
-      // as a deny that never takes hold.
-      const blocked =
-        d.worker.engine === "claude"
-          ? (d.blockedTools ?? []).map((t) => t.trim()).filter((t) => /^[A-Za-z][A-Za-z0-9_]*$/.test(t))
-          : [];
-      if (blocked.length > 0) def.blockedTools = blocked;
+      // Pass persisted access fields through verbatim (no editor UI for them).
+      if (d.access && d.access !== "full") def.access = d.access;
+      if (d.blockedTools && d.blockedTools.length > 0) def.blockedTools = d.blockedTools;
       if (d.collab && (d.collab.awareness || d.collab.chat)) {
         def.collab = {
           ...(d.collab.awareness ? { awareness: true } : {}),

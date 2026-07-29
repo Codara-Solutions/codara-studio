@@ -42,15 +42,13 @@ test("the + picker opens an editable whiteboard draft and Ctrl+S saves it into t
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    // The top strip's "+" picker advertises the new entry. Scope to the
-    // picker popover — the chat panel's inner strip has its own quiet
-    // "New whiteboard" affordance with the same accessible name.
-    await page.getByRole("button", { name: "New tab" }).click();
-    const pickerItem = page
-      .locator(".spark-tabbar-picker")
-      .getByRole("button", { name: /New whiteboard/ });
-    await expect(pickerItem).toBeVisible();
-    await pickerItem.click();
+    // The "+" picker no longer carries a whiteboard row (whiteboards folded
+    // into the Cora surfaces) — open the untitled draft via the
+    // tab.newWhiteboard chord instead. Wait for the booted workbench first so
+    // the global shortcut listeners are registered.
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeAttached();
+    const mod = process.platform === "darwin" ? "Meta" : "Control";
+    await page.keyboard.press(`${mod}+Shift+W`);
 
     // An untitled draft tab hosting an EDITABLE canvas: toolbar present,
     // header reports the unsaved state in words.

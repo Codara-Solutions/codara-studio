@@ -80,7 +80,7 @@ export default function LoopInspector({
         {/* Safety caps */}
         <Group
           label="Safety caps"
-          hint="Always enforced — even agent/continuous loops stop here. Leave blank to use the engine default."
+          hint="Always enforced: even agent/continuous loops stop here. Leave blank to use the default."
         >
           <div style={{ display: "flex", gap: 12 }}>
             <CapBox
@@ -144,7 +144,7 @@ export default function LoopInspector({
 
         {loop.kind === "agent" && (
           <p style={{ margin: 0, fontSize: 11, lineHeight: 1.55, color: "var(--muted)" }}>
-            The worker decides whether to continue each pass — via the{" "}
+            The worker decides whether to continue each pass, via the{" "}
             <span className="spark-mono">codara_request_next_iteration</span> tool, or by ending its
             summary with <span className="spark-mono">SPARK_LOOP_CONTINUE</span> /{" "}
             <span className="spark-mono">SPARK_LOOP_DONE</span>. Your caps above always stop it.
@@ -160,7 +160,7 @@ export default function LoopInspector({
           />
           <p style={{ margin: "4px 0 0 22px", fontSize: 10.5, lineHeight: 1.5, color: "var(--muted-2)" }}>
             {loop.isolate
-              ? "Each pass starts a clean run — no carried transcript."
+              ? "Each pass starts a clean run with no carried transcript."
               : "Iterations share one run's transcript (carry context)."}
           </p>
         </Group>

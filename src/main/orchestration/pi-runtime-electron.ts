@@ -364,6 +364,22 @@ export interface CreateCodaraPiWorkerLaunchOptions {
   /** The worker task id, stamped as CODARA_PI_SELF_ID alongside peerCommsDir
    * so the worker extension knows its own mailbox identity. */
   peerSelfId?: string;
+  /** Automation (loom) worker context. When set, the session's bridge roster
+   * flips to SPARK_MCP_MODE "worker" (studio tools plus codara_ask_user and
+   * codara_request_next_iteration), the automation/node identity is stamped
+   * into the env for the bridge's runId/nodeId auto-injection, and the
+   * extension's tool-access fence is armed from access/blockedTools. */
+  automation?: {
+    automationId: string;
+    nodeId?: string;
+    access?: "full" | "edits" | "readonly";
+    blockedTools?: string[];
+    /** Dirs OUTSIDE the workspace a fenced worker may still write: the attempt
+     * dir (mandatory final report) and, for chat participants, the shared
+     * board dir. Stamped as CODARA_PI_WORKER_WRITE_ALLOW for the extension's
+     * write-containment veto. Ignored without an edits/readonly access. */
+    writeAllowDirs?: string[];
+  };
 }
 
 /**
@@ -433,6 +449,35 @@ export async function createCodaraPiWorkerLaunchPlan(
   if (options.peerCommsDir && options.peerSelfId) {
     plan.env.CODARA_PI_PEER_DIR = resolve(options.peerCommsDir);
     plan.env.CODARA_PI_SELF_ID = options.peerSelfId;
+  }
+  // Automation (loom) workers. The plain "talk" plan gives the bridge the bare
+  // studio roster; a loom worker instead needs the WORKER roster (studio tools
+  // plus codara_ask_user + codara_request_next_iteration) and the automation/
+  // node identity the bridge auto-injects into those RPCs. The extension's
+  // tool-access fence reads the two CODARA_PI_WORKER_* names; blockedTools
+  // entries are bare identifiers by validation, so the comma join is safe.
+  if (options.automation) {
+    plan.env.SPARK_MCP_MODE = "worker";
+    plan.env.SPARK_AUTOMATION_ID = options.automation.automationId;
+    if (options.automation.nodeId) plan.env.SPARK_NODE_ID = options.automation.nodeId;
+    if (options.automation.access && options.automation.access !== "full") {
+      plan.env.CODARA_PI_WORKER_ACCESS = options.automation.access;
+      // Write containment allowlist rides only with a fenced preset; without
+      // one the extension never consults it.
+      const allow = (options.automation.writeAllowDirs ?? [])
+        .map((dir) => dir.trim())
+        .filter((dir) => dir.length > 0)
+        .map((dir) => resolve(dir));
+      if (allow.length > 0) {
+        plan.env.CODARA_PI_WORKER_WRITE_ALLOW = JSON.stringify(allow);
+      }
+    }
+    const blocked = (options.automation.blockedTools ?? [])
+      .map((tool) => tool.trim())
+      .filter((tool) => /^[A-Za-z][A-Za-z0-9_]*$/.test(tool));
+    if (blocked.length > 0) {
+      plan.env.CODARA_PI_WORKER_BLOCKED_TOOLS = blocked.join(",");
+    }
   }
   return plan;
 }

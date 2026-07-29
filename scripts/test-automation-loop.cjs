@@ -95,14 +95,14 @@ const harnessPlugin = {
             // Looms v2: the loop driver launches DIRECT worker runs. Each one
             // HOLDS until the test calls completeRun(). The launch record
             // captures the resolved engine/model/effort for assertions.
-            "export async function startDirectWorkerRun(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: 'running', executionMode: 'direct', humanMessages: [], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0 }; L.runs.set(id, run); L.launches.push({ kind: 'start', id, note: input.prompt, engine: input.engine, model: input.model, effort: input.effort, automationId: input.automationId, title: input.title, nodes: input.nodes, freshPass: input.freshPass }); L.pending.push(id); return run; }\n" +
+            "export async function startDirectWorkerRun(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: 'running', executionMode: 'direct', humanMessages: [], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0 }; L.runs.set(id, run); L.launches.push({ kind: 'start', id, note: input.prompt, model: input.model, effort: input.effort, automationId: input.automationId, title: input.title, nodes: input.nodes, freshPass: input.freshPass }); L.pending.push(id); return run; }\n" +
             // Same-run chain: a fresh task on the existing run (back to non-terminal).
             // Append a fresh LIVE attempt for the chained node (reusing the node's
             // existing task when present so newestAttemptForNode picks it up) and flip
             // the node's loomPass state to running — mirroring run-store's real
             // launchDirectNodeTasks so the per-node answer-resume + watchdog seams see
             // a coherent attempt set (the resumed node is no longer a blocked candidate).
-            "export async function addDirectIteration(input){ const L = globalThis.__LOOP; const run = L.runs.get(input.runId) || { id: input.runId, humanMessages: [], workerAttempts: [], workerTasks: [] }; run.status = 'running'; run.workerTasks = run.workerTasks || []; const node = input.loomNodeId || 'w0'; let task = run.workerTasks.find((t) => t.loomNodeId === node); if (!task) { task = { id: 't-' + node, loomNodeId: node }; run.workerTasks.push(task); } const aid = 'att-c' + (run.workerAttempts.length + 1); run.workerAttempts = [...(run.workerAttempts||[]), { id: aid, workerTaskId: task.id, status: 'running' }]; if (run.loomPass && run.loomPass.nodeStates[node]) { run.loomPass.nodeStates[node] = { ...run.loomPass.nodeStates[node], status: 'running', attemptIds: [...(run.loomPass.nodeStates[node].attemptIds||[]), aid] }; } L.runs.set(run.id, run); L.launches.push({ kind: 'chain', id: run.id, note: input.prompt, engine: input.engine, model: input.model, effort: input.effort, clientMessageId: input.clientMessageId, loomNodeId: input.loomNodeId, nodes: input.nodes, freshPass: input.freshPass }); L.pending.push(run.id); return run; }\n" +
+            "export async function addDirectIteration(input){ const L = globalThis.__LOOP; const run = L.runs.get(input.runId) || { id: input.runId, humanMessages: [], workerAttempts: [], workerTasks: [] }; run.status = 'running'; run.workerTasks = run.workerTasks || []; const node = input.loomNodeId || 'w0'; let task = run.workerTasks.find((t) => t.loomNodeId === node); if (!task) { task = { id: 't-' + node, loomNodeId: node }; run.workerTasks.push(task); } const aid = 'att-c' + (run.workerAttempts.length + 1); run.workerAttempts = [...(run.workerAttempts||[]), { id: aid, workerTaskId: task.id, status: 'running' }]; if (run.loomPass && run.loomPass.nodeStates[node]) { run.loomPass.nodeStates[node] = { ...run.loomPass.nodeStates[node], status: 'running', attemptIds: [...(run.loomPass.nodeStates[node].attemptIds||[]), aid] }; } L.runs.set(run.id, run); L.launches.push({ kind: 'chain', id: run.id, note: input.prompt, model: input.model, effort: input.effort, clientMessageId: input.clientMessageId, loomNodeId: input.loomNodeId, access: input.access, blockedTools: input.blockedTools, nodes: input.nodes, freshPass: input.freshPass }); L.pending.push(run.id); return run; }\n" +
             // Per-attempt force-fail: mark ONLY the named attempt failed (slice 7).
             // The run terminalizes (status=failed) only when NO live attempt remains —
             // mirroring finalizeDirectRun's wave join: a hung sibling failing while
@@ -388,9 +388,9 @@ async function main() {
     ok("loop + state + history persisted to disk", Boolean(persisted.loop && persisted.state && Array.isArray(persisted.history) && persisted.history.length >= 1));
 
     // Legacy jobs (no loop/state/history/worker) backfill on read — including
-    // the Looms v2 worker migration: the removed API backend (a persisted
-    // "openrouter" chatBackend from an older install) → auto; claude carries
-    // model/effort onto the worker config.
+    // the Looms-on-Pi worker migration: the removed API backend (a persisted
+    // "openrouter" chatBackend from an older install) lands on the default Pi
+    // worker; claude carries model/effort onto the worker config.
     const legacy = { id: "legacy-1", name: "old", trigger: { kind: "manual" }, enabled: true, input: baseInput, createdAt: new Date().toISOString() };
     const legacyOpenrouter = { id: "legacy-or", name: "or", trigger: { kind: "manual" }, enabled: true, input: { ...baseInput, chatBackend: "openrouter", chatModel: "x-ai/grok-4.3" }, createdAt: new Date().toISOString() };
     const legacyClaude = { id: "legacy-cc", name: "cc", trigger: { kind: "manual" }, enabled: true, input: { ...baseInput, chatBackend: "claude", chatModel: "claude-opus-4-8", chatEffort: "high" }, createdAt: new Date().toISOString() };
@@ -408,13 +408,13 @@ async function main() {
     );
     const or = jobs2.find((j) => j.id === "legacy-or");
     ok(
-      "legacy removed-API-backend loom migrates to worker engine=auto (model dropped)",
-      or && or.worker?.engine === "auto" && or.worker?.model === undefined,
+      "legacy removed-API-backend loom migrates to the default Pi worker (API model dropped)",
+      or && or.worker?.engine === undefined && or.worker?.model === "claude-opus-5" && or.worker?.effort === "medium",
     );
     const cc = jobs2.find((j) => j.id === "legacy-cc");
     ok(
-      "legacy claude loom carries model+effort onto the worker config",
-      cc && cc.worker?.engine === "claude" && cc.worker?.model === "claude-opus-4-8" && cc.worker?.effort === "high",
+      "legacy claude loom carries model+effort onto the worker config (engine dropped)",
+      cc && cc.worker?.engine === undefined && cc.worker?.model === "claude-opus-4-8" && cc.worker?.effort === "high",
     );
   }
 
@@ -506,7 +506,7 @@ async function main() {
     const launch = L.launches[L.launches.length - 1];
     ok("iteration launches a direct worker run (no autopilot)", launch?.kind === "start");
     ok("direct launch carries automationId + rendered prompt", launch.automationId === job.id && launch.note.includes("do the thing 0"));
-    ok("auto engine resolves to claude when installed", launch.engine === "claude");
+    ok("a loom with no pinned worker launches on the default Pi model", launch.engine === undefined && launch.model === "claude-opus-5");
     const rid = nextPending();
     L.pending.length = 0;
     await completeRun(rid, { summary: "done" });
@@ -534,7 +534,7 @@ async function main() {
     await completeRun(rid, { summary: "second" });
   }
 
-  // ── 13) pinned engine + model carried; unknown model falls back ──
+  // ── 13) pinned model carried (gpt ids normalized); unknown ids pass through ──
   {
     L.launches.length = 0;
     L.pending.length = 0;
@@ -548,7 +548,7 @@ async function main() {
     });
     await sched.runJobNow(job.id);
     const launch = L.launches[L.launches.length - 1];
-    ok("legacy pinned Codex model migrates to GPT-5.6 Sol", launch.engine === "codex" && launch.model === "gpt-5.6-sol" && launch.effort === "high");
+    ok("legacy pinned Codex model migrates to GPT-5.6 Sol", launch.engine === undefined && launch.model === "gpt-5.6-sol" && launch.effort === "high");
     let rid = nextPending();
     L.pending.length = 0;
     await completeRun(rid, { summary: "ok" });
@@ -563,13 +563,14 @@ async function main() {
     });
     await sched.runJobNow(bogus.id);
     const launch2 = L.launches[L.launches.length - 1];
-    ok("unknown model id falls back to the CLI default", launch2.engine === "claude" && launch2.model === undefined);
+    ok("an unknown claude-* model id passes through verbatim (Pi decides)", launch2.engine === undefined && launch2.model === "claude-9000-ultra");
     rid = nextPending();
     L.pending.length = 0;
     await completeRun(rid, { summary: "ok" });
   }
 
-  // ── 14) zero installed engines finalizes engine-missing ──
+  // ── 14) no CLI install gating: Pi is bundled, so a loom launches even when ──
+  //        no claude/codex CLI is installed on the machine. ──────────────────
   {
     L.launches.length = 0;
     L.pending.length = 0;
@@ -578,27 +579,25 @@ async function main() {
       { kind: "codex", installed: false, disabledBySettings: false, models: [] },
     ];
     const job = await sched.createJob({
-      name: "no-engines",
+      name: "no-clis",
       trigger: { kind: "manual" },
       loop: { kind: "once", stop: {}, isolate: true },
       input: baseInput,
       prompt: { template: "x" },
     });
-    let threw = false;
-    try {
-      await sched.runJobNow(job.id);
-    } catch {
-      threw = true; // no run was started — runNow surfaces that
-    }
-    const st = await getState(job.id);
+    await sched.runJobNow(job.id);
+    const launch = L.launches[L.launches.length - 1];
     ok(
-      "no installed engine stops the loom with engine-missing",
-      threw && st.status === "stopped" && st.lastStopReason === "engine-missing" && L.launches.length === 0,
+      "a loom launches on the bundled Pi runtime with zero CLIs installed",
+      launch?.kind === "start" && launch.model === "claude-opus-5",
     );
+    const rid = nextPending();
+    L.pending.length = 0;
+    await completeRun(rid, { summary: "ok" });
     L.runtimes = null; // restore the default stub set
   }
 
-  // ── 15) agent handoff: honored on auto looms, rejected on pinned ──
+  // ── 15) agent handoff: nextModel steers the next pass; legacy nextEngine ignored ──
   {
     L.launches.length = 0;
     L.pending.length = 0;
@@ -614,21 +613,20 @@ async function main() {
     let rid = nextPending();
     L.pending.length = 0;
     // The MCP tool's signal (persisted mirror — survives restarts) steers the
-    // NEXT pass to Codex; a legacy GPT-5.5 handoff migrates to GPT-5.6 Sol.
+    // NEXT pass to a Codex model; a legacy GPT-5.5 handoff migrates to Sol.
     await sched.patchJob(auto.id, (j) => ({
       ...j,
-      state: { ...j.state, pendingAgentSignal: { continue: true, nextEngine: "codex", nextModel: "gpt-5.5" } },
+      state: { ...j.state, pendingAgentSignal: { continue: true, nextModel: "gpt-5.5" } },
     }));
     await completeRun(rid, { summary: "no sentinel here" });
     const launch = L.launches[L.launches.length - 1];
-    ok("auto loom honors and migrates the agent's engine handoff", launch.engine === "codex" && launch.model === "gpt-5.6-sol");
+    ok("loom honors and migrates the agent's model handoff", launch.model === "gpt-5.6-sol");
     rid = nextPending();
     L.pending.length = 0;
     await completeRun(rid, { summary: "SPARK_LOOP_DONE" });
 
-    // Pinned loom: the handoff is honored even on a pinned engine — "auto" no
-    // longer exists as a gate, so a validated handoff steers the next pass
-    // directly (and no rejection event exists anymore).
+    // Legacy persisted signal carrying ONLY a nextEngine: the field is dead,
+    // so the loom keeps its own model and no rejection event is emitted.
     L.launches.length = 0;
     L.pending.length = 0;
     const pinned = await sched.createJob({
@@ -649,7 +647,7 @@ async function main() {
     }));
     await completeRun(rid, { summary: "no sentinel" });
     const launch2 = L.launches[L.launches.length - 1];
-    ok("pinned loom honors the handoff (engine becomes codex)", launch2.engine === "codex");
+    ok("a legacy nextEngine-only handoff is ignored (model unchanged)", launch2.model === "claude-opus-5");
     ok(
       "no handoff_rejected event is emitted anymore",
       !(L.events ?? []).some((e) => e.type === "automation.handoff_rejected"),
@@ -812,6 +810,24 @@ async function main() {
       loop: { kind: "count", stop: { maxIterations: 3 }, isolate: false },
       input: baseInput,
       prompt: { template: "a {{iteration}}" },
+      // The node pins a tool-access fence: the answer-resume continuation must
+      // carry it (a resumed attempt is the SAME node, not a fresh full-access
+      // worker).
+      graph: {
+        version: 1,
+        nodes: [
+          {
+            id: "w0",
+            kind: "worker",
+            worker: { model: "claude-opus-5", effort: "medium" },
+            prompt: "a {{iteration}}",
+            access: "readonly",
+            blockedTools: ["WebSearch"],
+          },
+        ],
+        edges: [],
+        entryNodeIds: ["w0"],
+      },
     });
     await sched.runJobNow(job.id);
     const rid = nextPending();
@@ -856,6 +872,10 @@ async function main() {
         chain.note.includes("Which config file should I edit?") &&
         chain.note.includes("Use config.staging.ts"),
     );
+    ok(
+      "the answer-resume keeps the node's tool-access fence",
+      chain.access === "readonly" && JSON.stringify(chain.blockedTools) === JSON.stringify(["WebSearch"]),
+    );
     st = await getState(job.id);
     ok("answer-resume does not advance the iteration counter", st.iteration === 1);
     L.pending.length = 0;
@@ -887,8 +907,8 @@ async function main() {
     await completeRun(rid, { summary: "plain" });
     const launch = L.launches[L.launches.length - 1];
     ok(
-      "effort-only handoff steers the next pass (engine auto-resolved)",
-      launch.engine === "claude" && launch.effort === "high",
+      "effort-only handoff steers the next pass (model kept)",
+      launch.model === "claude-opus-5" && launch.effort === "high",
     );
     rid = nextPending();
     L.pending.length = 0;
@@ -1129,9 +1149,10 @@ async function main() {
     L.launches.length = 0;
     L.pending.length = 0;
     // Two entry workers (A, B) feeding a shared sink C — A,B are indegree-0, so
-    // layers[0] = [A, B]. A is pinned codex; B is auto. The degenerate path would
+    // layers[0] = [A, B]. A pins a Codex-side model (via legacy engine, which
+    // the migration maps); B has a legacy auto engine. The degenerate path would
     // run the SINK's mirrored prompt on a single entry; the multi-node path runs
-    // each entry's authored prompt + its own engine.
+    // each entry's authored prompt + its own worker.
     const graph = {
       version: 1,
       nodes: [
@@ -1169,8 +1190,9 @@ async function main() {
         !byId.A.template.includes("ship") && !byId.B.template.includes("ship"),
     );
     ok(
-      "each entry resolves its OWN worker (A pinned codex, B auto→claude)",
-      byId.A.worker.engine === "codex" && byId.B.worker.engine === "claude",
+      "each entry resolves its OWN worker (A migrated to Sol, B to the default)",
+      byId.A.worker.engine === undefined && byId.A.worker.model === "gpt-5.6-sol" &&
+        byId.B.worker.engine === undefined && byId.B.worker.model === "claude-opus-5",
     );
     const rid = nextPending();
     L.pending.length = 0;

@@ -12,8 +12,22 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
+import { makeId } from "@shared/ids";
 import { isRemotePath } from "@shared/remote";
-import type { AppState, RunState, Workspace, WorkspaceGroup } from "@shared/types";
+import type {
+  AppState,
+  AutomationTrigger,
+  BoardCard,
+  BoardCardStatus,
+  RunBoard,
+  RunState,
+  RunStatus,
+  ScheduledJob,
+  SparkEvent,
+  Workspace,
+  WorkspaceGroup,
+  WorkerSessionMemoryScope,
+} from "@shared/types";
 import { logMain } from "../file-log";
 import { setAllowedRoots } from "../fs-sandbox";
 import { getCommitDetail as readGitCommitDetail } from "../git-inspect";
@@ -25,16 +39,40 @@ import {
   addRunMessage,
   answerRunQuestion,
   getRun,
+  getRunBoard,
   listRuns,
   startAutopilot,
+  updateRunBoard,
 } from "../orchestration/run-store";
+import { BOARD_MAX_CARDS } from "../orchestration/board-store";
 import { ensureCodexProjectTrust } from "../orchestration/codex-trust";
-import { getPreferenceSync } from "../preferences-store";
+import { subscribeToEvents } from "../orchestration/event-log";
+import {
+  getJob,
+  listJobs,
+  pauseJob,
+  resumeJob,
+  runJobNow,
+  setEnabled as setJobEnabled,
+} from "../orchestration/scheduler";
+import { isWatchingRun } from "../notify/attention";
+import {
+  EXPO_RECEIPT_POLL_MS,
+  ExpoReceiptTracker,
+  PhoneNotificationStore,
+  phoneNotificationKindAllowed,
+  sendExpoPushMessages,
+  type ExpoPushTarget,
+} from "./phone-notify";
+import { getPreferenceCached, getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
 import { sparkHome } from "../spark-home";
 import { loadState, onStateSaved, saveState } from "../storage";
 import { requestTerminalOp } from "../terminal-bridge";
-import { listWorkerSessions as listLocalWorkerSessions } from "../worker-sessions";
+import {
+  deleteWorkerSession as deleteLocalWorkerSession,
+  listWorkerSessions as listLocalWorkerSessions,
+} from "../worker-sessions";
 import {
   RemoteAccessService,
   type RemoteTerminalCreateRequest,
@@ -60,9 +98,24 @@ import {
   truncateUtf8,
 } from "./local-policy";
 import type {
+  RemoteAutomationDetail,
+  RemoteAutomationInfo,
+  RemoteAutomationRunRecord,
+  RemoteAutomationTriggerKind,
+  RemoteBoard,
+  RemoteBoardAction,
+  RemoteBoardCard,
+  RemoteBoardUpdateResult,
   RemoteCoraMessage,
   RemoteCoraRun,
   RemoteCoraRunSummary,
+  RemoteCoraStep,
+  RemoteCoraWorker,
+  RemoteWhiteboard,
+  RemoteWhiteboardEdge,
+  RemoteWhiteboardNode,
+  RemoteNotificationRegistration,
+  RemotePhoneNotification,
   RemoteDirectoryListing,
   RemoteFileContent,
   RemoteFileDeleteResult,
@@ -77,6 +130,7 @@ import type {
   RemoteWorkspaceGroupInfo,
   RemoteWorkspaceInfo,
   RemoteWorkspaceOrganization,
+  RemoteWorkerSessionDeleteResult,
   RemoteWorkerSessionInfo,
 } from "./rpc";
 
@@ -112,6 +166,18 @@ const MAX_CORA_MESSAGES = 200;
 const MAX_GIT_LOG_COMMITS = 100;
 const MAX_GIT_COMMIT_FILES = 500;
 const MAX_REMOTE_WORKER_SESSIONS = 40;
+const MAX_REMOTE_AUTOMATIONS = 50;
+const MAX_CORA_RUN_WORKERS = 12;
+const MAX_CORA_RUN_STEPS = 12;
+// A desktop board can hold BOARD_MAX_CARDS (500). The phone is a review
+// surface, so it takes the head of the pipeline order and reports the rest as
+// a count rather than shipping a 500-card list on every poll.
+const MAX_REMOTE_BOARD_CARDS = 100;
+const REMOTE_BOARD_TITLE_MAX_BYTES = 300;
+const REMOTE_BOARD_DESCRIPTION_MAX_BYTES = 2000;
+const REMOTE_BOARD_ERROR_MAX_BYTES = 500;
+const MAX_REMOTE_WHITEBOARD_NODES = 200;
+const MAX_REMOTE_WHITEBOARD_EDGES = 300;
 const GIT_COMMIT_BODY_MAX_BYTES = 32 * 1024;
 const TERMINAL_SPAWN_WAIT_MS = 10_000;
 const TERMINAL_SPAWN_SETTLE_MS = 150;
@@ -155,7 +221,18 @@ export function getRemoteAccessService(): RemoteAccessService {
       listCoraHistory: listCoraHistoryForRemote,
       getCoraRun: getCoraRunForRemote,
       sendCoraMessage: sendCoraMessageForRemote,
+      getCoraWhiteboard: getCoraWhiteboardForRemote,
+      getCoraBoard: getCoraBoardForRemote,
+      updateCoraBoard: updateCoraBoardForRemote,
       listWorkerSessions: listWorkerSessionsForRemote,
+      deleteWorkerSession: deleteWorkerSessionForRemote,
+      listAutomations: listAutomationsForRemote,
+      getAutomation: getAutomationForRemote,
+      runAutomation: runAutomationForRemote,
+      pauseAutomation: pauseAutomationForRemote,
+      resumeAutomation: resumeAutomationForRemote,
+      setAutomationEnabled: setAutomationEnabledForRemote,
+      registerNotifications: registerNotificationsForRemote,
       beginImageUpload: beginImageUploadForRemote,
       createTerminal: createRemoteTerminal,
       log: (line) => logMain("remote-access", line),
@@ -165,6 +242,7 @@ export function getRemoteAccessService(): RemoteAccessService {
     stateSavedSubscriptionInstalled = true;
     onStateSaved(() => singleton?.notifyWorkspacesChanged());
   }
+  startPhoneNotificationBridge(singleton);
   return singleton;
 }
 
@@ -1027,6 +1105,10 @@ async function requireOwnedRun(workspaceId: string, runId: string): Promise<RunS
 
 function toRemoteRunSummary(run: RunState): RemoteCoraRunSummary {
   const lastMessage = run.humanMessages.at(-1)?.message;
+  const costUsd =
+    run.totalCostUsd !== undefined || run.estimatedWorkerCostUsd !== undefined
+      ? (run.totalCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0)
+      : undefined;
   return {
     id: run.id,
     workspaceId: run.workspaceId,
@@ -1039,6 +1121,55 @@ function toRemoteRunSummary(run: RunState): RemoteCoraRunSummary {
     activeWorkers: run.workerAttempts.filter((attempt) =>
       ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status),
     ).length,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(run.automationId ? { automated: true } : {}),
+  };
+}
+
+// Worker roster for the phone's run header: active attempts first, then the
+// most recent settled ones, capped so a long run cannot bloat every poll.
+function toRemoteRunWorkers(run: RunState): RemoteCoraWorker[] {
+  const titles = new Map(run.workerTasks.map((task) => [task.id, task.title]));
+  const toWorker = (attempt: RunState["workerAttempts"][number]): RemoteCoraWorker => ({
+    id: attempt.id,
+    title: truncateUtf8(titles.get(attempt.workerTaskId) || "Worker", 300),
+    runtime: attempt.runtime,
+    ...(attempt.model ? { model: truncateUtf8(attempt.model, 120) } : {}),
+    status: attempt.status,
+    ...(attempt.startedAt ? { startedAt: attempt.startedAt } : {}),
+    ...(attempt.finishedAt ? { finishedAt: attempt.finishedAt } : {}),
+  });
+  const active = run.workerAttempts.filter((attempt) =>
+    ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status),
+  );
+  const settled = run.workerAttempts.filter(
+    (attempt) => !ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status),
+  );
+  // slice(-0) would return the whole array, so the settled fill is guarded.
+  const settledBudget = Math.max(0, MAX_CORA_RUN_WORKERS - active.length);
+  const recentSettled = settledBudget > 0 ? settled.slice(-settledBudget) : [];
+  return [...active, ...recentSettled].slice(0, MAX_CORA_RUN_WORKERS).map(toWorker);
+}
+
+// Steps a step will never leave: the plan progress line counts all three as
+// finished so a skipped step cannot stall the count at "3 of 5" forever.
+const FINISHED_STEP_STATUSES = new Set(["complete", "completed_unverified", "skipped"]);
+
+// Plan progress for the phone's run header. The list is capped but the totals
+// are computed over the whole plan, so a long plan still reports honestly.
+function toRemoteRunSteps(run: RunState): {
+  steps: RemoteCoraStep[];
+  total: number;
+  finished: number;
+} {
+  const ordered = [...run.steps].sort((left, right) => left.index - right.index);
+  return {
+    steps: ordered.slice(0, MAX_CORA_RUN_STEPS).map((step) => ({
+      title: truncateUtf8(step.title, 300),
+      status: step.status,
+    })),
+    total: ordered.length,
+    finished: ordered.filter((step) => FINISHED_STEP_STATUSES.has(step.status)).length,
   };
 }
 
@@ -1059,7 +1190,31 @@ function toRemoteRun(run: RunState): RemoteCoraRun {
     usedBytes += bytes;
   }
   messages.reverse();
-  return { ...toRemoteRunSummary(run), messages };
+  const workers = toRemoteRunWorkers(run);
+  const plan = toRemoteRunSteps(run);
+  const boardCards = run.board?.cards.length ?? 0;
+  const whiteboardNodes = run.whiteboard?.nodes.length ?? 0;
+  const blockedMessage = run.blockedOn
+    ? run.humanMessages.find((message) => message.id === run.blockedOn?.questionMessageId)
+    : undefined;
+  return {
+    ...toRemoteRunSummary(run),
+    messages,
+    ...(workers.length > 0 ? { workers } : {}),
+    ...(plan.total > 0
+      ? { steps: plan.steps, stepsTotal: plan.total, stepsFinished: plan.finished }
+      : {}),
+    ...(boardCards > 0 ? { boardCards } : {}),
+    ...(whiteboardNodes > 0 ? { whiteboardNodes } : {}),
+    ...(run.blockedOn && blockedMessage
+      ? {
+          blockedQuestion: {
+            messageId: blockedMessage.id,
+            message: truncateUtf8(blockedMessage.message, 16 * 1024),
+          },
+        }
+      : {}),
+  };
 }
 
 async function listWorkerSessionsForRemote(input: {
@@ -1074,6 +1229,721 @@ async function listWorkerSessionsForRemote(input: {
     title: truncateUtf8(session.title, 512),
     updatedAt: session.updatedAt,
   }));
+}
+
+async function deleteWorkerSessionForRemote(input: {
+  workspaceId: string;
+  runtime: "claude" | "codex";
+  sessionId: string;
+  memoryScope: WorkerSessionMemoryScope;
+}): Promise<RemoteWorkerSessionDeleteResult> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  // The phone knows a session id and a memory scope. Both file paths the
+  // delete needs are re-derived from THIS workspace's own listing, so a paired
+  // device can only ever reach sessions the workspace already offers to
+  // resume, and deleteWorkerSession still cross-checks the transcript's own
+  // recorded cwd before removing anything.
+  // Keyed per RUNTIME, not per session: two deletes of different sessions
+  // still rewrite the same provider history file, so serializing per session
+  // id would let one read-modify-write clobber the other's removal.
+  return fileMutations.run(
+    JSON.stringify(["workerSession.delete", input.workspaceId, input.runtime]),
+    async () => {
+      const sessions = await listLocalWorkerSessions(input.runtime, root);
+      const match = sessions.find((session) => session.sessionId === input.sessionId);
+      if (!match) {
+        throw new Error("That session is no longer in this workspace's history.");
+      }
+      const result = await deleteLocalWorkerSession({
+        runtime: match.runtime,
+        sessionId: match.sessionId,
+        cwd: match.cwd,
+        transcriptPath: match.transcriptPath,
+        memoryScope: input.memoryScope,
+      });
+      return {
+        deleted: result.deleted,
+        memoryDeleted: result.memoryDeleted,
+        memoryScope: result.memoryScope,
+        warnings: result.warnings.slice(0, 4).map((warning) => truncateUtf8(warning, 512)),
+      };
+    },
+  );
+}
+
+/* ------------------------------------------------------ Cora whiteboard */
+
+// A phone reads the whiteboard as a grouped list, so the canvas geometry is
+// dropped at the boundary and only the semantic content crosses.
+async function getCoraWhiteboardForRemote(input: {
+  workspaceId: string;
+  runId: string;
+}): Promise<RemoteWhiteboard | null> {
+  await requireLocalWorkspace(input.workspaceId);
+  const run = await requireOwnedRun(input.workspaceId, input.runId);
+  const board = run.whiteboard;
+  if (!board) return null;
+
+  let usedBytes = 2;
+  let truncated = false;
+  const nodes: RemoteWhiteboardNode[] = [];
+  for (const node of board.nodes.slice(0, MAX_REMOTE_WHITEBOARD_NODES)) {
+    const item: RemoteWhiteboardNode = {
+      id: node.id,
+      kind: node.kind,
+      title: truncateUtf8(node.title, 300),
+      ...(node.body ? { body: truncateUtf8(node.body, 2000) } : {}),
+      ...(node.tone ? { tone: node.tone } : {}),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) {
+      truncated = true;
+      break;
+    }
+    nodes.push(item);
+    usedBytes += bytes;
+  }
+  if (nodes.length < board.nodes.length) truncated = true;
+
+  // Only edges whose endpoints both survived the node cap are sent; an edge
+  // pointing at a node the phone never received would render as a dangling row.
+  const keptNodeIds = new Set(nodes.map((node) => node.id));
+  const edges: RemoteWhiteboardEdge[] = [];
+  for (const edge of board.edges) {
+    if (!keptNodeIds.has(edge.from) || !keptNodeIds.has(edge.to)) {
+      truncated = true;
+      continue;
+    }
+    if (edges.length >= MAX_REMOTE_WHITEBOARD_EDGES) {
+      truncated = true;
+      break;
+    }
+    const item: RemoteWhiteboardEdge = {
+      id: edge.id,
+      from: edge.from,
+      to: edge.to,
+      ...(edge.label ? { label: truncateUtf8(edge.label, 300) } : {}),
+      ...(edge.tone ? { tone: edge.tone } : {}),
+      ...(edge.style ? { style: edge.style } : {}),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) {
+      truncated = true;
+      break;
+    }
+    edges.push(item);
+    usedBytes += bytes;
+  }
+
+  return {
+    title: truncateUtf8(board.title, 300),
+    ...(board.summary ? { summary: truncateUtf8(board.summary, 700) } : {}),
+    nodes,
+    edges,
+    updatedAt: board.updatedAt,
+    ...(truncated ? { truncated: true } : {}),
+  };
+}
+
+/* ----------------------------------------------------------- Cora Board */
+
+// Lane order matches the desktop board's columns left to right. "failed"
+// shares the Review lane there, so it shares the rank here.
+const BOARD_LANE_RANK: Record<BoardCardStatus, number> = {
+  idea: 0,
+  queued: 1,
+  running: 2,
+  blocked: 3,
+  review: 4,
+  failed: 4,
+  done: 5,
+};
+
+function toRemoteBoardCard(card: BoardCard): RemoteBoardCard {
+  return {
+    id: card.id,
+    title: truncateUtf8(card.title, REMOTE_BOARD_TITLE_MAX_BYTES),
+    ...(card.description
+      ? { description: truncateUtf8(card.description, REMOTE_BOARD_DESCRIPTION_MAX_BYTES) }
+      : {}),
+    status: card.status,
+    order: card.order,
+    ...(card.workerTaskId ? { workerTaskId: truncateUtf8(card.workerTaskId, 200) } : {}),
+    ...(card.createdBy ? { createdBy: card.createdBy } : {}),
+    ...(card.error ? { error: truncateUtf8(card.error, REMOTE_BOARD_ERROR_MAX_BYTES) } : {}),
+    ...(card.imagePaths && card.imagePaths.length > 0
+      ? { imageCount: card.imagePaths.length }
+      : {}),
+    updatedAt: card.updatedAt,
+  };
+}
+
+// Cards in desktop lane order, capped by count and by the shared collection
+// budget. The phone groups them back into lanes; the ordering is done here so
+// both surfaces agree on what "first" means.
+function toRemoteBoard(board: RunBoard): RemoteBoard {
+  const ordered = [...board.cards].sort(
+    (left, right) =>
+      BOARD_LANE_RANK[left.status] - BOARD_LANE_RANK[right.status] ||
+      left.order - right.order ||
+      left.createdAt.localeCompare(right.createdAt),
+  );
+  const cards: RemoteBoardCard[] = [];
+  let usedBytes = 2;
+  for (const card of ordered.slice(0, MAX_REMOTE_BOARD_CARDS)) {
+    const item = toRemoteBoardCard(card);
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    cards.push(item);
+    usedBytes += bytes;
+  }
+  return { revision: board.revision, cards };
+}
+
+async function getCoraBoardForRemote(input: {
+  workspaceId: string;
+  runId: string;
+}): Promise<RemoteBoard> {
+  await requireLocalWorkspace(input.workspaceId);
+  await requireOwnedRun(input.workspaceId, input.runId);
+  return toRemoteBoard(await getRunBoard(input.runId));
+}
+
+/**
+ * Round-trip a stored card as a write payload. imagePaths are dropped rather
+ * than echoed: board-store re-validates any paths it is handed against the
+ * workspace, and an omitted field is what makes it carry the stored (already
+ * validated) attachments over instead.
+ */
+function toBoardWritePayload(card: BoardCard): BoardCard {
+  const { imagePaths: _imagePaths, ...rest } = card;
+  return rest;
+}
+
+/**
+ * One phone card action, applied against the board the computer holds right
+ * now. The phone sends the revision it rendered; a board that moved on in the
+ * meantime is reported back as applied:false with the fresh state rather than
+ * being overwritten, because a card list composed against stale content could
+ * resurrect a card Cora just finished or drop one it just added.
+ */
+async function updateCoraBoardForRemote(input: {
+  workspaceId: string;
+  runId: string;
+  baseRevision: number;
+  action: RemoteBoardAction;
+  cardId?: string;
+  title?: string;
+  description?: string;
+}): Promise<RemoteBoardUpdateResult> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  const run = await requireOwnedRun(input.workspaceId, input.runId);
+  const current = await getRunBoard(input.runId);
+  if (current.revision !== input.baseRevision) {
+    return { board: toRemoteBoard(current), applied: false };
+  }
+
+  const cards = current.cards.map(toBoardWritePayload);
+  const now = new Date().toISOString();
+  let next: BoardCard[];
+
+  if (input.action === "add-idea") {
+    if (!input.title) throw new Error("A card needs a title.");
+    if (cards.length >= BOARD_MAX_CARDS) {
+      throw new Error("This board is full. Clear some cards in Codara Studio first.");
+    }
+    const lane = cards.filter((card) => card.status === "idea");
+    next = [
+      ...cards,
+      {
+        id: makeId("card"),
+        title: input.title,
+        ...(input.description ? { description: input.description } : {}),
+        status: "idea",
+        order: lane.length > 0 ? Math.max(...lane.map((card) => card.order)) + 1 : 1,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+  } else {
+    const target = cards.find((card) => card.id === input.cardId);
+    if (!target) {
+      throw new Error("That card is no longer on this board.");
+    }
+    if (input.action === "delete") {
+      next = cards.filter((card) => card.id !== target.id);
+    } else {
+      if (target.status !== "idea") {
+        throw new Error("Only an idea card can be queued from the phone.");
+      }
+      // The nudge deliberately ignores automation runs (board-nudge's
+      // attemptNudge drops any run with an automationId), so queueing on one
+      // would be a promise nothing keeps. The phone hides the action; this is
+      // the enforcement behind it.
+      if (run.automationId) {
+        throw new Error("Cards on an automation's chat cannot be queued from the phone.");
+      }
+      // Queueing is the go signal: the board write emits run.board_updated,
+      // which is what wakes this chat's Cora (orchestration/board-nudge).
+      const lane = cards.filter((card) => card.status === "queued");
+      const order = lane.length > 0 ? Math.max(...lane.map((card) => card.order)) + 1 : 1;
+      next = cards.map((card) =>
+        card.id === target.id
+          ? { ...card, status: "queued" as BoardCardStatus, order, updatedAt: now }
+          : card,
+      );
+    }
+  }
+
+  const result = await updateRunBoard({
+    runId: input.runId,
+    baseRevision: current.revision,
+    cards: next,
+    workspaceCwd: root,
+  });
+  return { board: toRemoteBoard(result.board), applied: result.ok };
+}
+
+/* ----------------------------------------------------------- automations */
+
+// Read-mostly automations surface for the phone. Everything below delegates
+// to the scheduler's existing exported functions; no orchestration behaviour
+// lives here.
+function formatIntervalMs(everyMs: number): string {
+  const seconds = Math.round(everyMs / 1000);
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h`;
+  return `${Math.round(hours / 24)} d`;
+}
+
+function describeAutomationTrigger(trigger: AutomationTrigger): {
+  kind: RemoteAutomationTriggerKind;
+  summary: string;
+} {
+  switch (trigger.kind) {
+    case "cron":
+      return { kind: "cron", summary: `On schedule (${truncateUtf8(trigger.expr, 60)})` };
+    case "interval":
+      return { kind: "interval", summary: `Every ${formatIntervalMs(trigger.everyMs)}` };
+    case "folder":
+      return {
+        kind: "folder",
+        summary: `Watches ${truncateUtf8(basename(trigger.path) || trigger.path, 80)}`,
+      };
+    case "continuous":
+      return { kind: "continuous", summary: "Runs continuously" };
+    case "onFinishOf":
+      return { kind: "chain", summary: "Runs after another automation" };
+    default:
+      return { kind: "manual", summary: "Runs when you start it" };
+  }
+}
+
+function toRemoteAutomation(job: ScheduledJob): RemoteAutomationInfo {
+  const trigger = describeAutomationTrigger(job.trigger);
+  const lastRecord = job.history.at(-1);
+  return {
+    id: job.id,
+    name: truncateUtf8(job.name, 300),
+    enabled: job.enabled,
+    status: job.state.status,
+    triggerKind: trigger.kind,
+    triggerSummary: trigger.summary,
+    iteration: job.state.iteration,
+    ...(job.state.nextFireAt ? { nextFireAt: job.state.nextFireAt } : {}),
+    ...(job.lastRunAt ? { lastRunAt: job.lastRunAt } : {}),
+    ...(lastRecord ? { lastRunStatus: lastRecord.status } : {}),
+    ...(lastRecord?.summary
+      ? { lastRunSummary: truncateUtf8(lastRecord.summary, 500) }
+      : {}),
+    ...(job.state.spentUsd !== undefined ? { spentUsd: job.state.spentUsd } : {}),
+  };
+}
+
+async function listAutomationsForRemote(
+  workspaceId: string,
+): Promise<RemoteAutomationInfo[]> {
+  await requireLocalWorkspace(workspaceId);
+  const jobs = (await listJobs()).filter((job) => job.input.workspaceId === workspaceId);
+  const result: RemoteAutomationInfo[] = [];
+  let usedBytes = 2;
+  for (const job of jobs.slice(0, MAX_REMOTE_AUTOMATIONS)) {
+    const info = toRemoteAutomation(job);
+    const bytes = Buffer.byteLength(JSON.stringify(info), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    result.push(info);
+    usedBytes += bytes;
+  }
+  return result;
+}
+
+const MAX_REMOTE_AUTOMATION_HISTORY = 10;
+const REMOTE_AUTOMATION_PROMPT_CHARS = 500;
+
+// The loom's detail: what it is asking for, which worker runs it, and how the
+// recent passes went. Read only; authoring and the node graph stay desktop-side.
+async function getAutomationForRemote(input: {
+  workspaceId: string;
+  automationId: string;
+}): Promise<RemoteAutomationDetail> {
+  const job = await requireOwnedAutomation(input.workspaceId, input.automationId);
+  const template = job.prompt?.template ?? job.input.initialUserNote ?? "";
+  const prompt = template.slice(0, REMOTE_AUTOMATION_PROMPT_CHARS);
+
+  const history: RemoteAutomationRunRecord[] = [];
+  let usedBytes = 2;
+  for (const record of [...job.history].reverse().slice(0, MAX_REMOTE_AUTOMATION_HISTORY)) {
+    const item: RemoteAutomationRunRecord = {
+      iteration: record.iteration,
+      runId: record.runId,
+      startedAt: record.startedAt,
+      ...(record.finishedAt ? { finishedAt: record.finishedAt } : {}),
+      status: record.status,
+      ...(record.summary ? { summary: truncateUtf8(record.summary, 1000) } : {}),
+      ...(record.costUsd !== undefined ? { costUsd: record.costUsd } : {}),
+      ...(record.stopReason ? { stopReason: record.stopReason } : {}),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
+    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
+    history.push(item);
+    usedBytes += bytes;
+  }
+
+  return {
+    ...toRemoteAutomation(job),
+    ...(job.worker?.model ? { model: truncateUtf8(job.worker.model, 120) } : {}),
+    ...(job.worker?.effort ? { effort: job.worker.effort } : {}),
+    ...(job.worker?.timeoutMinutes !== undefined
+      ? { timeoutMinutes: job.worker.timeoutMinutes }
+      : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(template.length > prompt.length ? { promptTruncated: true } : {}),
+    history,
+  };
+}
+
+// The phone may only touch automations pinned to a workspace it can already
+// see; the id alone never grants access to another workspace's looms.
+async function requireOwnedAutomation(
+  workspaceId: string,
+  automationId: string,
+): Promise<ScheduledJob> {
+  await requireLocalWorkspace(workspaceId);
+  const job = await getJob(automationId);
+  if (!job || job.input.workspaceId !== workspaceId) {
+    throw new Error("That automation no longer exists in this workspace.");
+  }
+  return job;
+}
+
+async function runAutomationForRemote(input: {
+  workspaceId: string;
+  automationId: string;
+}): Promise<{ automation: RemoteAutomationInfo; runId: string }> {
+  await requireOwnedAutomation(input.workspaceId, input.automationId);
+  const run = await runJobNow(input.automationId);
+  const job = await getJob(input.automationId);
+  if (!job) throw new Error("That automation no longer exists in this workspace.");
+  return { automation: toRemoteAutomation(job), runId: run.id };
+}
+
+async function pauseAutomationForRemote(input: {
+  workspaceId: string;
+  automationId: string;
+}): Promise<RemoteAutomationInfo> {
+  await requireOwnedAutomation(input.workspaceId, input.automationId);
+  const job = await pauseJob(input.automationId);
+  if (!job) throw new Error("That automation no longer exists in this workspace.");
+  return toRemoteAutomation(job);
+}
+
+async function resumeAutomationForRemote(input: {
+  workspaceId: string;
+  automationId: string;
+}): Promise<RemoteAutomationInfo> {
+  await requireOwnedAutomation(input.workspaceId, input.automationId);
+  const job = await resumeJob(input.automationId);
+  if (!job) throw new Error("That automation no longer exists in this workspace.");
+  return toRemoteAutomation(job);
+}
+
+async function setAutomationEnabledForRemote(input: {
+  workspaceId: string;
+  automationId: string;
+  enabled: boolean;
+}): Promise<RemoteAutomationInfo> {
+  await requireOwnedAutomation(input.workspaceId, input.automationId);
+  return toRemoteAutomation(await setJobEnabled(input.automationId, input.enabled));
+}
+
+/* ---------------------------------------------------- phone notifications */
+
+// Mirrors the desktop notify pipeline (src/main/notify/index.ts run adapter +
+// automation-loop's finalize alert) onto paired phones. Connected phones get
+// a live cora.notify relay event; phones without a proven session fall back
+// to Expo push when they registered a token and left the kind enabled.
+// Trigger conditions and copy deliberately track the desktop's.
+
+let phoneNotifyStore: PhoneNotificationStore | null = null;
+let phoneNotifyStarted = false;
+const expoReceipts = new ExpoReceiptTracker();
+const handledPhoneNotifyEventIds = new Set<string>();
+const MAX_HANDLED_PHONE_NOTIFY_EVENT_IDS = 4_096;
+
+function getPhoneNotifyStore(): PhoneNotificationStore {
+  phoneNotifyStore ??= new PhoneNotificationStore(join(sparkHome(), "remote"), (line) =>
+    logMain("remote-access", line),
+  );
+  return phoneNotifyStore;
+}
+
+// Same idempotency guard the desktop run adapter uses: one canonical journal
+// event never notifies twice even if a subscriber re-registers or retries.
+function claimPhoneNotifyEvent(eventId: string): boolean {
+  if (handledPhoneNotifyEventIds.has(eventId)) return false;
+  handledPhoneNotifyEventIds.add(eventId);
+  if (handledPhoneNotifyEventIds.size > MAX_HANDLED_PHONE_NOTIFY_EVENT_IDS) {
+    const oldest = handledPhoneNotifyEventIds.values().next().value as string | undefined;
+    if (oldest) handledPhoneNotifyEventIds.delete(oldest);
+  }
+  return true;
+}
+
+async function registerNotificationsForRemote(
+  input: RemoteNotificationRegistration & { devicePublicKey: string },
+): Promise<void> {
+  await getPhoneNotifyStore().set(input.devicePublicKey, {
+    enabled: input.enabled,
+    prefs: input.prefs,
+    ...(input.token ? { token: input.token } : {}),
+    ...(input.deviceName ? { deviceName: input.deviceName } : {}),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function remoteWorkspaceName(workspaceId: string): Promise<string | undefined> {
+  if (!workspaceId) return undefined;
+  try {
+    const state = await loadState();
+    const name = state.workspaces.find((workspace) => workspace.id === workspaceId)?.name;
+    return name ? truncateUtf8(name, 120) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// The desktop's handleRunEvent conditions, reproduced: run-level status
+// transitions only, blocked requires a real user blocker, and loom-owned
+// iterations defer their terminal ping to the loop-level finalize (observed
+// here via the automation.iteration "stopped" journal event).
+async function buildPhoneNotification(
+  event: SparkEvent,
+): Promise<RemotePhoneNotification | null> {
+  if (event.type === "run.status_updated") {
+    const payload = event.payload as
+      | {
+          status?: unknown;
+          previousStatus?: unknown;
+          automationId?: unknown;
+          questionMessageId?: unknown;
+          blocker?: unknown;
+        }
+      | undefined;
+    const status =
+      typeof payload?.status === "string" ? (payload.status as RunStatus) : undefined;
+    const prevStatus =
+      typeof payload?.previousStatus === "string"
+        ? (payload.previousStatus as RunStatus)
+        : undefined;
+    const automationId =
+      typeof payload?.automationId === "string" && payload.automationId.length > 0
+        ? payload.automationId
+        : undefined;
+    const runId = event.runId;
+    if (!status || !runId || prevStatus === status) return null;
+    if (status !== "blocked" && status !== "complete" && status !== "failed") return null;
+    if (!claimPhoneNotifyEvent(event.id)) return null;
+    // Mirror the desktop policy's context gates (notify/policy.ts decide()):
+    // DND mutes every alert, and a completion for the run the user is
+    // actively watching in Studio is suppressed. "Needs you" survives
+    // watching on the desktop, so it survives here too.
+    if (getPreferenceCached("notificationsDnd") === true) return null;
+    if ((status === "complete" || status === "failed") && isWatchingRun(runId)) return null;
+
+    if (status === "blocked") {
+      const hasUserBlocker =
+        (typeof payload?.questionMessageId === "string" &&
+          payload.questionMessageId.length > 0) ||
+        (typeof payload?.blocker === "object" && payload.blocker !== null);
+      if (!hasUserBlocker) return null;
+      const workspaceName = await remoteWorkspaceName(event.workspaceId);
+      if (automationId) {
+        // kind "blocked", not "automation": a blocked iteration is a question
+        // for the user, so it rides the needsAnswer preference on both the
+        // push gate here and the phone's local filter. The automations pref
+        // gates only loop outcomes (the automation.iteration branch below).
+        return {
+          id: event.id,
+          kind: "blocked",
+          title: "Automation needs your answer",
+          body: event.message?.trim() || "An automation is waiting on your answer.",
+          workspaceId: event.workspaceId,
+          ...(workspaceName ? { workspaceName } : {}),
+          runId,
+          automationId,
+          createdAt: event.timestamp,
+        };
+      }
+      return {
+        id: event.id,
+        kind: "blocked",
+        title: "Cora needs your answer",
+        body: event.message?.trim() || "A run is waiting on your answer.",
+        workspaceId: event.workspaceId,
+        ...(workspaceName ? { workspaceName } : {}),
+        runId,
+        createdAt: event.timestamp,
+      };
+    }
+
+    // Loom iterations finalize through the automation branch below.
+    if (automationId) return null;
+    const ok = status === "complete";
+    const workspaceName = await remoteWorkspaceName(event.workspaceId);
+    return {
+      id: event.id,
+      kind: ok ? "completed" : "failed",
+      title: ok ? "Run complete" : "Run failed",
+      body:
+        event.message?.trim() || (ok ? "Cora finished a run." : "A run failed."),
+      workspaceId: event.workspaceId,
+      ...(workspaceName ? { workspaceName } : {}),
+      runId,
+      createdAt: event.timestamp,
+    };
+  }
+
+  if (event.type === "automation.iteration") {
+    const payload = event.payload as
+      | { automationId?: unknown; status?: unknown; iteration?: unknown }
+      | undefined;
+    if (payload?.status !== "stopped" || typeof payload.automationId !== "string") {
+      return null;
+    }
+    if (!claimPhoneNotifyEvent(event.id)) return null;
+    if (getPreferenceCached("notificationsDnd") === true) return null;
+    // The job re-read below can race an immediate trigger-restart, which
+    // resets state between the "stopped" event and this handler. The event
+    // payload carries the finalize-time iteration count, so prefer it;
+    // lastStopReason and lastRunId have no event-payload equivalent (the
+    // finalize emit lives in read-only automation-loop.ts) and keep the small
+    // residual window: a restart cannot rewrite them, only the NEXT finalize
+    // or firing can.
+    const job = await getJob(payload.automationId);
+    if (!job) return null;
+    // The user stopped it themselves; pinging them about their own click is
+    // noise (same rule as the desktop's finalize alert).
+    const reason = job.state.lastStopReason;
+    if (reason === "user-stop") return null;
+    const failed = reason === "iteration-failed" || reason === "engine-missing";
+    const iterations =
+      typeof payload.iteration === "number" && Number.isFinite(payload.iteration)
+        ? payload.iteration
+        : job.state.iteration;
+    const passes = `${iterations} iteration${iterations === 1 ? "" : "s"}`;
+    const workspaceName = await remoteWorkspaceName(job.input.workspaceId);
+    // lastRunId is the run of the loop's final iteration — the emit itself
+    // never carries a runId for "stopped" — so a tap can deep-link the run.
+    const runId = job.lastRunId;
+    return {
+      id: event.id,
+      kind: "automation",
+      title: failed ? "Automation failed" : "Automation finished",
+      body: `"${truncateUtf8(job.name, 120)}" ${failed ? "stopped" : "finished"} after ${passes}.`,
+      workspaceId: job.input.workspaceId,
+      ...(workspaceName ? { workspaceName } : {}),
+      automationId: job.id,
+      ...(runId ? { runId } : {}),
+      createdAt: event.timestamp,
+    };
+  }
+
+  return null;
+}
+
+async function deliverPhoneNotification(
+  service: RemoteAccessService,
+  notification: RemotePhoneNotification,
+): Promise<void> {
+  const store = getPhoneNotifyStore();
+  const pushTargets: ExpoPushTarget[] = [];
+  for (const devicePublicKey of service.pairedDeviceKeys()) {
+    // A push-live phone gets the live event and filters by its own local
+    // preferences; the registered prefs gate only server-initiated push.
+    // Stale-but-open sessions still receive the event (the phone dedupes by
+    // event id), but only recent inbound activity counts as delivered.
+    if (service.pushPhoneNotificationToDevice(devicePublicKey, notification)) continue;
+    const registration = await store.get(devicePublicKey);
+    if (!registration?.enabled || !registration.token) continue;
+    if (!phoneNotificationKindAllowed(notification.kind, registration.prefs)) continue;
+    pushTargets.push({ devicePublicKey, token: registration.token });
+  }
+  // Earlier sends' tickets are due a verdict by now; resolve them before
+  // adding this send's own.
+  await pollExpoReceipts();
+  if (pushTargets.length === 0) return;
+  const outcomes = await sendExpoPushMessages(pushTargets, notification);
+  for (const outcome of outcomes) {
+    if (outcome.ok) {
+      if (outcome.ticketId) expoReceipts.add(outcome.ticketId, outcome.devicePublicKey);
+      continue;
+    }
+    if (outcome.deviceNotRegistered) await store.clearToken(outcome.devicePublicKey);
+    logMain(
+      "remote-access",
+      `expo push to ${outcome.devicePublicKey.slice(0, 8)} failed: ${outcome.detail}`,
+    );
+  }
+}
+
+// Resolves pending push tickets against Expo's receipts endpoint. A ticket
+// that looked "ok" at send time can still receipt as DeviceNotRegistered —
+// that is in fact where the signal usually arrives — and must clear the dead
+// token exactly like an immediate ticket failure.
+async function pollExpoReceipts(): Promise<void> {
+  if (expoReceipts.size() === 0) return;
+  const store = getPhoneNotifyStore();
+  const failures = await expoReceipts.poll();
+  for (const failure of failures) {
+    if (failure.deviceNotRegistered) await store.clearToken(failure.devicePublicKey);
+    logMain(
+      "remote-access",
+      `expo push receipt for ${failure.devicePublicKey.slice(0, 8)} failed: ${failure.detail}`,
+    );
+  }
+}
+
+function startPhoneNotificationBridge(service: RemoteAccessService): void {
+  if (phoneNotifyStarted) return;
+  phoneNotifyStarted = true;
+  subscribeToEvents((event) => {
+    void (async () => {
+      const notification = await buildPhoneNotification(event);
+      if (!notification) return;
+      await deliverPhoneNotification(service, notification);
+    })().catch((err) => {
+      logMain("remote-access", `phone notify failed: ${(err as Error).message}`);
+    });
+  });
+  // Backstop for quiet periods: without another send, a pending receipt would
+  // otherwise wait forever for its verdict.
+  const receiptTimer = setInterval(() => {
+    void pollExpoReceipts().catch(() => undefined);
+  }, EXPO_RECEIPT_POLL_MS);
+  receiptTimer.unref?.();
 }
 
 // Phone terminals are real renderer-owned tabs. The bridge mints the leaf,

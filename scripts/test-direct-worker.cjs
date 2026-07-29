@@ -170,8 +170,8 @@ async function main() {
     const listed = await dw.listActiveAutomationWorkers();
     const worker = listed.find((item) => item.attemptId === "att-n");
     ok(
-      "node-stamped attempt retains node id and structured transport",
-      worker?.nodeId === "B" && worker.transport === "agent-sdk",
+      "node-stamped attempt retains node id and the Pi transport",
+      worker?.nodeId === "B" && worker.transport === "pi-rpc",
     );
   }
 
@@ -392,8 +392,8 @@ async function main() {
     ok("inventory lists only live direct runs", list.length === 1 && list[0].runId === "inv-1");
     const w = list[0];
     ok(
-      "inventory joins engine/model/effort from the task + name from the loom",
-      w.engine === "claude" && w.model === "claude-opus-4-8" && w.effort === "high" && w.automationName === "My Loom",
+      "inventory joins model/effort from the task + name from the loom",
+      w.engine === undefined && w.model === "claude-opus-4-8" && w.effort === "high" && w.automationName === "My Loom",
     );
     ok("inventory surfaces the blocked question", w.blocked === true && w.question === "Which file?");
     ok("inventory retains exact attempt identity", w.attemptId === "att-i1");
@@ -480,9 +480,9 @@ async function main() {
       byNode.A && byNode.A.nodeLabel === "Builder" && byNode.B && byNode.B.nodeLabel === "Tester",
     );
     ok(
-      "each worker's attemptId/engine/model come from its own node task",
-      byNode.A.attemptId === "att-wA" && byNode.A.engine === "claude" && byNode.A.model === "claude-opus-4-8" &&
-        byNode.B.attemptId === "att-wB" && byNode.B.engine === "codex" && byNode.B.model === "gpt-5.5",
+      "each worker's attemptId/model come from its own node task",
+      byNode.A.attemptId === "att-wA" && byNode.A.model === "claude-opus-4-8" &&
+        byNode.B.attemptId === "att-wB" && byNode.B.model === "gpt-5.5",
     );
     ok(
       "iteration is derived from the loom pass counter (NOT steps.length-1)",

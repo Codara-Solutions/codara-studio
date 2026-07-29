@@ -27,6 +27,9 @@ const MODES = ["plan_analysis", "chat", "step_planning", "worker_result_review"]
 const PROMPT_SURFACES = [
   "src/main/orchestration/prompt-profile.ts",
   "src/main/orchestration/worker-prompt.ts",
+  // The RPC/tool layer: its validation and error strings land verbatim in the
+  // model's tool results, so it must obey the same punctuation rule.
+  "src/main/agent-socket.ts",
   "resources/orchestration/manager-profile.json",
   "resources/orchestration/cc-auto-prompt.md",
   "resources/orchestration/cc-execute-prompt.md",
@@ -36,6 +39,7 @@ const PROMPT_SURFACES = [
   "resources/codara-studio-mcp/server.js",
   "resources/pi-cora/prompt.ts",
   "resources/pi-cora/worker.ts",
+  "resources/pi-cora/worker-policy.ts",
   "resources/pi-cora/mcp-bridge.ts",
   "resources/pi-cora/deep-search.ts",
   "resources/pi-cora/repeat-guard.ts",
