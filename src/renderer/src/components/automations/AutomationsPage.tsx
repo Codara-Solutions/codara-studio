@@ -33,6 +33,7 @@ import { graphForJob } from "./flow/model";
 import { useAutomationWorkers } from "./useAutomationWorkers";
 import WorkersView from "./WorkersView";
 import RunPeek from "./RunPeek";
+import RunIdChip from "../RunIdChip";
 import MiniFlow from "./MiniFlow";
 import LiveBoard from "./LiveBoard";
 import LiveRunHero from "./LiveRunHero";
@@ -1541,6 +1542,9 @@ function LivePassCard({
   const running = status === "running" || status === "blocked";
   const edge = liveRun ? runStatusColor(liveRun.status) : automationDotColor(status);
   const budget = job.loop?.stop?.budgetUsd;
+  // The pass on show: the live run while one is in flight, otherwise the most
+  // recent recorded iteration, so the card always names a run you can inspect.
+  const shownRunId = liveRun?.id ?? job.history[job.history.length - 1]?.runId;
 
   // The blocked iteration's exact unresolved question. Its id must travel with
   // every answer; a historical same-text question is not interchangeable.
@@ -1574,6 +1578,11 @@ function LivePassCard({
           {job.state.iteration}/{capLabel(job)} iters
         </span>
         <span style={{ flex: 1 }} />
+        {shownRunId && (
+          <span style={{ alignSelf: "center", minWidth: 0 }}>
+            <RunIdChip runId={shownRunId} maxChars={24} />
+          </span>
+        )}
         <span className="spark-mono spark-num" style={{ fontSize: 10.5, color: "var(--muted)" }}>
           est. {fmtUsd(job.state.spentUsd)}
           {typeof budget === "number" ? ` / ${fmtUsd(budget)}` : ""}
@@ -1682,59 +1691,74 @@ function HistoryTimeline({
         const isLive = rec.runId === liveRunId && rec.status === "running";
         return (
           <React.Fragment key={recKey}>
-            <button
-              type="button"
-              onClick={() => {
-                setExpanded(isExpanded ? null : recKey);
-                if (isExpanded) setPeekRunId(null);
-              }}
-              aria-expanded={isExpanded}
+            {/* The row's hover/rule live on this wrapper so the copy control
+                can sit beside the accordion button instead of inside it. */}
+            <div
               style={{
-                appearance: "none",
-                textAlign: "left",
                 display: "flex",
                 alignItems: "center",
-                gap: 10,
-                padding: "7px 4px",
-                border: "none",
+                gap: 6,
+                paddingRight: 4,
                 borderBottom: isExpanded ? "none" : "1px solid var(--rule-soft)",
                 background: isExpanded ? "var(--hover)" : "transparent",
-                cursor: "default",
               }}
               onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover)")}
               onMouseLeave={(e) => (e.currentTarget.style.background = isExpanded ? "var(--hover)" : "transparent")}
             >
-              <span
-                aria-hidden
-                style={{ flex: "0 0 7px", width: 7, height: 7, borderRadius: 999, background: dot }}
-              />
-              <span className="spark-mono spark-num" style={{ flex: "0 0 auto", fontSize: 10.5, color: "var(--ink-dim)" }}>
-                #{rec.iteration}
-              </span>
-              <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={rec.summary}>
-                {rec.summary || rec.status}
-              </span>
-              <span className="spark-mono spark-num" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
-                {fmtUsd(rec.costUsd)}
-              </span>
-              <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
-                {fmtTime(rec.finishedAt ?? rec.startedAt)}
-              </span>
-              {rec.stopReason && (
+              <button
+                type="button"
+                onClick={() => {
+                  setExpanded(isExpanded ? null : recKey);
+                  if (isExpanded) setPeekRunId(null);
+                }}
+                aria-expanded={isExpanded}
+                style={{
+                  appearance: "none",
+                  textAlign: "left",
+                  flex: 1,
+                  minWidth: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "7px 4px",
+                  border: "none",
+                  background: "transparent",
+                  cursor: "default",
+                }}
+              >
                 <span
-                  className={`spark-badge${
-                    rec.stopReason === "iteration-failed" || rec.stopReason === "budget" || rec.stopReason === "engine-missing"
-                      ? " is-danger"
-                      : rec.stopReason === "agent-done" || rec.stopReason === "tests-pass" || rec.stopReason === "once"
-                        ? " is-ok"
-                        : ""
-                  }`}
-                  style={{ flex: "0 0 auto" }}
-                >
-                  {STOP_REASON_LABEL[rec.stopReason]}
+                  aria-hidden
+                  style={{ flex: "0 0 7px", width: 7, height: 7, borderRadius: 999, background: dot }}
+                />
+                <span className="spark-mono spark-num" style={{ flex: "0 0 auto", fontSize: 10.5, color: "var(--ink-dim)" }}>
+                  #{rec.iteration}
                 </span>
-              )}
-            </button>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={rec.summary}>
+                  {rec.summary || rec.status}
+                </span>
+                <span className="spark-mono spark-num" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
+                  {fmtUsd(rec.costUsd)}
+                </span>
+                <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
+                  {fmtTime(rec.finishedAt ?? rec.startedAt)}
+                </span>
+                {rec.stopReason && (
+                  <span
+                    className={`spark-badge${
+                      rec.stopReason === "iteration-failed" || rec.stopReason === "budget" || rec.stopReason === "engine-missing"
+                        ? " is-danger"
+                        : rec.stopReason === "agent-done" || rec.stopReason === "tests-pass" || rec.stopReason === "once"
+                          ? " is-ok"
+                          : ""
+                    }`}
+                    style={{ flex: "0 0 auto" }}
+                  >
+                    {STOP_REASON_LABEL[rec.stopReason]}
+                  </span>
+                )}
+              </button>
+              <RunIdChip runId={rec.runId} compact />
+            </div>
             {isExpanded && (
               <div
                 style={{
@@ -1755,6 +1779,7 @@ function HistoryTimeline({
                   <span className="spark-mono" style={{ fontSize: 9.5, color: "var(--muted-2)" }}>
                     {rec.continuationSource ? `started by ${rec.continuationSource}` : ""}
                   </span>
+                  <RunIdChip runId={rec.runId} maxChars={24} />
                   <span style={{ flex: 1 }} />
                   {isLive ? (
                     <button type="button" className="spark-btn" style={{ height: 22, padding: "0 9px", fontSize: 10.5 }} onClick={onOpenLiveBoard}>

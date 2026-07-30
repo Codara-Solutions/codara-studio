@@ -4,6 +4,7 @@ import { resolveOpenRunQuestion, runQuestionDraftScopeKey } from "@shared/run-qu
 import { capLabel, fmtClock, fmtElapsed, fmtUsd } from "./presentation";
 import { workerModelLabel } from "./worker-models";
 import { describeWorkerLogFailure } from "./worker-log-tail";
+import RunIdChip from "../RunIdChip";
 
 // LiveRunHero — the automation page's signature moment: while an automation is
 // RUNNING, the detail leads with the machine actually working. The panel is
@@ -61,6 +62,9 @@ export default function LiveRunHero({
 
   const budget = job.loop?.stop?.budgetUsd;
   const tone = blocked ? "var(--danger)" : "var(--accent)";
+  // The pass in flight. currentRunId covers the window before the run state
+  // has been fetched into liveRun.
+  const liveRunId = liveRun?.id ?? job.state.currentRunId;
 
   // The blocked pass's exact unresolved question (id travels with the answer).
   const pendingQuestion = liveRun ? resolveOpenRunQuestion(liveRun) : null;
@@ -136,6 +140,7 @@ export default function LiveRunHero({
           {typeof budget === "number" ? ` / ${fmtUsd(budget)}` : ""}
         </span>
         <span style={{ flex: 1 }} />
+        {liveRunId && <RunIdChip runId={liveRunId} maxChars={24} />}
         <button
           type="button"
           className="spark-btn"

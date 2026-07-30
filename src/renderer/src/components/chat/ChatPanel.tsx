@@ -4,12 +4,12 @@ import type {
   AddRunMessageAttachmentInput,
   BoardCard,
   RunState,
-  ShellInfo,
   Workspace,
 } from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { CloseIcon, HistoryIcon } from "../icons";
+import RunIdChip from "../RunIdChip";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
@@ -17,6 +17,7 @@ import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "./timeline";
 import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
+import { BACKEND_TERMINAL_SHELL } from "./backend-terminal-shell";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
@@ -29,20 +30,6 @@ const BoardView = lazy(() => import("../board/BoardView"));
 const noopOpenCardRun = () => undefined;
 const noopOpenWorkerTerminal = () => false;
 const noopCreateBoardRun = async () => undefined;
-
-// Placeholder ShellInfo passed to TerminalPane when the underlying PTY was
-// already spawned by main-process backend code (claude-backend, codex-backend).
-// pty-manager's existing-session branch (line 143) ignores the shell when an
-// id is already registered — but the React prop is typed required. Using a
-// no-op exe avoids any chance of an accidental spawn if id-matching ever
-// breaks.
-export const BACKEND_TERMINAL_SHELL: ShellInfo = {
-  id: "spark-backend-attached",
-  label: "Backend PTY",
-  exe: "noop",
-  args: [],
-  family: "other",
-};
 
 // The Cora chat panel: the workspace's chats live here, one conversation at
 // a time. The header carries the live status; a switcher bar swaps between
@@ -502,72 +489,6 @@ function HeaderMeta({ run }: { run: RunState }) {
       <CostPill run={run} />
       <RunIdChip runId={run.id} />
     </span>
-  );
-}
-
-// Copyable run-id chip. Click → writes the full id to the clipboard and
-// flips the label to "Copied" for ~1.2s. The displayed text is truncated to
-// stay narrow in the header; the tooltip carries the full id so power users
-// can still read it without copying.
-function RunIdChip({ runId }: { runId: string }) {
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (timerRef.current != null) window.clearTimeout(timerRef.current);
-    },
-    [],
-  );
-  const short = runId.length > 12 ? `${runId.slice(0, 12)}…` : runId;
-  const handleClick = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      const writer = navigator.clipboard?.writeText?.(runId);
-      const settle = () => {
-        setCopied(true);
-        if (timerRef.current != null) window.clearTimeout(timerRef.current);
-        timerRef.current = window.setTimeout(() => setCopied(false), 1200);
-      };
-      if (writer && typeof writer.then === "function") {
-        writer.then(settle).catch(() => {
-          /* clipboard blocked — silently no-op */
-        });
-      } else {
-        settle();
-      }
-    },
-    [runId],
-  );
-  return (
-    <button
-      type="button"
-      onClick={handleClick}
-      title={copied ? "Copied run ID to clipboard" : `Copy run ID: ${runId}`}
-      aria-label="Copy run ID"
-      style={{
-        appearance: "none",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        height: 18,
-        padding: "0 7px",
-        borderRadius: 999,
-        border: copied ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
-        background: copied ? "var(--accent-soft)" : "var(--panel-2)",
-        color: copied ? "var(--accent)" : "var(--ink-dim)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
-        fontVariantNumeric: "tabular-nums",
-        whiteSpace: "nowrap",
-        // No inline box-shadow, so the global :focus-visible ring renders.
-        cursor: "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span aria-hidden style={{ color: "var(--muted)" }}>id</span>
-      <span>{copied ? "copied" : short}</span>
-    </button>
   );
 }
 
