@@ -84,6 +84,7 @@ assert.deepEqual(turn.result(), {
   finalText: "Hello world",
   toolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
   successfulToolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
+  providerResponseIds: [],
   usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 },
   contextTokens: 180,
   contextWindowTokens: null,
@@ -142,8 +143,37 @@ failed.consume({
 failed.consume({ type: "auto_retry_end", success: false, finalError: "limit persisted" });
 assert.equal(failed.result().failure, "limit persisted");
 
+// A failed provider response is provisional: Pi owns its retry loop and emits
+// a successful message_end followed by auto_retry_end(success) when it
+// recovers. Codara must not keep the first error latched onto the whole turn.
+const recovered = new PiTurnAccumulator();
+recovered.consume({
+  type: "message_end",
+  message: {
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "servers overloaded",
+    responseId: "resp_failed",
+  },
+});
+assert.equal(recovered.result().failure, "servers overloaded");
+recovered.consume({
+  type: "message_end",
+  message: {
+    role: "assistant",
+    content: [{ type: "text", text: "Recovered." }],
+    stopReason: "stop",
+    responseId: "resp_recovered",
+  },
+});
+recovered.consume({ type: "auto_retry_end", success: true, attempt: 3 });
+assert.equal(recovered.result().failure, null);
+assert.deepEqual(recovered.result().providerResponseIds, ["resp_failed", "resp_recovered"]);
+
 const extensionFailed = new PiTurnAccumulator();
 extensionFailed.consume({ type: "extension_error", error: "bridge unavailable" });
+extensionFailed.consume({ type: "auto_retry_end", success: true, attempt: 1 });
 assert.equal(extensionFailed.result().failure, "bridge unavailable");
 
 const rejectedTool = new PiTurnAccumulator();

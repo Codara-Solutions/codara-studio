@@ -756,6 +756,12 @@ function backendFailureDetails(text: string): { detail: string; hint: string } |
       hint: "Reconnect your Codex subscription for Cora · Pi, then retry this message.",
     };
   }
+  if (/overloaded|capacity|temporarily unavailable|service unavailable/i.test(detail)) {
+    return {
+      detail,
+      hint: "This is a temporary provider-capacity error, not a subscription sign-in failure. Wait a moment, then retry this message.",
+    };
+  }
   return {
     detail,
     hint: source === "Cora Pi"
@@ -772,7 +778,7 @@ function BackendFailureMessage({ detail, hint }: { detail: string; hint: string 
       role="alert"
       style={BACKEND_FAILURE_STYLE}
     >
-      <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t start this turn</div>
+      <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t complete this turn</div>
       <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
       <div style={BACKEND_FAILURE_HINT_STYLE}>{hint}</div>
     </div>

@@ -18,6 +18,10 @@ export interface PiTurnResult {
   finalText: string;
   toolCalls: PiTurnToolCall[];
   successfulToolCalls: PiTurnToolCall[];
+  /** Provider response ids observed during this turn. Persisted on the
+   *  SparkCall so support can correlate a capacity failure without needing
+   *  Pi's ephemeral in-memory error object. */
+  providerResponseIds: string[];
   usage: PiTurnUsage;
   /** Context the newest request occupied, not a sum over the turn. 0 when the
    *  provider reported no usable usage. */
@@ -152,7 +156,12 @@ export class PiTurnAccumulator {
   // supersede the earlier ones instead of adding to them.
   private contextTokens = 0;
   private contextWindowTokens: number | null = null;
-  private failure: string | null = null;
+  // Provider errors are provisional while Pi's own auto-retry loop is active.
+  // Keep them separate from extension failures so a later successful provider
+  // response can clear only the retryable failure, never a broken bridge.
+  private providerFailure: string | null = null;
+  private fatalFailure: string | null = null;
+  private readonly providerResponseIds = new Set<string>();
   private settled = false;
 
   constructor(onStream?: ChatStreamHandler) {
@@ -195,10 +204,18 @@ export class PiTurnAccumulator {
       const context = contextTokensFrom(usage);
       if (context > 0) this.contextTokens = context;
       this.contextWindowTokens = contextWindowFrom(message, usage) ?? this.contextWindowTokens;
+      if (typeof message.responseId === "string" && message.responseId.trim()) {
+        this.providerResponseIds.add(message.responseId.trim());
+      }
       if (message.stopReason === "error") {
-        this.failure = typeof message.errorMessage === "string" && message.errorMessage.trim()
+        this.providerFailure = typeof message.errorMessage === "string" && message.errorMessage.trim()
           ? message.errorMessage.trim()
           : "Pi provider turn failed.";
+      } else {
+        // Pi emits the successful message_end before auto_retry_end(success),
+        // so clear the provisional error at the first authoritative recovery
+        // signal. The later retry event is handled too for forward compatibility.
+        this.providerFailure = null;
       }
       this.onStream?.({
         kind: "usage",
@@ -244,17 +261,23 @@ export class PiTurnAccumulator {
       const detail = typeof event.error === "string" && event.error.trim()
         ? event.error.trim()
         : "Pi extension failed.";
-      this.failure = detail;
+      this.fatalFailure = detail;
       this.onStream?.({ kind: "error", message: detail });
       return;
     }
 
-    if (event.type === "auto_retry_end" && event.success === false) {
-      const detail = typeof event.finalError === "string" && event.finalError.trim()
-        ? event.finalError.trim()
-        : "Pi exhausted automatic retries.";
-      this.failure = detail;
-      this.onStream?.({ kind: "error", message: detail });
+    if (event.type === "auto_retry_end") {
+      if (event.success === true) {
+        this.providerFailure = null;
+        return;
+      }
+      if (event.success === false) {
+        const detail = typeof event.finalError === "string" && event.finalError.trim()
+          ? event.finalError.trim()
+          : "Pi exhausted automatic retries.";
+        this.providerFailure = detail;
+        this.onStream?.({ kind: "error", message: detail });
+      }
       return;
     }
 
@@ -272,10 +295,11 @@ export class PiTurnAccumulator {
       successfulToolCalls: this.toolCalls
         .filter((call) => this.completedToolIds.has(call.toolUseId) && !this.failedToolIds.has(call.toolUseId))
         .map((call) => ({ ...call })),
+      providerResponseIds: [...this.providerResponseIds],
       usage: { ...this.usage },
       contextTokens: this.contextTokens,
       contextWindowTokens: this.contextWindowTokens,
-      failure: this.failure,
+      failure: this.fatalFailure ?? this.providerFailure,
       settled: this.settled,
     };
   }

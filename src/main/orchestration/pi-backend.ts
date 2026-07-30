@@ -349,6 +349,9 @@ async function requestPiDecision(
         ? { contextWindowTokens: accumulated.contextWindowTokens }
         : {}),
     };
+    const providerDiagnostics = accumulated.providerResponseIds.length > 0
+      ? { providerResponseIds: accumulated.providerResponseIds }
+      : {};
     if (contractDriftDetected && session.executionPolicy === "frontier") {
       const restartCount = restartContext?.count ?? 0;
       if (restartCount >= MAX_FRONTIER_CONTRACT_RESTARTS) {
@@ -360,6 +363,7 @@ async function requestPiDecision(
           newSessionUuid: session.sessionId,
           ...cumulativeUsage,
           ...contextUsage,
+          ...providerDiagnostics,
           notice,
           turnFailed: true,
         };
@@ -384,14 +388,22 @@ async function requestPiDecision(
       const last = asRecord(await session.client.request({ type: "get_last_assistant_text" }));
       if (typeof last?.text === "string") finalText = last.text.trim();
     }
+    const executes = input.chat.mode === "auto" || input.chat.mode === "execute";
+    const liveDecisionApplied = executes &&
+      executeDecisionWasAppliedDuringTurn(accumulated.successfulToolCalls);
     if (accumulated.failure) {
       return {
-        decision: buildTalkReplyDecision(finalText || `Cora Pi backend error: ${accumulated.failure}`),
+        // A partial sentence before a failed tool-loop request is not a
+        // completed answer. Surface one unambiguous failure card; the streamed
+        // partial remains available in the technical trace.
+        decision: buildTalkReplyDecision(`Cora Pi backend error: ${accumulated.failure}`),
+        decisionAlreadyApplied: liveDecisionApplied || undefined,
         durationMs: Date.now() - startedAt,
         model: input.chat.model,
         newSessionUuid: session.sessionId,
         ...cumulativeUsage,
         ...contextUsage,
+        ...providerDiagnostics,
         notice: accumulated.failure,
         turnFailed: true,
       };
@@ -408,6 +420,7 @@ async function requestPiDecision(
         newSessionUuid: session.sessionId,
         ...cumulativeUsage,
         ...contextUsage,
+        ...providerDiagnostics,
         notice,
         turnFailed: true,
       };
@@ -436,21 +449,21 @@ async function requestPiDecision(
       onStream?.({ kind: "system_note", message: "Cora Frontier stopped before mutation because the tracked contract is not jointly implementable or verifiable as written." });
     }
     const reply = finalText || "Cora finished the Pi turn without a visible message.";
-    const executes = input.chat.mode === "auto" || input.chat.mode === "execute";
     return {
       decision: contractBlocked
         ? buildTalkReplyDecision(reply)
         : executes
         ? buildExecuteDecisionFromToolCalls(accumulated.successfulToolCalls, reply)
         : buildTalkReplyDecision(reply),
-      decisionAlreadyApplied: !contractBlocked && executes
-        ? executeDecisionWasAppliedDuringTurn(accumulated.successfulToolCalls)
+      decisionAlreadyApplied: !contractBlocked
+        ? liveDecisionApplied
         : undefined,
       durationMs: Date.now() - startedAt,
       model: input.chat.model,
       newSessionUuid: session.sessionId,
       ...cumulativeUsage,
       ...contextUsage,
+      ...providerDiagnostics,
       notice: contractBlocked ? "Cora Frontier found a machine-validated contract blocker; repository mutation remained locked." : undefined,
     };
   } catch (error) {

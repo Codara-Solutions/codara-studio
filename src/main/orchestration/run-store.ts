@@ -4365,18 +4365,17 @@ async function releaseUnsubmittedManagerInput(
   callId: string,
   epoch: number,
 ): Promise<void> {
-  // The failed turn's prompt never reached the provider, so any Cora memory it
-  // carried was never seen either: roll the injection gate back so the retry
-  // renders it again. Same ownership rule as canonical replay (a failed
-  // pre-submission attempt consumes nothing). Unconditional on purpose; the
-  // worst case of a spurious release is one duplicate injection, while a
-  // missed release silently costs the run its memory.
+  // The failed/aborted turn did not durably apply a manager decision, so roll
+  // its input ownership back for Resume/retry. This also covers a prompt that
+  // reached the provider but failed before any live orchestration tool applied;
+  // callers must acknowledge instead when a tool already mutated the run.
+  // Release the memory gate too so the retried prompt carries the same context.
   releaseCoraMemoryInjection(runId);
   const run = await getRun(runId);
   if (!run || !isManagerTurnCurrent(run, callId, epoch)) return;
   await commitRunChange(run, {
     type: "run.manager_input_requeued",
-    message: "Manager input requeued after pre-submission failure",
+    message: "Manager input requeued after an interrupted or unapplied turn",
     payload: { callId, conversationEpoch: epoch },
     mutate: (draft, timestamp) => {
       if (!isManagerTurnCurrent(draft, callId, epoch)) return false;
@@ -4668,16 +4667,6 @@ async function askManagerBackend(
     const completedAt = new Date().toISOString();
     const turnAborted = result.turnAborted === true;
     const turnFailed = !turnAborted && result.turnFailed === true;
-    if (turnFailed || turnAborted) {
-      // A failed/aborted turn did not produce a decision that Cora durably
-      // applied. Release both queued and submitted ownership so Resume/retry can
-      // deliver the user's input again instead of silently consuming it.
-      await releaseUnsubmittedManagerInput(
-        run.id,
-        callId,
-        preparedTurn.conversationEpoch,
-      );
-    }
     if (targetCall) {
       // Successful decisions remain started until their run mutations land.
       // Aborted/failed turns have no decision to apply and can settle now.
@@ -4713,6 +4702,9 @@ async function askManagerBackend(
       if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
       if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
       if (typeof result.cacheReadTokens === "number") targetCall.cacheReadTokens = result.cacheReadTokens;
+      if (result.providerResponseIds?.length) {
+        targetCall.providerResponseIds = [...new Set(result.providerResponseIds)];
+      }
       if (turnFailed || turnAborted) targetCall.completedAt = completedAt;
     }
     if (result.newSessionUuid && result.newSessionUuid !== latest.chatSessionUuid) {
@@ -4730,6 +4722,29 @@ async function askManagerBackend(
     latest.updatedAt = completedAt;
     await saveRun(latest);
 
+    // Settle input ownership only after the call metadata above is durable.
+    // Doing this before saveRun(latest) lets that stale snapshot overwrite the
+    // delivery transition. A failed Pi turn may also have successfully applied
+    // a live orchestration tool before its final provider request died; that
+    // input is acknowledged, never replayed on Resume.
+    let settledRun = latest;
+    if (turnFailed && result.decisionAlreadyApplied) {
+      await updateManagerInputDelivery(
+        run.id,
+        callId,
+        preparedTurn.conversationEpoch,
+        "acknowledged",
+      );
+      settledRun = await requireRun(run.id);
+    } else if (turnFailed || turnAborted) {
+      await releaseUnsubmittedManagerInput(
+        run.id,
+        callId,
+        preparedTurn.conversationEpoch,
+      );
+      settledRun = await requireRun(run.id);
+    }
+
     // Backend reported the turn was ABORTED by the user (Stop button). Not
     // a failure and not an answer: the Stop path (forcePauseRun /
     // stopAndUndoPending) already interrupted the CLI, cancelled workers,
@@ -4740,59 +4755,32 @@ async function askManagerBackend(
     if (turnAborted) {
       await appendEvent({
         timestamp: completedAt,
-        workspaceId: latest.workspaceId,
-        runId: latest.id,
+        workspaceId: settledRun.workspaceId,
+        runId: settledRun.id,
         sparkCallId: callId,
         type: "chat.backend_notice",
         message: result.notice ?? "Chat turn interrupted by user.",
         payload: { backend: chatConfig.backend, interrupted: true },
       });
-      return latest;
+      return settledRun;
     }
 
     // Backend reported the turn itself FAILED (turn timeout, CLI crash,
     // backend error). The decision object only carries a best-effort
     // chatReply — applying it through applySparkManagerDecision would record
     // "Cora answered the chat turn" and complete the run as if it had been
-    // answered (the CC 2.1.201 false-finish). Instead: surface the reply
-    // (partial assistant text or the error description) as a chat bubble,
-    // record the SparkCall failure, and move the run to "failed" through a
-    // run.status_updated event so the notify pipeline emits a truthful
-    // run.failed. The CLI session stays alive in the backend's session map
-    // and addRunMessage re-engages the manager when the user chats into a
-    // terminal run, so the chat remains fully usable afterwards.
+    // answered (the CC 2.1.201 false-finish). Instead, record the SparkCall
+    // failure and let manager-turn-policy preserve, retry, park, or fail the
+    // run. Only a settled park/fail gets a durable error bubble; quiet retries
+    // and late failures after an authoritative state do not spam the chat.
     if (turnFailed) {
       const failureMessage = result.notice ?? "Chat turn failed.";
-      await appendEvent({
-        timestamp: completedAt,
-        workspaceId: latest.workspaceId,
-        runId: latest.id,
-        sparkCallId: callId,
-        type: "spark_call.failed",
-        message: `Cora manager (${chatConfig.backend}) turn failed: ${failureMessage}`,
-        payload: { mode, model: result.model, backend: chatConfig.backend, error: failureMessage },
-      });
-      let failedRun = latest;
-      const replyText = result.decision.chatReply?.trim();
-      if (replyText) {
-        failedRun = await addRunMessage({
-          runId: latest.id,
-          author: "spark",
-          kind: "note",
-          message: replyText,
-          intent: "answer",
-          deliveryState: "acknowledged",
-          targetTurnId: callId,
-          backendTurnId: callId,
-          conversationEpoch: preparedTurn.conversationEpoch,
-        });
-      }
-
       const failurePlan = planManagerTurnFailure({
         error: failureMessage,
-        runStatus: failedRun.status,
+        runStatus: settledRun.status,
         mode,
         transientRetryCount,
+        backend: chatConfig.backend,
       });
 
       // The run already carries a state this dead turn must not rewrite: a
@@ -4805,14 +4793,19 @@ async function askManagerBackend(
       if (failurePlan.action === "keep_state") {
         await appendEvent({
           timestamp: completedAt,
-          workspaceId: failedRun.workspaceId,
-          runId: failedRun.id,
+          workspaceId: settledRun.workspaceId,
+          runId: settledRun.id,
           sparkCallId: callId,
           type: "chat.backend_notice",
-          message: `Cora's manager turn failed while the run was ${failedRun.status} (${failureMessage}). The run keeps its state.`,
-          payload: { backend: chatConfig.backend, error: failureMessage, keptStatus: failedRun.status },
+          message: `Cora's manager turn failed while the run was ${settledRun.status} (${failureMessage}). The run keeps its state.`,
+          payload: {
+            backend: chatConfig.backend,
+            error: failureMessage,
+            keptStatus: settledRun.status,
+            providerResponseIds: result.providerResponseIds,
+          },
         });
-        return failedRun;
+        return settledRun;
       }
 
       if (failurePlan.action === "retry") {
@@ -4823,8 +4816,8 @@ async function askManagerBackend(
         );
         await appendEvent({
           timestamp: completedAt,
-          workspaceId: failedRun.workspaceId,
-          runId: failedRun.id,
+          workspaceId: settledRun.workspaceId,
+          runId: settledRun.id,
           sparkCallId: callId,
           type: "run.chat_turn_retrying",
           message: `Cora's provider hiccuped (${failurePlan.kind}); retrying the turn in ${Math.round(delayMs / 1000)}s (${attemptLabel})`,
@@ -4836,14 +4829,15 @@ async function askManagerBackend(
             attempt: failurePlan.attempt,
             maxAttempts: MAX_MANAGER_TRANSIENT_RETRIES + 1,
             delayMs,
+            providerResponseIds: result.providerResponseIds,
           },
         });
         // A trace note on the failed call so the conversation's "Technical
         // details" explains the red row that a quiet retry follows.
         await appendEvent({
           timestamp: completedAt,
-          workspaceId: failedRun.workspaceId,
-          runId: failedRun.id,
+          workspaceId: settledRun.workspaceId,
+          runId: settledRun.id,
           sparkCallId: callId,
           type: "chat.backend_notice",
           message: `Provider issue (${failureMessage}). Cora is retrying this turn automatically (${attemptLabel}).`,
@@ -4856,7 +4850,7 @@ async function askManagerBackend(
         // mid-sleep completion all abandon the retry).
         const fresh = await getRun(run.id);
         if (!fresh || conversationEpoch(fresh) !== preparedTurn.conversationEpoch) {
-          return fresh ?? failedRun;
+          return fresh ?? settledRun;
         }
         if (fresh.status !== "planning" && fresh.status !== "running" && fresh.status !== "reviewing") {
           return fresh;
@@ -4874,11 +4868,46 @@ async function askManagerBackend(
         );
       }
 
+      // Quiet automatic retries never create a durable assistant error bubble.
+      // Once the policy settles on park/fail, persist exactly one final card
+      // and one failure event for the whole turn lineage.
+      await appendEvent({
+        timestamp: completedAt,
+        workspaceId: settledRun.workspaceId,
+        runId: settledRun.id,
+        sparkCallId: callId,
+        type: "spark_call.failed",
+        message: `Cora manager (${chatConfig.backend}) turn failed: ${failureMessage}`,
+        payload: {
+          mode,
+          model: result.model,
+          backend: chatConfig.backend,
+          error: failureMessage,
+          providerResponseIds: result.providerResponseIds,
+        },
+      });
+      let failedRun = settledRun;
+      const replyText = result.decision.chatReply?.trim();
+      if (replyText) {
+        failedRun = await addRunMessage({
+          runId: settledRun.id,
+          author: "spark",
+          kind: "note",
+          message: replyText,
+          intent: "answer",
+          deliveryState: "acknowledged",
+          targetTurnId: callId,
+          backendTurnId: callId,
+          conversationEpoch: preparedTurn.conversationEpoch,
+        });
+      }
+
       // Provider trouble that outlived the retries (or a rate limit, which a
       // fast retry can never clear): park instead of failing. The work did
-      // not fail, the provider did. Input was already requeued above, so
-      // Resume re-delivers it; workers still in flight keep running and are
-      // reviewed on resume.
+      // not fail, the provider did. Unapplied input was requeued above; input
+      // whose live tool already mutated the run was acknowledged so Resume
+      // cannot duplicate that side effect. Workers still in flight keep
+      // running and are reviewed on resume.
       if (failurePlan.action === "park") {
         console.warn(
           `[run-store] manager turn ${callId} (${chatConfig.backend}/${mode}) parked after ${failurePlan.kind} failure: ${failureMessage}`,
@@ -5038,11 +5067,6 @@ async function askManagerBackend(
     if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
       return latest;
     }
-    await releaseUnsubmittedManagerInput(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-    );
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
     if (targetCall) {
@@ -5053,6 +5077,13 @@ async function askManagerBackend(
     }
     latest.updatedAt = completedAt;
     await saveRun(latest);
+    // Persist the call failure first; otherwise saveRun(latest)'s pre-release
+    // snapshot can overwrite the requeued input written by the helper.
+    await releaseUnsubmittedManagerInput(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+    );
     await appendEvent({
       timestamp: completedAt,
       workspaceId: latest.workspaceId,
@@ -8496,8 +8527,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const resumeInput = autopilotInputFromRun(run);
   const shouldScheduleManagerAfterResume = shouldResumeManagerPlanning(run);
   // A run parked by the manager-turn failure policy (provider overload/rate
-  // limit) resumes by retrying the parked chat turn: the failed turn's input
-  // was requeued at park time, so a fresh chat turn re-delivers it.
+  // limit) resumes with a fresh chat turn. Unapplied input was requeued at
+  // park time; if a live Pi tool had already mutated the run, that input was
+  // acknowledged and the fresh turn continues from the durable run state
+  // instead of replaying the side effect.
   const parkedChatTurn =
     run.status === "paused" && run.autopilot?.lastAction === "chat_turn_parked";
   if (

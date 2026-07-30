@@ -67,6 +67,21 @@ async function main() {
     assert.equal(plan.attempt, 1);
   });
 
+  test("Pi owns provider retries, so an exhausted Pi turn parks without full-turn replay", () => {
+    for (const error of [OVERLOADED, "fetch failed: socket hang up (ECONNRESET)"]) {
+      const plan = P.planManagerTurnFailure({
+        error,
+        runStatus: "running",
+        mode: "chat",
+        transientRetryCount: 0,
+        backend: "pi",
+      });
+      assert.equal(plan.action, "park");
+      assert.match(plan.reason, /Pi exhausted its own automatic provider retries/);
+      assert.equal(plan.parkReason, "Cora's provider is overloaded. Retry runs the turn again.");
+    }
+  });
+
   test("the second retry is the last; the third failure parks", () => {
     const second = P.planManagerTurnFailure({
       error: OVERLOADED,

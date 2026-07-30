@@ -479,7 +479,7 @@ test("a rejected Codex launch fails once, stays failed, and never adopts a forei
     expect(managerCall).not.toContain("--yolo");
 
     await selectCoraTab(page);
-    await expect(page.getByText("Cora couldn’t start this turn")).toBeVisible();
+    await expect(page.getByText("Cora couldn’t complete this turn")).toBeVisible();
     if (process.env.SPARK_CHAT_FAILURE_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CHAT_FAILURE_SCREENSHOT, fullPage: true });
     }

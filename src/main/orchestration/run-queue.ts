@@ -27,7 +27,7 @@ import type {
 import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
 import { sparkHome } from "../spark-home";
-import { subscribeToEvents } from "./event-log";
+import { appendEvent, subscribeToEvents } from "./event-log";
 import { getRun, startAutopilot } from "./run-store";
 
 // File name for the persisted queue, kept directly under sparkHome() next to
@@ -58,7 +58,6 @@ async function persist(state: RunQueueState): Promise<void> {
 // filters on event.type. Best-effort — a missed push just delays a refresh.
 async function emitQueueUpdated(): Promise<void> {
   try {
-    const { appendEvent } = await import("./event-log");
     await appendEvent({ workspaceId: "", type: "queue.updated" });
   } catch {
     /* best effort */

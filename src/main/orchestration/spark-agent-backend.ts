@@ -126,6 +126,9 @@ export interface ManagerCallResult {
   cacheReadTokens?: number;
   promptTokens?: number;
   completionTokens?: number;
+  /** Provider response ids observed during the call, when the backend exposes
+   *  them. Useful for correlating capacity failures with provider support. */
+  providerResponseIds?: string[];
   /** The model's context window, when the backend reported one for this turn.
    *  Persisted onto the SparkCall so the context meter reads a real window
    *  instead of contextWindowForModel()'s per-model default. */
@@ -148,8 +151,9 @@ export interface ManagerCallResult {
    * applied as a normal manager decision — a status:"complete" decision
    * from a dead turn would record "Cora answered the chat turn" and mark
    * the run complete even though nothing was answered. run-store's
-   * dispatcher surfaces the reply, fails the SparkCall, and moves the run
-   * to status "failed" (which the user can re-prompt out of) instead.
+   * dispatcher fails the SparkCall and applies the manager-turn failure
+   * policy: preserve an authoritative state, retry, park provider trouble,
+   * or mark a genuine turn failure.
    */
   turnFailed?: boolean;
   /**

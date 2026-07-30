@@ -2686,6 +2686,8 @@ export interface SparkCall {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  /** Provider response ids captured by the backend for support correlation. */
+  providerResponseIds?: string[];
   error?: string;
   createdAt: string;
   completedAt?: string;

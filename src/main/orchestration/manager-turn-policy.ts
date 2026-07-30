@@ -16,7 +16,8 @@
 //     and the run keeps its state.
 //   retry      -> transport/provider failures on a DRIVING run are worth a
 //     bounded, jittered, seconds-scale retry of the SAME turn before
-//     bothering the user. Rate limits are excluded on purpose (same
+//     bothering the user, unless the selected backend already owns an
+//     automatic retry loop. Rate limits are excluded on purpose (same
 //     reasoning as the worker taxonomy: the quota window outlives any fast
 //     retry).
 //   park       -> provider trouble that outlived the retries. The run is
@@ -32,7 +33,7 @@
 // policy is uniform across them by construction.
 
 import { classifyWorkerFailure, isTransientWorkerFailure } from "./failure-taxonomy";
-import type { RunStatus, SparkCall, WorkerFailureKind } from "@shared/types";
+import type { ChatBackendKind, RunStatus, SparkCall, WorkerFailureKind } from "@shared/types";
 
 /**
  * Maximum automatic same-turn retries after a transient manager-turn failure.
@@ -99,6 +100,9 @@ export function planManagerTurnFailure(input: {
   runStatus: RunStatus;
   mode: SparkCall["mode"];
   transientRetryCount: number;
+  /** Pi retries each provider request internally. Retrying the entire manager
+   *  turn after that loop is exhausted replays tools and multiplies load. */
+  backend?: ChatBackendKind;
 }): ManagerTurnFailurePlan {
   const kind = classifyWorkerFailure(input.error);
 
@@ -110,7 +114,11 @@ export function planManagerTurnFailure(input: {
     };
   }
 
-  if (isTransientWorkerFailure(kind) && input.transientRetryCount < MAX_MANAGER_TRANSIENT_RETRIES) {
+  if (
+    isTransientWorkerFailure(kind) &&
+    input.backend !== "pi" &&
+    input.transientRetryCount < MAX_MANAGER_TRANSIENT_RETRIES
+  ) {
     return {
       action: "retry",
       kind: kind as WorkerFailureKind,
@@ -126,6 +134,8 @@ export function planManagerTurnFailure(input: {
       reason:
         kind === "rate_limit"
           ? "the provider is rate limited; a fast retry cannot clear a quota window, so the run parks for the user"
+          : input.backend === "pi"
+            ? "Pi exhausted its own automatic provider retries, so replaying the entire manager turn would duplicate work"
           : "transient provider trouble outlived the automatic retries, so the run parks instead of failing",
       // One voice everywhere the parked state surfaces: the run header detail,
       // the composer placeholder, and the Retry button all speak this exact
