@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { RunState, RunStatus } from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import { TerminalPane } from "../components/Terminal/TerminalPane";
-import { BACKEND_TERMINAL_SHELL } from "../components/chat/ChatPanel";
+import { BACKEND_TERMINAL_SHELL } from "../components/chat/backend-terminal-shell";
 import { PANEL_HEADER_H } from "../panels/usePanelLayout";
 import type { CoraView } from "../components/chat/cora-view";
 

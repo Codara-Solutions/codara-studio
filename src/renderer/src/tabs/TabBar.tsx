@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
-import { AutomationsGlyph } from "../components/automations/useAutomationsStatus";
+import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import { collectLeaves } from "./paneTree";
 import {
   TAB_REORDER_DRAG_MIME,

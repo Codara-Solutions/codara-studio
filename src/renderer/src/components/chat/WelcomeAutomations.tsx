@@ -1,6 +1,7 @@
 import React from "react";
 import { requestAutomationFocus } from "../automations/focus-request";
-import { AutomationsGlyph, useAutomationsStatus } from "../automations/useAutomationsStatus";
+import { AutomationsGlyph } from "../automations/AutomationsGlyph";
+import { useAutomationsStatus } from "../automations/useAutomationsStatus";
 
 // The new-chat welcome's door to Automations: one quiet row under the starter
 // cards. Idle it names the surface and how many automations are armed; while

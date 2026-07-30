@@ -131,6 +131,11 @@ const RunsStack = lazy(() => import("./tabs/RunsStack"));
 const AutomationsStack = lazy(() => import("./tabs/AutomationsStack"));
 const WhiteboardStack = lazy(() => import("./tabs/WhiteboardStack"));
 
+// React StrictMode intentionally remounts effects in development. The ready
+// handshake is document-scoped, so send it once per evaluated renderer module
+// rather than logging/disarming the same boot twice.
+let rendererReadySignaled = false;
+
 // Stable brand label for every chat tab in the top strip. The first-message-
 // derived run.title is kept on the RunState for the chat panel header and the
 // history popover; only the workspace tab strip is forced to this constant so
@@ -1719,6 +1724,8 @@ export default function App() {
   // splash is gone. If a loaded page never sends this, main escalates recovery
   // instead of leaving the user staring at the breathing-square splash.
   useEffect(() => {
+    if (rendererReadySignaled) return;
+    rendererReadySignaled = true;
     window.spark.app.signalReady?.();
   }, []);
 

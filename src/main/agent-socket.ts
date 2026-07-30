@@ -13,6 +13,14 @@ import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadState, saveState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
+import { detectAgentRuntimes } from "./agent-runtimes";
+import { broadcastPreferencesChanged } from "./ipc";
+import { publish } from "./notify";
+import {
+  appendEvent,
+  listEvents,
+  subscribeToEvents,
+} from "./orchestration/event-log";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
 import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
 import {
@@ -1095,7 +1103,6 @@ async function handleChatEvents(
     ),
   );
 
-  const { listEvents, subscribeToEvents } = await import("./orchestration/event-log");
   // Subscribe before reading the journal so an event landing between the read
   // and the wait loop arrives via the live feed instead of being lost until
   // the client's next poll.
@@ -1332,7 +1339,6 @@ async function handleAppNotify(
       : jobId
         ? ({ type: "automation", jobId, workspaceId: workspaceId ?? undefined } as const)
         : ({ type: "run", runId: stringParam(params, "runId") ?? "cli-test" } as const);
-  const { publish } = await import("./notify");
   publish({
     kind: kind as NotifyKind,
     sourceKey,
@@ -1383,7 +1389,6 @@ async function handleAppPrefsSet(
   // side effect not replayed here is ipc.ts's tray ensure/destroy hook for
   // keepRunningInBackground - a dev-only gap; the tray catches up on restart.
   const next = await setPreference(prefKey, params.value as AppPreferences[PrefKey]);
-  const { broadcastPreferencesChanged } = await import("./ipc");
   broadcastPreferencesChanged({ key: prefKey, value: next[prefKey] });
   return successResponse(id, { key, value: next[prefKey] });
 }
@@ -1741,7 +1746,6 @@ async function handleOrchestratorSpawnWorkers(
     );
     if (latestImplementation?.runtimePreference === onlyRequestedWorker.runtimePreference) {
       const opposite = latestImplementation.runtimePreference === "claude" ? "codex" : "claude";
-      const { detectAgentRuntimes } = await import("./agent-runtimes");
       const runtimes = await detectAgentRuntimes();
       // Cross-provider verification is valuable only when that provider is
       // healthy: it must be installed and must not have already failed
@@ -1792,7 +1796,6 @@ async function handleOrchestratorSpawnWorkers(
         !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : ""),
     );
     if (anyReroutableWorker) {
-      const { detectAgentRuntimes } = await import("./agent-runtimes");
       const detected = await detectAgentRuntimes();
       const preferredUsable =
         detected.some((runtime) => runtime.kind === headroomPreferredRuntime && runtime.installed) &&
@@ -2346,7 +2349,6 @@ async function handleOrchestratorRequestNextIteration(
         warning = warning ?? `nextEffort "${requestedEffort}" is not a valid effort level; ignored.`;
       }
       if (warning) {
-        const { appendEvent } = await import("./orchestration/event-log");
         await appendEvent({
           workspaceId: "",
           type: "automation.handoff_rejected",

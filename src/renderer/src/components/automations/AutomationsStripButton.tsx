@@ -15,7 +15,8 @@
 
 import React from "react";
 import { requestAutomationFocus } from "./focus-request";
-import { AutomationsGlyph, useAutomationsStatus } from "./useAutomationsStatus";
+import { AutomationsGlyph } from "./AutomationsGlyph";
+import { useAutomationsStatus } from "./useAutomationsStatus";
 
 export default function AutomationsStripButton({
   workspaceId,

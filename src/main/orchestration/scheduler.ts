@@ -24,6 +24,7 @@ import {
 import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
 import { sparkHome } from "../spark-home";
+import { appendEvent } from "./event-log";
 // run-store is heavy (it transitively loads the manager backends + agent-sync).
 // Importing scheduler at boot to arm timers must NOT drag run-store into cold
 // start, so we lazy-import startAutopilot only when a job actually fires
@@ -274,7 +275,6 @@ async function persist(jobs: ScheduledJob[]): Promise<void> {
 // the panel filters on event.type. Best-effort.
 async function emitUpdated(): Promise<void> {
   try {
-    const { appendEvent } = await import("./event-log");
     await appendEvent({ workspaceId: "", type: "automation.updated" });
   } catch {
     /* best effort — a missing live update just means the panel refreshes lazily */

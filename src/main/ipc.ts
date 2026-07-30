@@ -62,6 +62,8 @@ import {
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
 import { latestSessionStart } from "./agent-session-registry";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
+import * as mcpInstaller from "./mcp-installer";
+import * as coraMemory from "./orchestration/cora-memory";
 import {
   deleteWorkerSession,
   listAllWorkerSessions,
@@ -141,12 +143,6 @@ async function getAgentSync(): Promise<typeof import("./agent-sync")> {
   return agentSyncMod;
 }
 
-let mcpInstallerMod: typeof import("./mcp-installer") | undefined;
-async function getMcpInstaller(): Promise<typeof import("./mcp-installer")> {
-  mcpInstallerMod ??= await import("./mcp-installer");
-  return mcpInstallerMod;
-}
-
 let inlineAiMod: typeof import("./inline-ai") | undefined;
 async function getInlineAi(): Promise<typeof import("./inline-ai")> {
   inlineAiMod ??= await import("./inline-ai");
@@ -157,12 +153,6 @@ let piSubscriptionAuthMod: typeof import("./orchestration/pi-subscription-auth")
 async function getPiSubscriptionAuth(): Promise<typeof import("./orchestration/pi-subscription-auth")> {
   piSubscriptionAuthMod ??= await import("./orchestration/pi-subscription-auth");
   return piSubscriptionAuthMod;
-}
-
-let coraMemoryMod: typeof import("./orchestration/cora-memory") | undefined;
-async function getCoraMemory(): Promise<typeof import("./orchestration/cora-memory")> {
-  coraMemoryMod ??= await import("./orchestration/cora-memory");
-  return coraMemoryMod;
 }
 
 let runStoreMod: typeof import("./orchestration/run-store") | undefined;
@@ -523,7 +513,7 @@ export function registerIpc(): void {
       const settings = await loadSettings();
       if (settings.playwrightMcpAutoInstall !== false) {
         try {
-          const { repairSparkBuiltinEntries, SPARK_BUILTIN_SERVER_NAME } = await getMcpInstaller();
+          const { repairSparkBuiltinEntries, SPARK_BUILTIN_SERVER_NAME } = mcpInstaller;
           const repaired = await repairSparkBuiltinEntries();
           if (repaired.claude) result.mcp.toClaude.push(SPARK_BUILTIN_SERVER_NAME);
           if (repaired.codex) result.mcp.toCodex.push(SPARK_BUILTIN_SERVER_NAME);
@@ -593,7 +583,7 @@ export function registerIpc(): void {
   );
   handle("agents:builtins", async () => {
     const [{ getSparkBuiltinStatus }, runtimes, settings] = await Promise.all([
-      getMcpInstaller(),
+      mcpInstaller,
       detectAgentRuntimes(false),
       loadSettings(),
     ]);
@@ -608,14 +598,14 @@ export function registerIpc(): void {
   handle(
     "agents:installBuiltin",
     async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
-      const { installSparkBuiltin } = await getMcpInstaller();
+      const { installSparkBuiltin } = mcpInstaller;
       return installSparkBuiltin(input.id, input.runtime);
     },
   );
   handle(
     "agents:uninstallBuiltin",
     async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
-      const { uninstallSparkBuiltin } = await getMcpInstaller();
+      const { uninstallSparkBuiltin } = mcpInstaller;
       return uninstallSparkBuiltin(input.id, input.runtime);
     },
   );
@@ -662,7 +652,7 @@ export function registerIpc(): void {
     "memory:setEnabled",
     async (_e, input: MemorySetEnabledInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
-      const { setMemoryEnabled } = await getCoraMemory();
+      const { setMemoryEnabled } = coraMemory;
       await setMemoryEnabled(input.scope, workspaceId, input.enabled);
       return readMemoryStatus(input.workspaceId ?? null);
     },
@@ -672,7 +662,7 @@ export function registerIpc(): void {
     "memory:clear",
     async (_e, input: MemoryClearInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
-      const { clearMemory } = await getCoraMemory();
+      const { clearMemory } = coraMemory;
       // The user's own lines survive unless the caller opted in explicitly:
       // a missing flag must never be read as permission to delete them.
       await clearMemory(input.scope, workspaceId, input.includeUserLines === true);
@@ -1682,7 +1672,6 @@ export function registerIpc(): void {
   // human-scale (drags, card edits, agent lane moves), so a plain
   // getAllWindows fan-out is enough.
   void (async () => {
-    const { subscribeToEvents } = await import("./orchestration/event-log");
     const { getRun } = await getRunStore();
     subscribeToEvents((event) => {
       if (!event.runId) return;
@@ -2447,7 +2436,7 @@ export function registerIpc(): void {
 // the user could then toggle and clear. With no workspace open there is no
 // workspace tier to report, so say so instead of inventing one.
 async function readMemoryStatus(workspaceId: string | null): Promise<CoraMemoryStatus> {
-  const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = await getCoraMemory();
+  const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = coraMemory;
   const status = await getMemoryStatus(workspaceId ?? "");
   if (workspaceId) return status;
   return {

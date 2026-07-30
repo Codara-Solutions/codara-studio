@@ -26,7 +26,7 @@ import {
   INLINE_AI_MODEL_PRESETS,
 } from "@shared/types";
 import { runStatusColor } from "../lib/run-status";
-import { useTheme } from "../theme/ThemeProvider";
+import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
 import KeybindingsSection from "../shortcuts/KeybindingsSection";
 import SubscriptionUsage from "./SubscriptionUsage";

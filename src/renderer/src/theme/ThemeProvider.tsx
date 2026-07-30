@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
@@ -11,10 +9,10 @@ import {
   APP_THEME_IDS,
   APP_THEME_MODE,
   DEFAULT_PREFERENCES,
-  type ThemeMode,
   type ThemePref,
 } from "@shared/types";
 import { readAppTokens } from "../lib/theme-tokens";
+import { ThemeContext, type ThemeContextValue } from "./theme-context";
 
 // Codara uses named workbench themes. The selected theme
 // id lives on <html data-theme="..."> so the stylesheet can swap a complete
@@ -25,15 +23,6 @@ import { readAppTokens } from "../lib/theme-tokens";
 // broadcast); this provider just listens.
 
 type Theme = ThemePref;
-
-interface ThemeContextValue {
-  theme: Theme;
-  resolvedTheme: Theme;
-  themeMode: ThemeMode;
-  setTheme: (next: Theme) => void;
-}
-
-const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 const FAST_PATH_KEY = "spark-ui-theme-shadow";
 
@@ -238,10 +227,4 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
-}
-
-export function useTheme(): ThemeContextValue {
-  const ctx = useContext(ThemeContext);
-  if (!ctx) throw new Error("useTheme must be used within <ThemeProvider>");
-  return ctx;
 }
