@@ -193,12 +193,30 @@ export interface RemoteCoraRunSummary {
   messageCount: number;
   lastMessage?: string;
   activeWorkers: number;
-  // Combined manager + estimated worker spend in USD. Absent until the run
-  // has at least one priced call.
+  // MEASURED spend in USD only: metered manager API calls plus worker
+  // attempts whose CLI transport reported real cost or token usage. Absent
+  // when nothing measured exists on the run.
   costUsd?: number;
+  // Price-table ESTIMATE covering only the worker attempts that reported no
+  // real cost — the estimate-only remainder, never overlapping costUsd.
+  // Absent when every attempt is measured (or there are none).
+  estimatedCostUsd?: number;
   // True when an automation owns this run. Board cards on such a chat are
   // never handed to a manager, so the phone hides the queue action there.
   automated?: boolean;
+  // Identity of the owning automation so the phone can render automation
+  // sessions distinctly from ordinary worker chats. `automationId` always
+  // accompanies `automated`; name and pass iteration come from the scheduler's
+  // job store and are absent when the job no longer exists.
+  automationId?: string;
+  automationName?: string;
+  // 0-based pass index (mobile renders iteration + 1, matching
+  // RemoteAutomationRunRecord.iteration).
+  iteration?: number;
+  // Worker model for automation runs (newest attempt's resolved model, else
+  // the newest task's model hint) so the phone can chip the model on the row
+  // without opening the run. Absent on non-automation runs.
+  model?: string;
 }
 
 export interface RemoteCoraMessage {
@@ -224,10 +242,17 @@ export interface RemoteCoraWorker {
   id: string;
   title: string;
   runtime: string;
+  // The model the attempt actually launched on, falling back to the owning
+  // task's model hint when the attempt has not resolved one yet.
   model?: string;
+  // Effort hint of the owning task (low / medium / high / ...).
+  effort?: string;
   status: RemoteCoraWorkerStatus;
   startedAt?: string;
   finishedAt?: string;
+  // Latest agent state for the attempt (working / blocked / done / ...).
+  // Free-form on the wire so a new desktop state needs no phone update.
+  runtimeState?: string;
 }
 
 // The one question currently blocking a run. cora.send to a blocked run
@@ -416,7 +441,11 @@ export interface RemoteAutomationInfo {
   lastRunAt?: string;
   lastRunStatus?: RemoteCoraRunStatus;
   lastRunSummary?: string;
+  // MEASURED spend across the loop's passes; absent when nothing measured.
   spentUsd?: number;
+  // Estimate-only remainder of the loop's spend (attempts that reported no
+  // real cost). Never overlaps spentUsd; absent when zero.
+  estimatedSpentUsd?: number;
 }
 
 // One completed (or live) pass of an automation's loop.
@@ -427,7 +456,10 @@ export interface RemoteAutomationRunRecord {
   finishedAt?: string;
   status: RemoteCoraRunStatus;
   summary?: string;
+  // MEASURED spend for this pass; absent when nothing measured.
   costUsd?: number;
+  // Estimate-only remainder for this pass; never overlaps costUsd.
+  estimatedCostUsd?: number;
   // Free-form on the wire on purpose: the phone renders it as text, and a new
   // stop reason on the computer must not need a phone update to display.
   stopReason?: string;

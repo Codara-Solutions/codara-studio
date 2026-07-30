@@ -16,6 +16,7 @@ import {
   installOrchestratorMcpForCodex,
   isSparkOrchestratorMcpInstalled,
 } from "../mcp-installer";
+import { estimateWorkerCostUsd, type ModelUsage } from "../model-prices";
 import { resolveLaunchTarget } from "./cli-session";
 import { ensureCodexProjectTrust } from "./codex-trust";
 import { claudeDisallowedTools, codexAccessFlags } from "./worker-access";
@@ -36,6 +37,14 @@ export interface StructuredWorkerResult {
   exitCode: number;
   error?: string;
   transport: "agent-sdk" | "app-server";
+  /**
+   * Measured USD spend for the attempt when the transport reported it: the
+   * Claude Agent SDK result's own `total_cost_usd` (or its usage block priced
+   * through the model price table), or the Codex turn's token usage priced the
+   * same way. Absent when the stream ended without either — callers fall back
+   * to the run-level worker cost estimate.
+   */
+  costUsd?: number;
 }
 
 const WORKER_SYSTEM_PROMPT = `You are a Codara automation worker running without an interactive terminal.
@@ -100,6 +109,7 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
   const abortController = new AbortController();
   input.onStarted(() => abortController.abort());
   let stderrTail = "";
+  let costUsd: number | undefined;
   try {
     const env = await workerEnv(input);
     Object.assign(env, {
@@ -175,6 +185,24 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
         const content = Array.isArray(body?.content) ? body.content : [];
         const results = content.filter((block) => asRecord(block)?.type === "tool_result");
         if (results.length > 0) await append(input.paths.stdoutLog, "\n✓ tool completed\n");
+      } else if (record.type === "result") {
+        // The SDK's terminal result carries the CLI's own metered figure.
+        // Prefer it verbatim; fall back to pricing the result's usage block
+        // through the same table the manager's SparkCalls use.
+        const reported = record.total_cost_usd;
+        if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) {
+          costUsd = reported;
+        } else {
+          const usage = asRecord(record.usage);
+          if (usage) {
+            const priced = estimateWorkerCostUsd({
+              runtime: "claude",
+              modelHint: input.task.modelHint,
+              usage: usage as ModelUsage,
+            });
+            if (priced > 0) costUsd = priced;
+          }
+        }
       } else if (record.type === "assistant" && !sawTextDelta) {
         const body = record.message as { content?: Array<{ type?: string; text?: string }> } | undefined;
         const text = body?.content
@@ -189,9 +217,10 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
         exitCode: 1,
         error: "Claude Agent SDK completed without a parseable final-report.json.",
         transport: "agent-sdk",
+        ...(costUsd !== undefined ? { costUsd } : {}),
       };
     }
-    return { exitCode: 0, transport: "agent-sdk" };
+    return { exitCode: 0, transport: "agent-sdk", ...(costUsd !== undefined ? { costUsd } : {}) };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const combined = stderrTail.trim() && !message.includes(stderrTail.trim())
@@ -201,6 +230,7 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
       exitCode: 1,
       error: abortController.signal.aborted ? "Claude automation worker was interrupted." : combined,
       transport: "agent-sdk",
+      ...(costUsd !== undefined ? { costUsd } : {}),
     };
   }
 }
@@ -214,6 +244,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredWorkerResult> {
   let child: ChildProcessWithoutNullStreams | null = null;
   let interrupted = false;
+  let costUsd: number | undefined;
   try {
     await ensureCodexProjectTrust(input.cwd).catch(() => undefined);
     if (!(await isSparkOrchestratorMcpInstalled("codex"))) {
@@ -341,6 +372,25 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
         }
       } else if (method === "turn/completed") {
         const turn = asRecord(params.turn);
+        // Codex reports the turn's token usage on completion (input_tokens
+        // includes cached_input_tokens); price it through the same table the
+        // Claude branch uses so both runtimes report a comparable figure.
+        const turnUsage = asRecord(turn?.usage) ?? asRecord(params.usage);
+        if (turnUsage) {
+          const count = (value: unknown): number | undefined =>
+            typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+          const cached = count(turnUsage.cached_input_tokens) ?? count(turnUsage.cache_read_input_tokens);
+          const priced = estimateWorkerCostUsd({
+            runtime: "codex",
+            modelHint: input.task.modelHint,
+            usage: {
+              input_tokens: count(turnUsage.input_tokens) ?? 0,
+              output_tokens: count(turnUsage.output_tokens) ?? 0,
+              ...(cached !== undefined ? { cache_read_input_tokens: cached } : {}),
+            },
+          });
+          if (priced > 0) costUsd = priced;
+        }
         if (!settled) {
           settled = true;
           if (turn?.status === "failed") rejectTurn(new Error(jsonLine(turn.error).trim() || "Codex turn failed."));
@@ -416,9 +466,10 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
         exitCode: 1,
         error: "Codex App Server completed without a parseable final-report.json.",
         transport: "app-server",
+        ...(costUsd !== undefined ? { costUsd } : {}),
       };
     }
-    return { exitCode: 0, transport: "app-server" };
+    return { exitCode: 0, transport: "app-server", ...(costUsd !== undefined ? { costUsd } : {}) };
   } catch (error) {
     return {
       exitCode: 1,
@@ -426,6 +477,7 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
         ? "Codex automation worker was interrupted."
         : error instanceof Error ? error.message : String(error),
       transport: "app-server",
+      ...(costUsd !== undefined ? { costUsd } : {}),
     };
   } finally {
     if (child && child.exitCode == null && !child.killed) child.kill("SIGTERM");

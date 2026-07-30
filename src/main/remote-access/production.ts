@@ -1015,10 +1015,16 @@ async function listCoraHistoryForRemote(
 ): Promise<RemoteCoraRunSummary[]> {
   await requireLocalWorkspace(workspaceId);
   const runs = await listRuns(workspaceId);
+  const sliced = runs.slice(0, MAX_CORA_RUNS);
+  // One job-store read joined against the whole page, only when an automation
+  // run is actually present.
+  const join = sliced.some((run) => run.automationId)
+    ? buildAutomationJoin(await listJobs().catch(() => [] as ScheduledJob[]))
+    : () => undefined;
   const result: RemoteCoraRunSummary[] = [];
   let usedBytes = 2;
-  for (const run of runs.slice(0, MAX_CORA_RUNS)) {
-    const summary = toRemoteRunSummary(run);
+  for (const run of sliced) {
+    const summary = toRemoteRunSummary(run, join(run));
     const bytes = Buffer.byteLength(JSON.stringify(summary), "utf8") + 1;
     if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
     result.push(summary);
@@ -1033,7 +1039,7 @@ async function getCoraRunForRemote(input: {
 }): Promise<RemoteCoraRun> {
   await requireLocalWorkspace(input.workspaceId);
   const run = await requireOwnedRun(input.workspaceId, input.runId);
-  return toRemoteRun(run);
+  return toRemoteRun(run, await automationJoinForRun(run));
 }
 
 async function sendCoraMessageForRemote(input: {
@@ -1063,7 +1069,7 @@ async function sendCoraMessageForRemote(input: {
       message,
       clientMessageId,
     });
-    if (retry) return toRemoteRun(retry);
+    if (retry) return toRemoteRun(retry, await automationJoinForRun(retry));
 
     let run: RunState;
     if (!input.runId) {
@@ -1091,7 +1097,7 @@ async function sendCoraMessageForRemote(input: {
             clientMessageId,
           });
     }
-    return toRemoteRun(run);
+    return toRemoteRun(run, await automationJoinForRun(run));
   });
 }
 
@@ -1103,12 +1109,64 @@ async function requireOwnedRun(workspaceId: string, runId: string): Promise<RunS
   return run;
 }
 
-function toRemoteRunSummary(run: RunState): RemoteCoraRunSummary {
+// Owning-automation identity resolved from the scheduler's job store — the
+// run record itself only carries the automation id.
+interface RemoteAutomationJoin {
+  name?: string;
+  iteration?: number;
+}
+
+function automationJoinFromJob(
+  job: ScheduledJob | undefined,
+  run: RunState,
+): RemoteAutomationJoin | undefined {
+  if (!job) return undefined;
+  // Latest matching record wins: iteration alone collides across loop cycles
+  // ("Run now" resets the counter while history is retained), so scan by runId
+  // and keep the newest entry.
+  let iteration: number | undefined;
+  for (const record of job.history) {
+    if (record.runId === run.id) iteration = record.iteration;
+  }
+  return { name: job.name, ...(iteration !== undefined ? { iteration } : {}) };
+}
+
+// One listJobs() pass shared by a whole history listing — a 50-run history
+// must not hit the job store once per run.
+function buildAutomationJoin(
+  jobs: ScheduledJob[],
+): (run: RunState) => RemoteAutomationJoin | undefined {
+  const byId = new Map(jobs.map((job) => [job.id, job]));
+  return (run) =>
+    run.automationId ? automationJoinFromJob(byId.get(run.automationId), run) : undefined;
+}
+
+async function automationJoinForRun(run: RunState): Promise<RemoteAutomationJoin | undefined> {
+  if (!run.automationId) return undefined;
+  const job = await getJob(run.automationId).catch(() => undefined);
+  return automationJoinFromJob(job ?? undefined, run);
+}
+
+function toRemoteRunSummary(
+  run: RunState,
+  automation?: RemoteAutomationJoin,
+): RemoteCoraRunSummary {
   const lastMessage = run.humanMessages.at(-1)?.message;
+  // Honest split: costUsd carries ONLY measured spend (metered manager calls
+  // plus worker attempts whose transport reported real cost); the placeholder
+  // estimate for unmeasured attempts travels apart as estimatedCostUsd. The
+  // rollup guarantees the two never cover the same attempt.
   const costUsd =
-    run.totalCostUsd !== undefined || run.estimatedWorkerCostUsd !== undefined
-      ? (run.totalCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0)
+    run.totalCostUsd !== undefined || run.measuredWorkerCostUsd !== undefined
+      ? (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0)
       : undefined;
+  const estimatedCostUsd = run.estimatedWorkerCostUsd;
+  // Model chip for automation rows: the newest attempt's resolved model wins
+  // (what actually launched), else the newest task's hint (what will launch).
+  const automationModel = run.automationId
+    ? [...run.workerAttempts].reverse().find((attempt) => attempt.model)?.model ||
+      [...run.workerTasks].reverse().find((task) => task.modelHint)?.modelHint
+    : undefined;
   return {
     id: run.id,
     workspaceId: run.workspaceId,
@@ -1122,23 +1180,42 @@ function toRemoteRunSummary(run: RunState): RemoteCoraRunSummary {
       ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status),
     ).length,
     ...(costUsd !== undefined ? { costUsd } : {}),
-    ...(run.automationId ? { automated: true } : {}),
+    ...(estimatedCostUsd ? { estimatedCostUsd } : {}),
+    ...(run.automationId ? { automated: true, automationId: run.automationId } : {}),
+    ...(run.automationId && automation?.name
+      ? { automationName: truncateUtf8(automation.name, 200) }
+      : {}),
+    ...(run.automationId && automation?.iteration !== undefined
+      ? { iteration: automation.iteration }
+      : {}),
+    ...(automationModel ? { model: truncateUtf8(automationModel, 120) } : {}),
   };
 }
 
 // Worker roster for the phone's run header: active attempts first, then the
 // most recent settled ones, capped so a long run cannot bloat every poll.
 function toRemoteRunWorkers(run: RunState): RemoteCoraWorker[] {
-  const titles = new Map(run.workerTasks.map((task) => [task.id, task.title]));
-  const toWorker = (attempt: RunState["workerAttempts"][number]): RemoteCoraWorker => ({
-    id: attempt.id,
-    title: truncateUtf8(titles.get(attempt.workerTaskId) || "Worker", 300),
-    runtime: attempt.runtime,
-    ...(attempt.model ? { model: truncateUtf8(attempt.model, 120) } : {}),
-    status: attempt.status,
-    ...(attempt.startedAt ? { startedAt: attempt.startedAt } : {}),
-    ...(attempt.finishedAt ? { finishedAt: attempt.finishedAt } : {}),
-  });
+  const tasks = new Map(run.workerTasks.map((task) => [task.id, task]));
+  const toWorker = (attempt: RunState["workerAttempts"][number]): RemoteCoraWorker => {
+    const task = tasks.get(attempt.workerTaskId);
+    // The attempt only records a model once the launch resolved one; before
+    // that (and for legacy attempts) the owning task's hint is what Studio
+    // itself displays, so the phone gets the same fallback.
+    const model = attempt.model || task?.modelHint;
+    return {
+      id: attempt.id,
+      title: truncateUtf8(task?.title || "Worker", 300),
+      runtime: attempt.runtime,
+      ...(model ? { model: truncateUtf8(model, 120) } : {}),
+      ...(task?.effortHint ? { effort: truncateUtf8(task.effortHint, 40) } : {}),
+      status: attempt.status,
+      ...(attempt.startedAt ? { startedAt: attempt.startedAt } : {}),
+      ...(attempt.finishedAt ? { finishedAt: attempt.finishedAt } : {}),
+      ...(attempt.runtimeState
+        ? { runtimeState: truncateUtf8(attempt.runtimeState, 200) }
+        : {}),
+    };
+  };
   const active = run.workerAttempts.filter((attempt) =>
     ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status),
   );
@@ -1173,7 +1250,7 @@ function toRemoteRunSteps(run: RunState): {
   };
 }
 
-function toRemoteRun(run: RunState): RemoteCoraRun {
+function toRemoteRun(run: RunState, automation?: RemoteAutomationJoin): RemoteCoraRun {
   const messages: RemoteCoraMessage[] = [];
   let usedBytes = 2;
   for (const message of run.humanMessages.slice(-MAX_CORA_MESSAGES).reverse()) {
@@ -1198,7 +1275,7 @@ function toRemoteRun(run: RunState): RemoteCoraRun {
     ? run.humanMessages.find((message) => message.id === run.blockedOn?.questionMessageId)
     : undefined;
   return {
-    ...toRemoteRunSummary(run),
+    ...toRemoteRunSummary(run, automation),
     messages,
     ...(workers.length > 0 ? { workers } : {}),
     ...(plan.total > 0
@@ -1542,9 +1619,22 @@ function describeAutomationTrigger(trigger: AutomationTrigger): {
   }
 }
 
+// Round a derived USD remainder to the ledger's 6-decimal precision and clamp
+// float dust so "measured == total" reliably yields no estimated field.
+function usdRemainder(total: number | undefined, measured: number | undefined): number {
+  if (total === undefined) return 0;
+  const remainder = Math.round((total - (measured ?? 0)) * 1_000_000) / 1_000_000;
+  return remainder > 0 ? remainder : 0;
+}
+
 function toRemoteAutomation(job: ScheduledJob): RemoteAutomationInfo {
   const trigger = describeAutomationTrigger(job.trigger);
   const lastRecord = job.history.at(-1);
+  // Same honest split as the run payload: `spentUsd` on the wire is measured
+  // spend only; the estimate-only remainder (including everything on legacy
+  // records that never tallied a measured figure) rides in estimatedSpentUsd.
+  const measuredSpentUsd = job.state.measuredSpentUsd;
+  const estimatedSpentUsd = usdRemainder(job.state.spentUsd, measuredSpentUsd);
   return {
     id: job.id,
     name: truncateUtf8(job.name, 300),
@@ -1559,7 +1649,8 @@ function toRemoteAutomation(job: ScheduledJob): RemoteAutomationInfo {
     ...(lastRecord?.summary
       ? { lastRunSummary: truncateUtf8(lastRecord.summary, 500) }
       : {}),
-    ...(job.state.spentUsd !== undefined ? { spentUsd: job.state.spentUsd } : {}),
+    ...(measuredSpentUsd ? { spentUsd: measuredSpentUsd } : {}),
+    ...(estimatedSpentUsd ? { estimatedSpentUsd } : {}),
   };
 }
 
@@ -1596,6 +1687,9 @@ async function getAutomationForRemote(input: {
   const history: RemoteAutomationRunRecord[] = [];
   let usedBytes = 2;
   for (const record of [...job.history].reverse().slice(0, MAX_REMOTE_AUTOMATION_HISTORY)) {
+    // Per-pass honest split, mirroring toRemoteAutomation: costUsd measured
+    // only, estimatedCostUsd the estimate-only remainder.
+    const estimatedCostUsd = usdRemainder(record.costUsd, record.measuredCostUsd);
     const item: RemoteAutomationRunRecord = {
       iteration: record.iteration,
       runId: record.runId,
@@ -1603,7 +1697,8 @@ async function getAutomationForRemote(input: {
       ...(record.finishedAt ? { finishedAt: record.finishedAt } : {}),
       status: record.status,
       ...(record.summary ? { summary: truncateUtf8(record.summary, 1000) } : {}),
-      ...(record.costUsd !== undefined ? { costUsd: record.costUsd } : {}),
+      ...(record.measuredCostUsd ? { costUsd: record.measuredCostUsd } : {}),
+      ...(estimatedCostUsd ? { estimatedCostUsd } : {}),
       ...(record.stopReason ? { stopReason: record.stopReason } : {}),
     };
     const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;

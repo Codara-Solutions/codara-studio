@@ -10793,7 +10793,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   const peerCommsAcquired = watchPeerComms
     ? await acquirePeerCommsWatcher(run).catch(() => false)
     : false;
-  let result: { exitCode: number; error?: string };
+  let result: { exitCode: number; error?: string; costUsd?: number };
   try {
     result = usePiWorkerHarness
       ? await runPiWorkerSession({
@@ -10842,6 +10842,13 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   finishedAttempt.finishedAt = finishedAt;
   finishedAttempt.exitCode = result.exitCode;
   finishedAttempt.error = result.error;
+  // Measured spend, when the session transport reported one. Recorded even on
+  // failures — the tokens were spent — and folded into the run's
+  // measuredWorkerCostUsd by the cost rollup, which then skips this attempt
+  // in the placeholder estimate.
+  if (typeof result.costUsd === "number" && Number.isFinite(result.costUsd) && result.costUsd > 0) {
+    finishedAttempt.costUsd = roundCost(result.costUsd);
+  }
   // Classify the failure at the one point every worker session funnels through,
   // so the retry path can branch on a kind instead of re-reading error prose.
   finishedAttempt.failureKind = result.exitCode === 0 ? undefined : classifyWorkerFailure(result.error);
@@ -12664,6 +12671,15 @@ async function maybeQueueCliLaunchFallback({
         // The replacement joins the same batch, so it inherits the team marker
         // and the graph keeps showing the peer link across the runtime swap.
         peerComms: task.peerComms,
+        // Loom identity survives the retry: newestAttemptForNode judges a graph
+        // node by the newest attempt among tasks stamped with its id, so a
+        // fallback without loomNodeId would leave the node forever settled on
+        // the failed first attempt. The node-derived fence hints travel with
+        // the id: a fenced node's replacement must run under the same fence.
+        loomNodeId: task.loomNodeId,
+        accessHint: task.accessHint,
+        blockedToolsHint: task.blockedToolsHint,
+        collabMailDirHint: task.collabMailDirHint,
         createdBy: "system",
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -13662,13 +13678,15 @@ function recomputeRunCostRollups(run: RunState): void {
     }
   }
 
-  // Worker-side cost estimate (separate from the priced manager SparkCalls
-  // above). Live per-token usage from the Claude Code / Codex CLIs isn't
-  // ingested yet, so we can only multiply the price table by conservative,
-  // hardcoded token guesses per terminal attempt. These two constants are
-  // PLACEHOLDERS — replace them with measured input/output token counts once
-  // the worker-usage pipeline lands. Until then `estimatedWorkerCostUsd` is a
-  // directional figure for the CostPill split, not billed truth.
+  // Worker-side cost, split MEASURED vs ESTIMATED per attempt. An attempt
+  // whose transport reported real cost or token usage (Agent SDK result,
+  // Codex turn usage, Pi message_end usage — stamped as `attempt.costUsd` at
+  // session finish) rolls into `measuredWorkerCostUsd` and is excluded from
+  // the estimate below, so the two rollups never double-count one attempt.
+  // Attempts with no measurement (interactive pty CLIs, legacy runs) keep the
+  // old placeholder estimate: the price table times conservative hardcoded
+  // token guesses. `estimatedWorkerCostUsd` therefore remains a directional
+  // fallback figure, not billed truth.
   const estimatedInputTokens = 12_000;
   const estimatedOutputTokens = 4_000;
   const tasksById = new Map<string, WorkerTask>();
@@ -13676,7 +13694,16 @@ function recomputeRunCostRollups(run: RunState): void {
     tasksById.set(task.id, task);
   }
   let runWorkerTotal = 0;
+  let runMeasuredWorkerTotal = 0;
+  let runHasMeasuredWorker = false;
   for (const attempt of run.workerAttempts ?? []) {
+    // Measured attempts are done: `costUsd` is only ever stamped alongside
+    // `finishedAt`, so no in-flight gating is needed on this branch.
+    if (typeof attempt.costUsd === "number" && Number.isFinite(attempt.costUsd)) {
+      runMeasuredWorkerTotal += attempt.costUsd;
+      runHasMeasuredWorker = true;
+      continue;
+    }
     // Only count attempts that actually finished — `finishedAt` is set in
     // lockstep with the terminal attempt statuses below, so a missing
     // timestamp means the attempt is still in flight and has no cost yet.
@@ -13706,6 +13733,11 @@ function recomputeRunCostRollups(run: RunState): void {
     run.estimatedWorkerCostUsd = roundCost(runWorkerTotal);
   } else {
     delete run.estimatedWorkerCostUsd;
+  }
+  if (runHasMeasuredWorker) {
+    run.measuredWorkerCostUsd = roundCost(runMeasuredWorkerTotal);
+  } else {
+    delete run.measuredWorkerCostUsd;
   }
 }
 
@@ -15402,7 +15434,7 @@ async function runStructuredAutomationWorkerSession({
   command: string;
   sandboxed: boolean;
   extraWritableDirs: string[];
-}): Promise<{ exitCode: number; error?: string }> {
+}): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
   const runningTimestamp = new Date().toISOString();
   await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
   const transport = task.runtimePreference === "claude" ? "agent-sdk" : "app-server";
@@ -15459,7 +15491,11 @@ async function runStructuredAutomationWorkerSession({
         if (interruptedBeforeStart) nextKill();
       },
     });
-    return { exitCode: result.exitCode, error: result.error };
+    return {
+      exitCode: result.exitCode,
+      error: result.error,
+      ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}),
+    };
   } finally {
     activeWorkerProcesses.delete(attemptId);
   }
@@ -15701,6 +15737,30 @@ function piWorkerEventFailure(event: PiRpcEvent): string | null {
   return null;
 }
 
+// Per-turn provider usage from a Pi message_end event, using the same field
+// fallbacks as pi-turn.ts: `input` EXCLUDES what came from cache; reads and
+// writes are reported apart. Returns null when the event carried no usage.
+function piWorkerMessageUsage(
+  event: PiRpcEvent,
+): { input: number; output: number; cacheRead: number; cacheWrite: number } | null {
+  if (event.type !== "message_end") return null;
+  const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
+    ? event.message as Record<string, unknown>
+    : null;
+  const usage = message?.usage && typeof message.usage === "object" && !Array.isArray(message.usage)
+    ? message.usage as Record<string, unknown>
+    : null;
+  if (!usage) return null;
+  const count = (value: unknown): number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+  return {
+    input: count(usage.input ?? usage.inputTokens ?? usage.input_tokens),
+    output: count(usage.output ?? usage.outputTokens ?? usage.output_tokens),
+    cacheRead: count(usage.cacheRead ?? usage.cache_read ?? usage.cached),
+    cacheWrite: count(usage.cacheWrite ?? usage.cache_write ?? usage.cacheCreation),
+  };
+}
+
 async function waitForPiWorkerTurn(client: PiRpcClient, prompt: string): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
@@ -15796,7 +15856,7 @@ async function runPiWorkerSession({
   cwd: string;
   promptText: string;
   command: string;
-}): Promise<{ exitCode: number; error?: string }> {
+}): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const displayPtyRecovered = await ensurePiWorkerDisplayPty(
     attemptId,
@@ -15831,6 +15891,27 @@ async function runPiWorkerSession({
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
+  // Real provider token usage summed across the session's message_end events,
+  // priced at the end so the attempt records a MEASURED cost and the run's
+  // rollup can skip its placeholder estimate.
+  const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  let sawUsage = false;
+  const measuredPiCostUsd = (): number =>
+    sawUsage
+      ? estimateWorkerCostUsd({
+          runtime: task.runtimePreference,
+          modelHint: model ?? task.modelHint,
+          usage: {
+            // The pricer subtracts cache reads from input_tokens before
+            // applying the full input rate, so hand it the cache-inclusive
+            // total. Cache writes have no table rate of their own and are
+            // folded in at the plain input rate.
+            input_tokens: usageTotals.input + usageTotals.cacheRead + usageTotals.cacheWrite,
+            output_tokens: usageTotals.output,
+            cache_read_input_tokens: usageTotals.cacheRead,
+          },
+        })
+      : 0;
   // Mode-600 MCP roster written for this attempt; removed with the session.
   let mcpConfigPath: string | null = null;
   let logQueue: Promise<void> = Promise.resolve();
@@ -16007,6 +16088,14 @@ async function runPiWorkerSession({
         }
         assistantBudget = paneStreamBudget();
         assistantPaneCut = false;
+        const usage = piWorkerMessageUsage(event);
+        if (usage) {
+          sawUsage = true;
+          usageTotals.input += usage.input;
+          usageTotals.output += usage.output;
+          usageTotals.cacheRead += usage.cacheRead;
+          usageTotals.cacheWrite += usage.cacheWrite;
+        }
         const failure = piWorkerEventFailure(event);
         if (failure) paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
       } else if (event.type === "auto_retry_start") {
@@ -16037,14 +16126,32 @@ async function runPiWorkerSession({
     applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
     paintPiWorkerReportOutcome(paint, report);
     await logQueue.catch(() => undefined);
-    return { exitCode: 0 };
+    const successCost = measuredPiCostUsd();
+    return { exitCode: 0, ...(successCost > 0 ? { costUsd: successCost } : {}) };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // A late error must not fail work that already finished: when the worker's
+    // own final report is on disk with a non-failed status (observed live: a
+    // provider "servers overloaded" arriving during shutdown, long after the
+    // validated report), writeAutoFailureReport preserves it and this session
+    // settles as succeeded so the report's verdict decides the node.
+    const failureWrite = await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => null);
+    if (failureWrite?.preservedExisting) {
+      const report = await readWorkerReport(paths.finalReportJson).catch(() => null);
+      if (report && (report.status === "complete" || report.status === "partial")) {
+        applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
+        paint(`\r\n\x1b[33m  !  Late worker error ignored (final report already written): ${piWorkerSafeText(message, 700)}\x1b[0m\r\n`);
+        paintPiWorkerReportOutcome(paint, report);
+        await logQueue.catch(() => undefined);
+        const preservedCost = measuredPiCostUsd();
+        return { exitCode: 0, ...(preservedCost > 0 ? { costUsd: preservedCost } : {}) };
+      }
+    }
     applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
     paint(`\r\n\x1b[31m  ×  PI WORKER STOPPED\x1b[0m\r\n  ${message}\r\n`);
-    await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => undefined);
     await logQueue.catch(() => undefined);
-    return { exitCode: 1, error: message };
+    const failureCost = measuredPiCostUsd();
+    return { exitCode: 1, error: message, ...(failureCost > 0 ? { costUsd: failureCost } : {}) };
   } finally {
     unsubscribe?.();
     activeWorkerProcesses.delete(attemptId);

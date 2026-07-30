@@ -334,13 +334,45 @@ export function detectFatalWorkerRuntimeError(
 // Write a synthetic final-report so the autopilot review loop can consume the
 // failure as worker evidence (the manager will see status=failed and decide
 // whether to retry, route to a different runtime, or ask the user).
+//
+// A worker's own non-failed report always wins: a provider error that lands
+// AFTER the worker already wrote a complete/partial/blocked final report
+// (observed live: a Codex "servers overloaded" during session shutdown, 97s
+// after the validated report) must not replace the finished work with a
+// synthetic failure. In that case the late error is appended to the existing
+// report's risks and `preservedExisting: true` tells the caller the worker's
+// verdict still stands.
 export async function writeAutoFailureReport(
   paths: WorkerArtifactPaths,
   task: WorkerTask,
   reason: string,
   options?: { interrupted?: boolean },
-): Promise<void> {
+): Promise<{ preservedExisting: boolean }> {
   const interrupted = options?.interrupted === true;
+  try {
+    const raw = await fs.readFile(paths.finalReportJson, "utf8");
+    const existing = JSON.parse(raw) as Record<string, unknown>;
+    const status = existing?.status;
+    if (status === "complete" || status === "partial" || status === "blocked") {
+      const risks = Array.isArray(existing.risks)
+        ? existing.risks.filter((item): item is string => typeof item === "string")
+        : [];
+      risks.push(
+        interrupted
+          ? `A stop arrived after this report was written: ${reason}.`
+          : `A late ${task.runtimePreference} runtime error arrived after this report was written and was ignored: ${reason}.`,
+      );
+      existing.risks = risks;
+      try {
+        await fs.writeFile(paths.finalReportJson, JSON.stringify(existing, null, 2), "utf8");
+      } catch {
+        /* the untouched on-disk report still stands */
+      }
+      return { preservedExisting: true };
+    }
+  } catch {
+    /* absent, unreadable, or unparseable: write the synthetic failure below */
+  }
   const report: WorkerReport = {
     status: "failed",
     summary: interrupted
@@ -364,6 +396,7 @@ export async function writeAutoFailureReport(
   } catch {
     /* if we can't write the report the watchdog still resolves on pty exit */
   }
+  return { preservedExisting: false };
 }
 
 // Send a multi-line prompt as a single bracketed paste (so Ink-based TUIs

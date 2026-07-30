@@ -210,7 +210,55 @@ async function main() {
     productionSource.includes("if (run.automationId) {") &&
       productionSource.includes("cannot be queued from the phone") &&
       // and the phone is told which runs those are
-      productionSource.includes("...(run.automationId ? { automated: true } : {})"),
+      productionSource.includes(
+        "...(run.automationId ? { automated: true, automationId: run.automationId } : {})",
+      ),
+  );
+  check(
+    "run summary carries the owning automation's identity, gated on automationId",
+    // automationName/iteration come from the scheduler join and must be
+    // impossible on a plain chat: every spread is guarded by run.automationId.
+    productionSource.includes("automationName: truncateUtf8(automation.name, 200)") &&
+      productionSource.includes("...(run.automationId && automation?.name") &&
+      productionSource.includes("...(run.automationId && automation?.iteration !== undefined") &&
+      productionSource.includes("{ iteration: automation.iteration }"),
+  );
+  check(
+    "automation rows carry a summary-level model chip, attempt model over task hint",
+    productionSource.includes(
+      "[...run.workerAttempts].reverse().find((attempt) => attempt.model)?.model",
+    ) &&
+      productionSource.includes(
+        "[...run.workerTasks].reverse().find((task) => task.modelHint)?.modelHint",
+      ) &&
+      productionSource.includes("...(automationModel ? { model: truncateUtf8(automationModel, 120) } : {})"),
+  );
+  check(
+    "the automation join reads the job store once per listing, not once per run",
+    productionSource.includes("sliced.some((run) => run.automationId)") &&
+      productionSource.includes("buildAutomationJoin(await listJobs()"),
+  );
+  check(
+    "remote costUsd is measured spend only and the estimate travels apart",
+    // costUsd = totalCostUsd + measuredWorkerCostUsd; estimatedWorkerCostUsd
+    // may only ever appear as estimatedCostUsd. The old combined sum
+    // (totalCostUsd + estimatedWorkerCostUsd) must be gone.
+    productionSource.includes("(run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0)") &&
+      productionSource.includes("...(estimatedCostUsd ? { estimatedCostUsd } : {})") &&
+      !productionSource.includes("(run.totalCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0)"),
+  );
+  check(
+    "automation spend splits measured spentUsd from the estimate remainder",
+    productionSource.includes("usdRemainder(job.state.spentUsd, measuredSpentUsd)") &&
+      productionSource.includes("...(measuredSpentUsd ? { spentUsd: measuredSpentUsd } : {})") &&
+      productionSource.includes("...(estimatedSpentUsd ? { estimatedSpentUsd } : {})") &&
+      productionSource.includes("...(record.measuredCostUsd ? { costUsd: record.measuredCostUsd } : {})"),
+  );
+  check(
+    "remote worker rows fall back to the task's model hint and carry effort/runtimeState",
+    productionSource.includes("attempt.model || task?.modelHint") &&
+      productionSource.includes("...(task?.effortHint ? { effort: truncateUtf8(task.effortHint, 40) } : {})") &&
+      productionSource.includes("{ runtimeState: truncateUtf8(attempt.runtimeState, 200) }"),
   );
   check(
     "concurrent session deletes serialize per runtime, not per session",

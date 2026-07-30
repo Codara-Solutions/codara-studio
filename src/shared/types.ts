@@ -1633,6 +1633,17 @@ export interface RunState {
    */
   estimatedWorkerCostUsd?: number;
   /**
+   * MEASURED worker-side spend: the sum of `WorkerAttempt.costUsd` across
+   * attempts whose transport reported real cost or token usage. Attempts that
+   * contribute here are excluded from `estimatedWorkerCostUsd`, so the two
+   * fields never double-count the same attempt. Kept separate from
+   * `totalCostUsd` because that field means "metered manager API spend" to
+   * the desktop CostPill; a worker on a flat-rate CLI subscription has an
+   * API-equivalent cost, not a billed one. Recomputed by run-store's cost
+   * rollup; undefined until at least one attempt carries a measured cost.
+   */
+  measuredWorkerCostUsd?: number;
+  /**
    * Per-run checkpoint history. A checkpoint pairs a chat-history pointer
    * (humanMessages length at the time the checkpoint was created) with a git
    * commit on the hidden `refs/spark/runs/{runId}` shadow ref that captures the
@@ -2523,6 +2534,16 @@ export interface WorkerAttempt {
   sandboxMergedBack?: boolean;
   error?: string;
   /**
+   * Measured USD spend for this attempt, recorded at session finish when the
+   * transport reported it: the Claude Agent SDK result's `total_cost_usd`, or
+   * real provider token usage (Pi message_end usage, Codex turn usage) priced
+   * through the model price table. Absent for pty attempts (no structured
+   * stream), for transports that reported nothing, and for attempts recorded
+   * before this field existed — those fall back to the run-level
+   * `estimatedWorkerCostUsd` placeholder estimate.
+   */
+  costUsd?: number;
+  /**
    * Classification of `error`, written whenever an attempt is recorded as
    * failed. Purely additive: absent for successful attempts, for runs written
    * before the taxonomy existed, and for error text no pattern claims.
@@ -3322,8 +3343,10 @@ export interface StopConditions {
   // it to DEFAULT_AGENT_MAX_ITERATIONS when the user leaves it blank.
   maxIterations?: number;
   // Est. spend cap in USD, compared against the accumulated
-  // (run.totalCostUsd + run.estimatedWorkerCostUsd) across iterations.
-  // Approximate — labelled "est." in the UI.
+  // (run.totalCostUsd + run.measuredWorkerCostUsd + run.estimatedWorkerCostUsd)
+  // across iterations. Measured spend is preferred per attempt; the estimate
+  // only fills in for attempts that reported nothing. Approximate — labelled
+  // "est." in the UI.
   budgetUsd?: number;
   untilTestsPass?: boolean; // `testCommand` exits 0
   untilGitClean?: boolean; // `git status --porcelain` empty in the run cwd
@@ -3666,7 +3689,8 @@ export interface AutomationRunRecord {
   finishedAt?: string;
   status: RunStatus; // terminal status of the iteration (or "running" while live)
   summary?: string; // last spark message / review summary; drives {{lastOutput}}
-  costUsd?: number; // (totalCostUsd + estimatedWorkerCostUsd) delta for this pass
+  costUsd?: number; // (totalCostUsd + measuredWorkerCostUsd + estimatedWorkerCostUsd) delta for this pass
+  measuredCostUsd?: number; // measured-only portion of costUsd (totalCostUsd + measuredWorkerCostUsd delta)
   stopReason?: AutomationStopReason; // set only on the final record when stopping
   continuationSource?: AutomationContinuationSource;
 }
@@ -3676,7 +3700,8 @@ export interface AutomationState {
   status: AutomationStatus;
   iteration: number; // count of iterations STARTED
   currentRunId?: string; // THE live worker the Hub resolves -> getRun
-  spentUsd?: number; // running est. budget tally
+  spentUsd?: number; // running est. budget tally (measured + estimated)
+  measuredSpentUsd?: number; // measured-only portion of spentUsd
   nextFireAt?: string; // cadence/cron: ISO; drives the left-list sub-line
   lastStopReason?: AutomationStopReason;
   pendingNextPrompt?: string; // agent-supplied next instruction (from the tool)

@@ -76,7 +76,11 @@ export default function RunPeek({
         </span>
         {run && (
           <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted)" }}>
-            {fmtUsd((run.totalCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0))}
+            {fmtUsd(
+              (run.totalCostUsd ?? 0) +
+                (run.measuredWorkerCostUsd ?? 0) +
+                (run.estimatedWorkerCostUsd ?? 0),
+            )}
           </span>
         )}
         <button

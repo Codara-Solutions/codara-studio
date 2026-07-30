@@ -29,6 +29,7 @@
     "test:pi-turn": "node scripts/test-pi-turn.cjs && node scripts/test-pi-cora-extension.cjs",
     "test:deep-search": "node scripts/test-deep-search.cjs",
     "test:failure-taxonomy": "node scripts/test-failure-taxonomy.cjs",
+    "test:late-failure-preservation": "node scripts/test-late-failure-preservation.cjs",
     "test:repeat-guard": "node scripts/test-repeat-guard.cjs",
     "smoke:pi-live": "node scripts/smoke-pi-live.cjs",
     "smoke:pi-worker-live": "node scripts/smoke-pi-worker-live.cjs",

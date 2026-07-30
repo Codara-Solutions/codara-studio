@@ -172,13 +172,17 @@ async function main() {
   // Fire the watcher's completion event for a run, after setting its terminal
   // status / summary / cost. Waits a beat first so the async watcher
   // subscription (await import) is registered.
-  const completeRun = async (runId, { status = "complete", summary, cost = 0 } = {}) => {
+  const completeRun = async (
+    runId,
+    { status = "complete", summary, cost = 0, measuredWorkerCost = 0, estimatedWorkerCost = 0 } = {},
+  ) => {
     await sleep(40);
     const run = L.runs.get(runId);
     if (!run) throw new Error(`completeRun: unknown run ${runId}`);
     run.status = status;
     run.totalCostUsd = cost;
-    run.estimatedWorkerCostUsd = 0;
+    run.measuredWorkerCostUsd = measuredWorkerCost;
+    run.estimatedWorkerCostUsd = estimatedWorkerCost;
     if (summary !== undefined) run.humanMessages = [{ author: "spark", kind: "note", message: summary, createdAt: new Date().toISOString() }];
     for (const h of [...L.subs]) h({ runId });
     await sleep(40);
@@ -306,6 +310,51 @@ async function main() {
     const st = await getState(job.id);
     ok("budget cap halted the loop", st.status === "stopped" && st.lastStopReason === "budget");
     ok("budget halt counted both cost fields (spent >= cap)", (st.spentUsd ?? 0) >= 1.0);
+  }
+
+  // ── 4b) measured vs estimated spend are tallied apart per pass ──
+  // The remote payload's honesty contract rides on this split: spentUsd /
+  // costUsd on the wire may only carry MEASURED spend (metered manager calls +
+  // worker attempts whose transport reported real cost), while the placeholder
+  // estimate travels in estimated* fields. The combined figure still feeds the
+  // budget cap.
+  {
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const job = await sched.createJob({
+      name: "split",
+      trigger: { kind: "manual" },
+      loop: { kind: "count", stop: { maxIterations: 2 }, isolate: true },
+      input: baseInput,
+      prompt: { template: "split {{iteration}}" },
+    });
+    await sched.runJobNow(job.id);
+    // Pass 0: $0.10 metered manager + $0.25 measured worker + $0.40 estimate-only.
+    let rid = nextPending();
+    L.pending.length = 0;
+    await completeRun(rid, {
+      summary: "pass 0",
+      cost: 0.1,
+      measuredWorkerCost: 0.25,
+      estimatedWorkerCost: 0.4,
+    });
+    // Pass 1: estimate only, no measured spend at all.
+    rid = nextPending();
+    L.pending.length = 0;
+    await completeRun(rid, { summary: "pass 1", estimatedWorkerCost: 0.5 });
+    const fresh = await sched.getJob(job.id);
+    const [rec0, rec1] = fresh.history.slice(-2);
+    ok("pass record keeps the combined figure for the budget cap", Math.abs(rec0.costUsd - 0.75) < 1e-9);
+    ok("pass record tallies the measured portion apart", Math.abs(rec0.measuredCostUsd - 0.35) < 1e-9);
+    ok(
+      "an estimate-only pass records no measured figure",
+      Math.abs(rec1.costUsd - 0.5) < 1e-9 && rec1.measuredCostUsd === undefined,
+    );
+    ok(
+      "state splits measuredSpentUsd from the combined spentUsd",
+      Math.abs(fresh.state.spentUsd - 1.25) < 1e-9 &&
+        Math.abs(fresh.state.measuredSpentUsd - 0.35) < 1e-9,
+    );
   }
 
   // ── 5) blocked iteration HOLDS the loop (no advance until it completes) ──

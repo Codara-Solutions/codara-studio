@@ -23,6 +23,7 @@ import {
 } from "@shared/types";
 import { appendHistory, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
 import { automationSourceKey, publish, rearm } from "../notify";
+import { appendEvent, subscribeToEvents } from "./event-log";
 import { planLoomLayers, renderNodePrompt, sinkNodeIds } from "./loom-graph";
 // Shell-check / git-clean probes live in loom-predicates so guard nodes (run-store)
 // and these StopConditions settle identically without a run-store↔automation-loop
@@ -38,7 +39,7 @@ import { gitClean, runShellCheck } from "./loom-predicates";
 // It is a SEPARATE registry from scheduler.ts's `armed` map: pausing a loop
 // never disarms its trigger and vice-versa. The driver is loaded lazily by the
 // scheduler (await import) so its heavy transitive deps (run-store) stay out of
-// cold start; run-store / event-log are themselves lazy-imported per call.
+// cold start; run-store itself remains lazy-imported per call.
 //
 // Agent-driven loops: the model decides whether to keep going either via the
 // `codara_request_next_iteration` MCP tool (recorded through recordAgentSignal)
@@ -184,7 +185,6 @@ async function emitIteration(
   status: AutomationStatus,
 ): Promise<void> {
   try {
-    const { appendEvent } = await import("./event-log");
     await appendEvent({
       workspaceId: "",
       type: "automation.iteration",
@@ -224,6 +224,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         status: "idle",
         iteration: 0,
         spentUsd: 0,
+        measuredSpentUsd: 0,
         currentRunId: undefined,
         nextFireAt: undefined,
         lastStopReason: undefined,
@@ -523,6 +524,7 @@ export async function runNow(id: string): Promise<RunState> {
       iteration: 0,
       currentRunId: undefined,
       spentUsd: 0,
+      measuredSpentUsd: 0,
       nextFireAt: undefined,
       lastStopReason: undefined,
       pendingNextPrompt: undefined,
@@ -844,7 +846,6 @@ function watchTerminal(id: string, runId: string): void {
   if (watchedRuns.has(runId)) return;
   watchedRuns.add(runId);
   void (async () => {
-    const { subscribeToEvents } = await import("./event-log");
     const unsub = subscribeToEvents((event) => {
       if (event.runId !== runId) return;
       void (async () => {
@@ -1120,12 +1121,23 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
   // cost accounting + history finalize ONCE, keyed on the record's finishedAt,
   // so the budget tally is never double-counted on re-entry.
   let spentUsd = job.state.spentUsd ?? 0;
+  let measuredSpentUsd = job.state.measuredSpentUsd ?? 0;
   if (!prevRec?.finishedAt) {
-    const runCost = (run.totalCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0);
+    // Measured spend (metered manager calls + worker attempts whose transport
+    // reported real cost) tallied apart from the combined total so the remote
+    // payload can report real vs estimated honestly. The budget cap keeps
+    // consuming the combined figure: measured where an attempt has it, the
+    // placeholder estimate where it does not (the rollup never double-counts).
+    const measuredRunCost = (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0);
+    const runCost = measuredRunCost + (run.estimatedWorkerCostUsd ?? 0);
     // Same-run loops accumulate cost on ONE run (cumulative); isolate loops sum
     // per-run costs. Either way spentUsd ends up the true running total.
     const passCost = job.loop.isolate ? runCost : Math.max(0, runCost - spentUsd);
+    const measuredPassCost = job.loop.isolate
+      ? measuredRunCost
+      : Math.max(0, measuredRunCost - measuredSpentUsd);
     spentUsd = job.loop.isolate ? spentUsd + runCost : runCost;
+    measuredSpentUsd = job.loop.isolate ? measuredSpentUsd + measuredRunCost : measuredRunCost;
     await appendHistory(
       id,
       {
@@ -1136,9 +1148,10 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
         status: run.status,
         summary,
         costUsd: passCost,
+        ...(measuredPassCost > 0 ? { measuredCostUsd: measuredPassCost } : {}),
         continuationSource: prevRec?.continuationSource,
       },
-      { spentUsd },
+      { spentUsd, measuredSpentUsd },
     );
   }
 
