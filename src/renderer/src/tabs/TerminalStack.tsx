@@ -2509,14 +2509,17 @@ function forEachLeaf(node: PaneNode, fn: (l: TerminalLeaf) => void): void {
 // A runtimeState that means the agent's chip should stay visible in the pane
 // (vs "done", which is the post-exit terminal state that lets the chip be torn
 // down by lifecycle). Covers the live states (launching / working / blocked /
-// idle) plus "error" — a crashed pane must keep showing its red "exited" chip
-// until the user closes the pane, not silently drop the badge.
+// idle / stalled) plus "error" — a crashed pane must keep showing its red
+// "exited" chip until the user closes the pane, not silently drop the badge.
+// "stalled" belongs here for the same reason: the process has NOT exited, so
+// hiding its chip would be the exact silence the state exists to break.
 function isLiveRuntimeState(state: RuntimeState | undefined): boolean {
   return (
     state === "launching" ||
     state === "working" ||
     state === "blocked" ||
     state === "idle" ||
+    state === "stalled" ||
     state === "error"
   );
 }
@@ -2585,6 +2588,21 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
   if (runtime === "blocked") {
     return {
       status: "needs you",
+      dot: "var(--warn)",
+      dotGlow: "0 0 9px color-mix(in oklch, var(--warn) 45%, transparent)",
+      pulse: false,
+      frame: "warn",
+    };
+  }
+  if (runtime === "stalled") {
+    // We have heard nothing from this agent for long enough that "working" would
+    // be a claim we cannot support. Amber like "needs you" because it wants
+    // attention, but STEADY and worded as the absence it is — the pane that
+    // sat on a pulsing "working" for an hour after its provider died is exactly
+    // what this state exists to prevent. Not red: the process has not died, and
+    // a stalled worker that resumes flips straight back to working.
+    return {
+      status: "no response",
       dot: "var(--warn)",
       dotGlow: "0 0 9px color-mix(in oklch, var(--warn) 45%, transparent)",
       pulse: false,

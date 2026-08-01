@@ -14,6 +14,7 @@ import type {
   RunState,
   StepState,
   WorkerArtifactPaths,
+  WorkerHandoffArtifact,
   WorkerTask,
 } from "@shared/types";
 import { effectiveChatMode } from "@shared/chat-policy";
@@ -66,6 +67,7 @@ export function renderWorkerPrompt({
   task,
   paths,
   settings,
+  priorHandoffs,
 }: {
   cwd: string;
   run: RunState;
@@ -73,11 +75,31 @@ export function renderWorkerPrompt({
   task: WorkerTask;
   paths: WorkerArtifactPaths;
   settings: AppSettings;
+  /** Reusable artifacts earlier attempts in this run left behind. */
+  priorHandoffs?: WorkerHandoffArtifact[];
 }): string {
   if (task.taskClass === "verifier") {
-    return renderVerifierWorkerPrompt({ cwd, run, step, task, paths, settings });
+    return renderVerifierWorkerPrompt({ cwd, run, step, task, paths, settings, priorHandoffs });
   }
-  return renderImplementationWorkerPrompt({ cwd, run, step, task, paths, settings });
+  return renderImplementationWorkerPrompt({ cwd, run, step, task, paths, settings, priorHandoffs });
+}
+
+/**
+ * Hand a worker the work its predecessors already did, instead of letting it
+ * pay to rediscover it. Rendered high in the prompt, right after the task, so
+ * it is read before any plan of attack is formed.
+ */
+function renderPriorHandoffSection(priorHandoffs: WorkerHandoffArtifact[] | undefined): string[] {
+  if (!priorHandoffs?.length) return [];
+  const lines = [
+    "",
+    "## WORK ALREADY DONE FOR YOU",
+    "Earlier attempts in this run left these artifacts on disk on purpose. INSPECT THEM BEFORE PLANNING: they usually contain the expensive part (a validated dry run, a computed mapping, a scratch harness) and re-deriving that from scratch is pure waste. Verify an artifact still matches the current tree before you rely on it, and say in your report which ones you reused.",
+  ];
+  for (const artifact of priorHandoffs) {
+    lines.push(`- ${artifact.path}`, `    what: ${artifact.description}`, `    reuse: ${artifact.reuse}`);
+  }
+  return lines;
 }
 
 function taskContextText(step: StepState | undefined, task: WorkerTask): string {
@@ -481,6 +503,7 @@ function renderImplementationWorkerPrompt({
   task,
   paths,
   settings,
+  priorHandoffs,
 }: {
   cwd: string;
   run: RunState;
@@ -488,6 +511,7 @@ function renderImplementationWorkerPrompt({
   task: WorkerTask;
   paths: WorkerArtifactPaths;
   settings: AppSettings;
+  priorHandoffs?: WorkerHandoffArtifact[];
 }): string {
   const lines: string[] = [];
   const promptProfile = loadManagerPromptProfile();
@@ -504,6 +528,7 @@ function renderImplementationWorkerPrompt({
     task.title,
     "",
     task.description.trim(),
+    ...renderPriorHandoffSection(priorHandoffs),
   );
 
   if (step) {
@@ -526,6 +551,21 @@ function renderImplementationWorkerPrompt({
     "## SPEC EXACTNESS",
     "- Treat exact names, exported function shapes, JSON keys, sample output, punctuation, and decimal precision in the task as tests. If the prompt gives an example like `margin 80.0%`, match that formatting exactly unless the task explicitly says the example is illustrative.",
     "- Before reporting `complete`, run or construct a small probe that checks the exact public contract you implemented, and include the command/output in `proof[]`.",
+  );
+
+  lines.push(
+    "",
+    "## WHEN THE SPEC ITSELF DOES NOT WORK",
+    // A worker that proves the approved plan unbuildable and then stops has
+    // done the expensive half of the job and thrown it away. Observed live: two
+    // workers in a row spent 48 minutes and ~$7 proving the same approved
+    // 16-commit split did not compile, each reporting `blocked` with zero
+    // commits, before a third was allowed to apply the one-line repair and
+    // finish. The repair was never the risky part; re-deriving it twice was.
+    "- If the task as written cannot be satisfied because the SPEC is wrong (it does not compile, the ordering is impossible, a boundary splits one compile unit), you may apply the SMALLEST repair that makes it work and then finish the task. Do not stop at proving it broken.",
+    "- The repair allowance is bounded and is not a licence to redesign. It must be: the minimum change that clears the specific proven blocker; inside the task's stated intent and boundaries; mechanically verified after the change by the same commands the task already requires; and fully disclosed.",
+    "- Disclosure is mandatory. Record the repair in `risks[]` as `PLAN AMENDED: <what the spec said> -> <what you did> because <the proof it could not work>`, put the failing evidence in `proof[]`, and report `partial` rather than `complete` so the manager reviews the amendment.",
+    "- Stop and report `blocked` only when the repair would exceed that bound: a different approach, work outside your boundaries, discarding or rewriting someone else's changes, or anything irreversible. Then say precisely what you proved, what the minimal repair would be, and leave every artifact you built in place for whoever continues.",
   );
 
   const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
@@ -626,10 +666,21 @@ function renderImplementationWorkerPrompt({
         proof: ["Concrete evidence that the task is done."],
         risks: ["Known risk or empty array."],
         followups: ["Useful next task or empty array."],
+        handoff: [
+          {
+            path: "/absolute/path/you/left/on/disk",
+            description: "What it is and what it already proves.",
+            reuse: "Exactly how the next worker should reuse it, including commands to re-run.",
+          },
+        ],
       },
       null,
       2,
     ),
+    // Whoever runs next is handed this list verbatim, before they plan. A
+    // blocked or partial attempt that keeps its scratch harness to itself
+    // forces the next worker to buy the same expensive dry run twice.
+    "`handoff[]` is how you stop your successor from redoing your work. Whenever you leave reusable work on disk - a scratch worktree, a dry-run plan, a computed mapping, a probe script - list it there with an ABSOLUTE path. It is close to mandatory when you report `blocked` or `partial`: those are exactly the states where someone continues from where you stopped. Use an empty array only when you genuinely left nothing behind.",
   );
 
   return lines.join("\n");
@@ -642,6 +693,7 @@ function renderVerifierWorkerPrompt({
   task,
   paths,
   settings,
+  priorHandoffs,
 }: {
   cwd: string;
   run: RunState;
@@ -649,6 +701,7 @@ function renderVerifierWorkerPrompt({
   task: WorkerTask;
   paths: WorkerArtifactPaths;
   settings: AppSettings;
+  priorHandoffs?: WorkerHandoffArtifact[];
 }): string {
   const lines: string[] = [];
   const promptProfile = loadManagerPromptProfile();
@@ -674,6 +727,7 @@ function renderVerifierWorkerPrompt({
     task.title,
     "",
     task.description.trim(),
+    ...renderPriorHandoffSection(priorHandoffs),
   );
 
   if (step) {

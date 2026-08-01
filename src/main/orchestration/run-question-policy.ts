@@ -1,6 +1,7 @@
 import type {
   AutopilotStatus,
   HumanRunMessage,
+  PlanValidation,
   RunAssumption,
   RunBlocker,
   RunQuestionCategory,
@@ -230,6 +231,57 @@ export function blindApprovalAskProblem(
     "it (for a commit plan, each commit's title and the files it touches). If the list " +
     "is long, compress each item to one line but keep every item; never a bare count."
   );
+}
+
+/** Longest evidence string worth persisting on a question. */
+const MAX_PLAN_VALIDATION_EVIDENCE = 600;
+
+/**
+ * Require every plan_approval ask to say whether its plan was actually proven.
+ *
+ * Deliberately NOT a heuristic that guesses which plans are mechanically
+ * checkable — that guess would be wrong in both directions. The manager states
+ * it, once, and "not_applicable" is a cheap and legitimate answer for a
+ * judgment call. What is no longer possible is staying silent, which is how a
+ * 16-commit split that did not compile reached the user wearing the authority
+ * of six agents and a consensus vote.
+ *
+ * Returns a retry instruction, or null when the ask carries a usable claim.
+ */
+export function planValidationAskProblem(
+  category: RunQuestionCategory | undefined,
+  planValidation: PlanValidation | undefined,
+): string | null {
+  if (category !== "plan_approval") return null;
+  if (!planValidation) {
+    return (
+      "plan_approval rejected: the ask does not say whether this plan was verified. " +
+      "Call codara_ask_user again with planValidation set. Use status 'validated' when you " +
+      "mechanically proved the plan end to end (dry run in a scratch worktree, compile/test at " +
+      "each step) and put what you ran in evidence; 'unvalidated' when such a check was possible " +
+      "but you did not run it; 'not_applicable' when there is no mechanical oracle, with evidence " +
+      "saying why. Prefer actually validating first: a plan the user approves is a plan they " +
+      "become responsible for, and an unbuildable one costs far more to discover after approval."
+    );
+  }
+  if (!planValidation.evidence.trim()) {
+    return (
+      `plan_approval rejected: planValidation.status='${planValidation.status}' carries no evidence. ` +
+      "Supply evidence naming the exact commands run and their results, or - for 'not_applicable' - " +
+      "why no mechanical check exists for this plan."
+    );
+  }
+  return null;
+}
+
+/** Normalize an untrusted planValidation payload, or null when unusable. */
+export function parsePlanValidation(raw: unknown): PlanValidation | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const status = record.status;
+  if (status !== "validated" && status !== "unvalidated" && status !== "not_applicable") return null;
+  const evidence = typeof record.evidence === "string" ? record.evidence.trim() : "";
+  return { status, evidence: evidence.slice(0, MAX_PLAN_VALIDATION_EVIDENCE) };
 }
 
 export function inferRunQuestionCategory(

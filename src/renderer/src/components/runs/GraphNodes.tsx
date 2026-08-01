@@ -959,12 +959,16 @@ export const WorkerNode = React.memo(function WorkerNode({
         ? "ready"
         : runtimeState === "working"
           ? "working"
-          : runtimeState === "error"
-            // Matches the terminal pane chip. The raw state name ("error") is
-            // vaguer than what happened: the worker's process died on its own,
-            // which is never a sanctioned end since only Cora may stop a worker.
-            ? "crashed"
-            : runtimeState
+          : runtimeState === "stalled"
+            // Names the absence, not a state of the agent: Cora has heard
+            // nothing from it for long enough that "working" would be a guess.
+            ? "no response"
+            : runtimeState === "error"
+              // Matches the terminal pane chip. The raw state name ("error") is
+              // vaguer than what happened: the worker's process died on its own,
+              // which is never a sanctioned end since only Cora may stop a worker.
+              ? "crashed"
+              : runtimeState
       : queued
         ? "queued"
         : attempt?.status === "succeeded"
@@ -1133,9 +1137,11 @@ export const WorkerNode = React.memo(function WorkerNode({
               ? stateColor
               : runtimeState === "error" || blocked
                 ? "var(--danger)"
-                : runtimeState === "idle" || runtimeState === "done"
-                  ? "var(--ok)"
-                  : stateColor,
+                : runtimeState === "stalled"
+                  ? "var(--warn)"
+                  : runtimeState === "idle" || runtimeState === "done"
+                    ? "var(--ok)"
+                    : stateColor,
             fontFamily: "var(--font-sans)",
             fontSize: 9.5,
             fontWeight: 600,

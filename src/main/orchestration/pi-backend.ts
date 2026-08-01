@@ -23,6 +23,7 @@ import {
   type PiThinkingLevel,
 } from "./pi-runtime";
 import { PiRpcClient } from "./pi-rpc-client";
+import { classifyTurnLiveness, isLongPollToolName } from "./agent-liveness";
 import { piBackendSessionIdentityMatches } from "./pi-session-identity";
 import { frontierTurnHasRequiredCompletion, PiTurnAccumulator } from "./pi-turn";
 import {
@@ -66,7 +67,12 @@ interface PendingPiBackendSession extends PiProcessOwner {}
 const SESSIONS = new Map<string, PiBackendSession>();
 const PENDING_SESSIONS = new Map<string, PendingPiBackendSession>();
 const GENERATIONS = new Map<string, number>();
-const PI_TURN_TIMEOUT_MS = 90 * 60 * 1000;
+/**
+ * A manager turn is bounded by INACTIVITY, not by total wall clock — see
+ * agent-liveness.ts for the policy and why the old flat cap was the wrong
+ * shape for an orchestrator.
+ */
+const PI_TURN_IDLE_CHECK_MS = 15 * 1000;
 const FRONTIER_CONTRACT_DRIFT_MARKER = "CORA_FRONTIER_CONTRACT_DRIFT";
 const MAX_FRONTIER_CONTRACT_RESTARTS = 3;
 
@@ -389,18 +395,43 @@ async function ensureSession(
   return session;
 }
 
-async function waitForSettled(settled: Promise<void>, ms: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
+/** Liveness the turn's event listener keeps up to date for waitForSettled. */
+interface PiTurnLiveness {
+  /** Epoch ms of the last stream event. */
+  lastEventAt: number;
+  /** Epoch ms a long-poll tool call started, or null when none is in flight. */
+  longPollSince: number | null;
+  /** Name of the last long-poll tool, for the timeout message. */
+  longPollName: string | null;
+}
+
+/**
+ * Resolve when the turn settles; reject when it goes QUIET (see
+ * PI_TURN_IDLE_TIMEOUT_MS) or blows the absolute ceiling. A turn parked inside
+ * a long-poll orchestration tool is never idle, however long it waits.
+ */
+async function waitForSettled(settled: Promise<void>, liveness: PiTurnLiveness): Promise<void> {
+  let poll: ReturnType<typeof setInterval> | null = null;
+  const startedAt = Date.now();
   try {
     await Promise.race([
       settled,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Cora's Pi turn timed out.")), ms);
-        timer.unref();
+        poll = setInterval(() => {
+          const verdict = classifyTurnLiveness({
+            now: Date.now(),
+            startedAt,
+            lastEventAt: liveness.lastEventAt,
+            longPollSince: liveness.longPollSince,
+            longPollName: liveness.longPollName,
+          });
+          if (verdict.action === "fail") reject(new Error(verdict.detail));
+        }, PI_TURN_IDLE_CHECK_MS);
+        poll.unref();
       }),
     ]);
   } finally {
-    if (timer) clearTimeout(timer);
+    if (poll) clearInterval(poll);
   }
 }
 
@@ -463,7 +494,23 @@ async function requestPiDecision(
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     session.settleActiveTurn = settle;
+    const liveness: PiTurnLiveness = {
+      lastEventAt: Date.now(),
+      longPollSince: null,
+      longPollName: null,
+    };
     unsubscribe = session.client.onEvent((event) => {
+      liveness.lastEventAt = Date.now();
+      // A blocking orchestration tool means the manager is waiting on workers
+      // or on the user. Hold the idle clock for its duration instead of ageing
+      // a perfectly healthy turn toward a timeout.
+      if (event.type === "tool_execution_start" && isLongPollToolName(event.toolName)) {
+        liveness.longPollSince = Date.now();
+        liveness.longPollName = typeof event.toolName === "string" ? event.toolName : null;
+      }
+      if (event.type === "tool_execution_end" && liveness.longPollSince !== null) {
+        liveness.longPollSince = null;
+      }
       turn.consume(event);
       if (event.type === "tool_execution_end" && hasFrontierContractDrift(event.result)) {
         contractDriftDetected = true;
@@ -489,7 +536,7 @@ async function requestPiDecision(
       };
     }
     if (!restartContext?.promptAccepted) await input.onPromptAccepted?.();
-    await waitForSettled(settled, PI_TURN_TIMEOUT_MS);
+    await waitForSettled(settled, liveness);
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
       return {
         decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),

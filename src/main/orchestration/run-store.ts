@@ -6,6 +6,9 @@ import type {
   AddDirectIterationInput,
   AddRunMessageInput,
   AnswerRunQuestionInput,
+  ManagerTurnRecoveryFailureKind,
+  PlanValidation,
+  WorkerHandoffArtifact,
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
   Checkpoint,
@@ -174,6 +177,7 @@ import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
+import { classifyWorkerSilence, PI_WORKER_TURN_CEILING_MS } from "./agent-liveness";
 import {
   isParkedManagerTurnAction,
   managerTurnRetryDelayMs,
@@ -5848,13 +5852,10 @@ async function askManagerBackend(
             draft.managerTurnRecovery = {
               id: makeId("recovery"),
               state: "parked",
-              // manager-turn-policy only parks these four provider-side
-              // classes; keep the persisted union narrower than the generic
-              // worker failure taxonomy.
-              failureKind: failurePlan.kind as
-                | "rate_limit"
-                | "provider"
-                | "transport",
+              // manager-turn-policy only parks these classes; keep the
+              // persisted union narrower than the generic worker failure
+              // taxonomy.
+              failureKind: failurePlan.kind as ManagerTurnRecoveryFailureKind,
               backend: chatConfig.backend,
               managerMode: mode,
               conversationEpoch: preparedTurn.conversationEpoch,
@@ -5878,6 +5879,33 @@ async function askManagerBackend(
         });
       }
 
+      // Declaring a worker failed and leaving its process running is the worst
+      // of both worlds, and it is exactly what used to happen: attempts were
+      // marked failed while their Pi children kept executing tools and writing
+      // COMMITS to the user's tree for minutes afterwards, unobserved, with the
+      // run already terminal. If the verdict is that this run is over, stop its
+      // workers for real before recording it - the same order forcePauseRun
+      // uses (kill first, then commit, so nothing settles into a terminal run).
+      const orphanedWorkers = activeWorkersForRun(failedRun.id);
+      for (const worker of orphanedWorkers) {
+        try {
+          worker.kill();
+        } catch {
+          /* best-effort; fall through to the hard pty kill */
+        }
+        try {
+          pty.killImmediate(worker.attemptId);
+        } catch {
+          /* the session may already have exited */
+        }
+        activeWorkerProcesses.delete(worker.attemptId);
+      }
+      if (orphanedWorkers.length > 0) {
+        console.warn(
+          `[run-store] manager turn ${callId} failed; stopped ${orphanedWorkers.length} in-flight worker process(es) so none outlive the run`,
+        );
+      }
+
       return commitRunChange(failedRun, {
         type: "run.chat_turn_failed",
         message: `Cora's ${chatConfig.backend} chat turn failed: ${failureMessage}`,
@@ -5885,6 +5913,7 @@ async function askManagerBackend(
           backend: chatConfig.backend,
           sparkCallId: callId,
           error: failureMessage,
+          stoppedWorkerProcesses: orphanedWorkers.length,
         },
         mutate: (draft, timestamp) => {
           draft.status = "failed";
@@ -8842,6 +8871,8 @@ export interface PostRunQuestionInput {
   category?: RunQuestionCategory;
   reason?: string;
   recommendedOptionId?: string;
+  /** Mandatory on plan_approval asks; see PlanValidation. */
+  planValidation?: PlanValidation;
   source: RunQuestionSource;
   resumeStrategy: RunQuestionResumeStrategy;
   resumeStatus?: RunStatus;
@@ -9023,6 +9054,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
     reason,
     recommendedOptionId,
     source: input.source,
+    ...(input.planValidation ? { planValidation: input.planValidation } : {}),
   };
   let posted = false;
   let postedBlocker: RunBlocker | undefined;
@@ -12086,7 +12118,16 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   if (peerCommsEnabled) {
     await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
   }
-  const prompt = renderWorkerPrompt({ cwd: effectiveCwd, run, step, task, paths, settings });
+  const priorHandoffs = await collectPriorWorkerHandoffs(run, task);
+  const prompt = renderWorkerPrompt({
+    cwd: effectiveCwd,
+    run,
+    step,
+    task,
+    paths,
+    settings,
+    priorHandoffs,
+  });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
   await fs.writeFile(paths.taskJson, JSON.stringify(envelope, null, 2), "utf8");
@@ -16234,6 +16275,50 @@ function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
 }
 
+/** How many earlier attempts' handoffs one worker prompt may inherit. */
+const MAX_INHERITED_HANDOFF_ARTIFACTS = 8;
+
+/**
+ * Gather the reusable artifacts earlier attempts in this run deliberately left
+ * behind, newest first, so the next worker is HANDED them.
+ *
+ * Deliberately not limited to the supersedes lineage: the case this exists for
+ * is a SEQUENCE of tasks in different steps attacking the same job, where a
+ * blocked attempt's scratch dry-run is exactly what the next step needs. Before
+ * this, that only carried over when a human read the prose summary and pasted
+ * the path into the next task description, and a 24-minute dry run got rebuilt
+ * from cold when nobody did.
+ */
+async function collectPriorWorkerHandoffs(
+  run: RunState,
+  task: WorkerTask,
+): Promise<WorkerHandoffArtifact[]> {
+  const seenPaths = new Set<string>();
+  const collected: WorkerHandoffArtifact[] = [];
+  for (const attempt of [...run.workerAttempts].reverse()) {
+    if (collected.length >= MAX_INHERITED_HANDOFF_ARTIFACTS) break;
+    // Its own lineage's artifacts are the point; its own in-flight attempt has
+    // nothing to hand over yet.
+    if (attempt.workerTaskId === task.id) continue;
+    if (!attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (!report?.handoff?.length) continue;
+    const sourceTask = run.workerTasks.find((entry) => entry.id === attempt.workerTaskId);
+    for (const artifact of report.handoff) {
+      if (collected.length >= MAX_INHERITED_HANDOFF_ARTIFACTS) break;
+      if (seenPaths.has(artifact.path)) continue;
+      seenPaths.add(artifact.path);
+      collected.push({
+        ...artifact,
+        description: sourceTask
+          ? `${artifact.description} (left by "${sourceTask.title}", which ended ${report.status})`
+          : artifact.description,
+      });
+    }
+  }
+  return collected;
+}
+
 // Write a runtime state onto the WorkerAttempt behind a pane and tell the
 // renderer about it. Shared by the hook RPC (applyHookStateReport) and the
 // unsanctioned-pty-death path, which must produce the identical attempt-side
@@ -17602,15 +17687,49 @@ function piWorkerMessageUsage(
   };
 }
 
-async function waitForPiWorkerTurn(client: PiRpcClient, prompt: string): Promise<void> {
+/**
+ * Drive one Pi worker turn to completion.
+ *
+ * Ends on `agent_settled` (the happy path), on runtime death, on SILENCE (see
+ * the constants above), or on the ceiling. `onStallChange` reports the
+ * non-terminal middle ground — Cora has heard nothing for a while but the
+ * process is alive — so the pane and the run timeline can say so instead of
+ * showing a pulsing "working" over a worker nobody can hear.
+ */
+async function waitForPiWorkerTurn(
+  client: PiRpcClient,
+  prompt: string,
+  onStallChange?: (stall: { stalled: boolean; detail: string }) => void,
+): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
   let unsubscribe: () => void = () => undefined;
   try {
     const settled = new Promise<void>((resolve, reject) => {
       let providerFailure: string | null = null;
+      let lastEventAt = Date.now();
+      let lastEventType: string | null = null;
+      let stallReported = false;
       unsubscribe = client.onEvent((event) => {
+        lastEventAt = Date.now();
+        lastEventType = event.type;
+        // Any traffic at all means the worker is reachable again. Clear the
+        // stall mark so the pane returns to its real state rather than wearing
+        // an amber badge for the rest of a turn that recovered.
+        if (stallReported) {
+          stallReported = false;
+          onStallChange?.({ stalled: false, detail: `Pi worker responded again (${event.type}).` });
+        }
         providerFailure = piWorkerEventFailure(event) ?? providerFailure;
+        // A provider error is provisional while Pi's own retry loop is running:
+        // a later clean assistant message or a successful retry means the
+        // provider recovered, and the turn must not be failed for it on settle.
+        if (
+          (event.type === "message_end" && piWorkerEventFailure(event) === null) ||
+          (event.type === "auto_retry_end" && event.success === true)
+        ) {
+          providerFailure = null;
+        }
         if (event.type === "agent_settled") {
           if (providerFailure) reject(new Error(providerFailure));
           else resolve();
@@ -17620,10 +17739,28 @@ async function waitForPiWorkerTurn(client: PiRpcClient, prompt: string): Promise
         const state = client.state();
         if (state.phase === "failed" || state.phase === "stopped") {
           reject(new Error(state.failure?.message || `Pi worker runtime ${state.phase}.`));
+          return;
+        }
+        const verdict = classifyWorkerSilence({
+          silentForMs: Date.now() - lastEventAt,
+          providerFailure,
+          lastEventType,
+          alreadyWarned: stallReported,
+        });
+        if (verdict.action === "fail") {
+          reject(new Error(verdict.detail));
+          return;
+        }
+        if (verdict.action === "warn") {
+          stallReported = true;
+          onStallChange?.({ stalled: true, detail: verdict.detail });
         }
       }, 500);
       poll.unref();
-      timer = setTimeout(() => reject(new Error("Pi worker timed out after 90 minutes.")), 90 * 60 * 1000);
+      timer = setTimeout(
+        () => reject(new Error("Pi worker timed out after 90 minutes.")),
+        PI_WORKER_TURN_CEILING_MS,
+      );
       timer.unref();
     });
     await client.prompt(prompt);
@@ -18008,8 +18145,21 @@ async function runPiWorkerSession({
       }
     });
 
+    // Silence is reported, not just eventually acted on. The pane chip flips to
+    // amber "no response" and the run timeline gets a state change, so a worker
+    // Cora cannot hear stops looking identical to one that is working.
+    const reportStall = (stall: { stalled: boolean; detail: string }) => {
+      if (stall.stalled) {
+        applyHookStateReport({ paneId: attemptId, state: "stalled", note: stall.detail });
+        paint(`\r\n  \x1b[33m⏸ ${piWorkerSafeText(stall.detail, 700)}\x1b[0m\r\n`);
+      } else {
+        applyHookStateReport({ paneId: attemptId, state: "working", note: stall.detail });
+        paint(`\r\n  \x1b[32m▸ ${piWorkerSafeText(stall.detail, 300)}\x1b[0m\r\n`);
+      }
+    };
+
     paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
-    await waitForPiWorkerTurn(client, promptText);
+    await waitForPiWorkerTurn(client, promptText, reportStall);
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
@@ -18019,6 +18169,7 @@ async function runPiWorkerSession({
         client,
         `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
           "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
+        reportStall,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }

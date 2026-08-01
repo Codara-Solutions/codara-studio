@@ -73,8 +73,15 @@ const FAILURE_PATTERNS: ReadonlyArray<readonly [WorkerFailureKind, RegExp]> = [
     /rate ?limit|(?:status|code|error|http)[^A-Za-z0-9]{0,10}429\b|too many requests|quota (?:exceeded|reached|hit)|usage limit/i,
   ],
   [
+    // Includes the inactivity-based wordings the liveness policy emits
+    // (agent-liveness.ts): "went quiet for N min", "stalled: no response from",
+    // "stuck in <tool>", "exceeded its 6h ceiling". They are all the same
+    // condition as a classic timeout - we stopped waiting - and they MUST land
+    // here, because manager-turn-policy parks `timeout` and fails an
+    // unclassified error. Getting this wrong reintroduces the exact bug the
+    // park was added for: a run branded failed and its live workers killed.
     "timeout",
-    /timed out|\btimeout\b|ETIMEDOUT|deadline exceeded|no response within/i,
+    /timed out|\btimeout\b|ETIMEDOUT|deadline exceeded|no response (?:within|from)|went quiet for|\bstalled\b|stuck in \S|exceeded its .{0,20}ceiling/i,
   ],
   [
     "transport",

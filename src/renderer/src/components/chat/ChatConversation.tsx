@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { Checkpoint, RunMessageAttachment, RunQuestionOption, RunState } from "@shared/types";
+import type {
+  Checkpoint,
+  PlanValidation,
+  RunMessageAttachment,
+  RunQuestionOption,
+  RunState,
+} from "@shared/types";
 import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
@@ -727,6 +733,9 @@ const MessageTurn = React.memo(function MessageTurn({
       >
         <Markdown text={displayText} />
         <AttachmentStrip attachments={item.attachments} align="start" />
+        {isQuestion && item.planValidation && (
+          <PlanValidationNotice validation={item.planValidation} />
+        )}
         {showChoices && (
           <QuestionChoices
             runId={runId}
@@ -1194,6 +1203,50 @@ function fencedMarkdown(content: string, language: string): string {
   let fence = "```";
   while (content.includes(fence)) fence += "`";
   return `${fence}${language}\n${content.trim()}\n${fence}`;
+}
+
+/**
+ * Whether the plan being approved was actually proven, shown right above the
+ * approve/reject buttons.
+ *
+ * Approving is the user taking ownership of the plan, so "did anyone check
+ * this?" belongs at the moment of the decision rather than in a report they
+ * will never open. The unvalidated case is deliberately the loud one: a plan
+ * nobody compiled is exactly the plan that cost an hour of rework after it was
+ * approved on the strength of six agents agreeing with each other.
+ */
+function PlanValidationNotice({ validation }: { validation: PlanValidation }) {
+  const validated = validation.status === "validated";
+  const notApplicable = validation.status === "not_applicable";
+  const color = validated ? "var(--ok)" : notApplicable ? "var(--muted-2)" : "var(--warn)";
+  const label = validated
+    ? "Verified"
+    : notApplicable
+      ? "Nothing to verify mechanically"
+      : "Not verified";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 7,
+        marginTop: 10,
+        padding: "7px 9px",
+        borderRadius: 7,
+        border: `1px solid color-mix(in oklch, ${color} 34%, transparent)`,
+        background: `color-mix(in oklch, ${color} 8%, transparent)`,
+        fontFamily: "var(--font-sans)",
+        fontSize: 11.5,
+        lineHeight: 1.45,
+      }}
+    >
+      <StatusDot color={color} pulse={false} size={5} />
+      <span style={{ minWidth: 0 }}>
+        <span style={{ color, fontWeight: 600 }}>{label}</span>
+        <span style={{ color: "var(--muted-2)" }}> · {validation.evidence}</span>
+      </span>
+    </div>
+  );
 }
 
 function QuestionChoices({
@@ -2175,6 +2228,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
 // flows through automatically:
 //   working → accent (the live "spinner is on" colour).
 //   blocked → danger (steady red, no pulse — the "act on this" indicator).
+//   stalled → warn   (amber: nothing has been heard from it for a long while).
 //   idle    → muted (the agent is between turns, nothing for you to do).
 //   done    → ok    (the foreground TUI exited; the attempt may still wrap).
 // Returns null when there's no live state yet, so the caller can fall back
@@ -2185,6 +2239,8 @@ function runtimeStateColor(state: ChatWorker["runtimeState"]): string | null {
       return "var(--accent)";
     case "blocked":
       return "var(--danger)";
+    case "stalled":
+      return "var(--warn)";
     case "idle":
       return "var(--muted-2)";
     case "done":

@@ -1411,9 +1411,22 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
     "- claude-fable-5, PREMIUM tier, strongest and materially the most expensive. Reserve it for subtle invariants, tricky concurrency, large refactors, algorithmic depth, or a bug that already defeated a standard-tier worker.",
     "- There is no mid or cheap tier. Effort is the dial for easy work: skeleton → claude-fable-5 at the highest available effort; feature → standard tier at medium/high; leaf → standard tier at low/minimal.",
     "- Never pick the premium tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output): that wastes context and money for no gain.",
+    "- Set effort from VERIFIABILITY, not from how large the task feels. Ask: if this worker is wrong, will a command catch it? When the task has a mechanical oracle (it must compile, tests must pass, commits must be bisectable, output must match a fixture), that oracle is what makes the work correct, so medium/high plus the check beats xhigh: the extra tier buys wall clock and money, not accuracy. A mechanically-checked task run at xhigh typically spends the majority of its elapsed time thinking rather than running the check that decides it.",
+    "- Spend the premium tier and xhigh where being wrong is NOT mechanically detectable: design and decomposition calls, subtle invariants, concurrency, security boundaries, or a bug a lower tier already failed to fix. Size the fan-out the same way - do not send several reviewers to argue about something one command can settle.",
   );
   return lines.join("\n");
 }
+
+/**
+ * Verifier workers exist because a confident self-report is not proof. But a
+ * mechanical claim (exit code 0) is re-established by re-running the command,
+ * which is a bash call, not an agent. Observed live: an implementation worker
+ * self-verified all 16 commit boundaries green and the manager still spawned a
+ * whole worker to reprint those exit codes. Re-running is the cheap half of
+ * verification; the verifier is for the half re-running cannot reach.
+ */
+const MECHANICAL_PROOF_FIRST_POLICY =
+  "Before spawning any verifier, re-run the implementation report's commands_run/tests yourself with bash and read the exit codes. That is independent evidence for every MECHANICAL claim (it compiles, tests pass, the boundaries are green) and it costs seconds. Skip the verifier only when re-running settles every acceptance criterion; otherwise spawn it scoped to what re-running cannot settle - whether the behaviour is correct, whether the change means what it claims, what went unchecked - and name the mechanical results you already confirmed so the verifier does not repeat them.";
 
 function formatTaskComplexity(complexity: TaskComplexity): string {
   switch (complexity) {
@@ -1422,6 +1435,7 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
         "trivial, single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
         "Execution tier: fast (this classification set it, the user has no depth control).",
         "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof, the verifier re-derives correct behavior and runs adversarial input/output probes.",
+        MECHANICAL_PROOF_FIRST_POLICY,
         "Trivial keeps a tight step cap (max 2 worker_batch steps, no recon, no skeleton); it differs from standard only in scope, not in whether work gets verified.",
       ].join("\n");
     case "standard":
@@ -1429,12 +1443,14 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
         "standard, multi-file change OR public API touch, with clear scope.",
         "Execution tier: fast (this classification set it, the user has no depth control).",
         "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier.",
+        MECHANICAL_PROOF_FIRST_POLICY,
       ].join("\n");
     case "complex":
       return [
         "complex, subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics.",
         "Execution tier: deep (this classification set it): a wider verifier-round budget and more than one corrective rework per worker.",
         "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker, one Claude (claude-opus-5@high) and one Codex (gpt-5.6-sol@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
+        MECHANICAL_PROOF_FIRST_POLICY,
       ].join("\n");
   }
 }

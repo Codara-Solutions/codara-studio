@@ -68,11 +68,25 @@ const UNTRUSTED_PULL_REQUEST_TOOL_NAMES = new Set([
   "codara_name_chat",
 ]);
 
-// Orchestration RPCs can block up to ~15 min (codara_ask_user waits on a human;
-// codara_wait_for_workers / codara_wait_for_automation long-poll), so they get a
-// 20-minute HTTP timeout. Preview + terminal ops are quick and get 60s.
+// Orchestration RPCs can block for many minutes (codara_ask_user waits on a
+// human; codara_wait_for_workers / codara_wait_for_automation long-poll), so
+// they get a long HTTP timeout. Preview + terminal ops are quick and get 60s.
+//
+// INVARIANT: this client deadline must STRICTLY EXCEED every server-side
+// long-poll ceiling in src/main/agent-socket.ts, with enough margin for the
+// server to serialize its response. It used to be exactly 20 min - the same
+// number as WAIT_FOR_WORKERS_MAX_TIMEOUT_MS - so a manager that requested the
+// documented maximum wait raced its own transport and usually lost: the socket
+// was destroyed a few ms before the server's `reason:"timeout"` payload was
+// written, and the manager got `Codara agent socket unreachable` instead. The
+// server keeps its 20-minute ceiling; the extra minute here is the margin.
+// agent-socket.ts derives its ceilings from the same two numbers, and
+// scripts/test-orchestration-timeout-margin.cjs asserts the sides agree.
 const PREVIEW_TERMINAL_TIMEOUT_MS = 60_000;
-const ORCHESTRATION_TIMEOUT_MS = 20 * 60_000;
+const ORCHESTRATION_LONG_POLL_CEILING_MS = 20 * 60_000;
+const ORCHESTRATION_RESPONSE_MARGIN_MS = 60_000;
+const ORCHESTRATION_TIMEOUT_MS =
+  ORCHESTRATION_LONG_POLL_CEILING_MS + ORCHESTRATION_RESPONSE_MARGIN_MS;
 
 // ===========================================================================
 // Preview tool set (drive the live <preview> tab). Byte-for-byte the roster
@@ -1133,7 +1147,8 @@ const EXECUTE_TOOLS = [
               effortHint: {
                 type: "string",
                 enum: ["minimal", "low", "medium", "high", "xhigh"],
-                description: "Optional effort tier hint.",
+                description:
+                  "Optional effort tier hint. Choose it from VERIFIABILITY, not from how big the task feels. When the task has a mechanical oracle that will catch a wrong answer (it must compile, tests must pass, commits must be bisectable, output must match a fixture), the oracle is the safety net and 'medium' or 'high' is right: reasoning depth is not what makes that work correct, and the extra tier buys latency and cost instead of accuracy. Reserve 'xhigh' for work where being wrong is NOT mechanically detectable: design calls, subtle invariants, concurrency, security boundaries, or a bug that already defeated a lower tier. A mechanically-checked task at xhigh typically spends most of its wall clock thinking rather than running the check that would have decided it.",
               },
               allowedPaths: {
                 type: "array",
@@ -1203,6 +1218,26 @@ const EXECUTE_TOOLS = [
           type: "string",
           description:
             "Concrete rationale explaining why repository conventions and a reversible default are insufficient.",
+        },
+        planValidation: {
+          type: "object",
+          description:
+            "REQUIRED when category is 'plan_approval'. Says whether the plan was actually proven to work before asking the user to own it. Validate FIRST whenever the plan has a mechanical oracle (it compiles, tests pass, the commits are bisectable): dry-run it in a scratch worktree and report status 'validated'. An approval the user grants to an unbuildable plan is far more expensive to unwind than the dry run would have been.",
+          required: ["status", "evidence"],
+          properties: {
+            status: {
+              type: "string",
+              enum: ["validated", "unvalidated", "not_applicable"],
+              description:
+                "'validated' = mechanically executed end to end and it worked. 'unvalidated' = a mechanical check was possible but you did not run it; the user is warned. 'not_applicable' = no mechanical oracle exists (a judgment or preference call).",
+            },
+            evidence: {
+              type: "string",
+              description:
+                "For 'validated': the exact commands run and their results (e.g. 'dry-ran all 16 commit boundaries in a scratch worktree; tsc + jest green at each'). For the other two: why no check was run.",
+            },
+          },
+          additionalProperties: false,
         },
         recommendedOptionId: {
           type: "string",
@@ -1589,6 +1624,27 @@ function isOrchestrationRpc(rpc) {
   return typeof rpc === "string" && (rpc.startsWith("orchestrator.") || rpc.startsWith("automation."));
 }
 
+// The orchestration RPCs that deliberately hold the socket open with no traffic
+// until something else happens (a worker terminates, a human answers). Only
+// these get the graceful transport-timeout result: for a normal request a
+// timeout really is an error worth surfacing as one.
+const LONG_POLL_RPCS = new Set([
+  "orchestrator.wait_for_workers",
+  "orchestrator.ask_user",
+  "automation.wait",
+]);
+
+function isLongPollRpc(rpc) {
+  return LONG_POLL_RPCS.has(rpc);
+}
+
+// req.destroy(new Error("Codara agent socket timeout")) surfaces through the
+// 'error' handler as `Codara agent socket unreachable: Codara agent socket
+// timeout`, so match the inner text rather than the wrapped prefix.
+function isTransportTimeout(err) {
+  return Boolean(err && typeof err.message === "string" && err.message.includes("agent socket timeout"));
+}
+
 // terminal.create and preview.navigate mint renderer tabs; terminal.write and
 // terminal.close must prove they belong to the same run that minted their
 // terminal. For terminal ownership, the launch-time SPARK_RUN_ID is the
@@ -1911,6 +1967,27 @@ async function callTool(params) {
     const result = await postJsonRpc(rpc, args, timeoutMs);
     return toToolResult(result);
   } catch (err) {
+    // A long poll whose transport died has NOT told us anything about the
+    // workers, so we must not fabricate a `reason:"timeout"` worker list. But
+    // reporting it as a tool ERROR is what made the manager burn a whole turn
+    // on error recovery (observed: three 20-minute dead heats in one hour, one
+    // of which was in flight when the manager's own turn cap fired and failed
+    // the run). Return an honest, structured, NON-error result instead: it
+    // names the transport as the failure, states plainly that the workers are
+    // unaffected, and points at the exact next call. Post-margin this should be
+    // unreachable for a healthy main process, so it doubles as a signal.
+    if (isLongPollRpc(rpc) && isTransportTimeout(err)) {
+      return toToolResult({
+        reason: "transport_timeout",
+        waited_ms: timeoutMs,
+        workers_unaffected: true,
+        detail: err.message,
+        note:
+          "The wait's HTTP connection timed out; this says nothing about the workers, " +
+          "which keep running. Do NOT treat this as a worker failure and do NOT respawn them. " +
+          "Call codara_get_worker_status for the current state, then codara_wait_for_workers again.",
+      });
+    }
     return {
       isError: true,
       content: [{ type: "text", text: err.message }],

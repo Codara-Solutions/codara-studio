@@ -44,7 +44,11 @@ import {
   type MemoryScope,
 } from "./orchestration/cora-memory";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
-import { blindApprovalAskProblem } from "./orchestration/run-question-policy";
+import {
+  blindApprovalAskProblem,
+  parsePlanValidation,
+  planValidationAskProblem,
+} from "./orchestration/run-question-policy";
 import { runProjectPolicyMode } from "./orchestration/project-policy";
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
@@ -1739,17 +1743,25 @@ async function handleAppPrefsSet(
 // end-to-end from this call site through scheduleAutopilotCycles; the manager
 // can `await` completion via codara_wait_for_workers.
 
+/**
+ * The ceiling every server-side orchestrator long poll must return under.
+ *
+ * The MCP client aborts every orchestrator.* RPC at its own
+ * ORCHESTRATION_TIMEOUT_MS (resources/codara-studio-mcp/server.js), which is
+ * this ceiling PLUS a one-minute response margin. A long poll that runs to a
+ * deadline at or past the client's deadline does NOT buy the caller more time:
+ * the socket dies first, clientGone releases the blocker, and the manager gets
+ * a transport error instead of the graceful documented payload. Keep every
+ * long-poll bound at or under this number, and keep the two files' numbers in
+ * step - scripts/test-orchestration-timeout-margin.cjs asserts they agree.
+ */
+const ORCHESTRATION_LONG_POLL_CEILING_MS = 20 * 60 * 1000;
+
 const ASK_USER_POLL_MS = 500;
 const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min - covers the user being AFK
 // A plan approval is read-then-decide: the user reads a whole proposed plan
 // before answering, so the manager waits longer than for a one-line blocker.
-// Hard bound: the MCP client (and the in-process Pi bridge) abort every
-// orchestrator.* RPC at ORCHESTRATION_TIMEOUT_MS = 20 min
-// (resources/codara-studio-mcp/server.js). Overshooting that does NOT buy the
-// user more time: the socket dies first, clientGone releases the blocker, and
-// the plan card becomes unanswerable while the manager gets a transport error
-// instead of the graceful "ask_user timed out". Stay under the ceiling, like
-// ASK_USER_TIMEOUT_MS does.
+// Still under ORCHESTRATION_LONG_POLL_CEILING_MS, like ASK_USER_TIMEOUT_MS.
 const PLAN_APPROVAL_TIMEOUT_MS = 18 * 60 * 1000;
 const ORCHESTRATOR_RUNTIME_FALLBACK = "claude" as const;
 
@@ -2510,6 +2522,14 @@ async function handleOrchestratorAskUser(
   if (blindAsk) {
     return errorResponse(id, ERR_INVALID_PARAMS, blindAsk);
   }
+  // Same shape as the blind-ask guard: reject before posting so the manager
+  // gets a retry instruction on its still-open turn rather than the user
+  // getting a plan whose buildability nobody claims either way.
+  const planValidation = parsePlanValidation(params.planValidation) ?? undefined;
+  const planValidationProblem = planValidationAskProblem(category, planValidation);
+  if (planValidationProblem) {
+    return errorResponse(id, ERR_INVALID_PARAMS, planValidationProblem);
+  }
   const source = beforeAsk.executionMode === "direct" ? "direct_worker" : "live_manager_rpc";
   const managerMode = [...beforeAsk.sparkCalls]
     .reverse()
@@ -2523,6 +2543,7 @@ async function handleOrchestratorAskUser(
       category,
       reason: stringParam(params, "reason") ?? undefined,
       recommendedOptionId: stringParam(params, "recommendedOptionId") ?? undefined,
+      planValidation,
       source,
       resumeStrategy: "active_rpc",
       managerMode,
@@ -2804,7 +2825,15 @@ async function handleOrchestratorRequestNextIteration(
 
 const WAIT_FOR_WORKERS_POLL_MS = 500;
 const WAIT_FOR_WORKERS_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min default
-const WAIT_FOR_WORKERS_MAX_TIMEOUT_MS = 20 * 60 * 1000; // 20 min cap (req.setTimeout in MCP client is also 20 min)
+// The documented cap, and the one a manager asking for "as long as possible"
+// actually requests. It equals the long-poll ceiling exactly, which is safe
+// only because the MCP client's own deadline sits a full minute above it.
+const WAIT_FOR_WORKERS_MAX_TIMEOUT_MS = ORCHESTRATION_LONG_POLL_CEILING_MS;
+// Composing the timeout response is not free: it re-reads every worker's final
+// report off disk and peeks the manager inbox. Returning at exactly the
+// requested deadline therefore puts the WRITE after it. Stop polling slightly
+// early so the response is serialized inside the caller's budget.
+const WAIT_FOR_WORKERS_RESPONSE_RESERVE_MS = 2_000;
 
 async function handleOrchestratorWaitForWorkers(
   params: Record<string, unknown>,
@@ -2827,7 +2856,8 @@ async function handleOrchestratorWaitForWorkers(
       ? Math.min(params.timeout_ms, WAIT_FOR_WORKERS_MAX_TIMEOUT_MS)
       : WAIT_FOR_WORKERS_DEFAULT_TIMEOUT_MS;
   const runStore = await getRunStore();
-  const deadline = Date.now() + requestedTimeout;
+  const deadline =
+    Date.now() + Math.max(WAIT_FOR_WORKERS_POLL_MS, requestedTimeout - WAIT_FOR_WORKERS_RESPONSE_RESERVE_MS);
   const resolveLatestReplacement = (run: RunState, requestedTaskId: string) => {
     let current = run.workerTasks.find((task) => task.id === requestedTaskId) ?? null;
     const seen = new Set<string>();
@@ -2879,6 +2909,11 @@ async function handleOrchestratorWaitForWorkers(
               proof: report.proof.slice(0, 8),
               risks: report.risks.slice(0, 6),
               followups: report.followups.slice(0, 6),
+              // Reusable work this attempt left on disk. Codara already injects
+              // it into the next worker's prompt; surfacing it here lets the
+              // manager see WHY a follow-up will be cheap instead of assuming
+              // it must re-plan from scratch.
+              ...(report.handoff?.length ? { handoff: report.handoff } : {}),
               verifier: report.verifier
                 ? {
                     status: report.verifier.status,

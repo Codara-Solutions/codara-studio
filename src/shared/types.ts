@@ -2004,11 +2004,41 @@ export type RunQuestionSource =
 
 export type RunQuestionResumeStrategy = "schedule_manager" | "active_rpc";
 
+/**
+ * Whether a proposed plan was actually PROVEN to work before it was put in
+ * front of the user.
+ *
+ * Approving a plan is the user taking responsibility for it, so they are
+ * entitled to know whether anyone checked it. Observed live: six read-only
+ * planners spent 11 minutes and ~$19 agreeing on a 16-commit split, the user
+ * approved it, and the first execution worker discovered within five minutes
+ * that commit 1 does not typecheck — the planners had no way to stage or
+ * compile anything, so they proposed boundaries they could not test. Two more
+ * workers and 48 minutes went into rediscovering and repairing that.
+ *
+ *   - "validated"      : the plan was mechanically executed end to end (dry
+ *                        run, scratch worktree, compile/test at each step) and
+ *                        `evidence` says exactly what was run.
+ *   - "unvalidated"    : a mechanical check was possible but was not done.
+ *                        The user is told so before they approve.
+ *   - "not_applicable" : there is no mechanical oracle for this plan; it is a
+ *                        judgment or preference call. `evidence` says why.
+ */
+export type PlanValidationStatus = "validated" | "unvalidated" | "not_applicable";
+
+export interface PlanValidation {
+  status: PlanValidationStatus;
+  /** What was run to prove it, or why nothing could be. */
+  evidence: string;
+}
+
 export interface RunQuestionContext {
   category: RunQuestionCategory;
   reason: string;
   recommendedOptionId?: string;
   source: RunQuestionSource;
+  /** Present on plan_approval asks, where it is mandatory. */
+  planValidation?: PlanValidation;
 }
 
 export interface RunBlocker {
@@ -2177,8 +2207,23 @@ export type WorkerAttemptStatus =
 //                 has handed control back.
 //   - "error"   : the pty exited non-zero / the spawn failed — the agent
 //                 crashed rather than finishing cleanly. Chip reads red.
+//   - "stalled" : the agent has NOT exited and has NOT reported anything for
+//                 long enough that we no longer believe it is working. The
+//                 honest state for "we are deaf to this worker": a provider
+//                 error mid-turn, a wedged retry, an event stream that went
+//                 quiet. It is deliberately distinct from "working" (which
+//                 claims progress we cannot see) and from "error" (which
+//                 claims a death we have not observed). Any later event
+//                 supersedes it, because a stalled worker can come back.
 // null means "no detection has fired yet" — treat as unknown.
-export type RuntimeState = "launching" | "working" | "blocked" | "idle" | "done" | "error";
+export type RuntimeState =
+  | "launching"
+  | "working"
+  | "blocked"
+  | "idle"
+  | "done"
+  | "error"
+  | "stalled";
 
 // Binary foreground-agent lifecycle emitted by a terminal pane. A false state
 // can be heuristic (the visible UI disappeared briefly) or confirmed (the
@@ -2291,7 +2336,10 @@ export interface UserConstitutionSaveInput {
 export type ManagerTurnRecoveryFailureKind =
   | "rate_limit"
   | "provider"
-  | "transport";
+  | "transport"
+  // Cora's own turn cap, not a provider problem: the work and any workers it
+  // started are untouched, so the run parks resumable rather than failing.
+  | "timeout";
 
 /**
  * Durable, user-owned recovery handle for a manager turn that could not reach
@@ -3472,11 +3520,33 @@ export interface WorkerReport {
   risks: string[];
   followups: string[];
   /**
+   * Reusable work this attempt is leaving behind for whoever continues.
+   *
+   * An attempt that ends `blocked` or `partial` has usually done most of the
+   * expensive thinking already. Observed live: a worker spent 24 minutes
+   * building a complete, correct dry run of a 16-commit series in a scratch
+   * directory, reported `blocked`, and the next worker rebuilt the reasoning
+   * from cold - reusing the scratch directory only because a human happened to
+   * read its prose summary and paste the path into the next task. This makes
+   * that handoff a first-class field the successor is HANDED rather than one it
+   * must be lucky enough to be told about.
+   */
+  handoff?: WorkerHandoffArtifact[];
+  /**
    * Populated only by verifier-class workers. The 5-confidence-ladder verdict
    * the manager uses during worker_result_review to decide accept / retry-impl
    * with corrective_prompt / escalate-to-human.
    */
   verifier?: VerifierVerdict;
+}
+
+export interface WorkerHandoffArtifact {
+  /** Absolute path to a file or directory left on disk on purpose. */
+  path: string;
+  /** What it is and what it already proves. */
+  description: string;
+  /** Exactly how a successor should reuse it, including commands to re-run. */
+  reuse: string;
 }
 
 export interface VerifierVerdict {

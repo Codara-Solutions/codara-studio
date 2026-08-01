@@ -6,7 +6,12 @@
 // a ReviewDecision. Extracted from run-store.ts (move-only).
 
 import { promises as fs } from "node:fs";
-import type { ReviewDecision, VerifierVerdict, WorkerReport } from "@shared/types";
+import type {
+  ReviewDecision,
+  VerifierVerdict,
+  WorkerHandoffArtifact,
+  WorkerReport,
+} from "@shared/types";
 
 export async function readWorkerReport(path: string): Promise<WorkerReport | null> {
   let raw: string;
@@ -39,8 +44,31 @@ function normalizeWorkerReport(raw: Record<string, unknown>): WorkerReport {
     proof: normalizeStringList(raw.proof),
     risks: normalizeStringList(raw.risks),
     followups: normalizeStringList(raw.followups),
+    handoff: normalizeHandoffArtifacts(raw.handoff),
     verifier: normalizeVerifierVerdict(raw.verifier),
   };
+}
+
+/** Cap so one report can never balloon the successor's prompt. */
+const MAX_HANDOFF_ARTIFACTS = 8;
+const MAX_HANDOFF_FIELD_CHARS = 500;
+
+function normalizeHandoffArtifacts(value: unknown): WorkerHandoffArtifact[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const text = (raw: unknown): string =>
+    typeof raw === "string" ? raw.trim().slice(0, MAX_HANDOFF_FIELD_CHARS) : "";
+  const artifacts = value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .map((item) => ({
+      path: text(item.path),
+      description: text(item.description),
+      reuse: text(item.reuse),
+    }))
+    // A handoff with no path points at nothing; dropping it is better than
+    // handing a successor an instruction it cannot act on.
+    .filter((item) => item.path.length > 0)
+    .slice(0, MAX_HANDOFF_ARTIFACTS);
+  return artifacts.length > 0 ? artifacts : undefined;
 }
 
 function normalizeVerifierVerdict(value: unknown): VerifierVerdict | undefined {

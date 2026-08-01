@@ -1,5 +1,6 @@
 import type {
   HumanRunMessage,
+  PlanValidation,
   RuntimeState,
   SparkCall,
   RunState,
@@ -235,6 +236,8 @@ export type ChatTimelineItem =
       messageKind: HumanRunMessage["kind"];
       text: string;
       questionOptions: HumanRunMessage["questionOptions"];
+      /** Present on plan_approval asks: did anyone actually prove this plan? */
+      planValidation?: PlanValidation;
       answersMessageId: HumanRunMessage["answersMessageId"];
       attachments: HumanRunMessage["attachments"];
       intent: HumanRunMessage["intent"];
@@ -340,6 +343,9 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       messageKind: message.kind,
       text,
       questionOptions: message.questionOptions ?? [],
+      ...(message.questionContext?.planValidation
+        ? { planValidation: message.questionContext.planValidation }
+        : {}),
       answersMessageId: message.answersMessageId,
       attachments: message.attachments ?? [],
       intent: message.intent,

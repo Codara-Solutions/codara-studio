@@ -87,13 +87,22 @@ const KEEP_STATE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   "paused",
 ]);
 
-/** Failure kinds that are provider trouble rather than the work failing, and
- * therefore park the run instead of branding it failed once retries are
- * exhausted. Rate limits park without retrying first. `subscription` is
- * intentionally absent: a billing decline fails the turn visibly and leaves the
- * run running, so the composer stays a normal input. */
+/** Failure kinds that are provider trouble — or Cora's own patience running
+ * out — rather than the work failing, and therefore park the run instead of
+ * branding it failed once retries are exhausted. Rate limits park without
+ * retrying first. `subscription` is intentionally absent: a billing decline
+ * fails the turn visibly and leaves the run running, so the composer stays a
+ * normal input.
+ *
+ * `timeout` is here because a manager turn that ran out of time says nothing
+ * about the work. Observed live: a manager that had been correctly driving a
+ * run for 90 minutes hit its turn cap while blocked on a healthy
+ * codara_wait_for_workers; branding the run failed then terminalized a worker
+ * that was three commits from done, and the recovery turn invented cleanup
+ * work against a tree that did not need it. Parking keeps the run resumable
+ * and, critically, leaves in-flight workers alone. */
 function parksInsteadOfFailing(kind: WorkerFailureKind | undefined): boolean {
-  return kind === "transport" || kind === "provider" || kind === "rate_limit";
+  return kind === "transport" || kind === "provider" || kind === "rate_limit" || kind === "timeout";
 }
 
 /**
@@ -138,20 +147,24 @@ export function planManagerTurnFailure(input: {
       action: "park",
       kind: kind as WorkerFailureKind,
       reason:
-        kind === "rate_limit"
-          ? "the provider is rate limited; a fast retry cannot clear a quota window, so the run parks for the user"
-          : input.backend === "pi"
-            ? "Pi exhausted its own automatic provider retries, so replaying the entire manager turn would duplicate work"
-          : "transient provider trouble outlived the automatic retries, so the run parks instead of failing",
+        kind === "timeout"
+          ? "the manager turn ran out of time, which says nothing about the work or the workers, so the run parks resumable instead of failing"
+          : kind === "rate_limit"
+            ? "the provider is rate limited; a fast retry cannot clear a quota window, so the run parks for the user"
+            : input.backend === "pi"
+              ? "Pi exhausted its own automatic provider retries, so replaying the entire manager turn would duplicate work"
+              : "transient provider trouble outlived the automatic retries, so the run parks instead of failing",
       // One voice everywhere the parked state surfaces: the run header detail,
       // the composer placeholder, and the Retry button all speak this exact
       // sentence pair, naming the control that actually exists.
       parkReason:
-        kind === "rate_limit"
-          ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-          : kind === "transport"
-            ? "Cora lost its connection to the provider. Retry when the connection is stable."
-            : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+        kind === "timeout"
+          ? "Cora's turn ran out of time. Any workers it started kept running — retry the saved turn to pick them back up."
+          : kind === "rate_limit"
+            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
+            : kind === "transport"
+              ? "Cora lost its connection to the provider. Retry when the connection is stable."
+              : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
       lastAction: input.mode === "chat" ? "chat_turn_parked" : "manager_turn_parked",
     };
   }
