@@ -31,6 +31,7 @@ const STUDIO_TOOLS = [
   "codara_terminal_create",
   "codara_terminal_write",
   "codara_terminal_read",
+  "codara_terminal_close",
 ] as const;
 
 const EXECUTE_TOOLS = [

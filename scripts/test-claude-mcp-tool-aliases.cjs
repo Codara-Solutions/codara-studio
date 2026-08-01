@@ -23,7 +23,7 @@ async function main() {
   const { buildClaudeMcpToolAliases } = require(outfile);
 
   const automation = buildClaudeMcpToolAliases("automation");
-  assert.strictEqual(Object.keys(automation).length, 36, "automation aliases must cover its full MCP roster");
+  assert.strictEqual(Object.keys(automation).length, 37, "automation aliases must cover its full MCP roster");
   assert.strictEqual(
     automation.codara_list_automations,
     "mcp__codara-studio__codara_list_automations",
@@ -36,9 +36,13 @@ async function main() {
     automation.codara_ask_user,
     "mcp__codara-studio__codara_ask_user",
   );
+  assert.strictEqual(
+    automation.codara_terminal_close,
+    "mcp__codara-studio__codara_terminal_close",
+  );
 
   const execute = buildClaudeMcpToolAliases("execute");
-  assert.strictEqual(Object.keys(execute).length, 34, "execute aliases must cover its full MCP roster");
+  assert.strictEqual(Object.keys(execute).length, 35, "execute aliases must cover its full MCP roster");
   assert.strictEqual(
     execute.codara_spawn_workers,
     "mcp__codara-studio__codara_spawn_workers",

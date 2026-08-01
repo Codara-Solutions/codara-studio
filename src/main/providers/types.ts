@@ -1,8 +1,8 @@
 // CLI provider abstraction.
 //
 // One TypeScript interface per coding CLI that Codara can spawn (Claude Code
-// and Codex CLI today; Aider, Amp, OpenCode, Grok CLI, Droid,
-// Hermes, Pi, Kimi, Kiro, Antigravity, Cline tomorrow). The contract bundles
+// and Codex CLI today; Aider, Amp, Droid, Hermes, Pi, Kimi, Kiro,
+// Antigravity, Cline tomorrow). The contract bundles
 // everything callers need to launch the binary without baking CLI-specific
 // branches into run-store / agent-runtimes / etc:
 //
@@ -68,7 +68,7 @@ export interface ResumeOpts extends SpawnOpts {
  * `src/main/providers/<id>.ts` and are aggregated by `providers/index.ts`.
  */
 export interface CliProvider {
-  /** Stable identifier matching `AgentRuntimeKind` ("claude" | "codex" | ...). */
+  /** Stable identifier matching `AgentRuntimeKind` ("claude" | "codex"). */
   id: AgentRuntimeKind;
   /** Human-readable label shown in UI ("Claude Code"). */
   displayName: string;

@@ -138,7 +138,9 @@ async function probeVersion(
   }
 }
 
-async function diagnoseProvider(provider: CliProvider): Promise<AgentRuntimeDiagnostic> {
+async function diagnoseProvider(
+  provider: CliProvider & { id: AgentRuntimeKind },
+): Promise<AgentRuntimeDiagnostic> {
   // Use the binary resolver so installs that aren't on the inherited PATH
   // (npm-global behind a sparse Electron-from-Finder PATH, scoop shims,
   // nvm versions, etc.) still get found. The resolver internally falls
@@ -193,11 +195,11 @@ export async function detectAgentRuntimes(force = false): Promise<AgentRuntimeDi
   if (!force && cache && cache.expires > now) {
     return cache.value;
   }
+  const providers = listProviders();
   const masked = (process.env.SPARK_DISABLE_RUNTIMES ?? "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
-  const providers = listProviders();
   const value = await Promise.all(
     providers.map(async (provider) => {
       const diag = await diagnoseProvider(provider);

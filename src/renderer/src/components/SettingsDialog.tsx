@@ -4,20 +4,20 @@ import type { NativeCliTerminalSetupStatus } from "@shared/native-cli-terminal";
 import type {
   AppSettings,
   EditorThemeId,
-  NativeCliAccountsInspection,
-  NativeCliAccountRuntime,
   NativeCliAccountProfile,
+  NativeCliAccountRuntime,
+  NativeCliAccountsInspection,
   PiSubscriptionAuthEvent,
   PiSubscriptionConnection,
   PiSubscriptionOverview,
   PiSubscriptionPrompt,
   PiSubscriptionProvider,
-  PtyResourceSnapshot,
-  UserConstitutionDocument,
   ProjectConstitutionInspection,
+  PtyResourceSnapshot,
   RunState,
   ShellInfo,
   ThemePref,
+  UserConstitutionDocument,
   WorkerSessionMemoryScope,
   WorkerSessionRuntime,
   WorkerSessionSummary,
@@ -286,11 +286,13 @@ export default function SettingsDialog({
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Whether the active tab uses the draft-and-Save flow (terminal, api, agents) or
-  // auto-applies on change (general, editor, about). The footer
+  // Whether the active tab uses the draft-and-Save flow (terminal, api) or
+  // auto-applies on change (general, editor, about, agents). The footer
   // hides Save/Cancel on auto-save tabs so the UI doesn't pretend the user
-  // needs to commit a change that already persisted.
-  const isDraftTab = activeTab === "terminal" || activeTab === "api" || activeTab === "agents";
+  // needs to commit a change that already persisted. Agents left the draft
+  // flow when its last AppSettings row (fast mode) moved to the composer:
+  // accounts and the Capability Center pointer own their own persistence.
+  const isDraftTab = activeTab === "terminal" || activeTab === "api";
   // The runs tab has its own scrolling list and per-row destructive actions;
   // the global Save/Cancel footer would be misleading there. Hide the
   // footer entirely on tabs that manage their own persistence semantics.
@@ -434,7 +436,9 @@ export default function SettingsDialog({
               overflow: "auto",
             }}
           >
-            {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} workspaceId={workspaceId} />}
+            {renderedTab === "general" && (
+              <GeneralSettings workspaceCwd={workspaceCwd} workspaceId={workspaceId} />
+            )}
             {renderedTab === "editor" && <EditorSettings />}
             {renderedTab === "terminal" && (
               <TerminalSettings
@@ -648,6 +652,12 @@ function TerminalSettings({
           onChange={onScrollbackLineLimitChange}
         />
       </div>
+      <div style={{ marginTop: 22 }}>
+        <SectionTitle
+          title="Run terminal lifecycle"
+          detail="Temporary worker panes close when a run settles. Service panes remain until the run is deleted. Failed closes retry automatically."
+        />
+      </div>
     </div>
   );
 }
@@ -690,12 +700,6 @@ function ResourceMetric({
         }}
       >
         {value}
-      </div>
-      <div style={{ marginTop: 22 }}>
-        <SectionTitle
-          title="Run terminal lifecycle"
-          detail="Temporary worker panes close when a run settles. Service panes remain until the run is deleted. Failed closes retry automatically."
-        />
       </div>
     </div>
   );
@@ -1144,8 +1148,6 @@ function GeneralSettings({
         </div>
       ) : null}
 
-      <hr className="spark-divider" style={{ margin: "2px 0" }} />
-
       <UserConstitutionSettings />
 
       <ProjectConstitutionSettings workspaceId={workspaceId} />
@@ -1242,115 +1244,6 @@ function GeneralSettings({
       <CommandLineSettings />
 
       {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
-    </div>
-  );
-}
-
-function TerminalAccountSetting() {
-  const [status, setStatus] = useState<NativeCliTerminalSetupStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [showSnippet, setShowSnippet] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-    void window.spark.nativeCliTerminal
-      .status()
-      .then((next) => {
-        if (mounted) setStatus(next);
-      })
-      .catch((cause) => {
-        if (mounted) setError(cause instanceof Error ? cause.message : String(cause));
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  const toggle = async () => {
-    if (!status) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = status.installed
-        ? await window.spark.nativeCliTerminal.uninstall()
-        : await window.spark.nativeCliTerminal.install();
-      setStatus(result.status);
-      if (!result.ok) setError(result.error);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div
-      style={{
-        display: "grid",
-        gap: 8,
-        padding: "12px 14px",
-        border: "1px solid var(--rule-soft)",
-        borderRadius: 8,
-      }}
-    >
-      <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 600 }}>
-        Use the Active account in your terminal
-      </div>
-      <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
-        When this is on, running <code className="spark-mono">claude</code> or{" "}
-        <code className="spark-mono">codex</code> in a new terminal window signs
-        you in as whichever account is marked Active above, instead of the login
-        your terminal had before. Codara adds a few lines to{" "}
-        <code className="spark-mono">{status?.profilePath ?? "your shell startup file"}</code>{" "}
-        and keeps a copy of the original. Turning it off removes those lines
-        again. Terminals you already have open keep what they started with.
-      </div>
-      {status && !status.supported ? (
-        <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
-          {status.manualInstruction ??
-            status.error ??
-            "This system's shell cannot be set up automatically."}
-        </div>
-      ) : null}
-      {showSnippet && status ? (
-        <pre
-          className="spark-mono"
-          style={{
-            margin: 0,
-            padding: 8,
-            overflowX: "auto",
-            fontSize: 11,
-            color: "var(--muted)",
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 6,
-          }}
-        >
-          {status.snippet}
-        </pre>
-      ) : null}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <FooterButton
-          onClick={() => void toggle()}
-          disabled={busy || !status || !status.supported}
-        >
-          {busy
-            ? "Working…"
-            : status?.installed
-              ? "Turn off"
-              : "Turn on"}
-        </FooterButton>
-        {status ? (
-          <FooterButton onClick={() => setShowSnippet((value) => !value)}>
-            {showSnippet ? "Hide the lines" : "Show the lines"}
-          </FooterButton>
-        ) : null}
-      </div>
-      {error ? (
-        <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>
-          {error}
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1737,6 +1630,115 @@ const CORA_CLI_EXAMPLES = [
 // Consent gate for the shell setup: nothing is written to the user's shell
 // startup file until they press the button here, and the exact block is shown
 // before they do.
+function TerminalAccountSetting() {
+  const [status, setStatus] = useState<NativeCliTerminalSetupStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showSnippet, setShowSnippet] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    void window.spark.nativeCliTerminal
+      .status()
+      .then((next) => {
+        if (mounted) setStatus(next);
+      })
+      .catch((cause) => {
+        if (mounted) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const toggle = async () => {
+    if (!status) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = status.installed
+        ? await window.spark.nativeCliTerminal.uninstall()
+        : await window.spark.nativeCliTerminal.install();
+      setStatus(result.status);
+      if (!result.ok) setError(result.error);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: 8,
+        padding: "12px 14px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+      }}
+    >
+      <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 600 }}>
+        Use the Active account in your terminal
+      </div>
+      <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
+        When this is on, running <code className="spark-mono">claude</code> or{" "}
+        <code className="spark-mono">codex</code> in a new terminal window signs
+        you in as whichever account is marked Active above, instead of the login
+        your terminal had before. Codara adds a few lines to{" "}
+        <code className="spark-mono">{status?.profilePath ?? "your shell startup file"}</code>{" "}
+        and keeps a copy of the original. Turning it off removes those lines
+        again. Terminals you already have open keep what they started with.
+      </div>
+      {status && !status.supported ? (
+        <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
+          {status.manualInstruction ??
+            status.error ??
+            "This system's shell cannot be set up automatically."}
+        </div>
+      ) : null}
+      {showSnippet && status ? (
+        <pre
+          className="spark-mono"
+          style={{
+            margin: 0,
+            padding: 8,
+            overflowX: "auto",
+            fontSize: 11,
+            color: "var(--muted)",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 6,
+          }}
+        >
+          {status.snippet}
+        </pre>
+      ) : null}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <FooterButton
+          onClick={() => void toggle()}
+          disabled={busy || !status || !status.supported}
+        >
+          {busy
+            ? "Working…"
+            : status?.installed
+              ? "Turn off"
+              : "Turn on"}
+        </FooterButton>
+        {status ? (
+          <FooterButton onClick={() => setShowSnippet((value) => !value)}>
+            {showSnippet ? "Hide the lines" : "Show the lines"}
+          </FooterButton>
+        ) : null}
+      </div>
+      {error ? (
+        <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>
+          {error}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function CommandLineSettings() {
   const [status, setStatus] = useState<CoraCliInstallStatus | null>(null);
   const [busy, setBusy] = useState<"install" | "uninstall" | null>(null);
@@ -3711,6 +3713,7 @@ function SessionsSettings({
     try {
       const result = await deleteSession({
         runtime: session.runtime,
+        nativeCodexProfileId: session.nativeCodexProfileId,
         sessionId: session.sessionId,
         cwd: session.cwd,
         transcriptPath: session.transcriptPath,

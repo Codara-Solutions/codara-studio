@@ -54,6 +54,19 @@ const SPARK_MCP_MODE = (process.env.SPARK_MCP_MODE || "").trim().toLowerCase();
 const IS_EXECUTE_MODE = SPARK_MCP_MODE === "execute";
 const IS_AUTOMATION_MODE = SPARK_MCP_MODE === "automation";
 const IS_WORKER_MODE = SPARK_MCP_MODE === "worker";
+const IS_UNTRUSTED_PULL_REQUEST =
+  (process.env.CODARA_PI_PROJECT_POLICY || "").trim() === "untrusted-pull-request";
+const UNTRUSTED_PULL_REQUEST_TOOL_NAMES = new Set([
+  "codara_spawn_workers",
+  "codara_ask_user",
+  "codara_complete",
+  "codara_request_next_iteration",
+  "codara_get_worker_status",
+  "codara_wait_for_workers",
+  "codara_message_workers",
+  "codara_check_messages",
+  "codara_name_chat",
+]);
 
 // Orchestration RPCs can block up to ~15 min (codara_ask_user waits on a human;
 // codara_wait_for_workers / codara_wait_for_automation long-poll), so they get a
@@ -461,13 +474,18 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd }, the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
+      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Temporary terminals are closed automatically when their Cora run finishes. Use retention='service' only for a dev server or watcher the user explicitly needs after completion; it remains run-owned and is closed when the run is deleted. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd }, the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: "Working directory for the new terminal. Pass an absolute path that exists. Defaults to the calling run's workspace root (or the active workspace root when no run identity is available) when omitted." },
         command: { type: "string", description: "Optional shell command to run immediately after the terminal opens." },
         title: { type: "string", description: "Optional tab title." },
+        retention: {
+          type: "string",
+          enum: ["temporary", "service"],
+          description: "Lifecycle policy. temporary (default) is automatically closed when the run settles. service survives completion only when the user explicitly needs it, and is still closed with the run.",
+        },
       },
       additionalProperties: false,
     },
@@ -497,6 +515,19 @@ const TERMINAL_TOOLS = [
       properties: {
         paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
         lines: { type: "number", description: "How many trailing lines to return (default 100)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_terminal_close",
+    description:
+      "Stop and close an agent-owned terminal returned by codara_terminal_create. Ownership is scoped to the calling Cora run, so this cannot close a user's terminal or another run's terminal. The operation is idempotent: retrying the same close after a lost response succeeds with alreadyClosed=true. Close temporary dev servers, watchers, and helper CLIs before final verification; leave one open only when the user explicitly needs the live service.",
+    inputSchema: {
+      type: "object",
+      required: ["paneId"],
+      properties: {
+        paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
       },
       additionalProperties: false,
     },
@@ -674,6 +705,7 @@ const TERMINAL_TOOL_TO_RPC = {
   codara_terminal_create: "terminal.create",
   codara_terminal_write: "terminal.write",
   codara_terminal_read: "terminal.read",
+  codara_terminal_close: "terminal.close",
 };
 
 // ===========================================================================
@@ -1152,7 +1184,8 @@ const EXECUTE_TOOLS = [
         },
         question: {
           type: "string",
-          description: "The question to surface in the Codara chat panel.",
+          description:
+            "The question to surface in the Codara chat panel. The user sees ONLY this text: worker reports and prior tool output are collapsed, so an approval question must itself enumerate the concrete items being approved (never 'the plan shown above'). Blind plan_approval questions are rejected with a retry instruction.",
         },
         category: {
           type: "string",
@@ -1540,22 +1573,47 @@ if (IS_AUTOMATION_MODE) {
   TOOLS = STUDIO_TOOLS;
   TOOL_TO_RPC = STUDIO_TOOL_TO_RPC;
 }
+if (IS_UNTRUSTED_PULL_REQUEST) {
+  // Defense in depth for both the MCP CLI path and Pi's in-process bridge:
+  // imported PR content never receives terminal/preview/automation/memory
+  // tools even if a future launcher selects a broader SPARK_MCP_MODE.
+  TOOLS = TOOLS.filter((tool) => UNTRUSTED_PULL_REQUEST_TOOL_NAMES.has(tool.name));
+  TOOL_TO_RPC = Object.fromEntries(
+    Object.entries(TOOL_TO_RPC).filter(([name]) => UNTRUSTED_PULL_REQUEST_TOOL_NAMES.has(name)),
+  );
+}
 
 // Orchestration RPCs (orchestrator.* / automation.*) get the long HTTP timeout
-// and runId auto-injection; preview + terminal RPCs get the short timeout and
-// no injection.
+// and runId auto-injection; preview + terminal RPCs get the short timeout.
 function isOrchestrationRpc(rpc) {
   return typeof rpc === "string" && (rpc.startsWith("orchestrator.") || rpc.startsWith("automation."));
 }
 
-// terminal.create and preview.navigate can MINT a new renderer tab. Stamp the
-// calling run's identity (SPARK_RUN_ID, injected by pty-manager at spawn) so
-// the tab is attributed to, and routed into, that run's workspace rather
-// than whichever run/workspace the user happens to be viewing when the RPC
-// lands. Caller-supplied runId always wins; user-facing agents with no
-// SPARK_RUN_ID keep the active-workspace behavior.
-function injectRunIdForTabMint(rpc, args) {
-  if (rpc !== "terminal.create" && rpc !== "preview.navigate") return;
+// terminal.create and preview.navigate mint renderer tabs; terminal.write and
+// terminal.close must prove they belong to the same run that minted their
+// terminal. For terminal ownership, the launch-time SPARK_RUN_ID is the
+// authority: a model-supplied runId must never let one run impersonate another.
+// User-facing agents with no SPARK_RUN_ID keep null-scoped ownership. Preview
+// navigation retains its existing best-effort caller-supplied routing behavior.
+function injectRunIdForStudioOwnership(rpc, args) {
+  if (
+    rpc !== "terminal.read" &&
+    rpc !== "terminal.create" &&
+    rpc !== "terminal.write" &&
+    rpc !== "terminal.close" &&
+    rpc !== "preview.navigate"
+  ) return;
+  if (
+    rpc === "terminal.read" ||
+    rpc === "terminal.create" ||
+    rpc === "terminal.write" ||
+    rpc === "terminal.close"
+  ) {
+    const envRunId = (process.env.SPARK_RUN_ID || "").trim();
+    if (envRunId) args.runId = envRunId;
+    else delete args.runId;
+    return;
+  }
   if (typeof args.runId === "string" && args.runId.trim().length > 0) return;
   const envRunId = process.env.SPARK_RUN_ID;
   if (envRunId && envRunId.trim().length > 0) args.runId = envRunId.trim();
@@ -1793,6 +1851,12 @@ async function dispatch(method, params) {
 
 async function callTool(params) {
   const name = params && typeof params.name === "string" ? params.name : null;
+  if (
+    IS_UNTRUSTED_PULL_REQUEST &&
+    (!name || !UNTRUSTED_PULL_REQUEST_TOOL_NAMES.has(name))
+  ) {
+    throw mkErr(-32602, `tool is unavailable for an imported pull-request run: ${name || "(missing)"}`);
+  }
   // The batched preview runner is handled locally (it fans out to many RPCs).
   if (name === "codara_preview_run") {
     const args = params && params.arguments && typeof params.arguments === "object" ? params.arguments : {};
@@ -1840,7 +1904,7 @@ async function callTool(params) {
       }
     }
   }
-  injectRunIdForTabMint(rpc, args);
+  injectRunIdForStudioOwnership(rpc, args);
 
   const timeoutMs = isOrchestrationRpc(rpc) ? ORCHESTRATION_TIMEOUT_MS : PREVIEW_TERMINAL_TIMEOUT_MS;
   try {
@@ -1884,7 +1948,7 @@ async function callRunBatch(args) {
     if (defaultTabId && rpcArgs.tabId === undefined) rpcArgs.tabId = defaultTabId;
     // A batched navigate step can auto-open a preview tab exactly like the
     // single-shot tool; stamp the same run identity.
-    injectRunIdForTabMint(rpc, rpcArgs);
+    injectRunIdForStudioOwnership(rpc, rpcArgs);
     const entry = { index: i, action };
     if (label) entry.label = label;
     try {

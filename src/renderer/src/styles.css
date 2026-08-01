@@ -2960,12 +2960,16 @@ a { color: inherit; }
   content-visibility: auto;
   contain-intrinsic-size: auto 76px;
   contain: layout paint style;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.agent-capability-row:hover {
+  background: var(--hover);
 }
 
 /* ── Capability Center ──────────────────────────────────────────────────────
-   Two flat inventories (MCP servers, then skills) over one scroller, with the
-   session policy group closing the page. The outer surface stays pre-blended
-   (see the performance gate above) so scrolling never re-rasterizes the entire
+   A sidebar nav (MCP servers, Skills, Memory, Policy) over one content pane,
+   the same shape Settings uses. The outer surface stays pre-blended (see the
+   performance gate above) so scrolling never re-rasterizes the entire
    workbench on Wayland. */
 .agent-capabilities-surface {
   position: relative;
@@ -2998,8 +3002,19 @@ a { color: inherit; }
 .agent-capability-list > *:last-child {
   border-bottom: none !important;
 }
+/* Each cell repeats its column's name for the stacked layout below. While the
+   table is wide enough to carry a real header row, the repeat is noise. */
+.agent-capability-cell-label {
+  display: none;
+}
 
-@media (max-width: 720px) {
+/* The tables stack well before the window's 720px floor (src/main/index.ts):
+   at 721px the content pane is only ~435px while the MCP grid needs ~442px of
+   fixed columns, gaps and padding, so the Server column would resolve to zero
+   and `contain: paint` on the row would clip the trailing columns away. 860px
+   is the first width where the grid genuinely fits — pane ~575px, leaving the
+   Server column ~133px — so that is where the wide layout starts. */
+@media (max-width: 860px) {
   /* Row internals are inline-styled, so the stacked layout has to outrank them. */
   .agent-capability-row {
     grid-template-columns: minmax(0, 1fr) !important;
@@ -3009,6 +3024,22 @@ a { color: inherit; }
   .agent-capability-row > *:last-child {
     justify-content: flex-start !important;
     flex-wrap: wrap;
+  }
+  /* Give the content pane back what the nav can spare. The nav is inline-styled,
+     so the narrower basis has to outrank it. */
+  .agent-capabilities-nav {
+    flex: 0 0 150px !important;
+  }
+  /* The columns cannot fit, so rows stack and the table header stops describing
+     anything. Each cell shows its own label instead. */
+  .agent-capability-head {
+    display: none !important;
+  }
+  .agent-capability-cell-label {
+    display: inline;
+  }
+  .agent-capability-row > * {
+    justify-items: start !important;
   }
 }
 

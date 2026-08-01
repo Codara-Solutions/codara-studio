@@ -42,6 +42,14 @@ interface Props {
 
 type CapabilityKind = "mcp" | "skill";
 type RuntimeColumn = "claude" | "codex" | "shared";
+type CapabilityTab = "mcp" | "skills" | "memory" | "policy";
+
+const TABS: { id: CapabilityTab; label: string }[] = [
+  { id: "mcp", label: "MCP servers" },
+  { id: "skills", label: "Skills" },
+  { id: "memory", label: "Memory" },
+  { id: "policy", label: "Policy" },
+];
 
 interface NameGroup {
   kind: CapabilityKind;
@@ -81,6 +89,12 @@ const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
   claude: "Claude",
   codex: "Codex",
   shared: "Shared",
+};
+// What the user calls the two external tools. RUNTIME_LABEL names the config
+// column (and reads right in "Removed X from Claude"); this names the app.
+const CLI_LABEL: Record<"claude" | "codex", string> = {
+  claude: "Claude CLI",
+  codex: "Codex CLI",
 };
 const MCP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -171,6 +185,11 @@ export default function AgentCapabilitiesDialog({
   onClose,
   onSave,
 }: Props) {
+  const [activeTab, setActiveTab] = useState<CapabilityTab>("mcp");
+  // Selecting a section should acknowledge the click before the inventory it
+  // holds builds its DOM. The nav follows activeTab immediately while React
+  // renders the section body at deferred priority. Mirrors SettingsDialog.
+  const renderedTab = useDeferredValue(activeTab);
   const [draft, setDraft] = useState(settings);
   const [assets, setAssets] = useState<AgentAssetInventory | null>(null);
   const [builtins, setBuiltins] = useState<SparkBuiltinMcpStatus[] | null>(null);
@@ -196,6 +215,13 @@ export default function AgentCapabilitiesDialog({
   const [memoryBusy, setMemoryBusy] = useState<CoraMemoryScope | null>(null);
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
+  // Whether the form is still mounted when an async save settles. A save that
+  // fails after the form was dismissed has nowhere to put setEditorError, so
+  // the message has to fall back to the footer instead of vanishing.
+  const editorRef = useRef<EditorState | null>(null);
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
 
   const refreshAssets = useCallback(() => {
     void requestAssets(workspaceCwd)
@@ -416,8 +442,8 @@ export default function AgentCapabilitiesDialog({
       .then((result) => {
         setStatus(
           result.ok
-            ? `Shared ${group.name} with ${RUNTIME_LABEL[target]}.`
-            : result.error ?? `Could not share ${group.name} with ${RUNTIME_LABEL[target]}.`,
+            ? `Copied ${group.name} into the ${RUNTIME_LABEL[target]} config.`
+            : result.error ?? `Could not copy ${group.name} into the ${RUNTIME_LABEL[target]} config.`,
         );
         refreshAssets();
       })
@@ -459,6 +485,7 @@ export default function AgentCapabilitiesDialog({
 
   const openAdd = () => {
     setEditorError(null);
+    setActiveTab("mcp");
     setEditor({
       mode: "add",
       replaceId: null,
@@ -478,6 +505,7 @@ export default function AgentCapabilitiesDialog({
       group.installs.shared[0] ?? group.installs.claude[0] ?? group.installs.codex[0] ?? group.any;
     setEditorBusy(true);
     setEditorError(null);
+    setActiveTab("mcp");
     void window.spark.agents
       .mcpDetail(item.id)
       .then((detail) => {
@@ -489,6 +517,14 @@ export default function AgentCapabilitiesDialog({
       })
       .catch((err) => setStatus((err as Error).message))
       .finally(() => setEditorBusy(false));
+  };
+
+  // A save reports next to the fields while the form is up, and in the footer
+  // once it isn't: the form's own error slot is unmounted by then, so routing
+  // there would drop the message on the floor.
+  const reportEditorProblem = (message: string) => {
+    if (editorRef.current) setEditorError(message);
+    else setStatus(message);
   };
 
   const submitEditor = () => {
@@ -517,14 +553,14 @@ export default function AgentCapabilitiesDialog({
       })
       .then((result) => {
         if (!result.ok) {
-          setEditorError(result.error ?? "Could not save this server.");
+          reportEditorProblem(result.error ?? "Could not save this server.");
           return;
         }
         setStatus(`Saved ${result.name} to ${result.path}.`);
         setEditor(null);
         refreshAssets();
       })
-      .catch((err) => setEditorError((err as Error).message))
+      .catch((err) => reportEditorProblem((err as Error).message))
       .finally(() => setEditorBusy(false));
   };
 
@@ -536,6 +572,17 @@ export default function AgentCapabilitiesDialog({
 
   const visibleMcp = filteredMcp.slice(0, mcpLimit);
   const visibleSkills = filteredSkills.slice(0, skillLimit);
+  // Right-aligned nav counts, omitted until the inventory read lands so the nav
+  // never reports an empty workspace while it is still being walked. The MCP
+  // count has to include the pinned built-ins: they are rows in the same list,
+  // and counting only the discovered groups reports one fewer than is on screen.
+  const tabCount = (tab: CapabilityTab): string | null => {
+    if (assets === null) return null;
+    if (tab === "mcp") return String(mcpGroups.length + (builtins?.length ?? 0));
+    if (tab === "skills") return `${activeSkillCount}/${skillGroups.length}`;
+    return null;
+  };
+
   // The built-in is pinned above the discovered list, so the filter has to
   // reach it too or a search looks like it left a stray row behind.
   const visibleBuiltins = (builtins ?? []).filter((builtin) => {
@@ -560,214 +607,262 @@ export default function AgentCapabilitiesDialog({
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="agent-capabilities-header" style={headerStyle}>
-          <div style={{ minWidth: 0 }}>
-            <div className="spark-eyebrow" style={{ fontFamily: "var(--font-sans)" }}>
-              Agents
-            </div>
-            <div style={titleStyle}>Capability Center</div>
-            <div style={ledeStyle}>
-              MCP servers and skills available to Cora and Codara workers.
-            </div>
+          <AccentDot />
+          {/* One quiet title line, like Settings: the accent dot is the brand
+              mark and the tab nav says what the dialog holds. */}
+          <div
+            data-capability-tab={renderedTab}
+            aria-busy={renderedTab !== activeTab}
+            style={titleStyle}
+          >
+            Capability Center
           </div>
+          <div style={{ flex: 1 }} />
           <CloseButton onClick={onClose} />
         </header>
 
-        {editor ? (
-          <main className="agent-capabilities-scroll" style={mainStyle}>
-            <McpServerForm
-              editor={editor}
-              targets={editorTargets}
-              busy={editorBusy}
-              error={editorError}
-              onChange={setEditor}
-            />
-          </main>
-        ) : (
-          <main className="agent-capabilities-scroll" style={mainStyle}>
-            <section style={sectionStyle}>
-              <div style={sectionHeadStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <h2 style={sectionTitleStyle}>MCP servers</h2>
-                  <p style={sectionDetailStyle}>
-                    Tool servers agents can connect to. Cora and workers are assigned separately.
-                  </p>
-                </div>
-                <div style={sectionActionsStyle}>
-                  <SearchField
-                    value={mcpSearch}
-                    onChange={setMcpSearch}
-                    placeholder="Filter servers"
-                  />
-                  <button
-                    type="button"
-                    className="spark-btn is-primary"
-                    onClick={openAdd}
-                    disabled={targets.length === 0}
-                    title={targets.length === 0 ? "No writable MCP config location was found" : undefined}
-                  >
-                    Add MCP server
-                  </button>
-                </div>
-              </div>
+        <div style={bodyStyle}>
+          <nav className="agent-capabilities-nav" style={navStyle}>
+            {TABS.map((tab) => (
+              <TabButton
+                key={tab.id}
+                tab={tab.id}
+                label={tab.label}
+                count={tabCount(tab.id)}
+                active={activeTab === tab.id}
+                // The form is a view over the content pane, so picking a
+                // section backs out of it the same way Escape does — except
+                // while a save is in flight, where dropping the form would
+                // unmount the only place its result can be reported.
+                onClick={() => {
+                  if (editorBusy) return;
+                  // A per-row result ("Removed X from Claude") is about the
+                  // section it came from, so it does not follow the user out.
+                  setStatus(null);
+                  setEditor(null);
+                  setActiveTab(tab.id);
+                }}
+              />
+            ))}
+          </nav>
 
-              <div className="agent-capability-list" style={listStyle}>
-                {visibleBuiltins.map((builtin) => (
-                  <BuiltinRow
-                    key={builtin.id}
-                    builtin={builtin}
-                    busyKey={busyKey}
-                    autoInstallEnabled={draft.playwrightMcpAutoInstall}
-                    onInstall={installBuiltin}
-                    onUninstall={uninstallBuiltin}
-                  />
-                ))}
-                {visibleMcp.map((group) => (
-                  <McpRow
-                    key={group.sessionKey}
-                    group={group}
-                    busyKey={busyKey}
-                    coraAssigned={coraAssigned.has(group.sessionKey)}
-                    workerAssigned={workerAssigned.has(group.sessionKey)}
-                    onTogglePiScope={togglePiScope}
-                    onEdit={openEdit}
-                    onRemove={removeGroup}
-                    onInstall={installToRuntime}
-                  />
-                ))}
-                {filteredMcp.length === 0 && visibleBuiltins.length === 0 ? (
-                  <EmptyRow
-                    text={
-                      mcpGroups.length === 0
-                        ? "No MCP servers are configured for this workspace yet."
-                        : "No servers match this filter."
-                    }
-                  />
-                ) : null}
-                <Pager
-                  shown={visibleMcp.length}
-                  total={filteredMcp.length}
-                  onMore={() => setMcpLimit((current) => current + PAGE_SIZE)}
-                />
-              </div>
-            </section>
+          {editor ? (
+            <main className="agent-capabilities-scroll" style={mainStyle}>
+              <McpServerForm
+                editor={editor}
+                targets={editorTargets}
+                busy={editorBusy}
+                error={editorError}
+                onChange={setEditor}
+              />
+            </main>
+          ) : (
+            <main className="agent-capabilities-scroll" style={mainStyle}>
+              {renderedTab === "mcp" ? (
+                <section style={sectionStyle}>
+                  <div style={sectionHeadStyle}>
+                    <div style={{ minWidth: 0 }}>
+                      <h2 style={sectionTitleStyle}>MCP servers</h2>
+                      <p style={sectionDetailStyle}>
+                        Cora and Workers control what agents inside Codara can use. The Claude and Codex
+                        columns show which external CLI configs on this machine carry the server.
+                      </p>
+                    </div>
+                    <div style={sectionActionsStyle}>
+                      <SearchField
+                        value={mcpSearch}
+                        onChange={setMcpSearch}
+                        placeholder="Filter servers"
+                      />
+                      <button
+                        type="button"
+                        className="spark-btn is-primary"
+                        onClick={openAdd}
+                        disabled={targets.length === 0}
+                        title={targets.length === 0 ? "No writable MCP config location was found" : undefined}
+                      >
+                        Add MCP server
+                      </button>
+                    </div>
+                  </div>
 
-            <section style={sectionStyle}>
-              <div style={sectionHeadStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <h2 style={sectionTitleStyle}>Skills</h2>
-                  <p style={sectionDetailStyle}>
-                    Reusable workflows workers load on demand. {activeSkillCount} of {skillGroups.length} enabled.
-                  </p>
-                </div>
-                <div style={sectionActionsStyle}>
-                  <SearchField
-                    value={skillSearch}
-                    onChange={setSkillSearch}
-                    placeholder="Filter skills"
-                  />
-                </div>
-              </div>
+                  <div className="agent-capability-list" style={listStyle}>
+                    {visibleBuiltins.length > 0 || visibleMcp.length > 0 ? (
+                      <TableHeader
+                        template={MCP_GRID}
+                        labels={["Server", "Cora", "Workers", "Claude", "Codex", ""]}
+                      />
+                    ) : null}
+                    {visibleBuiltins.map((builtin) => (
+                      <BuiltinRow
+                        key={builtin.id}
+                        builtin={builtin}
+                        busyKey={busyKey}
+                        onInstall={installBuiltin}
+                        onUninstall={uninstallBuiltin}
+                      />
+                    ))}
+                    {visibleMcp.map((group) => (
+                      <McpRow
+                        key={group.sessionKey}
+                        group={group}
+                        busyKey={busyKey}
+                        coraAssigned={coraAssigned.has(group.sessionKey)}
+                        workerAssigned={workerAssigned.has(group.sessionKey)}
+                        onTogglePiScope={togglePiScope}
+                        onEdit={openEdit}
+                        onRemove={removeGroup}
+                        onInstall={installToRuntime}
+                      />
+                    ))}
+                    {filteredMcp.length === 0 && visibleBuiltins.length === 0 ? (
+                      <EmptyRow
+                        text={
+                          mcpGroups.length === 0
+                            ? "No MCP servers are configured for this workspace yet."
+                            : "No servers match this filter."
+                        }
+                      />
+                    ) : null}
+                    <Pager
+                      shown={visibleMcp.length}
+                      total={filteredMcp.length}
+                      onMore={() => setMcpLimit((current) => current + PAGE_SIZE)}
+                    />
+                  </div>
+                </section>
+              ) : null}
 
-              <div className="agent-capability-list" style={listStyle}>
-                {visibleSkills.map((group) => (
-                  <SkillRow
-                    key={group.sessionKey}
-                    group={group}
-                    busyKey={busyKey}
-                    enabled={!disabledSkills.has(group.sessionKey)}
-                    onToggle={toggleSkill}
-                    onRemove={removeGroup}
-                    onInstall={installToRuntime}
-                  />
-                ))}
-                {filteredSkills.length === 0 ? (
-                  <EmptyRow
-                    text={
-                      skillGroups.length === 0
-                        ? "No skills were found for this workspace."
-                        : "No skills match this filter."
-                    }
-                  />
-                ) : null}
-                <Pager
-                  shown={visibleSkills.length}
-                  total={filteredSkills.length}
-                  onMore={() => setSkillLimit((current) => current + PAGE_SIZE)}
-                />
-              </div>
-            </section>
+              {renderedTab === "skills" ? (
+                <section style={sectionStyle}>
+                  <div style={sectionHeadStyle}>
+                    <div style={{ minWidth: 0 }}>
+                      <h2 style={sectionTitleStyle}>Skills</h2>
+                      <p style={sectionDetailStyle}>
+                        Reusable workflows workers load on demand. {activeSkillCount} of {skillGroups.length} enabled.
+                      </p>
+                    </div>
+                    <div style={sectionActionsStyle}>
+                      <SearchField
+                        value={skillSearch}
+                        onChange={setSkillSearch}
+                        placeholder="Filter skills"
+                      />
+                    </div>
+                  </div>
 
-            <section style={policySectionStyle}>
-              <div style={sectionHeadStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <h2 style={sectionTitleStyle}>Cora memory</h2>
-                  <p style={sectionDetailStyle}>
-                    Two plain markdown files Cora reads at the start of every session and
-                    appends to when it learns something durable. Edit them like any other
-                    file; this only reports on them.
-                  </p>
-                </div>
-              </div>
+                  <div className="agent-capability-list" style={listStyle}>
+                    {visibleSkills.length > 0 ? (
+                      <TableHeader
+                        template={SKILL_GRID}
+                        labels={["Skill", "Enabled", "Claude", "Codex", ""]}
+                      />
+                    ) : null}
+                    {visibleSkills.map((group) => (
+                      <SkillRow
+                        key={group.sessionKey}
+                        group={group}
+                        busyKey={busyKey}
+                        enabled={!disabledSkills.has(group.sessionKey)}
+                        onToggle={toggleSkill}
+                        onRemove={removeGroup}
+                        onInstall={installToRuntime}
+                      />
+                    ))}
+                    {filteredSkills.length === 0 ? (
+                      <EmptyRow
+                        text={
+                          skillGroups.length === 0
+                            ? "No skills were found for this workspace."
+                            : "No skills match this filter."
+                        }
+                      />
+                    ) : null}
+                    <Pager
+                      shown={visibleSkills.length}
+                      total={filteredSkills.length}
+                      onMore={() => setSkillLimit((current) => current + PAGE_SIZE)}
+                    />
+                  </div>
+                </section>
+              ) : null}
 
-              <div className="agent-capability-list" style={listStyle}>
-                <MemoryRow
-                  scope="workspace"
-                  title="Workspace memory"
-                  detail="Facts about this repository: the command that really runs the tests, a build step with a gotcha, a convention the code does not state."
-                  status={memory?.workspace ?? null}
-                  busy={memoryBusy === "workspace"}
-                  unavailable={workspaceId === null ? "No workspace is open." : null}
-                  onToggle={toggleMemory}
-                  onOpen={openMemoryFile}
-                  onClear={clearMemory}
-                />
-                <MemoryRow
-                  scope="global"
-                  title="Global memory"
-                  detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
-                  status={memory?.global ?? null}
-                  busy={memoryBusy === "global"}
-                  unavailable={null}
-                  onToggle={toggleMemory}
-                  onOpen={openMemoryFile}
-                  onClear={clearMemory}
-                />
-              </div>
-            </section>
+              {renderedTab === "memory" ? (
+                <section style={sectionStyle}>
+                  <div style={sectionHeadStyle}>
+                    <div style={{ minWidth: 0 }}>
+                      <h2 style={sectionTitleStyle}>Cora memory</h2>
+                      <p style={sectionDetailStyle}>
+                        Two plain markdown files Cora reads at the start of every session and
+                        appends to when it learns something durable. Edit them like any other
+                        file; this only reports on them.
+                      </p>
+                    </div>
+                  </div>
 
-            <section style={policySectionStyle}>
-              <div style={sectionHeadStyle}>
-                <div style={{ minWidth: 0 }}>
-                  <h2 style={sectionTitleStyle}>Session policy</h2>
-                  <p style={sectionDetailStyle}>Applies to every agent session in this workspace.</p>
-                </div>
-                <button type="button" className="spark-btn" disabled={syncing} onClick={syncAssets}>
-                  {syncing ? "Syncing" : "Sync Claude and Codex"}
-                </button>
-              </div>
-              <div style={policyListStyle}>
-                <PolicyToggle
-                  title="MCP awareness"
-                  detail="List available MCP server names in agent planning prompts."
-                  checked={draft.agentMcpSyncEnabled}
-                  onChange={(agentMcpSyncEnabled) => setDraft((d) => ({ ...d, agentMcpSyncEnabled }))}
-                />
-                <PolicyToggle
-                  title="Skill awareness"
-                  detail="Let workers discover named workflows and load their docs on demand."
-                  checked={draft.agentSkillSyncEnabled}
-                  onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
-                />
-                <PolicyToggle
-                  title="Auto-install Codara Studio MCP"
-                  detail="Keep the built-in server present on launch for preview and terminal tools."
-                  checked={draft.playwrightMcpAutoInstall}
-                  onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
-                />
-              </div>
-            </section>
-          </main>
-        )}
+                  <div className="agent-capability-list" style={listStyle}>
+                    <MemoryRow
+                      scope="workspace"
+                      title="Workspace memory"
+                      detail="Facts about this repository: the command that really runs the tests, a build step with a gotcha, a convention the code does not state."
+                      status={memory?.workspace ?? null}
+                      busy={memoryBusy === "workspace"}
+                      unavailable={workspaceId === null ? "No workspace is open." : null}
+                      onToggle={toggleMemory}
+                      onOpen={openMemoryFile}
+                      onClear={clearMemory}
+                    />
+                    <MemoryRow
+                      scope="global"
+                      title="Global memory"
+                      detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
+                      status={memory?.global ?? null}
+                      busy={memoryBusy === "global"}
+                      unavailable={null}
+                      onToggle={toggleMemory}
+                      onOpen={openMemoryFile}
+                      onClear={clearMemory}
+                    />
+                  </div>
+                </section>
+              ) : null}
+
+              {renderedTab === "policy" ? (
+                <section style={sectionStyle}>
+                  <div style={sectionHeadStyle}>
+                    <div style={{ minWidth: 0 }}>
+                      <h2 style={sectionTitleStyle}>Session policy</h2>
+                      <p style={sectionDetailStyle}>Applies to every agent session in this workspace.</p>
+                    </div>
+                    <button type="button" className="spark-btn" disabled={syncing} onClick={syncAssets}>
+                      {syncing ? "Syncing" : "Sync Claude and Codex"}
+                    </button>
+                  </div>
+                  <div style={policyListStyle}>
+                    <PolicyToggle
+                      title="MCP awareness"
+                      detail="List available MCP server names in agent planning prompts."
+                      checked={draft.agentMcpSyncEnabled}
+                      onChange={(agentMcpSyncEnabled) => setDraft((d) => ({ ...d, agentMcpSyncEnabled }))}
+                    />
+                    <PolicyToggle
+                      title="Skill awareness"
+                      detail="Let workers discover named workflows and load their docs on demand."
+                      checked={draft.agentSkillSyncEnabled}
+                      onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
+                    />
+                    <PolicyToggle
+                      title="Auto-install Codara Studio MCP"
+                      detail="Keep the built-in server present on launch for preview and terminal tools."
+                      checked={draft.playwrightMcpAutoInstall}
+                      onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
+                    />
+                  </div>
+                </section>
+              ) : null}
+            </main>
+          )}
+        </div>
 
         <footer className="agent-capabilities-footer" style={footerStyle}>
           {/* Errors from the form render next to the fields; the footer keeps
@@ -783,7 +878,12 @@ export default function AgentCapabilitiesDialog({
           >
             {editor
               ? "Adding or editing a server writes to the config file right away."
-              : status ?? "Changes apply after Save. Running workers keep their current prompt."}
+              : status ??
+                // Memory writes to disk as you click; everything else is held
+                // in the draft until Save, so the standing note follows the tab.
+                (activeTab === "memory"
+                  ? "Memory changes apply immediately."
+                  : "Changes apply after Save. Running workers keep their current prompt.")}
           </div>
           {editor ? (
             <>
@@ -808,6 +908,144 @@ export default function AgentCapabilitiesDialog({
       </section>
     </div>
   );
+}
+
+// The header's brand mark. SettingsDialog keeps its own private copy of this;
+// duplicating the 7px dot is cheaper than exporting it across two dialogs.
+function AccentDot() {
+  return (
+    <span
+      aria-hidden
+      style={{
+        flex: "0 0 7px",
+        width: 7,
+        height: 7,
+        borderRadius: "50%",
+        background: "var(--accent)",
+        boxShadow: "0 0 8px var(--accent-glow)",
+      }}
+    />
+  );
+}
+
+function TabButton({
+  tab,
+  label,
+  count,
+  active,
+  onClick,
+}: {
+  tab: CapabilityTab;
+  label: string;
+  count: string | null;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const { hover, focus, pressed, handlers } = useInteractive();
+  // A quiet macOS-style sidebar row: selection is a calm ink fill alone, and
+  // font-weight is held constant across states (color carries selection) so the
+  // label never reflows. Matches SettingsDialog's nav exactly.
+  const restShadow = active ? "var(--lift-hi)" : undefined;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+      {...handlers}
+      style={{
+        appearance: "none",
+        width: "100%",
+        border: "1px solid transparent",
+        borderRadius: "var(--radius-control, 5px)",
+        background: active
+          ? "color-mix(in oklab, var(--ink) 7%, var(--panel))"
+          : pressed
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "transparent",
+        color: active ? "var(--ink)" : "var(--ink-dim)",
+        padding: "8px 10px",
+        textAlign: "left",
+        fontFamily: "var(--font-sans)",
+        fontSize: 12,
+        fontWeight: 600,
+        letterSpacing: "0.005em",
+        cursor: "default",
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        boxShadow: withFocusRing(restShadow, focus),
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          flex: "0 0 18px",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "flex-start",
+          color: active ? "var(--ink)" : "var(--muted)",
+          transition: "color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        <NavIcon tab={tab} />
+      </span>
+      <span style={navLabelStyle}>{label}</span>
+      {count ? <span style={navCountStyle}>{count}</span> : null}
+    </button>
+  );
+}
+
+function NavIcon({ tab }: { tab: CapabilityTab }) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (tab) {
+    case "mcp": // plug
+      return (
+        <svg {...common}>
+          <path d="M9 3v5M15 3v5" />
+          <path d="M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z" />
+          <path d="M12 17v4" />
+        </svg>
+      );
+    case "skills": // layered squares
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="12" height="12" rx="2.5" />
+          <path d="M9 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2" />
+        </svg>
+      );
+    case "memory": // book
+      return (
+        <svg {...common}>
+          <path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v18H6.5A1.5 1.5 0 0 1 5 19.5z" />
+          <path d="M5 17.5h14" />
+          <path d="M9 7h6" />
+        </svg>
+      );
+    case "policy": // sliders
+    default:
+      return (
+        <svg {...common}>
+          <line x1="4" y1="7" x2="20" y2="7" />
+          <line x1="4" y1="17" x2="20" y2="17" />
+          <circle cx="9" cy="7" r="2" />
+          <circle cx="15" cy="17" r="2" />
+        </svg>
+      );
+  }
 }
 
 // A quiet glyph button for the dialog corner: a 1.5px SVG on the shared
@@ -867,11 +1105,14 @@ function McpRow({
   const transport = group.any.mcpTransport ?? "stdio";
   const summary = group.any.mcpSummary ?? group.any.path;
   return (
-    <div className="agent-capability-row" style={rowStyle}>
+    <div className="agent-capability-row" style={mcpRowStyle}>
       <div style={{ minWidth: 0 }}>
         <div style={rowNameStyle} title={group.name}>
           {group.name}
+          <EntryFlags group={group} />
         </div>
+        {/* The transport rides with the summary, not the name: the Server
+            column is narrow and rowNameStyle clips, which would eat a badge. */}
         <div style={rowMetaStyle}>
           <span className="spark-badge" style={transportBadgeStyle}>
             {transport === "stdio" ? "stdio" : transport === "sse" ? "sse" : "http"}
@@ -881,23 +1122,26 @@ function McpRow({
           </span>
         </div>
         <div style={rowMetaStyle}>
-          <RuntimeStrip group={group} busyKey={busyKey} onInstall={onInstall} />
           <span style={rowScopeStyle}>{group.any.scope}</span>
         </div>
       </div>
-      <div style={rowControlsStyle}>
-        <SwitchCell
-          label="Cora"
+      <Cell label="Cora" title={`Connect ${group.name} to Cora`}>
+        <Switch
           checked={coraAssigned}
           onChange={(next) => onTogglePiScope(group, "cora", next)}
-          title={`Connect ${group.name} to Cora`}
+          ariaLabel={`Connect ${group.name} to Cora`}
         />
-        <SwitchCell
-          label="Workers"
+      </Cell>
+      <Cell label="Workers" title={`Connect ${group.name} to workers`}>
+        <Switch
           checked={workerAssigned}
           onChange={(next) => onTogglePiScope(group, "worker", next)}
-          title={`Connect ${group.name} to workers`}
+          ariaLabel={`Connect ${group.name} to workers`}
         />
+      </Cell>
+      <CliCell group={group} runtime="claude" busyKey={busyKey} onInstall={onInstall} />
+      <CliCell group={group} runtime="codex" busyKey={busyKey} onInstall={onInstall} />
+      <div style={rowActionsStyle}>
         <button type="button" className="spark-btn" style={smallBtnStyle} onClick={() => onEdit(group)}>
           Edit
         </button>
@@ -908,6 +1152,124 @@ function McpRow({
           onRemove={onRemove}
         />
       </div>
+    </div>
+  );
+}
+
+// One table cell. The caption repeats the column header, hidden while the grid
+// is wide enough to carry its own header row and revealed by the narrow-width
+// rule in styles.css, where rows stack and the header is gone.
+function Cell({
+  label,
+  title,
+  children,
+}: {
+  label: string;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={cellStyle} title={title}>
+      <span className="agent-capability-cell-label" style={cellLabelStyle}>
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+// Whether one external CLI carries this entry, in the column named after it.
+// A shared config file is read by both CLIs, so it satisfies either column —
+// the tooltip says so, because "set up in Claude" reads differently when the
+// file is one both tools happen to read.
+function CliCell({
+  group,
+  runtime,
+  busyKey,
+  onInstall,
+}: {
+  group: NameGroup;
+  runtime: "claude" | "codex";
+  busyKey: string | null;
+  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
+}) {
+  const noun = group.kind === "mcp" ? "server" : "skill";
+  const direct = group.installs[runtime];
+  const shared = group.installs.shared;
+  if (direct.length > 0 || shared.length > 0) {
+    const paths = [...direct, ...shared].map((item) => item.path);
+    const via = direct.length === 0 ? " via a shared config file" : "";
+    return (
+      <Cell
+        label={CLI_LABEL[runtime]}
+        title={`This ${noun} is set up for the ${CLI_LABEL[runtime]}${via}.\n${paths.join("\n")}`}
+      >
+        <CheckGlyph />
+      </Cell>
+    );
+  }
+  // shareState's "covered" cases are an install in this CLI's own config or in
+  // a shared one — both handled above — and a group with no install at all,
+  // which groupByName cannot build. Anything still here is blocked.
+  const state = shareState(group, runtime);
+  if (state.kind === "blocked") {
+    return (
+      <Cell label={CLI_LABEL[runtime]} title={state.reason}>
+        <span style={cellDashStyle}>—</span>
+      </Cell>
+    );
+  }
+  const busy = busyKey === `${group.sessionKey}:${runtime}`;
+  return (
+    <Cell label={CLI_LABEL[runtime]}>
+      <button
+        type="button"
+        className="spark-btn"
+        style={microBtnStyle}
+        disabled={busy}
+        onClick={() => onInstall(group, runtime)}
+        title={`Copy this ${noun} into the ${CLI_LABEL[runtime]} config so that tool can use it too`}
+      >
+        {busy ? "…" : "Copy"}
+      </button>
+    </Cell>
+  );
+}
+
+// The two standing warnings about an entry, next to its name where they qualify
+// it: an entry only one runtime understands, and one Codara is not allowed to
+// delete.
+function EntryFlags({ group }: { group: NameGroup }) {
+  const isProtected = RUNTIME_COLUMNS.some((rt) => group.installs[rt].some((item) => !item.canDelete));
+  return (
+    <>
+      {!group.any.syncable ? (
+        <span className="spark-badge is-warn" style={flagBadgeStyle} title={group.any.compatibilityReason}>
+          native
+        </span>
+      ) : null}
+      {isProtected ? (
+        <span className="spark-badge is-warn" style={flagBadgeStyle} title="Codara cannot delete this entry.">
+          protected
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+// The column labels. One flat row: a second tier of grouped captions over
+// Cora/Workers and Claude/Codex was more chrome than four short words need.
+function TableHeader({ template, labels }: { template: string; labels: string[] }) {
+  return (
+    <div
+      className="agent-capability-head"
+      style={{ ...tableHeadStyle, gridTemplateColumns: template }}
+    >
+      {labels.map((label, index) => (
+        <span key={label || `col-${index}`} style={index === 0 ? tableHeadLeadStyle : tableHeadCellStyle}>
+          {label}
+        </span>
+      ))}
     </div>
   );
 }
@@ -928,28 +1290,32 @@ function SkillRow({
   onInstall: (group: NameGroup, target: "claude" | "codex") => void;
 }) {
   return (
-    <div className="agent-capability-row" style={{ ...rowStyle, opacity: enabled ? 1 : 0.55 }}>
+    <div
+      className="agent-capability-row"
+      style={{ ...skillRowStyle, opacity: enabled ? 1 : 0.55 }}
+    >
       <div style={{ minWidth: 0 }}>
         <div style={rowNameStyle} title={group.name}>
           {group.name}
+          <EntryFlags group={group} />
         </div>
         <div style={rowMetaStyle}>
           <span style={rowSummaryStyle} title={group.any.path}>
             {group.any.path}
           </span>
-        </div>
-        <div style={rowMetaStyle}>
-          <RuntimeStrip group={group} busyKey={busyKey} onInstall={onInstall} />
           <span style={rowScopeStyle}>{group.any.scope}</span>
         </div>
       </div>
-      <div style={rowControlsStyle}>
-        <SwitchCell
-          label="Enabled"
+      <Cell label="Enabled" title={`Let workers load ${group.name}`}>
+        <Switch
           checked={enabled}
           onChange={(next) => onToggle(group, next)}
-          title={`Let workers load ${group.name}`}
+          ariaLabel={`Let workers load ${group.name}`}
         />
+      </Cell>
+      <CliCell group={group} runtime="claude" busyKey={busyKey} onInstall={onInstall} />
+      <CliCell group={group} runtime="codex" busyKey={busyKey} onInstall={onInstall} />
+      <div style={rowActionsStyle}>
         <RemoveControl
           group={group}
           busy={busyKey === group.sessionKey}
@@ -1154,81 +1520,6 @@ function MemoryClearControl({
   );
 }
 
-// Which runtimes can actually reach this entry, said once and plainly, plus a
-// share action for a runtime that is missing it. A shared-scope config file is
-// read by both runtimes, so it counts as full reach on its own. When a runtime
-// cannot take the entry, the reason takes the button's place instead of a
-// button that would quietly write a broken copy.
-function RuntimeStrip({
-  group,
-  busyKey,
-  onInstall,
-}: {
-  group: NameGroup;
-  busyKey: string | null;
-  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
-}) {
-  const reach = describeReach(group);
-  const protectedEntry = RUNTIME_COLUMNS.some((rt) => group.installs[rt].some((item) => !item.canDelete));
-  const shares = (["claude", "codex"] as const).map((rt) => ({ rt, state: shareState(group, rt) }));
-  return (
-    <>
-      <span className="spark-badge" style={runtimeBadgeStyle(reach.tone)} title={reach.title}>
-        {reach.label}
-      </span>
-      {!group.any.syncable ? (
-        <span className="spark-badge is-warn" style={flagBadgeStyle} title={group.any.compatibilityReason}>
-          native
-        </span>
-      ) : null}
-      {protectedEntry ? (
-        <span className="spark-badge is-warn" style={flagBadgeStyle}>
-          protected
-        </span>
-      ) : null}
-      {shares.map(({ rt, state }) => {
-        if (state.kind === "covered") return null;
-        if (state.kind === "blocked") {
-          return (
-            <span key={rt} className="spark-badge is-warn" style={flagBadgeStyle} title={state.reason}>
-              not for {RUNTIME_LABEL[rt]}
-            </span>
-          );
-        }
-        const busy = busyKey === `${group.sessionKey}:${rt}`;
-        return (
-          <button
-            key={rt}
-            type="button"
-            className="spark-btn"
-            style={microBtnStyle}
-            disabled={busy}
-            onClick={() => onInstall(group, rt)}
-            title={`Copy this into the ${RUNTIME_LABEL[rt]} config`}
-          >
-            {busy ? "Sharing" : `Share to ${RUNTIME_LABEL[rt]}`}
-          </button>
-        );
-      })}
-    </>
-  );
-}
-
-// The one-glance answer to "who can use this". Tone follows the same per-
-// runtime palette the badges have always used.
-function describeReach(group: NameGroup): { label: string; tone: RuntimeColumn; title: string } {
-  const files = RUNTIME_COLUMNS.flatMap((rt) => group.installs[rt].map((item) => item.path));
-  const title = files.join("\n");
-  const hasClaude = group.installs.claude.length > 0;
-  const hasCodex = group.installs.codex.length > 0;
-  if (group.installs.shared.length > 0 || (hasClaude && hasCodex)) {
-    return { label: "Claude + Codex", tone: "shared", title };
-  }
-  if (hasClaude) return { label: "Claude only", tone: "claude", title };
-  if (hasCodex) return { label: "Codex only", tone: "codex", title };
-  return { label: "no runtime", tone: "shared", title };
-}
-
 type ShareState = { kind: "covered" } | { kind: "ready" } | { kind: "blocked"; reason: string };
 
 function shareState(group: NameGroup, target: "claude" | "codex"): ShareState {
@@ -1371,23 +1662,20 @@ function ScopedRemoveButton({
 function BuiltinRow({
   builtin,
   busyKey,
-  autoInstallEnabled,
   onInstall,
   onUninstall,
 }: {
   builtin: SparkBuiltinMcpStatus;
   busyKey: string | null;
-  autoInstallEnabled: boolean;
   onInstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
   onUninstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
 }) {
   const runtimes: SparkBuiltinRuntime[] = ["claude", "codex"];
-  const showAutoHint = builtin.id === "codara-studio" && autoInstallEnabled;
   return (
-    <div className="agent-capability-row" style={rowStyle}>
+    <div className="agent-capability-row" style={mcpRowStyle}>
       <div style={{ minWidth: 0 }}>
         <div style={rowNameStyle}>
-          {builtin.name}
+          Codara Studio tools
           <span className="spark-badge is-accent" style={flagBadgeStyle}>
             built in
           </span>
@@ -1398,117 +1686,111 @@ function BuiltinRow({
           </span>
         </div>
         <div style={rowMetaStyle}>
+          <span style={rowScopeStyle}>{builtin.name}</span>
           <span className="spark-badge" style={flagBadgeStyle} title={builtin.tools.join(", ")}>
             {builtin.tools.length} tools
           </span>
-          {showAutoHint ? (
-            <span className="spark-badge is-info" style={flagBadgeStyle} title="Codara re-adds this on launch while auto-install is on.">
-              auto
-            </span>
-          ) : null}
         </div>
       </div>
-      <div style={rowControlsStyle}>
-        {/* Pi loads this server in-process from the app bundle, so Cora and the
-            workers have it whatever the Claude/Codex config files say. Rendered
-            as a fact, never as a switch: an assignment here would be dropped by
-            the Pi roster's reserved-name filter. */}
-        {builtin.id === "codara-studio" ? (
-          <>
-            <BuiltinFactCell
-              label="Cora"
-              title="Cora always loads the preview, terminal and whiteboard tools in-process. No assignment needed."
-            />
-            <BuiltinFactCell
-              label="Workers"
-              title="Workers always load the preview and terminal tools plus whiteboard read, in-process. No assignment needed."
-            />
-          </>
-        ) : null}
-        {runtimes.map((runtime) => (
-          <BuiltinRuntimeCell
-            key={runtime}
-            runtime={runtime}
-            status={builtin[runtime]}
-            busy={busyKey === `${builtin.id}:${runtime}`}
-            onInstall={() => onInstall(builtin.id, runtime)}
-            onUninstall={() => onUninstall(builtin.id, runtime)}
-          />
-        ))}
-      </div>
+      {/* No switch: Cora and workers reach these tools without any config, so a
+          toggle sitting on would be a control that does nothing. */}
+      <Cell label="Cora" title="Always on — loaded directly from Codara">
+        <CheckGlyph />
+      </Cell>
+      <Cell label="Workers" title="Always on — loaded directly from Codara">
+        <CheckGlyph />
+      </Cell>
+      {runtimes.map((runtime) => (
+        <BuiltinCliCell
+          key={runtime}
+          runtime={runtime}
+          status={builtin[runtime]}
+          autoManaged={builtin.autoManaged}
+          busy={busyKey === `${builtin.id}:${runtime}`}
+          onInstall={() => onInstall(builtin.id, runtime)}
+          onUninstall={() => onUninstall(builtin.id, runtime)}
+        />
+      ))}
+      <div style={rowActionsStyle} />
     </div>
   );
 }
 
-// A cell in the switch column that states a standing fact instead of offering a
-// control, so an always-on capability never reads as a toggle left off.
-function BuiltinFactCell({ label, title }: { label: string; title: string }) {
-  return (
-    <div style={builtinCellStyle} title={title}>
-      <span style={cellLabelStyle}>{label}</span>
-      <span className="spark-badge is-ok" style={flagBadgeStyle}>
-        Built in
-      </span>
-    </div>
-  );
-}
-
-function BuiltinRuntimeCell({
+// The built-in server's state in one CLI's config. Codara maintains these
+// entries itself when auto-install is on, so the common case is a fact to
+// report rather than an action to offer.
+function BuiltinCliCell({
   runtime,
   status,
+  autoManaged,
   busy,
   onInstall,
   onUninstall,
 }: {
   runtime: SparkBuiltinRuntime;
   status: SparkBuiltinMcpStatus["claude"];
+  autoManaged: boolean;
   busy: boolean;
   onInstall: () => void;
   onUninstall: () => void;
 }) {
-  const meta = builtinStateMeta(status.state);
-  return (
-    <div style={builtinCellStyle}>
-      <span style={cellLabelStyle}>{RUNTIME_LABEL[runtime]}</span>
-      {status.state === "installed" ? (
+  const label = CLI_LABEL[runtime];
+  if (status.state === "installed" && autoManaged) {
+    return (
+      <Cell label={label} title={`Codara keeps this entry in ${status.configPath}`}>
+        <span className="spark-badge is-ok" style={flagBadgeStyle}>
+          Managed
+        </span>
+      </Cell>
+    );
+  }
+  if (status.state === "installed") {
+    return (
+      <Cell label={label}>
         <ConfirmRemoveButton
           busy={busy}
           disabled={false}
-          label="Uninstall"
+          label="Remove"
           title={status.configPath}
           onConfirm={onUninstall}
         />
-      ) : status.state === "available" ? (
+      </Cell>
+    );
+  }
+  if (status.state === "available") {
+    return (
+      <Cell label={label}>
         <button
           type="button"
           className="spark-btn"
-          style={smallBtnStyle}
+          style={microBtnStyle}
           disabled={busy}
           onClick={onInstall}
           title={`Write the entry into ${status.configPath}`}
         >
-          {busy ? "Installing" : "Install"}
+          {busy ? "…" : "Add"}
         </button>
-      ) : (
-        <span style={cellNoteStyle} title={status.configPath}>
-          {meta.label}
-        </span>
-      )}
-    </div>
+      </Cell>
+    );
+  }
+  return (
+    <Cell label={label} title={status.configPath}>
+      <span style={cellNoteStyle}>{builtinStateLabel(status.state, autoManaged)}</span>
+    </Cell>
   );
 }
 
-function builtinStateMeta(state: SparkBuiltinInstallState): { label: string } {
+function builtinStateLabel(state: SparkBuiltinInstallState, autoManaged: boolean): string {
   switch (state) {
     case "installed":
-      return { label: "Installed" };
+      return autoManaged ? "managed by Codara" : "added";
     case "user-managed":
-      return { label: "Your config" };
+      return "Set up by you";
     case "available":
-      return { label: "Not installed" };
+      return "Not added";
     case "unavailable":
     default:
-      return { label: "Not detected" };
+      return "Not detected";
   }
 }
 
@@ -1974,6 +2256,26 @@ function SearchGlyph() {
   );
 }
 
+// "Yes, this one is set up here." Tinted --ok rather than inheriting, because
+// in a column of dashes and buttons the tick is the signal.
+function CheckGlyph() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      aria-hidden
+      fill="none"
+      stroke="var(--ok)"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </svg>
+  );
+}
+
 function TrashGlyph() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
@@ -2138,27 +2440,6 @@ function formatMemoryBytes(bytes: number): string {
   return `${kb >= 10 ? Math.round(kb) : Math.round(kb * 10) / 10} KB`;
 }
 
-// Per-runtime accent on the runtime badges: Claude rides the brand accent,
-// Codex the info blue, Shared the ok green. Token-only so each re-tints across
-// the themes. Layered on the .spark-badge base which supplies geometry.
-function runtimeBadgeStyle(runtime: RuntimeColumn): React.CSSProperties {
-  const tone: React.CSSProperties =
-    runtime === "claude"
-      ? { background: "var(--accent-soft)", border: "1px solid var(--accent-edge)", color: "var(--accent)" }
-      : runtime === "codex"
-        ? {
-          background: "var(--info-soft)",
-          border: "1px solid color-mix(in oklch, var(--info) 35%, transparent)",
-          color: "var(--info)",
-        }
-        : {
-          background: "var(--ok-soft)",
-          border: "1px solid color-mix(in oklch, var(--ok) 35%, transparent)",
-          color: "var(--ok)",
-        };
-  return { ...tone, ...flagBadgeStyle };
-}
-
 const overlayStyle: React.CSSProperties = {
   position: "absolute",
   inset: 0,
@@ -2182,34 +2463,60 @@ const dialogStyle: React.CSSProperties = {
 };
 
 const headerStyle: React.CSSProperties = {
-  padding: "16px 18px 15px",
+  padding: "15px 18px",
   borderBottom: "1px solid var(--rule-soft)",
   boxShadow: "var(--lift-hi)",
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto",
-  gap: 18,
-  alignItems: "start",
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
 };
 
 const titleStyle: React.CSSProperties = {
   color: "var(--ink)",
   fontSize: 15,
   fontWeight: 600,
-  marginTop: 6,
+  letterSpacing: "-0.005em",
 };
 
-const ledeStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 12,
-  lineHeight: 1.5,
-  marginTop: 5,
-  maxWidth: 620,
+const bodyStyle: React.CSSProperties = {
+  display: "flex",
+  minHeight: 0,
+  minWidth: 0,
+};
+
+const navStyle: React.CSSProperties = {
+  flex: "0 0 190px",
+  borderRight: "1px solid var(--rule-soft)",
+  // Translucent so the dialog's glass face shows through; over the opaque
+  // fallback face it reads like the old --bg/--panel mix.
+  background: "color-mix(in oklab, var(--bg) 45%, transparent)",
+  padding: "12px 10px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 3,
+};
+
+const navLabelStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const navCountStyle: React.CSSProperties = {
+  color: "var(--muted-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontWeight: 500,
 };
 
 const mainStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
   minHeight: 0,
-  overflowY: "auto",
-  padding: "18px 22px 22px",
+  overflow: "auto",
+  padding: "22px 26px 28px",
   display: "flex",
   flexDirection: "column",
   gap: 22,
@@ -2219,12 +2526,6 @@ const sectionStyle: React.CSSProperties = {
   display: "grid",
   gap: 10,
   alignContent: "start",
-};
-
-const policySectionStyle: React.CSSProperties = {
-  ...sectionStyle,
-  paddingTop: 14,
-  borderTop: "1px solid var(--rule-soft)",
 };
 
 const sectionHeadStyle: React.CSSProperties = {
@@ -2263,13 +2564,77 @@ const listStyle: React.CSSProperties = {
   boxShadow: "var(--well)",
 };
 
+// One grid template shared by a list's header row and every row in it. Every
+// column but the first is a fixed width so the two grids resolve identically —
+// an `auto` actions column would size to each row's own buttons and the
+// "table" would stop lining up the moment one row armed its remove confirm.
+// Widths are as tight as the content allows (a 34px switch, a 10px header word,
+// a "Copy" micro button) because every pixel here comes out of the Server
+// column: at the 860px breakpoint the pane is ~575px and the fixed columns plus
+// gaps and padding take ~442px of it.
+const MCP_GRID = "minmax(0, 1fr) 52px 60px 64px 64px 124px";
+const SKILL_GRID = "minmax(0, 1fr) 60px 64px 64px 124px";
+
+const tableHeadStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+  alignItems: "center",
+  padding: "8px 14px",
+  borderBottom: "1px solid var(--rule-soft)",
+  background: "color-mix(in oklab, var(--ink) 4%, transparent)",
+};
+
+const tableHeadCellStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 10,
+  lineHeight: 1.3,
+  textAlign: "center",
+};
+
+const tableHeadLeadStyle: React.CSSProperties = {
+  ...tableHeadCellStyle,
+  textAlign: "left",
+};
+
+const cellStyle: React.CSSProperties = {
+  display: "grid",
+  justifyItems: "center",
+  alignContent: "center",
+  gap: 4,
+  minWidth: 0,
+};
+
+const cellDashStyle: React.CSSProperties = {
+  color: "var(--muted-2)",
+  fontSize: 12,
+};
+
+const cellNoteStyle: React.CSSProperties = {
+  color: "var(--muted-2)",
+  fontSize: 10,
+  lineHeight: 1.3,
+  textAlign: "center",
+};
+
 const rowStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) auto",
   gap: 14,
   alignItems: "center",
-  padding: "10px 12px",
+  padding: "12px 14px",
   borderBottom: "1px solid var(--rule-soft)",
+};
+
+const mcpRowStyle: React.CSSProperties = {
+  ...rowStyle,
+  gridTemplateColumns: MCP_GRID,
+  gap: 10,
+};
+
+const skillRowStyle: React.CSSProperties = {
+  ...rowStyle,
+  gridTemplateColumns: SKILL_GRID,
+  gap: 10,
 };
 
 const rowNameStyle: React.CSSProperties = {
@@ -2296,7 +2661,7 @@ const rowMetaStyle: React.CSSProperties = {
 const rowSummaryStyle: React.CSSProperties = {
   color: "var(--muted)",
   fontFamily: "var(--font-mono)",
-  fontSize: 10.5,
+  fontSize: 11,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -2316,13 +2681,14 @@ const rowControlsStyle: React.CSSProperties = {
   gap: 10,
 };
 
-const switchCellStyle: React.CSSProperties = {
-  display: "grid",
-  justifyItems: "center",
-  gap: 4,
+const rowActionsStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  alignSelf: "center",
+  gap: 6,
 };
 
-const builtinCellStyle: React.CSSProperties = {
+const switchCellStyle: React.CSSProperties = {
   display: "grid",
   justifyItems: "center",
   gap: 4,
@@ -2334,9 +2700,15 @@ const removeChoiceStyle: React.CSSProperties = {
   gap: 4,
 };
 
+// Wraps: armed, this is up to five nowrap buttons inside a fixed 124px actions
+// track, and the row's `contain: paint` would clip the overflow into buttons
+// that are invisible but still keyboard-reachable. Only column WIDTH has to
+// match across rows, so growing taller costs the table nothing.
 const removeChoiceRowStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
+  justifyContent: "flex-end",
+  flexWrap: "wrap",
   gap: 4,
 };
 
@@ -2388,17 +2760,8 @@ const memoryCheckStyle: React.CSSProperties = {
 
 const cellLabelStyle: React.CSSProperties = {
   color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  textTransform: "uppercase",
-  letterSpacing: "0.08em",
-};
-
-const cellNoteStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  whiteSpace: "nowrap",
-  padding: "4px 0",
+  fontSize: 10,
+  lineHeight: 1.3,
 };
 
 const smallBtnStyle: React.CSSProperties = {
@@ -2561,6 +2924,7 @@ const footerStyle: React.CSSProperties = {
 const statusStyle: React.CSSProperties = {
   flex: 1,
   fontSize: 11,
+  fontWeight: 500,
   lineHeight: 1.45,
   overflowWrap: "anywhere",
 };

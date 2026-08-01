@@ -1,13 +1,10 @@
 // Provider registry.
 //
-// Single source of truth for the CLI providers Codara knows about. Adding a
-// new coding CLI is a two-step process:
+// Single source of truth for the CLI providers Codara knows about.
 //
 //   1. Create `src/main/providers/<id>.ts` that exports a `CliProvider`
 //      (see types.ts for the contract).
-//   2. Add it to `PROVIDERS` below. The order here is the order
-//      detectAgentRuntimes returns runtimes in, which is also the order
-//      they appear in the Settings > Agents picker.
+//   2. Add it to `PROVIDERS` below.
 //
 // Codara must NOT silently fall back when a caller asks for an unknown
 // provider id — the lookup throws so the bug surfaces immediately instead
@@ -20,17 +17,21 @@ import { codexProvider } from "./codex";
 
 import type { CliProvider } from "./types";
 
-const PROVIDERS: readonly CliProvider[] = [
-  claudeProvider,
-  codexProvider,
-];
+type OrchestrationCliProvider = CliProvider & { id: AgentRuntimeKind };
+
+const PROVIDERS: readonly CliProvider[] = [claudeProvider, codexProvider];
+
+function isOrchestrationProvider(
+  provider: CliProvider,
+): provider is OrchestrationCliProvider {
+  return provider.id === "claude" || provider.id === "codex";
+}
 
 /**
- * Return every provider the registry knows about, in the order Settings
- * and runtime diagnostics expect to render them.
+ * Return only providers supported by Cora orchestration.
  */
-export function listProviders(): readonly CliProvider[] {
-  return PROVIDERS;
+export function listProviders(): readonly OrchestrationCliProvider[] {
+  return PROVIDERS.filter(isOrchestrationProvider);
 }
 
 /**
@@ -39,7 +40,7 @@ export function listProviders(): readonly CliProvider[] {
  * id they don't recognize should explicitly catch + degrade.
  */
 export function getProvider(id: AgentRuntimeKind): CliProvider {
-  const provider = PROVIDERS.find((p) => p.id === id);
+  const provider = listProviders().find((p) => p.id === id);
   if (!provider) {
     throw new Error(`Unknown CLI provider id: ${id}`);
   }
@@ -52,7 +53,7 @@ export function getProvider(id: AgentRuntimeKind): CliProvider {
  * from untrusted JSON, etc.).
  */
 export function tryGetProvider(id: string): CliProvider | null {
-  return PROVIDERS.find((p) => p.id === id) ?? null;
+  return listProviders().find((p) => p.id === id) ?? null;
 }
 
 export type { CliProvider, SpawnOpts, ResumeOpts } from "./types";

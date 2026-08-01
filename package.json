@@ -9,6 +9,7 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:capability-center": "node scripts/test-capability-center-ui.cjs",
     "test:chat-surface-routing": "node scripts/test-chat-surface-routing.cjs",
     "test:composer-fast-mode": "node scripts/test-composer-fast-mode.cjs",
     "test:worker-terminal-controls": "node scripts/test-worker-terminal-controls.cjs",
