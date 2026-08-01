@@ -14,6 +14,20 @@ import type {
   RemotePairingState,
 } from "@shared/remote-access";
 import type {
+  GitHubPublishInput,
+  GitHubPublishResult,
+  GitHubMarkReadyInput,
+  GitHubMarkReadyResult,
+  GitHubMergeInput,
+  GitHubMergeResult,
+  GitHubWorkspaceStatus,
+  GitHubWorkQueueStatus,
+  StartGitHubIssueInput,
+  StartGitHubIssueResult,
+  StartGitHubPullRequestInput,
+  StartGitHubPullRequestResult,
+} from "@shared/github";
+import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
   AgentAssetDeleteResult,
@@ -736,6 +750,36 @@ const api = {
       }),
     resolveConflict: (cwd: string, path: string, side: GitConflictSide): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:resolveConflict", { cwd, path, side }),
+  },
+  github: {
+    workQueue: (
+      sourceWorkspaceId: string,
+      refresh = false,
+    ): Promise<GitHubWorkQueueStatus> =>
+      ipcRenderer.invoke("github:workQueue", { sourceWorkspaceId, refresh }),
+    status: (cwd: string): Promise<GitHubWorkspaceStatus> =>
+      ipcRenderer.invoke("github:status", cwd),
+    publish: (
+      cwd: string,
+      input: GitHubPublishInput,
+    ): Promise<GitHubPublishResult> =>
+      ipcRenderer.invoke("github:publish", { cwd, input }),
+    markReady: (
+      cwd: string,
+      input: GitHubMarkReadyInput,
+    ): Promise<GitHubMarkReadyResult> =>
+      ipcRenderer.invoke("github:markReady", { cwd, input }),
+    merge: (
+      cwd: string,
+      input: GitHubMergeInput,
+    ): Promise<GitHubMergeResult> =>
+      ipcRenderer.invoke("github:merge", { cwd, input }),
+    startIssue: (input: StartGitHubIssueInput): Promise<StartGitHubIssueResult> =>
+      ipcRenderer.invoke("github:startIssue", input),
+    startPullRequest: (
+      input: StartGitHubPullRequestInput,
+    ): Promise<StartGitHubPullRequestResult> =>
+      ipcRenderer.invoke("github:startPullRequest", input),
   },
   orchestration: {
     createRun: (input: CreateRunInput): Promise<RunState> =>

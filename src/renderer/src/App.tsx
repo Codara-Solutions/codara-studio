@@ -46,6 +46,10 @@ import ChatStack from "./tabs/ChatStack";
 import { boardBackend } from "./components/board/board-backend";
 import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
 import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
+import type {
+  GitHubIssueSummary,
+  GitHubWorkQueueItem,
+} from "@shared/github";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
@@ -135,6 +139,7 @@ const WhiteboardStack = lazy(() => import("./tabs/WhiteboardStack"));
 // handshake is document-scoped, so send it once per evaluated renderer module
 // rather than logging/disarming the same boot twice.
 let rendererReadySignaled = false;
+const EXACT_GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
 // Stable brand label for every chat tab in the top strip. The first-message-
 // derived run.title is kept on the RunState for the chat panel header and the
@@ -3038,6 +3043,159 @@ export default function App() {
     [newTerminalTab],
   );
 
+  const handleStartGitHubIssue = useCallback(
+    async (sourceWs: Workspace, issue: GitHubIssueSummary): Promise<void> => {
+      if (sourceWs.remote) {
+        throw new Error(
+          "GitHub issue workspaces require a local Git checkout; SSH workspaces are not supported yet.",
+        );
+      }
+      // Cancel a pending renderer snapshot before the main-owned atomic
+      // transaction changes workspace state. Its state:changed broadcast will
+      // repopulate React and schedule a fresh save with the authoritative row.
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      const result = await window.spark.github.startIssue({
+        sourceWorkspaceId: sourceWs.id,
+        issueNumber: issue.number,
+      });
+      if (!result.ok) throw new Error(result.message);
+      const run = await window.spark.orchestration.getRun(result.runId);
+      if (!run) {
+        throw new Error(
+          `The issue workspace started, but Cora run ${result.runId} could not be loaded.`,
+        );
+      }
+      if (run.workspaceId !== result.workspaceId) {
+        throw new Error(
+          "The issue workspace started, but its Cora run was linked to a different workspace.",
+        );
+      }
+      handleActivateWorkspace(result.workspaceId);
+      handleRunSnapshot(run, { select: true, focusRuns: true });
+    },
+    [handleActivateWorkspace, handleRunSnapshot],
+  );
+
+  const handleStartGitHubPullRequest = useCallback(
+    async (
+      item: Extract<GitHubWorkQueueItem, { kind: "pull-request" }>,
+    ): Promise<void> => {
+      const expectedHeadCommitOid =
+        item.pullRequest.headCommitOid?.trim().toLowerCase() ?? "";
+      if (!EXACT_GIT_OBJECT_ID.test(expectedHeadCommitOid)) {
+        throw new Error(
+          "GitHub did not provide an exact pull-request revision. Refresh the queue and try again.",
+        );
+      }
+      const source = workspacesRef.current.find(
+        (workspace) => workspace.id === item.sourceWorkspaceId,
+      );
+      if (!source) {
+        throw new Error(
+          "The source workspace changed. Refresh the GitHub work queue.",
+        );
+      }
+      if (source.remote) {
+        throw new Error(
+          "Pull-request workspaces require a local Git checkout; SSH workspaces are not supported yet.",
+        );
+      }
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      const result = await window.spark.github.startPullRequest({
+        sourceWorkspaceId: item.sourceWorkspaceId,
+        repositoryUrl: item.repositoryUrl,
+        pullRequestNumber: item.pullRequest.number,
+        expectedHeadCommitOid,
+      });
+      if (!result.ok) throw new Error(result.message);
+      const run = await window.spark.orchestration.getRun(result.runId);
+      if (!run) {
+        throw new Error(
+          `The pull-request workspace started, but Cora run ${result.runId} could not be loaded.`,
+        );
+      }
+      if (run.workspaceId !== result.workspaceId) {
+        throw new Error(
+          "The pull-request workspace started, but its Cora run was linked to a different workspace.",
+        );
+      }
+      handleActivateWorkspace(result.workspaceId);
+      handleRunSnapshot(run, { select: true, focusRuns: true });
+    },
+    [handleActivateWorkspace, handleRunSnapshot],
+  );
+
+  const handleOpenGitHubQueueItem = useCallback(
+    async (item: GitHubWorkQueueItem): Promise<void> => {
+      const link = item.link;
+      if (
+        link?.run &&
+        workspacesRef.current.some(
+          (workspace) => workspace.id === link.workspaceId,
+        )
+      ) {
+        const run = await window.spark.orchestration.getRun(link.run.runId);
+        if (!run || run.workspaceId !== link.workspaceId) {
+          throw new Error(
+            "This linked Cora run changed. Refresh the GitHub work queue.",
+          );
+        }
+        handleActivateWorkspace(link.workspaceId);
+        handleRunSnapshot(run, { select: true, focusRuns: true });
+        return;
+      }
+      if (
+        link?.matchCount === 1 &&
+        workspacesRef.current.some(
+          (workspace) => workspace.id === link.workspaceId,
+        )
+      ) {
+        handleActivateWorkspace(link.workspaceId);
+        return;
+      }
+
+      if (item.kind === "issue" && !link) {
+        const source = workspacesRef.current.find(
+          (workspace) => workspace.id === item.sourceWorkspaceId,
+        );
+        if (!source) {
+          throw new Error(
+            "The source workspace changed. Refresh the GitHub work queue.",
+          );
+        }
+        await handleStartGitHubIssue(source, item.issue);
+        return;
+      }
+
+      if (
+        item.kind === "pull-request" &&
+        !link &&
+        EXACT_GIT_OBJECT_ID.test(
+          item.pullRequest.headCommitOid?.trim() ?? "",
+        )
+      ) {
+        await handleStartGitHubPullRequest(item);
+        return;
+      }
+
+      const url =
+        item.kind === "issue" ? item.issue.url : item.pullRequest.url;
+      await window.spark.openExternal(url);
+    },
+    [
+      handleActivateWorkspace,
+      handleRunSnapshot,
+      handleStartGitHubIssue,
+      handleStartGitHubPullRequest,
+    ],
+  );
+
   const handleCreateCopyBranch = useCallback(
     (id: string) => {
       const ws = workspaces.find((w) => w.id === id);
@@ -4793,6 +4951,7 @@ export default function App() {
             onCreate={createWs}
             onCreateRemote={handleCreateRemote}
             onCreateCopyBranch={handleCreateCopyBranch}
+            onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onSplitChange={panels.setLeftSplit}
             onToggleSection={togglePanelSection}
             onMoveSection={movePanelSection}
@@ -4930,6 +5089,7 @@ export default function App() {
             onCreate={createWs}
             onCreateRemote={handleCreateRemote}
             onCreateCopyBranch={handleCreateCopyBranch}
+            onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onSplitChange={panels.setRightSplit}
             onToggleSection={togglePanelSection}
             onMoveSection={movePanelSection}

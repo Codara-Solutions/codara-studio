@@ -7,6 +7,7 @@ import type {
   RunState,
   Workspace,
 } from "@shared/types";
+import type { GitHubWorkQueueItem } from "@shared/github";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import ChangeRow from "./ChangeRow";
 import ChangeSection from "./ChangeSection";
@@ -14,6 +15,7 @@ import BranchMenu from "./BranchMenu";
 import CommitComposer from "./CommitComposer";
 import CommitDetail from "./CommitDetail";
 import CommitHistory from "./CommitHistory";
+import GitHubSection from "./GitHubSection";
 import StashSection from "./StashSection";
 import type { SharedGitStatus } from "../../git/useSharedGitStatus";
 import { buildSmartMergePlan, requestPrepareSmartMerge, smartMergePlanTitle } from "./smart-merge";
@@ -38,6 +40,7 @@ interface Props {
     run: RunState,
     options?: { select?: boolean; focusRuns?: boolean },
   ) => void;
+  onOpenGitHubQueueItem: (item: GitHubWorkQueueItem) => Promise<void>;
   /** Shared status/log poll owned by App (one per active workspace). */
   git: SharedGitStatus;
   /** Opens a changed file's diff as a workbench tab (VS Code-style). */
@@ -56,6 +59,7 @@ export default function GitPanel({
   onToggleCollapse,
   headerDrag,
   onRunSnapshot,
+  onOpenGitHubQueueItem,
   git,
   onOpenDiffTab,
   activeDiffTarget,
@@ -68,6 +72,7 @@ export default function GitPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [sections, setSections] = useState({ staged: false, changes: false, history: false });
+  const [githubRefreshNonce, setGitHubRefreshNonce] = useState(0);
   // A commit selected for inspection — when set, the body shows CommitDetail
   // (the history/inspection agent builds that view).
   const [detailHash, setDetailHash] = useState<string | null>(null);
@@ -145,6 +150,10 @@ export default function GitPanel({
   const handleInit = useCallback(() => {
     if (cwd) void runAction("init", () => window.spark.git.init(cwd));
   }, [cwd, runAction]);
+  const handleRefresh = useCallback(() => {
+    setGitHubRefreshNonce((value) => value + 1);
+    void refresh(false);
+  }, [refresh]);
 
   const handleSmartMerge = useCallback(
     async (backend?: ChatBackendKind): Promise<void> => {
@@ -302,7 +311,7 @@ export default function GitPanel({
         actions={
           <IconButton
             title="Refresh"
-            onClick={() => void refresh(false)}
+            onClick={handleRefresh}
             disabled={disabled}
             size={22}
           >
@@ -335,6 +344,25 @@ export default function GitPanel({
                 onChanged={handleGitChanged}
                 refreshKey={gitVersion}
                 disabled={disabled}
+              />
+              <GitHubSection
+                cwd={cwd}
+                gitStatus={status}
+                refreshKey={gitVersion + githubRefreshNonce}
+                queue={
+                  workspace && !workspace.remote
+                    ? {
+                        sourceWorkspaceId: workspace.id,
+                        refreshKey: githubRefreshNonce,
+                        onOpenItem: onOpenGitHubQueueItem,
+                      }
+                    : null
+                }
+                onRefresh={() => setGitHubRefreshNonce((value) => value + 1)}
+                onPublished={() => {
+                  setGitHubRefreshNonce((value) => value + 1);
+                  notifyChanged();
+                }}
               />
               {displayError && (
                 <ErrorStrip text={displayError} onDismiss={() => setOpError(null)} />
