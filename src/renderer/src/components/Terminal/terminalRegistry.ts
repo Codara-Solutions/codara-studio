@@ -66,9 +66,17 @@ export function setCloseAgentTerminalFn(fn: CloseAgentTerminalFn | null): void {
 }
 
 export function closeAgentTerminal(tabId: string): void {
-  // No-op if unregistered — the caller is best-effort cleanup and must not throw
-  // just because the renderer already tore the adapter down.
-  closeAgentTerminalFn?.(tabId);
+  // A destroy acknowledgement is the main process's commit signal: once it
+  // receives success, it drops the only run/retention ownership record for the
+  // pane. Returning success while App is remounting would therefore orphan the
+  // visual tab permanently. Surface a retryable bridge error instead; the
+  // terminal.create bad-cwd cleanup already treats destroy as best-effort.
+  if (!closeAgentTerminalFn) {
+    throw new Error(
+      "Codara is not ready to close terminal tabs yet (renderer not mounted). Retry in a moment.",
+    );
+  }
+  closeAgentTerminalFn(tabId);
 }
 
 type ExternalTerminalSize = { cols: number; rows: number };

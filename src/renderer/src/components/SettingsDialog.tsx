@@ -672,6 +672,12 @@ function ResourceMetric({
       >
         {value}
       </div>
+      <div style={{ marginTop: 22 }}>
+        <SectionTitle
+          title="Run terminal lifecycle"
+          detail="Temporary worker panes close when a run settles. Service panes remain until the run is deleted. Failed closes retry automatically."
+        />
+      </div>
     </div>
   );
 }

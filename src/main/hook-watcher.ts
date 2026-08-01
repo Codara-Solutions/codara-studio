@@ -23,7 +23,7 @@
 //      every other hook → appendEvent only (PreToolUse, PostToolUse,
 //                         UserPromptSubmit, PreCompact, ...)
 
-import { promises as fs, type FSWatcher } from "node:fs";
+import { promises as fs, type Dir, type FSWatcher } from "node:fs";
 import { watch as fsWatch } from "node:fs";
 import { join } from "node:path";
 
@@ -87,6 +87,15 @@ function noteOversizedDrop(size: number): void {
 // burst into one scan; low enough that we still feel real-time.
 const RESCAN_DEBOUNCE_MS = 50;
 
+// Native directory watchers are inode-bound on macOS/Linux. If hooks/ is
+// deleted and recreated, the old watcher can remain alive but permanently
+// deaf. Re-arm failures use one bounded exponential-backoff timer, and a
+// lightweight identity check catches silent directory replacement even when
+// the platform emits neither "error" nor "close".
+const REARM_BASE_DELAY_MS = 100;
+const REARM_MAX_DELAY_MS = 2_000;
+const WATCH_HEALTH_INTERVAL_MS = 30_000;
+
 // Concurrency cap for handleFile. The "burst rate here is small" assumption
 // above holds for a live session, but the cold-start backlog does not: the
 // hooks dir accumulates while Codara is closed (every Claude CLI session on
@@ -122,6 +131,10 @@ const PROCESSED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PROCESSED_PRUNE_BATCH = 200;
 // Let app boot settle before spending IO on the prune.
 const PROCESSED_PRUNE_DELAY_MS = 30_000;
+// Continue a large sweep in small, yielded chunks, then revisit retention
+// periodically for long-running app sessions.
+const PROCESSED_PRUNE_CONTINUE_MS = 25;
+const PROCESSED_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 // The cold-start backlog sweep is deferred past first paint. startHookWatcher()
 // runs immediately before createWindow(), and a backlog of a few hundred files
@@ -136,6 +149,16 @@ interface WatcherState {
   hooksDir: string;
   processedDir: string;
   watcher: FSWatcher | null;
+  // Monotonic lifecycle token. Every invalidation and stop advances it, so
+  // callbacks from a closed watcher or an old async arm attempt are inert.
+  generation: number;
+  watchedDirectoryIdentity: string | null;
+  armCount: number;
+  rearmAttempt: number;
+  rearmTimer: NodeJS.Timeout | null;
+  rearmPromise: Promise<void> | null;
+  healthTimer: NodeJS.Timeout | null;
+  healthPromise: Promise<void> | null;
   // Files we've already kicked off processing for in this process lifetime.
   // Prevents the same uuid being handled twice if fs.watch sends duplicate
   // events (which it can — same inode, different listeners on macOS).
@@ -149,6 +172,12 @@ interface WatcherState {
   initialScanTimer: NodeJS.Timeout | null;
   // One-shot timer for the deferred processed/ retention prune.
   pruneTimer: NodeJS.Timeout | null;
+  pruneDueAt: number | null;
+  prunePromise: Promise<void> | null;
+  pruneDir: Dir | null;
+  pruneCutoff: number;
+  pruneCount: number;
+  pruneSweepCount: number;
   // Lazy-resolved run-store. We use a Promise so concurrent dispatches
   // share the import.
   runStorePromise: Promise<RunStoreModule> | null;
@@ -175,26 +204,34 @@ export async function startHookWatcher(): Promise<void> {
   const hooksDir = join(sparkHome(), HOOKS_SUBDIR);
   const processedDir = join(hooksDir, PROCESSED_SUBDIR);
 
-  try {
-    await fs.mkdir(hooksDir, { recursive: true });
-    await fs.mkdir(processedDir, { recursive: true });
-  } catch (err) {
-    console.warn("[hook-watcher] failed to ensure hooks dir:", err);
-    // We still register state so a later directory-create observed elsewhere
-    // doesn't double-start the watcher.
-  }
-
   const state: WatcherState = {
     hooksDir,
     processedDir,
     watcher: null,
+    generation: 1,
+    watchedDirectoryIdentity: null,
+    armCount: 0,
+    rearmAttempt: 0,
+    rearmTimer: null,
+    rearmPromise: null,
+    healthTimer: null,
+    healthPromise: null,
     inFlight: new Set(),
     stopped: false,
     rescanTimer: null,
     initialScanTimer: null,
     pruneTimer: null,
+    pruneDueAt: null,
+    prunePromise: null,
+    pruneDir: null,
+    pruneCutoff: 0,
+    pruneCount: 0,
+    pruneSweepCount: 0,
     runStorePromise: null,
   };
+  // Claim ownership before the first await. Two startup paths can otherwise
+  // both pass the `active` check while mkdir is pending and publish duplicate
+  // native watchers.
   active = state;
 
   // Pick up any files that were dropped while Codara was shut down. Without
@@ -213,16 +250,56 @@ export async function startHookWatcher(): Promise<void> {
 
   // Retention prune for processed/, deferred past boot so the (potentially
   // large) stat sweep never competes with startup IO.
-  state.pruneTimer = setTimeout(() => {
-    state.pruneTimer = null;
-    void pruneProcessed(state).catch((err) =>
-      console.warn("[hook-watcher] processed prune failed:", err),
-    );
-  }, PROCESSED_PRUNE_DELAY_MS);
+  schedulePrune(state, PROCESSED_PRUNE_DELAY_MS);
+
+  let armed = false;
+  const initialArm = (async () => {
+    armed = await armWatcher(state, state.generation);
+  })();
+  state.rearmPromise = initialArm;
+  try {
+    await initialArm;
+  } finally {
+    if (state.rearmPromise === initialArm) state.rearmPromise = null;
+  }
+  if (!armed && !state.stopped) {
+    scheduleRearm(state);
+  }
+}
+
+function isCurrentGeneration(state: WatcherState, generation: number): boolean {
+  return active === state && !state.stopped && state.generation === generation;
+}
+
+function isCurrentWatcher(
+  state: WatcherState,
+  watcher: FSWatcher,
+  generation: number,
+): boolean {
+  return isCurrentGeneration(state, generation) && state.watcher === watcher;
+}
+
+async function armWatcher(state: WatcherState, generation: number): Promise<boolean> {
+  if (!isCurrentGeneration(state, generation) || state.watcher !== null) return false;
 
   try {
-    const watcher = fsWatch(hooksDir, { persistent: true }, (_eventType, filename) => {
-      if (state.stopped) return;
+    await fs.mkdir(state.hooksDir, { recursive: true });
+    await fs.mkdir(state.processedDir, { recursive: true });
+  } catch (err) {
+    if (isCurrentGeneration(state, generation)) {
+      console.warn("[hook-watcher] failed to ensure hooks dir for re-arm:", err);
+    }
+    return false;
+  }
+  if (!isCurrentGeneration(state, generation) || state.watcher !== null) return false;
+
+  const beforeIdentity = await directoryIdentity(state.hooksDir);
+  if (beforeIdentity === null || !isCurrentGeneration(state, generation)) return false;
+
+  let watcher: FSWatcher;
+  try {
+    watcher = fsWatch(state.hooksDir, { persistent: true }, (_eventType, filename) => {
+      if (!isCurrentWatcher(state, watcher, generation)) return;
       if (filename && typeof filename === "string") {
         const name = filename.toString();
         if (TMP_FILE_PATTERN.test(name)) return;
@@ -233,24 +310,183 @@ export async function startHookWatcher(): Promise<void> {
           return;
         }
       }
-      // Filename missing (Windows on some volumes) OR the event was a
-      // rename of an unrelated file (e.g. the python tmp file). Schedule a
-      // debounced rescan so we don't miss any newly-arrived hook files.
-      if (state.rescanTimer === null) {
-        state.rescanTimer = setTimeout(() => {
-          state.rescanTimer = null;
-          void rescanDirectory(state).catch((err) =>
-            console.warn("[hook-watcher] rescan failed:", err),
-          );
-        }, RESCAN_DEBOUNCE_MS);
-      }
+      scheduleRescan(state, generation);
     });
-    watcher.on("error", (err) => {
-      console.warn("[hook-watcher] fs.watch error:", err);
-    });
-    state.watcher = watcher;
   } catch (err) {
-    console.warn("[hook-watcher] failed to start fs.watch on", hooksDir, ":", err);
+    if (isCurrentGeneration(state, generation)) {
+      console.warn("[hook-watcher] failed to start fs.watch on", state.hooksDir, ":", err);
+    }
+    return false;
+  }
+
+  if (!isCurrentGeneration(state, generation) || state.watcher !== null) {
+    try {
+      watcher.close();
+    } catch {
+      // A watcher that lost the generation race has no remaining owner.
+    }
+    return false;
+  }
+
+  state.watcher = watcher;
+  state.watchedDirectoryIdentity = beforeIdentity;
+  state.armCount++;
+  state.rearmAttempt = 0;
+
+  watcher.on("error", (err) => {
+    if (!isCurrentWatcher(state, watcher, generation)) return;
+    console.warn("[hook-watcher] fs.watch error:", err);
+    invalidateWatcher(state, watcher, generation, "watcher error");
+  });
+  watcher.on("close", () => {
+    if (!isCurrentWatcher(state, watcher, generation)) return;
+    invalidateWatcher(state, watcher, generation, "watcher closed");
+  });
+
+  // Close the narrow stat→watch race: if another process replaced hooks/
+  // between those operations, this watcher belongs to the old inode.
+  const afterIdentity = await directoryIdentity(state.hooksDir);
+  if (
+    !isCurrentWatcher(state, watcher, generation) ||
+    afterIdentity === null ||
+    afterIdentity !== beforeIdentity
+  ) {
+    if (isCurrentWatcher(state, watcher, generation)) {
+      invalidateWatcher(state, watcher, generation, "directory changed while arming");
+    }
+    return false;
+  }
+
+  scheduleHealthCheck(state, generation, WATCH_HEALTH_INTERVAL_MS);
+  return true;
+}
+
+function invalidateWatcher(
+  state: WatcherState,
+  expectedWatcher: FSWatcher | null,
+  generation: number,
+  _reason: string,
+): void {
+  if (!isCurrentGeneration(state, generation)) return;
+  if (expectedWatcher !== null && state.watcher !== expectedWatcher) return;
+
+  const watcher = state.watcher;
+  state.watcher = null;
+  state.watchedDirectoryIdentity = null;
+  state.generation++;
+  state.rearmAttempt = 0;
+  if (state.rescanTimer !== null) {
+    clearTimeout(state.rescanTimer);
+    state.rescanTimer = null;
+  }
+  if (state.healthTimer !== null) {
+    clearTimeout(state.healthTimer);
+    state.healthTimer = null;
+  }
+  try {
+    watcher?.close();
+  } catch (err) {
+    console.warn("[hook-watcher] watcher.close during re-arm threw:", err);
+  }
+  scheduleRearm(state);
+}
+
+function scheduleRearm(state: WatcherState): void {
+  if (
+    state.stopped ||
+    active !== state ||
+    state.watcher !== null ||
+    state.rearmTimer !== null ||
+    state.rearmPromise !== null
+  ) {
+    return;
+  }
+  const generation = state.generation;
+  const delayMs = Math.min(
+    REARM_MAX_DELAY_MS,
+    REARM_BASE_DELAY_MS * 2 ** Math.min(state.rearmAttempt, 8),
+  );
+  state.rearmTimer = setTimeout(() => {
+    state.rearmTimer = null;
+    if (!isCurrentGeneration(state, generation) || state.watcher !== null) return;
+
+    let armed = false;
+    const pending = (async () => {
+      armed = await armWatcher(state, generation);
+      if (!armed && isCurrentGeneration(state, generation)) {
+        state.rearmAttempt++;
+      }
+    })();
+    state.rearmPromise = pending;
+    void pending
+      .catch((err) => console.warn("[hook-watcher] re-arm failed:", err))
+      .finally(() => {
+        if (state.rearmPromise === pending) state.rearmPromise = null;
+        if (!state.stopped && active === state && state.watcher === null) {
+          scheduleRearm(state);
+        }
+      });
+  }, delayMs);
+  state.rearmTimer.unref?.();
+}
+
+function scheduleRescan(state: WatcherState, generation: number): void {
+  if (!isCurrentGeneration(state, generation) || state.rescanTimer !== null) return;
+  state.rescanTimer = setTimeout(() => {
+    state.rescanTimer = null;
+    if (!isCurrentGeneration(state, generation)) return;
+    void rescanDirectory(state).catch((err) =>
+      console.warn("[hook-watcher] rescan failed:", err),
+    );
+  }, RESCAN_DEBOUNCE_MS);
+  state.rescanTimer.unref?.();
+}
+
+function scheduleHealthCheck(
+  state: WatcherState,
+  generation: number,
+  delayMs: number,
+): void {
+  if (!isCurrentGeneration(state, generation) || state.healthTimer !== null) return;
+  state.healthTimer = setTimeout(() => {
+    state.healthTimer = null;
+    if (!isCurrentGeneration(state, generation)) return;
+    const pending = checkWatcherHealth(state, generation);
+    state.healthPromise = pending;
+    void pending
+      .catch((err) => console.warn("[hook-watcher] health check failed:", err))
+      .finally(() => {
+        if (state.healthPromise === pending) state.healthPromise = null;
+        if (isCurrentGeneration(state, generation) && state.watcher !== null) {
+          scheduleHealthCheck(state, generation, WATCH_HEALTH_INTERVAL_MS);
+        }
+      });
+  }, delayMs);
+  state.healthTimer.unref?.();
+}
+
+async function checkWatcherHealth(state: WatcherState, generation: number): Promise<void> {
+  if (!isCurrentGeneration(state, generation)) return;
+  const identity = await directoryIdentity(state.hooksDir);
+  if (!isCurrentGeneration(state, generation)) return;
+  if (
+    identity === null ||
+    state.watchedDirectoryIdentity === null ||
+    identity !== state.watchedDirectoryIdentity
+  ) {
+    invalidateWatcher(state, state.watcher, generation, "health check");
+  }
+}
+
+async function directoryIdentity(dirPath: string): Promise<string | null> {
+  try {
+    const stat = await fs.stat(dirPath);
+    if (!stat.isDirectory()) return null;
+    // birthtime covers filesystems/platforms that report a non-distinct or
+    // zero inode for replaced directories (notably some Windows volumes).
+    return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+  } catch {
+    return null;
   }
 }
 
@@ -258,6 +494,7 @@ export async function stopHookWatcher(): Promise<void> {
   if (!active) return;
   const state = active;
   state.stopped = true;
+  state.generation++;
   if (state.rescanTimer !== null) {
     clearTimeout(state.rescanTimer);
     state.rescanTimer = null;
@@ -269,6 +506,15 @@ export async function stopHookWatcher(): Promise<void> {
   if (state.pruneTimer !== null) {
     clearTimeout(state.pruneTimer);
     state.pruneTimer = null;
+    state.pruneDueAt = null;
+  }
+  if (state.rearmTimer !== null) {
+    clearTimeout(state.rearmTimer);
+    state.rearmTimer = null;
+  }
+  if (state.healthTimer !== null) {
+    clearTimeout(state.healthTimer);
+    state.healthTimer = null;
   }
   // Wake every queued handleFile so its post-acquire stopped check runs and
   // the pending promises settle instead of hanging past shutdown.
@@ -277,9 +523,34 @@ export async function stopHookWatcher(): Promise<void> {
     if (next) next();
   }
   try {
-    state.watcher?.close();
+    const watcher = state.watcher;
+    state.watcher = null;
+    state.watchedDirectoryIdentity = null;
+    watcher?.close();
   } catch (err) {
     console.warn("[hook-watcher] watcher.close threw:", err);
+  }
+  // Any arm/health/prune operation already inside an fs promise is allowed to
+  // settle, but its generation/stopped checks prevent it from publishing new
+  // resources. Awaiting them makes stop deterministic for tests and app quit.
+  await Promise.allSettled(
+    [state.rearmPromise, state.healthPromise, state.prunePromise].filter(
+      (pending): pending is Promise<void> => pending !== null,
+    ),
+  );
+  if (state.pruneDir) {
+    try {
+      await state.pruneDir.close();
+    } catch {
+      // A completed async iterator may already have closed it.
+    }
+    state.pruneDir = null;
+  }
+  if (oversizedFlushTimer !== null) {
+    clearTimeout(oversizedFlushTimer);
+    oversizedFlushTimer = null;
+    oversizedDropCount = 0;
+    oversizedDropBytes = 0;
   }
   active = null;
 }
@@ -291,17 +562,22 @@ async function rescanDirectory(state: WatcherState): Promise<void> {
     entries = await fs.readdir(state.hooksDir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      // Directory disappeared (user wiped ~/.SparkAgent); re-create on the
-      // next event tick. fs.watch is now bound to a deleted inode; restart.
-      try {
-        await fs.mkdir(state.hooksDir, { recursive: true });
-        await fs.mkdir(state.processedDir, { recursive: true });
-      } catch (mkErr) {
-        console.warn("[hook-watcher] failed to recreate hooks dir:", mkErr);
-      }
+      // The watcher is inode-bound, so recreating the path alone is not
+      // enough. Invalidate this exact generation and let the single re-arm
+      // owner recreate both directories.
+      invalidateWatcher(state, state.watcher, state.generation, "directory missing");
       return;
     }
     console.warn("[hook-watcher] readdir failed:", err);
+    return;
+  }
+  const identity = await directoryIdentity(state.hooksDir);
+  if (
+    identity === null ||
+    (state.watchedDirectoryIdentity !== null &&
+      identity !== state.watchedDirectoryIdentity)
+  ) {
+    invalidateWatcher(state, state.watcher, state.generation, "directory replaced");
     return;
   }
   for (const name of entries) {
@@ -404,42 +680,105 @@ async function handleFile(state: WatcherState, filename: string): Promise<void> 
   }
 }
 
-// Best-effort retention sweep of processed/. Batched stats with a yield
-// between batches so a large backlog (six figures observed) never saturates
-// the event loop or the disk; every batch re-checks stopped so shutdown
-// stays prompt.
-async function pruneProcessed(state: WatcherState): Promise<void> {
-  if (state.stopped) return;
-  let names: string[];
-  try {
-    names = await fs.readdir(state.processedDir);
-  } catch {
-    return; // dir missing — nothing to prune
+function schedulePrune(state: WatcherState, delayMs: number): void {
+  if (state.stopped || active !== state || state.prunePromise !== null) return;
+  const dueAt = Date.now() + delayMs;
+  // An opportunistic request may bring a distant periodic prune forward, but
+  // never creates a second timer.
+  if (state.pruneTimer !== null) {
+    if (state.pruneDueAt !== null && state.pruneDueAt <= dueAt) return;
+    clearTimeout(state.pruneTimer);
   }
-  const cutoff = Date.now() - PROCESSED_RETENTION_MS;
-  let pruned = 0;
-  for (let i = 0; i < names.length; i += PROCESSED_PRUNE_BATCH) {
-    if (state.stopped) return;
-    const batch = names.slice(i, i + PROCESSED_PRUNE_BATCH);
-    await Promise.all(
-      batch.map(async (name) => {
-        try {
-          const filePath = join(state.processedDir, name);
-          const stat = await fs.stat(filePath);
-          if (stat.isFile() && stat.mtimeMs < cutoff) {
-            await fs.unlink(filePath);
-            pruned++;
-          }
-        } catch {
-          /* best-effort; a vanished or locked file just stays for next time */
+  state.pruneDueAt = dueAt;
+  state.pruneTimer = setTimeout(() => {
+    state.pruneTimer = null;
+    state.pruneDueAt = null;
+    if (state.stopped || active !== state) return;
+
+    let sweepComplete = true;
+    const pending = (async () => {
+      sweepComplete = await pruneProcessedChunk(state);
+    })();
+    state.prunePromise = pending;
+    void pending
+      .catch((err) => console.warn("[hook-watcher] processed prune failed:", err))
+      .finally(() => {
+        if (state.prunePromise === pending) state.prunePromise = null;
+        if (!state.stopped && active === state) {
+          schedulePrune(
+            state,
+            sweepComplete ? PROCESSED_PRUNE_INTERVAL_MS : PROCESSED_PRUNE_CONTINUE_MS,
+          );
         }
-      }),
+      });
+  }, delayMs);
+  state.pruneTimer.unref?.();
+}
+
+// Best-effort retention sweep of processed/. One invocation reads/stats at
+// most PROCESSED_PRUNE_BATCH entries. A single open directory cursor carries
+// the sweep across yielded timer ticks, so a six-figure backlog neither
+// allocates a six-figure names array nor monopolises the main process.
+async function pruneProcessedChunk(state: WatcherState): Promise<boolean> {
+  if (state.stopped) return true;
+  if (state.pruneDir === null) {
+    try {
+      state.pruneDir = await fs.opendir(state.processedDir);
+      state.pruneCutoff = Date.now() - PROCESSED_RETENTION_MS;
+      state.pruneCount = 0;
+    } catch {
+      return true; // dir missing — nothing to prune
+    }
+  }
+
+  const dir = state.pruneDir;
+  const batch: string[] = [];
+  let reachedEnd = false;
+  try {
+    for (let i = 0; i < PROCESSED_PRUNE_BATCH; i++) {
+      if (state.stopped) return false;
+      const entry = await dir.read();
+      if (entry === null) {
+        reachedEnd = true;
+        break;
+      }
+      if (entry.isFile()) batch.push(entry.name);
+    }
+  } catch {
+    reachedEnd = true;
+  }
+
+  await Promise.all(
+    batch.map(async (name) => {
+      if (state.stopped) return;
+      try {
+        const filePath = join(state.processedDir, name);
+        const stat = await fs.stat(filePath);
+        if (stat.isFile() && stat.mtimeMs < state.pruneCutoff) {
+          await fs.unlink(filePath);
+          state.pruneCount++;
+        }
+      } catch {
+        /* best-effort; a vanished or locked file just stays for next time */
+      }
+    }),
+  );
+
+  if (!reachedEnd) return false;
+  try {
+    await dir.close();
+  } catch {
+    // Directory replacement may have closed the handle for us.
+  }
+  if (state.pruneDir === dir) state.pruneDir = null;
+  if (state.pruneCount > 0) {
+    console.log(
+      `[hook-watcher] pruned ${state.pruneCount} processed hook files older than 7 days`,
     );
-    await delay(10);
   }
-  if (pruned > 0) {
-    console.log(`[hook-watcher] pruned ${pruned} processed hook files older than 7 days`);
-  }
+  state.pruneCount = 0;
+  state.pruneSweepCount++;
+  return true;
 }
 
 async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope): Promise<void> {
@@ -686,3 +1025,52 @@ function delay(ms: number): Promise<void> {
 export function isHookWatcherActive(): boolean {
   return active !== null && active.stopped === false;
 }
+
+// Narrow deterministic test seam for lifecycle faults that cannot be induced
+// portably through the public fs API (notably FSWatcher "error"). It exposes
+// counters/booleans only—never the watcher handle or hook payloads.
+export const __test = {
+  diagnostics(): {
+    generation: number;
+    armCount: number;
+    watcherArmed: boolean;
+    rearmPending: boolean;
+    pruneSweepCount: number;
+    prunePending: boolean;
+  } | null {
+    const state = active;
+    if (!state) return null;
+    return {
+      generation: state.generation,
+      armCount: state.armCount,
+      watcherArmed: state.watcher !== null,
+      rearmPending: state.rearmTimer !== null || state.rearmPromise !== null,
+      pruneSweepCount: state.pruneSweepCount,
+      prunePending:
+        state.pruneTimer !== null ||
+        state.prunePromise !== null ||
+        state.pruneDir !== null,
+    };
+  },
+  emitWatcherError(times = 1): boolean {
+    const watcher = active?.watcher;
+    if (!watcher) return false;
+    for (let i = 0; i < Math.max(1, times); i++) {
+      watcher.emit("error", new Error("synthetic hook watcher fault"));
+    }
+    return true;
+  },
+  emitWatcherClose(): boolean {
+    const watcher = active?.watcher;
+    if (!watcher) return false;
+    watcher.emit("close");
+    return true;
+  },
+  async rescanNow(): Promise<void> {
+    if (active) await rescanDirectory(active);
+  },
+  pruneNow(): void {
+    if (active) schedulePrune(active, 0);
+  },
+  rearmBaseDelayMs: REARM_BASE_DELAY_MS,
+};

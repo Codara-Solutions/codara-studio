@@ -9,6 +9,7 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:hook-watcher": "node scripts/test-hook-watcher-lifecycle.cjs",
     "test:pty-resource-governor": "node scripts/test-pty-spawn-serialization.cjs",
     "test:posix-pty-tree-cleanup": "node scripts/test-posix-pty-tree-cleanup.cjs",
     "dev": "electron-vite dev",

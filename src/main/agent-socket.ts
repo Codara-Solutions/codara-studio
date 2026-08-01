@@ -9,6 +9,16 @@ import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
 import { requestTerminalOp } from "./terminal-bridge";
+import {
+  AgentTerminalOwnershipError,
+  type AgentTerminalRegistration,
+} from "./agent-terminal-registry";
+import {
+  agentTerminals,
+  canRegisterAgentTerminal,
+  quarantineLateAgentTerminal,
+  registerAgentTerminal,
+} from "./agent-terminal-lifecycle";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadState, saveState } from "./storage";
@@ -110,12 +120,6 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
-// Pane ids minted by terminal.create in this process. terminal.write is
-// restricted to this set so an agent can't inject keystrokes into a sibling
-// worker's or the user's own terminal (whose paneIds are discoverable via the
-// intentionally-broad terminal.read). Process-session scoped - see
-// handleTerminalWrite for why per-run scoping isn't available here.
-const agentCreatedPaneIds = new Set<string>();
 // Cap on chat.append message length. Big enough for a verifier verdict
 // summary or a multi-paragraph status update, small enough that a buggy
 // sub-agent can't DoS the run-store by sending a megabyte at a time.
@@ -429,6 +433,8 @@ async function dispatch(
         return await handleTerminalCreate(params, id);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
+      case "terminal.close":
+        return await handleTerminalClose(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
       case "chat.create":
@@ -602,30 +608,65 @@ async function handleTerminalCreate(
   const cwd = stringParam(params, "cwd");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
+  const rawRetention = params.retention;
+  if (
+    rawRetention !== undefined &&
+    rawRetention !== "temporary" &&
+    rawRetention !== "service"
+  ) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "retention must be temporary or service",
+    );
+  }
   // The MCP server stamps SPARK_RUN_ID onto terminal.create so a background
   // run's terminal lands in - and defaults its cwd to - the RUN's workspace,
-  // not whichever workspace the user happens to be viewing. Resolution is
-  // best-effort: no runId (user-facing/non-run agents) or an unknown run keeps
-  // the active-workspace behavior.
+  // not whichever workspace the user happens to be viewing. A run-owned pane
+  // must have a live owner: accepting a stale/missing/settled run here would
+  // create it after that run's one-shot cleanup snapshot and leak it forever.
+  // Null ownership remains the user-facing/manual-agent path.
   const runId = stringParam(params, "runId");
   let workspaceId: string | null = null;
   let workspaceCwd: string | null = null;
   if (runId) {
+    let run: RunState | null;
     try {
-      const run = await (await getRunStore()).getRun(runId);
-      if (run) {
-        workspaceId = run.workspaceId ?? null;
-        workspaceCwd =
-          typeof run.settingsSnapshot?.workspaceCwd === "string"
-            ? run.settingsSnapshot.workspaceCwd
-            : null;
-        if (workspaceId && !workspaceCwd) {
-          const state = await loadState();
-          workspaceCwd = state.workspaces.find((w) => w.id === workspaceId)?.cwd ?? null;
-        }
+      run = await (await getRunStore()).getRun(runId);
+    } catch (error) {
+      return errorResponse(
+        id,
+        ERR_INTERNAL,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (!run) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "terminal owner run was not found");
+    }
+    if (
+      run.status === "complete" ||
+      run.status === "failed" ||
+      run.status === "cancelled" ||
+      !canRegisterAgentTerminal(runId)
+    ) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "terminal owner run is no longer accepting new auxiliary terminals",
+      );
+    }
+    workspaceId = run.workspaceId ?? null;
+    workspaceCwd =
+      typeof run.settingsSnapshot?.workspaceCwd === "string"
+        ? run.settingsSnapshot.workspaceCwd
+        : null;
+    if (workspaceId && !workspaceCwd) {
+      try {
+        const state = await loadState();
+        workspaceCwd = state.workspaces.find((w) => w.id === workspaceId)?.cwd ?? null;
+      } catch {
+        /* the run's snapshotted cwd remains the preferred source */
       }
-    } catch {
-      /* identity resolution is best-effort */
     }
   }
   try {
@@ -675,11 +716,47 @@ async function handleTerminalCreate(
         "terminal failed to start (check that cwd exists and is accessible)",
       );
     }
-    // Record the pane as agent-created so terminal.write can be restricted to it
-    // (see handleTerminalWrite). Ids are unique per process, so leaving a stale
-    // id after the pane exits is harmless (the exists() check below still gates
-    // dead panes).
-    agentCreatedPaneIds.add(result.paneId);
+    // Record both process-level agent ownership (terminal.write) and run
+    // ownership (terminal.close). The MCP server injects runId from the
+    // caller's SPARK_RUN_ID; a user-facing studio agent has no run and owns a
+    // null-scoped terminal.
+    const registration: AgentTerminalRegistration = {
+      paneId: result.paneId,
+      tabId: result.tabId,
+      runId,
+      retention: rawRetention === "service" ? "service" : "temporary",
+    };
+    if (!registerAgentTerminal(registration)) {
+      // The run settled/deleted while its renderer tab was spawning. The
+      // synchronous lifecycle fence closes this check/register race. Adopt the
+      // pane into a forced-fresh cleanup pass so a renderer timeout remains
+      // retryable instead of orphaning an untracked visual tab.
+      if (runId) {
+        quarantineLateAgentTerminal({
+          ...registration,
+          runId,
+        });
+      }
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "terminal owner run settled while the terminal was starting",
+      );
+    }
+    const offExit = pty.onExit(result.paneId, () => {
+      offExit();
+      // A naturally completed one-shot command should no longer count as a
+      // writable/live agent terminal. Retain only bounded ownership metadata
+      // so terminal.close can still remove its dead renderer tab later.
+      agentTerminals.markExited(registration);
+    });
+    // onExit only observes future exits. Cover the narrow gap between the
+    // alive settle check above and listener registration without closing the
+    // renderer tab or otherwise changing the existing dead-pane UI.
+    if (!pty.exists(result.paneId)) {
+      offExit();
+      agentTerminals.markExited(registration);
+    }
     return successResponse(id, result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -696,30 +773,61 @@ async function handleTerminalWrite(
 ): Promise<JsonRpcResponse> {
   const paneId = stringParam(params, "paneId");
   if (!paneId) return errorResponse(id, ERR_INVALID_PARAMS, "paneId is required");
+  const runId = stringParam(params, "runId");
   // text may legitimately be "" (submit a bare newline), so accept any string
   // rather than going through stringParam (which rejects empty).
   const text = params.text;
   if (typeof text !== "string") return errorResponse(id, ERR_INVALID_PARAMS, "text is required");
   // Ownership gate: writing INJECTS keystrokes (and, by default, Enter) into a
   // live PTY. terminal.read intentionally lets an agent sample sibling worker
-  // panes, so their paneIds are discoverable - without this check an agent could
-  // type into another worker's Claude/Codex TUI (a confused-deputy). Restrict
-  // writes to panes THIS process created via terminal.create. Scope is the
-  // process session (the socket carries no per-run identity - orchestrator RPCs
-  // pass runId explicitly in params, and these terminal panes are not run-
-  // scoped), so an agent can only reach terminals it (or a co-resident agent)
-  // spawned as agent-owned, never a worker's or the user's own terminal.
-  if (!agentCreatedPaneIds.has(paneId)) {
+  // panes, so their paneIds are discoverable. The bridge stamps SPARK_RUN_ID
+  // onto writes; require the same run that created this terminal so one Cora
+  // run cannot type into another run's agent-owned shell.
+  if (!agentTerminals.isActiveOwnedBy(paneId, runId)) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "terminal.write is only permitted on panes this agent created via terminal.create",
+      "terminal.write is only permitted on active panes owned by this Cora run",
     );
   }
   if (!pty.exists(paneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
   const submit = typeof params.submit === "boolean" ? params.submit : true;
   pty.inject(paneId, text, { submit });
   return successResponse(id, { ok: true });
+}
+
+// Stop an auxiliary terminal created through terminal.create and remove its
+// renderer-owned tab. Ownership is run-scoped: one Cora run cannot close a
+// sibling run's watcher/dev server even though both share the app-local socket
+// token. Successful closes leave a bounded tombstone, so a client that lost
+// the first JSON-RPC response can retry and receive alreadyClosed=true.
+async function handleTerminalClose(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const paneId = stringParam(params, "paneId");
+  if (!paneId) return errorResponse(id, ERR_INVALID_PARAMS, "paneId is required");
+  const runId = stringParam(params, "runId");
+
+  try {
+    const result = await agentTerminals.close({
+      paneId,
+      runId,
+      stop: () => pty.killImmediate(paneId),
+      destroyTab: (registration) =>
+        requestTerminalOp("destroy", {
+          tabId: registration.tabId,
+          paneId: registration.paneId,
+        }),
+    });
+    return successResponse(id, { ok: true, ...result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof AgentTerminalOwnershipError) {
+      return errorResponse(id, ERR_INVALID_PARAMS, message);
+    }
+    return errorResponse(id, ERR_INTERNAL, message);
+  }
 }
 
 async function handlePreviewOp(

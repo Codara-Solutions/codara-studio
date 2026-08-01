@@ -260,6 +260,12 @@ import {
   WORKER_DEFAULT_CLAUDE_MODEL,
 } from "./worker-model-hint";
 import * as pty from "../pty-manager";
+import {
+  deleteAgentTerminalRun,
+  fenceAgentTerminalRunDeleting,
+  markAgentTerminalRunActive,
+  settleAgentTerminalRun,
+} from "../agent-terminal-lifecycle";
 import { runStructuredWorker } from "./structured-worker";
 import { detectAgentRuntimes } from "../agent-runtimes";
 import { getProvider } from "../providers";
@@ -11043,6 +11049,14 @@ export async function deleteRun(runId: string): Promise<void> {
         "Open or recover those worktrees before deleting the run.",
     );
   }
+  fenceAgentTerminalRunDeleting(run.id);
+  const terminalCleanup = await deleteAgentTerminalRun(run.id);
+  if (terminalCleanup.failures.length > 0) {
+    console.warn(
+      `[run-store] ${terminalCleanup.failures.length} run-owned terminal tab(s) ` +
+        `could not be removed while deleting ${run.id}; their PTYs were stopped`,
+    );
+  }
   const timestamp = new Date().toISOString();
   for (const worker of activeWorkersForRun(run.id)) {
     worker.kill();
@@ -11063,6 +11077,8 @@ export async function deleteRun(runId: string): Promise<void> {
     payload: {
       title: run.title,
       artifactDir: run.artifactDir,
+      agentTerminalsClosed: terminalCleanup.closed.length,
+      agentTerminalCleanupFailures: terminalCleanup.failures.length,
     },
   });
 
@@ -13856,6 +13872,38 @@ async function commitRunChange(
         latest.seen = false;
       }
       await saveRun(latest);
+
+      // The run file is the lifecycle authority. Fence + schedule cleanup as
+      // soon as that terminal status is durable, before the event journal
+      // append: a disk error in events.jsonl must not leave a live forgotten
+      // watcher behind after run.json already says complete/failed/cancelled.
+      if (
+        prevStatus !== null &&
+        !isTerminalRunStatus(prevStatus) &&
+        isTerminalRunStatus(latest.status)
+      ) {
+        void settleAgentTerminalRun(run.id)
+          .then((cleanup) => {
+            if (cleanup.failures.length > 0) {
+              console.warn(
+                `[run-store] ${cleanup.failures.length} temporary terminal tab(s) ` +
+                  `could not be removed after ${run.id} settled; their PTYs were stopped and cleanup was queued for retry`,
+              );
+            }
+          })
+          .catch((error) => {
+            console.warn(`[run-store] failed to reconcile terminals for ${run.id}`, error);
+          });
+      } else if (
+        prevStatus !== null &&
+        isTerminalRunStatus(prevStatus) &&
+        !isTerminalRunStatus(latest.status)
+      ) {
+        // Continuing a completed chat opens a new lifecycle epoch. The
+        // lifecycle module releases the fence now, or after a pending cleanup
+        // retry finishes, so a retry can never close a new epoch's terminal.
+        markAgentTerminalRunActive(run.id);
+      }
 
       const domainEventId = makeId("evt");
       const domainType =

@@ -33,6 +33,7 @@ import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
+import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
 import { registerTerminalBridge } from "./terminal-bridge";
@@ -352,6 +353,7 @@ const RELAUNCHED_FLAG = "--spark-boot-relaunch";
 let bootWatchdog: NodeJS.Timeout | null = null;
 let bootFailures = 0;
 ipcMain.on("app:renderer-ready", (e) => {
+  retryPendingAgentTerminalCleanups();
   // Same gate as the health pong: only the trusted main frame may disarm the
   // boot watchdog. App.tsx sends this after React mounts, which only happens
   // once the allowlisted document has committed, so the real signal is always

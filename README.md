@@ -74,3 +74,8 @@ cora rpc preview.list    # raw JSON-RPC escape hatch (any method)
 unpackaged builds, and in packaged builds only when the app is launched with
 `CODARA_DEV_TOOLS=1` — a shipped app's socket must not let another local process
 screenshot the user's terminals. Preview and run commands work everywhere.
+
+### Run terminal lifecycle
+
+Temporary worker panes close automatically when a run settles. Service panes
+remain until their run is deleted, and failed closes retry automatically.
