@@ -92,6 +92,7 @@ import type {
   PreferencesChange,
   PrepareWorkerTaskInput,
   PtyExitInfo,
+  PtyResourceSnapshot,
   QueuedRun,
   RenameRunInput,
   ResumeRunInput,
@@ -797,6 +798,8 @@ const api = {
       ipcRenderer.invoke("pty:resize", { id, cols, rows }),
     dispose: (id: string): Promise<void> => ipcRenderer.invoke("pty:dispose", { id }),
     exists: (id: string): Promise<boolean> => ipcRenderer.invoke("pty:exists", { id }),
+    resourceSnapshot: (): Promise<PtyResourceSnapshot> =>
+      ipcRenderer.invoke("pty:resourceSnapshot"),
     pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
     resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
     onHostResume: (handler: HostResumeHandler): (() => void) => {

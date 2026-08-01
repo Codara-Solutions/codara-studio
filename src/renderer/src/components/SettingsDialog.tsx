@@ -7,6 +7,7 @@ import type {
   PiSubscriptionOverview,
   PiSubscriptionPrompt,
   PiSubscriptionProvider,
+  PtyResourceSnapshot,
   RunState,
   ShellInfo,
   ThemePref,
@@ -513,6 +514,30 @@ function TerminalSettings({
   onSelect: (shellId: string) => void;
   onScrollbackLineLimitChange: (lineLimit: number) => void;
 }) {
+  const [resourceSnapshot, setResourceSnapshot] =
+    useState<PtyResourceSnapshot | null>(null);
+  const [resourceError, setResourceError] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const snapshot = await window.spark.pty.resourceSnapshot();
+        if (!active) return;
+        setResourceSnapshot(snapshot);
+        setResourceError(false);
+      } catch {
+        if (active) setResourceError(true);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 10_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   return (
     <div>
       <SectionTitle title="Default terminal" detail="Used for new manual worker panes." />
@@ -539,6 +564,59 @@ function TerminalSettings({
       </div>
       <div style={{ marginTop: 22 }}>
         <SectionTitle
+          title="Resource overview"
+          detail="Observation only. Parked output streams can still have a running child process; Codara never stops terminal work just because it is quiet."
+        />
+        <div
+          aria-live="polite"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: 8,
+          }}
+        >
+          <ResourceMetric
+            label="Live"
+            value={resourceSnapshot?.totals.live ?? "—"}
+          />
+          <ResourceMetric
+            label="Visible streams"
+            value={resourceSnapshot?.totals.attached ?? "—"}
+          />
+          <ResourceMetric
+            label="Parked / headless"
+            value={resourceSnapshot?.totals.detached ?? "—"}
+          />
+          <ResourceMetric
+            label="Bounded buffers"
+            value={
+              resourceSnapshot
+                ? formatResourceBytes(
+                    resourceSnapshot.totals.tailBytes +
+                      resourceSnapshot.totals.detachedBacklogBytes +
+                      resourceSnapshot.totals.pendingBytes,
+                  )
+                : "—"
+            }
+          />
+        </div>
+        <div
+          style={{
+            marginTop: 8,
+            color: resourceError ? "var(--danger)" : "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+          }}
+        >
+          {resourceError
+            ? "Resource inventory is temporarily unavailable."
+            : resourceSnapshot?.totals.remote
+              ? `${resourceSnapshot.totals.remote} remote terminal${resourceSnapshot.totals.remote === 1 ? "" : "s"} included. CPU and resident memory are not estimated yet.`
+              : "CPU and resident memory are not estimated yet."}
+        </div>
+      </div>
+      <div style={{ marginTop: 22 }}>
+        <SectionTitle
           title="Output history"
           detail="Applies to manual terminals, worker panes, and chat backend terminal views."
         />
@@ -553,6 +631,55 @@ function TerminalSettings({
       </div>
     </div>
   );
+}
+
+function ResourceMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number;
+}) {
+  return (
+    <div
+      style={{
+        minWidth: 0,
+        border: "1px solid var(--rule-soft)",
+        borderRadius: "var(--radius-surface, 7px)",
+        background: "color-mix(in oklab, var(--ink) 2%, transparent)",
+        padding: "10px 11px",
+      }}
+    >
+      <div
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          marginTop: 4,
+          color: "var(--ink)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 15,
+          fontWeight: 650,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function formatResourceBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function ShellOption({

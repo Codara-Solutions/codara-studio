@@ -1835,6 +1835,9 @@ export function registerIpc(): void {
   handle("pty:exists", async (_e, args: { id: string }) => {
     return pty.exists(args.id);
   });
+  handle("pty:resourceSnapshot", async () => {
+    return pty.resourceSnapshot();
+  });
 
   // Pause / resume the live byte stream while the renderer-side TerminalPane
   // is unmounted (workspace switch). Paused sessions buffer pty output into a

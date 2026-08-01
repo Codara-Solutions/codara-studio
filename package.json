@@ -9,6 +9,8 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:pty-resource-governor": "node scripts/test-pty-spawn-serialization.cjs",
+    "test:posix-pty-tree-cleanup": "node scripts/test-posix-pty-tree-cleanup.cjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",

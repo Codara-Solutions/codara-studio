@@ -4,13 +4,26 @@ import { promises as fsp, chmodSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { WebContents } from "electron";
-import type { PtyExitInfo, ShellInfo } from "@shared/types";
+import type {
+  PtyExitInfo,
+  PtyResourceSnapshot,
+  PtySessionResourceDiagnostic,
+  ShellInfo,
+} from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
 import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { sparkHome } from "./spark-home";
 import { getConnection, shQuote } from "./remote/connections";
+
+import {
+  beginPosixPtyTreeTeardown,
+  capturePosixPtyTree,
+  isPosixPtyTreeAlive,
+  signalPosixPtyTree,
+  type PosixPtyTreeTarget,
+} from "./posix-pty-tree";
 
 // The subset of node-pty's IPty that pty-manager actually drives. Local
 // sessions hand in the real IPty; REMOTE sessions (ssh:// cwd) hand in an
@@ -27,6 +40,11 @@ type PtyHandle = Pick<nodePty.IPty, "pid" | "write" | "resize" | "kill" | "onDat
 
 interface Session {
   id: string;
+  generationId: string;
+  createdAt: number;
+  lastInputAt: number;
+  lastOutputAt: number;
+  lastAttachAt: number;
   // Working directory the pty was spawned in. Lets disposeUnderCwd find and
   // kill the shells / agent panes holding a worktree open when it's deleted.
   cwd: string;
@@ -102,6 +120,12 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+let nextSessionGeneration = 0;
+
+function createSessionGeneration(id: string): string {
+  nextSessionGeneration += 1;
+  return `${id}:${Date.now().toString(36)}:${nextSessionGeneration.toString(36)}`;
+}
 // Listeners for "session id became available" — orchestration uses this to
 // wait until the renderer-side TerminalView has called pty:spawn before we
 // start typing into the pwsh shell.
@@ -116,6 +140,8 @@ const dataTaps = new Map<string, Array<(chunk: Buffer) => void>>();
 
 const pendingKills = new Map<string, NodeJS.Timeout>();
 const GRACE_MS = 250;
+
+const sessionSpawnLocks = new Map<string, Promise<void>>();
 
 // When a PTY is killed while a renderer's webContents is bound to its
 // sessionId — and a fresh PTY spawns at the same id within a short window —
@@ -343,6 +369,12 @@ function ensureSpawnHelperExecutable(): void {
 export async function spawn(
   opts: SpawnOptions,
 ): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> {
+  return serializeSessionSpawn(opts.id, () => spawnWithSessionLock(opts));
+}
+
+async function spawnWithSessionLock(
+  opts: SpawnOptions,
+): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> {
   ensureSpawnHelperExecutable();
   // Mirror attach (see SpawnOptions.mirror): observe-only. Checked FIRST so a
   // mirror can never clear a pending kill, mutate session sinks, resize the
@@ -373,7 +405,10 @@ export async function spawn(
     // buffer once, before attach, so the user sees CC's banner + recent
     // turn instead of a black hole.
     const previouslyDetached = !existing.webContents && Boolean(opts.webContents);
-    if (opts.webContents) existing.webContents = opts.webContents;
+    if (opts.webContents) {
+      existing.webContents = opts.webContents;
+      existing.lastAttachAt = Date.now();
+    }
     if (previouslyDetached && opts.webContents) {
       // The tail replay below is the AUTHORITATIVE re-attach frame for a session
       // whose renderer sink was absent (a headless cli-session, or a raw-tail
@@ -455,6 +490,32 @@ export async function spawn(
   }
 }
 
+function serializeSessionSpawn<T>(id: string, operation: () => Promise<T>): Promise<T> {
+  const previous = sessionSpawnLocks.get(id) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  // This set is the crucial synchronous claim: a same-tick caller sees
+  // `current` here and queues behind it even though `previous.then(...)` has
+  // not begun running yet.
+  sessionSpawnLocks.set(id, current);
+
+  return previous
+    .then(operation)
+    .finally(() => {
+      // A later caller may already have installed its own tail promise. Only
+      // the current tail removes the map entry; every predecessor still
+      // releases its successor. The release runs on success and failure, so a
+      // rejected remote connection cannot permanently poison this id.
+      if (sessionSpawnLocks.get(id) === current) {
+        sessionSpawnLocks.delete(id);
+      }
+      release();
+    });
+}
+
 // Spawn a REMOTE pty: an ssh2 shell channel on the workspace's host, wrapped
 // in a PtyHandle so every downstream path (enqueueData, tail buffers,
 // pause/resume/detach, taps, exit waiters) is shared with local sessions.
@@ -515,8 +576,14 @@ async function doSpawnRemote(
   };
 
   const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
+  const now = Date.now();
   const session: Session = {
     id: opts.id,
+    generationId: createSessionGeneration(opts.id),
+    createdAt: now,
+    lastInputAt: now,
+    lastOutputAt: now,
+    lastAttachAt: now,
     cwd: opts.cwd,
     pty: handle,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -815,8 +882,14 @@ function doSpawn(
   // never re-spawns on its own. Without this adoption the xterm tab keeps
   // listening on `pty:data:<sessionId>` but the new pty has no sink.
   const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
+  const now = Date.now();
   const session: Session = {
     id: opts.id,
+    generationId: createSessionGeneration(opts.id),
+    createdAt: now,
+    lastInputAt: now,
+    lastOutputAt: now,
+    lastAttachAt: now,
     cwd,
     pty,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -1255,9 +1328,81 @@ export function exists(id: string): boolean {
   return sessions.has(id);
 }
 
+export function resourceSnapshot(): PtyResourceSnapshot {
+  const sampledAt = Date.now();
+  const diagnostics: PtySessionResourceDiagnostic[] = [...sessions.values()]
+    .map((session) => {
+      const hasRenderer = Boolean(
+        session.webContents && !session.webContents.isDestroyed(),
+      );
+      return {
+        id: session.id,
+        generationId: session.generationId,
+        pid: session.pty.pid,
+        cwd: session.cwd,
+        createdAt: session.createdAt,
+        lastInputAt: session.lastInputAt,
+        lastOutputAt: session.lastOutputAt,
+        lastAttachAt: session.lastAttachAt,
+        attached: session.attached,
+        hasRenderer,
+        remote: session.pty.pid === 0 || isRemotePath(session.cwd),
+        tailBytes: session.tailBytes,
+        detachedBacklogBytes: session.detachedBacklogBytes,
+        pendingBytes: session.pendingBytes,
+      };
+    })
+    .sort(
+      (left, right) =>
+        left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+    );
+  const attached = diagnostics.filter(
+    (session) => session.hasRenderer && session.attached,
+  ).length;
+  return {
+    sampledAt,
+    sessions: diagnostics,
+    totals: {
+      live: diagnostics.length,
+      attached,
+      detached: diagnostics.length - attached,
+      remote: diagnostics.filter((session) => session.remote).length,
+      tailBytes: diagnostics.reduce(
+        (total, session) => total + session.tailBytes,
+        0,
+      ),
+      detachedBacklogBytes: diagnostics.reduce(
+        (total, session) => total + session.detachedBacklogBytes,
+        0,
+      ),
+      pendingBytes: diagnostics.reduce(
+        (total, session) => total + session.pendingBytes,
+        0,
+      ),
+    },
+  };
+}
+
+/**
+ * Exact-generation teardown seam for future proved-orphan reconciliation.
+ * Observation alone never calls this: the caller must already hold positive
+ * lifecycle proof that this exact session generation is disposable.
+ */
+export function killIfGeneration(
+  id: string,
+  generationId: string,
+): boolean {
+  const session = sessions.get(id);
+  if (!session || session.generationId !== generationId) return false;
+  markSanctioned(id);
+  killNow(id);
+  return true;
+}
+
 export function write(id: string, data: string): void {
   const s = sessions.get(id);
   if (!s) return;
+  s.lastInputAt = Date.now();
   s.pty.write(data);
 }
 
@@ -1628,6 +1773,7 @@ export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
   for (const t of pendingKills.values()) clearTimeout(t);
   pendingKills.clear();
   const pids: number[] = [];
+  const posixTrees: PosixPtyTreeTarget[] = [];
   for (const id of [...sessions.keys()]) {
     const s = sessions.get(id);
     if (!s) continue;
@@ -1640,6 +1786,8 @@ export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
     stashWebContents(id, s);
     const pid = s.pty.pid;
     if (typeof pid === "number" && pid > 0) pids.push(pid);
+    const posixTree = capturePosixPtyTree(s.pty);
+    if (posixTree) posixTrees.push(posixTree);
     try {
       flushDataNow(s);
       s.pty.kill();
@@ -1654,7 +1802,22 @@ export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
     s.detachedBacklogBytes = 0;
     sessions.delete(id);
   }
-  if (pids.length === 0 || process.platform !== "win32") return;
+  if (process.platform !== "win32") {
+    // Match an actual terminal hangup for every process that belonged to the
+    // exact forkpty tree at capture time. Interactive shells place jobs in
+    // separate process groups, so signaling only `-shellPid` misses them.
+    for (const tree of posixTrees) signalPosixPtyTree(tree, "SIGHUP");
+    const deadline = Date.now() + Math.max(0, maxWaitMs);
+    while (
+      Date.now() < deadline &&
+      posixTrees.some((tree) => isPosixPtyTreeAlive(tree))
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    for (const tree of posixTrees) signalPosixPtyTree(tree, "SIGKILL");
+    return;
+  }
+  if (pids.length === 0) return;
 
   const alive = (pid: number): boolean => {
     try {
@@ -1704,6 +1867,10 @@ function killNow(id: string): void {
   // (mode-flip in claude-backend) can re-bind it; otherwise the xterm tab in
   // the UI silently goes deaf to the new process.
   stashWebContents(id, s);
+  // Capture the exact slave tty and its root-descendant identities while the
+  // forkpty root is still alive. After pty.kill() the shell can exit and
+  // reparent surviving jobs, at which point ownership can no longer be proven.
+  const posixTree = capturePosixPtyTree(s.pty);
   try {
     flushDataNow(s);
     s.pty.kill();
@@ -1738,6 +1905,8 @@ function killNow(id: string): void {
         /* taskkill missing in PATH should be impossible on Windows; ignore */
       }
     }
+  } else {
+    beginPosixPtyTreeTeardown(posixTree);
   }
   if (s.flushTimer) clearTimeout(s.flushTimer);
   s.tail = [];

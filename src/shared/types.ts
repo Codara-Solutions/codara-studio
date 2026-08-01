@@ -676,6 +676,42 @@ export interface PtyExitInfo {
   sanctioned?: boolean;
 }
 
+/** Main-owned, observation-only resource data for one live PTY session. */
+export interface PtySessionResourceDiagnostic {
+  id: string;
+  generationId: string;
+  pid: number;
+  cwd: string;
+  createdAt: number;
+  lastInputAt: number;
+  lastOutputAt: number;
+  lastAttachAt: number;
+  attached: boolean;
+  hasRenderer: boolean;
+  remote: boolean;
+  tailBytes: number;
+  detachedBacklogBytes: number;
+  pendingBytes: number;
+}
+
+/**
+ * A bounded process-local PTY inventory. It intentionally makes no claim
+ * about CPU hibernation: renderer pause/backlog is transport state only.
+ */
+export interface PtyResourceSnapshot {
+  sampledAt: number;
+  sessions: PtySessionResourceDiagnostic[];
+  totals: {
+    live: number;
+    attached: number;
+    detached: number;
+    remote: number;
+    tailBytes: number;
+    detachedBacklogBytes: number;
+    pendingBytes: number;
+  };
+}
+
 export type NotificationSoundKind = "needs-you" | "done";
 
 // ── Unified notifications pipeline (src/main/notify) ────────────────────────
