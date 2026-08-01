@@ -6,7 +6,14 @@
 // of a card never has to be interpreted.
 
 import React, { useCallback, useEffect, useState } from "react";
-import type { PiUsageOverview, PiUsageProvider, PiUsageWindow } from "@shared/types";
+import type {
+  PiUsageOverview,
+  PiUsageProfile,
+  PiUsageProvider,
+  PiUsageWindow,
+} from "@shared/types";
+
+export type UsageEntry = PiUsageProvider | PiUsageProfile;
 
 /**
  * Headroom as a colour: green with plenty left, through amber, to red as the
@@ -77,29 +84,16 @@ function UsageBar({ window: usageWindow }: { window: PiUsageWindow }) {
   );
 }
 
-function ProviderCard({ usage }: { usage: PiUsageProvider }) {
+/**
+ * The limit report for one account, without any card chrome: the Accounts
+ * section renders this inside the account's own card, so the usage panel must
+ * not draw a competing border or its own accent ring.
+ */
+export function UsageEntryBody({ usage }: { usage: UsageEntry }) {
   const connected = usage.status === "ok";
-  const attention = usage.status === "expired" || usage.status === "error" || usage.limitReached === true;
+  const temporarilyThrottled = usage.message?.startsWith("Claude temporarily throttled") === true;
   return (
-    <div
-      style={{
-        display: "grid",
-        gap: 8,
-        padding: "9px 10px",
-        borderRadius: "var(--radius-control, 5px)",
-        border: `1px solid ${attention ? "color-mix(in oklab, var(--danger) 38%, var(--rule-soft))" : "var(--rule-soft)"}`,
-        background: "color-mix(in oklab, var(--ink) 3%, transparent)",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
-          {usage.label}
-        </span>
-        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
-          {usage.plan ? usage.plan : connected ? "connected" : ""}
-        </span>
-      </div>
-
+    <div style={{ display: "grid", gap: 7 }}>
       {connected && usage.windows.length > 0 ? (
         <div style={{ display: "grid", gap: 7 }}>
           {usage.windows.map((usageWindow) => (
@@ -109,14 +103,19 @@ function ProviderCard({ usage }: { usage: PiUsageProvider }) {
       ) : (
         <span
           style={{
-            color: usage.status === "not_connected" ? "var(--muted)" : "var(--danger)",
+            color:
+              usage.status === "not_connected"
+                ? "var(--muted)"
+                : temporarilyThrottled
+                  ? "var(--warn)"
+                  : "var(--danger)",
             fontFamily: "var(--font-sans)",
             fontSize: 11,
             lineHeight: 1.4,
           }}
         >
           {usage.status === "not_connected"
-            ? "Not connected — connect this subscription to see its limits."
+            ? "Not connected — reconnect this account to see its limits."
             : usage.message ||
               (connected
                 ? "This provider reported no usage windows."
@@ -126,14 +125,21 @@ function ProviderCard({ usage }: { usage: PiUsageProvider }) {
 
       {usage.limitReached ? (
         <span style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 11, fontWeight: 650 }}>
-          Limit reached — requests will be refused until this resets.
+          {usage.generalLimitReached
+            ? "General limit reached — normal agent requests will be refused until this resets."
+            : "A model or feature limit is reached — check the scoped window above."}
         </span>
       ) : null}
     </div>
   );
 }
 
-export default function SubscriptionUsage() {
+/**
+ * Reads the limits once per mount and re-reads whenever a connection changes
+ * anywhere in the app. Shared so the Accounts section and this panel never
+ * disagree about how much quota is left.
+ */
+export function useSubscriptionUsage() {
   const [overview, setOverview] = useState<PiUsageOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -153,15 +159,74 @@ export default function SubscriptionUsage() {
   }, [load]);
 
   // A connect, disconnect, or completed login flow anywhere in the app drops
-  // the main-process cache and pushes this event; re-read so the panel shows
-  // the new session's limits without the user pressing Refresh.
+  // the main-process cache and pushes this event; re-read so the limits follow
+  // the new session without the user pressing Refresh.
   useEffect(() => {
     return window.spark.piSubscriptions.onEvent((event) => {
       if (event.type === "changed" || event.type === "completed") load(false);
     });
   }, [load]);
 
-  const anyConnected = overview?.providers.some((provider) => provider.status !== "not_connected");
+  return { overview, loading, error, load };
+}
+
+function ProviderCard({ usage }: { usage: UsageEntry }) {
+  const connected = usage.status === "ok";
+  // The account this provider is currently running on. Selection owns the
+  // card edge and nothing else does: health is reported inside the card, by
+  // the usage bars and the limit message. An account in trouble keeps a plain
+  // border, so a red edge never competes with the accent ring for "which
+  // account am I on".
+  const active = "isDefault" in usage && usage.isDefault === true;
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: 8,
+        padding: "9px 10px",
+        borderRadius: "var(--radius-control, 5px)",
+        border: `1px solid ${active ? "var(--accent-edge)" : "var(--rule-soft)"}`,
+        boxShadow: active ? "0 0 0 3px var(--accent-soft)" : undefined,
+        background: active
+          ? "color-mix(in oklab, var(--accent) 4%, transparent)"
+          : "color-mix(in oklab, var(--ink) 3%, transparent)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
+          {usage.label}
+        </span>
+        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+          {active
+            ? usage.plan
+              ? `active · ${usage.plan}`
+              : "active"
+            : usage.plan
+              ? usage.plan
+              : connected
+                ? "connected"
+                : ""}
+        </span>
+      </div>
+
+      <UsageEntryBody usage={usage} />
+    </div>
+  );
+}
+
+export default function SubscriptionUsage() {
+  const { overview, loading, error, load } = useSubscriptionUsage();
+
+  const usageEntries: UsageEntry[] =
+    overview?.profiles && overview.profiles.length > 0
+      ? [...overview.profiles]
+      : [...(overview?.providers ?? [])];
+  usageEntries.sort(
+    (left, right) =>
+      (left.provider === "anthropic" ? 0 : 1) -
+      (right.provider === "anthropic" ? 0 : 1),
+  );
+  const anyConnected = usageEntries.some((entry) => entry.status !== "not_connected");
 
   return (
     <div style={{ display: "grid", gap: 8 }}>
@@ -190,8 +255,11 @@ export default function SubscriptionUsage() {
 
       {overview ? (
         <div style={{ display: "grid", gap: 8 }}>
-          {overview.providers.map((provider) => (
-            <ProviderCard key={provider.provider} usage={provider} />
+          {usageEntries.map((entry) => (
+            <ProviderCard
+              key={"profileId" in entry ? entry.profileId : entry.provider}
+              usage={entry}
+            />
           ))}
         </div>
       ) : loading ? (
@@ -206,7 +274,7 @@ export default function SubscriptionUsage() {
 
       {overview && !anyConnected ? null : (
         <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
-          Read live from each provider with your connected subscription · cached for a minute
+          Read live from each provider with your connected subscription · Claude cached for 15 minutes
         </span>
       )}
     </div>

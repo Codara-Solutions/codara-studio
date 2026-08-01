@@ -1,7 +1,11 @@
-import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import type { NativeCliTerminalSetupStatus } from "@shared/native-cli-terminal";
 import type {
   AppSettings,
   EditorThemeId,
+  NativeCliAccountsInspection,
+  NativeCliAccountRuntime,
+  NativeCliAccountProfile,
   PiSubscriptionAuthEvent,
   PiSubscriptionConnection,
   PiSubscriptionOverview,
@@ -30,7 +34,16 @@ import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
 import KeybindingsSection from "../shortcuts/KeybindingsSection";
-import SubscriptionUsage from "./SubscriptionUsage";
+import SubscriptionUsage, {
+  UsageEntryBody,
+  useSubscriptionUsage,
+} from "./SubscriptionUsage";
+import AccountCards, {
+  type AccountActions,
+  type AccountCardView,
+  type AccountProviderView,
+  type NativeCliAccountBusyAction,
+} from "./AccountCards";
 import RemoteAccessSettings from "./RemoteAccessSettings";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
 import packageJson from "../../../../package.json";
@@ -1213,6 +1226,115 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
   );
 }
 
+function TerminalAccountSetting() {
+  const [status, setStatus] = useState<NativeCliTerminalSetupStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showSnippet, setShowSnippet] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    void window.spark.nativeCliTerminal
+      .status()
+      .then((next) => {
+        if (mounted) setStatus(next);
+      })
+      .catch((cause) => {
+        if (mounted) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const toggle = async () => {
+    if (!status) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = status.installed
+        ? await window.spark.nativeCliTerminal.uninstall()
+        : await window.spark.nativeCliTerminal.install();
+      setStatus(result.status);
+      if (!result.ok) setError(result.error);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: 8,
+        padding: "12px 14px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+      }}
+    >
+      <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 600 }}>
+        Use the Active account in your terminal
+      </div>
+      <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
+        When this is on, running <code className="spark-mono">claude</code> or{" "}
+        <code className="spark-mono">codex</code> in a new terminal window signs
+        you in as whichever account is marked Active above, instead of the login
+        your terminal had before. Codara adds a few lines to{" "}
+        <code className="spark-mono">{status?.profilePath ?? "your shell startup file"}</code>{" "}
+        and keeps a copy of the original. Turning it off removes those lines
+        again. Terminals you already have open keep what they started with.
+      </div>
+      {status && !status.supported ? (
+        <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
+          {status.manualInstruction ??
+            status.error ??
+            "This system's shell cannot be set up automatically."}
+        </div>
+      ) : null}
+      {showSnippet && status ? (
+        <pre
+          className="spark-mono"
+          style={{
+            margin: 0,
+            padding: 8,
+            overflowX: "auto",
+            fontSize: 11,
+            color: "var(--muted)",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 6,
+          }}
+        >
+          {status.snippet}
+        </pre>
+      ) : null}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <FooterButton
+          onClick={() => void toggle()}
+          disabled={busy || !status || !status.supported}
+        >
+          {busy
+            ? "Working…"
+            : status?.installed
+              ? "Turn off"
+              : "Turn on"}
+        </FooterButton>
+        {status ? (
+          <FooterButton onClick={() => setShowSnippet((value) => !value)}>
+            {showSnippet ? "Hide the lines" : "Show the lines"}
+          </FooterButton>
+        ) : null}
+      </div>
+      {error ? (
+        <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>
+          {error}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
   const { preferences, hydrated, setPreference } = usePreferences();
   const stored = preferences.copyBranchSetupCommandByRepo?.[workspaceCwd];
@@ -1600,13 +1722,69 @@ interface PiInstallView {
   message: string;
 }
 
-function PiSubscriptionSettings() {
+/**
+ * The two providers behind every account in Codara, each with the local tool it
+ * signs in to. Order is the order they appear in Settings.
+ */
+const ACCOUNT_PROVIDERS: ReadonlyArray<{
+  provider: PiSubscriptionProvider;
+  runtime: NativeCliAccountRuntime;
+  label: string;
+  cliLabel: string;
+}> = [
+  {
+    provider: "anthropic",
+    runtime: "claude",
+    label: "Anthropic",
+    cliLabel: "Claude Code",
+  },
+  {
+    provider: "openai-codex",
+    runtime: "codex",
+    label: "OpenAI",
+    cliLabel: "Codex CLI",
+  },
+];
+
+function cliRuntimeForProvider(
+  provider: PiSubscriptionProvider,
+): NativeCliAccountRuntime {
+  return provider === "anthropic" ? "claude" : "codex";
+}
+
+/**
+ * One section for every account behind Codara: the Cora (Pi) connections and
+ * the local Claude Code / Codex CLI sign-ins, grouped by the provider they
+ * belong to. Only the presentation is merged — the two sides keep their own
+ * credential stores, their own login ceremonies, and their own stored default.
+ */
+function AccountsSettings() {
+  // Preferences carry the Codara-side display names for CLI sign-ins the CLI
+  // itself cannot rename (the built-in one) — see nativeCliAccountLabels.
+  const { preferences, setPreference } = usePreferences();
   const [overview, setOverview] = useState<PiSubscriptionOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [login, setLogin] = useState<PiLoginView | null>(null);
   const [promptValue, setPromptValue] = useState("");
   const [install, setInstall] = useState<PiInstallView | null>(null);
+  const [addingProvider, setAddingProvider] = useState<PiSubscriptionProvider | null>(null);
+  const [addLabel, setAddLabel] = useState("");
+  const [accountMutationId, setAccountMutationId] = useState<string | null>(null);
+  const [cliInspection, setCliInspection] =
+    useState<NativeCliAccountsInspection | null>(null);
+  const [cliLoading, setCliLoading] = useState(true);
+  const [cliBusy, setCliBusy] = useState<NativeCliSettingsBusy | null>(null);
+  const [cliError, setCliError] = useState<string | null>(null);
+  const [addingCliProvider, setAddingCliProvider] =
+    useState<PiSubscriptionProvider | null>(null);
+  const [addCliLabel, setAddCliLabel] = useState("");
+  const {
+    overview: usageOverview,
+    loading: usageLoading,
+    error: usageError,
+    load: loadUsage,
+  } = useSubscriptionUsage();
   // Bumped on connect/disconnect to force the usage panel to re-read; the main
   // process caches usage for a minute, which is right for idle re-renders but
   // wrong immediately after the set of connected subscriptions changes.
@@ -1661,7 +1839,7 @@ function PiSubscriptionSettings() {
               requestId: event.requestId,
               provider: event.provider,
               status: "running",
-              message: "Connecting subscription…",
+              message: "Signing in…",
             };
         if (event.type === "auth_url") {
           return {
@@ -1718,6 +1896,12 @@ function PiSubscriptionSettings() {
     }
   }, [overview?.runtimeInstalling, install]);
 
+  // Account mutations bump the epoch; the cached usage read in main is right
+  // for idle re-renders but wrong the moment the set of accounts changes.
+  useEffect(() => {
+    if (usageEpoch > 0) loadUsage(false);
+  }, [usageEpoch, loadUsage]);
+
   const installRuntime = () => {
     setError(null);
     setInstall({ status: "running", message: "Starting install…" });
@@ -1732,7 +1916,7 @@ function PiSubscriptionSettings() {
       requestId: "starting",
       provider,
       status: "running",
-      message: "Preparing secure browser login…",
+      message: "Opening your browser to sign in…",
     });
     void window.spark.piSubscriptions.connect(provider).catch((err) => {
       setLogin({
@@ -1743,6 +1927,90 @@ function PiSubscriptionSettings() {
       });
     });
   };
+
+  const beginProfileLogin = (
+    provider: PiSubscriptionProvider,
+    message: string,
+    start: () => Promise<unknown>,
+  ) => {
+    setError(null);
+    setAddingProvider(null);
+    setAddLabel("");
+    setLogin({
+      requestId: "starting",
+      provider,
+      status: "running",
+      message,
+    });
+    void start().catch((err) => {
+      setLogin({
+        requestId: "failed-to-start",
+        provider,
+        status: "failed",
+        message: (err as Error).message,
+      });
+    });
+  };
+
+  const addAccount = (provider: PiSubscriptionProvider, label: string) => {
+    beginProfileLogin(
+      provider,
+      "Opening your browser to sign in to another account…",
+      () => window.spark.piSubscriptions.addAccount({
+        provider,
+        ...(label.trim() ? { label: label.trim() } : {}),
+      }),
+    );
+  };
+
+  const reconnectAccount = (
+    provider: PiSubscriptionProvider,
+    profileId: string,
+    label: string,
+  ) => {
+    beginProfileLogin(
+      provider,
+      `Opening your browser to sign in to ${label}…`,
+      () => window.spark.piSubscriptions.reconnectAccount({ provider, profileId }),
+    );
+  };
+
+  const mutateAccount = async (
+    profileId: string,
+    mutation: () => Promise<PiSubscriptionOverview>,
+  ): Promise<boolean> => {
+    setError(null);
+    setAccountMutationId(profileId);
+    try {
+      const next = await mutation();
+      setOverview(next);
+      setUsageEpoch((epoch) => epoch + 1);
+      return true;
+    } catch (err) {
+      setError((err as Error).message);
+      return false;
+    } finally {
+      setAccountMutationId(null);
+    }
+  };
+
+  const renameAccount = (profileId: string, label: string): Promise<boolean> =>
+    mutateAccount(profileId, () =>
+      window.spark.piSubscriptions.renameAccount({ profileId, label }),
+    );
+
+  const makeDefault = (
+    provider: PiSubscriptionProvider,
+    profileId: string,
+  ): Promise<boolean> =>
+    mutateAccount(profileId, () =>
+      window.spark.piSubscriptions.makeDefault({ provider, profileId }),
+    );
+
+  const deleteAccount = (profileId: string): Promise<boolean> =>
+    mutateAccount(profileId, () =>
+      window.spark.piSubscriptions.deleteAccount({ profileId }),
+    );
 
   const disconnect = (provider: PiSubscriptionProvider) => {
     setLoading(true);
@@ -1758,12 +2026,94 @@ function PiSubscriptionSettings() {
       .finally(() => setLoading(false));
   };
 
+  // The CLI side is a separate main-process store with its own change feed.
+  const refreshCli = useCallback(async () => {
+    setCliLoading(true);
+    try {
+      const next = await window.spark.nativeCliAccounts.inspect();
+      setCliInspection(next);
+      setCliError(null);
+    } catch (err) {
+      setCliError(
+        (err as Error).message || "Command-line accounts could not be loaded.",
+      );
+    } finally {
+      setCliLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCli();
+    return window.spark.nativeCliAccounts.onChanged(() => {
+      void refreshCli();
+    });
+  }, [refreshCli]);
+
+  const mutateCli = useCallback(
+    async (
+      nextBusy: NativeCliSettingsBusy,
+      operation: () => Promise<unknown>,
+    ): Promise<boolean> => {
+      setCliBusy(nextBusy);
+      setCliError(null);
+      try {
+        await operation();
+        await refreshCli();
+        return true;
+      } catch (err) {
+        setCliError(
+          (err as Error).message || "Command-line account action failed.",
+        );
+        return false;
+      } finally {
+        setCliBusy(null);
+      }
+    },
+    [refreshCli],
+  );
+
+  const signInCli = useCallback(
+    async (runtime: NativeCliAccountRuntime, profileId: string, label: string) => {
+      setCliBusy({ runtime, profileId, action: "signing-in" });
+      setCliError(null);
+      try {
+        const prepared = await window.spark.nativeCliAccounts.prepareLogin({
+          runtime,
+          profileId,
+        });
+        const runtimeLabel = runtime === "claude" ? "Claude Code" : "Codex CLI";
+        const event = new CustomEvent("spark:open-native-cli-login", {
+          cancelable: true,
+          detail: {
+            launchToken: prepared.launchToken,
+            label: `${runtimeLabel} sign-in · ${label || "account"}`,
+          },
+        });
+        const accepted = !window.dispatchEvent(event);
+        if (!accepted) {
+          await window.spark.nativeCliAccounts.cancelLogin({
+            launchToken: prepared.launchToken,
+          });
+          setCliError("A workspace is required to open the sign-in terminal.");
+          await refreshCli();
+        }
+      } catch (err) {
+        setCliError(
+          (err as Error).message || "Could not start the command-line sign-in.",
+        );
+      } finally {
+        setCliBusy(null);
+      }
+    },
+    [refreshCli],
+  );
+
   const submitPrompt = (value: string) => {
     if (!login?.promptId || !value.trim()) return;
     const { requestId, promptId } = login;
     setLogin((current) => current ? {
       ...current,
-      message: "Finishing secure login…",
+      message: "Finishing sign-in…",
       prompt: undefined,
       promptId: undefined,
     } : current);
@@ -1779,11 +2129,305 @@ function PiSubscriptionSettings() {
 
   const busyProvider = login?.status === "running" ? login.provider : null;
 
+  const providerViews = useMemo<AccountProviderView[]>(() => {
+    // Limits are reported per Cora account, so they belong in that account's
+    // card rather than in a second list of provider cards below it.
+    const usageByProfile = new Map(
+      (usageOverview?.profiles ?? []).map((entry) => [entry.profileId, entry] as const),
+    );
+    return ACCOUNT_PROVIDERS.map((descriptor) => {
+      const connection = overview?.connections.find(
+        (entry) => entry.provider === descriptor.provider,
+      );
+      const piProfiles = (overview?.profiles ?? []).filter(
+        (profile) => profile.provider === descriptor.provider,
+      );
+      const inspected = cliInspection?.runtimes.find(
+        (entry) => entry.runtime === descriptor.runtime,
+      );
+      const cliProfiles = inspected?.profiles ?? [];
+
+      // Identity pairing: the only account identity that crosses IPC is an
+      // anonymous sha256 of the vendor account id, computed on both sides in
+      // the main process from the same value. Equal digests mean the same
+      // account, so its Cora connection and its CLI sign-in share one card.
+      // Anything without a digest on both sides keeps its own card rather than
+      // being matched on a guess. Anthropic accounts connected before Codara
+      // could read their account id have no digest until they are reconnected,
+      // which is what the pairing hint below offers.
+      const cliByFingerprint = new Map<string, NativeCliAccountProfile>();
+      for (const profile of cliProfiles) {
+        if (profile.accountFingerprint && !cliByFingerprint.has(profile.accountFingerprint)) {
+          cliByFingerprint.set(profile.accountFingerprint, profile);
+        }
+      }
+      // Email fallback: a connection from before Codara captured account ids
+      // has no fingerprint, but both sides now report the account's email, and
+      // one address inside one provider group is the same account. The digest
+      // always wins — email only stands in where a digest comparison is
+      // impossible on at least one side, because two differing digests are two
+      // accounts no matter what the addresses say. Matching happens inside
+      // this provider's own loop, so an email never matches across providers.
+      const cliByEmail = new Map<string, NativeCliAccountProfile>();
+      for (const profile of cliProfiles) {
+        const email = profile.email?.trim().toLowerCase();
+        if (email && !cliByEmail.has(email)) cliByEmail.set(email, profile);
+      }
+      const pairedCliIds = new Set<string>();
+
+      const cliFacet = (
+        profile: NativeCliAccountProfile,
+      ): NonNullable<AccountCardView["cli"]> => ({
+        profileId: profile.id,
+        runtime: descriptor.runtime,
+        authState: nativeCliAuthState(profile.status),
+        active: profile.isDefault,
+        inUse: profile.inUse,
+        managed: profile.managed,
+        busyAction:
+          cliBusy?.runtime === descriptor.runtime &&
+          cliBusy.profileId === profile.id
+            ? cliBusy.action
+            : null,
+      });
+
+      const coraCards = piProfiles.map<AccountCardView>((profile) => {
+          const usage = usageByProfile.get(profile.id);
+          const byFingerprint = profile.accountFingerprint
+            ? cliByFingerprint.get(profile.accountFingerprint)
+            : undefined;
+          const emailKey = profile.email?.trim().toLowerCase();
+          const byEmailCandidate =
+            !byFingerprint && emailKey ? cliByEmail.get(emailKey) : undefined;
+          // The email match only stands when a fingerprint verdict was
+          // impossible: if both sides carry fingerprints, they differ (a match
+          // would have paired them above), and that is proof of two accounts.
+          const byEmail =
+            byEmailCandidate &&
+            (!profile.accountFingerprint || !byEmailCandidate.accountFingerprint)
+              ? byEmailCandidate
+              : undefined;
+          const candidate = byFingerprint ?? byEmail;
+          // One CLI sign-in can only be the same account as one Cora
+          // connection, so the first match claims it.
+          const paired =
+            candidate && !pairedCliIds.has(candidate.id) ? candidate : undefined;
+          if (paired) pairedCliIds.add(paired.id);
+          const pairedByEmail = Boolean(paired && !byFingerprint);
+          // Both facets are the same account, so their addresses agree; the
+          // Cora one wins if a provider ever reported them differently.
+          const email = profile.email ?? paired?.email;
+          return {
+            key: paired ? `cora:${profile.id}+cli:${paired.id}` : `cora:${profile.id}`,
+            label: profile.label,
+            provider: descriptor.provider,
+            ...(email ? { email } : {}),
+            ...(usage?.plan ? { plan: usage.plan } : {}),
+            ...(usage ? { usage: <UsageEntryBody usage={usage} /> } : {}),
+            // An email match is a strong hint, not proof, so the card says how
+            // to make it one. Reconnecting captures the account id and turns
+            // this into a fingerprint pairing.
+            ...(pairedByEmail
+              ? {
+                  pairHint:
+                    "Same email address — reconnect to Cora to fully pair these sign-ins.",
+                }
+              : {}),
+            cora: {
+              profileId: profile.id,
+              connected: profile.connected,
+              expired: profile.expired,
+              active: profile.isDefault,
+              busy: accountMutationId === profile.id,
+              ...(profile.error ? { error: profile.error } : {}),
+            },
+            ...(paired ? { cli: cliFacet(paired) } : {}),
+          };
+        });
+      const cliOnlyCards = cliProfiles
+        .filter((profile) => !pairedCliIds.has(profile.id))
+        .map<AccountCardView>((profile) => ({
+          key: `cli:${profile.id}`,
+          // The built-in sign-in has no name field in the CLI, so its display
+          // name is a Codara-side preference; "Personal" is the fallback.
+          label: profile.managed
+            ? profile.label
+            : preferences.nativeCliAccountLabels[
+                `${descriptor.runtime}:${profile.id}`
+              ]?.trim() || "Personal",
+          provider: descriptor.provider,
+          ...(profile.email ? { email: profile.email } : {}),
+          cli: cliFacet(profile),
+        }));
+
+      // Reconnecting is what teaches Codara which account a Cora connection
+      // belongs to, so the offer to merge only appears where there is something
+      // to merge with: an unmatched CLI sign-in in this same provider group.
+      const cards: AccountCardView[] = [
+        ...coraCards.map((card) =>
+          card.cora && !card.cli && cliOnlyCards.length > 0
+            ? {
+                ...card,
+                pairHint: `Reconnect to Cora if this is the same account as your ${descriptor.cliLabel} sign-in — they will then share one card.`,
+              }
+            : card,
+        ),
+        ...cliOnlyCards,
+      ];
+
+      const coraCount = piProfiles.length;
+      const cliCount = cliProfiles.length;
+      const counts = `${coraCount} ${
+        coraCount === 1 ? "account" : "accounts"
+      } in Cora · ${cliCount} in ${descriptor.cliLabel}`;
+      const detail = connection
+        ? `Cora runs on ${connection.model} · ${counts}`
+        : counts;
+
+      return {
+        provider: descriptor.provider,
+        label: descriptor.label,
+        cliLabel: descriptor.cliLabel,
+        detail,
+        cards,
+        coraDisabled: !overview?.runtimeInstalled,
+        coraBusy: busyProvider !== null || accountMutationId !== null,
+        cliDisabled: Boolean(cliBusy),
+        cliLoading: cliLoading && !cliInspection,
+        cliError: Boolean(cliError && !cliInspection),
+        cliPersonalMissing: Boolean(
+          inspected && !cliProfiles.some((profile) => !profile.managed),
+        ),
+        addingCora: addingProvider === descriptor.provider,
+        addCoraLabel: addingProvider === descriptor.provider ? addLabel : "",
+        addingCli: addingCliProvider === descriptor.provider,
+        addCliLabel: addingCliProvider === descriptor.provider ? addCliLabel : "",
+      };
+    });
+  }, [
+    accountMutationId,
+    addCliLabel,
+    addLabel,
+    addingCliProvider,
+    addingProvider,
+    busyProvider,
+    cliBusy,
+    cliError,
+    cliInspection,
+    cliLoading,
+    overview,
+    preferences.nativeCliAccountLabels,
+    usageOverview,
+  ]);
+
+  const accountActions: AccountActions = {
+    // "Connect to Cora" on a card that only has a CLI sign-in: the same
+    // browser login "Add account" runs, seeded with the card's name. When the
+    // connect-time fingerprint matches the CLI sign-in, the new connection
+    // lands in this same card.
+    onCoraConnect: (card) => addAccount(card.provider, card.label),
+    onBeginAddCora: (provider) => {
+      setAddingProvider(provider);
+      setAddingCliProvider(null);
+      setAddLabel("");
+      setError(null);
+    },
+    onAddCoraLabel: setAddLabel,
+    onAddCora: (provider) => addAccount(provider, addLabel),
+    onCancelAddCora: () => {
+      setAddingProvider(null);
+      setAddLabel("");
+    },
+    onBeginAddCli: (provider) => {
+      setAddingCliProvider(provider);
+      setAddingProvider(null);
+      setAddCliLabel("");
+      setCliError(null);
+    },
+    onAddCliLabel: setAddCliLabel,
+    onAddCli: (provider) => {
+      const runtime = cliRuntimeForProvider(provider);
+      const label = addCliLabel.trim();
+      if (!label) return;
+      setAddingCliProvider(null);
+      setAddCliLabel("");
+      void mutateCli({ runtime, action: "creating" }, () =>
+        window.spark.nativeCliAccounts.create({ runtime, label }),
+      );
+    },
+    onCancelAddCli: () => {
+      setAddingCliProvider(null);
+      setAddCliLabel("");
+    },
+    onCoraReconnect: (card) => {
+      if (!card.cora) return;
+      reconnectAccount(card.provider, card.cora.profileId, card.label);
+    },
+    onCoraRename: (card, label) =>
+      card.cora ? renameAccount(card.cora.profileId, label) : Promise.resolve(false),
+    onCoraUse: (card) => {
+      if (!card.cora) return;
+      void makeDefault(card.provider, card.cora.profileId);
+    },
+    onCoraDelete: (card) => {
+      if (!card.cora) return;
+      void deleteAccount(card.cora.profileId);
+    },
+    onCliSignIn: (card) => {
+      if (!card.cli) return;
+      void signInCli(card.cli.runtime, card.cli.profileId, card.label);
+    },
+    onCliSignOut: (card) => {
+      if (!card.cli) return;
+      const { runtime, profileId } = card.cli;
+      void mutateCli({ runtime, profileId, action: "signing-out" }, () =>
+        window.spark.nativeCliAccounts.logout({ runtime, profileId }),
+      );
+    },
+    onCliRename: (card, label) => {
+      if (!card.cli) return Promise.resolve(false);
+      const { runtime, profileId, managed } = card.cli;
+      // The built-in sign-in has no name field in the CLI itself, so its name
+      // is a Codara-side preference — purely cosmetic, never sent to the CLI.
+      if (!managed) {
+        return setPreference("nativeCliAccountLabels", {
+          ...preferences.nativeCliAccountLabels,
+          [`${runtime}:${profileId}`]: label,
+        }).then(
+          () => true,
+          (err) => {
+            setCliError(
+              (err as Error).message || "The account name could not be saved.",
+            );
+            return false;
+          },
+        );
+      }
+      return mutateCli({ runtime, profileId, action: "renaming" }, () =>
+        window.spark.nativeCliAccounts.rename({ runtime, profileId, label }),
+      );
+    },
+    onCliUse: (card) => {
+      if (!card.cli) return;
+      const { runtime, profileId } = card.cli;
+      void mutateCli({ runtime, profileId, action: "setting-default" }, () =>
+        window.spark.nativeCliAccounts.setDefault({ runtime, profileId }),
+      );
+    },
+    onCliDelete: (card) => {
+      if (!card.cli) return;
+      const { runtime, profileId } = card.cli;
+      void mutateCli({ runtime, profileId, action: "deleting" }, () =>
+        window.spark.nativeCliAccounts.delete({ runtime, profileId }),
+      );
+    },
+  };
+
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
-        title="Cora subscriptions"
-        detail="Connect the subscriptions Pi uses for Cora chat, planning, and every worker. Credentials stay in Codara's private Pi store; API-key environment variables are stripped from every launch."
+        title="Accounts"
+        detail="Cora and the terminal tools each need their own sign-in, even to the same account. When Codara can tell two sign-ins belong to one account, they share one card; when it cannot, that account appears twice — once for each sign-in."
       />
       <div
         className="spark-glass"
@@ -1796,33 +2440,39 @@ function PiSubscriptionSettings() {
           boxShadow: "var(--well)",
         }}
       >
-        {overview?.connections.map((connection) => (
-          <PiSubscriptionRow
-            key={connection.provider}
-            connection={connection}
-            busy={busyProvider === connection.provider}
-            disabled={
-              // Connecting without the runtime can only fail — the OAuth flow
-              // itself is loaded out of the Pi package. Point at Install
-              // instead of letting the user earn the error.
-              !overview.runtimeInstalled ||
-              (busyProvider !== null && busyProvider !== connection.provider)
-            }
-            onConnect={() => connect(connection.provider)}
-            onDisconnect={() => disconnect(connection.provider)}
-          />
-        ))}
+        {overview?.profiles || cliInspection ? (
+          <AccountCards providers={providerViews} actions={accountActions} />
+        ) : null}
+        {overview && !overview.profiles
+          ? overview.connections.map((connection) => (
+              <PiSubscriptionRow
+                key={connection.provider}
+                connection={connection}
+                busy={busyProvider === connection.provider}
+                disabled={
+                  // Compatibility with an older main process that exposes one
+                  // provider row but no profile collection.
+                  !overview.runtimeInstalled ||
+                  (busyProvider !== null && busyProvider !== connection.provider)
+                }
+                onConnect={() => connect(connection.provider)}
+                onDisconnect={() => disconnect(connection.provider)}
+              />
+            ))
+          : null}
         {!overview && loading ? <RuntimeDiagnosticSkeleton /> : null}
         {overview?.runtimeInstalled ? (
           <div
             style={{
               padding: "3px 3px 0",
               color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
+              lineHeight: 1.4,
             }}
           >
-            Pinned Pi {overview.runtimeVersion} · one auth store for manager + workers
+            Cora runs on Pi {overview.runtimeVersion}. Each account keeps its own
+            private sign-in, and they all share the same Cora chats.
           </div>
         ) : overview ? (
           <PiRuntimeInstallRow
@@ -1833,6 +2483,8 @@ function PiSubscriptionSettings() {
           />
         ) : null}
       </div>
+
+      <TerminalAccountSetting />
 
       {login ? (
         <PiLoginPanel
@@ -1856,9 +2508,48 @@ function PiSubscriptionSettings() {
         </div>
       ) : null}
 
-      {/* Remounted whenever a connection changes so the bars re-read instead of
-          showing the pre-login state of a subscription you just connected. */}
-      {overview?.runtimeInstalled ? <SubscriptionUsage key={usageEpoch} /> : null}
+      {cliError ? (
+        <div
+          role="alert"
+          style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}
+        >
+          {cliError}
+        </div>
+      ) : null}
+
+      {/* Limits live inside each account card above. The standalone panel is
+          only for an older main process that reports providers but no account
+          profiles, where there are no account cards to put them in. */}
+      {overview?.runtimeInstalled && !overview.profiles ? (
+        <SubscriptionUsage key={usageEpoch} />
+      ) : null}
+
+      {overview?.runtimeInstalled && overview.profiles ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+          }}
+        >
+          <span
+            style={{
+              color: usageError ? "var(--danger)" : "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
+              lineHeight: 1.4,
+            }}
+          >
+            {usageError
+              ? usageError
+              : "Limits come straight from each provider. Claude's are re-checked every 15 minutes."}
+          </span>
+          <FooterButton onClick={() => loadUsage(true)} disabled={usageLoading}>
+            {usageLoading ? "Checking…" : "Refresh limits"}
+          </FooterButton>
+        </div>
+      ) : null}
 
       <div
         style={{
@@ -1868,9 +2559,9 @@ function PiSubscriptionSettings() {
           lineHeight: 1.45,
         }}
       >
-        Claude note: Pi documents that third-party Claude Pro/Max harness use may draw from Anthropic Extra Usage.
-        Codara never substitutes an Anthropic API key, but you should keep Extra Usage disabled if you require a hard
-        no-metered-usage boundary.
+        About Claude accounts: using a Claude Pro or Max account outside Anthropic's own apps can draw on Anthropic
+        Extra Usage, which is billed on top of the plan. Codara never quietly switches you to a paid API key, but if
+        you want a hard no-extra-charges limit, turn Extra Usage off in your Anthropic account.
       </div>
     </div>
   );
@@ -1914,9 +2605,12 @@ function PiSubscriptionRow({
         gap: 10,
         padding: "10px 10px",
         borderRadius: "var(--radius-control, 5px)",
-        border: healthy ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
-        background: healthy ? "var(--accent-soft)" : "color-mix(in oklab, var(--ink) 3%, transparent)",
-        boxShadow: healthy ? "var(--lift-hi)" : "none",
+        // Plain edge regardless of health. An accent edge means exactly one
+        // thing across this panel — the active account — so a healthy provider
+        // must not borrow the same cue. Health is reported inside the row, by
+        // the status dot below and the status text beside it.
+        border: "1px solid var(--rule-soft)",
+        background: "color-mix(in oklab, var(--ink) 3%, transparent)",
       }}
     >
       <span
@@ -2007,7 +2701,7 @@ function PiRuntimeInstallRow({
         >
           {install?.message ||
             runtimeError ||
-            "Cora needs this exact Pi build for chat, planning, and every worker."}
+            "Cora needs this exact Pi build for chats, planning, and every worker."}
         </span>
         {!running ? (
           <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
@@ -2067,7 +2761,7 @@ function PiLoginPanel({
         />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
-            {done ? "Subscription connected" : failed ? "Could not connect" : "Secure subscription login"}
+            {done ? "Account connected" : failed ? "Could not sign in" : "Signing in to this account"}
           </div>
           <div style={{ marginTop: 2, color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11, lineHeight: 1.45 }}>
             {login.message}
@@ -2117,7 +2811,7 @@ function PiLoginPanel({
             type={textPrompt.type === "secret" ? "password" : "text"}
             value={promptValue}
             onChange={(event) => onPromptValue(event.currentTarget.value)}
-            placeholder={textPrompt.placeholder || "Paste the authorization code"}
+            placeholder={textPrompt.placeholder || "Paste the code from your browser"}
             style={inputShellStyle}
           />
           <button type="submit" className="spark-btn is-primary" disabled={!promptValue.trim()}>
@@ -2136,10 +2830,34 @@ function PiLoginPanel({
   );
 }
 
+type NativeCliSettingsBusy = {
+  runtime: NativeCliAccountRuntime;
+  profileId?: string;
+  action: NativeCliAccountBusyAction;
+};
+
+function nativeCliAuthState(
+  status: NativeCliAccountsInspection["runtimes"][number]["profiles"][number]["status"],
+) {
+  switch (status) {
+    case "connected":
+      return "connected" as const;
+    case "sign_in_required":
+      return "signed-out" as const;
+    case "unsafe":
+      return "error" as const;
+    case "unavailable":
+      return "unavailable" as const;
+  }
+}
+
+// Accounts, plus a pointer to the Capability Center. The fast-mode toggle used
+// to sit here; it now lives on the composer's flash button, next to the model
+// it applies to.
 function AgentsSettings() {
   return (
     <div style={{ display: "grid", gap: 18 }}>
-      <PiSubscriptionSettings />
+      <AccountsSettings />
 
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 

@@ -323,7 +323,7 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
     expect(settingsGlass!.scrimBackdrop).toBe("none");
 
     await clickAttached(page.getByRole("button", { name: "Agents" }));
-    await expect(page.getByText("Cora subscriptions", { exact: true })).toBeVisible();
+    await expect(page.getByText("Accounts", { exact: true })).toBeVisible();
     // The provider label legitimately appears twice once the usage overview
     // resolves: PiSubscriptionRow (connect surface) and SubscriptionUsage's
     // ProviderCard both name it. .first() keeps the assertion timing-proof.

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
+import type { NativeCliTerminalSetupResult, NativeCliTerminalSetupStatus } from "@shared/native-cli-terminal";
 import type {
   RemoteAuthPromptAnswer,
   RemoteAuthPromptRequest,
@@ -91,6 +92,12 @@ import type {
   PauseRunInput,
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
+  PiSubscriptionRenameAccountInput,
+  PiSubscriptionReconnectAccountInput,
+  PiSubscriptionProfileLoginRequest,
+  PiSubscriptionMakeDefaultInput,
+  PiSubscriptionDeleteAccountInput,
+  PiSubscriptionAddAccountInput,
   PiCatalogModel,
   PiSubscriptionOverview,
   PiUsageOverview,
@@ -213,12 +220,77 @@ const api = {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
   },
+  nativeCliTerminal: {
+    status: (): Promise<NativeCliTerminalSetupStatus> =>
+      ipcRenderer.invoke("native-cli-terminal:status"),
+    install: (): Promise<NativeCliTerminalSetupResult> =>
+      ipcRenderer.invoke("native-cli-terminal:install"),
+    uninstall: (): Promise<NativeCliTerminalSetupResult> =>
+      ipcRenderer.invoke("native-cli-terminal:uninstall"),
+  },
+  nativeCliAccounts: {
+    inspect: (): Promise<NativeCliAccountsInspection> =>
+      ipcRenderer.invoke("native-cli-accounts:inspect"),
+    create: (
+      input: NativeCliAccountCreateInput,
+    ): Promise<NativeCliAccountMutationResult> =>
+      ipcRenderer.invoke("native-cli-accounts:create", input),
+    rename: (
+      input: NativeCliAccountRenameInput,
+    ): Promise<NativeCliAccountMutationResult> =>
+      ipcRenderer.invoke("native-cli-accounts:rename", input),
+    setDefault: (
+      input: NativeCliAccountProfileInput,
+    ): Promise<NativeCliAccountMutationResult> =>
+      ipcRenderer.invoke("native-cli-accounts:set-default", input),
+    prepareLogin: (
+      input: NativeCliAccountProfileInput,
+    ): Promise<NativeCliAccountLoginPreparation> =>
+      ipcRenderer.invoke("native-cli-accounts:prepare-login", input),
+    cancelLogin: (
+      input: NativeCliAccountCancelLoginInput,
+    ): Promise<boolean> =>
+      ipcRenderer.invoke("native-cli-accounts:cancel-login", input),
+    logout: (
+      input: NativeCliAccountProfileInput,
+    ): Promise<NativeCliAccountsInspection> =>
+      ipcRenderer.invoke("native-cli-accounts:logout", input),
+    delete: (
+      input: NativeCliAccountProfileInput,
+    ): Promise<NativeCliAccountDeleteResult> =>
+      ipcRenderer.invoke("native-cli-accounts:delete", input),
+    onChanged: (handler: () => void): (() => void) => {
+      const listener = () => handler();
+      ipcRenderer.on("native-cli-accounts:changed", listener);
+      return () => ipcRenderer.off("native-cli-accounts:changed", listener);
+    },
+  },
   piSubscriptions: {
     status: (): Promise<PiSubscriptionOverview> => ipcRenderer.invoke("pi-subscriptions:status"),
     connect: (
       provider: PiSubscriptionProvider,
-    ): Promise<{ requestId: string; provider: PiSubscriptionProvider }> =>
+    ): Promise<PiSubscriptionProfileLoginRequest> =>
       ipcRenderer.invoke("pi-subscriptions:connect", { provider }),
+    addAccount: (
+      input: PiSubscriptionAddAccountInput,
+    ): Promise<PiSubscriptionProfileLoginRequest> =>
+      ipcRenderer.invoke("pi-subscriptions:add-account", input),
+    reconnectAccount: (
+      input: PiSubscriptionReconnectAccountInput,
+    ): Promise<PiSubscriptionProfileLoginRequest> =>
+      ipcRenderer.invoke("pi-subscriptions:reconnect-account", input),
+    renameAccount: (
+      input: PiSubscriptionRenameAccountInput,
+    ): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:rename-account", input),
+    makeDefault: (
+      input: PiSubscriptionMakeDefaultInput,
+    ): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:make-default", input),
+    deleteAccount: (
+      input: PiSubscriptionDeleteAccountInput,
+    ): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:delete-account", input),
     respond: (input: { requestId: string; promptId: string; value: string }): Promise<void> =>
       ipcRenderer.invoke("pi-subscriptions:respond", input),
     cancel: (requestId: string): Promise<void> =>

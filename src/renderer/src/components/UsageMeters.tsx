@@ -1,14 +1,26 @@
 // Subscription usage, always visible in the title bar.
 //
 // The quota that matters is the one Cora is about to spend, and the moment it
-// matters is *before* a long run — not after a refusal. Each connected
-// subscription gets a pill showing its tightest window; clicking one opens a
+// matters is *before* a long run — not after a refusal. Each provider's
+// selected/default subscription gets a pill showing its tightest window;
+// clicking one opens a
 // glass popover with that provider's full breakdown, so the common question
 // ("how much is left, and when does it come back") is answered in place rather
 // than by a trip through Settings.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { PiUsageOverview, PiUsageProvider, PiUsageWindow } from "@shared/types";
+import type {
+  PiUsageOverview,
+  PiUsageProfile,
+  PiUsageProvider,
+  PiUsageWindow,
+} from "@shared/types";
+
+type UsageEntry = PiUsageProvider | PiUsageProfile;
+
+function usageEntryKey(usage: UsageEntry): string {
+  return "profileId" in usage ? usage.profileId : usage.provider;
+}
 
 interface AppRegionStyle extends React.CSSProperties {
   WebkitAppRegion?: "drag" | "no-drag";
@@ -55,13 +67,15 @@ function OpenAIGlyph({ size = 11 }: { size?: number }) {
   );
 }
 
-function ProviderGlyph({ provider, size }: { provider: PiUsageProvider["provider"]; size?: number }) {
+function ProviderGlyph({ provider, size }: { provider: UsageEntry["provider"]; size?: number }) {
   return provider === "anthropic" ? <AnthropicGlyph size={size} /> : <OpenAIGlyph size={size} />;
 }
 
 /** The binding constraint: the window closest to exhausted. */
-function tightestWindow(usage: PiUsageProvider): PiUsageWindow | null {
-  return usage.windows.reduce<PiUsageWindow | null>(
+function tightestWindow(usage: UsageEntry): PiUsageWindow | null {
+  return usage.windows
+    .filter((window) => !window.scope || window.scope.kind === "general")
+    .reduce<PiUsageWindow | null>(
     (worst, window) => (worst === null || window.usedPercent > worst.usedPercent ? window : worst),
     null,
   );
@@ -123,9 +137,13 @@ function windowSeconds(label: string): number {
  * entry rather than showing a bare percentage: with one window there is nothing
  * to compare against, so "15%" alone never says of what.
  */
-function planWindows(usage: PiUsageProvider): PiUsageWindow[] {
+function planWindows(usage: UsageEntry): PiUsageWindow[] {
   return usage.windows
-    .filter((usageWindow) => shortWindowLabel(usageWindow.label) !== null)
+    .filter(
+      (usageWindow) =>
+        (!usageWindow.scope || usageWindow.scope.kind === "general") &&
+        shortWindowLabel(usageWindow.label) !== null,
+    )
     .sort((a, b) => windowSeconds(a.label) - windowSeconds(b.label));
 }
 
@@ -185,7 +203,7 @@ function UsagePopover({
   onRefresh,
   refreshing,
 }: {
-  usage: PiUsageProvider;
+  usage: UsageEntry;
   anchor: DOMRect;
   onClose: () => void;
   onRefresh: () => void;
@@ -254,7 +272,9 @@ function UsagePopover({
 
       {usage.limitReached ? (
         <span style={{ color: "var(--danger)", fontSize: 11, fontWeight: 650 }}>
-          Limit reached — requests are refused until this resets.
+          {usage.generalLimitReached
+            ? "General limit reached — normal agent requests are refused until this resets."
+            : "A model or feature limit is reached — see its scoped window above."}
         </span>
       ) : null}
 
@@ -290,7 +310,7 @@ function UsagePill({
   open,
   onToggle,
 }: {
-  usage: PiUsageProvider;
+  usage: UsageEntry;
   open: boolean;
   onToggle: (rect: DOMRect | null) => void;
 }) {
@@ -363,6 +383,21 @@ function UsagePill({
       >
         <ProviderGlyph provider={usage.provider} />
       </span>
+      {"profileId" in usage ? (
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 9,
+            maxWidth: 72,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {usage.label}
+        </span>
+      ) : null}
       {entries.length === 0 && expired ? (
         <span style={{ color: "var(--warn, #d99a2b)", fontWeight: 650 }}>reconnect</span>
       ) : null}
@@ -393,7 +428,7 @@ function UsagePill({
 
 export default function UsageMeters() {
   const [overview, setOverview] = useState<PiUsageOverview | null>(null);
-  const [openProvider, setOpenProvider] = useState<PiUsageProvider["provider"] | null>(null);
+  const [openEntry, setOpenEntry] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -430,8 +465,8 @@ export default function UsageMeters() {
   // popover is anchored to a rect captured at click time, so it would otherwise
   // drift away from its pill.
   useEffect(() => {
-    if (!openProvider) return;
-    const close = () => setOpenProvider(null);
+    if (!openEntry) return;
+    const close = () => setOpenEntry(null);
     const onDown = (event: MouseEvent) => {
       const target = event.target;
       if (target instanceof Node && rootRef.current?.contains(target)) return;
@@ -449,20 +484,33 @@ export default function UsageMeters() {
       document.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", close);
     };
-  }, [openProvider]);
+  }, [openEntry]);
 
   // Only connected subscriptions earn space up here; an unconnected provider
   // has nothing to report and a "not connected" chip would be pure noise. An
   // EXPIRED one is different: it was connected, its workers will fail, and
   // hiding it is how the user finds out the hard way. It keeps a pill that
   // says "reconnect".
-  const connected = (overview?.providers ?? []).filter(
-    (provider) =>
-      (provider.status === "ok" && provider.windows.length > 0) ||
-      provider.status === "expired",
-  );
+  // Multi-account Settings owns the complete roster. The title bar is the
+  // glanceable "what is selected" surface, so it shows exactly one default
+  // account per provider rather than every connected spare subscription.
+  const usageEntries: UsageEntry[] =
+    overview?.profiles && overview.profiles.length > 0
+      ? overview.profiles.filter((profile) => profile.isDefault)
+      : overview?.providers ?? [];
+  const connected = usageEntries
+    .filter(
+      (entry) =>
+        (entry.status === "ok" && entry.windows.length > 0) ||
+        entry.status === "expired",
+    )
+    .sort(
+      (left, right) =>
+        (left.provider === "anthropic" ? 0 : 1) -
+        (right.provider === "anthropic" ? 0 : 1),
+    );
   if (connected.length === 0) return null;
-  const active = connected.find((provider) => provider.provider === openProvider) ?? null;
+  const active = connected.find((entry) => usageEntryKey(entry) === openEntry) ?? null;
 
   return (
     <div
@@ -477,14 +525,14 @@ export default function UsageMeters() {
         } as AppRegionStyle
       }
     >
-      {connected.map((provider) => (
+      {connected.map((entry) => (
         <UsagePill
-          key={provider.provider}
-          usage={provider}
-          open={openProvider === provider.provider}
+          key={usageEntryKey(entry)}
+          usage={entry}
+          open={openEntry === usageEntryKey(entry)}
           onToggle={(rect) => {
             setAnchor(rect);
-            setOpenProvider(rect ? provider.provider : null);
+            setOpenEntry(rect ? usageEntryKey(entry) : null);
           }}
         />
       ))}
@@ -492,7 +540,7 @@ export default function UsageMeters() {
         <UsagePopover
           usage={active}
           anchor={anchor}
-          onClose={() => setOpenProvider(null)}
+          onClose={() => setOpenEntry(null)}
           onRefresh={() => load(true)}
           refreshing={refreshing}
         />

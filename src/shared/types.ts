@@ -1,5 +1,7 @@
 export type ShellId = string;
 
+export type ProjectPolicyMode = "trusted" | "untrusted-pull-request";
+
 export interface ShellInfo {
   id: ShellId;
   label: string;
@@ -181,6 +183,73 @@ export interface PiSubscriptionConnection {
   error?: string;
 }
 
+/** Sanitized local account row. Opaque ids are safe to persist on runs; no
+ * provider token or auth path crosses main-process IPC. The identity-derived
+ * values allowed here are accountFingerprint and the account's own email
+ * address below, both of which the remote projections strip. */
+export interface PiSubscriptionProfileConnection {
+  id: string;
+  provider: PiSubscriptionProvider;
+  label: string;
+  isDefault: boolean;
+  connected: boolean;
+  expired: boolean;
+  canRefresh: boolean;
+  expiresAt: number | null;
+  error?: string;
+  /**
+   * Anonymous sha256 of the vendor account id, computed in the main process.
+   * It exists so Settings can show one card when this connection and a local
+   * CLI sign-in belong to the same account; the digest is one-way and carries
+   * no email, token, or path. An OpenAI account's digest comes from the stored
+   * credential. An Anthropic credential holds no account id, so its digest is
+   * captured once while the login finishes and is absent on accounts connected
+   * before that existed — those stay unpaired until they are reconnected,
+   * rather than being matched on a guess.
+   */
+  accountFingerprint?: string;
+  /**
+   * The account's email address, as the provider reports it. Shown on the
+   * Settings card so one login is tellable from another — the one identity
+   * exception below, alongside the digest. Captured while a login finishes, so
+   * a connection made before that existed shows none until it is reconnected.
+   */
+  email?: string;
+}
+
+/** Sanitized renderer→main requests for local account-profile management. */
+export interface PiSubscriptionAddAccountInput {
+  provider: PiSubscriptionProvider;
+  label?: string;
+}
+
+export interface PiSubscriptionReconnectAccountInput {
+  provider: PiSubscriptionProvider;
+  profileId: string;
+}
+
+export interface PiSubscriptionRenameAccountInput {
+  profileId: string;
+  label: string;
+}
+
+export interface PiSubscriptionMakeDefaultInput {
+  provider: PiSubscriptionProvider;
+  profileId: string;
+}
+
+export interface PiSubscriptionDeleteAccountInput {
+  profileId: string;
+}
+
+/** Login flow handle. targetProfileId is an opaque local UUID, never an
+ * upstream identity, credential, email, or filesystem path. */
+export interface PiSubscriptionProfileLoginRequest {
+  requestId: string;
+  provider: PiSubscriptionProvider;
+  targetProfileId?: string;
+}
+
 export interface PiSubscriptionOverview {
   runtimeInstalled: boolean;
   runtimeVersion: string | null;
@@ -193,6 +262,7 @@ export interface PiSubscriptionOverview {
   runtimeInstalling?: boolean;
   connections: PiSubscriptionConnection[];
   /** Multi-account rows. Absent on older main processes. */
+  profiles?: PiSubscriptionProfileConnection[];
 }
 
 // Native Claude Code / Codex CLI account profiles are local CLI config homes,
@@ -296,11 +366,27 @@ export interface PiCatalogModel {
   thinkingLevels: string[];
 }
 
-/** One quota window (Claude's 5-hour/7-day, Codex's primary/secondary). */
+export type PiUsageWindowScope =
+  | { kind: "general" }
+  | { kind: "code_review" }
+  | { kind: "model"; modelId?: string; modelLabel: string }
+  | {
+      kind: "metered_feature";
+      featureId: string;
+      featureLabel: string;
+    };
+
+/** One quota window (Claude's 5-hour/7-day, Codex's primary/secondary).
+ *
+ * Older in-memory/plugin projections may omit `scope`; consumers must treat
+ * that legacy shape as `general`, while every current provider parser stamps
+ * an explicit scope.
+ */
 export interface PiUsageWindow {
   id: string;
   /** Human window length — "5-hour", "7-day", "Opus 7-day", "Code review 7-day". */
   label: string;
+  scope?: PiUsageWindowScope;
   usedPercent: number;
   remainingPercent: number;
   /** Countdown to reset, pre-formatted ("3h 12m"). Absent when unknown. */
@@ -317,13 +403,38 @@ export interface PiUsageProvider {
   windows: PiUsageWindow[];
   checkedAt: string;
   plan?: string;
+  /** Whether normal agent traffic (excluding code-review/model-only buckets)
+   * is known exhausted. `limitReached` remains the aggregate UI warning. */
+  generalLimitReached?: boolean;
+  limitReached?: boolean;
+  message?: string;
+}
+
+/** Sanitized quota snapshot for one locally named subscription account.
+ *
+ * `profileId` is an opaque local UUID. Provider identities (email/account id),
+ * credentials and auth paths never cross IPC in this shape.
+ */
+export interface PiUsageProfile {
+  profileId: string;
+  provider: PiSubscriptionProvider;
+  label: string;
+  isDefault: boolean;
+  status: PiUsageProvider["status"];
+  windows: PiUsageWindow[];
+  checkedAt: string;
+  plan?: string;
+  generalLimitReached?: boolean;
   limitReached?: boolean;
   message?: string;
 }
 
 export interface PiUsageOverview {
   checkedAt: string;
+  /** Compatibility projection: one provider-default row per provider. */
   providers: PiUsageProvider[];
+  /** Account-specific usage. Absent on older main processes. */
+  profiles?: PiUsageProfile[];
 }
 
 /** Progress for the managed install of Codara's pinned Pi runtime. */
@@ -1826,6 +1937,31 @@ export interface RunState {
   /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
    * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
   chatEffort?: AgentEffortLevel;
+  /**
+   * Opaque Pi account-profile UUID this run was pinned to at launch, resolved
+   * from the provider's active account in Settings. Not user-selectable per
+   * chat: main chooses a connected account from token-free cached quota
+   * signals on a fresh unpinned chat and persists it before the first
+   * SparkCall, freezing the run's launch identity so mid-run credential drift
+   * cannot occur. Legacy chats with prior calls are never silently
+   * retrofitted.
+   */
+  chatAccountProfileId?: string;
+  /**
+   * Concrete native Codex CLI account profile this chat was pinned to at
+   * launch, resolved from the provider's active account in Settings. This is
+   * deliberately distinct from Pi's chatAccountProfileId. New Codex chats
+   * stamp the active account before first launch; absence on legacy runs
+   * remains the personal ~/.codex home.
+   */
+  nativeCodexProfileId?: string;
+  /**
+   * Concrete native Claude CLI account profile this chat was pinned to at
+   * launch, resolved from the provider's active account in Settings. New
+   * Claude chats freeze the active account; absence on legacy runs is the
+   * personal legacy-unset configuration.
+   */
+  nativeClaudeProfileId?: string;
   /** Pinned Pi orchestration depth. NOT user-selectable: the effective policy
    * is derived from taskComplexity by effectiveRunExecutionPolicy in main.
    * This field survives for pre-picker runs and for non-UI callers (frontier
@@ -2637,6 +2773,19 @@ export interface WorkerAttempt {
    * recorded before this field existed.
    */
   model?: string;
+  /**
+   * Opaque Pi account-profile UUID that actually launched this attempt.
+   * Persisted before process startup so recovery of the same attempt cannot
+   * silently switch subscriptions. Undefined for legacy/non-Pi attempts.
+   */
+  accountProfileId?: string;
+  /**
+   * Concrete native Codex CLI account used by a native CLI/app-server
+   * attempt. Distinct from Pi accountProfileId; absent is legacy/personal.
+   */
+  nativeCodexProfileId?: string;
+  /** Concrete native Claude CLI account for a native Claude attempt. */
+  nativeClaudeProfileId?: string;
   command?: string;
   cwd: string;
   status: WorkerAttemptStatus;
@@ -2720,6 +2869,10 @@ export interface WorkerTaskEnvelope {
   workerTaskId: string;
   attemptId: string;
   runtime: WorkerRuntime;
+  /** Frozen native Codex account for CLI-backed attempts. */
+  nativeCodexProfileId?: string;
+  /** Frozen native Claude account for CLI/SDK-backed attempts. */
+  nativeClaudeProfileId?: string;
   cwd: string;
   executionDisabled: true;
   task: WorkerTask;
@@ -2787,6 +2940,12 @@ export interface SparkCall {
     | "final_summary"
     | "test";
   model: string;
+  /** Opaque Pi account-profile UUID that actually served this manager call. */
+  accountProfileId?: string;
+  /** Frozen native Codex CLI profile for this manager call. */
+  nativeCodexProfileId?: string;
+  /** Frozen native Claude CLI profile for this manager call. */
+  nativeClaudeProfileId?: string;
   status: "started" | "completed" | "failed";
   /** Ordered user-message ids frozen onto this manager turn before startup. */
   inputMessageIds?: string[];

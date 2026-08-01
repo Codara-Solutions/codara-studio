@@ -121,6 +121,14 @@ async function main() {
     ]).length,
     1,
   );
+  eq(
+    "an invalid duplicate cannot suppress a later valid model window",
+    modelScopedWindows([
+      { kind: "weekly_scoped", percent: "not-a-percent", scope: { model: { id: "fable", display_name: "Fable" } } },
+      { kind: "weekly_scoped", percent: 12, scope: { model: { id: "fable", display_name: "Fable" } } },
+    ])[0]?.usedPercent,
+    12,
+  );
 
   // ── resets_at arrives as epoch SECONDS inside limits[], but as an ISO
   // string at top level. Reading it as a string only would silently drop the

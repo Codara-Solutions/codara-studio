@@ -8,13 +8,32 @@ import type {
   PiSubscriptionAuthEvent,
   PiSubscriptionConnection,
   PiSubscriptionOverview,
+  PiSubscriptionProfileConnection,
   PiSubscriptionPrompt,
   PiSubscriptionProvider,
 } from "@shared/types";
 
-import { codaraPiPaths, resolveCodaraPiRuntime } from "./pi-runtime-electron";
-import { CODARA_PI_VERSION, inspectPiSubscriptionAuth } from "./pi-runtime";
+import { resolveCodaraPiRuntime } from "./pi-runtime-electron";
+import { CODARA_PI_VERSION } from "./pi-runtime";
 import { installPinnedPiRuntime, isPinnedPiRuntimeInstalling } from "./pi-runtime-install";
+import {
+  deletePiAccountCredentialProfile,
+  inspectPiAccountProfileAuthStore,
+  piAccountCredentialAccountEmail,
+  piAccountCredentialIdentityFingerprint,
+  preparePiAccountCredentialTarget,
+  renamePiAccountProfile,
+  resolvePiAccountRuntimeProfile,
+  setDefaultPiAccountProfile,
+  type PiAccountProfileOwnershipGuard,
+  PiOAuthLoginGate,
+} from "./pi-account-auth-store";
+import { readAnthropicAccountIdentity } from "./anthropic-account-identity";
+import {
+  startPiOAuthCallbackServer,
+  type PiOAuthCallbackServer,
+} from "./pi-oauth-callback-server";
+import { focusStudioWindow } from "../window-focus";
 
 interface OAuthCredential {
   type: "oauth";
@@ -67,14 +86,33 @@ interface AuthStorageInstance {
 interface ActiveFlow {
   requestId: string;
   provider: PiSubscriptionProvider;
+  targetProfileId?: string;
+  label?: string;
+  makeDefault?: boolean;
   ownerId: number;
   abort: AbortController;
+  releaseLoginGate: () => void;
   pendingPrompt: {
     promptId: string;
     resolve(value: string): void;
     reject(error: Error): void;
     removeAbortListener(): void;
   } | null;
+}
+
+export interface StartPiSubscriptionProfileLoginInput {
+  provider: PiSubscriptionProvider;
+  /** Reconnect this profile. Omit to add another account. */
+  profileId?: string;
+  /** Required by future multi-account UI; compatibility callers get a provider label. */
+  label?: string;
+  makeDefault?: boolean;
+}
+
+export interface PiSubscriptionProfileLoginRequest {
+  requestId: string;
+  provider: PiSubscriptionProvider;
+  targetProfileId?: string;
 }
 
 const PROVIDER_META: Record<
@@ -96,6 +134,7 @@ const PROVIDER_META: Record<
 };
 
 const activeFlows = new Map<string, ActiveFlow>();
+const oauthLoginGate = new PiOAuthLoginGate();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -196,44 +235,77 @@ async function loadAuthStorage(): Promise<{ create(path: string): AuthStorageIns
   return loaded.AuthStorage;
 }
 
-async function connectionStatus(provider: PiSubscriptionProvider): Promise<PiSubscriptionConnection> {
+function disconnectedConnection(provider: PiSubscriptionProvider): PiSubscriptionConnection {
   const meta = PROVIDER_META[provider];
-  try {
-    const status = await inspectPiSubscriptionAuth(codaraPiPaths().authFile, provider);
-    return {
-      provider,
-      label: meta.label,
-      model: meta.model,
-      connected: true,
-      expired: status.expired,
-      canRefresh: status.canRefresh,
-      expiresAt: status.expiresAt,
-    };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    const message = safeAuthError(error);
-    const expectedMissing = code === "ENOENT" || /not authenticated|no OAuth access token/i.test(message);
-    return {
-      provider,
-      label: meta.label,
-      model: meta.model,
-      connected: false,
-      expired: false,
-      canRefresh: false,
-      expiresAt: null,
-      ...(expectedMissing ? {} : { error: message }),
-    };
-  }
+  return {
+    provider,
+    label: meta.label,
+    model: meta.model,
+    connected: false,
+    expired: false,
+    canRefresh: false,
+    expiresAt: null,
+  };
+}
+
+function compatibilityConnection(
+  provider: PiSubscriptionProvider,
+  profiles: readonly PiSubscriptionProfileConnection[],
+): PiSubscriptionConnection {
+  const meta = PROVIDER_META[provider];
+  const selected =
+    profiles.find((profile) => profile.provider === provider && profile.isDefault) ??
+    profiles.find((profile) => profile.provider === provider && profile.connected) ??
+    profiles.find((profile) => profile.provider === provider);
+  return selected
+    ? {
+        provider,
+        label: meta.label,
+        model: meta.model,
+        connected: selected.connected,
+        expired: selected.expired,
+        canRefresh: selected.canRefresh,
+        expiresAt: selected.expiresAt,
+        ...(selected.error ? { error: selected.error } : {}),
+      }
+    : disconnectedConnection(provider);
 }
 
 export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> {
-  const [runtimeResult, ...connections] = await Promise.all([
+  const [runtimeResult, inspection] = await Promise.all([
     resolveCodaraPiRuntime()
       .then((runtime) => ({ installed: true as const, version: runtime.version, error: undefined }))
       .catch((error) => ({ installed: false as const, version: null, error: safeAuthError(error) })),
-    connectionStatus("openai-codex"),
-    connectionStatus("anthropic"),
+    inspectPiAccountProfileAuthStore(),
   ]);
+  const statuses = new Map(inspection.statuses.map((status) => [status.profileId, status]));
+  const profiles: PiSubscriptionProfileConnection[] = inspection.snapshot.profiles.map((profile) => {
+    const status = statuses.get(profile.id);
+    // The registry digest is authoritative; the credential read backfills
+    // accounts connected before the registry recorded one. Only the hash
+    // crosses IPC — the account id it was taken from stays in this process.
+    const accountFingerprint = profile.identityFingerprint ?? status?.accountFingerprint;
+    // The registry address was captured at connect time (Anthropic); the
+    // credential read covers Codex, whose token carries its own claims.
+    const email = profile.accountEmail ?? status?.accountEmail;
+    return {
+      id: profile.id,
+      provider: profile.provider,
+      label: profile.label,
+      isDefault: inspection.snapshot.defaults[profile.provider] === profile.id,
+      connected: status?.connected === true,
+      expired: status?.expired === true,
+      canRefresh: status?.canRefresh === true,
+      expiresAt: status?.expiresAt ?? null,
+      ...(status?.error ? { error: status.error } : {}),
+      ...(accountFingerprint ? { accountFingerprint } : {}),
+      ...(email ? { email } : {}),
+    };
+  });
+  const connections = [
+    compatibilityConnection("openai-codex", profiles),
+    compatibilityConnection("anthropic", profiles),
+  ];
   return {
     runtimeInstalled: runtimeResult.installed,
     runtimeVersion: runtimeResult.version,
@@ -241,8 +313,12 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     runtimeExpectedVersion: CODARA_PI_VERSION,
     ...(isPinnedPiRuntimeInstalling() ? { runtimeInstalling: true } : {}),
     connections,
+    profiles,
   };
 }
+
+/** Stable sanitized read for Settings/IPC. Credentials and auth paths never leave main. */
+export const inspectPiSubscriptionProfiles = inspectPiSubscriptions;
 
 /**
  * Install the pinned Pi runtime for a Settings window, streaming npm's
@@ -282,27 +358,84 @@ function settlePendingPrompt(flow: ActiveFlow, error: Error): void {
   pending.reject(error);
 }
 
-async function persistCredential(provider: PiSubscriptionProvider, credential: OAuthCredential): Promise<void> {
-  const paths = codaraPiPaths();
-  await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
-  const AuthStorage = await loadAuthStorage();
-  const storage = AuthStorage.create(paths.authFile);
-  await storage.modify(provider, async () => credential);
-  if (process.platform !== "win32") await chmod(paths.authFile, 0o600);
+/**
+ * The anonymous account digest and the account's email address to record for a
+ * credential that has just been issued. Codex carries both inside the
+ * credential, so they come straight out of it. Anthropic's credential is opaque
+ * tokens, so its account uuid and address are read once here — the single
+ * moment a fresh access token is in hand — from Anthropic's OAuth profile
+ * endpoint. A stored credential is never read for this and a refresh is never
+ * triggered: outside connect, an account without a digest simply stays
+ * unpaired, and one without an address simply shows none.
+ */
+async function connectTimeIdentity(
+  provider: PiSubscriptionProvider,
+  credential: OAuthCredential,
+): Promise<{ fingerprint?: string; email?: string }> {
+  const fingerprint = piAccountCredentialIdentityFingerprint(provider, credential);
+  const email = piAccountCredentialAccountEmail(provider, credential);
+  if (fingerprint || email) return { ...(fingerprint ? { fingerprint } : {}), ...(email ? { email } : {}) };
+  if (provider !== "anthropic" || !nonEmptyString(credential.access)) return {};
+  return readAnthropicAccountIdentity(credential.access);
+}
+
+async function persistCredential(
+  flow: ActiveFlow,
+  credential: OAuthCredential,
+): Promise<string> {
+  const identity = await connectTimeIdentity(flow.provider, credential);
+  const target = await preparePiAccountCredentialTarget({
+    provider: flow.provider,
+    ...(flow.targetProfileId ? { profileId: flow.targetProfileId } : {}),
+    ...(flow.label ? { label: flow.label } : {}),
+    ...(identity.fingerprint ? { identityFingerprint: identity.fingerprint } : {}),
+    ...(identity.email ? { accountEmail: identity.email } : {}),
+  });
+  try {
+    await mkdir(target.configDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") await chmod(target.configDir, 0o700);
+    const AuthStorage = await loadAuthStorage();
+    await AuthStorage.create(target.authFile).modify(flow.provider, async () => credential);
+    if (process.platform !== "win32") await chmod(target.authFile, 0o600);
+    if (flow.makeDefault) {
+      await setDefaultPiAccountProfile(flow.provider, target.profile.id);
+    }
+  } catch (error) {
+    // A failed first write must not leave a metadata row that looks usable.
+    if (target.created) {
+      await deletePiAccountCredentialProfile(target.profile.id).catch(() => undefined);
+    }
+    throw error;
+  }
   // A newly connected subscription must not read its limits — or its model
   // catalog — through a cache populated while it was still disconnected.
   const { invalidatePiSubscriptionUsageCache } = await import("./pi-subscription-usage");
   invalidatePiSubscriptionUsageCache();
   const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
   invalidatePiModelCatalogCache();
-  broadcastSubscriptionsChanged(provider);
+  broadcastSubscriptionsChanged(flow.provider);
+  return target.profile.id;
+}
+
+function oauthStateFromAuthUrl(url: string): string | null {
+  try {
+    return new URL(url).searchParams.get("state");
+  } catch {
+    return null;
+  }
 }
 
 async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
   const { provider, requestId } = flow;
   const meta = PROVIDER_META[provider];
+  let callback: PiOAuthCallbackServer | null = null;
   try {
     const oauth = await loadOAuth(provider);
+    // Own the loopback callback so the browser's last page is Codara's, not
+    // Pi's. Only the OpenAI flow tolerates losing its own listener — see
+    // pi-oauth-callback-server.ts. A null result means the port was taken and
+    // Pi runs the callback itself, exactly as before.
+    if (provider === "openai-codex") callback = await startPiOAuthCallbackServer();
     const credential = await oauth.login({
       signal: flow.abort.signal,
       prompt: async (prompt) => {
@@ -317,7 +450,7 @@ async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
               type: "progress",
               requestId,
               provider,
-              message: "Opening secure browser login…",
+              message: "Opening your browser to sign in…",
             });
             return browser.id;
           }
@@ -330,7 +463,7 @@ async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
           provider,
           prompt: publicPrompt(prompt),
         });
-        return new Promise<string>((resolve, reject) => {
+        const typed = new Promise<string>((resolve, reject) => {
           const abort = () => {
             if (flow.pendingPrompt?.promptId !== promptId) return;
             flow.pendingPrompt = null;
@@ -352,9 +485,42 @@ async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
             },
           };
         });
+        if (!callback || prompt.type !== "manual_code") return typed;
+        // Pi asks for a pasted code because it believes it has no listener of
+        // its own; Codara's listener answers that prompt when the browser
+        // lands, while a genuine paste still wins if it comes first. Attaching
+        // the handlers here keeps the loser from surfacing as an unhandled
+        // rejection when the flow settles the pending prompt on the way out.
+        const typedOutcome = typed.then(
+          (value) => ({ kind: "typed" as const, value }),
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        );
+        const outcome = await Promise.race([
+          typedOutcome,
+          callback.waitForRedirect().then((url) => ({ kind: "callback" as const, url })),
+        ]);
+        if (outcome.kind === "typed") return outcome.value;
+        if (outcome.kind === "failed") throw outcome.error;
+        if (outcome.url) {
+          const pending = flow.pendingPrompt;
+          if (pending?.promptId === promptId) {
+            flow.pendingPrompt = null;
+            pending.removeAbortListener();
+          }
+          return outcome.url;
+        }
+        // The listener gave up without a callback; the paste box is the answer.
+        const settled = await typedOutcome;
+        if (settled.kind === "typed") return settled.value;
+        throw settled.error;
       },
       notify: (event) => {
         if (event.type === "auth_url" && event.url) {
+          // Pi's authorize URL carries the state its callback expects. Learning
+          // it here — before the browser opens — lets Codara's listener reject
+          // anything that is not this sign-in, exactly as Pi's own would.
+          const state = oauthStateFromAuthUrl(event.url);
+          if (state) callback?.expectState(state);
           send(owner, {
             type: "auth_url",
             requestId,
@@ -385,55 +551,124 @@ async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
       },
     });
     if (flow.abort.signal.aborted) throw new Error("Login cancelled");
-    await persistCredential(provider, credential);
+    const profileId = await persistCredential(flow, credential);
+    flow.targetProfileId = profileId;
     send(owner, {
       type: "completed",
       requestId,
       provider,
-      message: `${meta.label} is connected to Cora through Pi.`,
+      message: `${meta.label} is connected to Cora.`,
       overview: await inspectPiSubscriptions(),
     });
+    // The user finished in the browser; bring them back to the Settings window
+    // that started this instead of leaving them to find Studio themselves.
+    focusStudioWindow(owner);
   } catch (error) {
     const cancelled = flow.abort.signal.aborted || /cancelled|canceled|aborted/i.test(safeAuthError(error));
     send(owner, {
       type: cancelled ? "cancelled" : "failed",
       requestId,
       provider,
-      message: cancelled ? "Subscription login cancelled." : safeAuthError(error),
+      message: cancelled ? "Sign-in cancelled." : safeAuthError(error),
     });
+    // A cancel came from Studio, so the user is already here; a real failure
+    // happened out in the browser and needs the window pulled back.
+    if (!cancelled) focusStudioWindow(owner);
   } finally {
+    callback?.close();
     settlePendingPrompt(flow, new Error("Login finished"));
     activeFlows.delete(requestId);
+    flow.releaseLoginGate();
   }
 }
 
-export function startPiSubscriptionLogin(
+export async function startPiSubscriptionProfileLogin(
+  input: StartPiSubscriptionProfileLoginInput,
+  owner: WebContents,
+): Promise<PiSubscriptionProfileLoginRequest> {
+  const provider = providerFrom(input.provider);
+  let targetProfileId: string | undefined;
+  if (input.profileId) {
+    const inspection = await inspectPiAccountProfileAuthStore();
+    const profile = inspection.snapshot.profiles.find((entry) => entry.id === input.profileId);
+    if (!profile) throw new Error(`Pi account profile not found: ${input.profileId}`);
+    if (profile.provider !== provider) {
+      throw new Error(`Pi account profile ${input.profileId} does not belong to provider ${provider}`);
+    }
+    targetProfileId = profile.id;
+  }
+
+  for (const flow of activeFlows.values()) {
+    if (
+      flow.provider === provider &&
+      flow.ownerId === owner.id &&
+      flow.targetProfileId === targetProfileId
+    ) {
+      return {
+        requestId: flow.requestId,
+        provider,
+        ...(targetProfileId ? { targetProfileId } : {}),
+      };
+    }
+    break;
+  }
+
+  const requestId = randomUUID();
+  // Pi's OAuth implementations bind fixed loopback callback ports. One
+  // process-wide flow at a time prevents windows from racing those ports or
+  // delivering one account's callback into another account's request.
+  const releaseLoginGate = oauthLoginGate.acquire(requestId);
+  try {
+    const flow: ActiveFlow = {
+      requestId,
+      provider,
+      ...(targetProfileId ? { targetProfileId } : {}),
+      ...(input.label?.trim() ? { label: input.label.trim() } : {}),
+      ...(input.makeDefault ? { makeDefault: true } : {}),
+      ownerId: owner.id,
+      abort: new AbortController(),
+      releaseLoginGate,
+      pendingPrompt: null,
+    };
+    activeFlows.set(requestId, flow);
+    send(owner, {
+      type: "started",
+      requestId,
+      provider,
+      message: `Signing in to ${PROVIDER_META[provider].label}…`,
+    });
+    void runLogin(flow, owner);
+    return {
+      requestId,
+      provider,
+      ...(targetProfileId ? { targetProfileId } : {}),
+    };
+  } catch (error) {
+    activeFlows.delete(requestId);
+    releaseLoginGate();
+    throw error;
+  }
+}
+
+/** Compatibility entry point: reconnect the provider default, or create it. */
+export async function startPiSubscriptionLogin(
   rawProvider: unknown,
   owner: WebContents,
-): { requestId: string; provider: PiSubscriptionProvider } {
+): Promise<PiSubscriptionProfileLoginRequest> {
   const provider = providerFrom(rawProvider);
-  for (const flow of activeFlows.values()) {
-    if (flow.provider === provider && flow.ownerId === owner.id) {
-      return { requestId: flow.requestId, provider };
-    }
-  }
-  const requestId = randomUUID();
-  const flow: ActiveFlow = {
-    requestId,
-    provider,
-    ownerId: owner.id,
-    abort: new AbortController(),
-    pendingPrompt: null,
-  };
-  activeFlows.set(requestId, flow);
-  send(owner, {
-    type: "started",
-    requestId,
-    provider,
-    message: `Connecting ${PROVIDER_META[provider].label}…`,
-  });
-  void runLogin(flow, owner);
-  return { requestId, provider };
+  const inspection = await inspectPiAccountProfileAuthStore();
+  const defaultId = inspection.snapshot.defaults[provider];
+  const existing =
+    inspection.snapshot.profiles.find((profile) => profile.id === defaultId) ??
+    inspection.snapshot.profiles.find((profile) => profile.provider === provider);
+  return startPiSubscriptionProfileLogin(
+    {
+      provider,
+      ...(existing ? { profileId: existing.id } : { label: PROVIDER_META[provider].label }),
+      makeDefault: true,
+    },
+    owner,
+  );
 }
 
 export function answerPiSubscriptionPrompt(
@@ -474,13 +709,25 @@ export function cancelPiSubscriptionLogin(rawRequestId: unknown, owner: WebConte
  * re-check expiry, because the session that beat us here may have already
  * produced a perfectly good token.
  */
-export async function refreshPiSubscriptionCredential(
-  rawProvider: unknown,
+export async function refreshPiSubscriptionProfileCredential(
+  rawProfileId: unknown,
+  rawProvider?: unknown,
 ): Promise<string | null> {
-  const provider = providerFrom(rawProvider);
+  const profileId = typeof rawProfileId === "string" ? rawProfileId : "";
+  const inspection = await inspectPiAccountProfileAuthStore();
+  const profile = inspection.snapshot.profiles.find((entry) => entry.id === profileId);
+  if (!profile) throw new Error(`Pi account profile not found: ${profileId}`);
+  const provider = rawProvider === undefined ? profile.provider : providerFrom(rawProvider);
+  if (profile.provider !== provider) {
+    throw new Error(`Pi account profile ${profileId} does not belong to provider ${provider}`);
+  }
   const oauth = await loadOAuth(provider);
   if (typeof oauth.refresh !== "function") return null;
-  const paths = codaraPiPaths();
+  const paths = await resolvePiAccountRuntimeProfile({
+    provider,
+    preferredAccountProfileId: profileId,
+    requirePreferred: true,
+  });
   const AuthStorage = await loadAuthStorage();
   const storage = AuthStorage.create(paths.authFile);
   let access: string | null = null;
@@ -501,16 +748,43 @@ export async function refreshPiSubscriptionCredential(
   return access;
 }
 
-export async function disconnectPiSubscription(rawProvider: unknown): Promise<PiSubscriptionOverview> {
+/** Compatibility refresh: target the provider's validated default profile. */
+export async function refreshPiSubscriptionCredential(
+  rawProvider: unknown,
+): Promise<string | null> {
   const provider = providerFrom(rawProvider);
-  const paths = codaraPiPaths();
-  const AuthStorage = await loadAuthStorage();
-  await AuthStorage.create(paths.authFile).delete(provider);
-  if (process.platform !== "win32") await chmod(paths.authFile, 0o600).catch(() => undefined);
+  const resolved = await resolvePiAccountRuntimeProfile({ provider });
+  if (!resolved.accountProfileId) return null;
+  return refreshPiSubscriptionProfileCredential(resolved.accountProfileId, provider);
+}
+
+export async function deletePiSubscriptionProfile(
+  rawProfileId: unknown,
+  options: { ownershipGuard?: PiAccountProfileOwnershipGuard } = {},
+): Promise<PiSubscriptionOverview> {
+  const profileId = typeof rawProfileId === "string" ? rawProfileId : "";
+  const inspection = await inspectPiAccountProfileAuthStore();
+  const profile = inspection.snapshot.profiles.find((entry) => entry.id === profileId);
+  if (!profile) throw new Error(`Pi account profile not found: ${profileId}`);
+  await deletePiAccountCredentialProfile(profile.id, options);
   const { invalidatePiSubscriptionUsageCache } = await import("./pi-subscription-usage");
   invalidatePiSubscriptionUsageCache();
   const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
   invalidatePiModelCatalogCache();
-  broadcastSubscriptionsChanged(provider);
+  broadcastSubscriptionsChanged(profile.provider);
   return inspectPiSubscriptions();
 }
+
+/** Compatibility delete: remove the provider default profile. */
+export async function disconnectPiSubscription(rawProvider: unknown): Promise<PiSubscriptionOverview> {
+  const provider = providerFrom(rawProvider);
+  const inspection = await inspectPiAccountProfileAuthStore();
+  const defaultId = inspection.snapshot.defaults[provider];
+  const profile =
+    inspection.snapshot.profiles.find((entry) => entry.id === defaultId) ??
+    inspection.snapshot.profiles.find((entry) => entry.provider === provider);
+  if (!profile) return inspectPiSubscriptions();
+  return deletePiSubscriptionProfile(profile.id);
+}
+
+export { renamePiAccountProfile, setDefaultPiAccountProfile };

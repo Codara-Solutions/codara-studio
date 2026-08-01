@@ -4,11 +4,9 @@
 // runtime, ChatGPT Plus/Pro on the codex runtime). This module turns the raw
 // per-window usage that pi-subscription-usage.ts reads into three things:
 //
-//   1. summarizeProviderHeadroom: a conservative per-provider headroom number,
-//      the minimum remaining percent across every window that provider reports.
-//      The minimum, not the average: the tightest window is the one that stops
-//      workers, whatever its length. Window shapes are taken as reported and
-//      never hardcoded, a provider adds or drops windows without a code change.
+//   1. summarizeProviderHeadroom: a conservative provider-general headroom
+//      number. Model and code-review buckets need a selected workload and are
+//      evaluated at the actual manager/worker launch boundary instead.
 //   2. describeHeadroomForPrompt: a short dynamic-tail section for the manager
 //      prompt so the manager can lean toward the provider with more room.
 //   3. preferredRuntimeForHeadroom: the enforcement signal used at spawn time.
@@ -23,6 +21,7 @@
 import type {
   PiSubscriptionProvider,
   PiUsageOverview,
+  PiUsageProfile,
   PiUsageProvider,
 } from "@shared/types";
 
@@ -71,8 +70,8 @@ export interface ProviderHeadroom {
   /** Prompt-facing provider name ("Claude" / "Codex"). */
   label: string;
   /**
-   * Conservative headroom: the minimum remainingPercent across every window
-   * the provider reported. Null when the provider gave no usable data (not
+   * Conservative general-agent headroom: the minimum remainingPercent across
+   * provider-general windows. Null when the provider gave no usable data (not
    * connected, expired, errored, or no windows), which downstream reads as
    * "no signal", never as 0 or 100.
    */
@@ -85,6 +84,14 @@ export interface ProviderHeadroom {
 }
 
 export type SubscriptionHeadroomSummary = Record<HeadroomRuntime, ProviderHeadroom>;
+
+export interface ProfileHeadroom extends ProviderHeadroom {
+  /** Opaque local UUID; no vendor identity is exposed. */
+  profileId: string;
+  /** User-assigned local label. */
+  label: string;
+  isDefault: boolean;
+}
 
 function emptyHeadroom(runtime: HeadroomRuntime, limitReached: boolean): ProviderHeadroom {
   return {
@@ -100,14 +107,20 @@ function emptyHeadroom(runtime: HeadroomRuntime, limitReached: boolean): Provide
 
 function providerHeadroom(
   runtime: HeadroomRuntime,
-  entry: PiUsageProvider | undefined,
+  entry: PiUsageProvider | PiUsageProfile | undefined,
 ): ProviderHeadroom {
-  // limitReached passes through even when the windows are unusable: the OpenAI
-  // endpoint can flag limit_reached at the top level independently of windows.
-  const limitReached = entry?.limitReached === true;
+  const limitReached =
+    entry?.generalLimitReached ??
+    (entry?.windows.every(
+      (window) => !window.scope || window.scope.kind === "general",
+    )
+      ? entry?.limitReached === true
+      : false);
   if (!entry || entry.status !== "ok") return emptyHeadroom(runtime, limitReached);
-  const windows = (entry.windows ?? []).filter((window) =>
-    Number.isFinite(window.remainingPercent),
+  const windows = (entry.windows ?? []).filter(
+    (window) =>
+      (!window.scope || window.scope.kind === "general") &&
+      Number.isFinite(window.remainingPercent),
   );
   if (windows.length === 0) return emptyHeadroom(runtime, limitReached);
   let tightest = windows[0];
@@ -125,6 +138,67 @@ function providerHeadroom(
   };
 }
 
+function usageProfileHeadroom(entry: PiUsageProfile): ProfileHeadroom {
+  const base = providerHeadroom(RUNTIME_FOR_PROVIDER[entry.provider], entry);
+  return {
+    ...base,
+    profileId: entry.profileId,
+    label: entry.label,
+    isDefault: entry.isDefault,
+  };
+}
+
+/** Account-level quota signals in deterministic provider/default/label order.
+ * This is deliberately separate from provider rerouting: selecting an account
+ * is only safe at the run/attempt boundary where explicit pins are known. */
+export function summarizeProfileHeadroom(
+  overview: PiUsageOverview | null | undefined,
+  provider?: PiSubscriptionProvider,
+): ProfileHeadroom[] {
+  return (overview?.profiles ?? [])
+    .filter((entry) => !provider || entry.provider === provider)
+    .map(usageProfileHeadroom)
+    .sort((left, right) =>
+      left.provider.localeCompare(right.provider) ||
+      Number(right.isDefault) - Number(left.isDefault) ||
+      left.label.localeCompare(right.label) ||
+      left.profileId.localeCompare(right.profileId),
+    );
+}
+
+/**
+ * Rank account candidates by conservative remaining quota.
+ *
+ * An explicit profile id is an immutable pin: when it exists for this provider
+ * this function returns that row alone, even if it is exhausted or errored.
+ * Callers must surface the failure and let the user choose another account;
+ * silently spending a different subscription would violate the pin.
+ */
+export function rankProfilesForHeadroom(
+  overview: PiUsageOverview | null | undefined,
+  provider: PiSubscriptionProvider,
+  explicitProfileId?: string | null,
+): ProfileHeadroom[] {
+  const candidates = summarizeProfileHeadroom(overview, provider);
+  if (explicitProfileId) {
+    const pinned = candidates.find((entry) => entry.profileId === explicitProfileId);
+    return pinned ? [pinned] : [];
+  }
+  return candidates.sort((left, right) => {
+    const leftUsable = left.headroomPercent !== null && !left.limitReached;
+    const rightUsable = right.headroomPercent !== null && !right.limitReached;
+    if (leftUsable !== rightUsable) return rightUsable ? 1 : -1;
+    // Percentages are clamped to 0..100, so -1 is a stable "no data" sentinel
+    // and avoids -Infinity - -Infinity producing NaN (which would skip the
+    // deterministic default/label tie-break below).
+    const remaining = (right.headroomPercent ?? -1) - (left.headroomPercent ?? -1);
+    if (remaining !== 0) return remaining;
+    return Number(right.isDefault) - Number(left.isDefault) ||
+      left.label.localeCompare(right.label) ||
+      left.profileId.localeCompare(right.profileId);
+  });
+}
+
 /**
  * Fold a raw usage overview into one conservative headroom per runtime. Every
  * degraded state (provider missing from the overview, not_connected, expired,
@@ -138,9 +212,70 @@ export function summarizeProviderHeadroom(
   for (const entry of overview?.providers ?? []) {
     if (entry && entry.provider in RUNTIME_FOR_PROVIDER) byProvider.set(entry.provider, entry);
   }
+  const profileForProvider = (
+    provider: PiSubscriptionProvider,
+  ): PiUsageProfile | undefined => {
+    const profiles = (overview?.profiles ?? []).filter(
+      (entry) => entry.provider === provider,
+    );
+    if (profiles.length === 0) return undefined;
+
+    const ranked = profiles
+      .map((profile) => ({
+        profile,
+        headroom: usageProfileHeadroom(profile),
+      }))
+      .sort((left, right) => {
+        const leftUsable =
+          left.headroom.headroomPercent !== null &&
+          !left.headroom.limitReached;
+        const rightUsable =
+          right.headroom.headroomPercent !== null &&
+          !right.headroom.limitReached;
+        if (leftUsable !== rightUsable) return rightUsable ? 1 : -1;
+        const remaining =
+          (right.headroom.headroomPercent ?? -1) -
+          (left.headroom.headroomPercent ?? -1);
+        if (remaining !== 0) return remaining;
+        return (
+          Number(right.profile.isDefault) -
+            Number(left.profile.isDefault) ||
+          left.profile.label.localeCompare(right.profile.label) ||
+          left.profile.profileId.localeCompare(right.profile.profileId)
+        );
+      });
+    const usable = ranked.find(
+      ({ headroom }) =>
+        headroom.headroomPercent !== null && !headroom.limitReached,
+    );
+    if (usable) return usable.profile;
+
+    // A provider-level "limited" signal is safe only when every account is
+    // known limited. One disconnected/error/unknown account means the
+    // provider has no trustworthy aggregate signal, not that it is exhausted.
+    if (
+      ranked.length > 0 &&
+      ranked.every(({ headroom }) => headroom.limitReached)
+    ) {
+      return ranked[0].profile;
+    }
+    return undefined;
+  };
+  const anthropicProfile = profileForProvider("anthropic");
+  const codexProfile = profileForProvider("openai-codex");
   return {
-    claude: providerHeadroom("claude", byProvider.get("anthropic")),
-    codex: providerHeadroom("codex", byProvider.get("openai-codex")),
+    claude: anthropicProfile
+      ? providerHeadroom("claude", anthropicProfile)
+      : overview?.profiles?.some((entry) => entry.provider === "anthropic")
+        ? emptyHeadroom("claude", false)
+        : providerHeadroom("claude", byProvider.get("anthropic")),
+    codex: codexProfile
+      ? providerHeadroom("codex", codexProfile)
+      : overview?.profiles?.some(
+            (entry) => entry.provider === "openai-codex",
+          )
+        ? emptyHeadroom("codex", false)
+        : providerHeadroom("codex", byProvider.get("openai-codex")),
   };
 }
 

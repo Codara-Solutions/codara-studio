@@ -73,10 +73,11 @@ async function bundle(name, entry) {
 
 const CHECKED_AT = "2026-07-26T00:00:00.000Z";
 
-function win(id, label, remainingPercent, resetsIn) {
+function win(id, label, remainingPercent, resetsIn, scope) {
   return {
     id,
     label,
+    ...(scope ? { scope } : {}),
     usedPercent: Math.round((100 - remainingPercent) * 10) / 10,
     remainingPercent,
     ...(resetsIn ? { resetsIn } : {}),
@@ -98,6 +99,19 @@ function overview(providers) {
   return { checkedAt: CHECKED_AT, providers };
 }
 
+function profile(profileId, providerName, label, isDefault, status, windows, extra) {
+  return {
+    profileId,
+    provider: providerName,
+    label,
+    isDefault,
+    status,
+    windows,
+    checkedAt: CHECKED_AT,
+    ...extra,
+  };
+}
+
 async function main() {
   const headroom = await bundle(
     "subscription-headroom",
@@ -109,8 +123,10 @@ async function main() {
     describeHeadroomForPrompt,
     headroomForRuntime,
     preferredRuntimeForHeadroom,
+    rankProfilesForHeadroom,
     readSubscriptionHeadroomSummary,
     runtimeLimitReached,
+    summarizeProfileHeadroom,
     summarizeProviderHeadroom,
   } = headroom;
   const { rosterModelFor } = await bundle(
@@ -126,13 +142,18 @@ async function main() {
 
   // ── Headroom math across window shapes ────────────────────────────────────
 
-  // Anthropic's per-model weekly cap (limit_* id) binds tighter than the
-  // five-hour and seven-day windows: min across ALL windows must win, whatever
-  // the window's id or count.
+  // Provider-wide guidance has no selected model. It must use only general
+  // windows; a model-specific cap is evaluated later at the exact launch.
   const anthropicTight = provider("anthropic", "ok", [
-    win("five_hour", "5-hour", 12, "2h 10m"),
+    win("five_hour", "5-hour", 8, "2h 10m"),
     win("seven_day", "7-day", 55, "3d 4h"),
-    win("limit_fable 5", "Fable 5 7-day", 8, "5d 1h"),
+    win(
+      "limit_fable-5",
+      "Fable 5 7-day",
+      2,
+      "5d 1h",
+      { kind: "model", modelId: "claude-fable-5", modelLabel: "Fable 5" },
+    ),
   ]);
   const codexRoomy = provider("openai-codex", "ok", [
     win("primary", "5-hour", 78, "1h 3m"),
@@ -140,10 +161,10 @@ async function main() {
   ]);
   const both = summarizeProviderHeadroom(overview([anthropicTight, codexRoomy]));
   check(
-    "headroom is the min across every anthropic window, including limit_* caps",
+    "provider-wide guidance excludes model-specific windows",
     both.claude.headroomPercent === 8 &&
-      both.claude.tightestWindowLabel === "Fable 5 7-day" &&
-      both.claude.tightestWindowResetsIn === "5d 1h",
+      both.claude.tightestWindowLabel === "5-hour" &&
+      both.claude.tightestWindowResetsIn === "2h 10m",
     JSON.stringify(both.claude),
   );
   check(
@@ -276,6 +297,83 @@ async function main() {
   );
   check("a null summary never routes", preferredRuntimeForHeadroom(null) === null);
 
+  // ── Same-provider account ranking (never overrides an explicit pin) ────────
+
+  const codexAccounts = {
+    ...overview([codexRoomy]),
+    profiles: [
+      profile(
+        "11111111-1111-4111-8111-111111111111",
+        "openai-codex",
+        "Codex default",
+        true,
+        "ok",
+        [win("primary", "5-hour", 8)],
+      ),
+      profile(
+        "22222222-2222-4222-8222-222222222222",
+        "openai-codex",
+        "Codex roomy",
+        false,
+        "ok",
+        [win("primary", "5-hour", 82)],
+      ),
+      profile(
+        "33333333-3333-4333-8333-333333333333",
+        "openai-codex",
+        "Codex expired",
+        false,
+        "expired",
+        [],
+      ),
+    ],
+  };
+  const profileSignals = summarizeProfileHeadroom(codexAccounts, "openai-codex");
+  check(
+    "profile summary keeps opaque ids, labels and per-account windows",
+    profileSignals.length === 3 &&
+      profileSignals[0].profileId === "11111111-1111-4111-8111-111111111111" &&
+      profileSignals[0].headroomPercent === 8 &&
+      profileSignals.find((entry) => entry.profileId === "33333333-3333-4333-8333-333333333333")
+        ?.headroomPercent === null,
+    JSON.stringify(profileSignals),
+  );
+  check(
+    "provider routing uses the roomiest usable account instead of the provider default",
+    summarizeProviderHeadroom(codexAccounts).codex.headroomPercent === 82,
+    JSON.stringify(summarizeProviderHeadroom(codexAccounts).codex),
+  );
+  const rankedProfiles = rankProfilesForHeadroom(codexAccounts, "openai-codex");
+  check(
+    "unpinned profile ranking puts usable account headroom first",
+    rankedProfiles.map((entry) => entry.profileId).join(",") ===
+      [
+        "22222222-2222-4222-8222-222222222222",
+        "11111111-1111-4111-8111-111111111111",
+        "33333333-3333-4333-8333-333333333333",
+      ].join(","),
+    JSON.stringify(rankedProfiles),
+  );
+  const pinnedProfile = rankProfilesForHeadroom(
+    codexAccounts,
+    "openai-codex",
+    "11111111-1111-4111-8111-111111111111",
+  );
+  check(
+    "an explicit account pin is never replaced by a roomier account",
+    pinnedProfile.length === 1 &&
+      pinnedProfile[0].profileId === "11111111-1111-4111-8111-111111111111",
+    JSON.stringify(pinnedProfile),
+  );
+  check(
+    "an unknown explicit pin yields no candidate instead of silently falling back",
+    rankProfilesForHeadroom(
+      codexAccounts,
+      "openai-codex",
+      "44444444-4444-4444-8444-444444444444",
+    ).length === 0,
+  );
+
   // ── Prompt section rendering and omission ─────────────────────────────────
 
   const decisive = describeHeadroomForPrompt(both);
@@ -284,7 +382,7 @@ async function main() {
   check("section stays within 4 lines", decisiveLines.length <= 4, String(decisive));
   check(
     "tight provider renders headroom with its binding window and reset",
-    /Claude 8% left \(Fable 5 7-day window, resets in 5d 1h\)/.test(decisive ?? ""),
+    /Claude 8% left \(5-hour window, resets in 2h 10m\)/.test(decisive ?? ""),
     String(decisive),
   );
   check(
