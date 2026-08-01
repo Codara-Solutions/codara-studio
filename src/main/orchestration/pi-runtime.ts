@@ -87,6 +87,10 @@ export interface PiManagerLaunchPlan {
   /** Set only when a roster was handed over, so the caller can delete the file
    * when the session ends. */
   mcpConfigPath: string | null;
+  /** Process-local revocation handle for an untrusted Pi socket claim. */
+  agentSocketCapabilityId?: string;
+  /** Absolute lease boundary for the process-local socket claim. */
+  agentSocketCapabilityExpiresAt?: number;
 }
 
 const DEFAULT_MODELS: Record<PiSubscriptionProvider, string> = {

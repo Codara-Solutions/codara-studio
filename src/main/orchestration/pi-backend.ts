@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
+import { revokeAgentSocketCapability } from "../agent-socket-capabilities";
 
 import {
   buildExecuteDecisionFromToolCalls,
@@ -159,6 +160,7 @@ async function stopSession(runId: string, expected?: PiBackendSession): Promise<
   const session = SESSIONS.get(runId);
   if (!session || (expected && session !== expected)) return;
   SESSIONS.delete(runId);
+  revokeAgentSocketCapability(session.plan.agentSocketCapabilityId);
   session.interrupted = true;
   session.settleActiveTurn?.();
   session.settleActiveTurn = null;
@@ -215,6 +217,7 @@ async function ensureSession(
     // The launch plan already wrote the MCP bridge config, and without a
     // stored session there is no stopSession to clean it up, so a failed
     // start would otherwise leak one bridge file per attempt.
+    revokeAgentSocketCapability(plan.agentSocketCapabilityId);
     await cleanupPiMcpBridgeConfig(plan).catch(() => undefined);
     throw error;
   }

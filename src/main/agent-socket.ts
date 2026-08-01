@@ -44,6 +44,11 @@ import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
+  authorizeAgentSocketCapability,
+  setAgentSocketCapabilityEndpoint,
+  type AgentSocketCapabilityClaim,
+} from "./agent-socket-capabilities";
+import {
   CODEX_MODEL_CATALOG,
   normalizeCodexModelId,
 } from "@shared/model-catalog";
@@ -225,6 +230,7 @@ export async function startAgentSocket(): Promise<ServerHandle> {
     throw new Error("[agent-socket] failed to determine listening address");
   }
   const url = `http://127.0.0.1:${address.port}`;
+  setAgentSocketCapabilityEndpoint(url);
   currentHandle = { server, url, token };
   pty.setAgentSocketEnv({ url, token });
   // Persist a handshake file so MCP servers spawned by external runtimes
@@ -239,6 +245,7 @@ export async function startAgentSocket(): Promise<ServerHandle> {
 
 /** Stop the server. Safe to call multiple times. */
 export async function stopAgentSocket(): Promise<void> {
+  setAgentSocketCapabilityEndpoint(null);
   const handle = currentHandle;
   if (!handle) return;
   currentHandle = null;
@@ -266,7 +273,7 @@ async function writeHandshakeFile(input: { url: string; token: string }): Promis
     pid: process.pid,
     writtenAt: new Date().toISOString(),
   }, null, 2);
-  await writeFileAtomic(handshakeFilePath(), payload);
+  await writeFileAtomic(handshakeFilePath(), payload, { mode: 0o600 });
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse, expectedToken: string): Promise<void> {
@@ -277,7 +284,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
     return;
   }
 
-  if (!verifyAuthHeader(req, expectedToken)) {
+  const auth = authenticateRequest(req, expectedToken);
+  if (!auth) {
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "unauthorized" }));
     return;
@@ -323,24 +331,36 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
   // MCP client a spurious ECONNRESET. Disarm it now that real work begins.
   req.socket.setTimeout(0);
 
-  const response = await dispatch(reqObj.method, reqObj.params, id, res);
+  const response = await dispatch(reqObj.method, reqObj.params, id, res, auth);
   writeJsonRpc(res, response);
 }
 
-function verifyAuthHeader(req: IncomingMessage, expectedToken: string): boolean {
+type AgentSocketAuth =
+  | { kind: "root" }
+  | { kind: "scoped"; claim: AgentSocketCapabilityClaim };
+
+function authenticateRequest(
+  req: IncomingMessage,
+  expectedToken: string,
+): AgentSocketAuth | null {
   const header = req.headers["authorization"];
-  if (typeof header !== "string") return false;
+  if (typeof header !== "string") return null;
   const match = /^Bearer\s+(.+)$/.exec(header);
-  if (!match) return false;
+  if (!match) return null;
   const presented = match[1].trim();
   const expectedBuf = Buffer.from(expectedToken, "utf8");
   const presentedBuf = Buffer.from(presented, "utf8");
-  if (presentedBuf.length !== expectedBuf.length) return false;
-  try {
-    return timingSafeEqual(presentedBuf, expectedBuf);
-  } catch {
-    return false;
+  if (presentedBuf.length === expectedBuf.length) {
+    try {
+      if (timingSafeEqual(presentedBuf, expectedBuf)) {
+        return { kind: "root" };
+      }
+    } catch {
+      // Fall through to a scoped-token lookup.
+    }
   }
+  const claim = authorizeAgentSocketCapability(presented);
+  return claim ? { kind: "scoped", claim } : null;
 }
 
 function readBody(req: IncomingMessage): Promise<string | null> {
@@ -412,10 +432,24 @@ async function dispatch(
   rawParams: unknown,
   id: JsonRpcId,
   res: ServerResponse,
+  auth: AgentSocketAuth,
 ): Promise<JsonRpcResponse> {
-  const params = rawParams && typeof rawParams === "object" ? (rawParams as Record<string, unknown>) : {};
+  const params =
+    rawParams && typeof rawParams === "object"
+      ? { ...(rawParams as Record<string, unknown>) }
+      : {};
 
   try {
+    if (auth.kind === "scoped") {
+      if (!auth.claim.allowedMethods.includes(method)) {
+        return errorResponse(
+          id,
+          ERR_FORBIDDEN,
+          "this capability is unavailable to the calling agent process",
+        );
+      }
+      params.runId = auth.claim.runId;
+    }
     if (MID_COMPACTION_BLOCKED_METHODS.has(method)) {
       const runId = stringParam(params, "runId");
       if (runId && (await getRunStore()).isRunMidAutoCompaction(runId)) {

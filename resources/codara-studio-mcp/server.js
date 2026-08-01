@@ -1567,7 +1567,61 @@ function resolveSparkHome() {
   return DEFAULT_SPARK_HOME;
 }
 
+function validatedAgentSocketConnection(urlValue, tokenValue, source) {
+  const url = typeof urlValue === "string" ? urlValue.trim() : "";
+  const token = typeof tokenValue === "string" ? tokenValue.trim() : "";
+  if (!url || !/^[a-f0-9]{64}$/.test(token)) {
+    throw new Error(`${source} agent socket credentials are incomplete or malformed`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (err) {
+    throw new Error(`${source} agent socket URL is malformed: ${err.message}`);
+  }
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.hostname !== "127.0.0.1" ||
+    !parsed.port ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.pathname !== "/" && parsed.pathname !== "")
+  ) {
+    throw new Error(`${source} agent socket URL is not a safe loopback endpoint`);
+  }
+  return { url: parsed.origin, token };
+}
+
 function readHandshake() {
+  const capability = (process.env.SPARK_AGENT_CAPABILITY || "").trim();
+  const envUrl = process.env.SPARK_AGENT_SOCKET;
+  const envToken = process.env.SPARK_AGENT_TOKEN;
+  if (capability) {
+    // A scoped process capability always uses its exact launch-time
+    // credentials. Missing or malformed env must fail closed: falling back to
+    // the mode-600 handshake would silently upgrade an imported-PR
+    // manager/worker to the process-global user authority.
+    if (capability !== "scoped") {
+      const e = new Error("Codara agent capability marker is unsupported");
+      e.code = "SPARK_OFFLINE";
+      throw e;
+    }
+    try {
+      return validatedAgentSocketConnection(envUrl, envToken, "scoped");
+    } catch (err) {
+      const e = new Error(`Codara scoped agent capability is unavailable. Cause: ${err.message}`);
+      e.code = "SPARK_OFFLINE";
+      throw e;
+    }
+  }
+
+  // Trusted/global callers deliberately prefer the mode-600 handshake on
+  // every call. Their inherited PTY credentials are process-lifetime values;
+  // after Codara restarts those values are stale while the handshake points at
+  // the new socket and token. A complete env pair remains a startup fallback
+  // for the best-effort window where the handshake write has not landed yet.
   const file = path.join(resolveSparkHome(), HANDSHAKE_FILE);
   try {
     const raw = fs.readFileSync(file, "utf8");
@@ -1575,10 +1629,22 @@ function readHandshake() {
     if (!parsed || typeof parsed.url !== "string" || typeof parsed.token !== "string") {
       throw new Error("handshake file is malformed");
     }
-    return { url: parsed.url, token: parsed.token };
-  } catch (err) {
+    return validatedAgentSocketConnection(parsed.url, parsed.token, "handshake");
+  } catch (handshakeError) {
+    if (envUrl !== undefined || envToken !== undefined) {
+      try {
+        return validatedAgentSocketConnection(envUrl, envToken, "trusted environment");
+      } catch (envError) {
+        const e = new Error(
+          `Codara appears to be offline (could not read ${file}, and inherited credentials were unusable). ` +
+          `Handshake cause: ${handshakeError.message}. Environment cause: ${envError.message}`,
+        );
+        e.code = "SPARK_OFFLINE";
+        throw e;
+      }
+    }
     const e = new Error(
-      `Codara appears to be offline (could not read ${file}). Open Codara and try again. Cause: ${err.message}`,
+      `Codara appears to be offline (could not read ${file}). Open Codara and try again. Cause: ${handshakeError.message}`,
     );
     e.code = "SPARK_OFFLINE";
     throw e;

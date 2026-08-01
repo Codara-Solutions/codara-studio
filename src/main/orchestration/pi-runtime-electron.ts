@@ -6,6 +6,10 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
 
 import { resolveBundledResourcePath } from "../bundled-resources";
+import {
+  mintAgentSocketCapability,
+  revokeAgentSocketCapability,
+} from "../agent-socket-capabilities";
 import { sparkHome } from "../spark-home";
 import { loadSettings } from "../storage";
 import { managedPiRuntimeNodeModules } from "./pi-runtime-install";
@@ -173,6 +177,23 @@ async function writePiMcpBridgeConfig(input: {
 export async function cleanupPiMcpBridgeConfig(plan: { mcpConfigPath: string | null }): Promise<void> {
   if (!plan.mcpConfigPath) return;
   await rm(plan.mcpConfigPath, { force: true }).catch(() => undefined);
+}
+
+function attachUntrustedSocketCapability(
+  plan: PiManagerLaunchPlan,
+  input:
+    | { audience: "untrusted-pi-manager"; runId: string }
+    | {
+        audience: "untrusted-pi-worker";
+        runId: string;
+        attemptId: string;
+      },
+): PiManagerLaunchPlan {
+  const capability = mintAgentSocketCapability(input);
+  Object.assign(plan.env, capability.environment);
+  plan.agentSocketCapabilityId = capability.id;
+  plan.agentSocketCapabilityExpiresAt = capability.expiresAt;
+  return plan;
 }
 
 function developmentNodeModulesRoots(): string[] {
