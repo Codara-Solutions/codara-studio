@@ -29,3 +29,29 @@ export function getBackend(kind: ChatBackendKind): SparkAgentBackend {
 export function listBackends(): readonly SparkAgentBackend[] {
   return Object.values(REGISTRY);
 }
+
+// End every provider runtime that may still be associated with a run. We fan
+// out across the complete registry rather than trusting the run's current
+// backend field: a chat can switch providers, and an older provider session may
+// still be finishing asynchronous teardown. Each backend is best-effort and
+// independent so one broken disposer cannot strand the others.
+export async function disposeManagerSessions(runId: string): Promise<void> {
+  const backends = listBackends();
+  for (const backend of backends) {
+    try {
+      backend.interruptChat?.(runId);
+    } catch {
+      // Continue to disposal, and continue through the remaining backends.
+    }
+  }
+  await Promise.all(
+    backends.map(async (backend) => {
+      try {
+        await backend.disposeChat?.(runId);
+      } catch {
+        // Provider process cleanup is best-effort. Deletion must still be able
+        // to remove durable run state after every backend got an attempt.
+      }
+    }),
+  );
+}

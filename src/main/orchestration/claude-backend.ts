@@ -47,11 +47,14 @@ import { encodeCwdForClaudeProjects } from "./claude-paths";
 import { resolveBundledResourcePath } from "../bundled-resources";
 import { writeFileAtomic } from "../fs-atomic";
 import { resolvePythonBinary } from "../hook-installer";
-import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "../mcp-installer";
 import { claudeProvider } from "../providers/claude";
 import { sparkHome } from "../spark-home";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { sanitizeNestedAgentEnv } from "../env-sanitize";
+import {
+  acquireNativeClaudeProfileLease,
+  resolveFrozenNativeClaudeProfile,
+} from "./native-claude-profile-runtime";
 
 import type {
   SparkManagerDecision,
@@ -74,6 +77,9 @@ import {
   type ManagerRequestInput,
   type SparkAgentBackend,
 } from "./spark-agent-backend";
+import {
+  appendManagerConstitutionBlock,
+} from "./manager-constitution";
 
 const TURN_POLL_INTERVAL_MS = 200;
 // codara_wait_for_workers legitimately blocks for up to twenty minutes. Claude's
@@ -197,6 +203,8 @@ function resolveOrchestrationPromptPath(filename: string): string {
 interface ClaudeChatSession {
   runId: string;
   cwd: string;
+  nativeClaudeProfileId: string;
+  releaseProfileLease: () => void;
   session: CliSession;
   spawnTimestampMs: number;
   /** Mode the session was spawned under. If the user flips the composer chip
@@ -290,6 +298,9 @@ export const claudeBackend: SparkAgentBackend = {
     };
 
     try {
+      // Run-store resolved the exact capture before dispatch. Backends only
+      // deliver these frozen bytes and never consult mutable Settings.
+      const managerConstitutionBlock = input.managerConstitutionBlock;
       const home = sparkHome();
       const queueDir = join(home, "queues");
       const turnDir = join(home, "turns");
@@ -316,42 +327,10 @@ export const claudeBackend: SparkAgentBackend = {
           mode === "auto"
             ? resolveOrchestrationPromptPath(AUTO_PROMPT_RESOURCE_FILENAME)
             : resolveOrchestrationPromptPath(EXECUTE_PROMPT_RESOURCE_FILENAME);
-        // Idempotent — installs the codara-studio entry into ~/.claude.json the
-        // first time, no-ops thereafter. We skip the work when the entry is
-        // already in place to avoid touching the file on every turn.
-        if (
-          !useClaudeAgentSdkTransport() &&
-          !(await isSparkOrchestratorMcpInstalled("claude"))
-        ) {
-          await installOrchestratorMcpForCC().catch((err) => {
-            emit({
-              kind: "system_note",
-              message: `Could not install codara-studio MCP for Claude: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            });
-          });
-        }
       } else if (mode === "automation") {
         systemPromptPath = resolveOrchestrationPromptPath(
           AUTOMATION_PROMPT_RESOURCE_FILENAME,
         );
-        // Same idempotent global install as Execute — the per-run MCP config
-        // written in spawnChatSession scopes the visible tools, but the global
-        // entry still needs to exist for CC to spawn the server.
-        if (
-          !useClaudeAgentSdkTransport() &&
-          !(await isSparkOrchestratorMcpInstalled("claude"))
-        ) {
-          await installOrchestratorMcpForCC().catch((err) => {
-            emit({
-              kind: "system_note",
-              message: `Could not install codara-studio MCP for Claude: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            });
-          });
-        }
       } else {
         systemPromptPath = join(promptDir, TALK_SYSTEM_PROMPT_FILENAME);
         await ensureTalkPromptFile(systemPromptPath);
@@ -370,6 +349,7 @@ export const claudeBackend: SparkAgentBackend = {
           requestGeneration,
           startedAt,
           emit,
+          managerConstitutionBlock,
         });
       }
       if (useClaudePrintTransport()) {
@@ -380,11 +360,34 @@ export const claudeBackend: SparkAgentBackend = {
           requestGeneration,
           startedAt,
           emit,
+          managerConstitutionBlock,
         });
       }
 
       // Spin up (or reuse) the per-chat CLI session.
       let chat = sessions.get(runId);
+      const requestedNativeClaudeProfileId =
+        // Legacy persisted absence is the personal profile; run-store freezes
+        // all new direct runs to a concrete id before dispatch.
+        input.chat.nativeClaudeProfileId ?? "personal";
+      if (
+        chat &&
+        chat.nativeClaudeProfileId !== requestedNativeClaudeProfileId
+      ) {
+        // Account pins are immutable for a provider thread. A picker change
+        // applies only after the in-flight turn settles; on the next turn,
+        // discard the old account's persistent process and start a fresh
+        // session under the newly frozen profile. Never resume the old UUID
+        // across native config homes.
+        emit({
+          kind: "system_note",
+          message: "Switched Claude Code account for the next turn.",
+        });
+        await disposeChatSessionInternal(chat);
+        sessions.delete(runId);
+        chat = undefined;
+        input.chat.sessionUuid = undefined;
+      }
       if (chat && chat.fatal) {
         // Previous spawn already died; clear it so we retry from scratch.
         await disposeChatSessionInternal(chat);
@@ -393,10 +396,10 @@ export const claudeBackend: SparkAgentBackend = {
       }
       if (chat && chat.spawnMode !== mode) {
         // Mode flipped mid-chat. Talk and Execute use different spawn args
-        // (Talk: --append-system-prompt + read-only tools; Execute:
-        // --system-prompt full override + spark_* tools only), so a respawn
+        // (Talk: --append-system-prompt-file + read-only tools; Execute:
+        // --system-prompt-file full override + spark_* tools only), so a respawn
         // is required. Resume via -r <uuid> keeps the conversation history.
-        // Execute's --system-prompt is a hard override that dominates the
+        // Execute's --system-prompt-file is a hard override that dominates the
         // prior chat transcript — that's how CC snaps to manager-only
         // behavior even if earlier turns were in Talk mode.
         emit({
@@ -433,6 +436,8 @@ export const claudeBackend: SparkAgentBackend = {
           chatEffort: input.chat.effort,
           resumeSessionUuid: input.chat.sessionUuid,
           talkPromptPath: systemPromptPath,
+          managerConstitutionBlock,
+          nativeClaudeProfileId: input.chat.nativeClaudeProfileId,
           onStream: emit,
         });
         if ((sessionGenerations.get(runId) ?? 0) !== requestGeneration) {
@@ -781,6 +786,7 @@ interface ClaudePrintTurnOptions {
   input: ManagerRequestInput;
   mode: ChatMode;
   systemPromptPath: string;
+  managerConstitutionBlock: string;
   requestGeneration: number;
   startedAt: number;
   emit: ChatStreamHandler;
@@ -847,6 +853,7 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
     outputTokens?: number;
     cacheReadTokens?: number;
   } = {};
+  let releaseProfileLease: (() => void) | null = null;
   const markAccepted = () => {
     if (acceptedPromise) return;
     if (injectedPlanContext) contextInjectedRuns.add(runId);
@@ -854,6 +861,14 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
   };
 
   try {
+    const execution = await resolveFrozenNativeClaudeProfile(
+      input.chat.nativeClaudeProfileId,
+      await buildClaudeManagerEnvironment(runId),
+    );
+    releaseProfileLease = acquireNativeClaudeProfileLease(
+      execution.profileId,
+      `manager:${runId}`,
+    );
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     let turnPrompt = prompt || ".";
     let turnSessionUuid = sessionUuid;
@@ -871,10 +886,12 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
         sessionUuid: turnSessionUuid,
         resume: shouldResume,
         systemPromptPath: opts.systemPromptPath,
+        managerConstitutionBlock: opts.managerConstitutionBlock,
         abortController,
         onStderr(data) {
           stderrTail = `${stderrTail}${data}`.slice(-8_000);
         },
+        env: execution.env,
       });
       const stream = query({ prompt: turnPrompt, options });
       for await (const message of stream) {
@@ -991,6 +1008,7 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
     };
   } finally {
     if (sdkTurns.get(runId) === active) sdkTurns.delete(runId);
+    releaseProfileLease?.();
   }
 }
 
@@ -1008,18 +1026,9 @@ function claudeSdkMessageAcceptedPrompt(message: unknown): boolean {
   );
 }
 
-async function buildClaudeAgentSdkOptions(input: {
-  runId: string;
-  cwd: string;
-  mode: ChatMode;
-  model: string;
-  effort: string;
-  sessionUuid: string;
-  resume: boolean;
-  systemPromptPath: string;
-  abortController: AbortController;
-  onStderr: (data: string) => void;
-}): Promise<ClaudeAgentSdkOptions> {
+async function buildClaudeManagerEnvironment(
+  runId: string,
+): Promise<Record<string, string>> {
   const inherited = await getEnrichedEnv();
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(inherited)) {
@@ -1032,10 +1041,26 @@ async function buildClaudeAgentSdkOptions(input: {
     CLAUDE_CODE_HIDE_CWD: "1",
     CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
     MCP_TOOL_TIMEOUT: String(ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS),
-    SPARK_RUN_ID: input.runId,
+    SPARK_RUN_ID: runId,
     SPARK_HOME_DIR: sparkHome(),
   });
+  return env;
+}
 
+async function buildClaudeAgentSdkOptions(input: {
+  runId: string;
+  cwd: string;
+  mode: ChatMode;
+  model: string;
+  effort: string;
+  sessionUuid: string;
+  resume: boolean;
+  systemPromptPath: string;
+  managerConstitutionBlock: string;
+  abortController: AbortController;
+  onStderr: (data: string) => void;
+  env: NodeJS.ProcessEnv;
+}): Promise<ClaudeAgentSdkOptions> {
   let systemPrompt: ClaudeAgentSdkOptions["systemPrompt"];
   let tools: ClaudeAgentSdkOptions["tools"];
   const disallowedTools: string[] = [];
@@ -1047,13 +1072,27 @@ async function buildClaudeAgentSdkOptions(input: {
       fs.readFile(input.systemPromptPath, "utf8"),
     );
   if (input.mode === "execute") {
-    systemPrompt = buildExecuteSystemPrompt(input.cwd);
+    systemPrompt = appendManagerConstitutionBlock(
+      buildExecuteSystemPrompt(input.cwd),
+      input.managerConstitutionBlock,
+    );
     tools = [];
   } else if (input.mode === "auto") {
-    systemPrompt = buildManagerStablePrefix({ guidance: await guidance(), cwd: input.cwd });
+    systemPrompt = buildManagerStablePrefix({
+      guidance: await guidance(),
+      cwd: input.cwd,
+      managerConstitutionBlock: input.managerConstitutionBlock,
+    });
     tools = ["Read", "Glob", "Grep"];
   } else {
-    systemPrompt = { type: "preset", preset: "claude_code", append: await guidance() };
+    systemPrompt = {
+      type: "preset",
+      preset: "claude_code",
+      append: appendManagerConstitutionBlock(
+        await guidance(),
+        input.managerConstitutionBlock,
+      ),
+    };
     tools = { type: "preset", preset: "claude_code" };
     disallowedTools.push("Edit", "Write", "Bash", "NotebookEdit", "MultiEdit");
   }
@@ -1083,7 +1122,7 @@ async function buildClaudeAgentSdkOptions(input: {
   return {
     abortController: input.abortController,
     cwd: input.cwd,
-    env,
+    env: input.env,
     includePartialMessages: true,
     persistSession: true,
     settingSources: [],
@@ -1225,6 +1264,7 @@ async function runClaudePrintTurn(opts: ClaudePrintTurnOptions): Promise<Manager
     sessionUuid,
     resume: Boolean(input.chat.sessionUuid),
     systemPromptPath: opts.systemPromptPath,
+    managerConstitutionBlock: opts.managerConstitutionBlock,
   });
 
   let prompt = input.prompt;
@@ -1245,27 +1285,27 @@ async function runClaudePrintTurn(opts: ClaudePrintTurnOptions): Promise<Manager
   logConfigShieldOnce();
   const shielded = buildClaudeSandboxArgv(exe, args);
   const launch = resolveLaunchTarget(shielded.exe, shielded.args);
-  const inherited = await getEnrichedEnv();
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(inherited)) {
-    if (typeof value === "string") env[key] = value;
-  }
-  sanitizeNestedAgentEnv(env);
-  Object.assign(env, {
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    CLAUDE_CODE_HIDE_CWD: "1",
-    CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
-    MCP_TOOL_TIMEOUT: String(ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS),
-    SPARK_RUN_ID: runId,
-    SPARK_HOME_DIR: sparkHome(),
-  });
+  const execution = await resolveFrozenNativeClaudeProfile(
+    input.chat.nativeClaudeProfileId,
+    await buildClaudeManagerEnvironment(runId),
+  );
+  const releaseProfileLease = acquireNativeClaudeProfileLease(
+    execution.profileId,
+    `manager:${runId}`,
+  );
 
-  const child = spawn(launch.exe, launch.args, {
-    cwd: input.cwd,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(launch.exe, launch.args, {
+      cwd: input.cwd,
+      env: execution.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (error) {
+    releaseProfileLease();
+    throw error;
+  }
   child.stdin.end();
   const active = { child, interrupted: false };
   headlessTurns.set(runId, active);
@@ -1303,10 +1343,15 @@ async function runClaudePrintTurn(opts: ClaudePrintTurnOptions): Promise<Manager
     stderrTail = `${stderrTail}${chunk}`.slice(-8_000);
   });
 
-  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal }));
-  });
+  let exit: { code: number | null; signal: NodeJS.Signals | null };
+  try {
+    exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+  } finally {
+    releaseProfileLease();
+  }
   if (stdoutBuffer.trim()) {
     try {
       parser.accept(JSON.parse(stdoutBuffer.trim()) as unknown);
@@ -1365,6 +1410,37 @@ async function runClaudePrintTurn(opts: ClaudePrintTurnOptions): Promise<Manager
   };
 }
 
+async function materializeClaudeManagerPrompt(input: {
+  runId: string;
+  cwd: string;
+  mode: ChatMode;
+  guidancePath: string;
+  managerConstitutionBlock: string;
+}): Promise<string> {
+  const guidance =
+    input.mode === "execute"
+      ? buildExecuteSystemPrompt(input.cwd)
+      : await fs.readFile(input.guidancePath, "utf8");
+  const prompt =
+    input.mode === "auto"
+      ? buildManagerStablePrefix({
+          guidance,
+          cwd: input.cwd,
+          managerConstitutionBlock: input.managerConstitutionBlock,
+        })
+      : appendManagerConstitutionBlock(
+          guidance,
+          input.managerConstitutionBlock,
+        );
+  const directory = join(sparkHome(), "manager-prompts", "claude");
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") await fs.chmod(directory, 0o700);
+  const path = join(directory, `${input.runId}-${input.mode}.md`);
+  await writeFileAtomic(path, prompt, { mode: 0o600 });
+  if (process.platform !== "win32") await fs.chmod(path, 0o600);
+  return path;
+}
+
 async function buildClaudePrintArgs(input: {
   runId: string;
   cwd: string;
@@ -1374,6 +1450,7 @@ async function buildClaudePrintArgs(input: {
   sessionUuid: string;
   resume: boolean;
   systemPromptPath: string;
+  managerConstitutionBlock: string;
 }): Promise<string[]> {
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   if (input.resume) args.push("--resume", input.sessionUuid);
@@ -1404,19 +1481,23 @@ async function buildClaudePrintArgs(input: {
     }, null, 2));
   }
 
-  if (input.mode === "execute") {
-    args.push("--system-prompt", buildExecuteSystemPrompt(input.cwd), "--tools", "");
-  } else if (input.mode === "auto") {
-    const autoPrompt = await fs.readFile(input.systemPromptPath, "utf8");
-    args.push("--system-prompt", `${autoPrompt}\n\nWorkspace cwd: ${input.cwd}\n`, "--tools", "Read,Glob,Grep");
-  } else if (input.mode === "automation") {
+  const managerPromptPath = await materializeClaudeManagerPrompt({
+    runId: input.runId,
+    cwd: input.cwd,
+    mode: input.mode,
+    guidancePath: input.systemPromptPath,
+    managerConstitutionBlock: input.managerConstitutionBlock,
+  });
+  if (input.mode === "execute" || input.mode === "auto") {
     args.push(
-      "--append-system-prompt-file", input.systemPromptPath,
-      "--disallowed-tools", "Edit", "Write", "Bash", "NotebookEdit", "MultiEdit",
+      "--system-prompt-file",
+      managerPromptPath,
+      "--tools",
+      input.mode === "execute" ? "" : "Read,Glob,Grep",
     );
   } else {
     args.push(
-      "--append-system-prompt-file", input.systemPromptPath,
+      "--append-system-prompt-file", managerPromptPath,
       "--disallowed-tools", "Edit", "Write", "Bash", "NotebookEdit", "MultiEdit",
     );
   }
@@ -1590,6 +1671,8 @@ interface SpawnChatSessionOpts {
    *  the legacy parameter name, this works for both Talk and Execute prompts
    *  — the caller picks the right path based on `mode`. */
   talkPromptPath: string;
+  managerConstitutionBlock: string;
+  nativeClaudeProfileId?: string;
   onStream: ChatStreamHandler;
 }
 
@@ -1716,6 +1799,13 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   }
   args.push("--dangerously-skip-permissions");
   args.push("--settings", settingsFile);
+  const managerPromptPath = await materializeClaudeManagerPrompt({
+    runId: opts.runId,
+    cwd: opts.cwd,
+    mode: opts.mode,
+    guidancePath: opts.talkPromptPath,
+    managerConstitutionBlock: opts.managerConstitutionBlock,
+  });
   // Mode shapes the spawn args sharply because Talk and Execute are
   // fundamentally different jobs.
   //
@@ -1726,7 +1816,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //
   // - Execute: CC is a *manager*. Same pattern every manager backend uses, the
   //   user message goes in, a worker-spawn spec comes out. We use
-  //   `--system-prompt` (FULL OVERRIDE, not append) so CC's default
+  //   `--system-prompt-file` (FULL OVERRIDE, not append) so CC's default
   //   "be a helpful coder" personality is gone and our orchestrator prompt
   //   is the only instruction CC sees. `--tools ""` (below) disables every
   //   built-in tool (no Read/Edit/Bash), and the --mcp-config +
@@ -1740,7 +1830,10 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //   high-level terminal/worker/completion calls as manager decisions, so the
   //   lower-level studio tools can't derail the route-or-complete contract.
   if (opts.mode === "execute") {
-    args.push("--system-prompt", buildExecuteSystemPrompt(opts.cwd));
+    args.push(
+      "--system-prompt-file",
+      managerPromptPath,
+    );
     // `--tools ""` disables ALL built-in tools (Read, Edit, Bash, Glob,
     // Grep, NotebookEdit, etc.) — without this, CC sees the built-ins in
     // its tool list and falls back to "I'd Read the file" / "I can't Edit
@@ -1764,8 +1857,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // `--tools` whitelists exactly those three read-only built-ins instead
     // of disabling everything — mutating tools stay invisible, delegation
     // still has no competing Edit/Bash to reach for.
-    const autoPrompt = await fs.readFile(opts.talkPromptPath, "utf8");
-    args.push("--system-prompt", `${autoPrompt}\n\nWorkspace cwd: ${opts.cwd}\n`);
+    args.push("--system-prompt-file", managerPromptPath);
     args.push("--tools", "Read,Glob,Grep");
     if (mcpConfigFile) {
       args.push("--mcp-config", mcpConfigFile);
@@ -1780,7 +1872,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // while designing automations. We block the mutating built-ins —
     // automations are the only thing this mode should change, and those
     // changes flow exclusively through the scoped codara-studio MCP.
-    args.push("--append-system-prompt-file", opts.talkPromptPath);
+    args.push("--append-system-prompt-file", managerPromptPath);
     args.push(
       "--disallowed-tools",
       "Edit",
@@ -1794,7 +1886,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       args.push("--strict-mcp-config");
     }
   } else {
-    args.push("--append-system-prompt-file", opts.talkPromptPath);
+    args.push("--append-system-prompt-file", managerPromptPath);
     args.push(
       "--disallowed-tools",
       "Edit",
@@ -1818,8 +1910,18 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     args.push("--effort", effortForCC);
   }
 
+  const execution = await resolveFrozenNativeClaudeProfile(
+    opts.nativeClaudeProfileId,
+    await buildClaudeManagerEnvironment(opts.runId),
+  );
   const spawnTimestampMs = Date.now();
-  const projectsDir = join(homedir(), ".claude", "projects", encodeCwdForClaudeProjects(opts.cwd));
+  const stateDir =
+    execution.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  const projectsDir = join(
+    stateDir,
+    "projects",
+    encodeCwdForClaudeProjects(opts.cwd),
+  );
   const jsonlPath = join(projectsDir, `${sessionUuid}.jsonl`);
   // Ensure the project dir exists before tailJsonl starts watching — on
   // first-ever CC run for this cwd the directory doesn't exist yet, and
@@ -1830,17 +1932,12 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // attach to the same PTY without a state-sync round-trip via the helper.
   const sessionId = backendPtySessionId(opts.runId, "claude") ?? `spark-cc-talk-${opts.runId}`;
   // Emit the resolved flag set so failing runs can be diagnosed from
-  // events.jsonl without re-instrumenting. Redact the inline system prompt
-  // (the manager prompt is multi-KB) and the long mcp-config file content;
-  // just record the flag presence + file paths.
+  // events.jsonl without re-instrumenting. Manager instructions live in a
+  // private prompt file, so this records only flag presence and file paths.
   opts.onStream({
     kind: "system_note",
     message: `Spawning claude (mode=${opts.mode}) args: ${args
-      .map((a, i) => {
-        if (a === "--system-prompt") return `--system-prompt <${args[i + 1]?.length ?? 0} chars>`;
-        if (args[i - 1] === "--system-prompt") return "<elided>";
-        return JSON.stringify(a);
-      })
+      .map((a) => JSON.stringify(a))
       .join(" ")}`,
   });
   // Config shield: wrap the CLI in sandbox-exec so this Cora-spawned manager
@@ -1850,33 +1947,39 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // agent-config-shield.ts.
   logConfigShieldOnce();
   const shielded = buildClaudeSandboxArgv(exe, args);
-  const session = await startCliSession({
-    sessionId,
-    cwd: opts.cwd,
-    exe: shielded.exe,
-    args: shielded.args,
-    env: {
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-      CLAUDE_CODE_HIDE_CWD: "1",
-      CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
-      MCP_TOOL_TIMEOUT: String(ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS),
-      SPARK_RUN_ID: opts.runId,
-      // The shipped hooks resolve the app home from this (falling back to
-      // ~/.Codara); inject it so hook-written turn markers always land where
-      // waitForTurnFileWithRetries looks, whatever home the app runs under.
-      SPARK_HOME_DIR: sparkHome(),
-    },
-    fixedJsonlPath: jsonlPath,
-    // Resume case: the JSONL already contains prior turns' assistant text.
-    // Skip it on attach — otherwise the tailer replays everything into the
-    // current turn's accumulator and the spark reply ends up as
-    // "previous answer 1 + previous answer 2 + actual new answer".
-    skipExistingJsonl: Boolean(opts.resumeSessionUuid),
-  });
+  const releaseProfileLease = acquireNativeClaudeProfileLease(
+    execution.profileId,
+    `manager:${opts.runId}`,
+  );
+  const sessionEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(execution.env)) {
+    if (typeof value === "string") sessionEnv[key] = value;
+  }
+  let session: CliSession;
+  try {
+    session = await startCliSession({
+      sessionId,
+      cwd: opts.cwd,
+      exe: shielded.exe,
+      args: shielded.args,
+      env: sessionEnv,
+      fixedJsonlPath: jsonlPath,
+      // Resume case: the JSONL already contains prior turns' assistant text.
+      // Skip it on attach — otherwise the tailer replays everything into the
+      // current turn's accumulator and the spark reply ends up as
+      // "previous answer 1 + previous answer 2 + actual new answer".
+      skipExistingJsonl: Boolean(opts.resumeSessionUuid),
+    });
+  } catch (error) {
+    releaseProfileLease();
+    throw error;
+  }
 
   const chat: ClaudeChatSession = {
     runId: opts.runId,
     cwd: opts.cwd,
+    nativeClaudeProfileId: execution.profileId,
+    releaseProfileLease,
     session,
     spawnTimestampMs,
     spawnMode: opts.mode,
@@ -1927,6 +2030,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // waiter unblocks at once. The waiter polls indefinitely otherwise, so this
   // (and the Stop hook's done-marker) is how a crashed turn stops waiting.
   session.onExit(({ exitCode, signal }) => {
+    chat.releaseProfileLease();
     if (chat.fatal) return;
     chat.fatal = true;
     const tail = stdoutTail
@@ -2387,6 +2491,8 @@ async function disposeChatSessionInternal(chat: ClaudeChatSession): Promise<void
     await chat.session.dispose();
   } catch {
     // ignore — pty may already be gone
+  } finally {
+    chat.releaseProfileLease();
   }
 }
 
@@ -2593,7 +2699,7 @@ function coerceQuestionOption(
 }
 
 /**
- * Execute-mode system prompt — passed via `--system-prompt` as a FULL
+ * Execute-mode system prompt — passed via `--system-prompt-file` as a FULL
  * override of CC's default. This is the only instruction CC sees in
  * execute mode; the chat conversation history is treated as context, not
  * as authority. The manager's whole job in this mode: turn each user

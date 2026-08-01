@@ -208,6 +208,41 @@ async function main() {
     ["control-character id", session({ active: true, sessionId: "bad\ncommand" })],
     ["unknown runtime", session({ runtime: "other", active: true })],
     ["missing cwd", session({ active: true, cwd: "" })],
+    [
+      "Claude pointer with native Codex profile",
+      session({
+        runtime: "claude",
+        nativeCodexProfileId: "personal",
+      }),
+    ],
+    [
+      "control-character native Codex profile",
+      session({
+        runtime: "codex",
+        nativeCodexProfileId: "bad\nprofile",
+      }),
+    ],
+    [
+      "Codex pointer with native Claude profile",
+      session({
+        runtime: "codex",
+        nativeClaudeProfileId: "personal",
+      }),
+    ],
+    [
+      "control-character native Claude profile",
+      session({
+        runtime: "claude",
+        nativeClaudeProfileId: "bad\nprofile",
+      }),
+    ],
+    [
+      "non-v4 native Claude profile",
+      session({
+        runtime: "claude",
+        nativeClaudeProfileId: "10000000-0000-3000-8000-000000000042",
+      }),
+    ],
   ]) {
     const item = leaf(name, { agentSession: pointer, bootResume: true });
     cleanupTransientTerminalState(item);
@@ -285,6 +320,42 @@ async function main() {
   check("persist(on) keeps scrollback", kept.scrollback === "KEEP_ME");
   check("persist(on) keeps agent session", kept.agentSession?.active === true);
   check("persist(on) still strips worker/autorun/origin/bootResume", !("worker" in kept) && !("autorun" in kept) && !("origin" in kept) && !("bootResume" in kept));
+
+  const codexProfilePointer = session({
+    runtime: "codex",
+    nativeCodexProfileId: "00000000-0000-4000-8000-000000000042",
+    active: true,
+  });
+  const keptCodexProfile = stripTransientPaneState(
+    leaf("codex-profile", { agentSession: codexProfilePointer }),
+    true,
+  );
+  check(
+    "terminal restore preserves the frozen native Codex profile",
+    keptCodexProfile.agentSession?.nativeCodexProfileId ===
+      "00000000-0000-4000-8000-000000000042",
+  );
+
+  const claudeProfilePointer = session({
+    nativeClaudeProfileId: "10000000-0000-4000-8000-000000000042",
+    active: true,
+  });
+  const keptClaudeProfile = stripTransientPaneState(
+    leaf("claude-profile", { agentSession: claudeProfilePointer }),
+    true,
+  );
+  check(
+    "terminal restore preserves the frozen native Claude profile",
+    keptClaudeProfile.agentSession?.nativeClaudeProfileId ===
+      "10000000-0000-4000-8000-000000000042",
+  );
+  cleanupTransientTerminalState(keptClaudeProfile);
+  check(
+    "cold hydration retains a valid native Claude profile and resumes it once",
+    keptClaudeProfile.agentSession?.nativeClaudeProfileId ===
+      "10000000-0000-4000-8000-000000000042" &&
+      keptClaudeProfile.bootResume === true,
+  );
 
   const cleanOn = leaf("k2", { cwd: "/clean", scrollback: "s", agentSession: session() });
   check("persist(on) preserves durable-only leaf identity", stripTransientPaneState(cleanOn, true) === cleanOn);

@@ -197,6 +197,41 @@ export function decideRunManagerQuestion(input: {
   };
 }
 
+// An approval ask must carry what it asks about. The chat renders only the
+// question text itself; worker reports and prior tool output sit behind
+// collapsed disclosures, so a plan_approval question that says "the plan
+// shown above" while enumerating nothing asks the user to sign off blind.
+// Matching is deliberately narrow: it only fires on an explicit reference to
+// unrendered content, and any enumerated line in the body clears it.
+const UNRENDERED_CONTENT_REFERENCE =
+  /\b(?:shown|described|listed|outlined|presented|detailed)\s+(?:above|earlier|previously)\b|\b(?:the|this)\s+plan\s+above\b|\babove\s+plan\b|\bas\s+(?:described|reported|proposed)\s+by\s+the\s+workers?\b|\bin\s+the\s+workers?['’]?s?\s+(?:final\s+)?reports?\b/i;
+
+// A numbered ("1." / "1)") or bulleted ("-", "*", "•") line with content.
+const ENUMERATED_LINE = /^\s{0,6}(?:\d{1,3}[.)]\s+|[-*•]\s+)\S/m;
+
+/**
+ * Reject a plan_approval ask whose body points at content the user cannot
+ * see instead of containing it. Returns the retry instruction to hand back
+ * to the manager, or null when the ask is self-contained.
+ */
+export function blindApprovalAskProblem(
+  question: string,
+  category: RunQuestionCategory | undefined,
+): string | null {
+  if (category !== "plan_approval") return null;
+  if (!UNRENDERED_CONTENT_REFERENCE.test(question)) return null;
+  if (ENUMERATED_LINE.test(question)) return null;
+  return (
+    "plan_approval rejected: the question refers to content the user cannot see. " +
+    "Phrases like 'shown above' or 'as described by the workers' point at collapsed " +
+    "worker reports or prior tool output, which the chat does not render inside the ask. " +
+    "Call codara_ask_user again with the question text itself containing the full " +
+    "enumerated plan: every item on its own numbered line with enough identity to judge " +
+    "it (for a commit plan, each commit's title and the files it touches). If the list " +
+    "is long, compress each item to one line but keep every item; never a bare count."
+  );
+}
+
 export function inferRunQuestionCategory(
   question: string,
   source: RunQuestionSource,

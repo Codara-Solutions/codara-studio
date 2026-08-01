@@ -1,7 +1,5 @@
 export type ShellId = string;
 
-export type ProjectPolicyMode = "trusted" | "untrusted-pull-request";
-
 export interface ShellInfo {
   id: ShellId;
   label: string;
@@ -586,6 +584,11 @@ export interface AppSettings {
   // afterwards. Default off. Interactive / non-autopilot launches are
   // unaffected and stay byte-identical regardless of this flag.
   autopilotSandbox: boolean;
+  // Applies OpenAI's faster (and pricier) service tier to every Cora session
+  // that runs on a GPT model: chat, planning, and workers. Off by default.
+  // Anthropic sessions are unaffected and can never run a fast/priority tier;
+  // resources/pi-cora/service-tier.ts strips one structurally.
+  openAiFastMode?: boolean;
 }
 
 // Cora runs its manager and implementation workers through one pinned Pi
@@ -1496,7 +1499,6 @@ export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
   installed: boolean;
-  workerAssignable?: boolean;
   // Tri-state sign-in signal. `installed` only means the binary was found on
   // PATH; a CLI can be present but signed out, which fails at launch time.
   // true/false when detection could establish credential PRESENCE (never the
@@ -1509,6 +1511,15 @@ export interface AgentRuntimeDiagnostic {
   // Short human-readable hint for the authenticated=false case
   // (e.g. "run `claude` and sign in"). Never contains secret material.
   authHint?: string;
+  // Whether Cora may assign an autonomous WORKER to this runtime. Deliberately
+  // separate from `installed`: workers run on the bundled Pi harness, so what
+  // they need is a connected Pi subscription for the provider this runtime
+  // selects (claude = Anthropic, codex = OpenAI), not a CLI binary on PATH.
+  // `installed` still governs the surfaces that really do spawn the binaries
+  // (manager chat backends, agent terminals, the MCP builtin installer).
+  // Stamped by orchestration/pi-worker-providers; undefined means the
+  // diagnostic was not decorated, and consumers fall back to `installed`.
+  workerAssignable?: boolean;
   executablePath: string | null;
   version: string | null;
   versionError: string | null;
@@ -2214,6 +2225,7 @@ export interface ProjectConstitutionSnapshot {
  * Imported pull-request heads are untrusted review input: their committed
  * instructions, hooks, skills, and project settings must not govern Cora.
  */
+export type ProjectPolicyMode = "trusted" | "untrusted-pull-request";
 
 export type ProjectConstitutionInspectionStatus =
   | "missing"
@@ -2391,6 +2403,12 @@ export interface RunState {
   /** A linked answer that must restart one exact manager stage. Persisted until
    * the scheduler claims it so app restart cannot strand the continuation. */
   pendingManagerResume?: PendingManagerResume;
+  /**
+   * Exact replay token for a manager turn parked by quota/provider/transport
+   * trouble. Absent for ordinary user pauses and after a replacement manager
+   * turn has completed successfully.
+   */
+  managerTurnRecovery?: ManagerTurnRecovery;
   /** Crash-recoverable conversation rewind currently crossing its durable seam. */
   pendingConversationRewind?: PendingConversationRewind;
   /**
@@ -2843,7 +2861,6 @@ export interface UpdateChatBackendInput {
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
   coraExecutionPolicy?: CoraExecutionPolicy;
-  chatFastMode?: boolean;
   chat1mContext?: boolean;
 }
 
@@ -3296,6 +3313,10 @@ export interface WorkerTask {
  *   - rate_limit: the provider refused for quota (429, rate limit). Never
  *     fast-retried on the same runtime; the window outlives any quick retry,
  *     while the other provider's quota is independent.
+ *   - subscription: the provider declined for billing (e.g. Anthropic bills
+ *     third-party harness use against Extra Usage and the account has none
+ *     available, or a credit balance is too low). Terminal for that account:
+ *     no quota window resets it, so the same account is never retried.
  *   - auth: credentials are missing, expired, or rejected.
  *   - launch: the runtime binary never came up (missing, bad flag, no TUI).
  *   - tool: a tool, MCP bridge, or extension inside the harness failed.
@@ -3308,6 +3329,7 @@ export type WorkerFailureKind =
   | "transport"
   | "provider"
   | "rate_limit"
+  | "subscription"
   | "auth"
   | "launch"
   | "tool"
@@ -3479,9 +3501,31 @@ export interface ReviewDecision {
   nextStepAllowed: boolean;
 }
 
+/**
+ * Durable proof that one live manager tool crossed its application boundary.
+ *
+ * This record is deliberately call-scoped and internal. The provider-facing
+ * tool payload never chooses the SparkCall id: main resolves the one active
+ * current-epoch call and derives `key` from that authority.
+ */
+export interface ManagerApplicationReceipt {
+  key: string;
+  method: "codara_complete";
+  state: "effects_applied";
+  payloadSchemaVersion: 1;
+  payloadSha256: string;
+  /** Exact response that an identical retry may safely receive. */
+  result: { ok: true };
+  appliedAt: string;
+  summaryMessageId?: string;
+  /** Frozen before terminal run normalization removes recovery state. */
+  recoveryAccountProfileId?: string;
+}
+
 export interface SparkCall {
   id: string;
   runId: string;
+  /** Fresh immutable copy of the owning run's captured global constitution. */
   userConstitution?: UserConstitutionCapture;
   /**
    * The run's `currentStepId` at call start. Lets per-step cost rollups
@@ -3513,6 +3557,15 @@ export interface SparkCall {
   conversationEpoch?: number;
   /** Links a manager call to the durable answer-resume launch that registered it. */
   managerResumeClaimId?: string;
+  /** Links a replacement call to the durable parked-turn recovery claim. */
+  managerRecoveryClaimId?: string;
+  /** Call-scoped application outbox. Currently only codara_complete writes it. */
+  applicationReceipts?: ManagerApplicationReceipt[];
+  /**
+   * Fail-closed normalization marker. Once a malformed receipt surface has
+   * been observed, recovery must never provider-replay this call.
+   */
+  applicationReceiptIntegrity?: "invalid";
   /**
    * Internal bookkeeping turns that are not part of the user conversation.
    * "compaction" marks the summarize call auto-compaction sends to the
@@ -3584,6 +3637,7 @@ export interface CreateRunInput {
   workspaceName: string;
   cwd: string;
   origin?: GitHubOrigin;
+  projectPolicyMode?: ProjectPolicyMode;
   title?: string;
   // Per-chat backend selections forwarded from the composer's chip when
   // creating a fresh chat. Optional, when omitted, the run defaults to the
@@ -3594,9 +3648,9 @@ export interface CreateRunInput {
   chatBackend?: ChatBackendKind;
   chatModel?: string;
   chatMode?: ChatMode;
+  chatFastMode?: boolean;
   chatEffort?: AgentEffortLevel;
   coraExecutionPolicy?: CoraExecutionPolicy;
-  chatFastMode?: boolean;
   chat1mContext?: boolean;
   // Looms v2: stamp automation ownership + direct execution at creation so
   // the renderer can suppress tabs synchronously from the very first event.
@@ -3923,6 +3977,7 @@ export interface StartAutopilotInput {
   workspaceName: string;
   cwd: string;
   origin?: GitHubOrigin;
+  projectPolicyMode?: ProjectPolicyMode;
   runId?: string;
   planPath?: string;
   planTitle?: string;
@@ -4423,6 +4478,7 @@ export interface StartDirectWorkerRunInput {
   workspaceName?: string;
   cwd: string;
   origin?: GitHubOrigin;
+  projectPolicyMode?: ProjectPolicyMode;
   automationId: string;
   title: string; // `Loom: ${name} — pass ${n}`
   prompt: string; // fully rendered loop prompt

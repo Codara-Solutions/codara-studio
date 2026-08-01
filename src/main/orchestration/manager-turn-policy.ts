@@ -23,6 +23,10 @@
 //   park       -> provider trouble that outlived the retries. The run is
 //     paused, not failed: the work did not fail, the provider did, and
 //     Resume re-drives the turn. Rate limits land here directly.
+//     subscription (billing) declines deliberately do NOT park: a billing
+//     decline is a plain turn failure the user retries themselves. Parking
+//     it paused the run and took over the composer for something the user
+//     had not asked to be handled.
 //   fail       -> everything else keeps the pre-policy behaviour.
 //
 // Classification is delegated to the worker failure taxonomy: manager turns
@@ -85,7 +89,9 @@ const KEEP_STATE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
 
 /** Failure kinds that are provider trouble rather than the work failing, and
  * therefore park the run instead of branding it failed once retries are
- * exhausted. Rate limits park without retrying first. */
+ * exhausted. Rate limits park without retrying first. `subscription` is
+ * intentionally absent: a billing decline fails the turn visibly and leaves the
+ * run running, so the composer stays a normal input. */
 function parksInsteadOfFailing(kind: WorkerFailureKind | undefined): boolean {
   return kind === "transport" || kind === "provider" || kind === "rate_limit";
 }
@@ -142,8 +148,10 @@ export function planManagerTurnFailure(input: {
       // sentence pair, naming the control that actually exists.
       parkReason:
         kind === "rate_limit"
-          ? "Cora's provider is rate limited. Retry runs the turn again."
-          : "Cora's provider is overloaded. Retry runs the turn again.",
+          ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
+          : kind === "transport"
+            ? "Cora lost its connection to the provider. Retry when the connection is stable."
+            : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
       lastAction: input.mode === "chat" ? "chat_turn_parked" : "manager_turn_parked",
     };
   }

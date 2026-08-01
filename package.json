@@ -9,6 +9,9 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:user-message-resume": "node scripts/test-user-message-resume.cjs",
+    "test:codara-complete-application": "node scripts/test-codara-complete-application.cjs",
+    "test:manager-call-settlement": "node scripts/test-manager-call-settlement.cjs",
     "test:manual-agent-constitution": "node scripts/test-manual-agent-constitution.cjs",
     "test:user-constitution-store": "node scripts/test-user-constitution-store.cjs",
     "test:project-constitution-settings": "node scripts/test-project-constitution-settings.cjs",

@@ -76,6 +76,10 @@ export default function RunIdChip({
             "--spark-icon-btn-size": "18px",
             fontSize: 10,
             color: copied ? "var(--accent)" : "var(--muted-2)",
+            // Copy must survive a cramped row: the chip holds its width
+            // instead of being shrunk (or clipped) out of reach by a long
+            // sibling such as a paused run's park reason.
+            flex: "0 0 auto",
           } as React.CSSProperties
         }
       >
@@ -105,6 +109,10 @@ export default function RunIdChip({
         fontSize: 10,
         fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
+        // Copy must survive a cramped row: the chip holds its width instead of
+        // being shrunk (or clipped) out of reach by a long sibling such as a
+        // paused run's park reason.
+        flex: "0 0 auto",
         // No inline box-shadow, so the global :focus-visible ring renders.
         cursor: "default",
         transition:

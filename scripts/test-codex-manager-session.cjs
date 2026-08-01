@@ -319,6 +319,82 @@ async function main() {
       sessionUuid: resumeId,
     });
     check("resume discovery binds by exact UUID even for an old session", resumedFound === resumed);
+
+    const accountAHome = path.join(TMP, "codex-account-a");
+    const accountBHome = path.join(TMP, "codex-account-b");
+    const accountAId = uuid(5);
+    const accountBId = uuid(6);
+    const accountARollout = path.join(
+      sessions.sessionsDirFor(spawnDate, accountAHome),
+      `rollout-account-a-${accountAId}.jsonl`,
+    );
+    const accountBRollout = path.join(
+      sessions.sessionsDirFor(spawnDate, accountBHome),
+      `rollout-account-b-${accountBId}.jsonl`,
+    );
+    await writeRollout(accountARollout, {
+      cwd,
+      startedAt: new Date(since + 300).toISOString(),
+      message: "account A",
+    });
+    await writeRollout(accountBRollout, {
+      cwd,
+      startedAt: new Date(since + 400).toISOString(),
+      message: "account B",
+    });
+    const accountASnapshot = await sessions.snapshotRolloutPaths(
+      spawnDate,
+      accountAHome,
+    );
+    check(
+      "Explicit rollout snapshots cannot see another Codex home",
+      accountASnapshot.has(accountARollout) &&
+        !accountASnapshot.has(accountBRollout),
+    );
+    const accountBFound = await sessions.discoverRolloutForCwd(
+      since,
+      spawnDate,
+      cwd,
+      { strict: true, codexHome: accountBHome },
+    );
+    check(
+      "Explicit rollout discovery stays in the selected Codex home",
+      accountBFound === accountBRollout,
+    );
+    await fsp
+      .access(accountARollout)
+      .then(async () => {
+        let crossHomeRejected = false;
+        try {
+          await sessions.readRolloutMetadata(accountARollout, accountBHome);
+        } catch {
+          crossHomeRejected = true;
+        }
+        check(
+          "Transcript metadata reads reject cross-home paths",
+          crossHomeRejected,
+        );
+      });
+    if (process.platform !== "win32") {
+      const linkedSessionHome = path.join(TMP, "codex-linked-session-home");
+      const linkedSessionsRoot = path.join(linkedSessionHome, "sessions");
+      await fsp.mkdir(linkedSessionsRoot, { recursive: true });
+      await fsp.symlink(
+        path.join(accountAHome, "sessions", String(spawnDate.getFullYear())),
+        path.join(linkedSessionsRoot, String(spawnDate.getFullYear())),
+        "dir",
+      );
+      let linkedDirectoryRejected = false;
+      try {
+        await sessions.snapshotRolloutPaths(spawnDate, linkedSessionHome);
+      } catch {
+        linkedDirectoryRejected = true;
+      }
+      check(
+        "Rollout discovery rejects nested session-directory symlinks",
+        linkedDirectoryRejected,
+      );
+    }
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;

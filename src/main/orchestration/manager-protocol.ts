@@ -1382,8 +1382,15 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   }
   const lines: string[] = [];
   for (const r of runtimes) {
-    if (!r.installed) {
-      lines.push(`- ${r.kind} (${r.label}): NOT INSTALLED: do not assign work to this runtime.`);
+    // Worker assignability, not CLI presence: every autonomous worker runs on
+    // the bundled Pi harness, so what decides this is whether the provider
+    // this runtime selects has a connected subscription. `workerAssignable` is
+    // stamped by orchestration/pi-worker-providers; an undecorated diagnostic
+    // falls back to the old CLI-presence meaning.
+    if (!(r.workerAssignable ?? r.installed)) {
+      lines.push(
+        `- ${r.kind} (${r.label}): NO CONNECTED SUBSCRIPTION: do not assign workers to this provider.`,
+      );
       continue;
     }
     const versionPart = r.version ? ` v${r.version.split(/\s+/)[0]}` : "";
@@ -1393,14 +1400,7 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
       const def = m.isDefault ? " default" : "";
       return `${m.id} [${efforts}${tier}${def}]`;
     }).join(", ");
-    // The sign-in probe is advisory: it cannot see shell-exported credentials
-    // from a Finder-launched app, so "no credential detected" must not forbid
-    // assigning work — only bias the choice when an equivalent peer exists.
-    const authCaveat =
-      r.authenticated === false
-        ? " (WARNING: no credential detected on this machine, it may not be signed in; prefer an equivalent runtime without this warning, but assigning work here is allowed)"
-        : "";
-    lines.push(`- ${r.kind} (${r.label})${versionPart} INSTALLED${authCaveat}. Models: ${modelList}`);
+    lines.push(`- ${r.kind} (${r.label})${versionPart} AVAILABLE. Models: ${modelList}`);
   }
   lines.push("- shell: always available (deterministic command-only tasks).");
   lines.push("- manual: always available (human executes; only when automation is unsafe).");

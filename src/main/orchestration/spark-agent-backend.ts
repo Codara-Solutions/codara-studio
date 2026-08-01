@@ -32,6 +32,7 @@ import type {
   ChatMode,
   CoraExecutionPolicy,
   HumanRunMessage,
+  ProjectConstitutionSnapshot,
   RunState,
 } from "@shared/types";
 import { DEFAULT_CODEX_CHAT_MODEL } from "@shared/model-catalog";
@@ -46,6 +47,8 @@ import {
   effectiveChatOneMillionContext,
 } from "@shared/chat-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
+import { appendProjectConstitution } from "./project-constitution";
+import { appendManagerConstitutionBlock } from "./manager-constitution";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -97,7 +100,7 @@ export interface ManagerRequestInput {
   agentSyncContext?: string;
   settings: AppSettings;
   /** Pre-resolved immutable global-then-project manager guidance. */
-  managerConstitutionBlock?: string;
+  managerConstitutionBlock: string;
   /** Ordered immutable user input bundled by run-store before backend startup. */
   prompt: string;
   /** Durable message ownership mirrored onto the SparkCall. */
@@ -345,7 +348,10 @@ export interface SparkAgentBackend {
  * plan", `cora start` with no mode) and a legacy talk/plan/execute stamp both
  * dispatch as Auto from here.
  */
-export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
+export function resolveChatBackendConfig(
+  run: RunState,
+  openAiFastMode?: boolean,
+): ChatBackendConfig {
   const backend: ChatBackendKind = run.chatBackend ?? "pi";
   const mode: ChatMode = effectiveChatMode(run.chatMode);
   const effort: AgentEffortLevel = run.chatEffort ?? (backend === "pi" ? "high" : "medium");
@@ -358,10 +364,19 @@ export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
     model,
     mode,
     effort,
+    accountProfileId: run.chatAccountProfileId,
+    nativeCodexProfileId: run.nativeCodexProfileId,
+    nativeClaudeProfileId: run.nativeClaudeProfileId,
     executionPolicy: effectiveRunExecutionPolicy(run),
     sessionUuid: run.chatSessionUuid,
     sessionMode: run.chatSessionMode,
-    fastMode: effectiveChatFastMode(backend, run.chatFastMode),
+    // Fast mode is one global setting, not a per-chat one: the composer's
+    // flash button writes it, and the whole chatFastMode write path that the
+    // old per-chat pill used is gone. run.chatFastMode is
+    // deliberately NOT consulted here even as a fallback, so a legacy run.json
+    // that still carries `true` cannot resurrect fast mode from stale data.
+    // Callers that know the setting pass it; anyone else gets off.
+    fastMode: effectiveChatFastMode(backend, openAiFastMode === true),
     oneMillionContext: effectiveChatOneMillionContext(backend),
   };
 }
@@ -603,10 +618,11 @@ function buildManagerTurnInput(
  *   <stable prefix>  MANAGER_PROMPT_DYNAMIC_MARKER  <per-turn dynamic suffix>
  *
  * The stable prefix is what the provider caches. It is the mode's shipped
- * guidance plus the run's workspace cwd, and NOTHING else: no clock, no run
- * state, no worker digests, no message counts. Every one of those belongs after
- * the marker, where a changed byte costs nothing because the suffix was never
- * cacheable to begin with.
+ * guidance plus the run's workspace cwd and immutable project-constitution
+ * snapshot, and NOTHING else: no clock, no mutable run state, no worker
+ * digests, no message counts. Every one of those belongs after the marker,
+ * where a changed byte costs nothing because the suffix was never cacheable to
+ * begin with.
  *
  * Backends send the two halves on different wires (system prompt vs user
  * message), so the marker never travels to the provider verbatim. It exists so
@@ -625,15 +641,22 @@ export interface ManagerPromptParts {
 }
 
 /**
- * Build the cacheable half of a manager turn. Deliberately takes primitives
- * rather than a RunState: a function that cannot see the run cannot leak a
- * timestamp or a worker digest into the cached prefix.
+ * Build the cacheable half of a manager turn. Deliberately takes only stable
+ * inputs rather than a RunState: a function that cannot see the mutable run
+ * cannot leak a timestamp or worker digest into the cached prefix.
  */
 export function buildManagerStablePrefix(input: {
   guidance: string;
   cwd: string;
+  /** Pre-resolved global-then-project block for active manager backends. */
+  managerConstitutionBlock?: string;
+  /** Legacy/project-only seam retained for pure prompt and worker tests. */
+  projectConstitution?: ProjectConstitutionSnapshot;
 }): string {
-  return `${input.guidance}\n\nWorkspace cwd: ${input.cwd}\n`;
+  const prompt = `${input.guidance}\n\nWorkspace cwd: ${input.cwd}\n`;
+  return input.managerConstitutionBlock !== undefined
+    ? appendManagerConstitutionBlock(prompt, input.managerConstitutionBlock)
+    : appendProjectConstitution(prompt, input.projectConstitution);
 }
 
 /** Join the two halves for auditing. `turnPrompt` is buildManagerTurnPrompt's output. */
@@ -641,6 +664,8 @@ export function assembleManagerPrompt(input: {
   guidance: string;
   cwd: string;
   turnPrompt: string;
+  managerConstitutionBlock?: string;
+  projectConstitution?: ProjectConstitutionSnapshot;
 }): ManagerPromptParts {
   const stablePrefix = buildManagerStablePrefix(input);
   return {

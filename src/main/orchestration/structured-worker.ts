@@ -20,13 +20,29 @@ import { estimateWorkerCostUsd, type ModelUsage } from "../model-prices";
 import { resolveLaunchTarget } from "./cli-session";
 import { ensureCodexProjectTrust } from "./codex-trust";
 import { claudeDisallowedTools, codexAccessFlags } from "./worker-access";
+import {
+  acquireNativeCodexProfileLease,
+  resolveFrozenNativeCodexProfile,
+} from "./native-codex-profile-runtime";
+import {
+  acquireNativeClaudeProfileLease,
+  resolveFrozenNativeClaudeProfile,
+} from "./native-claude-profile-runtime";
+import { structuredWorkerSystemPrompt } from "./structured-worker-system";
 
 export interface StructuredWorkerInput {
   runId: string;
+  attemptId: string;
   automationId: string;
   task: WorkerTask;
+  /** Frozen native Codex account. Undefined is legacy/personal. */
+  nativeCodexProfileId?: string;
+  /** Frozen native Claude account. Undefined is legacy personal/unset. */
+  nativeClaudeProfileId?: string;
   cwd: string;
   prompt: string;
+  /** Exact attempt-scoped global block, resolved by the launch owner. */
+  workerConstitutionBlock: string;
   paths: WorkerArtifactPaths;
   sandboxed?: boolean;
   extraWritableDirs?: string[];
@@ -46,9 +62,6 @@ export interface StructuredWorkerResult {
    */
   costUsd?: number;
 }
-
-const WORKER_SYSTEM_PROMPT = `You are a Codara automation worker running without an interactive terminal.
-Execute the user's worker brief autonomously with the tools available to you. The brief is authoritative about scope, access, verification, and the required final-report.json path. Do not merely explain what should be done: perform the work, verify it, and write the structured report before finishing.`;
 
 function normalizeEffort(effort: AgentEffortLevel | undefined): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
   if (!effort) return undefined;
@@ -110,8 +123,18 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
   input.onStarted(() => abortController.abort());
   let stderrTail = "";
   let costUsd: number | undefined;
+  let releaseProfileLease: (() => void) | null = null;
   try {
-    const env = await workerEnv(input);
+    const baseEnv = await workerEnv(input);
+    const execution = await resolveFrozenNativeClaudeProfile(
+      input.nativeClaudeProfileId,
+      baseEnv,
+    );
+    releaseProfileLease = acquireNativeClaudeProfileLease(
+      execution.profileId,
+      `worker:${input.runId}:${input.attemptId}`,
+    );
+    const env = execution.env as Record<string, string>;
     Object.assign(env, {
       CLAUDE_AGENT_SDK_CLIENT_APP: "codara-studio/0.1.0",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -131,7 +154,11 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
       settingSources: [],
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      systemPrompt: { type: "preset", preset: "claude_code", append: WORKER_SYSTEM_PROMPT },
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: structuredWorkerSystemPrompt(input.workerConstitutionBlock),
+      },
       tools: { type: "preset", preset: "claude_code" },
       disallowedTools,
       mcpServers: {
@@ -232,6 +259,8 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
       transport: "agent-sdk",
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
+  } finally {
+    releaseProfileLease?.();
   }
 }
 
@@ -245,10 +274,22 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
   let child: ChildProcessWithoutNullStreams | null = null;
   let interrupted = false;
   let costUsd: number | undefined;
+  let releaseProfileLease: (() => void) | null = null;
   try {
-    await ensureCodexProjectTrust(input.cwd).catch(() => undefined);
-    if (!(await isSparkOrchestratorMcpInstalled("codex"))) {
-      await installOrchestratorMcpForCodex();
+    const baseEnv = await workerEnv(input);
+    const execution = await resolveFrozenNativeCodexProfile(
+      input.nativeCodexProfileId,
+      baseEnv,
+    );
+    const codexHome = execution.env.CODEX_HOME;
+    if (!codexHome) throw new Error("Resolved native Codex profile has no CODEX_HOME.");
+    releaseProfileLease = acquireNativeCodexProfileLease(
+      execution.profileId,
+      `worker:${input.runId}:${input.attemptId}`,
+    );
+    await ensureCodexProjectTrust(input.cwd, codexHome).catch(() => undefined);
+    if (!(await isSparkOrchestratorMcpInstalled("codex", { codexHome }))) {
+      await installOrchestratorMcpForCodex(false, { codexHome });
     }
     const binary = await codexProvider.resolveBinary();
     if (!binary) throw new Error("Codex CLI not found. Install Codex and run it once to log in.");
@@ -275,9 +316,11 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
     const launch = resolveLaunchTarget(binary, args);
     child = spawn(launch.exe, launch.args, {
       cwd: input.cwd,
-      env: await workerEnv(input),
+      env: execution.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    child.once("error", () => releaseProfileLease?.());
+    child.once("close", () => releaseProfileLease?.());
     input.onStarted(() => {
       interrupted = true;
       if (child && child.exitCode == null && !child.killed) child.kill("SIGTERM");
@@ -444,7 +487,9 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
       cwd: input.cwd,
       approvalPolicy: "never",
       sandbox: access.sandboxMode ?? "danger-full-access",
-      baseInstructions: WORKER_SYSTEM_PROMPT,
+      baseInstructions: structuredWorkerSystemPrompt(
+        input.workerConstitutionBlock,
+      ),
       threadSource: "startup",
       ephemeral: true,
     });
@@ -481,6 +526,7 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
     };
   } finally {
     if (child && child.exitCode == null && !child.killed) child.kill("SIGTERM");
+    if (!child) releaseProfileLease?.();
   }
 }
 

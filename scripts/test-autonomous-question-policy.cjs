@@ -52,6 +52,7 @@ async function main() {
   const {
     decideRunManagerQuestion,
     normalizeRunQuestionSignature,
+    blindApprovalAskProblem,
     REVERSIBLE_MANAGER_DEFAULT,
   } = await loadPolicy();
   let passed = 0;
@@ -214,6 +215,68 @@ async function main() {
     });
     assert.equal(decision.action, "protocol_error");
     assert.match(decision.error, /without a usable recommendation/i);
+  });
+
+  // ── Blind approval asks (run-msafk7yu-zkudx6) ─────────────────────────────
+  // A plan_approval ask must carry the plan; "the plan shown above" points at
+  // collapsed worker reports the chat never rendered.
+
+  test("a plan_approval ask that references unrendered content with no list is rejected", () => {
+    const problem = blindApprovalAskProblem(
+      "Please approve or revise the six-agent consensus plan shown above. The recommended execution is the 47 agreed commits plus a separate commit 48.",
+      "plan_approval",
+    );
+    assert.ok(problem, "the blind ask must be rejected");
+    assert.match(problem, /content the user cannot see/);
+    assert.match(problem, /enumerated plan/);
+  });
+
+  test("worker-report references are rejected the same way", () => {
+    assert.ok(
+      blindApprovalAskProblem(
+        "Approve the commit series as described by the workers, or revise it.",
+        "plan_approval",
+      ),
+    );
+    assert.ok(
+      blindApprovalAskProblem(
+        "Approve the migration steps outlined earlier before I proceed.",
+        "plan_approval",
+      ),
+    );
+  });
+
+  test("an ask that enumerates its content passes even when it also says 'above'", () => {
+    const enumerated =
+      "Please approve the plan described above, now enumerated in full:\n" +
+      "1. fix: chat timeline ticker (timeline.ts, ChatConversation.tsx)\n" +
+      "2. feat: approval-ask validation (run-question-policy.ts, agent-socket.ts)\n";
+    assert.equal(blindApprovalAskProblem(enumerated, "plan_approval"), null);
+    const bulleted =
+      "Approve the plan shown above:\n- commit one (a.ts)\n- commit two (b.ts)";
+    assert.equal(blindApprovalAskProblem(bulleted, "plan_approval"), null);
+  });
+
+  test("self-contained asks and non-approval categories are untouched", () => {
+    assert.equal(
+      blindApprovalAskProblem(
+        "Approve committing these two changes: the timeline fix and the ask validation?",
+        "plan_approval",
+      ),
+      null,
+    );
+    // Only plan_approval is gated; other categories keep their own policy.
+    assert.equal(
+      blindApprovalAskProblem(
+        "May I delete the table described above?",
+        "destructive_irreversible",
+      ),
+      null,
+    );
+    assert.equal(
+      blindApprovalAskProblem("May I proceed as described above?", undefined),
+      null,
+    );
   });
 
   console.log(`${passed} autonomous-question policy tests passed.`);

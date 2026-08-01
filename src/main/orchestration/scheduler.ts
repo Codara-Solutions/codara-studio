@@ -67,6 +67,19 @@ function schedulerPath(): string {
 // one-shot firing behaviour exactly.
 function normalizeJob(job: ScheduledJob): ScheduledJob {
   let next = job;
+  if (next.input?.origin?.kind === "github-pull-request") {
+    // A persisted PR-authored loom must never launder its next iteration into
+    // trusted project-policy mode. Disable it on read as a legacy/future-proof
+    // fail-closed migration; the socket also refuses new PR automation calls.
+    next = {
+      ...next,
+      enabled: false,
+      input: {
+        ...next.input,
+        projectPolicyMode: "untrusted-pull-request",
+      },
+    };
+  }
   if (!next.trigger && next.cron) {
     next = { ...next, trigger: { kind: "cron", expr: next.cron } };
   }

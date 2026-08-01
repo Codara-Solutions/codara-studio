@@ -79,7 +79,10 @@ export function stepStatusColor(status: StepState["status"]): string {
 }
 
 export function attemptStatusColor(status: WorkerAttempt["status"]): string {
-  if (["running", "launching", "preparing", "prompt_ready", "finishing"].includes(status)) {
+  // Accent is reserved for an attempt with a process behind it. "preparing" and
+  // "prompt_ready" are a prompt on disk and nothing more — they fall through to
+  // the muted default, the same colour a queued worker gets everywhere else.
+  if (["running", "launching", "finishing"].includes(status)) {
     return "var(--accent)";
   }
   if (status === "succeeded") return "var(--ok)";
@@ -186,7 +189,7 @@ export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
 // OpenAI ("gpt-5.6-sol" -> "Sol"). Unknown shapes pass through rather than
 // being mangled, a new model must never render as an empty chip.
 // `runtime` is only the fallback text, so it is typed loosely: callers include
-// pane metadata whose runtime union ("opencode") is wider than WorkerRuntime.
+// pane metadata whose runtime union is wider than WorkerRuntime.
 export function workerModelLabel(
   model: string | undefined,
   runtime: string,
@@ -386,12 +389,14 @@ export function deriveAgentStatus(
   if (
     attempt?.status === "running" ||
     attempt?.status === "launching" ||
-    attempt?.status === "preparing" ||
-    attempt?.status === "prompt_ready" ||
     attempt?.status === "finishing"
   ) {
     return "running";
   }
+  // "preparing"/"prompt_ready" are deliberately absent: a prepared attempt has
+  // no process, and a paused run can leave one sitting there indefinitely. The
+  // node falls through to "queued" — matching the composer chip and the chat
+  // row, so the graph never shows a worker running that never started.
   if (task?.status === "running" || task?.status === "claimed") return "running";
   if (task?.status === "accepted" || task?.status === "needs_review" || attempt?.status === "succeeded") {
     return "done";

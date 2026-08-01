@@ -1,5 +1,5 @@
 import { promises as fs, createWriteStream, watch, type FSWatcher } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import type {
@@ -9,6 +9,7 @@ import type {
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
   Checkpoint,
+  ProjectPolicyMode,
   CoraWhiteboard,
   CoraWhiteboardEdge,
   CoraWhiteboardNode,
@@ -17,7 +18,9 @@ import type {
   AgentRuntimeModel,
   AppSettings,
   BoardCard,
+  ChatBackendKind,
   LoomWorkerConfig,
+  ManagerApplicationReceipt,
   RunBoard,
   RunBoardUpdateInput,
   RunBoardUpdateResult,
@@ -68,12 +71,13 @@ import type {
   WorkerTaskStatus,
   WorkerAttempt,
   WorkerArtifactPaths,
+  UserConstitutionCapture,
   WorkerRuntimeState,
   VerifierVerdict,
   WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
-import { FAN_OUT_DIRECTIVE_MARKER } from "@shared/types";
+import { FAN_OUT_DIRECTIVE_MARKER, normalizeGitHubOrigin } from "@shared/types";
 import {
   normalizeHumanRunQuestionMessages,
   resolveOpenRunQuestion as resolveOpenRunQuestionPure,
@@ -101,8 +105,25 @@ import {
   normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
 import { contextWindowForModel } from "@shared/context-window";
+import {
+  chatContextCapacityTokens,
+  resolveCompactAtTokens,
+} from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
+import {
+  normalizeProjectConstitutionSnapshot,
+  readProjectConstitutionSnapshot,
+} from "./project-constitution";
+import { resolveCapturedManagerConstitutionBlock } from "./manager-constitution-resolver";
+import { captureCurrentUserConstitution } from "../user-constitution-store";
+import {
+  copyUserConstitutionCapture,
+  copyRunUserConstitutionCapture,
+  normalizeRunUserConstitutionProvenance,
+} from "../user-constitution-capture";
+const resolveProjectPolicyMode = (_input: unknown): ProjectPolicyMode => "trusted";
+const runProjectPolicyMode = (_run: RunState): ProjectPolicyMode => "trusted";
 import {
   CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
   whiteboardNodeSizeLimits,
@@ -232,6 +253,15 @@ import {
 } from "./loom-graph";
 import { evaluateGuardPredicate } from "./loom-predicates";
 import { ensureCodexProjectTrust } from "./codex-trust";
+import {
+  resolveFrozenNativeCodexProfile,
+  resolveNewNativeCodexProfile,
+  nativeCodexProfileStore,
+} from "./native-codex-profile-runtime";
+import {
+  resolveNewNativeClaudeProfile,
+  nativeClaudeProfileStore,
+} from "./native-claude-profile-runtime";
 import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { recordRunMemory } from "./run-memory";
 import { recordRunLessons } from "./workspace-lessons";
@@ -249,16 +279,22 @@ import {
 } from "./checkpoints";
 import { resolveConversationRewindTransaction } from "./conversation-rewind";
 import { createKeyedTaskQueue } from "./keyed-task-queue";
-import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
+import {
+  createSandboxWorktree,
+  managedWorktreesRoot,
+  mergeBackSandboxWorktree,
+  removeSandboxWorktree,
+} from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
 import { defaultShell } from "../shells";
 import {
-  coerceWorkerModelToRoster,
+  plannedWorkerModel,
   rosterModelFor,
   sanitizeWorkerModelHint,
   WORKER_DEFAULT_CLAUDE_MODEL,
 } from "./worker-model-hint";
+import { shouldResumeForUserMessage } from "./user-message-resume";
 import * as pty from "../pty-manager";
 import {
   deleteAgentTerminalRun,
@@ -267,7 +303,7 @@ import {
   settleAgentTerminalRun,
 } from "../agent-terminal-lifecycle";
 import { runStructuredWorker } from "./structured-worker";
-import { detectAgentRuntimes } from "../agent-runtimes";
+import { detectWorkerAssignableRuntimes } from "./pi-worker-providers";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
 import {
@@ -276,18 +312,53 @@ import {
   isManagerTurnCurrent,
   resolveChatBackendConfig,
   shouldIncludeCanonicalReplay,
+  type ChatBackendConfig,
   type ChatStreamEvent,
 } from "./spark-agent-backend";
-import { getBackend } from "./backend-registry";
-import { cleanupPiMcpBridgeConfig, createCodaraPiWorkerLaunchPlan } from "./pi-runtime-electron";
+import { disposeManagerSessions, getBackend } from "./backend-registry";
+import { createRunRuntimeShutdown } from "./run-runtime-shutdown";
+import {
+  cleanupPiMcpBridgeConfig,
+  createCodaraPiWorkerLaunchPlan,
+  resolveCodaraPiExecutionAccount,
+} from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
 import type { PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
+import { resolveCapturedWorkerConstitutionBlock } from "./worker-constitution-resolver";
+import {
+  unsupportedEnabledWorkerConstitutionReason,
+  workerConstitutionLaunchSurface,
+} from "./worker-constitution-support";
+import {
+  cleanupPrivateWorkerConstitutionPrompt,
+  privateWorkerConstitutionPromptPath,
+  writePrivateWorkerConstitutionPrompt,
+} from "./worker-constitution-file";
+import {
+  normalizePiAccountProfileId,
+  preserveFrozenPiAccountProfileId,
+  selectPiWorkerAccountProfile,
+} from "./pi-account-execution";
+import {
+  applyAtomicManagerCallSettlement,
+  type AppliedManagerCallSettlementInput,
+} from "./manager-call-settlement";
+import {
+  canonicalCodaraCompleteSummary,
+  codaraCompleteReceiptForCall,
+  codaraCompleteReceiptKey,
+  hashCodaraCompletePayload,
+  normalizeManagerApplicationReceipts,
+} from "./manager-application-receipts";
+import {
+  rankImplicitPiAccounts,
+  selectImplicitPiAccount,
+} from "./pi-account-router";
 import {
   abandonRunQuestionOwnership,
   applyRunQuestionAnswer,
   applyRunQuestionBlocker,
   claimPendingManagerResume,
-  clearRegisteredPendingManagerResume,
   createRunBlocker,
   decideRunManagerQuestion,
   inferRunQuestionCategory,
@@ -295,6 +366,110 @@ import {
   recoverPendingManagerResumeLease,
   releaseRunQuestionBlocker,
 } from "./run-question-policy";
+
+function piProviderForManagerModel(model: string): PiSubscriptionProvider {
+  if (model.startsWith("claude-")) return "anthropic";
+  if (model.startsWith("gpt-")) return "openai-codex";
+  throw new Error(`Pi subscription backend does not support model ${model}`);
+}
+
+async function freezeManagerExecutionAccount(
+  chat: ChatBackendConfig,
+): Promise<ChatBackendConfig> {
+  if (chat.backend === "claude") {
+    const account = await nativeClaudeProfileStore.resolveProfile({
+      profileId: chat.nativeClaudeProfileId,
+      requireConnected: true,
+    });
+    return {
+      ...chat,
+      nativeClaudeProfileId: account.profileId,
+    };
+  }
+  if (chat.backend === "codex") {
+    const account = await nativeCodexProfileStore.resolveProfile({
+      profileId: chat.nativeCodexProfileId,
+      requireConnected: true,
+    });
+    return {
+      ...chat,
+      nativeCodexProfileId: account.profileId,
+    };
+  }
+  if (chat.backend !== "pi") return chat;
+  const account = await resolveCodaraPiExecutionAccount({
+    provider: piProviderForManagerModel(chat.model),
+    preferredAccountProfileId: chat.accountProfileId,
+  });
+  return {
+    ...chat,
+    accountProfileId: account.accountProfileId,
+  };
+}
+
+async function pinImplicitPiManagerAccount(
+  run: RunState,
+): Promise<RunState> {
+  const initial = resolveChatBackendConfig(run);
+  if (
+    initial.backend !== "pi" ||
+    initial.accountProfileId ||
+    run.sparkCalls.length > 0
+  ) {
+    return run;
+  }
+  const provider = piProviderForManagerModel(initial.model);
+  const candidate = await selectImplicitPiAccount(provider, initial.model);
+  if (!candidate) return run;
+
+  // Re-resolve the route as an exact identity pin before persisting it. A
+  // stale cached quota row may rank an account, but only the auth-store
+  // resolver can authorize its private config root for execution.
+  await resolveCodaraPiExecutionAccount({
+    provider,
+    preferredAccountProfileId: candidate.accountProfileId,
+  });
+  return commitRunChange(run, {
+    type: "run.pi_account_profile_selected",
+    message: candidate.knownLimitReached
+      ? "Cora froze a connected subscription account before checking its live limit"
+      : "Cora selected a connected subscription account for this chat",
+    payload: {
+      accountProfileId: candidate.accountProfileId,
+      provider,
+      selection: "implicit",
+      ...(candidate.knownLimitReached ? { cachedLimitReached: true } : {}),
+    },
+    mutate: (draft, timestamp) => {
+      const current = resolveChatBackendConfig(draft);
+      if (
+        current.backend !== "pi" ||
+        current.accountProfileId ||
+        draft.sparkCalls.length > 0 ||
+        piProviderForManagerModel(current.model) !== provider
+      ) {
+        return false;
+      }
+      draft.chatAccountProfileId = candidate.accountProfileId;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+type DirectNativeBackend = Extract<ChatBackendKind, "claude" | "codex">;
+
+async function resolveSelectableNativeProfile(
+  backend: DirectNativeBackend,
+  profileId: string | null | undefined,
+): Promise<string> {
+  const input = profileId === null || profileId === undefined
+    ? { useDefault: true as const, requireConnected: true }
+    : { profileId, requireConnected: true };
+  const resolved = backend === "claude"
+    ? await nativeClaudeProfileStore.resolveProfile(input)
+    : await nativeCodexProfileStore.resolveProfile(input);
+  return resolved.profileId;
+}
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -305,6 +480,7 @@ const HUMAN_INPUT_PAUSE_REASON = "Cora needs human input before continuing.";
 // of them even when they exceed this budget, then fill the remaining slots with
 // the newest known-terminal runs.
 const RUN_RETENTION_KEEP = 50;
+const RUN_RETRY_REPAIR_READ_LIMIT = 64;
 const RETENTION_TERMINAL_STATUSES = new Set<RunStatus>([
   "complete",
   "failed",
@@ -333,6 +509,8 @@ interface ActiveWorkerProcess {
   attemptId: string;
   pid?: number;
   command: string;
+  processGenerationId: string;
+  inputCapability: "pty" | "steer" | "none";
   write: (input: string) => void;
   kill: () => void;
   // Self-reported runtime state from the worker process via the hook RPC
@@ -350,10 +528,15 @@ const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
 const activeSteeringFollowups = new Map<string, Promise<void>>();
+const activeManagerTurnRecoveries = new Map<string, Promise<void>>();
 const activeConversationRewinds = new Map<string, Promise<UndoToCheckpointResult>>();
 // Durable answer continuations are keyed by question identity until the intended
 // manager stage claims their persisted pendingManagerResume record.
 const activePendingManagerResumes = new Set<string>();
+// Runs whose paused state is being lifted by a user message that just landed.
+// One at a time per run: a burst of sends must produce one resume, not one per
+// message (the later messages ride the same turn's queue).
+const activeUserMessageResumes = new Set<string>();
 // Guard so the fan-out serial-downgrade event is emitted at most once per
 // (run, task): pickAutopilotTasks is a PURE selector called every autopilot
 // tick, so without this the launch site would re-emit fanout.downgraded_to_serial
@@ -394,6 +577,25 @@ const SKIPPED_DIRECT_FILE_MENTION_DIRS = new Set([
 // only read snapshots and the IPC bridge structured-clones results across to
 // the renderer, so no caller relies on getRun handing back a fresh deep copy.
 const runCache = new Map<string, RunState>();
+
+const drainRunRuntimeResources = createRunRuntimeShutdown({
+  activeWorkers: () => activeWorkerProcesses.values(),
+  activeRunIds: () => runCache.keys(),
+  persistedRunIds: () => fs.readdir(runsRoot()),
+  disposeManagerSessions,
+  killPty: (attemptId) => pty.killImmediate(attemptId),
+  releaseWorker: (attemptId) => {
+    activeWorkerProcesses.delete(attemptId);
+  },
+});
+
+/**
+ * Best-effort process-lifetime teardown for explicit application quit. Durable
+ * run, worktree, and artifact data is intentionally left untouched.
+ */
+export function shutdownRunRuntimeResources(maxWaitMs?: number): Promise<void> {
+  return drainRunRuntimeResources(maxWaitMs);
+}
 
 interface ManagerDecisionMutationContext {
   runId: string;
@@ -451,6 +653,115 @@ const appendBufferedEvent = (
 // One-shot per process: fired lazily from listRuns(). Keeps the runs/ dir
 // from growing unbounded (see RUN_RETENTION_KEEP).
 let didRetentionSweep = false;
+const runDeletedListeners = new Set<
+  (input: { workspaceId: string; runId: string }) => void | Promise<void>
+>();
+const runSavedListeners = new Set<
+  (input: { workspaceId: string; runId: string }) => void | Promise<void>
+>();
+
+/**
+ * Narrow lifecycle hook for durable indexes that point at run ids. The
+ * run-store remains unaware of those indexes; listeners receive identities
+ * only after the run directory and cache entry are gone.
+ */
+export function onRunDeleted(
+  listener: (input: {
+    workspaceId: string;
+    runId: string;
+  }) => void | Promise<void>,
+): () => void {
+  runDeletedListeners.add(listener);
+  return () => runDeletedListeners.delete(listener);
+}
+
+/** Identity-only post-commit hook for bounded derived indexes and caches. */
+export function onRunSaved(
+  listener: (input: {
+    workspaceId: string;
+    runId: string;
+  }) => void | Promise<void>,
+): () => void {
+  runSavedListeners.add(listener);
+  return () => runSavedListeners.delete(listener);
+}
+
+export type RunLinkSummary = Pick<
+  RunState,
+  | "id"
+  | "workspaceId"
+  | "title"
+  | "status"
+  | "updatedAt"
+  | "automationId"
+  | "origin"
+>;
+
+const RUN_LINK_SUMMARY_READ_LIMIT = 64;
+
+/**
+ * Bounded queue-oriented projection. Every run.json may contribute only a
+ * cheap filesystem timestamp; only the 64 most recently written bodies are
+ * deserialized. This keeps an older, still-active run linkable after many
+ * newer conversations were created without loading the complete run store.
+ */
+export async function listRecentRunLinkSummaries(
+  requestedLimit = RUN_LINK_SUMMARY_READ_LIMIT,
+): Promise<RunLinkSummary[]> {
+  const limit = Math.max(
+    0,
+    Math.min(
+      RUN_LINK_SUMMARY_READ_LIMIT,
+      Number.isSafeInteger(requestedLimit)
+        ? Math.floor(requestedLimit)
+        : RUN_LINK_SUMMARY_READ_LIMIT,
+    ),
+  );
+  if (limit === 0) return [];
+
+  let names: string[];
+  try {
+    names = await fs.readdir(runsRoot());
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+  const candidates = await Promise.all(
+    names.map(async (name) => {
+      try {
+        return { name, mtimeMs: (await fs.stat(runPath(name))).mtimeMs };
+      } catch {
+        return { name, mtimeMs: Number.NEGATIVE_INFINITY };
+      }
+    }),
+  );
+  const recent = candidates
+    .sort(
+      (left, right) =>
+        right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name),
+    )
+    .slice(0, limit);
+  const runs = await Promise.all(
+    recent.map(({ name }) => getRun(name)),
+  );
+  return runs
+    .filter((run): run is RunState => Boolean(run))
+    .sort(
+      (left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt) ||
+        left.id.localeCompare(right.id),
+    )
+    .slice(0, limit)
+    .map((run) => ({
+      id: run.id,
+      workspaceId: run.workspaceId,
+      title: run.title,
+      status: run.status,
+      updatedAt: run.updatedAt,
+      ...(run.automationId ? { automationId: run.automationId } : {}),
+      ...(run.origin ? { origin: run.origin } : {}),
+    }));
+}
 
 interface RuntimeReroute {
   [key: string]: unknown;
@@ -461,25 +772,132 @@ interface RuntimeReroute {
   reason: string;
 }
 
+/**
+ * Runtime diagnostics for WORKER ASSIGNMENT, decorated with `workerAssignable`.
+ *
+ * Every caller of this helper is deciding where a worker goes, and workers run
+ * on the bundled Pi harness, so the question is "is there a connected Pi
+ * subscription for that provider", not "is the CLI binary on PATH". See
+ * pi-worker-providers for the split. Surfaces that really do spawn the
+ * binaries keep reading `installed` from detectAgentRuntimes directly.
+ */
 async function detectConfiguredAgentRuntimes(): Promise<AgentRuntimeDiagnostic[]> {
-  return detectAgentRuntimes().catch(() => []);
+  return detectWorkerAssignableRuntimes();
 }
 
+/** Worker assignability for one runtimePreference within a decorated set. */
+function runtimeAssignable(diagnostic: AgentRuntimeDiagnostic): boolean {
+  return diagnostic.workerAssignable ?? diagnostic.installed;
+}
+
+const reservedRunCreations = new Map<string, Promise<RunState>>();
+
 export async function createRun(input: CreateRunInput): Promise<RunState> {
+  return createRunInternal(input);
+}
+
+/**
+ * Crash-recovery seam for journaled PR imports. The id is preallocated before
+ * Git/state side effects; replay returns only an exact authoritative match and
+ * refuses an unrelated collision.
+ */
+export async function createRunWithReservedId(
+  runId: string,
+  input: CreateRunInput,
+): Promise<RunState> {
+  if (
+    !/^run-pr-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      runId,
+    )
+  ) {
+    throw new Error("Reserved pull-request run id is invalid.");
+  }
+  const inflight = reservedRunCreations.get(runId);
+  if (inflight) return inflight;
+  const operation = (async () => {
+    const existing = await getRun(runId);
+    if (existing) {
+      const expectedOrigin = normalizeGitHubOrigin(input.origin);
+      const exact =
+        existing.workspaceId === input.workspaceId &&
+        existing.settingsSnapshot?.workspaceCwd === input.cwd &&
+        existing.projectPolicyMode ===
+          resolveProjectPolicyMode({
+            origin: expectedOrigin,
+            projectPolicyMode: input.projectPolicyMode,
+          }) &&
+        JSON.stringify(existing.origin ?? null) ===
+          JSON.stringify(expectedOrigin ?? null);
+      if (!exact) {
+        throw new Error("Reserved pull-request run id belongs to another run.");
+      }
+      return existing;
+    }
+    return createRunInternal(input, runId);
+  })();
+  reservedRunCreations.set(runId, operation);
+  try {
+    return await operation;
+  } finally {
+    if (reservedRunCreations.get(runId) === operation) {
+      reservedRunCreations.delete(runId);
+    }
+  }
+}
+
+async function createRunInternal(
+  input: CreateRunInput,
+  reservedRunId?: string,
+): Promise<RunState> {
   const now = new Date().toISOString();
+  const origin = normalizeGitHubOrigin(input.origin);
+  const projectPolicyMode = resolveProjectPolicyMode({
+    origin,
+    projectPolicyMode: input.projectPolicyMode,
+  });
+  const projectConstitution =
+    projectPolicyMode === "trusted"
+      ? await readProjectConstitutionSnapshot(input.cwd)
+      : null;
   const initialBackend = input.chatBackend ?? "pi";
+  if (
+    projectPolicyMode === "untrusted-pull-request" &&
+    initialBackend !== "pi"
+  ) {
+    throw new Error(
+      "Imported pull-request runs currently require Cora · Pi so repository-owned agent policy stays disabled.",
+    );
+  }
+  // Account selection is not a per-chat input: native backends freeze the
+  // provider's active account from Settings at creation.
+  const initialNativeCodexProfileId =
+    initialBackend === "codex"
+      ? await resolveSelectableNativeProfile("codex", undefined)
+      : null;
+  const initialNativeClaudeProfileId =
+    initialBackend === "claude"
+      ? await resolveSelectableNativeProfile("claude", undefined)
+      : null;
   const initialChatFlags = normalizeChatFeatureFlags(initialBackend, {
-    chatFastMode: input.chatFastMode,
     chat1mContext: input.chat1mContext,
   });
+  // This is the only global-constitution read in the managed-run lifecycle.
+  // Retries, resumes, compaction, and reserved-id replay inherit this exact
+  // pointer from the run and never consult current Settings again.
+  const userConstitution = await captureCurrentUserConstitution();
   const run: RunState = {
-    id: makeId("run"),
+    id: reservedRunId ?? makeId("run"),
     workspaceId: input.workspaceId,
+    origin,
+    projectPolicyMode,
     title: input.title?.trim() || `Run - ${input.workspaceName}`,
     status: "idle",
     settingsSnapshot: {
       workspaceCwd: input.cwd,
+      projectPolicyMode,
     },
+    ...(projectConstitution ? { projectConstitution } : {}),
+    userConstitution: copyUserConstitutionCapture(userConstitution),
     artifactDir: "",
     createdAt: now,
     updatedAt: now,
@@ -507,10 +925,15 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     chatModel: input.chatModel?.trim() || (initialBackend === "pi" ? "gpt-5.6-sol" : undefined),
     chatMode: input.chatMode,
     chatEffort: input.chatEffort ?? (initialBackend === "pi" ? "high" : undefined),
+    ...(initialNativeCodexProfileId
+      ? { nativeCodexProfileId: initialNativeCodexProfileId }
+      : {}),
+    ...(initialNativeClaudeProfileId
+      ? { nativeClaudeProfileId: initialNativeClaudeProfileId }
+      : {}),
     coraExecutionPolicy: input.coraExecutionPolicy === undefined
       ? undefined
       : normalizeCoraExecutionPolicy(input.coraExecutionPolicy),
-    chatFastMode: initialChatFlags.chatFastMode,
     chat1mContext: initialChatFlags.chat1mContext,
     // Looms v2: ownership + execution mode are stamped at creation (not
     // patched after) so the run.created event itself already carries them.
@@ -537,14 +960,16 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
 
   // Take a baseline snapshot in the background so a fresh chat opens without
   // waiting on `git add -A`. The baseline shows up on the next event tick.
-  void recordCheckpointInBackground({
-    runId: run.id,
-    cwd: input.cwd,
-    kind: "run-start",
-    messagePointer: 0,
-    label: "Chat start",
-    conversationEpoch: 0,
-  });
+  if (projectPolicyMode === "trusted") {
+    void recordCheckpointInBackground({
+      runId: run.id,
+      cwd: input.cwd,
+      kind: "run-start",
+      messagePointer: 0,
+      label: "Chat start",
+      conversationEpoch: 0,
+    });
+  }
 
   return run;
 }
@@ -735,6 +1160,55 @@ export async function listRuns(workspaceId?: string): Promise<RunState[]> {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/**
+ * One-time legacy repair surface for durable retry indexes. Directory metadata
+ * may be inspected to find the newest candidates, but no more than 64 run
+ * bodies are ever read. Normal indexed retries use getRun(runId) directly.
+ */
+export async function listRecentRunsForRetryRepair(
+  requestedLimit = RUN_RETRY_REPAIR_READ_LIMIT,
+): Promise<{ runs: RunState[]; truncated: boolean }> {
+  const limit = Math.max(
+    0,
+    Math.min(
+      RUN_RETRY_REPAIR_READ_LIMIT,
+      Number.isSafeInteger(requestedLimit)
+        ? Math.floor(requestedLimit)
+        : RUN_RETRY_REPAIR_READ_LIMIT,
+    ),
+  );
+  if (limit === 0) return { runs: [], truncated: true };
+  let names: string[];
+  try {
+    names = await fs.readdir(runsRoot());
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { runs: [], truncated: false };
+    }
+    throw err;
+  }
+  const candidates = await Promise.all(
+    names.map(async (name) => {
+      try {
+        return { name, mtimeMs: (await fs.stat(runPath(name))).mtimeMs };
+      } catch {
+        return { name, mtimeMs: Number.NEGATIVE_INFINITY };
+      }
+    }),
+  );
+  const recent = candidates
+    .sort(
+      (left, right) =>
+        right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name),
+    )
+    .slice(0, limit);
+  const runs = await Promise.all(recent.map(({ name }) => getRun(name)));
+  return {
+    runs: runs.filter((run): run is RunState => Boolean(run)),
+    truncated: candidates.length > recent.length,
+  };
+}
+
 export async function getRunArtifactPaths(runId: string): Promise<RunArtifactPaths> {
   const run = await getRun(runId);
   return {
@@ -795,6 +1269,8 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
       cwd: input.cwd,
+      origin: input.origin,
+      projectPolicyMode: input.projectPolicyMode,
       title: chatTitleFromInput(input),
       // Engine choice from the "Run plan" / "Smart Merge" pickers and from
       // per-automation loop config. Threading these through createRun stamps
@@ -1128,6 +1604,8 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     workspaceId: input.workspaceId,
     workspaceName: input.workspaceName ?? "workspace",
     cwd: input.cwd,
+    origin: input.origin,
+    projectPolicyMode: input.projectPolicyMode,
     title: input.title,
     automationId: input.automationId,
     executionMode: "direct",
@@ -1611,6 +2089,55 @@ async function launchDirectNodeTasks(
 
   scheduleAutopilotCycles(run.id, attempts.map((a) => a.attemptId));
   return requireRun(run.id);
+}
+
+// Reject before launch without pretending that a process started. The event
+// and persisted reason are deliberately content-free: no captured body,
+// revision, digest, command, argv, or environment crosses this seam.
+async function rejectWorkerAttemptLaunchForUnsupportedConstitution(
+  runId: string,
+  attemptId: string,
+  error: string,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  await commitRunChange(run, {
+    type: "worker_attempt.launch_rejected",
+    message: `Worker attempt launch rejected: ${error}`,
+    payload: { attemptId, error },
+    mutate: (draft, timestamp) => {
+      const attempt = draft.workerAttempts.find((item) => item.id === attemptId);
+      if (!attempt || (attempt.status !== "prompt_ready" && attempt.status !== "failed")) {
+        return false;
+      }
+      attempt.status = "failed";
+      attempt.startedAt = undefined;
+      attempt.finishedAt = timestamp;
+      attempt.exitCode = undefined;
+      attempt.error = error;
+      attempt.failureKind = classifyWorkerFailure(error);
+      attempt.command = undefined;
+      const task = draft.workerTasks.find((item) => item.id === attempt.workerTaskId);
+      if (task && !["accepted", "cancelled"].includes(task.status)) {
+        task.status = "failed";
+        task.updatedAt = timestamp;
+      }
+      const step = task?.stepId
+        ? draft.steps.find((item) => item.id === task.stepId)
+        : undefined;
+      if (
+        step &&
+        !["complete", "completed_unverified", "skipped"].includes(step.status)
+      ) {
+        step.status = "failed";
+        step.updatedAt = timestamp;
+        if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  const latest = await requireRun(runId);
+  if (latest.executionMode === "direct") await finalizeDirectRun(runId);
+  return requireRun(runId);
 }
 
 // Force-fail a live (or stuck-preparing) attempt. Used by the automation-loop
@@ -2736,6 +3263,68 @@ function hasQueuedSteering(run: RunState): boolean {
   return queuedManagerInputMessages(run).some((message) => message.intent === "steer");
 }
 
+/**
+ * Sending into a paused run resumes it, carrying the message.
+ *
+ * A user who pauses, types, and hits send has already said what they want:
+ * continue, with this. Before this, the message was recorded and then nothing
+ * happened — scheduleQueuedSteeringFollowup returns early while paused and
+ * only resumeRun consumes the queue, so the text sat there until the user
+ * found the Resume button (run-msa0s2t6-sz26w1). The send arrow and Resume are
+ * now the same act, and resumeRun is the single path both take, so a message
+ * cannot resume a run by some second, divergent route.
+ *
+ * Deliberately scoped to `paused`, which covers BOTH a user force-pause and a
+ * run the manager-turn failure policy parked (provider overload, billing):
+ * both leave the run waiting on a human, and in both the human just spoke.
+ * Excluded:
+ *   - "blocked": an open question is answered through answerRunQuestion long
+ *     before this point, and it owns its own continuation
+ *     (schedulePendingManagerResume).
+ *   - terminal runs: the revived-terminal branch in addRunMessage replans them.
+ *   - direct/loom runs: the loop driver decides what runs next.
+ */
+function scheduleResumeForUserMessage(
+  run: RunState,
+  intent: RunConversationMessageIntent,
+): void {
+  if (!shouldResumeForUserMessage(run, intent)) return;
+  if (activeUserMessageResumes.has(run.id)) return;
+  const scheduledEpoch = conversationEpoch(run);
+  activeUserMessageResumes.add(run.id);
+
+  // Same ordering discipline as the other schedulers: never start a turn on
+  // top of planning/review work that is still settling.
+  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
+    (promise): promise is Promise<void> => Boolean(promise),
+  );
+  void Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+    .then(async () => {
+      const latest = await getRun(run.id);
+      if (!latest || conversationEpoch(latest) !== scheduledEpoch) return;
+      // Re-decide on the freshly read run: the Resume button, another client,
+      // or a question arriving in the meantime may already own the next move.
+      if (!shouldResumeForUserMessage(latest, intent)) return;
+      await resumeRun({ runId: latest.id });
+    })
+    .catch(async (err) => {
+      // Leave the run paused and usable — the Resume button is still there.
+      // Journal the failure so a resume that never happened is visible in the
+      // run's history instead of reading as another silent send.
+      const error = err instanceof Error ? err.message : String(err);
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        type: "run.auto_resume_failed",
+        message: `Resuming after a user message failed: ${error}`,
+        payload: { error },
+      }).catch(() => undefined);
+    })
+    .finally(() => {
+      activeUserMessageResumes.delete(run.id);
+    });
+}
+
 function scheduleQueuedSteeringFollowup(run: RunState): void {
   if (run.executionMode === "direct" || !hasQueuedSteering(run)) return;
   if (activeSteeringFollowups.has(run.id)) return;
@@ -2846,40 +3435,64 @@ async function claimScheduledManagerResume(
   return claimed ? launchClaimId : null;
 }
 
-async function clearRegisteredManagerResume(
+async function clearRegisteredManagerTurnRecovery(
   runId: string,
   launchClaimId: string,
   sparkCallId: string,
 ): Promise<void> {
   const run = await requireRun(runId);
   await commitRunChange(run, {
-    type: "run.question_resume_launched",
-    message: "Manager continuation launch registered",
+    type: "run.manager_turn_recovery_completed",
+    message: "Parked manager turn resumed successfully",
     payload: { launchClaimId, sparkCallId },
     mutate: (draft, timestamp) => {
-      if (!clearRegisteredPendingManagerResume(draft, launchClaimId)) return false;
+      const recovery = draft.managerTurnRecovery;
+      if (
+        !recovery ||
+        recovery.state !== "resuming" ||
+        recovery.resumeClaimId !== launchClaimId ||
+        recovery.conversationEpoch !== conversationEpoch(draft)
+      ) {
+        return false;
+      }
+      const call = draft.sparkCalls.find(
+        (entry) =>
+          entry.id === sparkCallId &&
+          entry.managerRecoveryClaimId === launchClaimId &&
+          (entry.conversationEpoch ?? 0) === recovery.conversationEpoch &&
+          entry.status === "completed",
+      );
+      if (!call) return false;
+      if (
+        recovery.resumeAccountProfileId &&
+        call.accountProfileId !== recovery.resumeAccountProfileId &&
+        call.nativeClaudeProfileId !== recovery.resumeAccountProfileId &&
+        call.nativeCodexProfileId !== recovery.resumeAccountProfileId
+      ) {
+        return false;
+      }
+      delete draft.managerTurnRecovery;
       draft.updatedAt = timestamp;
     },
   });
 }
 
-async function finalizeAppliedManagerCall(
-  runId: string,
-  callId: string,
-  epoch: number,
+async function settleAppliedManagerCall(
+  run: RunState,
+  input: AppliedManagerCallSettlementInput,
 ): Promise<RunState> {
-  const run = await requireRun(runId);
   return commitRunChange(run, {
     type: "spark_call.completed",
-    message: "Cora manager decision applied",
-    sparkCallId: callId,
-    payload: { callId, conversationEpoch: epoch },
+    message: "Cora manager decision applied and settled",
+    sparkCallId: input.callId,
+    payload: {
+      callId: input.callId,
+      conversationEpoch: input.conversationEpoch,
+      managerResumeClaimId: input.managerResumeClaimId,
+      managerRecoveryClaimId: input.managerRecoveryClaimId,
+    },
     mutate: (draft, timestamp) => {
-      if (conversationEpoch(draft) !== epoch) return false;
-      const call = draft.sparkCalls.find((entry) => entry.id === callId);
-      if (!call || call.status !== "started" || call.completedAt) return false;
-      call.status = "completed";
-      call.completedAt = timestamp;
+      if (!applyAtomicManagerCallSettlement(draft, input, timestamp)) return false;
       recomputeRunCostRollups(draft);
       draft.updatedAt = timestamp;
     },
@@ -2890,8 +3503,9 @@ async function runManagerStageAfterQuestion(
   run: RunState,
   cwd: string,
   mode: SparkCall["mode"],
-  managerResumeClaimId: string,
+  managerResumeClaimId?: string,
   autonomyRetryCount = 0,
+  managerRecoveryClaimId?: string,
 ): Promise<void> {
   if (mode === "chat" || mode === "plan_analysis") {
     await runInitialAutopilotPlanning(
@@ -2900,11 +3514,17 @@ async function runManagerStageAfterQuestion(
       mode,
       managerResumeClaimId,
       autonomyRetryCount,
+      managerRecoveryClaimId,
     );
     return;
   }
   if (mode === "worker_result_review") {
-    await runAutopilotManagerReview(run.id, cwd, managerResumeClaimId);
+    await runAutopilotManagerReview(
+      run.id,
+      cwd,
+      managerResumeClaimId,
+      managerRecoveryClaimId,
+    );
     return;
   }
 
@@ -2914,6 +3534,8 @@ async function runManagerStageAfterQuestion(
     mode,
     managerResumeClaimId,
     autonomyRetryCount,
+    0,
+    managerRecoveryClaimId,
   );
   if (
     !decided ||
@@ -3023,11 +3645,14 @@ export async function recoverPendingConversationRewinds(): Promise<void> {
  * "failed" like any other, so a later boot step cannot use "started with no
  * completedAt" to recognize an interrupted turn (see interruptedManagerCall). */
 export const MANAGER_TURN_INTERRUPTED_ERROR = "Manager turn interrupted by application restart.";
+export const MANAGER_APPLICATION_RECOVERY_INTEGRITY_ERROR =
+  "Manager effects may already be applied, but their durable receipt could not be settled safely; provider replay was suppressed.";
 
 /** Repair manager turns that were durable but had no live driver after process
- * exit. Claimed queued/submitted input is released, the orphaned call is marked
- * failed, and answer-driven continuations are recreated from the exact linked
- * answer so startup can safely retry them. */
+ * exit. Ordinary interrupted calls release their input for a user-approved
+ * retry. Calls carrying an effects_applied receipt settle locally and
+ * acknowledge their exact input instead, so provider replay cannot duplicate
+ * the already-applied completion. */
 export async function recoverOrphanedManagerTurns(): Promise<void> {
   const runs = await listRuns();
   for (const run of runs) {
@@ -3040,23 +3665,128 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
     );
     if (orphaned.length === 0) continue;
     const orphanedIds = new Set(orphaned.map((call) => call.id));
+    const interruptedIds = new Set(
+      orphaned
+        .filter(
+          (call) =>
+            call.applicationReceiptIntegrity !== "invalid" &&
+            !codaraCompleteReceiptForCall(call),
+        )
+        .map((call) => call.id),
+    );
 
     const recovered = await commitRunChange(run, {
       type: "run.manager_turns_recovered",
       message: `Recovered ${orphaned.length} interrupted manager turn(s) after restart`,
-      payload: { callIds: [...orphanedIds], conversationEpoch: epoch },
+      payload: {
+        callIds: [...orphanedIds],
+        interruptedCallIds: [...interruptedIds],
+        conversationEpoch: epoch,
+      },
       mutate: (draft, timestamp) => {
         if (conversationEpoch(draft) !== epoch) return false;
         let changed = false;
         for (const call of draft.sparkCalls) {
           if (!orphanedIds.has(call.id) || call.status !== "started") continue;
+
+          const receipt = codaraCompleteReceiptForCall(call);
+          if (receipt) {
+            const settled = applyAtomicManagerCallSettlement(
+              draft,
+              {
+                callId: call.id,
+                conversationEpoch: epoch,
+                applicationProof: {
+                  kind: "durable-effects-applied",
+                  receiptKey: receipt.key,
+                },
+                managerResumeClaimId: call.managerResumeClaimId,
+                managerRecoveryClaimId: call.managerRecoveryClaimId,
+                managerRecoveryClaimedAccountProfileId:
+                  receipt.recoveryAccountProfileId,
+              },
+              timestamp,
+            );
+            if (settled) {
+              changed = true;
+              continue;
+            }
+            // A receipt is an irreversible replay fence. If ownership was
+            // hand-edited or otherwise cannot pass the exact settlement
+            // checks, close the local call and acknowledge its inputs rather
+            // than converting an already-applied effect back into provider
+            // work.
+            call.status = "failed";
+            call.error = MANAGER_APPLICATION_RECOVERY_INTEGRITY_ERROR;
+            call.completedAt = timestamp;
+            for (const message of draft.humanMessages) {
+              if (
+                message.backendTurnId !== call.id &&
+                !(call.inputMessageIds ?? []).includes(message.id)
+              ) {
+                continue;
+              }
+              if (message.deliveryState !== "cancelled") {
+                message.deliveryState = "acknowledged";
+              }
+            }
+            if (
+              call.managerResumeClaimId &&
+              draft.pendingManagerResume?.launchClaimId === call.managerResumeClaimId
+            ) {
+              delete draft.pendingManagerResume;
+            }
+            if (
+              call.managerRecoveryClaimId &&
+              draft.managerTurnRecovery?.resumeClaimId === call.managerRecoveryClaimId
+            ) {
+              delete draft.managerTurnRecovery;
+            }
+            changed = true;
+            continue;
+          }
+
+          if (call.applicationReceiptIntegrity === "invalid") {
+            // Normalization found a receipt-shaped record it could not trust.
+            // Treat that as "effects may have landed": fail closed locally,
+            // acknowledge the owned input, and never release it for replay.
+            call.status = "failed";
+            call.error = MANAGER_APPLICATION_RECOVERY_INTEGRITY_ERROR;
+            call.completedAt = timestamp;
+            for (const message of draft.humanMessages) {
+              if (
+                message.backendTurnId !== call.id &&
+                !(call.inputMessageIds ?? []).includes(message.id)
+              ) {
+                continue;
+              }
+              if (message.deliveryState !== "cancelled") {
+                message.deliveryState = "acknowledged";
+              }
+            }
+            if (
+              call.managerResumeClaimId &&
+              draft.pendingManagerResume?.launchClaimId === call.managerResumeClaimId
+            ) {
+              delete draft.pendingManagerResume;
+            }
+            if (
+              call.managerRecoveryClaimId &&
+              draft.managerTurnRecovery?.resumeClaimId === call.managerRecoveryClaimId
+            ) {
+              delete draft.managerTurnRecovery;
+            }
+            changed = true;
+            continue;
+          }
+
           call.status = "failed";
           call.error = MANAGER_TURN_INTERRUPTED_ERROR;
           call.completedAt = timestamp;
           changed = true;
         }
         for (const message of draft.humanMessages) {
-          if (!message.backendTurnId || !orphanedIds.has(message.backendTurnId)) continue;
+          if (!message.backendTurnId || !interruptedIds.has(message.backendTurnId)) continue;
           if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
           message.deliveryState = "queued";
           delete message.backendTurnId;
@@ -3069,7 +3799,10 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         if (!draft.pendingManagerResume) {
           const resumeCall = [...orphaned]
             .reverse()
-            .find((call) => Boolean(call.managerResumeClaimId));
+            .find(
+              (call) =>
+                interruptedIds.has(call.id) && Boolean(call.managerResumeClaimId),
+            );
           if (resumeCall) {
             const linkedAnswer = [...draft.humanMessages]
               .reverse()
@@ -3092,6 +3825,7 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
           }
         }
         if (!changed) return false;
+        recomputeRunCostRollups(draft);
         draft.updatedAt = timestamp;
       },
     });
@@ -3102,6 +3836,60 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
     // to pending) and stops there. pauseManagedRunsAfterRestart then parks the
     // run, and the user's Resume, which re-drives everything, including a
     // queued input and a pending continuation, is what starts work again.
+  }
+}
+
+/**
+ * Repair durable parked-turn launch claims after orphaned SparkCalls have been
+ * settled. A completed linked call proves recovery landed and clears the
+ * token; every other resuming claim returns to the same user-owned parked
+ * token without starting work during boot.
+ */
+export async function recoverManagerTurnRecoveries(): Promise<void> {
+  const runs = await listRuns();
+  for (const run of runs) {
+    const recovery = run.managerTurnRecovery;
+    if (!recovery) continue;
+    if (recovery.state === "parked") continue;
+    const claimId = recovery.resumeClaimId;
+    if (!claimId) {
+      // normalizeRun normally repairs this shape, but keep boot recovery
+      // defensive against an in-memory record written by an older process.
+      await commitRunChange(run, {
+        type: "run.manager_turn_recovery_repaired",
+        message: "Recovered an incomplete manager turn recovery claim",
+        mutate: (draft, timestamp) => {
+          const current = draft.managerTurnRecovery;
+          if (!current || current.id !== recovery.id) return false;
+          current.state = "parked";
+          delete current.resumeClaimId;
+          delete current.resumeRequestedAt;
+          draft.status = "paused";
+          draft.updatedAt = timestamp;
+        },
+      }).catch(() => undefined);
+      continue;
+    }
+    const linked = [...run.sparkCalls]
+      .reverse()
+      .find((call) => call.managerRecoveryClaimId === claimId);
+    if (linked?.status === "completed") {
+      await clearRegisteredManagerTurnRecovery(
+        run.id,
+        claimId,
+        linked.id,
+      ).catch(() => undefined);
+      const afterClear = await getRun(run.id);
+      if (afterClear?.managerTurnRecovery?.resumeClaimId !== claimId) {
+        continue;
+      }
+    }
+    await returnUnfinishedManagerRecoveryToParked(
+      run.id,
+      claimId,
+      recovery.conversationEpoch,
+      "The application restarted before the replacement manager turn completed.",
+    ).catch(() => undefined);
   }
 }
 
@@ -3512,13 +4300,30 @@ async function runInitialAutopilotPlanning(
   mode: "plan_analysis" | "chat" = "plan_analysis",
   managerResumeClaimId?: string,
   autonomyRetryCount = 0,
+  managerRecoveryClaimId?: string,
 ): Promise<void> {
   let run = await requireRun(runId);
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
 
   let managerPlannedRun = mode === "chat"
-    ? await askManagerBackend(run, input.cwd, "chat", managerResumeClaimId, autonomyRetryCount)
-    : await askManagerBackend(run, input.cwd, "plan_analysis", managerResumeClaimId, autonomyRetryCount);
+    ? await askManagerBackend(
+        run,
+        input.cwd,
+        "chat",
+        managerResumeClaimId,
+        autonomyRetryCount,
+        0,
+        managerRecoveryClaimId,
+      )
+    : await askManagerBackend(
+        run,
+        input.cwd,
+        "plan_analysis",
+        managerResumeClaimId,
+        autonomyRetryCount,
+        0,
+        managerRecoveryClaimId,
+      );
   if (
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
@@ -3549,7 +4354,11 @@ async function runInitialAutopilotPlanning(
   // (runtime missing, spawn failure, provider error), the failure itself is
   // already journaled as spark_call.failed. Park the run on an accurate
   // question instead of silently idling at status=running with no driver.
-  if (!managerPlannedRun && (mode === "chat" || !manualFallbackEnabled())) {
+  if (
+    !managerPlannedRun &&
+    !managerRecoveryClaimId &&
+    (mode === "chat" || !manualFallbackEnabled())
+  ) {
     await askHumanQuestion(
       run.id,
       mode === "chat"
@@ -3563,6 +4372,11 @@ async function runInitialAutopilotPlanning(
     );
     return;
   }
+  // A claimed parked-turn recovery is replaying one exact manager stage. If
+  // its backend fails before producing a decision, the recovery scheduler
+  // returns the same durable token to "parked"; synthesizing a manual worker
+  // here would silently replace the failed stage with different work.
+  if (!managerPlannedRun && managerRecoveryClaimId) return;
 
   run = managerPlannedRun ?? (await createFallbackAutopilotTask(run, input));
   // A spawn_terminals decision lands the run as `complete` straight out of
@@ -3862,6 +4676,7 @@ async function runAutopilotManagerReview(
   runId: string,
   cwd: string,
   managerResumeClaimId?: string,
+  managerRecoveryClaimId?: string,
 ): Promise<void> {
   let run = await requireRun(runId);
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
@@ -3872,6 +4687,35 @@ async function runAutopilotManagerReview(
   if (run.executionMode === "direct") {
     await finalizeDirectRun(runId);
     return;
+  }
+
+  // A parked worker-result review owns one exact provider stage. Register and
+  // run that claimed SparkCall before any of the review pipeline's ordinary
+  // preflight actions (pending-task launch, verifier synthesis, council
+  // advancement, or a manual-review question) can mutate the run. A backend
+  // failure returns immediately so the recovery finalizer can repark it.
+  let recoveredReviewApplied = false;
+  if (managerRecoveryClaimId) {
+    const recovered = await askManagerBackend(
+      run,
+      cwd,
+      "worker_result_review",
+      managerResumeClaimId,
+      0,
+      0,
+      managerRecoveryClaimId,
+    );
+    if (!recovered) return;
+    run = recovered;
+    recoveredReviewApplied = true;
+    if (
+      run.status === "paused" ||
+      run.status === "blocked" ||
+      run.status === "cancelled" ||
+      isTerminalRunStatus(run.status)
+    ) {
+      return;
+    }
   }
 
   const pendingLaunchTasks = pickAutopilotTasks(run);
@@ -3997,16 +4841,20 @@ async function runAutopilotManagerReview(
     if (await escalateManualNeedsReview(run, manualPendingReview)) return;
   }
   const REVIEW_REPROMPT_CAP = 3;
-  for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
-    run = await askManagerBackend(
-      run,
-      cwd,
-      "worker_result_review",
-      attempt === 0 ? managerResumeClaimId : undefined,
-    ) ?? run;
-    if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
-    const lastAction = run.autopilot?.lastAction;
-    if (lastAction !== "completion_refused") break;
+  if (!recoveredReviewApplied) {
+    for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
+      const reviewed = await askManagerBackend(
+        run,
+        cwd,
+        "worker_result_review",
+        attempt === 0 ? managerResumeClaimId : undefined,
+      );
+      if (!reviewed) return;
+      run = reviewed;
+      if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
+      const lastAction = run.autopilot?.lastAction;
+      if (lastAction !== "completion_refused") break;
+    }
   }
   // Advance any now-fully-accepted steps before we pick the next tasks. A
   // worker_result_review that accepts step N AND queues step N+1's task in the
@@ -4314,7 +5162,15 @@ async function prepareManagerTurn(
     },
     mutate: (draft, timestamp) => {
       if (conversationEpoch(draft) !== epoch) return false;
-      includeCanonicalReplay = shouldIncludeCanonicalReplay(draft, epoch);
+      const recovery = draft.managerTurnRecovery;
+      const recoveryOwnsCall =
+        Boolean(call.managerRecoveryClaimId) &&
+        recovery?.state === "resuming" &&
+        recovery.resumeClaimId === call.managerRecoveryClaimId &&
+        recovery.conversationEpoch === epoch;
+      includeCanonicalReplay =
+        shouldIncludeCanonicalReplay(draft, epoch) ||
+        (recoveryOwnsCall && recovery?.forceCanonicalReplay === true);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
       call.inputMessageIds = selectedIds;
@@ -4535,6 +5391,7 @@ async function askManagerBackend(
   // failures (see manager-turn-policy). Distinct from autonomyRetryCount,
   // which counts question reprompts.
   transientRetryCount = 0,
+  managerRecoveryClaimId?: string,
 ): Promise<RunState | null> {
   // Defense in depth: a direct (loom) run must never reach a manager LLM. If
   // a code path gets here anyway, surface it loudly instead of silently
@@ -4550,7 +5407,18 @@ async function askManagerBackend(
     return null;
   }
   const settings = await loadSettings();
-  const chatConfig = resolveChatBackendConfig(run);
+  run = await pinImplicitPiManagerAccount(run);
+  const chatConfig = await freezeManagerExecutionAccount(
+    resolveChatBackendConfig(run, settings.openAiFastMode === true),
+  );
+  if (
+    runProjectPolicyMode(run) === "untrusted-pull-request" &&
+    chatConfig.backend !== "pi"
+  ) {
+    throw new Error(
+      "Imported pull-request runs currently require Cora · Pi so repository-owned agent policy stays disabled.",
+    );
+  }
 
   // Every manager backend (Claude Code, Codex, Pi) owns its own request
   // lifecycle, spawn/resume a real agent session, stream events, and return
@@ -4562,18 +5430,31 @@ async function askManagerBackend(
   // work identically across backends.
   const backend = getBackend(chatConfig.backend);
   const callId = makeId("spark");
+  const callUserConstitution = copyRunUserConstitutionCapture(run);
   const sparkCall: SparkCall = {
     id: callId,
     runId: run.id,
+    ...(callUserConstitution ? { userConstitution: callUserConstitution } : {}),
     stepId: run.currentStepId,
     mode,
     model: chatConfig.model,
+    accountProfileId: chatConfig.accountProfileId,
+    nativeCodexProfileId: chatConfig.nativeCodexProfileId,
+    nativeClaudeProfileId: chatConfig.nativeClaudeProfileId,
     status: "started",
     managerResumeClaimId,
+    managerRecoveryClaimId,
     createdAt: new Date().toISOString(),
   };
   const preparedTurn = await prepareManagerTurn(run, sparkCall);
   run = preparedTurn.run;
+  const managerRecoveryClaimedAccountProfileId =
+    managerRecoveryClaimId &&
+    run.managerTurnRecovery?.state === "resuming" &&
+    run.managerTurnRecovery.resumeClaimId === managerRecoveryClaimId &&
+    run.managerTurnRecovery.conversationEpoch === preparedTurn.conversationEpoch
+      ? run.managerTurnRecovery.resumeAccountProfileId
+      : undefined;
   const frozenRun = structuredClone(run);
 
   // Once requestManagerDecision settles, that SparkCall owns no more stream
@@ -4656,12 +5537,15 @@ async function askManagerBackend(
 
   const callStartedMs = Date.now();
   try {
+    const managerConstitutionBlock =
+      await resolveCapturedManagerConstitutionBlock(frozenRun);
     const result = await backend.requestManagerDecision(
       {
         run: frozenRun,
         cwd,
         mode: normalizeManagerMode(mode),
         settings,
+        managerConstitutionBlock,
         chat: { ...chatConfig },
         prompt: preparedTurn.prompt,
         inputMessageIds: preparedTurn.call.inputMessageIds ?? [],
@@ -4697,6 +5581,10 @@ async function askManagerBackend(
         targetCall.error = result.notice ?? "Chat turn failed.";
       }
       targetCall.model = result.model;
+      targetCall.accountProfileId = preserveFrozenPiAccountProfileId(
+        targetCall.accountProfileId,
+        result.accountProfileId,
+      );
       targetCall.durationMs = result.durationMs;
       if (typeof result.promptTokens === "number") targetCall.promptTokens = result.promptTokens;
       if (typeof result.completionTokens === "number") targetCall.completionTokens = result.completionTokens;
@@ -4729,7 +5617,25 @@ async function askManagerBackend(
       }
       if (turnFailed || turnAborted) targetCall.completedAt = completedAt;
     }
-    if (result.newSessionUuid && result.newSessionUuid !== latest.chatSessionUuid) {
+    // Account/backend changes are next-turn mutations. A provider response
+    // completing after such a change still belongs to the frozen SparkCall,
+    // but its session UUID must never be attached to the newly selected
+    // account. Compare the latest persisted owner to the turn's pre-launch
+    // snapshot rather than to the resolved config: legacy/default Pi runs may
+    // intentionally keep an undefined pin while the turn resolves a concrete
+    // account internally.
+    const managerSessionOwnerUnchanged =
+      (latest.chatBackend ?? "pi") === (frozenRun.chatBackend ?? "pi") &&
+      (chatConfig.backend === "claude"
+        ? latest.nativeClaudeProfileId === frozenRun.nativeClaudeProfileId
+        : chatConfig.backend === "codex"
+          ? latest.nativeCodexProfileId === frozenRun.nativeCodexProfileId
+          : latest.chatAccountProfileId === frozenRun.chatAccountProfileId);
+    if (
+      managerSessionOwnerUnchanged &&
+      result.newSessionUuid &&
+      result.newSessionUuid !== latest.chatSessionUuid
+    ) {
       latest.chatSessionUuid = result.newSessionUuid;
     }
     // Stamp the mode the session was spawned under. Next-turn dispatch
@@ -4737,7 +5643,7 @@ async function askManagerBackend(
     // on mismatch — otherwise CC/Codex resume into a transcript whose prior
     // assistant replies were written in the old mode's persona and the new
     // mode's prompt gets ignored.
-    if (result.newSessionUuid) {
+    if (managerSessionOwnerUnchanged && result.newSessionUuid) {
       latest.chatSessionMode = chatConfig.mode;
     }
     recomputeRunCostRollups(latest);
@@ -4887,6 +5793,7 @@ async function askManagerBackend(
           managerResumeClaimId,
           autonomyRetryCount,
           transientRetryCount + 1,
+          managerRecoveryClaimId,
         );
       }
 
@@ -4908,21 +5815,11 @@ async function askManagerBackend(
           providerResponseIds: result.providerResponseIds,
         },
       });
-      let failedRun = settledRun;
-      const replyText = result.decision.chatReply?.trim();
-      if (replyText) {
-        failedRun = await addRunMessage({
-          runId: settledRun.id,
-          author: "spark",
-          kind: "note",
-          message: replyText,
-          intent: "answer",
-          deliveryState: "acknowledged",
-          targetTurnId: callId,
-          backendTurnId: callId,
-          conversationEpoch: preparedTurn.conversationEpoch,
-        });
-      }
+      // Never turn provider diagnostics or partial output into conversational
+      // history. Canonical replay treats spark notes as Cora dialogue, so doing
+      // so would make an overload string a future manager prompt. The failed
+      // SparkCall and typed events above are the sole durable error surface.
+      const failedRun = settledRun;
 
       // Provider trouble that outlived the retries (or a rate limit, which a
       // fast retry can never clear): park instead of failing. The work did
@@ -4947,11 +5844,32 @@ async function askManagerBackend(
           },
           mutate: (draft, timestamp) => {
             draft.status = "paused";
+            draft.managerTurnRecovery = {
+              id: makeId("recovery"),
+              state: "parked",
+              // manager-turn-policy only parks these four provider-side
+              // classes; keep the persisted union narrower than the generic
+              // worker failure taxonomy.
+              failureKind: failurePlan.kind as
+                | "rate_limit"
+                | "provider"
+                | "transport",
+              backend: chatConfig.backend,
+              managerMode: mode,
+              conversationEpoch: preparedTurn.conversationEpoch,
+              failedSparkCallId: callId,
+              failedAccountProfileId:
+                sparkCall.accountProfileId ??
+                sparkCall.nativeClaudeProfileId ??
+                sparkCall.nativeCodexProfileId,
+              parkedAt: timestamp,
+            };
             draft.autopilot = {
               ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
               status: "paused",
               lastAction: failurePlan.lastAction,
               stopReason: failurePlan.parkReason,
+              pausedAt: timestamp,
               updatedAt: timestamp,
             };
             draft.updatedAt = timestamp;
@@ -5029,20 +5947,17 @@ async function askManagerBackend(
       // spawn/ask/complete decision would duplicate workers or falsely finish
       // a turn whose question merely settled.
       const appliedLive = await requireRun(run.id);
-      await updateManagerInputDelivery(
-        run.id,
+      const finalized = await settleAppliedManagerCall(appliedLive, {
         callId,
-        preparedTurn.conversationEpoch,
-        "acknowledged",
-      );
-      const finalized = await finalizeAppliedManagerCall(
-        run.id,
-        callId,
-        preparedTurn.conversationEpoch,
-      );
-      if (managerResumeClaimId) {
-        await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
-      }
+        conversationEpoch: preparedTurn.conversationEpoch,
+        applicationProof: {
+          kind: "decision-already-applied",
+          decisionAlreadyApplied: result.decisionAlreadyApplied,
+        },
+        managerResumeClaimId,
+        managerRecoveryClaimId,
+        managerRecoveryClaimedAccountProfileId,
+      });
       scheduleQueuedSteeringFollowup(finalized);
       await maybeAutoCompactConversation(run.id, callId, cwd);
       // Re-read: if compaction just cut the conversation over, callers that
@@ -5059,20 +5974,17 @@ async function askManagerBackend(
       preparedTurn.conversationEpoch,
       autonomyRetryCount,
     );
-    await updateManagerInputDelivery(
-      run.id,
+    const finalized = await settleAppliedManagerCall(applied, {
       callId,
-      preparedTurn.conversationEpoch,
-      "acknowledged",
-    );
-    const finalized = await finalizeAppliedManagerCall(
-      run.id,
-      callId,
-      preparedTurn.conversationEpoch,
-    );
-    if (managerResumeClaimId) {
-      await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
-    }
+      conversationEpoch: preparedTurn.conversationEpoch,
+      applicationProof: {
+        kind: "structured-decision-applied",
+        applicationReady: true,
+      },
+      managerResumeClaimId,
+      managerRecoveryClaimId,
+      managerRecoveryClaimedAccountProfileId,
+    });
     scheduleQueuedSteeringFollowup(finalized);
     await maybeAutoCompactConversation(run.id, callId, cwd);
     // Re-read: if compaction just cut the conversation over, callers that
@@ -5492,7 +6404,7 @@ async function chooseUiLogicRuntimes(): Promise<{
   const diagnostics = await detectConfiguredAgentRuntimes();
   const installed = new Set(
     diagnostics
-      .filter((runtime) => runtime.installed)
+      .filter(runtimeAssignable)
       .map((runtime) => runtime.kind),
   );
   const hasClaude = installed.has("claude");
@@ -5512,14 +6424,14 @@ async function chooseUiLogicRuntimes(): Promise<{
 // prose [FAN OUT] contract. The manager profile is also taught the marker, but
 // this path is what actually guarantees the disjoint parallel scopes.
 
-// Distribute fan-out workers across the runtimes that are actually installed so
-// a multi-target fan-out is not single-runtime by default. Falls back to a
+// Distribute fan-out workers across the providers Cora can actually assign to
+// so a multi-target fan-out is not single-provider by default. Falls back to a
 // single available runtime (or "manual" when none is configured). The list is
 // stable + index-addressable so each target gets a deterministic assignment.
 async function chooseFanOutRuntimes(): Promise<WorkerRuntime[]> {
   const diagnostics = await detectConfiguredAgentRuntimes();
   const installed = new Set(
-    diagnostics.filter((runtime) => runtime.installed).map((runtime) => runtime.kind),
+    diagnostics.filter(runtimeAssignable).map((runtime) => runtime.kind),
   );
   const ordered: WorkerRuntime[] = [];
   if (installed.has("claude")) ordered.push("claude");
@@ -6159,7 +7071,7 @@ async function rerouteUnavailableAgentRuntimes(
   decision: SparkManagerDecision,
 ): Promise<{ decision: SparkManagerDecision; rerouted: RuntimeReroute[] }> {
   const diagnostics = await detectConfiguredAgentRuntimes();
-  const available = diagnostics.filter((runtime) => runtime.installed);
+  const available = diagnostics.filter(runtimeAssignable);
   const availableKinds = new Set(available.map((runtime) => runtime.kind));
   const fallback = available.find((runtime) => runtime.kind === "codex")
     ?? available.find((runtime) => runtime.kind === "claude");
@@ -6176,7 +7088,7 @@ async function rerouteUnavailableAgentRuntimes(
       rerouted.push({
         from: runtimePreference,
         to: "manual",
-        reason: "Requested agent runtime is not installed or is disabled by Settings > Agents.",
+        reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
       });
       return {
         runtimePreference: "manual" as WorkerRuntime,
@@ -6195,7 +7107,7 @@ async function rerouteUnavailableAgentRuntimes(
       to: fallback.kind,
       modelHint: nextModelHint,
       effortHint: nextEffortHint,
-      reason: "Requested agent runtime is not installed or is disabled by Settings > Agents.",
+      reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
     });
     return {
       runtimePreference: fallback.kind as WorkerRuntime,
@@ -6259,21 +7171,21 @@ function detectPlanRuntimeMandate(run: RunState): WorkerRuntime | null {
 // Rewrites every task and plannedAgent in the decision so its runtimePreference,
 // modelHint, and effortHint match the user's mandated runtime. Skips entries
 // already on the mandate, and leaves shell/manual entries alone (those are
-// escape hatches, not autonomous runtimes). If the mandated runtime is not
-// installed, returns the decision unchanged so rerouteUnavailableAgentRuntimes
-// can pick a fallback the usual way.
+// escape hatches, not autonomous runtimes). If the mandated provider has no
+// connected subscription, returns the decision unchanged so
+// rerouteUnavailableAgentRuntimes can pick a fallback the usual way.
 async function enforceUserRuntimeMandate(
   decision: SparkManagerDecision,
   mandate: WorkerRuntime,
 ): Promise<{ decision: SparkManagerDecision; overrides: RuntimeReroute[] }> {
   const diagnostics = await detectConfiguredAgentRuntimes();
-  const installedKinds = new Set(
-    diagnostics.filter((runtime) => runtime.installed).map((runtime) => runtime.kind),
+  const assignableKinds = new Set(
+    diagnostics.filter(runtimeAssignable).map((runtime) => runtime.kind),
   );
   if (mandate !== "claude" && mandate !== "codex") {
     return { decision, overrides: [] };
   }
-  if (!installedKinds.has(mandate)) {
+  if (!assignableKinds.has(mandate)) {
     return { decision, overrides: [] };
   }
   const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
@@ -8287,7 +9199,7 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
   }
 
   const cwd = workspaceCwdFromRun(updated);
-  if (cwd) {
+  if (cwd && runProjectPolicyMode(updated) === "trusted") {
     const labelText = message.length > 60 ? `${message.slice(0, 60).trimEnd()}…` : message;
     void recordCheckpointInBackground({
       runId: updated.id,
@@ -8544,8 +9456,361 @@ export async function pauseRunAfterCurrentWorkers(input: PauseRunInput): Promise
   });
 }
 
+export type ManagerTurnRecoveryAccountSelection =
+  | { kind: "subscription"; profileId: string }
+  | { kind: "native-cli"; backend: "claude" | "codex"; profileId: string };
+
+export interface ResumeManagerTurnRecoveryInput {
+  runId: string;
+  recoveryId: string;
+  account?: ManagerTurnRecoveryAccountSelection;
+}
+
+export type ResumeManagerTurnRecoveryResult = {
+  outcome:
+    | "accepted"
+    | "already-resuming"
+    | "stale"
+    | "account-unavailable"
+    | "account-incompatible";
+  run: RunState;
+  reason?: string;
+};
+
+type ResolvedManagerRecoveryAccount =
+  | { backend: "pi"; profileId: string }
+  | { backend: "claude" | "codex"; profileId: string };
+
+async function resolveManagerRecoveryAccount(
+  run: RunState,
+  account: ManagerTurnRecoveryAccountSelection | undefined,
+): Promise<
+  | { ok: true; account?: ResolvedManagerRecoveryAccount }
+  | { ok: false; outcome: "account-unavailable" | "account-incompatible"; reason: string }
+> {
+  if (!account) return { ok: true };
+  const backend = run.chatBackend ?? "pi";
+  if (account.kind === "subscription") {
+    if (backend !== "pi") {
+      return {
+        ok: false,
+        outcome: "account-incompatible",
+        reason: "Subscription accounts can only resume a Cora · Pi manager turn.",
+      };
+    }
+    try {
+      const profileId = normalizePiAccountProfileId(
+        account.profileId,
+        "Recovery Pi account profile id",
+      );
+      if (!profileId) throw new Error("A concrete subscription account is required.");
+      const config = resolveChatBackendConfig(run);
+      const resolved = await resolveCodaraPiExecutionAccount({
+        provider: piProviderForManagerModel(config.model),
+        preferredAccountProfileId: profileId,
+      });
+      if (resolved.accountProfileId !== profileId) {
+        throw new Error("The selected subscription account could not be pinned exactly.");
+      }
+      return { ok: true, account: { backend: "pi", profileId } };
+    } catch (error) {
+      return {
+        ok: false,
+        outcome: "account-unavailable",
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  if (backend !== account.backend) {
+    return {
+      ok: false,
+      outcome: "account-incompatible",
+      reason: `A ${account.backend} CLI account cannot resume a ${backend} manager turn.`,
+    };
+  }
+  try {
+    const profileId = await resolveSelectableNativeProfile(
+      account.backend,
+      account.profileId,
+    );
+    if (profileId !== account.profileId) {
+      throw new Error("The selected native CLI account could not be pinned exactly.");
+    }
+    return { ok: true, account: { backend: account.backend, profileId } };
+  } catch (error) {
+    return {
+      ok: false,
+      outcome: "account-unavailable",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function returnUnfinishedManagerRecoveryToParked(
+  runId: string,
+  claimId: string,
+  expectedEpoch: number,
+  reason: string,
+): Promise<void> {
+  const run = await getRun(runId);
+  if (!run) return;
+  await commitRunChange(run, {
+    type: "run.manager_turn_recovery_reparked",
+    message: "Cora could not finish the recovered manager turn; it remains ready to retry",
+    payload: { claimId, reason },
+    mutate: (draft, timestamp) => {
+      const recovery = draft.managerTurnRecovery;
+      if (
+        !recovery ||
+        recovery.state !== "resuming" ||
+        recovery.resumeClaimId !== claimId ||
+        recovery.conversationEpoch !== expectedEpoch
+      ) {
+        return false;
+      }
+      if (
+        conversationEpoch(draft) !== expectedEpoch ||
+        isTerminalRunStatus(draft.status) ||
+        draft.status === "blocked"
+      ) {
+        // A rewind/new generation, terminal verdict, or durable question owns
+        // the run now. Retire the old recovery token without rewriting that
+        // newer/user-owned state.
+        delete draft.managerTurnRecovery;
+        draft.updatedAt = timestamp;
+        return;
+      }
+      recovery.state = "parked";
+      delete recovery.resumeClaimId;
+      delete recovery.resumeRequestedAt;
+      if (draft.status === "paused") {
+        // Stop/pause may have won while the replacement provider was live.
+        // Preserve its reason and projection; only release the stale launch
+        // lease so a later explicit Resume can claim it again.
+        draft.updatedAt = timestamp;
+        return;
+      }
+      if (
+        draft.status !== "planning" &&
+        draft.status !== "running" &&
+        draft.status !== "reviewing"
+      ) {
+        delete draft.managerTurnRecovery;
+        draft.updatedAt = timestamp;
+        return;
+      }
+      draft.status = "paused";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "paused",
+        lastAction:
+          recovery.managerMode === "chat"
+            ? "chat_turn_parked"
+            : "manager_turn_parked",
+        stopReason:
+          recovery.failureKind === "rate_limit"
+            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
+            : recovery.failureKind === "transport"
+              ? "Cora lost its provider connection. Retry when the connection is stable."
+              : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+function scheduleClaimedManagerTurnRecovery(
+  run: RunState,
+  claimId: string,
+): void {
+  const recovery = run.managerTurnRecovery;
+  if (
+    !recovery ||
+    recovery.state !== "resuming" ||
+    recovery.resumeClaimId !== claimId
+  ) {
+    return;
+  }
+  const key = `${run.id}:${claimId}`;
+  if (activeManagerTurnRecoveries.has(key)) return;
+  const cycle = Promise.resolve()
+    .then(async () => {
+      const latest = await getRun(run.id);
+      if (
+        !latest ||
+        latest.managerTurnRecovery?.state !== "resuming" ||
+        latest.managerTurnRecovery.resumeClaimId !== claimId ||
+        latest.managerTurnRecovery.conversationEpoch !==
+          recovery.conversationEpoch ||
+        conversationEpoch(latest) !== recovery.conversationEpoch ||
+        (latest.status !== "planning" &&
+          latest.status !== "running" &&
+          latest.status !== "reviewing") ||
+        isTerminalRunStatus(latest.status)
+      ) {
+        return;
+      }
+      const current = latest.managerTurnRecovery;
+      await runManagerStageAfterQuestion(
+        latest,
+        autopilotInputFromRun(latest).cwd,
+        current.managerMode,
+        undefined,
+        0,
+        claimId,
+      );
+    })
+    .catch(async (error) => {
+      console.warn(
+        `[run-store] parked manager turn recovery ${claimId} failed:`,
+        error,
+      );
+    })
+    .finally(async () => {
+      activeManagerTurnRecoveries.delete(key);
+      await returnUnfinishedManagerRecoveryToParked(
+        run.id,
+        claimId,
+        recovery.conversationEpoch,
+        "The replacement manager turn did not complete.",
+      ).catch(() => undefined);
+    });
+  activeManagerTurnRecoveries.set(key, cycle);
+  void cycle;
+}
+
+/**
+ * Atomically claim one exact parked manager stage and, optionally, switch the
+ * account that will serve it. The mutation returns before provider work
+ * starts; retries with the same recovery id observe `already-resuming`.
+ */
+export async function resumeManagerTurnRecovery(
+  input: ResumeManagerTurnRecoveryInput,
+): Promise<ResumeManagerTurnRecoveryResult> {
+  let run = await requireRun(input.runId);
+  const recovery = run.managerTurnRecovery;
+  if (!recovery || recovery.id !== input.recoveryId) {
+    return { outcome: "stale", run };
+  }
+  if (recovery.state === "resuming") {
+    return { outcome: "already-resuming", run };
+  }
+  if (
+    run.status !== "paused" ||
+    run.executionMode === "direct" ||
+    (run.chatBackend ?? "pi") !== recovery.backend ||
+    conversationEpoch(run) !== recovery.conversationEpoch
+  ) {
+    return { outcome: "stale", run };
+  }
+
+  const resolved = await resolveManagerRecoveryAccount(run, input.account);
+  if (!resolved.ok) {
+    return {
+      outcome: resolved.outcome,
+      run,
+      reason: resolved.reason,
+    };
+  }
+
+  const claimId = makeId("recovery-claim");
+  const decision: { outcome: ResumeManagerTurnRecoveryResult["outcome"] } = {
+    outcome: "stale",
+  };
+  run = await commitRunChange(run, {
+    type: "run.manager_turn_recovery_claimed",
+    message: "Parked manager turn recovery claimed",
+    payload: {
+      recoveryId: input.recoveryId,
+      claimId,
+      accountBackend: resolved.account?.backend,
+      accountProfileId: resolved.account?.profileId,
+    },
+    mutate: (draft, timestamp) => {
+      const current = draft.managerTurnRecovery;
+      if (!current || current.id !== input.recoveryId) {
+        decision.outcome = "stale";
+        return false;
+      }
+      if (current.state === "resuming") {
+        decision.outcome = "already-resuming";
+        return false;
+      }
+      if (
+        draft.status !== "paused" ||
+        draft.executionMode === "direct" ||
+        (draft.chatBackend ?? "pi") !== current.backend ||
+        conversationEpoch(draft) !== current.conversationEpoch
+      ) {
+        decision.outcome = "stale";
+        return false;
+      }
+
+      if (resolved.account) {
+        if (resolved.account.backend !== current.backend) {
+          decision.outcome = "account-incompatible";
+          return false;
+        }
+        let accountChanged = false;
+        if (resolved.account.backend === "pi") {
+          accountChanged =
+            draft.chatAccountProfileId !== resolved.account.profileId;
+          draft.chatAccountProfileId = resolved.account.profileId;
+        } else if (resolved.account.backend === "claude") {
+          accountChanged =
+            draft.nativeClaudeProfileId !== resolved.account.profileId;
+          draft.nativeClaudeProfileId = resolved.account.profileId;
+        } else {
+          accountChanged =
+            draft.nativeCodexProfileId !== resolved.account.profileId;
+          draft.nativeCodexProfileId = resolved.account.profileId;
+        }
+        if (accountChanged) {
+          delete draft.chatSessionUuid;
+          delete draft.chatSessionMode;
+          current.forceCanonicalReplay = true;
+        }
+        current.resumeAccountProfileId = resolved.account.profileId;
+      }
+
+      current.state = "resuming";
+      current.resumeClaimId = claimId;
+      current.resumeRequestedAt = timestamp;
+      draft.status = "running";
+      draft.verificationRounds = 0;
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "resumed_by_user",
+        stopReason: undefined,
+        resumedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+      decision.outcome = "accepted";
+    },
+  });
+
+  if (decision.outcome === "accepted") {
+    scheduleClaimedManagerTurnRecovery(run, claimId);
+  }
+  return { outcome: decision.outcome, run };
+}
+
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  if (run.managerTurnRecovery) {
+    if (run.managerTurnRecovery.state === "resuming") return run;
+    return (
+      await resumeManagerTurnRecovery({
+        runId: run.id,
+        recoveryId: run.managerTurnRecovery.id,
+      })
+    ).run;
+  }
   const resumeInput = autopilotInputFromRun(run);
   const shouldScheduleManagerAfterResume = shouldResumeManagerPlanning(run);
   // A run parked by the manager-turn failure policy (provider overload/rate
@@ -8970,7 +10235,10 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   // Land the message checkpoint before any new manager turn is allowed to edit
   // the workspace. This makes Chat+Code undo restore the send-time tree rather
   // than a later tree captured after the requested work had already begun.
-  if (input.author === "user") {
+  if (
+    input.author === "user" &&
+    runProjectPolicyMode(updated) === "trusted"
+  ) {
     const cwd = workspaceCwdFromRun(updated);
     if (cwd) {
       const labelText = message.length > 60 ? `${message.slice(0, 60).trimEnd()}…` : message;
@@ -9000,6 +10268,13 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       activeAutopilotReviews.has(updated.id))
   ) {
     scheduleQueuedSteeringFollowup(updated);
+  }
+  // A paused run has no manager turn to queue behind, so neither branch above
+  // fires and the message would sit unread until the user pressed Resume.
+  // Sending IS resuming — see scheduleResumeForUserMessage for what that
+  // covers and what it deliberately leaves to the question/terminal paths.
+  if (input.author === "user") {
+    scheduleResumeForUserMessage(updated, recordedIntent);
   }
 
   return updated;
@@ -10070,10 +11345,155 @@ function normalizeWhiteboardEdge(
   return { id, from, to, label, tone, style };
 }
 
+/** Stored-response outcome for the call-scoped codara_complete application. */
+export interface CodaraCompleteApplicationOutcome {
+  run: RunState;
+  callId: string;
+  replayed: boolean;
+  result: { ok: true };
+}
+
 /**
- * Terminalize a run after codara_complete has passed the socket's worker and
- * verification invariants. Unlike the generic status editor, this keeps the
- * autopilot projection and completed timestamp consistent with run.status.
+ * Apply the live codara_complete tool exactly once for the authoritative
+ * current-epoch manager call.
+ *
+ * The completion note, terminal run projection, and application receipt share
+ * one run.json commit. The SparkCall deliberately remains started until the
+ * provider turn reaches the manager-call settlement boundary; if the process
+ * exits in between, boot recovery uses the receipt to settle locally without
+ * replaying the provider.
+ */
+export async function applyCodaraCompleteFromManagerCall(input: {
+  runId: string;
+  summary: string;
+}): Promise<CodaraCompleteApplicationOutcome> {
+  const run = await requireRun(input.runId);
+  const summary = canonicalCodaraCompleteSummary(input.summary);
+  const payloadSha256 = hashCodaraCompletePayload(summary);
+  let outcome: Omit<CodaraCompleteApplicationOutcome, "run"> | undefined;
+  const eventPayload: Record<string, unknown> = {
+    requestedStatus: "complete",
+    source: "codara_complete",
+  };
+
+  const applied = await commitRunChange(run, {
+    type: "run.status_change_requested",
+    message: "Cora marked the run complete",
+    payload: eventPayload,
+    mutate: (draft, timestamp) => {
+      const epoch = conversationEpoch(draft);
+      const activeCalls = draft.sparkCalls.filter(
+        (call) =>
+          call.status === "started" &&
+          !call.completedAt &&
+          call.purpose !== "compaction" &&
+          (call.conversationEpoch ?? 0) === epoch,
+      );
+      if (activeCalls.length === 0) {
+        throw new Error(
+          "No active current-epoch manager call can apply codara_complete.",
+        );
+      }
+      if (activeCalls.length > 1) {
+        throw new Error(
+          `Ambiguous active current-epoch manager calls (${activeCalls.length}); refusing codara_complete.`,
+        );
+      }
+
+      const call = activeCalls[0];
+      if (call.applicationReceiptIntegrity === "invalid") {
+        throw new Error(
+          `Manager application receipt integrity failed for ${call.id}; refusing codara_complete.`,
+        );
+      }
+      const existing = codaraCompleteReceiptForCall(call);
+      if (existing) {
+        if (existing.payloadSha256 !== payloadSha256) {
+          throw new Error(
+            "codara_complete was already applied for this manager call with a different payload.",
+          );
+        }
+        outcome = {
+          callId: call.id,
+          replayed: true,
+          result: existing.result,
+        };
+        return false;
+      }
+      if ((call.applicationReceipts?.length ?? 0) !== 0) {
+        throw new Error(
+          `Manager application receipt integrity failed for ${call.id}; refusing codara_complete.`,
+        );
+      }
+
+      const summaryMessageId = summary ? makeId("msg") : undefined;
+      if (summaryMessageId) {
+        draft.humanMessages.push({
+          id: summaryMessageId,
+          runId: draft.id,
+          author: "spark",
+          kind: "note",
+          message: summary,
+          attachments: [],
+          intent: "answer",
+          deliveryState: "acknowledged",
+          backendTurnId: call.id,
+          conversationEpoch: epoch,
+          createdAt: timestamp,
+        });
+      }
+
+      const matchingRecovery =
+        call.managerRecoveryClaimId &&
+        draft.managerTurnRecovery?.state === "resuming" &&
+        draft.managerTurnRecovery.resumeClaimId === call.managerRecoveryClaimId
+          ? draft.managerTurnRecovery
+          : undefined;
+      const receipt: ManagerApplicationReceipt = {
+        key: codaraCompleteReceiptKey(call.id),
+        method: "codara_complete",
+        state: "effects_applied",
+        payloadSchemaVersion: 1,
+        payloadSha256,
+        result: { ok: true },
+        appliedAt: timestamp,
+        ...(summaryMessageId ? { summaryMessageId } : {}),
+        ...(matchingRecovery?.resumeAccountProfileId
+          ? { recoveryAccountProfileId: matchingRecovery.resumeAccountProfileId }
+          : {}),
+      };
+      call.applicationReceipts = [receipt];
+
+      delete draft.blockedOn;
+      abandonRunQuestionOwnership(draft);
+      draft.status = "complete";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "complete",
+        lastAction: "manager_marked_complete",
+        updatedAt: timestamp,
+      };
+      draft.completedAt = timestamp;
+      draft.updatedAt = timestamp;
+
+      eventPayload.callId = call.id;
+      eventPayload.conversationEpoch = epoch;
+      eventPayload.receiptKey = receipt.key;
+      eventPayload.summaryMessageId = summaryMessageId;
+      outcome = { callId: call.id, replayed: false, result: receipt.result };
+    },
+  });
+
+  if (!outcome) {
+    throw new Error("codara_complete did not establish an application result.");
+  }
+  return { run: applied, ...outcome };
+}
+
+/**
+ * Terminalize a run from non-live-tool orchestration paths. Live
+ * codara_complete calls must use applyCodaraCompleteFromManagerCall so their
+ * application receipt and summary share the terminal status commit.
  */
 export async function completeRunFromOrchestrator(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
@@ -10115,12 +11535,36 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
     input.chatMode === undefined &&
     input.chatEffort === undefined &&
     input.coraExecutionPolicy === undefined &&
-    input.chatFastMode === undefined &&
     input.chat1mContext === undefined;
   if (noChange) return run;
+  if (run.managerTurnRecovery?.state === "resuming") {
+    throw new Error(
+      "Cora is retrying this turn with a frozen provider configuration. Wait for that retry to finish before changing its backend, model, mode, or effort.",
+    );
+  }
   const nextBackend = input.chatBackend ?? run.chatBackend ?? "pi";
+  if (
+    runProjectPolicyMode(run) === "untrusted-pull-request" &&
+    nextBackend !== "pi"
+  ) {
+    throw new Error(
+      "Imported pull-request runs cannot switch to a native manager until project policy isolation is available for that CLI.",
+    );
+  }
+  const switchingBackend =
+    input.chatBackend !== undefined && input.chatBackend !== run.chatBackend;
+  // Account identity is not a per-chat input. Switching onto a native backend
+  // re-freezes that provider's active account from Settings; everything else
+  // leaves the run's pinned accounts untouched.
+  const nextNativeCodexProfileId =
+    nextBackend === "codex" && switchingBackend
+      ? await resolveSelectableNativeProfile("codex", undefined)
+      : null;
+  const nextNativeClaudeProfileId =
+    nextBackend === "claude" && switchingBackend
+      ? await resolveSelectableNativeProfile("claude", undefined)
+      : null;
   const nextFeatureFlags = normalizeChatFeatureFlags(nextBackend, {
-    chatFastMode: input.chatFastMode ?? run.chatFastMode,
     chat1mContext: input.chat1mContext ?? run.chat1mContext,
   });
   const nextExecutionPolicy = normalizeCoraExecutionPolicy(
@@ -10135,8 +11579,9 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: run.chatModel,
         chatMode: run.chatMode,
         chatEffort: run.chatEffort,
+        nativeCodexProfileId: run.nativeCodexProfileId,
+        nativeClaudeProfileId: run.nativeClaudeProfileId,
         coraExecutionPolicy: run.coraExecutionPolicy,
-        chatFastMode: run.chatFastMode,
         chat1mContext: run.chat1mContext,
       },
       next: {
@@ -10144,8 +11589,11 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: input.chatModel ?? run.chatModel,
         chatMode: input.chatMode ?? run.chatMode,
         chatEffort: input.chatEffort ?? run.chatEffort,
+        nativeCodexProfileId:
+          nextNativeCodexProfileId ?? run.nativeCodexProfileId,
+        nativeClaudeProfileId:
+          nextNativeClaudeProfileId ?? run.nativeClaudeProfileId,
         coraExecutionPolicy: nextExecutionPolicy,
-        chatFastMode: nextFeatureFlags.chatFastMode,
         chat1mContext: nextFeatureFlags.chat1mContext,
       },
     },
@@ -10154,15 +11602,20 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       if (input.chatModel !== undefined) draft.chatModel = input.chatModel.trim() || undefined;
       if (input.chatMode !== undefined) draft.chatMode = input.chatMode;
       if (input.chatEffort !== undefined) draft.chatEffort = input.chatEffort;
+      if (nextNativeCodexProfileId !== null) {
+        draft.nativeCodexProfileId = nextNativeCodexProfileId;
+      }
+      if (nextNativeClaudeProfileId !== null) {
+        draft.nativeClaudeProfileId = nextNativeClaudeProfileId;
+      }
       if (input.coraExecutionPolicy !== undefined) {
         draft.coraExecutionPolicy = nextExecutionPolicy;
       }
-      draft.chatFastMode = nextFeatureFlags.chatFastMode;
       draft.chat1mContext = nextFeatureFlags.chat1mContext;
       // Switching backend invalidates the prior session UUID — the new
       // backend would mis-resume otherwise. Selected per the answers: no
       // cross-backend handoff; each backend gets its own fresh thread.
-      if (input.chatBackend !== undefined && input.chatBackend !== run.chatBackend) {
+      if (switchingBackend) {
         draft.chatSessionUuid = undefined;
         draft.chatSessionMode = undefined;
       }
@@ -10493,15 +11946,37 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   const settings = await loadSettings();
   const attemptNumber =
     run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id).length + 1;
+  const attemptUserConstitution = copyRunUserConstitutionCapture(run);
   const attempt: WorkerAttempt = {
     id: makeId("attempt"),
     runId: run.id,
+    ...(attemptUserConstitution ? { userConstitution: attemptUserConstitution } : {}),
     workerTaskId: task.id,
     attemptNumber,
     runtime: task.runtimePreference,
     cwd: input.cwd,
     status: "prompt_ready",
   };
+  // Only native Codex transports own a CODEX_HOME. Codex-labelled Pi workers
+  // keep their separate Pi account identity and never enter this path.
+  if (
+    task.runtimePreference === "codex" &&
+    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS === "1" &&
+    runProjectPolicyMode(run) === "trusted"
+  ) {
+    attempt.nativeCodexProfileId = (
+      await resolveNewNativeCodexProfile()
+    ).profileId;
+  }
+  if (
+    task.runtimePreference === "claude" &&
+    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS === "1" &&
+    runProjectPolicyMode(run) === "trusted"
+  ) {
+    attempt.nativeClaudeProfileId = (
+      await resolveNewNativeClaudeProfile()
+    ).profileId;
+  }
   // Filesystem-isolate unattended (autopilot) workers in a throwaway git
   // worktree forked off the run's checkpoint, so a misbehaving agent can't
   // touch the user's working tree. Best-effort: any failure (non-repo, no
@@ -10514,12 +11989,16 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   // synthesis judge can read every candidate's PLAN.md / PRD.md afterward.
   if (
     input.unattended &&
+    runProjectPolicyMode(run) === "trusted" &&
     settings.autopilotSandbox &&
     !task.councilGroupId &&
     (await isGitWorktreeRepo(input.cwd))
   ) {
     try {
-      const worktreesRoot = join(sparkHome(), "worktrees", basename(input.cwd), "sandbox");
+      const worktreesRoot = join(
+        managedWorktreesRoot(sparkHome(), input.cwd),
+        "sandbox",
+      );
       const startPoint = (await runCheckpointStartPoint(input.cwd, run.id)) ?? undefined;
       const created = await createSandboxWorktree({
         repoCwd: input.cwd,
@@ -10587,6 +12066,8 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     workerTaskId: task.id,
     attemptId: attempt.id,
     runtime: task.runtimePreference,
+    nativeCodexProfileId: attempt.nativeCodexProfileId,
+    nativeClaudeProfileId: attempt.nativeClaudeProfileId,
     cwd: effectiveCwd,
     executionDisabled: true,
     task,
@@ -10628,6 +12109,8 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     payload: {
       executionDisabled: true,
       attemptId: attempt.id,
+      nativeCodexProfileId: attempt.nativeCodexProfileId,
+      nativeClaudeProfileId: attempt.nativeClaudeProfileId,
       paths,
       // Looms v2: lets the renderer suppress the workers tab (and the
       // direct-worker spawn handler claim the pty) synchronously from the
@@ -10657,8 +12140,8 @@ async function rerouteSparkShellTaskToAgent(task: WorkerTask): Promise<RuntimeRe
   if (task.createdBy !== "spark" || task.runtimePreference !== "shell") return null;
   const runtimes = await detectConfiguredAgentRuntimes();
   const target =
-    runtimes.find((runtime) => runtime.kind === "codex" && runtime.installed) ??
-    runtimes.find((runtime) => runtime.kind === "claude" && runtime.installed);
+    runtimes.find((runtime) => runtime.kind === "codex" && runtimeAssignable(runtime)) ??
+    runtimes.find((runtime) => runtime.kind === "claude" && runtimeAssignable(runtime));
   if (!target) return null;
 
   const model = target.models.find((item) => item.isDefault) ?? target.models[0];
@@ -10708,6 +12191,37 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     throw new Error(`Cannot launch worker task for ${taskStep.status} step: ${taskStep.title}`);
   }
 
+  // Select the concrete launch seam before performing any launch work. An
+  // enabled immutable capture may proceed only through a seam that can deliver
+  // its exact block as provider-owned system guidance (or Claude's append-only
+  // system-prompt file). The legacy visible Codex CLI, shell/manual terminals,
+  // and unknown persisted runtimes have no secure equivalent, so fail closed
+  // before log creation, trust preparation, running state, PTY, or provider.
+  const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
+  const untrustedPullRequest =
+    runProjectPolicyMode(run) === "untrusted-pull-request";
+  const usePiWorkerHarness =
+    (untrustedPullRequest ||
+      process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1") &&
+    (task.runtimePreference === "claude" || task.runtimePreference === "codex");
+  const constitutionLaunchSurface = workerConstitutionLaunchSurface({
+    runtimePreference: task.runtimePreference,
+    isAutomationRun,
+    usePiWorkerHarness,
+  });
+  const unsupportedConstitutionReason =
+    unsupportedEnabledWorkerConstitutionReason(
+      attempt.userConstitution,
+      constitutionLaunchSurface,
+    );
+  if (unsupportedConstitutionReason) {
+    return rejectWorkerAttemptLaunchForUnsupportedConstitution(
+      run.id,
+      attempt.id,
+      unsupportedConstitutionReason,
+    );
+  }
+
   const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
   await fs.mkdir(paths.attemptDir, { recursive: true });
   await Promise.all([
@@ -10723,8 +12237,18 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // honored in v0.128 (path-format mismatch); the only reliable suppressor
   // is an exact-path entry in ~/.codex/config.toml, which we ensure here
   // before spawning. Idempotent and cheap.
-  if (task.runtimePreference === "codex") {
-    await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
+  if (
+    task.runtimePreference === "codex" &&
+    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS === "1" &&
+    runProjectPolicyMode(run) === "trusted"
+  ) {
+    const nativeCodexExecution = await resolveFrozenNativeCodexProfile(
+      attempt.nativeCodexProfileId,
+    );
+    await ensureCodexProjectTrust(
+      attempt.cwd,
+      nativeCodexExecution.env.CODEX_HOME,
+    ).catch(() => undefined);
   }
   // A direct run bound to an automationId is the automation (loom) worker
   // path: it launches on a pinned/handoff model the automation engine already
@@ -10732,10 +12256,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // Cora-worker roster coercion. Automation workers run on the SAME Pi harness
   // as ordinary Cora workers (the legacy structured transports below survive
   // only behind the SPARK_E2E_LEGACY_WORKER_HARNESS escape hatch).
-  const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
-  const usePiWorkerHarness =
-    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
-    (task.runtimePreference === "claude" || task.runtimePreference === "codex");
   const piWorkerModel = usePiWorkerHarness
     ? piModelForWorker(task, isAutomationRun)
     : undefined;
@@ -10747,10 +12267,26 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     paths.attemptDir,
     ...(task.collabMailDirHint ? [task.collabMailDirHint] : []),
   ];
+  // The legacy visible Claude CLI accepts an append-only system prompt file.
+  // Derive its path now for the display command, but do not create it until
+  // the launch driver has completed every PTY prerequisite and resolved this
+  // exact attempt capture. Pi owns a separate process-scoped file below.
+  const cliWorkerConstitutionPrompt =
+    task.runtimePreference === "claude" &&
+    attempt.userConstitution?.enabledAtCapture
+      ? {
+          directory: join(paths.attemptDir, ".system"),
+          fileStem: "global-user-constitution",
+        }
+      : undefined;
+  const cliWorkerConstitutionPromptPath = cliWorkerConstitutionPrompt
+    ? privateWorkerConstitutionPromptPath(cliWorkerConstitutionPrompt)
+    : undefined;
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
     isAutomation: isAutomationRun,
     extraWritableDirs,
+    workerConstitutionPromptPath: cliWorkerConstitutionPromptPath,
   });
   const command = usePiWorkerHarness
     ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
@@ -10797,6 +12333,13 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     payload: {
       command,
       paths,
+      // This event is what materializes the renderer's worker pane (App.tsx),
+      // so it carries the same loom stamp envelope_prepared does: a direct/loom
+      // attempt must be recognizable synchronously from the payload, with no
+      // getRun round-trip, or the Automations Hub's worker would briefly claim
+      // a chat terminal tab.
+      automationId: run.automationId,
+      executionMode: run.executionMode,
     },
   });
   await updatePeerCommsRegistry(run, launchStep, task, attempt.id, paths, "launching").catch(() => undefined);
@@ -10807,7 +12350,10 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // claim can then auto-restore the workspace to this exact pre-mutation state.
   // Best-effort: a failed snapshot or non-git workspace yields sha=null and just
   // disables restore for this attempt; it must never block the launch.
-  if (taskWritesWorkspace(task)) {
+  if (
+    taskWritesWorkspace(task) &&
+    runProjectPolicyMode(run) === "trusted"
+  ) {
     try {
       const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
       const checkpoint = await withCheckpointLock(run.id, () =>
@@ -10859,6 +12405,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           cwd: attempt.cwd,
           promptText,
           command,
+          userConstitution: attempt.userConstitution,
         })
       : isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
       ? await runStructuredAutomationWorkerSession({
@@ -10869,8 +12416,11 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           cwd: attempt.cwd,
           promptText,
           command,
+          nativeCodexProfileId: attempt.nativeCodexProfileId,
+          nativeClaudeProfileId: attempt.nativeClaudeProfileId,
           sandboxed: Boolean(attempt.sandboxWorktreePath),
           extraWritableDirs,
+          userConstitution: attempt.userConstitution,
         })
       : await runWorkerSession({
           run,
@@ -10881,6 +12431,8 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           launchCommand,
           promptText,
           command,
+          userConstitution: attempt.userConstitution,
+          workerConstitutionPromptFile: cliWorkerConstitutionPrompt,
         });
   } finally {
     if (peerCommsAcquired) releasePeerCommsWatcher(run.id);
@@ -11049,19 +12601,36 @@ export async function deleteRun(runId: string): Promise<void> {
         "Open or recover those worktrees before deleting the run.",
     );
   }
+  // Close the terminal-create race at the first destructive point. Provider
+  // disposal below can await several runtimes; a stale MCP child must not mint
+  // a new run-owned pane during that window and land after the cleanup
+  // snapshot. The unreconciled-worktree refusal above deliberately remains
+  // first and leaves the run fully usable.
   fenceAgentTerminalRunDeleting(run.id);
+  // The safety guard above must remain first: refusing deletion for an
+  // unreconciled sandbox is non-destructive and must not tear down a chat the
+  // user can still use to recover it. Once deletion is authorized, stop every
+  // provider runtime before removing its durable artifacts. Retention uses this
+  // same entry point, so old terminal runs cannot leave invisible manager
+  // processes behind. The helper attempts every backend even if one rejects.
+  await disposeManagerSessions(run.id);
+  const timestamp = new Date().toISOString();
+  for (const worker of activeWorkersForRun(run.id)) {
+    worker.kill();
+    pty.killImmediate(worker.attemptId);
+    activeWorkerProcesses.delete(worker.attemptId);
+  }
+  // Reconcile every auxiliary terminal minted by this exact run. This includes
+  // explicitly retained service panes: they may outlive run completion, but
+  // never deletion. The bulk closer stops PTYs before asking the renderer to
+  // remove tabs and reports individual failures without aborting the remaining
+  // panes, so deletion cannot strand CPU-consuming child processes.
   const terminalCleanup = await deleteAgentTerminalRun(run.id);
   if (terminalCleanup.failures.length > 0) {
     console.warn(
       `[run-store] ${terminalCleanup.failures.length} run-owned terminal tab(s) ` +
         `could not be removed while deleting ${run.id}; their PTYs were stopped`,
     );
-  }
-  const timestamp = new Date().toISOString();
-  for (const worker of activeWorkersForRun(run.id)) {
-    worker.kill();
-    pty.killImmediate(worker.attemptId);
-    activeWorkerProcesses.delete(worker.attemptId);
   }
   for (const key of [...activeAutopilotCycles.keys()]) {
     if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
@@ -11119,6 +12688,16 @@ export async function deleteRun(runId: string): Promise<void> {
   // Evict from the in-memory cache so a later getRun for this id falls
   // through to disk (and correctly returns null now that the file is gone).
   runCache.delete(run.id);
+  for (const listener of runDeletedListeners) {
+    try {
+      await listener({ workspaceId: run.workspaceId, runId: run.id });
+    } catch (error) {
+      console.warn(
+        `[run-store] run deletion listener failed for ${run.id}:`,
+        error,
+      );
+    }
+  }
 }
 
 // Reliable Cora-owned rewind. The epoch barrier lands before any asynchronous
@@ -11131,26 +12710,6 @@ interface ConversationRewindTarget {
   messagePointer: number;
   messageId?: string;
   scope: "chat" | "chat+code";
-}
-
-function disposeManagerSessions(runId: string): Promise<void> {
-  for (const backendKind of ["claude", "codex", "pi"] as const) {
-    try {
-      getBackend(backendKind).interruptChat?.(runId);
-    } catch {
-      // Continue: epoch invalidation is authoritative even if ESC fails.
-    }
-  }
-  return Promise.all(
-    (["claude", "codex", "pi"] as const).map(async (backendKind) => {
-      try {
-        await getBackend(backendKind).disposeChat?.(runId);
-      } catch {
-        // Provider processes are best-effort cleanup; stale callbacks are still
-        // blocked by the epoch barrier below.
-      }
-    }),
-  ).then(() => undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -11251,19 +12810,30 @@ async function maybeAutoCompactConversation(
     if (!isManagerTurnCurrent(run, callId, call.conversationEpoch ?? 0)) return;
     const contextTokens = typeof call.promptTokens === "number" ? call.promptTokens : 0;
     if (contextTokens <= 0) return;
-    // Window fallback MUST mirror the composer's ContextPill budget
-    // (ChatComposer.tsx, `activeOneMillionContext && activeChatBackend ===
-    // "claude" ? 1_000_000 : contextWindowForModel(...)`): Claude chats are
+    // Capacity MUST mirror the composer's ContextPill budget (ChatComposer.tsx
+    // feeds the same chatContextCapacityTokens helper): Claude chats are
     // normalized to 1M context by effectiveChatOneMillionContext, and pricing
     // the trigger off the 200k per-model default while the meter shows a 1M
     // budget would compact a Claude conversation at 16% of displayed budget.
+    // For a Pi chat the ceiling is the compaction cap, not the raw window, so
+    // this summary pass runs before the Pi extension's own compaction.
     const chatBackend = run.chatBackend ?? "pi";
-    const windowTokens =
-      typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0
-        ? call.contextWindowTokens
-        : effectiveChatOneMillionContext(chatBackend) && chatBackend === "claude"
-          ? 1_000_000
-          : contextWindowForModel(call.model).tokens;
+    const windowTokens = chatContextCapacityTokens({
+      contextWindowTokens:
+        typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0
+          ? call.contextWindowTokens
+          : effectiveChatOneMillionContext(chatBackend) && chatBackend === "claude"
+            ? 1_000_000
+            : contextWindowForModel(call.model).tokens,
+      backend: chatBackend,
+      // Same env override the Pi session was stamped with and the composer
+      // meter reads back off the usage stream (pi-turn emits it as
+      // compactAtTokens). Resolving it here too is what keeps this trigger and
+      // the ContextPill measuring the same ceiling: without it, an override
+      // below ~204.8k would silently disable this summary pass, and one above
+      // 256k would fire it at 204.8k while the meter advertised more.
+      compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+    });
     if (contextTokens / windowTokens < AUTO_COMPACTION_CONTEXT_RATIO) return;
     if (runsMidAutoCompaction.has(runId)) return;
     if (run.executionMode === "direct") return;
@@ -11343,7 +12913,18 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
     let run = await requireRun(runId);
     const epoch = conversationEpoch(run);
     const settings = await loadSettings();
-    const chatConfig = resolveChatBackendConfig(run);
+    const chatConfig = await freezeManagerExecutionAccount(
+      resolveChatBackendConfig(run),
+    );
+    if (
+      runProjectPolicyMode(run) === "untrusted-pull-request" &&
+      chatConfig.backend !== "pi"
+    ) {
+      console.warn(
+        `[run-store] auto-compaction skipped for untrusted PR run ${runId}: native manager policy isolation unavailable`,
+      );
+      return;
+    }
     // No provider session means there is no held context to summarize — the
     // backend would spawn a FRESH session and "summarize" nothing. Skip;
     // nothing durable has been recorded yet.
@@ -11355,13 +12936,18 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
     }
     const backend = getBackend(chatConfig.backend);
     const callId = makeId("spark");
+    const callUserConstitution = copyRunUserConstitutionCapture(run);
     const summarizeCall: SparkCall = {
       id: callId,
       runId: run.id,
+      ...(callUserConstitution ? { userConstitution: callUserConstitution } : {}),
       stepId: run.currentStepId,
       mode: "chat",
       purpose: "compaction",
       model: chatConfig.model,
+      accountProfileId: chatConfig.accountProfileId,
+      nativeCodexProfileId: chatConfig.nativeCodexProfileId,
+      nativeClaudeProfileId: chatConfig.nativeClaudeProfileId,
       status: "started",
       inputMessageIds: [],
       conversationEpoch: epoch,
@@ -11402,11 +12988,14 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
     const startedMs = Date.now();
     let result: Awaited<ReturnType<typeof backend.requestManagerDecision>>;
     try {
+      const managerConstitutionBlock =
+        await resolveCapturedManagerConstitutionBlock(run);
       result = await backend.requestManagerDecision({
         run: structuredClone(run),
         cwd,
         mode: "chat",
         settings,
+        managerConstitutionBlock,
         chat: { ...chatConfig },
         prompt: AUTO_COMPACTION_SUMMARY_PROMPT,
         inputMessageIds: [],
@@ -11479,6 +13068,10 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         call.completedAt = timestamp;
         call.durationMs = durationMs;
         if (result.model) call.model = result.model;
+        call.accountProfileId = preserveFrozenPiAccountProfileId(
+          call.accountProfileId,
+          result.accountProfileId,
+        );
         if (typeof result.costUsd === "number") call.costUsd = result.costUsd;
         if (typeof result.inputTokens === "number") call.inputTokens = result.inputTokens;
         if (typeof result.outputTokens === "number") call.outputTokens = result.outputTokens;
@@ -11656,6 +13249,7 @@ async function performConversationRewind(
       draft.conversationEpoch = newEpoch;
       delete draft.chatSessionUuid;
       delete draft.chatSessionMode;
+      delete draft.managerTurnRecovery;
       draft.pendingConversationRewind = {
         oldEpoch,
         newEpoch,
@@ -11701,6 +13295,9 @@ async function performConversationRewind(
   activeSteeringFollowups.delete(original.id);
   for (const key of [...activePendingManagerResumes]) {
     if (key.startsWith(`${original.id}:`)) activePendingManagerResumes.delete(key);
+  }
+  for (const key of [...activeManagerTurnRecoveries.keys()]) {
+    if (key.startsWith(`${original.id}:`)) activeManagerTurnRecoveries.delete(key);
   }
   await disposeManagerSessions(runId);
 
@@ -11771,6 +13368,7 @@ async function performConversationRewind(
       draft.humanMessages = draft.humanMessages.slice(0, pointer);
       draft.checkpoints = keptCheckpoints;
       delete draft.pendingManagerResume;
+      delete draft.managerTurnRecovery;
       delete draft.pendingConversationRewind;
       delete draft.blockedOn;
       delete draft.chatSessionUuid;
@@ -12675,7 +14273,7 @@ async function maybeQueueCliLaunchFallback({
   const preferenceOrder: WorkerRuntime[] = ["claude", "codex"];
   const opposite: WorkerRuntime | null = preferenceOrder
     .filter((kind) => kind !== task.runtimePreference)
-    .find((kind) => availableRuntimes.some((runtime) => runtime.kind === kind && runtime.installed)) ?? null;
+    .find((kind) => availableRuntimes.some((runtime) => runtime.kind === kind && runtimeAssignable(runtime))) ?? null;
   // Only fall back once per (step, title) lineage. If a sibling with the
   // opposite runtime already exists (failed, cancelled, or pending), both
   // runtimes have been tried — let the manager handle it.
@@ -13499,6 +15097,13 @@ async function saveRun(run: RunState): Promise<void> {
   runWriteQueues.set(run.id, next);
   try {
     await next;
+    for (const listener of runSavedListeners) {
+      try {
+        await listener({ workspaceId: run.workspaceId, runId: run.id });
+      } catch (err) {
+        console.error("[run-store] run-saved listener failed:", err);
+      }
+    }
   } finally {
     if (runWriteQueues.get(run.id) === next) runWriteQueues.delete(run.id);
   }
@@ -13551,6 +15156,29 @@ async function requireRun(runId: string): Promise<RunState> {
 }
 
 function normalizeRun(run: RunState): RunState {
+  // Validate all present provenance before mutating legacy/default fields.
+  // Absence remains absence: a reload must never capture current Settings on
+  // behalf of a run, call, or attempt created by an older build.
+  normalizeRunUserConstitutionProvenance(run);
+  const origin = normalizeGitHubOrigin(run.origin);
+  if (origin) run.origin = origin;
+  else delete run.origin;
+  run.projectPolicyMode = resolveProjectPolicyMode({
+    origin,
+    projectPolicyMode: run.projectPolicyMode,
+  });
+  if (run.settingsSnapshot && typeof run.settingsSnapshot === "object") {
+    run.settingsSnapshot.projectPolicyMode = run.projectPolicyMode;
+  }
+  const projectConstitution =
+    run.projectPolicyMode === "trusted"
+      ? normalizeProjectConstitutionSnapshot(run.projectConstitution)
+      : null;
+  if (projectConstitution) {
+    run.projectConstitution = projectConstitution;
+  } else {
+    delete run.projectConstitution;
+  }
   run.humanMessages ??= [];
   run.sparkCalls ??= [];
   run.conversationEpoch ??= 0;
@@ -13666,6 +15294,58 @@ function normalizeRun(run: RunState): RunState {
   for (const call of run.sparkCalls) {
     call.inputMessageIds ??= [];
     call.conversationEpoch ??= 0;
+    normalizeManagerApplicationReceipts(call);
+  }
+  if (run.managerTurnRecovery) {
+    const recovery = run.managerTurnRecovery;
+    const validMode =
+      recovery.managerMode === "plan_analysis" ||
+      recovery.managerMode === "chat" ||
+      recovery.managerMode === "step_planning" ||
+      recovery.managerMode === "worker_prompt_generation" ||
+      recovery.managerMode === "worker_result_review" ||
+      recovery.managerMode === "retry_planning" ||
+      recovery.managerMode === "final_summary" ||
+      recovery.managerMode === "test";
+    const valid =
+      typeof recovery.id === "string" &&
+      recovery.id.startsWith("recovery-") &&
+      (recovery.state === "parked" || recovery.state === "resuming") &&
+      (recovery.failureKind === "rate_limit" ||
+        recovery.failureKind === "provider" ||
+        recovery.failureKind === "transport") &&
+      (recovery.backend === "pi" ||
+        recovery.backend === "claude" ||
+        recovery.backend === "codex") &&
+      validMode &&
+      Number.isSafeInteger(recovery.conversationEpoch) &&
+      recovery.conversationEpoch >= 0 &&
+      recovery.conversationEpoch === conversationEpoch(run) &&
+      typeof recovery.failedSparkCallId === "string" &&
+      recovery.failedSparkCallId.startsWith("spark-") &&
+      Number.isFinite(Date.parse(recovery.parkedAt)) &&
+      (recovery.resumeAccountProfileId === undefined ||
+        (typeof recovery.resumeAccountProfileId === "string" &&
+          recovery.resumeAccountProfileId.length > 0 &&
+          recovery.resumeAccountProfileId.length <= 256)) &&
+      (recovery.forceCanonicalReplay === undefined ||
+        typeof recovery.forceCanonicalReplay === "boolean");
+    if (!valid || run.executionMode === "direct" || isTerminalRunStatus(run.status)) {
+      delete run.managerTurnRecovery;
+    } else if (recovery.state === "resuming") {
+      if (
+        !recovery.resumeClaimId?.startsWith("recovery-claim-") ||
+        !recovery.resumeRequestedAt ||
+        !Number.isFinite(Date.parse(recovery.resumeRequestedAt))
+      ) {
+        recovery.state = "parked";
+        delete recovery.resumeClaimId;
+        delete recovery.resumeRequestedAt;
+      }
+    } else {
+      delete recovery.resumeClaimId;
+      delete recovery.resumeRequestedAt;
+    }
   }
   for (const step of run.steps ?? []) {
     step.plannedAgents ??= [];
@@ -13872,6 +15552,8 @@ async function commitRunChange(
         latest.seen = false;
       }
       await saveRun(latest);
+      nextStatus = latest.status;
+      persisted = true;
 
       // The run file is the lifecycle authority. Fence + schedule cleanup as
       // soon as that terminal status is durable, before the event journal
@@ -13945,8 +15627,6 @@ async function commitRunChange(
       // same-run writer, persists both lines, then broadcasts in the identical
       // sequence, so a direct append cannot split cause from transition.
       await appendEvents(events);
-      nextStatus = latest.status;
-      persisted = true;
     });
   runMutationQueues.set(run.id, next);
   try {
@@ -14883,6 +16563,8 @@ function autopilotInputFromRun(run: RunState): StartAutopilotInput {
     workspaceId: run.workspaceId,
     workspaceName: run.title.replace(/^Autopilot -\s*/i, "") || "workspace",
     cwd,
+    origin: run.origin,
+    projectPolicyMode: runProjectPolicyMode(run),
     planPath: plan?.sourceFile,
     planText: plan?.rawContent,
     planTitle: plan?.title,
@@ -14947,6 +16629,39 @@ function writeWorkerInput(worker: ActiveWorkerProcess, input: string): void {
   worker.write(input);
 }
 
+export type ActiveWorkerInputCapability = "pty" | "steer" | "none";
+
+export function activeWorkerInputDescriptor(
+  attemptId: string,
+): {
+  capability: ActiveWorkerInputCapability;
+  processGenerationId: string;
+} | null {
+  const worker = activeWorkerProcesses.get(attemptId);
+  if (!worker) return null;
+  return {
+    capability: worker.inputCapability,
+    processGenerationId: worker.processGenerationId,
+  };
+}
+
+export function writeActiveWorkerInput(
+  attemptId: string,
+  processGenerationId: string,
+  input: string,
+): boolean {
+  const worker = activeWorkerProcesses.get(attemptId);
+  if (
+    !worker ||
+    worker.processGenerationId !== processGenerationId ||
+    worker.inputCapability === "none"
+  ) {
+    return false;
+  }
+  worker.write(input);
+  return true;
+}
+
 function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input: string; messageId?: string } {
   const pausedAt = run.autopilot?.pausedAt;
   const userUpdate = run.humanMessages
@@ -14958,10 +16673,10 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
       return message.createdAt >= pausedAt;
     });
 
-  const pauseReason = run.autopilot?.stopReason?.trim();
-  const promptText =
-    userUpdate?.message ??
-    (pauseReason && pauseReason !== "Paused by user" ? pauseReason : undefined);
+  // stopReason is operational state, not user-authored direction. Provider
+  // failures, quota notices, and pause labels must never be injected into a
+  // worker as if the user had asked for them.
+  const promptText = userUpdate?.message;
 
   if (!promptText) {
     return { kind: "continue", input: CONTINUE_INPUT };
@@ -15533,8 +17248,11 @@ async function runStructuredAutomationWorkerSession({
   cwd,
   promptText,
   command,
+  nativeCodexProfileId,
+  nativeClaudeProfileId,
   sandboxed,
   extraWritableDirs,
+  userConstitution,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -15543,9 +17261,25 @@ async function runStructuredAutomationWorkerSession({
   cwd: string;
   promptText: string;
   command: string;
+  nativeCodexProfileId?: string;
+  nativeClaudeProfileId?: string;
   sandboxed: boolean;
   extraWritableDirs: string[];
+  userConstitution?: UserConstitutionCapture;
 }): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
+  let workerConstitutionBlock: string;
+  try {
+    workerConstitutionBlock = await resolveCapturedWorkerConstitutionBlock({
+      userConstitution,
+    });
+  } catch (error) {
+    return {
+      exitCode: 1,
+      error: `Worker global constitution could not be resolved from the attempt capture: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
   const runningTimestamp = new Date().toISOString();
   await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
   const transport = task.runtimePreference === "claude" ? "agent-sdk" : "app-server";
@@ -15583,6 +17317,8 @@ async function runStructuredAutomationWorkerSession({
     workerTaskId: task.id,
     attemptId,
     command,
+    processGenerationId: randomUUID(),
+    inputCapability: "none",
     write: () => undefined,
     kill,
   });
@@ -15590,10 +17326,14 @@ async function runStructuredAutomationWorkerSession({
   try {
     const result = await runStructuredWorker({
       runId: run.id,
+      attemptId,
       automationId: run.automationId ?? "",
       task,
+      nativeCodexProfileId,
+      nativeClaudeProfileId,
       cwd,
       prompt: promptText,
+      workerConstitutionBlock,
       paths,
       sandboxed,
       extraWritableDirs,
@@ -15661,23 +17401,12 @@ function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
 }
 
 function piModelForWorker(task: WorkerTask, isAutomationRun = false): string | undefined {
-  // Automation (loom) workers launch on a pinned/handoff model the automation
-  // validation layer already vetted (agent-socket's validateConcreteWorker +
-  // the scheduler migration), so their hint goes through verbatim — only the
-  // superseded-id remaps apply. Coercing them onto the Cora chat-worker roster
-  // would silently rewrite a model the user explicitly pinned.
-  if (isAutomationRun) {
-    return sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
-  }
-  // For Cora-spawned workers the roster is enforced HERE, at the spawn
-  // chokepoint, not only in the planner's prompt. A manager session keeps the
-  // system prompt it was born with for the whole run, so a prompt-only rule
-  // cannot bind an in-flight run (and cannot bind a resumed one at all).
-  // Coercion never rejects: an off-roster hint lands on the nearest allowed
-  // model instead of failing the spawn, and an omitted one pins the standard
-  // tier rather than delegating the choice to the subscription default (which
-  // can be the premium tier).
-  return coerceWorkerModelToRoster(task.runtimePreference, task.modelHint);
+  // One answer, shared with the renderer: plannedWorkerModel holds both the
+  // automation passthrough (a pinned/handoff model the automation validation
+  // layer already vetted) and the roster coercion Cora-spawned workers get.
+  // The renderer prints the same value on queued worker rows, so a row can
+  // never advertise a model this chokepoint will not launch.
+  return plannedWorkerModel(task, { isAutomationRun });
 }
 
 function piWorkerToolLabel(value: unknown): string {
@@ -15959,6 +17688,7 @@ async function runPiWorkerSession({
   cwd,
   promptText,
   command,
+  userConstitution,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -15967,6 +17697,7 @@ async function runPiWorkerSession({
   cwd: string;
   promptText: string;
   command: string;
+  userConstitution?: UserConstitutionCapture;
 }): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const displayPtyRecovered = await ensurePiWorkerDisplayPty(
@@ -16025,6 +17756,8 @@ async function runPiWorkerSession({
       : 0;
   // Mode-600 MCP roster written for this attempt; removed with the session.
   let mcpConfigPath: string | null = null;
+  let workerConstitutionPromptPath: string | null = null;
+  let agentSocketCapabilityId: string | undefined;
   let logQueue: Promise<void> = Promise.resolve();
   const appendWorkerLog = (text: string) => {
     logQueue = logQueue
@@ -16051,7 +17784,45 @@ async function runPiWorkerSession({
 
   try {
     const step = run.steps.find((item) => item.id === task.stepId);
-    const peerCommsEnabled = shouldUsePeerComms(run, step, task);
+    const peerCommsEnabled =
+      runProjectPolicyMode(run) === "trusted" &&
+      shouldUsePeerComms(run, step, task);
+    const persistedAttempt = run.workerAttempts.find(
+      (item) => item.id === attemptId,
+    );
+    const managerChat = resolveChatBackendConfig(run);
+    let workerAccountProfileId = selectPiWorkerAccountProfile({
+      persistedAttemptProfileId: persistedAttempt?.accountProfileId,
+      runManagerProfileId: managerChat.accountProfileId,
+      runManagerProvider:
+        managerChat.backend === "pi"
+          ? piProviderForManagerModel(managerChat.model)
+          : null,
+      workerProvider: provider,
+    });
+    if (!workerAccountProfileId) {
+      workerAccountProfileId = (
+        await rankImplicitPiAccounts(provider, model)
+      )[0]?.accountProfileId;
+    }
+    const resolvedWorkerAccount = await resolveCodaraPiExecutionAccount({
+      provider,
+      ...(workerAccountProfileId
+        ? { preferredAccountProfileId: workerAccountProfileId }
+        : {}),
+    });
+    await stampAttemptAccountProfile(
+      run.id,
+      task.id,
+      attemptId,
+      resolvedWorkerAccount.accountProfileId,
+    );
+    // Resolve only this attempt's immutable provenance after account/runtime
+    // prerequisites, immediately before the plan can create a provider-owned
+    // prompt file or start Pi. Current Settings and run-level fallback are not
+    // available through this resolver's type or implementation.
+    const workerConstitutionBlock =
+      await resolveCapturedWorkerConstitutionBlock({ userConstitution });
     const plan = await createCodaraPiWorkerLaunchPlan({
       provider,
       runId: run.id,
@@ -16060,7 +17831,15 @@ async function runPiWorkerSession({
       model,
       thinking,
       sessionName: task.title,
+      accountProfileId: resolvedWorkerAccount.accountProfileId,
+      resolvedAccount: resolvedWorkerAccount,
       executionPolicy: effectiveRunExecutionPolicy(run),
+      projectPolicyMode: runProjectPolicyMode(run),
+      workerConstitutionBlock,
+      untrustedWriteAllowFiles:
+        runProjectPolicyMode(run) === "untrusted-pull-request"
+          ? [paths.finalReportJson]
+          : undefined,
       // Frozen contract with resources/pi-cora/worker.ts: parallel-batch
       // workers get CODARA_PI_PEER_DIR + CODARA_PI_SELF_ID to reach the
       // run's mailbox natively. Same gate as the prompt-side guidance.
@@ -16085,7 +17864,15 @@ async function runPiWorkerSession({
           }
         : undefined,
     });
+    // The plan creator may write a per-session MCP bridge file. Capture it
+    // before the durable profile stamp so any stamp failure still reaches the
+    // finally cleanup path.
     mcpConfigPath = plan.mcpConfigPath;
+    workerConstitutionPromptPath = plan.workerConstitutionPromptPath;
+    agentSocketCapabilityId = plan.agentSocketCapabilityId;
+    if (plan.accountProfileId !== resolvedWorkerAccount.accountProfileId) {
+      throw new Error("Pi worker plan changed its frozen account identity");
+    }
     client = new PiRpcClient(plan, {
       requestTimeoutMs: 120_000,
       shutdownGraceMs: 2_000,
@@ -16123,6 +17910,8 @@ async function runPiWorkerSession({
       workerTaskId: task.id,
       attemptId,
       command,
+      processGenerationId: randomUUID(),
+      inputCapability: "steer",
       write: (input) => {
         if (!client) return;
         if (input === ESC_KEY) {
@@ -16267,7 +18056,11 @@ async function runPiWorkerSession({
     unsubscribe?.();
     activeWorkerProcesses.delete(attemptId);
     await client?.stop().catch(() => undefined);
-    await cleanupPiMcpBridgeConfig({ mcpConfigPath }).catch(() => undefined);
+    await cleanupPiMcpBridgeConfig({
+      mcpConfigPath,
+      workerConstitutionPromptPath,
+      agentSocketCapabilityId,
+    }).catch(() => undefined);
     // Keep the completed frame in xterm; disposing the idle host shell matches
     // the former CLI worker lifecycle and prevents one process per old worker.
     try { pty.killImmediate(attemptId); } catch { /* already closed */ }
@@ -16288,6 +18081,8 @@ async function runWorkerSession({
   launchCommand,
   promptText,
   command,
+  userConstitution,
+  workerConstitutionPromptFile,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -16297,10 +18092,16 @@ async function runWorkerSession({
   launchCommand: string | null;
   promptText: string;
   command: string;
+  userConstitution?: UserConstitutionCapture;
+  workerConstitutionPromptFile?: {
+    directory: string;
+    fileStem: string;
+  };
 }): Promise<{ exitCode: number; error?: string }> {
   // Wait until the renderer's TerminalView mounts and calls pty:spawn for
-  // this attempt. The "envelope_prepared" event triggers the pane add in
-  // App.tsx; from there it's normally <1s before pty-manager has a session.
+  // this attempt. The "worker_attempt.launch_requested" event (emitted by
+  // launchWorkerAttempt just above) triggers the pane add in App.tsx; from
+  // there it's normally <1s before pty-manager has a session.
   const spawned = await pty.waitForSpawn(attemptId, 30_000);
   if (!spawned) {
     return { exitCode: 1, error: "Worker pane never spawned (renderer did not call pty:spawn within 30s)." };
@@ -16362,28 +18163,39 @@ async function runWorkerSession({
     kill: () => pty.dispose(attemptId, { sanctioned: true }),
   };
 
-  const runningTimestamp = new Date().toISOString();
-  await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
-  await appendEvent({
-    timestamp: runningTimestamp,
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    stepId: task.stepId,
-    workerTaskId: task.id,
-    attemptId,
-    type: "worker_attempt.running",
-    message: `Worker attempt running: ${task.title}`,
-    payload: {
-      command,
-      runtime: task.runtimePreference,
-      session: "pty",
-    },
-  });
   const step = run.steps.find((item) => item.id === task.stepId);
-  if (shouldUsePeerComms(run, step, task)) {
-    await updatePeerCommsRegistry(run, step, task, attemptId, paths, "running")
-      .catch(() => undefined);
-  }
+  const announceCliWorkerRunning = async (): Promise<void> => {
+    const runningTimestamp = new Date().toISOString();
+    await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
+    await appendEvent({
+      timestamp: runningTimestamp,
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      type: "worker_attempt.running",
+      message: `Worker attempt running: ${task.title}`,
+      payload: {
+        command,
+        runtime: task.runtimePreference,
+        session: "pty",
+      },
+    });
+    if (shouldUsePeerComms(run, step, task)) {
+      await updatePeerCommsRegistry(
+        run,
+        step,
+        task,
+        attemptId,
+        paths,
+        "running",
+      ).catch(() => undefined);
+    }
+  };
+  // Preserve the historical legacy/disabled timing exactly. Enabled captures
+  // defer the running transition until their immutable file exists.
+  if (!workerConstitutionPromptFile) await announceCliWorkerRunning();
 
   activeWorkerProcesses.set(attemptId, {
     runId: run.id,
@@ -16391,6 +18203,8 @@ async function runWorkerSession({
     workerTaskId: task.id,
     attemptId,
     command,
+    processGenerationId: randomUUID(),
+    inputCapability: "pty",
     write: handle.write,
     kill: handle.kill,
   });
@@ -16405,6 +18219,7 @@ async function runWorkerSession({
   // will ever fire. Assigned by the executor below, armed by the launch driver.
   let onAgentCliExit: (exitCode: number | null) => void = () => undefined;
   let offAgentCliExit: (() => void) | null = null;
+  let sessionSettled = false;
   // Backstop for a death Cora never asked for. exitPromise below settles the
   // attempt whenever this orchestration loop is still watching, and the settle
   // checks skip anything it settled; what survives is the case that used to
@@ -16426,6 +18241,7 @@ async function runWorkerSession({
     const finish = (value: { exitCode: number; error?: string }) => {
       if (settled) return;
       settled = true;
+      sessionSettled = true;
       // Tear down the worker tree BEFORE resolving so callers awaiting
       // exitPromise observe a fully cleaned-up worker. killImmediate is a
       // no-op if the pty already exited via offExit, so success paths cost
@@ -16557,10 +18373,36 @@ async function runWorkerSession({
   //     model id, etc.) fails the worker fast instead of hanging the whole
   //     run waiting for a final report that will never come,
   //  4. paste the prompt and submit.
+  let workerConstitutionPromptPath: string | null = null;
   void (async () => {
     try {
       await delay(1500);
+      if (sessionSettled) return;
       if (launchCommand) {
+        if (workerConstitutionPromptFile) {
+          // Final prerequisite before the provider command: resolve this exact
+          // attempt and materialize an owner-only append-system-prompt file.
+          // The task prompt and event stream never receive these bytes.
+          const block = await resolveCapturedWorkerConstitutionBlock({
+            userConstitution,
+          });
+          workerConstitutionPromptPath =
+            await writePrivateWorkerConstitutionPrompt({
+              block,
+              ...workerConstitutionPromptFile,
+            });
+          if (sessionSettled) {
+            await cleanupPrivateWorkerConstitutionPrompt(
+              workerConstitutionPromptPath,
+            );
+            workerConstitutionPromptPath = null;
+            return;
+          }
+        }
+        if (workerConstitutionPromptFile) {
+          await announceCliWorkerRunning();
+        }
+        if (sessionSettled) return;
         // Armed before the command is typed so the watcher sees that command's
         // own pre-exec marker; without a pre-exec first it would fire on the
         // marker the shell already emitted for its startup prompt.
@@ -16605,14 +18447,58 @@ async function runWorkerSession({
         return;
       }
     } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
       await recordWorkerOutput(run, task, attemptId, paths, "stderr",
-        `\n[spark] failed to drive worker pane: ${(err as Error).message}\n`);
+        `\n[spark] failed to prepare or drive worker pane: ${reason}\n`);
+      await writeAutoFailureReport(paths, task, reason).catch(() => undefined);
+      failFast(`Worker launch preparation failed: ${reason}`);
     }
   })();
 
-  const result = await exitPromise;
-  activeWorkerProcesses.delete(attemptId);
-  return result;
+  try {
+    return await exitPromise;
+  } finally {
+    activeWorkerProcesses.delete(attemptId);
+    await cleanupPrivateWorkerConstitutionPrompt(
+      workerConstitutionPromptPath,
+    ).catch(() => undefined);
+  }
+}
+
+async function stampAttemptAccountProfile(
+  runId: string,
+  workerTaskId: string,
+  attemptId: string,
+  accountProfileId: string | undefined,
+): Promise<void> {
+  if (!accountProfileId) return;
+  const run = await requireRun(runId);
+  const existing = run.workerAttempts.find((item) => item.id === attemptId);
+  if (!existing) throw new Error(`Worker attempt not found: ${attemptId}`);
+  if (existing.accountProfileId === accountProfileId) return;
+  if (existing.accountProfileId) {
+    throw new Error(
+      `Worker attempt ${attemptId} is pinned to a different Pi account profile`,
+    );
+  }
+  await commitRunChange(run, {
+    type: "worker_attempt.account_profile_selected",
+    message: "Worker attempt pinned to its Pi account profile",
+    workerTaskId,
+    payload: { attemptId, accountProfileId },
+    mutate: (draft, timestamp) => {
+      const attempt = draft.workerAttempts.find((item) => item.id === attemptId);
+      if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
+      if (attempt.accountProfileId === accountProfileId) return false;
+      if (attempt.accountProfileId && attempt.accountProfileId !== accountProfileId) {
+        throw new Error(
+          `Worker attempt ${attemptId} is pinned to a different Pi account profile`,
+        );
+      }
+      attempt.accountProfileId = accountProfileId;
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 async function markAttemptRunning(
@@ -16672,7 +18558,12 @@ async function recordWorkerOutput(
 function buildLaunchCommandLine(
   task: WorkerTask,
   cwd: string,
-  opts?: { sandboxDir?: string; isAutomation?: boolean; extraWritableDirs?: string[] },
+  opts?: {
+    sandboxDir?: string;
+    isAutomation?: boolean;
+    extraWritableDirs?: string[];
+    workerConstitutionPromptPath?: string;
+  },
 ): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
   // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
@@ -16707,6 +18598,12 @@ function buildLaunchCommandLine(
     args.push("--model", quoteShellArg(launchModel || WORKER_DEFAULT_CLAUDE_MODEL));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
+    if (opts?.workerConstitutionPromptPath) {
+      args.push(
+        "--append-system-prompt-file",
+        quoteShellArg(opts.workerConstitutionPromptPath),
+      );
+    }
     // Tool fence LAST: --dangerously-skip-permissions suppresses the prompts, but
     // a preset (or the node's extra blockedTools) still hard-denies tools on top.
     // "edits" removes shell + web, "readonly" removes existing-file edits + shell

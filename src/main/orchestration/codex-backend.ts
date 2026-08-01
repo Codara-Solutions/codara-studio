@@ -22,6 +22,7 @@ import type {
   SparkAgentBackend,
 } from "./spark-agent-backend";
 import {
+  buildManagerStablePrefix,
   buildSparkRunContextBlock,
   buildTalkReplyDecision,
   forgetRunManagerGuidance,
@@ -50,6 +51,10 @@ import { codexProvider } from "../providers/codex";
 import { sparkHome } from "../spark-home";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { sanitizeNestedAgentEnv } from "../env-sanitize";
+import {
+  acquireNativeCodexProfileLease,
+  resolveFrozenNativeCodexProfile,
+} from "./native-codex-profile-runtime";
 
 interface CodexChatSession {
   cli: CliSession;
@@ -718,9 +723,14 @@ async function codexManagerInstructions(input: ManagerRequestInput): Promise<str
   // Pinned per run: these bytes are the cacheable prefix of every turn, so
   // re-reading the file mid-conversation is the one thing here that could split
   // a live prompt cache. See loadRunManagerGuidance.
-  return loadRunManagerGuidance(input.run.id, `${input.chat.mode}:${promptPath}`, () =>
+  const guidance = await loadRunManagerGuidance(input.run.id, `${input.chat.mode}:${promptPath}`, () =>
     fs.readFile(promptPath, "utf8"),
   );
+  return buildManagerStablePrefix({
+    guidance,
+    cwd: input.cwd,
+    managerConstitutionBlock: input.managerConstitutionBlock,
+  });
 }
 
 function appServerTool(item: Record<string, unknown>): {
@@ -780,15 +790,27 @@ async function requestCodexAppServerDecision(
   });
   let child: ChildProcessWithoutNullStreams | null = null;
   let active: ActiveCodexAppServerTurn | null = null;
+  let releaseProfileLease: (() => void) | null = null;
   try {
-    await ensureCodexProjectTrust(input.cwd).catch(() => undefined);
+    const inherited = await getEnrichedEnv();
+    const execution = await resolveFrozenNativeCodexProfile(
+      input.chat.nativeCodexProfileId,
+      inherited,
+    );
+    const codexHome = execution.env.CODEX_HOME;
+    if (!codexHome) throw new Error("Resolved native Codex profile has no CODEX_HOME.");
+    releaseProfileLease = acquireNativeCodexProfileLease(
+      execution.profileId,
+      `manager:${runId}:${generation}`,
+    );
+    await ensureCodexProjectTrust(input.cwd, codexHome).catch(() => undefined);
     if (
       (input.chat.mode === "execute" ||
         input.chat.mode === "auto" ||
         input.chat.mode === "automation") &&
-      !(await isSparkOrchestratorMcpInstalled("codex"))
+      !(await isSparkOrchestratorMcpInstalled("codex", { codexHome }))
     ) {
-      await installOrchestratorMcpForCodex();
+      await installOrchestratorMcpForCodex(false, { codexHome });
     }
     const binary = await codexProvider.resolveBinary();
     if (!binary) {
@@ -817,9 +839,8 @@ async function requestCodexAppServerDecision(
     }
 
     const launch = resolveLaunchTarget(binary, codexAppServerArgs(input));
-    const inherited = await getEnrichedEnv();
     const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(inherited)) {
+    for (const [key, value] of Object.entries(execution.env)) {
       if (typeof value === "string") env[key] = value;
     }
     env.SPARK_RUN_ID = runId;
@@ -834,6 +855,8 @@ async function requestCodexAppServerDecision(
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    child.once("error", () => releaseProfileLease?.());
+    child.once("close", () => releaseProfileLease?.());
     active = { child, threadId: input.chat.sessionUuid ?? null, turnId: null, interrupted: false };
     ACTIVE_APP_SERVER_TURNS.set(runId, active);
 
@@ -1157,6 +1180,9 @@ async function requestCodexAppServerDecision(
   } finally {
     if (ACTIVE_APP_SERVER_TURNS.get(runId) === active) ACTIVE_APP_SERVER_TURNS.delete(runId);
     if (child && child.exitCode == null && !child.killed) child.kill("SIGTERM");
+    // When spawn failed synchronously there is no child event to own cleanup.
+    // Otherwise close/error releases the lease only after the OS process ends.
+    if (!child) releaseProfileLease?.();
   }
 }
 
