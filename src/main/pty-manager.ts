@@ -3,11 +3,13 @@ import { spawn as spawnChild } from "node:child_process";
 import { promises as fsp, chmodSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import type { WebContents } from "electron";
+import { homedir } from "node:os";
+import { app, type WebContents } from "electron";
 import type {
   PtyExitInfo,
   PtyResourceSnapshot,
   PtySessionResourceDiagnostic,
+  ProjectPolicyMode,
   ShellInfo,
 } from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
@@ -16,7 +18,30 @@ import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { sparkHome } from "./spark-home";
 import { getConnection, shQuote } from "./remote/connections";
-
+import {
+  manualAgentWrapperCommand,
+  manualAgentWrapperEnv,
+  parseManualAgentStartupCommand,
+} from "./manual-agent-constitution";
+import {
+  readProjectConstitutionSnapshot,
+  renderProjectConstitution,
+} from "./orchestration/project-constitution";
+import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
+import { buildCodexCliProfileEnvironment } from "./orchestration/codex-cli-profile-execution";
+import { buildClaudeCliProfileEnvironment } from "./orchestration/claude-cli-profile-environment";
+import {
+  acquireNativeCodexProfileLease,
+  resolveFrozenNativeCodexProfile,
+  resolveNewNativeCodexProfile,
+} from "./orchestration/native-codex-profile-runtime";
+import {
+  acquireNativeClaudeProfileLease,
+  resolveFrozenNativeClaudeProfile,
+  resolveNewNativeClaudeProfile,
+} from "./orchestration/native-claude-profile-runtime";
+import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
+import { installClaudeHooks } from "./hook-installer";
 import {
   beginPosixPtyTreeTeardown,
   capturePosixPtyTree,
@@ -40,6 +65,8 @@ type PtyHandle = Pick<nodePty.IPty, "pid" | "write" | "resize" | "kill" | "onDat
 
 interface Session {
   id: string;
+  // Process-generation fence. A same-id respawn receives a new value so a
+  // diagnostic sweep can never act on a replacement process using stale data.
   generationId: string;
   createdAt: number;
   lastInputAt: number;
@@ -130,6 +157,7 @@ function createSessionGeneration(id: string): string {
   nextSessionGeneration += 1;
   return `${id}:${Date.now().toString(36)}:${nextSessionGeneration.toString(36)}`;
 }
+
 function releaseNativeProfileSessionLeases(session: Session): void {
   const release = session.releaseNativeCodexProfileLease;
   session.releaseNativeCodexProfileLease = undefined;
@@ -153,6 +181,17 @@ const dataTaps = new Map<string, Array<(chunk: Buffer) => void>>();
 const pendingKills = new Map<string, NodeJS.Timeout>();
 const GRACE_MS = 250;
 
+// Serialize the complete "does this id already exist? otherwise create it"
+// transaction per session id. Several spawn paths await before the OS process
+// becomes visible in `sessions` (remote SSH connection/shell creation and
+// PowerShell profile-cache repair/locking). Without an id-scoped queue, two
+// callers entering during that window both observe "missing" and each create
+// a process; the second sessions.set(id, ...) then strands the first process.
+//
+// This is intentionally separate from `spawnLocks` below: those locks protect
+// shared PowerShell profile files across DIFFERENT session ids, while this map
+// protects process identity for the SAME session id across every transport and
+// shell family.
 const sessionSpawnLocks = new Map<string, Promise<void>>();
 
 // When a PTY is killed while a renderer's webContents is bound to its
@@ -290,6 +329,11 @@ export interface SpawnOptions {
   // Claude/Codex panes so they don't have to wait for the renderer to type a
   // command after the prompt appears.
   startupCommand?: string;
+  /**
+   * Main-process-only policy derived from persisted workspace provenance.
+   * Renderer IPC deliberately never accepts this field.
+   */
+  projectPolicyMode?: ProjectPolicyMode;
   // Mirror attach: a SECONDARY renderer xterm observing an EXISTING session
   // whose canonical pane lives elsewhere (TerminalPane's readOnly mode — the
   // Automations live-board dock). A mirror attach must be a pure no-op on
@@ -461,13 +505,14 @@ function ensureSpawnHelperExecutable(): void {
 
 export async function spawn(
   opts: SpawnOptions,
-): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> {
-  return serializeSessionSpawn(opts.id, () => spawnWithSessionLock(opts));
-}
-
-async function spawnWithSessionLock(
-  opts: SpawnOptions,
-): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> {
+): Promise<{
+  id: string;
+  pid: number;
+  startupCommandHandled?: boolean;
+  attached?: boolean;
+  nativeCodexProfileId?: string;
+  nativeClaudeProfileId?: string;
+}> {
   ensureSpawnHelperExecutable();
   // Mirror attach (see SpawnOptions.mirror): observe-only. Checked FIRST so a
   // mirror can never clear a pending kill, mutate session sinks, resize the
@@ -477,12 +522,53 @@ async function spawnWithSessionLock(
     if (!target) {
       throw new Error(`mirror attach: no pty session '${opts.id}'`);
     }
+    if (
+      opts.nativeCodexProfileId !== undefined &&
+      opts.nativeCodexProfileId !== target.nativeCodexProfileId
+    ) {
+      throw new Error(
+        `mirror attach: pty session '${opts.id}' is pinned to another native Codex account`,
+      );
+    }
+    if (
+      opts.nativeClaudeProfileId !== undefined &&
+      opts.nativeClaudeProfileId !== target.nativeClaudeProfileId
+    ) {
+      throw new Error(
+        `mirror attach: pty session '${opts.id}' is pinned to another native Claude account`,
+      );
+    }
     // attached: the session pre-existed, so an unhandled startupCommand here
     // means "a live shell/TUI already owns this pty", not "shell can't take
     // startup commands" — callers use the distinction to decide whether a
     // dropped resume deserves a manual-run notice.
-    return { id: opts.id, pid: target.pty.pid, startupCommandHandled: false, attached: true };
+    return {
+      id: opts.id,
+      pid: target.pty.pid,
+      startupCommandHandled: false,
+      attached: true,
+      nativeCodexProfileId: target.nativeCodexProfileId,
+      nativeClaudeProfileId: target.nativeClaudeProfileId,
+    };
   }
+
+  // `serializeSessionSpawn` records this caller in the per-id queue
+  // synchronously, before this function reaches any await. Once inside the
+  // critical section we re-check sessions, so queued callers attach to the
+  // process the winner created instead of spawning another one.
+  return serializeSessionSpawn(opts.id, () => spawnWithSessionLock(opts));
+}
+
+async function spawnWithSessionLock(
+  opts: SpawnOptions,
+): Promise<{
+  id: string;
+  pid: number;
+  startupCommandHandled?: boolean;
+  attached?: boolean;
+  nativeCodexProfileId?: string;
+  nativeClaudeProfileId?: string;
+}> {
   const pending = pendingKills.get(opts.id);
   if (pending) {
     clearTimeout(pending);
@@ -491,6 +577,25 @@ async function spawnWithSessionLock(
 
   const existing = sessions.get(opts.id);
   if (existing) {
+    if (opts.requireFreshSession) {
+      throw new Error(`pty session '${opts.id}' already exists`);
+    }
+    if (
+      opts.nativeCodexProfileId !== undefined &&
+      opts.nativeCodexProfileId !== existing.nativeCodexProfileId
+    ) {
+      throw new Error(
+        `pty session '${opts.id}' is already pinned to another native Codex account`,
+      );
+    }
+    if (
+      opts.nativeClaudeProfileId !== undefined &&
+      opts.nativeClaudeProfileId !== existing.nativeClaudeProfileId
+    ) {
+      throw new Error(
+        `pty session '${opts.id}' is already pinned to another native Claude account`,
+      );
+    }
     // A late-attaching webContents (e.g. ChatPanel's backend-terminal tab
     // mounting after the cli-session already spawned the PTY) needs the
     // recent scrollback or it sees a blank xterm — historical bytes only
@@ -547,19 +652,144 @@ async function spawnWithSessionLock(
         /* may have exited */
       }
     }
-    return { id: opts.id, pid: existing.pty.pid, startupCommandHandled: false, attached: true };
+    return {
+      id: opts.id,
+      pid: existing.pty.pid,
+      startupCommandHandled: false,
+      attached: true,
+      nativeCodexProfileId: existing.nativeCodexProfileId,
+      nativeClaudeProfileId: existing.nativeClaudeProfileId,
+    };
+  }
+
+  // Recognize only Studio's finite fresh/resume command forms. Imported PR
+  // refusal is transport-independent and must happen before local account
+  // setup or a remote shell can start.
+  const parsedStartup = parseManualAgentStartupCommand(opts.startupCommand);
+  if (parsedStartup) {
+    // Imported PR checkouts can provide AGENTS.md, CLAUDE.md, hooks, skills,
+    // and other repository context that native agent CLIs discover before
+    // Studio can reliably suppress it. Refuse this Studio-managed autorun
+    // before profile resolution, Codex trust writes, hook installation, or
+    // process spawn. Plain shells have no parsed startup and remain available;
+    // fenced Pi PR reviews run in main and use display-only PTYs.
+    assertManualAgentLaunchAllowed(opts.projectPolicyMode);
   }
 
   // Remote workspace pane: the cwd is a ssh://<hostId>/<path> virtual path.
   // Everything local below (shell detection, $PROFILE locks, node-pty) is
   // irrelevant — the host's own login shell runs on an ssh2 PTY channel.
   if (isRemotePath(opts.cwd)) {
+    if (
+      opts.nativeCodexProfileId !== undefined ||
+      opts.nativeClaudeProfileId !== undefined
+    ) {
+      throw new Error("Native agent account profiles are only available in local terminals.");
+    }
     return doSpawnRemote(opts);
   }
 
-  const noShellIntegration = opts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
-  const launch = withStartupCommand(opts.shell, opts.startupCommand, noShellIntegration);
-  const spawnOpts: SpawnOptions = launch.shell === opts.shell ? opts : { ...opts, shell: launch.shell };
+  // Prepared native-account login is already fully resolved and sanitized by
+  // native-cli-accounts. It launches the executable directly, with no shell,
+  // constitution wrapper, account re-resolution, hook install, or environment
+  // augmentation at this layer.
+  if (opts.exactEnvironment !== undefined) {
+    return doSpawn(opts, null, false);
+  }
+
+  // Studio-created fresh/resume panes carry a bounded startupCommand. When
+  // that command is one of the exact UI-generated Claude/Codex forms, give
+  // the agent the workspace constitution through the hidden Cora wrapper.
+  // Later user-typed commands only travel through write()/inject() and never
+  // pass this seam. Cora-managed panes already inject their immutable run
+  // snapshot through their backend, so SPARK_RUN_ID explicitly opts out.
+  let preparedOpts = opts;
+  if (
+    opts.nativeCodexProfileId !== undefined ||
+    parsedStartup?.runtime === "codex"
+  ) {
+    const execution =
+      opts.nativeCodexProfileId === undefined
+        ? await resolveNewNativeCodexProfile()
+        : await resolveFrozenNativeCodexProfile(opts.nativeCodexProfileId);
+    const nativeCodexHome = execution.env.CODEX_HOME;
+    if (!nativeCodexHome) {
+      throw new Error("Resolved native Codex profile has no CODEX_HOME.");
+    }
+    const releaseNativeCodexProfileLease = acquireNativeCodexProfileLease(
+      execution.profileId,
+      `terminal:${opts.id}`,
+    );
+    await ensureCodexProjectTrust(opts.cwd, nativeCodexHome).catch(
+      () => undefined,
+    );
+    preparedOpts = {
+      ...opts,
+      nativeCodexProfileId: execution.profileId,
+      nativeCodexHome,
+      releaseNativeCodexProfileLease,
+    };
+  }
+  if (
+    opts.nativeClaudeProfileId !== undefined ||
+    parsedStartup?.runtime === "claude"
+  ) {
+    const execution =
+      opts.nativeClaudeProfileId === undefined
+        ? await resolveNewNativeClaudeProfile()
+        : await resolveFrozenNativeClaudeProfile(opts.nativeClaudeProfileId);
+    const releaseNativeClaudeProfileLease = acquireNativeClaudeProfileLease(
+      execution.profileId,
+      `terminal:${opts.id}`,
+    );
+    const claudeStateDir =
+      execution.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+    await installClaudeHooks({
+      settingsPath: join(claudeStateDir, "settings.json"),
+    }).catch(() => undefined);
+    preparedOpts = {
+      ...preparedOpts,
+      nativeClaudeProfileId: execution.profileId,
+      nativeClaudeConfigDirEnv: execution.env.CLAUDE_CONFIG_DIR ?? null,
+      releaseNativeClaudeProfileLease,
+    };
+  }
+  if (!Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID")) {
+    const startup = parsedStartup;
+    if (startup) {
+      const snapshot = await readProjectConstitutionSnapshot(opts.cwd);
+      const constitution = renderProjectConstitution(snapshot);
+      if (constitution) {
+        const wrapperCommand = manualAgentWrapperCommand(
+          opts.shell.family,
+          manualAgentRuntimeExecutable(),
+          manualAgentWrapperPath(),
+        );
+        if (wrapperCommand) {
+          preparedOpts = {
+            ...preparedOpts,
+            startupCommand: wrapperCommand,
+            env: {
+              ...(preparedOpts.env ?? {}),
+              ...manualAgentWrapperEnv(startup, constitution),
+            },
+          };
+        }
+      }
+    }
+  }
+
+  const noShellIntegration =
+    preparedOpts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
+  const launch = withStartupCommand(
+    preparedOpts.shell,
+    preparedOpts.startupCommand,
+    noShellIntegration,
+  );
+  const spawnOpts: SpawnOptions =
+    launch.shell === preparedOpts.shell
+      ? preparedOpts
+      : { ...preparedOpts, shell: launch.shell };
 
   // See FAMILIES_WITH_SHARED_PROFILE_WRITES — wait for the previous spawn of
   // this family to finish $PROFILE before starting the next one. Panes that
@@ -579,8 +809,27 @@ async function spawnWithSessionLock(
     return doSpawn(spawnOpts, releaseLock, launch.handled);
   } catch (err) {
     releaseLock?.();
+    spawnOpts.releaseNativeCodexProfileLease?.();
+    spawnOpts.releaseNativeClaudeProfileLease?.();
     throw err;
   }
+}
+
+function manualAgentRuntimeExecutable(): string {
+  if (
+    process.platform === "linux" &&
+    app.isPackaged &&
+    process.env.APPIMAGE?.trim()
+  ) {
+    return process.env.APPIMAGE;
+  }
+  return process.execPath;
+}
+
+function manualAgentWrapperPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "cora-cli", "cora.cjs")
+    : join(app.getAppPath(), "bin", "cora.cjs");
 }
 
 function serializeSessionSpawn<T>(id: string, operation: () => Promise<T>): Promise<T> {
@@ -669,14 +918,14 @@ async function doSpawnRemote(
   };
 
   const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
-  const now = Date.now();
+  const createdAt = Date.now();
   const session: Session = {
     id: opts.id,
     generationId: createSessionGeneration(opts.id),
-    createdAt: now,
-    lastInputAt: now,
-    lastOutputAt: now,
-    lastAttachAt: now,
+    createdAt,
+    lastInputAt: createdAt,
+    lastOutputAt: createdAt,
+    lastAttachAt: createdAt,
     cwd: opts.cwd,
     pty: handle,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -841,6 +1090,25 @@ function withStartupCommand(
     };
   }
 
+  if (shell.family === "fish") {
+    // fish's -C runs the command after config is read but before its first
+    // prompt, then keeps the interactive shell alive. --no-config mirrors the
+    // profile-free agent-pane behavior used by bash/zsh/pwsh.
+    return {
+      shell: {
+        ...shell,
+        args: [
+          ...(noShellIntegration ? ["--no-config"] : []),
+          "-i",
+          "-C",
+          startup,
+        ],
+      },
+      handled: true,
+      skipsProfile: noShellIntegration,
+    };
+  }
+
   return { shell, handled: false, skipsProfile: false };
 }
 
@@ -848,14 +1116,22 @@ function doSpawn(
   opts: SpawnOptions,
   releaseLock: (() => void) | null,
   startupCommandHandled: boolean,
-): { id: string; pid: number; startupCommandHandled?: boolean } {
+): {
+  id: string;
+  pid: number;
+  startupCommandHandled?: boolean;
+  nativeCodexProfileId?: string;
+  nativeClaudeProfileId?: string;
+} {
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
 
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
+  const environmentSource = opts.exactEnvironment ?? process.env;
+  for (const [k, v] of Object.entries(environmentSource)) {
     if (typeof v === "string") env[k] = v;
   }
+  if (opts.exactEnvironment === undefined) {
   // Strip inherited Claude Code nesting markers (CLAUDECODE, CLAUDE_CODE_*…)
   // BEFORE the per-shell / per-spawn override layers below, so callers that
   // deliberately set a CLAUDE_CODE_* var still win. When Codara is launched
@@ -933,6 +1209,27 @@ function doSpawn(
     // wants that, without forcing the caller to know its own attemptId.
     env.SPARK_AGENT_PANE_ID = opts.id;
   }
+  if (opts.nativeCodexHome) {
+    const selectedEnv = buildCodexCliProfileEnvironment(
+      env,
+      opts.nativeCodexHome,
+    );
+    for (const key of Object.keys(env)) delete env[key];
+    for (const [key, value] of Object.entries(selectedEnv)) {
+      if (typeof value === "string") env[key] = value;
+    }
+  }
+  if (opts.nativeClaudeProfileId !== undefined) {
+    const selectedEnv = buildClaudeCliProfileEnvironment(
+      env,
+      opts.nativeClaudeConfigDirEnv ?? null,
+    );
+    for (const key of Object.keys(env)) delete env[key];
+    for (const [key, value] of Object.entries(selectedEnv)) {
+      if (typeof value === "string") env[key] = value;
+    }
+  }
+  }
 
   const cwd =
     opts.cwd && opts.cwd.trim().length > 0
@@ -975,14 +1272,14 @@ function doSpawn(
   // never re-spawns on its own. Without this adoption the xterm tab keeps
   // listening on `pty:data:<sessionId>` but the new pty has no sink.
   const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
-  const now = Date.now();
+  const createdAt = Date.now();
   const session: Session = {
     id: opts.id,
     generationId: createSessionGeneration(opts.id),
-    createdAt: now,
-    lastInputAt: now,
-    lastOutputAt: now,
-    lastAttachAt: now,
+    createdAt,
+    lastInputAt: createdAt,
+    lastOutputAt: createdAt,
+    lastAttachAt: createdAt,
     cwd,
     pty,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -1002,6 +1299,10 @@ function doSpawn(
     disposed: false,
     exitEmitted: false,
     sanctioned: false,
+    nativeCodexProfileId: opts.nativeCodexProfileId,
+    releaseNativeCodexProfileLease: opts.releaseNativeCodexProfileLease,
+    nativeClaudeProfileId: opts.nativeClaudeProfileId,
+    releaseNativeClaudeProfileLease: opts.releaseNativeClaudeProfileLease,
   };
 
   // Capture the local session reference so we can identity-gate this closure.
@@ -1061,6 +1362,7 @@ function doSpawn(
         pendingKills.delete(opts.id);
       }
       exitWaiters.delete(opts.id);
+      releaseNativeProfileSessionLeases(s);
       return;
     }
     if (s) {
@@ -1080,6 +1382,7 @@ function doSpawn(
       if (s.flushTimer) clearTimeout(s.flushTimer);
     }
     if (current === session) sessions.delete(opts.id);
+    releaseNativeProfileSessionLeases(s);
     const t = pendingKills.get(opts.id);
     if (t) {
       clearTimeout(t);
@@ -1115,7 +1418,13 @@ function doSpawn(
     waitForPromptReady(opts.id, SPAWN_LOCK_TIMEOUT_MS).finally(releaseLock);
   }
 
-  return { id: opts.id, pid: pty.pid, startupCommandHandled };
+  return {
+    id: opts.id,
+    pid: pty.pid,
+    startupCommandHandled,
+    nativeCodexProfileId: session.nativeCodexProfileId,
+    nativeClaudeProfileId: session.nativeClaudeProfileId,
+  };
 }
 
 // Recover from the corruption mode described in FAMILIES_WITH_SHARED_PROFILE_WRITES:
@@ -1190,6 +1499,7 @@ function enqueueData(id: string, data: string | Buffer): void {
   if (!s) return;
 
   const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+  s.lastOutputAt = Date.now();
   // Fan out to main-process taps before buffering for the renderer. Taps
   // observe the live byte stream and must not modify it.
   const taps = dataTaps.get(id);
@@ -1327,6 +1637,7 @@ export function resume(id: string): void {
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
   s.attached = true;
+  s.lastAttachAt = Date.now();
 }
 
 // Called by the renderer's raw-tail-reattach panes (the ChatPanel backend
@@ -1562,9 +1873,9 @@ export function hasSession(id: string): boolean {
 }
 
 // Wait for a renderer-spawned session to come online. Used by orchestration
-// after it emits the "envelope_prepared" event — the renderer adds the pane,
-// TerminalView mounts, calls pty:spawn, and main can then start typing into
-// the (now-warm) pwsh shell. Resolves false on timeout.
+// after it emits the "worker_attempt.launch_requested" event — the renderer
+// adds the pane, TerminalView mounts, calls pty:spawn, and main can then start
+// typing into the (now-warm) pwsh shell. Resolves false on timeout.
 export function waitForSpawn(id: string, timeoutMs: number): Promise<boolean> {
   if (sessions.has(id)) return Promise.resolve(true);
   return new Promise((resolve) => {

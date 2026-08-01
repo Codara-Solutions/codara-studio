@@ -41,6 +41,7 @@ import {
   type MemoryScope,
 } from "./orchestration/cora-memory";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
+import { runProjectPolicyMode } from "./orchestration/project-policy";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
@@ -427,6 +428,24 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "automation.name_chat",
 ]);
 
+// The in-process Pi extension and MCP roster both hide these capabilities for
+// imported PR runs. Enforce the same boundary at the authenticated socket so a
+// stale extension, hand-crafted request, or future roster regression cannot
+// turn adversarial repository content into terminal execution, durable memory,
+// or an automation that later runs with trusted policy.
+const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
+  "terminal.read",
+  "terminal.create",
+  "terminal.write",
+  "terminal.close",
+  "orchestrator.spawn_terminals",
+  "orchestrator.remember",
+]);
+
+function isUntrustedPullRequestBlockedMethod(method: string): boolean {
+  return UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) || method.startsWith("automation.");
+}
+
 async function dispatch(
   method: string,
   rawParams: unknown,
@@ -449,6 +468,19 @@ async function dispatch(
         );
       }
       params.runId = auth.claim.runId;
+    }
+    if (isUntrustedPullRequestBlockedMethod(method)) {
+      const runId = stringParam(params, "runId");
+      if (runId) {
+        const run = await (await getRunStore()).getRun(runId);
+        if (run && runProjectPolicyMode(run) === "untrusted-pull-request") {
+          return errorResponse(
+            id,
+            ERR_FORBIDDEN,
+            "this capability is unavailable for an imported pull-request run",
+          );
+        }
+      }
     }
     if (MID_COMPACTION_BLOCKED_METHODS.has(method)) {
       const runId = stringParam(params, "runId");

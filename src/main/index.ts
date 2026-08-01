@@ -822,6 +822,14 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  try {
+    const { recoverGitHubPullRequestImports } = await import(
+      "./github-pull-request-workspace"
+    );
+    await recoverGitHubPullRequestImports();
+  } catch (error) {
+    console.warn("[main] GitHub pull-request import recovery failed:", error);
+  }
   // Lost the single-instance lock — another Codara Studio owns it. app.quit()
   // was already called; bail before doing any startup work or opening a window.
   if (!ownsSingleInstanceLock) return;

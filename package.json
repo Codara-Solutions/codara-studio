@@ -9,6 +9,7 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:github-pr-import": "node scripts/test-github-pull-request-git.cjs && node scripts/test-github-pull-request-import-journal.cjs && node scripts/test-github-pull-request-workspace.cjs && node scripts/test-untrusted-pr-policy.cjs && node scripts/test-github-pull-request-surface.cjs",
     "test:user-message-resume": "node scripts/test-user-message-resume.cjs",
     "test:codara-complete-application": "node scripts/test-codara-complete-application.cjs",
     "test:manager-call-settlement": "node scripts/test-manager-call-settlement.cjs",

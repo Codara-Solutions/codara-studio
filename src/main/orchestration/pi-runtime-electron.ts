@@ -4,7 +4,6 @@ import { existsSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
-  AppSettings,
   ChatMode,
   CoraExecutionPolicy,
   ProjectPolicyMode,
@@ -150,7 +149,7 @@ export function codaraPiPaths(configDir = join(sparkHome(), "pi-agent")): Codara
  */
 async function openAiFastModeEnabled(): Promise<boolean> {
   try {
-    return ((await loadSettings()) as AppSettings & { openAiFastMode?: boolean }).openAiFastMode === true;
+    return (await loadSettings()).openAiFastMode === true;
   } catch {
     return false;
   }

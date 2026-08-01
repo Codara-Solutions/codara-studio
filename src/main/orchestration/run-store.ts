@@ -9,7 +9,6 @@ import type {
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
   Checkpoint,
-  ProjectPolicyMode,
   CoraWhiteboard,
   CoraWhiteboardEdge,
   CoraWhiteboardNode,
@@ -122,8 +121,10 @@ import {
   copyRunUserConstitutionCapture,
   normalizeRunUserConstitutionProvenance,
 } from "../user-constitution-capture";
-const resolveProjectPolicyMode = (_input: unknown): ProjectPolicyMode => "trusted";
-const runProjectPolicyMode = (_run: RunState): ProjectPolicyMode => "trusted";
+import {
+  resolveProjectPolicyMode,
+  runProjectPolicyMode,
+} from "./project-policy";
 import {
   CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
   whiteboardNodeSizeLimits,

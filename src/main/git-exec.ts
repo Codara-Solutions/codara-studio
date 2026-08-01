@@ -30,7 +30,7 @@ export interface RunResult {
 export async function runGit(
   cwd: string,
   args: string[],
-  opts: { timeout?: number } = {},
+  opts: { timeout?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<RunResult> {
   // Remote workspace: run git on the host over the SSH exec channel. Same
   // flags + non-interactive credential env; parsers are unchanged since git's
@@ -45,7 +45,10 @@ export async function runGit(
       windowsHide: true,
       maxBuffer: MAX_BUFFER,
       timeout: opts.timeout ?? LOCAL_TIMEOUT_MS,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: {
+        ...(opts.env ?? process.env),
+        GIT_TERMINAL_PROMPT: "0",
+      },
     },
   );
   return { stdout: stdout.toString(), stderr: stderr.toString() };

@@ -32,6 +32,7 @@ import {
   type ManagerRequestInput,
   type SparkAgentBackend,
 } from "./spark-agent-backend";
+import { runProjectPolicyMode } from "./project-policy";
 import {
   isAgentSocketCapabilityActive,
   revokeAgentSocketCapability,
@@ -256,7 +257,7 @@ async function ensureSession(
   const thinking = piThinkingForEffort(input.chat.effort);
   const mode = piModeForChat(input.chat.mode);
   const executionPolicy = input.chat.executionPolicy;
-  const projectPolicyMode = "trusted" as const;
+  const projectPolicyMode = runProjectPolicyMode(input.run);
   const [account, fastMode] = await Promise.all([
     resolveCodaraPiExecutionAccount({
       provider,
@@ -426,7 +427,7 @@ async function requestPiDecision(
   try {
     session = await ensureSession(
       input,
-      input.managerConstitutionBlock ?? "",
+      input.managerConstitutionBlock,
       onStream,
       restartContext?.accountProfileId,
     );
