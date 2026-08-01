@@ -9,6 +9,11 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:manual-agent-constitution": "node scripts/test-manual-agent-constitution.cjs",
+    "test:user-constitution-store": "node scripts/test-user-constitution-store.cjs",
+    "test:project-constitution-settings": "node scripts/test-project-constitution-settings.cjs",
+    "test:project-constitution": "node scripts/test-project-constitution.cjs",
+    "test:worker-cleanup-safety": "node scripts/test-worker-cleanup-safety.cjs",
     "test:pi-worker-harness": "node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs",
     "test:account-identity": "node scripts/test-anthropic-account-identity.cjs && node scripts/test-native-cli-accounts.cjs && node scripts/test-native-cli-account-wiring.cjs && node scripts/test-pi-account-settings-surface.cjs && node scripts/test-login-return-focus.cjs",
     "test:native-cli-active-pointer": "node scripts/test-native-cli-active-pointer.cjs",

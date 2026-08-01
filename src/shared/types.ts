@@ -2200,16 +2200,148 @@ export interface PlanState {
   updatedAt: string;
 }
 
+export interface ProjectConstitutionSnapshot {
+  /** Literal UTF-8 guidance captured once when the run is created. */
+  text: string;
+  /** SHA-256 of `text` encoded as UTF-8. */
+  sha256: string;
+  /** Workspace-relative source; phase 1 permits exactly one location. */
+  sourcePath: ".codara/constitution.md";
+}
+
+/**
+ * Controls whether repository-owned agent policy may participate in a run.
+ * Imported pull-request heads are untrusted review input: their committed
+ * instructions, hooks, skills, and project settings must not govern Cora.
+ */
+
+export type ProjectConstitutionInspectionStatus =
+  | "missing"
+  | "active"
+  | "invalid-or-unsupported";
+
+/**
+ * Content-free Settings projection for the active workspace constitution.
+ * The full digest and literal body stay in main/run storage; Settings needs
+ * only enough metadata to explain whether the exact project file is in use.
+ */
+export interface ProjectConstitutionInspection {
+  workspaceId: string;
+  sourcePath: ".codara/constitution.md";
+  status: ProjectConstitutionInspectionStatus;
+  /** First 12 lowercase hex characters of the SHA-256, present only when active. */
+  shortHash?: string;
+  detail: string;
+  canCreate: boolean;
+  canOpen: boolean;
+}
+
+export interface ProjectConstitutionWorkspaceInput {
+  workspaceId: string;
+}
+
+/** Maximum UTF-8 body size accepted by the app-owned user constitution. */
+export const USER_CONSTITUTION_MAX_BYTES = 16 * 1024;
+
+/**
+ * The one user-owned constitution stored by Codara Studio for this app user.
+ * This is intentionally independent of workspace/project constitutions.
+ */
+export interface UserConstitutionDocument {
+  enabled: boolean;
+  body: string;
+  /** Monotonic compare-and-swap revision; zero is the unsaved default. */
+  revision: number;
+  /** SHA-256 of `body` encoded as UTF-8. */
+  sha256: string;
+  /** Null until the default document is first persisted. */
+  updatedAt: string | null;
+}
+
+/**
+ * Immutable provenance captured by a managed launch before prompt assembly.
+ * The body deliberately stays in the main-process content-addressed store;
+ * persisted runs/calls/attempts need only this exact revision/hash pair.
+ */
+export interface UserConstitutionCapture {
+  readonly enabledAtCapture: boolean;
+  readonly revision: number;
+  readonly sha256: string;
+}
+
+export interface UserConstitutionSaveInput {
+  enabled: boolean;
+  body: string;
+  /** Save only if the durable document still has this revision. */
+  expectedRevision: number;
+}
+
+export type ManagerTurnRecoveryFailureKind =
+  | "rate_limit"
+  | "provider"
+  | "transport";
+
+/**
+ * Durable, user-owned recovery handle for a manager turn that could not reach
+ * a provider. The record survives process restart and names the exact manager
+ * stage that must be replayed; operational failure text is deliberately not
+ * stored as a prompt.
+ */
+export interface ManagerTurnRecovery {
+  /** Opaque compare-and-swap token. A later park always creates a new token. */
+  id: string;
+  state: "parked" | "resuming";
+  failureKind: ManagerTurnRecoveryFailureKind;
+  backend: ChatBackendKind;
+  managerMode: SparkCall["mode"];
+  /** Conversation generation that owned the failed turn and its replay. */
+  conversationEpoch: number;
+  failedSparkCallId: string;
+  /** Exact account that served the failed turn, when the backend exposed one. */
+  failedAccountProfileId?: string;
+  parkedAt: string;
+  /** Durable launch claim used to make Resume idempotent across lost receipts. */
+  resumeClaimId?: string;
+  resumeRequestedAt?: string;
+  /**
+   * Account explicitly frozen by the accepted recovery claim. Completion may
+   * clear the token only when the linked SparkCall proves it used this account.
+   */
+  resumeAccountProfileId?: string;
+  /**
+   * Account rotation discards the provider session that owned the existing
+   * transcript. Keep this bit until the replacement turn succeeds so every
+   * retry rebuilds that fresh session from canonical persisted history.
+   */
+  forceCanonicalReplay?: boolean;
+}
+
 export interface RunState {
   id: string;
   workspaceId: string;
   origin?: GitHubOrigin;
+  /**
+   * Missing on legacy ordinary runs and therefore interpreted as "trusted".
+   * A GitHub pull-request origin always normalizes to
+   * "untrusted-pull-request", regardless of a stale persisted value.
+   */
+  projectPolicyMode?: ProjectPolicyMode;
   planId?: string;
   title: string;
   status: RunStatus;
   currentStepId?: string;
   pipelinePreset?: string;
   settingsSnapshot?: Record<string, unknown>;
+  /**
+   * Immutable run-scoped copy of the workspace constitution. Missing on
+   * legacy runs, remote workspaces, and workspaces without a safe local file.
+   */
+  projectConstitution?: ProjectConstitutionSnapshot;
+  /**
+   * Exact global user-constitution pointer captured once when this managed
+   * run was created. Missing only on legacy runs; never inferred on reload.
+   */
+  userConstitution?: UserConstitutionCapture;
   artifactDir: string;
   createdAt: string;
   updatedAt: string;
@@ -3185,6 +3317,8 @@ export type WorkerFailureKind =
 export interface WorkerAttempt {
   id: string;
   runId: string;
+  /** Fresh immutable copy of the owning run's captured global constitution. */
+  userConstitution?: UserConstitutionCapture;
   workerTaskId: string;
   attemptNumber: number;
   runtime: WorkerRuntime;
@@ -3348,6 +3482,7 @@ export interface ReviewDecision {
 export interface SparkCall {
   id: string;
   runId: string;
+  userConstitution?: UserConstitutionCapture;
   /**
    * The run's `currentStepId` at call start. Lets per-step cost rollups
    * walk sparkCalls without needing to replay events. Plan-analysis runs

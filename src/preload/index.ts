@@ -92,6 +92,10 @@ import type {
   PauseRunInput,
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
+  UserConstitutionSaveInput,
+  UserConstitutionDocument,
+  ProjectConstitutionWorkspaceInput,
+  ProjectConstitutionInspection,
   PiSubscriptionRenameAccountInput,
   PiSubscriptionReconnectAccountInput,
   PiSubscriptionProfileLoginRequest,
@@ -219,6 +223,28 @@ const api = {
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
+  },
+  userConstitution: {
+    load: (): Promise<UserConstitutionDocument> =>
+      ipcRenderer.invoke("user-constitution:load"),
+    save: (
+      input: UserConstitutionSaveInput,
+    ): Promise<UserConstitutionDocument> =>
+      ipcRenderer.invoke("user-constitution:save", input),
+  },
+  projectConstitution: {
+    inspect: (
+      input: ProjectConstitutionWorkspaceInput,
+    ): Promise<ProjectConstitutionInspection> =>
+      ipcRenderer.invoke("project-constitution:inspect", input),
+    create: (
+      input: ProjectConstitutionWorkspaceInput,
+    ): Promise<ProjectConstitutionInspection> =>
+      ipcRenderer.invoke("project-constitution:create", input),
+    open: (input: ProjectConstitutionWorkspaceInput): Promise<void> =>
+      ipcRenderer.invoke("project-constitution:open", input),
+    reveal: (input: ProjectConstitutionWorkspaceInput): Promise<void> =>
+      ipcRenderer.invoke("project-constitution:reveal", input),
   },
   nativeCliTerminal: {
     status: (): Promise<NativeCliTerminalSetupStatus> =>

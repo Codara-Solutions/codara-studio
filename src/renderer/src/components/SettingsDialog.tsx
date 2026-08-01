@@ -12,6 +12,8 @@ import type {
   PiSubscriptionPrompt,
   PiSubscriptionProvider,
   PtyResourceSnapshot,
+  UserConstitutionDocument,
+  ProjectConstitutionInspection,
   RunState,
   ShellInfo,
   ThemePref,
@@ -29,6 +31,7 @@ import {
   AUTOSAVE_DELAY_PRESETS,
   INLINE_AI_DELAY_PRESETS,
   INLINE_AI_MODEL_PRESETS,
+  USER_CONSTITUTION_MAX_BYTES,
 } from "@shared/types";
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
@@ -247,6 +250,7 @@ interface SettingsDialogProps {
   shells: ShellInfo[];
   defaultShell: ShellInfo | null;
   workspaceCwd?: string | null;
+  workspaceId?: string | null;
   initialTab?: SettingsTab;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
@@ -265,6 +269,7 @@ export default function SettingsDialog({
   shells,
   defaultShell,
   workspaceCwd,
+  workspaceId,
   initialTab = "general",
   onClose,
   onSave,
@@ -428,7 +433,7 @@ export default function SettingsDialog({
               overflow: "auto",
             }}
           >
-            {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
+            {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} workspaceId={workspaceId} />}
             {renderedTab === "editor" && <EditorSettings />}
             {renderedTab === "terminal" && (
               <TerminalSettings
@@ -1008,7 +1013,13 @@ const APPEARANCE = APP_THEME_IDS.map((id) => ({
   ...APP_THEME_META[id],
 }));
 
-function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
+function GeneralSettings({
+  workspaceCwd,
+  workspaceId,
+}: {
+  workspaceCwd?: string | null;
+  workspaceId?: string | null;
+}) {
   const { theme, setTheme } = useTheme();
   const { preferences, hydrated, setPreference } = usePreferences();
   return (
@@ -1131,6 +1142,12 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           />
         </div>
       ) : null}
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
+      <UserConstitutionSettings />
+
+      <ProjectConstitutionSettings workspaceId={workspaceId} />
 
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
@@ -1335,6 +1352,388 @@ function TerminalAccountSetting() {
   );
 }
 
+function ProjectConstitutionSettings({
+  workspaceId,
+}: {
+  workspaceId?: string | null;
+}) {
+  const [inspection, setInspection] = useState<ProjectConstitutionInspection | null>(null);
+  const [busy, setBusy] = useState<"create" | "open" | "reveal" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    if (!workspaceId) {
+      setInspection(null);
+      return;
+    }
+    try {
+      const next = await window.spark.projectConstitution.inspect({ workspaceId });
+      setInspection(next);
+      setError(null);
+    } catch (cause) {
+      setInspection(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    setInspection(null);
+    setError(null);
+    if (!workspaceId) return () => {
+      cancelled = true;
+    };
+    void window.spark.projectConstitution
+      .inspect({ workspaceId })
+      .then((next) => {
+        if (!cancelled) setInspection(next);
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  const runAction = async (action: "create" | "open" | "reveal") => {
+    if (!workspaceId) return;
+    setBusy(action);
+    setError(null);
+    try {
+      if (action === "create") {
+        setInspection(await window.spark.projectConstitution.create({ workspaceId }));
+      } else if (action === "open") {
+        await window.spark.projectConstitution.open({ workspaceId });
+      } else {
+        await window.spark.projectConstitution.reveal({ workspaceId });
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const status = !workspaceId
+    ? "invalid-or-unsupported"
+    : inspection?.status ?? "loading";
+  const statusLabel =
+    status === "active"
+      ? "Active"
+      : status === "missing"
+        ? "Missing"
+        : status === "loading"
+          ? "Checking"
+          : "Invalid or unsupported";
+  const detail = !workspaceId
+    ? "Open a local workspace to create or use a project constitution."
+    : inspection?.detail ?? "Inspecting the active workspace…";
+  const statusColor =
+    status === "active"
+      ? "var(--success)"
+      : status === "missing" || status === "loading"
+        ? "var(--muted)"
+        : "var(--danger)";
+
+  return (
+    <>
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+      <div data-project-constitution-status={status}>
+        <SectionTitle
+          title="Project constitution"
+          detail="One project-local contract for Cora managers and workers, plus Claude and Codex panes launched from Codara Studio. It is captured when each run or pane starts; existing sessions keep their snapshot."
+        />
+        <div
+          style={{
+            marginTop: 10,
+            padding: "11px 12px",
+            display: "grid",
+            gap: 9,
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 8,
+            background: "color-mix(in oklab, var(--ink) 2%, transparent)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+            }}
+          >
+            <span
+              style={{
+                minWidth: 0,
+                color: "var(--ink)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              .codara/constitution.md
+            </span>
+            <span
+              style={{
+                flex: "0 0 auto",
+                color: statusColor,
+                fontFamily: "var(--font-sans)",
+                fontSize: 11,
+                fontWeight: 650,
+              }}
+            >
+              {statusLabel}
+              {inspection?.status === "active" && inspection.shortHash
+                ? ` · ${inspection.shortHash}`
+                : ""}
+            </span>
+          </div>
+          <div
+            aria-live="polite"
+            style={{
+              color: error ? "var(--danger)" : "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
+              lineHeight: 1.45,
+            }}
+          >
+            {error ?? detail}
+          </div>
+          {inspection?.canCreate || inspection?.canOpen ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              {inspection.canCreate ? (
+                <FooterButton
+                  primary
+                  disabled={busy !== null}
+                  onClick={() => void runAction("create")}
+                >
+                  {busy === "create" ? "Creating" : "Create default"}
+                </FooterButton>
+              ) : null}
+              {inspection.canOpen ? (
+                <>
+                  <FooterButton
+                    primary
+                    disabled={busy !== null}
+                    onClick={() => void runAction("open")}
+                  >
+                    {busy === "open" ? "Opening" : "Open file"}
+                  </FooterButton>
+                  <FooterButton
+                    disabled={busy !== null}
+                    onClick={() => void runAction("reveal")}
+                  >
+                    {busy === "reveal" ? "Revealing" : "Reveal"}
+                  </FooterButton>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function UserConstitutionSettings() {
+  const [document, setDocument] = useState<UserConstitutionDocument | null>(null);
+  const [body, setBody] = useState("");
+  const [enabled, setEnabled] = useState(false);
+  const [busy, setBusy] = useState<"load" | "save" | null>("load");
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const bodyBytes = useMemo(
+    () => new TextEncoder().encode(body).byteLength,
+    [body],
+  );
+  const dirty = Boolean(
+    document && (body !== document.body || enabled !== document.enabled),
+  );
+  const validDraft = body.trim().length > 0 && bodyBytes <= USER_CONSTITUTION_MAX_BYTES;
+
+  const load = useCallback(async () => {
+    setBusy("load");
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await window.spark.userConstitution.load();
+      setDocument(next);
+      setBody(next.body);
+      setEnabled(next.enabled);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async () => {
+    if (!document || !validDraft || busy) return;
+    setBusy("save");
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await window.spark.userConstitution.save({
+        enabled,
+        body,
+        expectedRevision: document.revision,
+      });
+      setDocument(next);
+      setBody(next.body);
+      setEnabled(next.enabled);
+      setNotice("Global constitution saved.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const shortHash = document?.sha256.slice(0, 12) ?? "—";
+  const status = busy === "load"
+    ? "Loading"
+    : enabled
+      ? "Enabled"
+      : "Disabled";
+
+  return (
+    <>
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+      <div data-user-constitution-status={status.toLowerCase()}>
+        <SectionTitle
+          title="Global user constitution"
+          detail="One app-owned working agreement for Codara-managed agents. It is stored in Codara app data and remains separate from every workspace and project constitution. Existing sessions are never rewritten."
+        />
+        <div
+          style={{
+            marginTop: 10,
+            padding: "11px 12px",
+            display: "grid",
+            gap: 10,
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 8,
+            background: "color-mix(in oklab, var(--ink) 2%, transparent)",
+          }}
+        >
+          {document ? (
+            <>
+              <ToggleRow
+                title="Enable for supported managed-agent launches"
+                desc="Marks this global agreement active without modifying repository files. Runtime injection is handled separately and never places this body in process arguments, environment variables, or logs."
+                checked={enabled}
+                onChange={setEnabled}
+              />
+              <Label text="Constitution body">
+                <textarea
+                  className="spark-input spark-mono"
+                  aria-label="Global user constitution body"
+                  aria-invalid={!validDraft}
+                  value={body}
+                  onChange={(event) => setBody(event.currentTarget.value)}
+                  disabled={busy !== null}
+                  spellCheck={false}
+                  style={{
+                    width: "100%",
+                    minHeight: 250,
+                    resize: "vertical",
+                    padding: "10px 11px",
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                  }}
+                />
+              </Label>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  color: bodyBytes > USER_CONSTITUTION_MAX_BYTES
+                    ? "var(--danger)"
+                    : "var(--muted)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 10,
+                }}
+              >
+                <span>
+                  {bodyBytes.toLocaleString()} / {USER_CONSTITUTION_MAX_BYTES.toLocaleString()} UTF-8 bytes
+                </span>
+                <span aria-hidden>·</span>
+                <span>revision {document.revision}</span>
+                <span aria-hidden>·</span>
+                <span>sha256 {shortHash}</span>
+              </div>
+              <div
+                aria-live="polite"
+                style={{
+                  color: error ? "var(--danger)" : notice ? "var(--success)" : "var(--muted)",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 11,
+                  lineHeight: 1.45,
+                }}
+              >
+                {error ?? notice ?? (document.updatedAt
+                  ? `Last saved ${new Date(document.updatedAt).toLocaleString()}.`
+                  : "Using Codara's unsaved default. Review it before enabling.")}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <FooterButton
+                  primary
+                  disabled={!dirty || !validDraft || busy !== null}
+                  onClick={() => void save()}
+                >
+                  {busy === "save" ? "Saving" : "Save constitution"}
+                </FooterButton>
+                <FooterButton
+                  disabled={busy !== null}
+                  onClick={() => void load()}
+                >
+                  Reload stored
+                </FooterButton>
+              </div>
+            </>
+          ) : (
+            <div
+              aria-live="polite"
+              style={{
+                color: error ? "var(--danger)" : "var(--muted)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 11,
+                lineHeight: 1.45,
+              }}
+            >
+              {error ?? "Loading the global constitution…"}
+              {error ? (
+                <div style={{ marginTop: 8 }}>
+                  <FooterButton onClick={() => void load()}>Retry</FooterButton>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+const CORA_CLI_EXAMPLES = [
+  'cora start "Fix the failing tests" --cwd . --wait',
+  'cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex',
+  'cora agent message <run> all "Re-check the acceptance criteria"',
+] as const;
+
+// Consent gate for the shell setup: nothing is written to the user's shell
+// startup file until they press the button here, and the exact block is shown
+// before they do.
 function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
   const { preferences, hydrated, setPreference } = usePreferences();
   const stored = preferences.copyBranchSetupCommandByRepo?.[workspaceCwd];
