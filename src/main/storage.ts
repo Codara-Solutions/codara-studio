@@ -251,8 +251,7 @@ export async function loadState(): Promise<AppState> {
 
 export async function saveState(state: AppState): Promise<void> {
   // Accept pre-folder renderer/CLI payloads during rolling upgrades while
-  // keeping the in-memory state on the current shape immediately (not only
-  // after the next process restart/readFromDisk pass).
+  // keeping the in-memory state on the current shape after it is durable.
   const normalizedState: AppState = {
     ...state,
     workspaceGroups: normalizeWorkspaceGroups(state.workspaceGroups),
@@ -262,28 +261,73 @@ export async function saveState(state: AppState): Promise<void> {
       state.workspaceGroups,
     ),
   };
-  cache = normalizedState;
-  // Serialize writes to avoid races. Keep two handles on the chain: `write`
-  // (which rejects on disk failure) is awaited so the IPC caller learns the
-  // save never hit disk, while `writing` swallows the rejection so a single
-  // failure doesn't poison every subsequent queued save.
-  const write = writing.then(() => writeToDisk(normalizedState));
-  writing = write.catch((err) => {
-    console.error("[storage] write failed:", err);
+  // Serialize writes to avoid races. Cache publication and listeners belong
+  // inside the same queued slot and happen only AFTER the atomic rename
+  // succeeds. A failed save must leave loadState() and subscribers on the last
+  // durable snapshot; otherwise a renderer can believe a new worktree was
+  // registered even though it will disappear on restart.
+  //
+  // Keep two handles on the chain: `write` (which rejects on disk failure) is
+  // awaited so the IPC caller learns the save never hit disk, while `writing`
+  // swallows the rejection so one failure does not poison later queued saves.
+  await enqueueStateWrite(async () => normalizedState);
+}
+
+/**
+ * Atomically read, modify, and persist AppState inside the same queue used by
+ * saveState. The updater receives a deep clone so a thrown updater or failed
+ * disk write cannot mutate the last durable in-memory snapshot by reference.
+ */
+export async function updateState(
+  mutator: (current: AppState) => AppState | Promise<AppState>,
+): Promise<AppState> {
+  return enqueueStateWrite(async () => {
+    const current = cache ?? await readFromDisk();
+    const candidate = await mutator(cloneAppState(current));
+    return {
+      ...candidate,
+      workspaceGroups: normalizeWorkspaceGroups(candidate.workspaceGroups),
+      workspaceRailOrder: normalizeWorkspaceRailOrder(
+        candidate.workspaceRailOrder,
+        candidate.workspaces,
+        candidate.workspaceGroups,
+      ),
+    };
   });
-  await write;
-  for (const listener of stateSavedListeners) {
-    try {
-      listener(normalizedState);
-    } catch (err) {
-      console.error("[storage] state-saved listener failed:", err);
-    }
-  }
 }
 
 export function onStateSaved(listener: (state: AppState) => void): () => void {
   stateSavedListeners.add(listener);
   return () => stateSavedListeners.delete(listener);
+}
+
+async function enqueueStateWrite(
+  produce: () => Promise<AppState>,
+): Promise<AppState> {
+  const operation = writing.then(async () => {
+    const next = await produce();
+    await writeToDisk(next);
+    cache = next;
+    for (const listener of stateSavedListeners) {
+      try {
+        listener(next);
+      } catch (err) {
+        console.error("[storage] state-saved listener failed:", err);
+      }
+    }
+    return next;
+  });
+  writing = operation.then(
+    () => undefined,
+    (err) => {
+      console.error("[storage] write failed:", err);
+    },
+  );
+  return operation;
+}
+
+function cloneAppState(state: AppState): AppState {
+  return JSON.parse(JSON.stringify(state)) as AppState;
 }
 
 export async function loadSettings(): Promise<AppSettings> {

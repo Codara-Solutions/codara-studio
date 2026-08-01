@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult } from "@shared/types";
 import { errorText, readGitText, runGit } from "./git-exec";
 
@@ -37,6 +38,39 @@ export interface RemoveCopyWorktreeInput {
   branch: string;
   force?: boolean;
   deleteBranch?: boolean;
+}
+
+const MANAGED_REPO_HASH_HEX_LENGTH = 12;
+
+/**
+ * Stable per-repository namespace for all newly managed worktrees.
+ *
+ * Existing worktrees are deliberately never migrated: their persisted
+ * absolute paths remain valid and cleanup/recovery consumes those paths
+ * directly. Canonicalizing both the basename and hash makes symlink aliases
+ * converge while keeping unrelated same-named repositories isolated.
+ */
+export function managedWorktreesRoot(
+  sparkHomeDir: string,
+  repoCwd: string,
+): string {
+  const absolute = resolve(repoCwd);
+  let canonical = absolute;
+  try {
+    canonical = realpathSync.native(absolute);
+  } catch {
+    // Provisioning will report the real git/path failure. Root derivation
+    // remains deterministic if the path disappeared after user selection.
+  }
+  const suffix = createHash("sha256")
+    .update(canonical, "utf8")
+    .digest("hex")
+    .slice(0, MANAGED_REPO_HASH_HEX_LENGTH);
+  return join(
+    sparkHomeDir,
+    "worktrees",
+    `${basename(canonical)}-${suffix}`,
+  );
 }
 
 async function branchExists(repoCwd: string, name: string): Promise<boolean> {
@@ -441,6 +475,20 @@ async function tryRemoveWorktreeOnce(
   input: RemoveCopyWorktreeInput,
 ): Promise<{ ok: true } | { ok: false; error: string; retryable: boolean }> {
   try {
+    if (!input.force) {
+      const status = await readGitText(input.worktreePath, [
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+      ]);
+      if (status.trim()) {
+        return {
+          ok: false,
+          error: "Worktree has uncommitted changes. Use force removal to discard them.",
+          retryable: false,
+        };
+      }
+    }
     await runGit(input.repoCwd, [
       "worktree",
       "remove",

@@ -1770,6 +1770,10 @@ export default function App() {
   // Mirror the workspaces list through a ref so the orchestration listener
   // doesn't re-subscribe on every workspace state change (which is often
   // — runs trigger updates).
+  const workspaceGroupsRef = useRef(workspaceGroups);
+  workspaceGroupsRef.current = workspaceGroups;
+  const workspaceRailOrderRef = useRef(workspaceRailOrder);
+  workspaceRailOrderRef.current = workspaceRailOrder;
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
 
@@ -2480,6 +2484,7 @@ export default function App() {
   // stable for the lifetime of the component — which lets the React.memo on
   // WorkspaceRail actually skip renders.
   const handleActivateWorkspace = useCallback((id: string) => {
+    activeIdRef.current = id;
     const currentWorkspaceId = activeIdRef.current;
     if (currentWorkspaceId) {
       activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
@@ -2791,31 +2796,36 @@ export default function App() {
   const createCopyBranchWs = useCallback(
     async (
       sourceWs: Workspace,
-      opts?: { newBranch?: string; checkoutBranch?: string; checkoutIsRemote?: boolean },
-    ) => {
+      opts?: {
+        newBranch?: string;
+        checkoutBranch?: string;
+        checkoutIsRemote?: boolean;
+        /** Issue provisioning stays on the source workspace until Cora starts. */
+        activate?: boolean;
+        /** Issue provisioning gives setup to Cora as an awaited first step. */
+        launchSetupTerminal?: boolean;
+      },
+    ): Promise<Workspace> => {
       setCreateCopyBusy(true);
       setCreateCopyError(null);
-      const res = await window.spark.git.createCopyWorktree(sourceWs.cwd, opts);
-      setCreateCopyBusy(false);
-      if (!res.ok) {
-        // Surfaced inline by the still-open CreateCopyDialog.
-        setCreateCopyError(res.error);
-        return;
-      }
-      setCreateCopyDialogWs(null);
-      // Same Part A race as createWs: push the worktree path onto the main
-      // read-sandbox allowlist BEFORE the workspace exists in state. The rail's
-      // missing-folder probe (fs:pathExists) and FileTree's fs:list fire from
-      // child effects ahead of the parent setAllowedRoots effect, and a
-      // sandbox-denied probe reports exists:false — striking the brand-new
-      // copy through as "folder not found" until the next re-check.
-      const existingCwds = workspacesRef.current
-        .map((w) => w.cwd)
-        .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
-      await window.spark.ui?.setAllowedRoots([...existingCwds, res.path]).catch(() => {
-        /* sandbox push is best-effort; the parent effect re-sends on state change */
-      });
-      setWorkspaces((list) => {
+      try {
+        const activate = opts?.activate !== false;
+        const launchSetupTerminal = opts?.launchSetupTerminal !== false;
+        const worktreeOptions = opts
+          ? {
+              ...(opts.newBranch ? { newBranch: opts.newBranch } : {}),
+              ...(opts.checkoutBranch ? { checkoutBranch: opts.checkoutBranch } : {}),
+              ...(opts.checkoutIsRemote !== undefined
+                ? { checkoutIsRemote: opts.checkoutIsRemote }
+                : {}),
+            }
+          : undefined;
+        const res = await window.spark.git.createCopyWorktree(
+          sourceWs.cwd,
+          worktreeOptions,
+        );
+        if (!res.ok) throw new Error(res.error);
+
         const ws: Workspace = {
           id: makeId("ws"),
           // The branch is always user-meaningful now (picked or typed), so it
@@ -2836,32 +2846,194 @@ export default function App() {
             fileCount: res.fileCount,
           },
         };
-        activeRunIdsByWorkspaceRef.current[ws.id] = null;
-        setActiveId(ws.id);
-        // Run the per-repo setup command live in a terminal in the new worktree.
-        // Default is empty (opt-in) — nothing runs unless this repo has one set.
-        void window.spark.preferences.load().then((prefs) => {
-          const cmd = (
-            prefs.copyBranchSetupCommandByRepo?.[sourceWs.cwd] ??
-            DEFAULT_COPY_BRANCH_SETUP_COMMAND
-          ).trim();
-          if (cmd) newTerminalTab(res.path, cmd);
+
+        // Same Part A race as createWs: push the worktree path onto the main
+        // read-sandbox allowlist BEFORE the workspace exists in state. The rail's
+        // missing-folder probe (fs:pathExists) and FileTree's fs:list fire from
+        // child effects ahead of the parent setAllowedRoots effect, and a
+        // sandbox-denied probe reports exists:false — striking the brand-new
+        // copy through as "folder not found" until the next re-check.
+        const list = workspacesRef.current;
+        const existingCwds = list
+          .map((w) => w.cwd)
+          .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+        await window.spark.ui?.setAllowedRoots([...existingCwds, res.path]).catch(() => {
+          /* sandbox push is best-effort; the parent effect re-sends on state change */
         });
+
         // Insert directly below the source workspace (and any existing copy
         // branches of it) so it reads as an indented child of its parent.
+        const nextWorkspaces = list.slice();
         const parentIdx = list.findIndex((w) => w.id === sourceWs.id);
-        if (parentIdx === -1) return [...list, ws];
-        let insertAt = parentIdx + 1;
-        while (
-          insertAt < list.length &&
-          list[insertAt].copyBranch?.repoCwd === sourceWs.cwd
-        ) {
-          insertAt += 1;
+        if (parentIdx === -1) {
+          nextWorkspaces.push(ws);
+        } else {
+          let insertAt = parentIdx + 1;
+          while (
+            insertAt < list.length &&
+            list[insertAt].copyBranch?.repoCwd === sourceWs.cwd
+          ) {
+            insertAt += 1;
+          }
+          nextWorkspaces.splice(insertAt, 0, ws);
         }
-        const next = list.slice();
-        next.splice(insertAt, 0, ws);
-        return next;
-      });
+        const nextRailOrder = normalizedWorkspaceRailOrder(
+          workspaceRailOrderRef.current,
+          nextWorkspaces,
+          workspaceGroupsRef.current,
+        );
+        const previousActiveId = activeIdRef.current;
+        const previousState: AppState = {
+          workspaces: list,
+          workspaceGroups: workspaceGroupsRef.current,
+          workspaceRailOrder: workspaceRailOrderRef.current,
+          activeWorkspaceId: previousActiveId,
+        };
+        const nextState: AppState = {
+          workspaces: nextWorkspaces,
+          workspaceGroups: workspaceGroupsRef.current,
+          workspaceRailOrder: nextRailOrder,
+          activeWorkspaceId: activate ? ws.id : previousActiveId,
+        };
+
+        // Durability is phase one. Do not publish refs, React state, or active
+        // selection until the exact snapshot is on disk; a failed save leaves
+        // the source issue row mounted and makes cleanup invisible to no one.
+        if (saveTimer.current !== null) {
+          window.clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+        try {
+          await window.spark.state.save(nextState);
+        } catch (cause) {
+          const reason = cause instanceof Error ? cause.message : String(cause);
+          let cleanupSucceeded = false;
+          let cleanupDetail = "";
+          try {
+            const cleanup = await window.spark.git.removeCopyWorktree({
+              repoCwd: sourceWs.cwd,
+              worktreePath: res.path,
+              branch: res.branch,
+              force: true,
+              // Fork mode created this branch in the failed transaction.
+              // Checkout mode may point at a user's pre-existing branch.
+              deleteBranch: res.mode === "fork",
+            });
+            if (cleanup.ok) {
+              cleanupSucceeded = true;
+            } else {
+              const pathState = await window.spark.fs.pathExists({
+                target: res.path,
+              });
+              if (!pathState.exists && res.mode === "fork") {
+                // removeCopyWorktree can remove the directory successfully and
+                // then report failure because its safe `branch -d` refused.
+                // No setup or Cora work has run yet, so this transaction-owned
+                // branch is safe to force-delete.
+                const branchCleanup = await window.spark.git.deleteBranch(
+                  sourceWs.cwd,
+                  res.branch,
+                  true,
+                );
+                if (branchCleanup.ok) {
+                  cleanupSucceeded = true;
+                } else {
+                  const branches = await window.spark.git
+                    .branches(sourceWs.cwd)
+                    .catch(() => null);
+                  const branchStillExists =
+                    branches?.isRepo === true &&
+                    !branches.error
+                      ? branches.local.some((branch) => branch.name === res.branch)
+                      : null;
+                  if (branchStillExists === false) {
+                    cleanupSucceeded = true;
+                  } else {
+                    cleanupDetail =
+                      `The worktree directory was removed, but branch '${res.branch}' remains: ` +
+                      `${branchCleanup.error} Delete that branch manually before retrying.`;
+                  }
+                }
+              } else if (!pathState.exists) {
+                cleanupSucceeded = true;
+              } else {
+                cleanupDetail =
+                  `Automatic cleanup failed: ${cleanup.error} ` +
+                  `Recover or remove the worktree at '${res.path}' ` +
+                  `(branch '${res.branch}') before retrying.`;
+              }
+            }
+          } catch (cleanupCause) {
+            const cleanupReason =
+              cleanupCause instanceof Error ? cleanupCause.message : String(cleanupCause);
+            const pathState = await window.spark.fs
+              .pathExists({ target: res.path })
+              .catch(() => ({ exists: true }));
+            cleanupDetail = pathState.exists
+              ? `Automatic cleanup failed: ${cleanupReason} Recover or remove the worktree ` +
+                `at '${res.path}' (branch '${res.branch}') before retrying.`
+              : `The worktree directory was removed, but cleanup could not confirm branch ` +
+                `'${res.branch}' was removed: ${cleanupReason}`;
+          }
+
+          // The failed next snapshot never published, but an older debounced
+          // state save may have been cancelled above. Re-persist that exact
+          // previous snapshot and shrink the read allowlist either way.
+          await window.spark.state.save(previousState).catch(() => undefined);
+          const rootsRestored = await window.spark.ui
+            ?.setAllowedRoots(existingCwds)
+            .then(() => true)
+            .catch(() => false);
+          const cleanupSummary = cleanupSucceeded
+            ? "The incomplete worktree was removed."
+            : cleanupDetail;
+          const rootsSummary =
+            rootsRestored === false
+              ? " Codara could not restore the filesystem allowlist; restart Studio before retrying."
+              : "";
+          throw new Error(
+            `The isolated workspace was created, but Codara could not persist it: ${reason} ` +
+              `${cleanupSummary}${rootsSummary}`,
+          );
+        }
+
+        // Publication is phase two. The issue path publishes the durable
+        // workspace in the rail but deliberately keeps the source active until
+        // startAutopilot succeeds, so any failure remains visible in its row.
+        if (activate && previousActiveId) {
+          activeRunIdsByWorkspaceRef.current[previousActiveId] = activeRunIdRef.current;
+        }
+        workspacesRef.current = nextWorkspaces;
+        workspaceRailOrderRef.current = nextRailOrder;
+        activeRunIdsByWorkspaceRef.current[ws.id] = null;
+        setWorkspaces(nextWorkspaces);
+        setWorkspaceRailOrder(nextRailOrder);
+        if (activate) {
+          activeIdRef.current = ws.id;
+          setActiveId(ws.id);
+        }
+
+        setCreateCopyDialogWs(null);
+        // Run the per-repo setup command live in a terminal in the new worktree.
+        // Default is empty (opt-in) — nothing runs unless this repo has one set.
+        if (launchSetupTerminal) {
+          void window.spark.preferences.load().then((prefs) => {
+            const cmd = (
+              prefs.copyBranchSetupCommandByRepo?.[sourceWs.cwd] ??
+              DEFAULT_COPY_BRANCH_SETUP_COMMAND
+            ).trim();
+            if (cmd) newTerminalTab(res.path, cmd);
+          }).catch(() => undefined);
+        }
+        return ws;
+      } catch (cause) {
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        // Surfaced inline by CreateCopyDialog or the GitHub issue row.
+        setCreateCopyError(error.message);
+        throw error;
+      } finally {
+        setCreateCopyBusy(false);
+      }
     },
     [newTerminalTab],
   );
@@ -4884,7 +5056,9 @@ export default function App() {
               }
             }}
             onCreateNew={(name) =>
-              void createCopyBranchWs(createCopyDialogWs, { newBranch: name })
+              void createCopyBranchWs(createCopyDialogWs, { newBranch: name }).catch(
+                () => undefined,
+              )
             }
             onOpenBranch={(b) =>
               void createCopyBranchWs(createCopyDialogWs, {

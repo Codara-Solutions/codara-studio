@@ -613,6 +613,11 @@ async function purgeTerminalRunForRetention(runId: string): Promise<void> {
       ) {
         return;
       }
+      // A failed/cancelled sandbox may still be the only copy of a worker's
+      // edits. removeSandboxWorktree force-removes its directory before the
+      // safe branch deletion runs, so retention must never send an
+      // un-reconciled attempt through deleteRun.
+      if (unreconciledSandboxAttempts(latest).length > 0) return;
       await deleteRun(runId);
     });
   runMutationQueues.set(runId, next);
@@ -621,6 +626,17 @@ async function purgeTerminalRunForRetention(runId: string): Promise<void> {
   } finally {
     if (runMutationQueues.get(runId) === next) runMutationQueues.delete(runId);
   }
+}
+
+function unreconciledSandboxAttempts(run: RunState): WorkerAttempt[] {
+  return run.workerAttempts.filter(
+    (attempt) =>
+      Boolean(
+        attempt.sandboxWorktreePath &&
+          attempt.sandboxBranch &&
+          attempt.sandboxBaseRepo,
+      ) && attempt.sandboxMergedBack !== true,
+  );
 }
 
 // Recursively delete only known-terminal runs outside the retention budget.
@@ -11013,6 +11029,20 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
 
 export async function deleteRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
+  const sandboxBlockers = unreconciledSandboxAttempts(run);
+  if (sandboxBlockers.length > 0) {
+    const labels = sandboxBlockers
+      .slice(0, 3)
+      .map((attempt) => attempt.sandboxBranch ?? attempt.id)
+      .join(", ");
+    const suffix = sandboxBlockers.length > 3 ? ` and ${sandboxBlockers.length - 3} more` : "";
+    throw new Error(
+      `This run still owns ${sandboxBlockers.length} sandbox worktree${
+        sandboxBlockers.length === 1 ? "" : "s"
+      } whose changes were not confirmed merged back (${labels}${suffix}). ` +
+        "Open or recover those worktrees before deleting the run.",
+    );
+  }
   const timestamp = new Date().toISOString();
   for (const worker of activeWorkersForRun(run.id)) {
     worker.kill();

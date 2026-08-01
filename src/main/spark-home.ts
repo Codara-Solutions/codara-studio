@@ -1,5 +1,5 @@
 import { app } from "electron";
-import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -57,7 +57,16 @@ export function sparkHome(): string {
 
 export function ensureSparkHomeSync(): void {
   const dir = sparkHome();
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") {
+    // The home contains the loopback bearer token and other per-user state.
+    // Tighten pre-existing homes as well as newly created directories.
+    try {
+      chmodSync(dir, 0o700);
+    } catch (err) {
+      console.warn(`[spark-home] could not set owner-only permissions on ${dir}:`, err);
+    }
+  }
   // Test escape hatch (e2e specs): an isolated throwaway home must stay
   // pristine — importing the machine's real legacy state (~/.SparkAgent runs,
   // run-queue) both defeats the isolation and can wedge boot replaying it.

@@ -6,7 +6,16 @@
 // @shared alias as the production build.
 const assert = require("node:assert");
 const { execFileSync } = require("node:child_process");
-const { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } = require("node:fs");
+const { createHash } = require("node:crypto");
+const {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+  rmSync,
+} = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -41,7 +50,37 @@ async function main() {
   const repo = mkdtempSync(path.join(os.tmpdir(), "spark-repo-"));
   const worktreesRoot = mkdtempSync(path.join(os.tmpdir(), "spark-wts-"));
   const origin = mkdtempSync(path.join(os.tmpdir(), "spark-origin-"));
+  const identityRoot = mkdtempSync(path.join(os.tmpdir(), "spark-root-id-"));
   try {
+    const firstSame = path.join(identityRoot, "a", "same");
+    const secondSame = path.join(identityRoot, "b", "same");
+    mkdirSync(firstSame, { recursive: true });
+    mkdirSync(secondSame, { recursive: true });
+    const managedHome = path.join(identityRoot, "home");
+    const firstManaged = wt.managedWorktreesRoot(managedHome, firstSame);
+    const secondManaged = wt.managedWorktreesRoot(managedHome, secondSame);
+    assert.notStrictEqual(
+      firstManaged,
+      secondManaged,
+      "same-basename repositories receive distinct managed roots",
+    );
+    const expectedSuffix = createHash("sha256")
+      .update(realpathSync.native(firstSame), "utf8")
+      .digest("hex")
+      .slice(0, 12);
+    assert.strictEqual(
+      path.basename(firstManaged),
+      `same-${expectedSuffix}`,
+      "managed root uses the canonical basename plus a 12-hex SHA-256 suffix",
+    );
+    const alias = path.join(identityRoot, "renamed-alias");
+    symlinkSync(firstSame, alias, "dir");
+    assert.strictEqual(
+      wt.managedWorktreesRoot(managedHome, alias),
+      firstManaged,
+      "a symlink alias resolves to the target repository's exact managed root",
+    );
+
     execFileSync("git", ["init", "-b", "main", repo]);
     git(repo, ["config", "user.email", "test@example.com"]);
     git(repo, ["config", "user.name", "Test"]);
@@ -132,7 +171,7 @@ async function main() {
     // stay on disk, not get force-deleted by the orphan fallback.
     const live = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "live-test" });
     assert.ok(live.ok, `live create failed: ${live.ok ? "" : live.error}`);
-    writeFileSync(path.join(live.path, "dirty.txt"), "uncommitted\n");
+    writeFileSync(path.join(live.path, "README.md"), "# uncommitted change\n");
     const liveRm = await wt.removeCopyWorktree({
       repoCwd: repo,
       worktreePath: live.path,
@@ -279,6 +318,7 @@ async function main() {
     rmSync(repo, { recursive: true, force: true });
     rmSync(worktreesRoot, { recursive: true, force: true });
     rmSync(origin, { recursive: true, force: true });
+    rmSync(identityRoot, { recursive: true, force: true });
     try {
       rmSync(outFile, { force: true });
     } catch {

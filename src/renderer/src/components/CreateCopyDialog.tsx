@@ -127,11 +127,14 @@ export default function CreateCopyDialog({
               color: "var(--ink)",
             }}
           >
-            <span style={{ flex: 1, minWidth: 0 }}>Create copy of “{workspace.name}”</span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              Create isolated worktree for “{workspace.name}”
+            </span>
             {busy && <Spinner size={12} />}
           </div>
           <div style={{ fontSize: 12, color: "var(--ink-dim)", lineHeight: 1.5 }}>
-            Open an existing branch as a workspace, or create a new branch.
+            Open an existing branch or create a new one in a separate Git worktree, so agents
+            can work in parallel without changing this checkout.
           </div>
         </div>
 
