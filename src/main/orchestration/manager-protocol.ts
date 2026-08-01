@@ -1426,7 +1426,7 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
  * verification; the verifier is for the half re-running cannot reach.
  */
 const MECHANICAL_PROOF_FIRST_POLICY =
-  "Before spawning any verifier, re-run the implementation report's commands_run/tests yourself with bash and read the exit codes. That is independent evidence for every MECHANICAL claim (it compiles, tests pass, the boundaries are green) and it costs seconds. Skip the verifier only when re-running settles every acceptance criterion; otherwise spawn it scoped to what re-running cannot settle - whether the behaviour is correct, whether the change means what it claims, what went unchecked - and name the mechanical results you already confirmed so the verifier does not repeat them.";
+  "Before spawning the verifier, re-run the implementation report's commands_run/tests yourself with bash and read the exit codes. That is independent evidence for every MECHANICAL claim (it compiles, tests pass, the boundaries are green) and it costs seconds rather than minutes. Then SCOPE the verifier to what re-running cannot settle - whether the behaviour is correct, whether the change means what it claims, what went unchecked - and name the mechanical results you already confirmed so it does not spend its turn reprinting exit codes you hold. The verifier itself is not optional: codara_complete requires a passing verifier verdict for any files-changing implementation, so a run that skips it cannot finish.";
 
 function formatTaskComplexity(complexity: TaskComplexity): string {
   switch (complexity) {
