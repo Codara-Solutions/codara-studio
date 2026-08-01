@@ -45,6 +45,7 @@ const {
   isLongPollToolName,
   OBSERVED_HEALTHY_WORKER_GAP_MS,
   PI_WORKER_STALL_WARN_MS,
+  PI_WORKER_PROVIDER_FAILURE_WARN_MS,
   PI_WORKER_PROVIDER_FAILURE_GRACE_MS,
   PI_WORKER_STALL_FAIL_MS,
   PI_TURN_IDLE_TIMEOUT_MS,
@@ -65,26 +66,33 @@ const CODEX_500 =
 
 // ── Worker silence ────────────────────────────────────────────────────────
 
-check("thresholds sit above the widest gap a healthy worker ever produced", () => {
+check("the generic warn clears the healthy envelope by a real margin", () => {
+  // Regression on a live miss: this was originally set level with the widest
+  // healthy gap on record and a perfectly healthy worker tripped it on the
+  // first real run, mid-message. A warning that cries wolf gets ignored.
   assert.ok(
-    PI_WORKER_STALL_WARN_MS >= OBSERVED_HEALTHY_WORKER_GAP_MS - 6_000,
-    "the warn threshold must not fire inside normal worker behaviour",
+    PI_WORKER_STALL_WARN_MS >= OBSERVED_HEALTHY_WORKER_GAP_MS * 1.5,
+    "the generic warn must sit well clear of normal worker behaviour, not level with it",
   );
-  assert.ok(PI_WORKER_PROVIDER_FAILURE_GRACE_MS > OBSERVED_HEALTHY_WORKER_GAP_MS);
-  assert.ok(PI_WORKER_STALL_FAIL_MS > PI_WORKER_PROVIDER_FAILURE_GRACE_MS);
-  assert.ok(PI_WORKER_PROVIDER_FAILURE_GRACE_MS > PI_WORKER_STALL_WARN_MS,
-    "a stalled worker must be SHOWN as stalled before it is failed");
+  assert.ok(PI_WORKER_STALL_FAIL_MS > PI_WORKER_STALL_WARN_MS,
+    "a silent worker must be SHOWN as stalled before it is failed");
+  assert.ok(PI_WORKER_PROVIDER_FAILURE_GRACE_MS > PI_WORKER_PROVIDER_FAILURE_WARN_MS,
+    "the same ordering must hold on the provider-failure path");
+  assert.ok(PI_WORKER_PROVIDER_FAILURE_WARN_MS < PI_WORKER_STALL_WARN_MS,
+    "a KNOWN provider error is evidence, so it must surface sooner than bare silence");
 });
 
 check("a busy worker is never disturbed", () => {
-  for (const gap of [0, 1_000, 60_000, 4 * MIN]) {
+  // Includes the exact gap that produced the false positive: 5 min of silence
+  // between message_update and message_end on a healthy worker.
+  for (const gap of [0, 1_000, 60_000, 4 * MIN, 5 * MIN, 7 * MIN]) {
     const verdict = classifyWorkerSilence({
       silentForMs: gap,
       providerFailure: null,
-      lastEventType: "tool_execution_end",
+      lastEventType: "message_update",
       alreadyWarned: false,
     });
-    assert.equal(verdict.action, "continue", `${gap}ms of silence must not act`);
+    assert.equal(verdict.action, "continue", `${gap}ms of healthy silence must not act`);
   }
 });
 
@@ -92,12 +100,12 @@ check("the incident's provider error is reported, then failed with its own text"
   // t+0: the Codex 500 lands. auto_retry_start follows immediately, so the
   // silence clock starts from that last event, not from the error.
   const atWarn = classifyWorkerSilence({
-    silentForMs: PI_WORKER_STALL_WARN_MS,
+    silentForMs: PI_WORKER_PROVIDER_FAILURE_WARN_MS,
     providerFailure: CODEX_500,
     lastEventType: "auto_retry_start",
     alreadyWarned: false,
   });
-  assert.equal(atWarn.action, "warn", "5 min of post-error silence must surface as a stall");
+  assert.equal(atWarn.action, "warn", "post-error silence must surface as a stall promptly");
   assert.match(atWarn.detail, /Codex error/, "the stall note must carry the provider's own words");
   assert.match(atWarn.detail, /auto_retry_start/, "and name the last thing we heard");
 
@@ -114,9 +122,10 @@ check("the incident's provider error is reported, then failed with its own text"
 
 check("the whole incident resolves inside the window the old code needed", () => {
   // The real run went 16 minutes with nobody the wiser, and was only ended by
-  // an unrelated manager cap. Both decisions must now land well inside that.
-  assert.ok(PI_WORKER_STALL_WARN_MS < 16 * MIN);
+  // an unrelated manager cap. Every decision must now land well inside that.
+  assert.ok(PI_WORKER_PROVIDER_FAILURE_WARN_MS < 16 * MIN);
   assert.ok(PI_WORKER_PROVIDER_FAILURE_GRACE_MS < 16 * MIN);
+  assert.ok(PI_WORKER_STALL_WARN_MS < 16 * MIN);
 });
 
 check("silence with no diagnosis still terminates, just later", () => {
@@ -158,6 +167,26 @@ check("the stall warning is edge-triggered, not repeated every poll", () => {
     alreadyWarned: true,
   });
   assert.equal(repeat.action, "continue", "an already-reported stall must not re-announce itself");
+});
+
+check("a known provider error surfaces far sooner than bare silence", () => {
+  // Same silence, different evidence: with a provider error in hand this is a
+  // report, without one it is still a guess.
+  const gap = PI_WORKER_PROVIDER_FAILURE_WARN_MS;
+  const withError = classifyWorkerSilence({
+    silentForMs: gap,
+    providerFailure: CODEX_500,
+    lastEventType: "auto_retry_start",
+    alreadyWarned: false,
+  });
+  const withoutError = classifyWorkerSilence({
+    silentForMs: gap,
+    providerFailure: null,
+    lastEventType: "auto_retry_start",
+    alreadyWarned: false,
+  });
+  assert.equal(withError.action, "warn");
+  assert.equal(withoutError.action, "continue");
 });
 
 // ── Manager turn liveness ─────────────────────────────────────────────────

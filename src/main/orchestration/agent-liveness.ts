@@ -24,10 +24,26 @@
 /** Widest inter-event gap ever observed from a healthy worker, for reference. */
 export const OBSERVED_HEALTHY_WORKER_GAP_MS = 5.1 * 60 * 1000;
 
-/** Silence after which a worker is reported stalled (non-terminal). */
-export const PI_WORKER_STALL_WARN_MS = 5 * 60 * 1000;
+/**
+ * Silence after which a worker with NO known problem is reported stalled.
+ *
+ * Sized well clear of OBSERVED_HEALTHY_WORKER_GAP_MS rather than level with it.
+ * This started at 5 min - exactly the widest healthy gap on record - and a
+ * healthy worker tripped it on the first real run, mid-message between
+ * message_update and message_end. The warning is non-destructive and
+ * self-clearing so the cost was only a moment of amber, but a state that cries
+ * wolf is a state people learn to ignore, which defeats the whole point.
+ */
+export const PI_WORKER_STALL_WARN_MS = 8 * 60 * 1000;
 /**
  * Silence after which a worker that ALREADY reported a provider error is
+ * reported stalled. Far shorter than the generic window because this is not a
+ * guess: something demonstrably went wrong, so saying so immediately is
+ * accurate rather than noisy.
+ */
+export const PI_WORKER_PROVIDER_FAILURE_WARN_MS = 60 * 1000;
+/**
+ * Silence after which a worker that already reported a provider error is
  * failed. Shorter than the generic window because there is a concrete
  * diagnosis to report; still above the widest healthy gap, so a slow retry
  * that is genuinely producing events is never cut off.
@@ -82,7 +98,12 @@ export function classifyWorkerSilence(input: {
       detail: `${providerFailure} (${silence}, so the retry never produced a response)`,
     };
   }
-  if (!alreadyWarned && silentForMs >= PI_WORKER_STALL_WARN_MS) {
+  // Two warn thresholds, because the two situations carry different evidence.
+  // With a provider error in hand there is nothing to guess about, so surface it
+  // almost at once; without one, silence alone is weak evidence and must clear
+  // the healthy envelope by a wide margin before it is worth saying anything.
+  const warnAfter = providerFailure ? PI_WORKER_PROVIDER_FAILURE_WARN_MS : PI_WORKER_STALL_WARN_MS;
+  if (!alreadyWarned && silentForMs >= warnAfter) {
     return {
       action: "warn",
       detail: providerFailure ? `${providerFailure} - ${silence}.` : `${silence}.`,
