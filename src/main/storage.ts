@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  normalizeGitHubOrigin,
   normalizeTerminalScrollbackLineLimit,
   type AppSettings,
   type AppState,
@@ -124,6 +125,7 @@ function normalize(w: Workspace): Workspace {
     typeof cb.city === "string" &&
     typeof cb.createdAt === "string"
   ) {
+    const origin = normalizeGitHubOrigin(cb.origin);
     normalized.copyBranch = {
       repoCwd: cb.repoCwd,
       branch: cb.branch,
@@ -132,6 +134,7 @@ function normalize(w: Workspace): Workspace {
       ...(typeof cb.baseBranch === "string" ? { baseBranch: cb.baseBranch } : {}),
       ...(cb.mode === "fork" || cb.mode === "checkout" ? { mode: cb.mode } : {}),
       ...(typeof cb.fileCount === "number" ? { fileCount: cb.fileCount } : {}),
+      ...(origin ? { origin } : {}),
     };
   }
   // SSH remote workspaces: carry the host pointer through, and never let the
@@ -229,10 +232,13 @@ async function writeToDisk(state: AppState): Promise<void> {
       state.workspaces,
       state.workspaceGroups,
     ),
-    workspaces: state.workspaces.map((workspace) => ({
-      ...workspace,
-      workers: workspace.workers.filter((worker) => worker.kind !== "orchestration"),
-    })),
+    workspaces: state.workspaces.map((workspace) => {
+      const normalizedWorkspace = normalizeWorkspaceGitHubOrigin(workspace);
+      return {
+        ...normalizedWorkspace,
+        workers: normalizedWorkspace.workers.filter((worker) => worker.kind !== "orchestration"),
+      };
+    }),
   };
   const json = JSON.stringify(persisted, null, 2);
   await writeFileAtomic(statePath(), json);
@@ -254,6 +260,7 @@ export async function saveState(state: AppState): Promise<void> {
   // keeping the in-memory state on the current shape after it is durable.
   const normalizedState: AppState = {
     ...state,
+    workspaces: state.workspaces.map(normalizeWorkspaceGitHubOrigin),
     workspaceGroups: normalizeWorkspaceGroups(state.workspaceGroups),
     workspaceRailOrder: normalizeWorkspaceRailOrder(
       state.workspaceRailOrder,
@@ -286,6 +293,7 @@ export async function updateState(
     const candidate = await mutator(cloneAppState(current));
     return {
       ...candidate,
+      workspaces: candidate.workspaces.map(normalizeWorkspaceGitHubOrigin),
       workspaceGroups: normalizeWorkspaceGroups(candidate.workspaceGroups),
       workspaceRailOrder: normalizeWorkspaceRailOrder(
         candidate.workspaceRailOrder,
@@ -328,6 +336,15 @@ async function enqueueStateWrite(
 
 function cloneAppState(state: AppState): AppState {
   return JSON.parse(JSON.stringify(state)) as AppState;
+}
+
+function normalizeWorkspaceGitHubOrigin(workspace: Workspace): Workspace {
+  if (!workspace.copyBranch) return workspace;
+  const origin = normalizeGitHubOrigin(workspace.copyBranch.origin);
+  const copyBranch: Workspace["copyBranch"] = { ...workspace.copyBranch };
+  delete copyBranch.origin;
+  if (origin) copyBranch.origin = origin;
+  return { ...workspace, copyBranch };
 }
 
 export async function loadSettings(): Promise<AppSettings> {

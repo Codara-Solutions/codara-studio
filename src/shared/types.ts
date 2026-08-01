@@ -34,6 +34,427 @@ export interface ShellInfo {
 // should reach for `RuntimeState`.
 export type WorkerRuntimeState = RuntimeState;
 
+export const GITHUB_ISSUE_ORIGIN_MAX_REPOSITORY_LENGTH = 256;
+export const GITHUB_ISSUE_ORIGIN_MAX_TITLE_LENGTH = 512;
+export const GITHUB_ISSUE_ORIGIN_MAX_URL_LENGTH = 4_096;
+export const GITHUB_ISSUE_ORIGIN_MAX_WORKSPACE_ID_LENGTH = 256;
+export const GITHUB_ISSUE_ORIGIN_MAX_NUMBER = 2_147_483_647;
+
+/**
+ * Durable provenance for a workspace/run created from a GitHub issue.
+ *
+ * This is deliberately a small projection: it carries no issue body, comments,
+ * credentials, or arbitrary GitHub response data. Branch and creation time
+ * already belong to Workspace.copyBranch and are not duplicated here.
+ */
+export interface GitHubIssueOrigin {
+  kind: "github-issue";
+  repository: string;
+  /** Canonical HTTPS repository root, used to distinguish GitHub Enterprise hosts. */
+  repositoryUrl: string;
+  number: number;
+  title: string;
+  url: string;
+  sourceWorkspaceId: string;
+}
+
+/**
+ * Durable provenance for a workspace/run imported from one exact GitHub pull
+ * request revision. Branch names are retained as display provenance only;
+ * checkout code must use generated private refs and managed local branches.
+ */
+export interface GitHubPullRequestOrigin {
+  kind: "github-pull-request";
+  /** Base repository containing the pull request. */
+  repository: string;
+  repositoryUrl: string;
+  number: number;
+  title: string;
+  url: string;
+  sourceWorkspaceId: string;
+  base: {
+    branch: string;
+    commitOid: string;
+  };
+  head: {
+    relationship: "same-repository" | "fork";
+    repository: string;
+    repositoryUrl: string;
+    branch: string;
+    commitOid: string;
+  };
+}
+
+export type GitHubOrigin = GitHubIssueOrigin | GitHubPullRequestOrigin;
+
+/**
+ * Defensive persistence-boundary normalizer for GitHub issue provenance.
+ * Returns a fresh, bounded exact-shape object or undefined.
+ */
+export function normalizeGitHubIssueOrigin(value: unknown): GitHubIssueOrigin | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<GitHubIssueOrigin>;
+  if (candidate.kind !== "github-issue") return undefined;
+
+  const repository = boundedTrimmedString(
+    candidate.repository,
+    GITHUB_ISSUE_ORIGIN_MAX_REPOSITORY_LENGTH,
+  );
+  const title = boundedTrimmedString(candidate.title, GITHUB_ISSUE_ORIGIN_MAX_TITLE_LENGTH);
+  const url = boundedTrimmedString(candidate.url, GITHUB_ISSUE_ORIGIN_MAX_URL_LENGTH);
+  const suppliedRepositoryUrl = boundedTrimmedString(
+    candidate.repositoryUrl,
+    GITHUB_ISSUE_ORIGIN_MAX_URL_LENGTH,
+  );
+  const sourceWorkspaceId = boundedTrimmedString(
+    candidate.sourceWorkspaceId,
+    GITHUB_ISSUE_ORIGIN_MAX_WORKSPACE_ID_LENGTH,
+  );
+  if (
+    !repository ||
+    !isGitHubRepositoryNameWithOwner(repository) ||
+    !title ||
+    hasUnsafeGitHubText(title) ||
+    !url ||
+    !sourceWorkspaceId ||
+    hasUnsafeGitHubText(sourceWorkspaceId) ||
+    !Number.isSafeInteger(candidate.number) ||
+    (candidate.number ?? 0) < 1 ||
+    (candidate.number ?? 0) > GITHUB_ISSUE_ORIGIN_MAX_NUMBER
+  ) {
+    return undefined;
+  }
+  const urls = normalizeGitHubIssueUrls(
+    repository,
+    candidate.number!,
+    url,
+    suppliedRepositoryUrl,
+  );
+  if (!urls) return undefined;
+
+  return {
+    kind: "github-issue",
+    repository,
+    repositoryUrl: urls.repositoryUrl,
+    number: candidate.number!,
+    title,
+    url: urls.issueUrl,
+    sourceWorkspaceId,
+  };
+}
+
+/**
+ * Defensive persistence-boundary normalizer for pull-request provenance.
+ * Unknown fields and non-authoritative GitHub projections are deliberately
+ * discarded so bodies, comments, credentials, and raw CLI payloads can never
+ * become durable run metadata.
+ */
+export function normalizeGitHubPullRequestOrigin(
+  value: unknown,
+): GitHubPullRequestOrigin | undefined {
+  if (!isGitHubOriginRecord(value)) return undefined;
+  if (value.kind !== "github-pull-request") return undefined;
+
+  const repository = boundedTrimmedString(
+    value.repository,
+    GITHUB_ISSUE_ORIGIN_MAX_REPOSITORY_LENGTH,
+  );
+  const title = boundedTrimmedString(
+    value.title,
+    GITHUB_ISSUE_ORIGIN_MAX_TITLE_LENGTH,
+  );
+  const url = boundedTrimmedString(
+    value.url,
+    GITHUB_ISSUE_ORIGIN_MAX_URL_LENGTH,
+  );
+  const repositoryUrl = boundedTrimmedString(
+    value.repositoryUrl,
+    GITHUB_ISSUE_ORIGIN_MAX_URL_LENGTH,
+  );
+  const sourceWorkspaceId = boundedTrimmedString(
+    value.sourceWorkspaceId,
+    GITHUB_ISSUE_ORIGIN_MAX_WORKSPACE_ID_LENGTH,
+  );
+  const base = isGitHubOriginRecord(value.base) ? value.base : undefined;
+  const head = isGitHubOriginRecord(value.head) ? value.head : undefined;
+  const baseBranch = normalizeGitHubOriginRef(base?.branch);
+  const headBranch = normalizeGitHubOriginRef(head?.branch);
+  const baseCommitOid = normalizeGitHubOriginCommitOid(base?.commitOid);
+  const headCommitOid = normalizeGitHubOriginCommitOid(head?.commitOid);
+  const headRepository = boundedTrimmedString(
+    head?.repository,
+    GITHUB_ISSUE_ORIGIN_MAX_REPOSITORY_LENGTH,
+  );
+  const headRepositoryUrl = boundedTrimmedString(
+    head?.repositoryUrl,
+    GITHUB_ISSUE_ORIGIN_MAX_URL_LENGTH,
+  );
+  const relationship =
+    head?.relationship === "same-repository" || head?.relationship === "fork"
+      ? head.relationship
+      : undefined;
+
+  if (
+    !repository ||
+    !isGitHubRepositoryNameWithOwner(repository) ||
+    !title ||
+    hasUnsafeGitHubText(title) ||
+    !url ||
+    !repositoryUrl ||
+    !sourceWorkspaceId ||
+    hasUnsafeGitHubText(sourceWorkspaceId) ||
+    !Number.isSafeInteger(value.number) ||
+    (value.number as number) < 1 ||
+    (value.number as number) > GITHUB_ISSUE_ORIGIN_MAX_NUMBER ||
+    !baseBranch ||
+    !headBranch ||
+    !baseCommitOid ||
+    !headCommitOid ||
+    baseCommitOid.length !== headCommitOid.length ||
+    !headRepository ||
+    !isGitHubRepositoryNameWithOwner(headRepository) ||
+    !headRepositoryUrl ||
+    !relationship
+  ) {
+    return undefined;
+  }
+
+  const baseUrls = normalizeGitHubPullRequestUrls(
+    repository,
+    value.number as number,
+    url,
+    repositoryUrl,
+  );
+  if (!baseUrls) return undefined;
+  const normalizedHeadRepositoryUrl = normalizeGitHubRepositoryUrl(
+    headRepository,
+    headRepositoryUrl,
+    baseUrls.repositoryOrigin,
+  );
+  if (!normalizedHeadRepositoryUrl) return undefined;
+
+  const sameRepository =
+    repository.toLowerCase() === headRepository.toLowerCase() &&
+    baseUrls.repositoryUrl.toLowerCase() ===
+      normalizedHeadRepositoryUrl.toLowerCase();
+  if (
+    (relationship === "same-repository" && !sameRepository) ||
+    (relationship === "fork" && sameRepository)
+  ) {
+    return undefined;
+  }
+
+  return {
+    kind: "github-pull-request",
+    repository,
+    repositoryUrl: baseUrls.repositoryUrl,
+    number: value.number as number,
+    title,
+    url: baseUrls.pullRequestUrl,
+    sourceWorkspaceId,
+    base: {
+      branch: baseBranch,
+      commitOid: baseCommitOid,
+    },
+    head: {
+      relationship,
+      repository: headRepository,
+      repositoryUrl: normalizedHeadRepositoryUrl,
+      branch: headBranch,
+      commitOid: headCommitOid,
+    },
+  };
+}
+
+/** Normalize either supported durable GitHub provenance discriminator. */
+export function normalizeGitHubOrigin(value: unknown): GitHubOrigin | undefined {
+  if (!isGitHubOriginRecord(value)) return undefined;
+  if (value.kind === "github-issue") return normalizeGitHubIssueOrigin(value);
+  if (value.kind === "github-pull-request") {
+    return normalizeGitHubPullRequestOrigin(value);
+  }
+  return undefined;
+}
+
+function isGitHubOriginRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedTrimmedString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized && normalized.length <= maxLength ? normalized : undefined;
+}
+
+function normalizeGitHubOriginCommitOid(value: unknown): string | undefined {
+  if (typeof value !== "string" || value !== value.trim()) return undefined;
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
+function normalizeGitHubOriginRef(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 1_024 ||
+    value !== value.trim() ||
+    value.startsWith("-") ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.endsWith(".") ||
+    value === "@" ||
+    value.includes("//") ||
+    value.includes("..") ||
+    value.includes("@{") ||
+    /[\s~^:?*[\]\\]/u.test(value) ||
+    hasUnsafeGitHubText(value)
+  ) {
+    return undefined;
+  }
+  const components = value.split("/");
+  if (
+    components.some(
+      (component) =>
+        !component ||
+        component.startsWith(".") ||
+        component.toLowerCase().endsWith(".lock"),
+    )
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+function isGitHubRepositoryNameWithOwner(value: string): boolean {
+  const parts = value.split("/");
+  return (
+    parts.length === 2 &&
+    parts.every(
+      (part) =>
+        part !== "." &&
+        part !== ".." &&
+        /^[A-Za-z0-9_.-]+$/.test(part),
+    )
+  );
+}
+
+function hasUnsafeGitHubText(value: string): boolean {
+  return /[\u0000-\u001f\u007f-\u009f]|\p{Bidi_Control}/u.test(value);
+}
+
+function normalizeGitHubIssueUrls(
+  repository: string,
+  number: number,
+  issueValue: string,
+  repositoryValue: string | undefined,
+): { repositoryUrl: string; issueUrl: string } | undefined {
+  try {
+    const issue = new URL(issueValue);
+    if (
+      !isCanonicalGitHubHttpsUrl(issue, issueValue) ||
+      issue.pathname.toLowerCase() !==
+        `/${repository}/issues/${number}`.toLowerCase()
+    ) {
+      return undefined;
+    }
+
+    const repositoryUrl = repositoryValue
+      ? new URL(repositoryValue)
+      : new URL(`/${repository}`, issue.origin);
+    const canonicalRepositoryValue =
+      repositoryValue ?? repositoryUrl.toString().replace(/\/$/u, "");
+    if (
+      !isCanonicalGitHubHttpsUrl(
+        repositoryUrl,
+        canonicalRepositoryValue,
+      ) ||
+      repositoryUrl.origin.toLowerCase() !== issue.origin.toLowerCase() ||
+      repositoryUrl.pathname.toLowerCase() !== `/${repository}`.toLowerCase()
+    ) {
+      return undefined;
+    }
+    return {
+      repositoryUrl: repositoryUrl.toString().replace(/\/$/u, ""),
+      issueUrl: issue.toString(),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeGitHubPullRequestUrls(
+  repository: string,
+  number: number,
+  pullRequestValue: string,
+  repositoryValue: string,
+):
+  | {
+      repositoryUrl: string;
+      repositoryOrigin: string;
+      pullRequestUrl: string;
+    }
+  | undefined {
+  try {
+    const pullRequest = new URL(pullRequestValue);
+    const repositoryUrl = normalizeGitHubRepositoryUrl(
+      repository,
+      repositoryValue,
+      pullRequest.origin,
+    );
+    if (
+      !repositoryUrl ||
+      !isCanonicalGitHubHttpsUrl(pullRequest, pullRequestValue) ||
+      pullRequest.pathname.toLowerCase() !==
+        `/${repository}/pull/${number}`.toLowerCase()
+    ) {
+      return undefined;
+    }
+    return {
+      repositoryUrl,
+      repositoryOrigin: pullRequest.origin,
+      pullRequestUrl: pullRequest.toString(),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeGitHubRepositoryUrl(
+  repository: string,
+  repositoryValue: string,
+  expectedOrigin: string,
+): string | undefined {
+  try {
+    const parsed = new URL(repositoryValue);
+    if (
+      !isCanonicalGitHubHttpsUrl(parsed, repositoryValue) ||
+      parsed.origin.toLowerCase() !== expectedOrigin.toLowerCase() ||
+      parsed.pathname.toLowerCase() !== `/${repository}`.toLowerCase()
+    ) {
+      return undefined;
+    }
+    return parsed.toString().replace(/\/$/u, "");
+  } catch {
+    return undefined;
+  }
+}
+
+function isCanonicalGitHubHttpsUrl(parsed: URL, raw: string): boolean {
+  return (
+    parsed.protocol === "https:" &&
+    Boolean(parsed.hostname) &&
+    !parsed.username &&
+    !parsed.password &&
+    !parsed.search &&
+    !parsed.hash &&
+    !parsed.pathname.includes("%") &&
+    !hasUnsafeGitHubText(raw)
+  );
+}
+
 export interface Worker {
   id: string;
   name?: string;
@@ -79,6 +500,7 @@ export interface Workspace {
     mode?: "fork" | "checkout"; // absent (pre-existing workspaces) == "fork"
     createdAt: string; // ISO timestamp
     fileCount?: number; // tracked files copied into the worktree (chat banner)
+    origin?: GitHubOrigin;
   };
   // Present only on SSH remote workspaces (cwd is then ssh://<hostId>/...).
   // Host connection details live in the remote-hosts registry, keyed by id,
@@ -1781,6 +2203,7 @@ export interface PlanState {
 export interface RunState {
   id: string;
   workspaceId: string;
+  origin?: GitHubOrigin;
   planId?: string;
   title: string;
   status: RunStatus;
@@ -3025,6 +3448,7 @@ export interface CreateRunInput {
   workspaceId: string;
   workspaceName: string;
   cwd: string;
+  origin?: GitHubOrigin;
   title?: string;
   // Per-chat backend selections forwarded from the composer's chip when
   // creating a fresh chat. Optional, when omitted, the run defaults to the
@@ -3363,6 +3787,7 @@ export interface StartAutopilotInput {
   workspaceId: string;
   workspaceName: string;
   cwd: string;
+  origin?: GitHubOrigin;
   runId?: string;
   planPath?: string;
   planTitle?: string;
@@ -3862,6 +4287,7 @@ export interface StartDirectWorkerRunInput {
   workspaceId: string;
   workspaceName?: string;
   cwd: string;
+  origin?: GitHubOrigin;
   automationId: string;
   title: string; // `Loom: ${name} — pass ${n}`
   prompt: string; // fully rendered loop prompt
