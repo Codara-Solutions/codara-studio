@@ -1,7 +1,7 @@
 // Shared types for phone Remote Access (docs/remote-access.md), phase 1.
 // This is the renderer-facing surface only: status for the Settings panel,
 // paired-device summaries, and the pairing modal's live state. The wire
-// protocol (RPC v0 frames) lives in src/main/remote-access/rpc.ts and is
+// protocol (RPC v1 frames) lives in src/main/remote-access/rpc.ts and is
 // deliberately not exported to the renderer, which never speaks it. The
 // pairing QR payload crosses IPC as an opaque string the renderer renders
 // into a QR image and must not parse.

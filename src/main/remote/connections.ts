@@ -59,6 +59,15 @@ const KEEPALIVE_COUNT_MAX = 3;
 const DEFAULT_EXEC_TIMEOUT_MS = 20_000;
 const DEFAULT_EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 
+class ConnectionAttemptCancelledError extends Error {
+  constructor() {
+    super("SSH connection attempt was cancelled or superseded.");
+    this.name = "ConnectionAttemptCancelledError";
+  }
+}
+
+const swallowUnownedClientError = () => undefined;
+
 export interface ExecOptions {
   stdin?: string | Buffer;
   timeoutMs?: number;
@@ -86,7 +95,7 @@ type PromptSender = (request: RemoteAuthPromptRequest) => void;
 let promptSender: PromptSender | null = null;
 const pendingPrompts = new Map<
   string,
-  { resolve: (answer: RemoteAuthPromptAnswer) => void; timer: ReturnType<typeof setTimeout> }
+  { resolve: (answer: RemoteAuthPromptAnswer) => void }
 >();
 
 export function setAuthPromptSender(sender: PromptSender | null): void {
@@ -96,8 +105,6 @@ export function setAuthPromptSender(sender: PromptSender | null): void {
 export function answerAuthPrompt(answer: RemoteAuthPromptAnswer): void {
   const pending = pendingPrompts.get(answer.requestId);
   if (!pending) return;
-  pendingPrompts.delete(answer.requestId);
-  clearTimeout(pending.timer);
   pending.resolve(answer);
 }
 
@@ -105,8 +112,9 @@ async function promptAuth(
   hostId: string,
   kind: "password" | "passphrase",
   message: string,
+  signal: AbortSignal,
 ): Promise<RemoteAuthPromptAnswer> {
-  if (!promptSender) {
+  if (!promptSender || signal.aborted) {
     return { requestId: "", value: null, remember: false };
   }
   const requestId = randomUUID();
@@ -118,14 +126,30 @@ async function promptAuth(
     canRemember: true,
   };
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (answer: RemoteAuthPromptAnswer) => {
+      if (settled) return;
+      settled = true;
+      pendingPrompts.delete(requestId);
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(answer);
+    };
+    const onAbort = () => {
+      finish({ requestId, value: null, remember: false });
+    };
     // 5 minutes: a modal left unanswered should not leak the pending map
     // entry (or hang a connect forever) if the window closed meanwhile.
     const timer = setTimeout(() => {
-      pendingPrompts.delete(requestId);
-      resolve({ requestId, value: null, remember: false });
+      finish({ requestId, value: null, remember: false });
     }, 5 * 60_000);
-    pendingPrompts.set(requestId, { resolve, timer });
-    promptSender?.(request);
+    pendingPrompts.set(requestId, { resolve: finish });
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      promptSender?.(request);
+    } catch {
+      finish({ requestId, value: null, remember: false });
+    }
   });
 }
 
@@ -165,6 +189,9 @@ export function setStatusSender(sender: StatusSender | null): void {
 class RemoteConnection {
   private client: Client | null = null;
   private connecting: Promise<Client> | null = null;
+  private connectingAbort: AbortController | null = null;
+  private generation = 0;
+  private disposed = false;
   private sftpCached: Promise<SFTPWrapper> | null = null;
   state: RemoteConnectionStatus["state"] = "disconnected";
   lastError: string | null = null;
@@ -179,17 +206,35 @@ class RemoteConnection {
 
   async ensure(): Promise<Client> {
     if (this.client) return this.client;
+    if (this.disposed) throw new ConnectionAttemptCancelledError();
     if (this.connecting) return this.connecting;
-    this.connecting = this.connect().finally(() => {
-      this.connecting = null;
+    const generation = ++this.generation;
+    const controller = new AbortController();
+    const connecting = this.connect(generation, controller.signal).finally(() => {
+      if (this.connecting === connecting) {
+        this.connecting = null;
+        this.connectingAbort = null;
+      }
     });
-    return this.connecting;
+    this.connecting = connecting;
+    this.connectingAbort = controller;
+    return connecting;
   }
 
-  private async connect(): Promise<Client> {
+  private isCurrent(generation: number, signal: AbortSignal): boolean {
+    return !this.disposed && !signal.aborted && this.generation === generation;
+  }
+
+  private assertCurrent(generation: number, signal: AbortSignal): void {
+    if (!this.isCurrent(generation, signal)) throw new ConnectionAttemptCancelledError();
+  }
+
+  private async connect(generation: number, signal: AbortSignal): Promise<Client> {
     const host = this.host;
+    this.assertCurrent(generation, signal);
     this.setState("connecting");
     const { utils: sshUtils } = await loadSsh2();
+    this.assertCurrent(generation, signal);
 
     // Gather private keys up front (passphrase prompts must complete before
     // the TCP handshake starts consuming auth attempts).
@@ -200,18 +245,22 @@ class RemoteConnection {
     for (const candidate of keyCandidates) {
       try {
         const raw = await fs.readFile(candidate);
+        this.assertCurrent(generation, signal);
         const parsed = sshUtils.parseKey(raw);
         if (parsed instanceof Error) {
           if (/passphrase/i.test(parsed.message)) {
             const secretKey = `passphrase:${host.id}:${candidate}`;
             let passphrase = await getSecret(secretKey);
+            this.assertCurrent(generation, signal);
             let fromPrompt = false;
             if (passphrase === null) {
               const answer = await promptAuth(
                 host.id,
                 "passphrase",
                 `Passphrase for key ${candidate}`,
+                signal,
               );
+              this.assertCurrent(generation, signal);
               passphrase = answer.value;
               fromPrompt = answer.value !== null && answer.remember;
               if (answer.value !== null && answer.remember) {
@@ -235,6 +284,7 @@ class RemoteConnection {
           keys.push(raw);
         }
       } catch {
+        this.assertCurrent(generation, signal);
         // Missing candidate key — fine, ladder continues.
       }
     }
@@ -246,6 +296,7 @@ class RemoteConnection {
         : undefined);
 
     const storedPassword = await getSecret(`password:${host.id}`);
+    this.assertCurrent(generation, signal);
 
     // Build the ordered auth attempts. Each entry yields a ConnectConfig
     // fragment; we try them in sequence over fresh TCP connections (simpler
@@ -269,10 +320,11 @@ class RemoteConnection {
     let lastErr: Error | null = null;
     for (const attempt of attempts) {
       try {
-        const client = await this.tryConnect(attempt.cfg);
-        this.adopt(client);
+        const client = await this.tryConnect(attempt.cfg, generation, signal);
+        this.adopt(client, generation, signal);
         return client;
       } catch (err) {
+        if (err instanceof ConnectionAttemptCancelledError) throw err;
         lastErr = err as Error;
         if (!isAuthFailure(lastErr)) break; // network/hostkey errors: stop the ladder
       }
@@ -286,20 +338,27 @@ class RemoteConnection {
           this.host.id,
           "password",
           `Password for ${host.username}@${host.host}`,
+          signal,
         );
+        this.assertCurrent(generation, signal);
         if (answer.value === null) {
           lastErr = new Error("Authentication cancelled.");
           break;
         }
         try {
-          const client = await this.tryConnect({
-            password: answer.value,
-            tryKeyboard: true,
-          });
+          const client = await this.tryConnect(
+            {
+              password: answer.value,
+              tryKeyboard: true,
+            },
+            generation,
+            signal,
+          );
           if (answer.remember) void setSecret(`password:${host.id}`, answer.value);
-          this.adopt(client);
+          this.adopt(client, generation, signal);
           return client;
         } catch (err) {
+          if (err instanceof ConnectionAttemptCancelledError) throw err;
           lastErr = err as Error;
           if (!isAuthFailure(lastErr)) break;
         }
@@ -307,56 +366,115 @@ class RemoteConnection {
     }
 
     const message = lastErr?.message ?? "Unable to authenticate.";
+    this.assertCurrent(generation, signal);
     this.setState("error", message);
     throw new Error(`SSH connection to ${host.id} failed: ${message}`);
   }
 
   private keyPassphrases = new Map<Buffer, string>();
 
-  private async tryConnect(auth: Partial<ConnectConfig>): Promise<Client> {
+  private async tryConnect(
+    auth: Partial<ConnectConfig>,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<Client> {
     const host = this.host;
     const { Client } = await loadSsh2();
+    this.assertCurrent(generation, signal);
     return new Promise((resolve, reject) => {
       const client = new Client();
       let settled = false;
-      client.on("ready", () => {
+      const cleanup = () => {
+        signal.removeEventListener("abort", onAbort);
+        client.removeListener("ready", onReady);
+        client.removeListener("error", onError);
+        client.removeListener("close", onClose);
+        client.removeListener("end", onEnd);
+        client.removeListener("keyboard-interactive", onKeyboardInteractive);
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
         settled = true;
-        resolve(client);
-      });
-      client.on("error", (err) => {
-        if (!settled) {
-          settled = true;
-          reject(err);
+        cleanup();
+        reject(err);
+      };
+      const onReady = () => {
+        if (!this.isCurrent(generation, signal)) {
+          fail(new ConnectionAttemptCancelledError());
+          disposeClient(client);
+          return;
         }
-      });
+        // Promise continuations run on the next microtask. Keep an inert
+        // listener through that ready→adopt handoff so a transport error in
+        // the gap cannot become an uncaught EventEmitter "error".
+        client.on("error", swallowUnownedClientError);
+        settled = true;
+        cleanup();
+        resolve(client);
+      };
+      const onError = (err: Error) => {
+        fail(err);
+      };
+      const onClose = () => {
+        fail(new Error(`SSH connection to ${host.id} closed before it was ready.`));
+      };
+      const onEnd = () => {
+        fail(new Error(`SSH connection to ${host.id} ended before it was ready.`));
+      };
       // Password auth servers sometimes only offer keyboard-interactive;
       // answer its prompts with the password we were given.
-      client.on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
+      const onKeyboardInteractive = (
+        _name: string,
+        _instr: string,
+        _lang: string,
+        prompts: unknown[],
+        finish: (answers: string[]) => void,
+      ) => {
         const pw = typeof auth.password === "string" ? auth.password : "";
         finish(prompts.map(() => pw));
-      });
-      client.connect({
-        host: host.host,
-        port: host.port,
-        username: host.username,
-        readyTimeout: READY_TIMEOUT_MS,
-        keepaliveInterval: KEEPALIVE_INTERVAL_MS,
-        keepaliveCountMax: KEEPALIVE_COUNT_MAX,
-        tryKeyboard: typeof auth.password === "string",
-        hostVerifier: (key: Buffer, verified: (ok: boolean) => void) => {
-          void this.verifyHostKey(key).then(verified);
-        },
-        ...auth,
-      });
+      };
+      const onAbort = () => {
+        fail(new ConnectionAttemptCancelledError());
+        disposeClient(client);
+      };
+      client.on("ready", onReady);
+      client.on("error", onError);
+      client.on("close", onClose);
+      client.on("end", onEnd);
+      client.on("keyboard-interactive", onKeyboardInteractive);
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        client.connect({
+          host: host.host,
+          port: host.port,
+          username: host.username,
+          readyTimeout: READY_TIMEOUT_MS,
+          keepaliveInterval: KEEPALIVE_INTERVAL_MS,
+          keepaliveCountMax: KEEPALIVE_COUNT_MAX,
+          tryKeyboard: typeof auth.password === "string",
+          hostVerifier: (key: Buffer, verified: (ok: boolean) => void) => {
+            void this.verifyHostKey(key, generation, signal).then(verified);
+          },
+          ...auth,
+        });
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error(String(err)));
+        disposeClient(client);
+      }
     });
   }
 
-  private async verifyHostKey(key: Buffer): Promise<boolean> {
+  private async verifyHostKey(
+    key: Buffer,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
     // Trust-on-first-use: remember the key's fingerprint per host:port and
     // refuse silently-changed keys (the workspace row shows the error).
     const id = `${this.host.host}:${this.host.port}`;
     const fingerprint = createHash("sha256").update(key).digest("base64");
     const known = await readKnownHosts();
+    if (!this.isCurrent(generation, signal)) return false;
     const prior = known[id];
     if (!prior) {
       await rememberHostKey(id, fingerprint);
@@ -370,7 +488,11 @@ class RemoteConnection {
     return false;
   }
 
-  private adopt(client: Client): void {
+  private adopt(client: Client, generation: number, signal: AbortSignal): void {
+    if (!this.isCurrent(generation, signal)) {
+      disposeClient(client);
+      throw new ConnectionAttemptCancelledError();
+    }
     this.client = client;
     this.sftpCached = null;
     this.setState("connected");
@@ -387,6 +509,9 @@ class RemoteConnection {
       if (this.client === client) this.setState("error", err.message);
       drop();
     });
+    // The owned lifecycle listeners above are now installed atomically from
+    // the EventEmitter's point of view; the handoff guard is no longer needed.
+    client.removeListener("error", swallowUnownedClientError);
   }
 
   async sftp(): Promise<SFTPWrapper> {
@@ -517,9 +642,15 @@ class RemoteConnection {
   }
 
   dispose(): void {
-    this.client?.end();
+    this.disposed = true;
+    this.generation += 1;
+    this.connectingAbort?.abort();
+    this.connectingAbort = null;
+    this.connecting = null;
+    const client = this.client;
     this.client = null;
     this.sftpCached = null;
+    client?.end();
     this.setState("disconnected");
   }
 }
@@ -527,11 +658,23 @@ class RemoteConnection {
 // ── Manager ──────────────────────────────────────────────────────────────────
 
 const connections = new Map<string, RemoteConnection>();
+const connectionGenerations = new Map<string, number>();
+let allConnectionsGeneration = 0;
 
 export async function getConnection(hostId: string): Promise<RemoteConnection> {
   let conn = connections.get(hostId);
   if (!conn) {
+    const hostGeneration = connectionGenerations.get(hostId) ?? 0;
+    const allGeneration = allConnectionsGeneration;
     const host = await getHost(hostId);
+    conn = connections.get(hostId);
+    if (conn) return conn;
+    if (
+      hostGeneration !== (connectionGenerations.get(hostId) ?? 0) ||
+      allGeneration !== allConnectionsGeneration
+    ) {
+      throw new ConnectionAttemptCancelledError();
+    }
     if (!host) throw new Error(`Unknown SSH host "${hostId}".`);
     conn = new RemoteConnection(host);
     connections.set(hostId, conn);
@@ -550,11 +693,13 @@ export function getConnectionStatus(hostId: string): RemoteConnectionStatus {
 }
 
 export function disconnectHost(hostId: string): void {
+  connectionGenerations.set(hostId, (connectionGenerations.get(hostId) ?? 0) + 1);
   connections.get(hostId)?.dispose();
   connections.delete(hostId);
 }
 
 export function disposeAllConnections(): void {
+  allConnectionsGeneration += 1;
   for (const conn of connections.values()) conn.dispose();
   connections.clear();
 }
@@ -566,6 +711,25 @@ export function shQuote(value: string): string {
 
 function isAuthFailure(err: Error): boolean {
   return /authentication|All configured authentication methods failed/i.test(err.message);
+}
+
+function disposeClient(client: Client): void {
+  // ssh2 may report a final socket error after end()/destroy(). Keep one
+  // inert listener on the now-unreachable client so that late transport
+  // cleanup cannot become an uncaught EventEmitter "error".
+  if (!client.listeners("error").includes(swallowUnownedClientError)) {
+    client.on("error", swallowUnownedClientError);
+  }
+  try {
+    client.end();
+  } catch {
+    // Best effort: a half-open ssh2 client may not have a socket yet.
+  }
+  try {
+    client.destroy();
+  } catch {
+    // The stale resource is already unusable; cancellation must still settle.
+  }
 }
 
 export type { RemoteConnection };

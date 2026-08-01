@@ -509,7 +509,7 @@ export function isPrivateOrLocalAddress(address: string | undefined | null): boo
 
 // The single request/response pair spoken over the encrypted stream when an
 // unknown key connects during an open pairing window. Framed with the same
-// length-prefixed JSON as RPC v0 (see rpc.ts). Documented in
+// length-prefixed JSON as the versioned RPC transport (see rpc.ts). Documented in
 // docs/remote-access.md; the phone transport implements the client half.
 export interface PairRequestFrame {
   t: "pair";

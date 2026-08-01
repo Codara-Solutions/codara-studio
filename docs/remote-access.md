@@ -172,7 +172,7 @@ Integrity tickets; those tickets supplement rather than replace Noise.
 ## Application protocol
 
 After Noise opens, the phone and Studio exchange length-prefixed JSON frames.
-The current RPC protocol version is `0`. A hello must complete before any
+The current RPC protocol version is `1`. A hello must complete before any
 other request.
 
 The exposed surface is intentionally bounded:

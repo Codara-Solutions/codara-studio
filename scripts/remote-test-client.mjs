@@ -1,6 +1,6 @@
 // Test client for phone Remote Access, standing in for the mobile app until
 // it ships. It speaks the same wire protocol the phone does: Noise IK over
-// TCP for the LAN rung, then length-prefixed JSON RPC v0. The real mobile
+// TCP for the LAN rung, then length-prefixed JSON RPC v1. The real mobile
 // interop matrix owns relay coverage.
 //
 // First run (pairing) takes the QR payload the Settings modal shows:
@@ -29,7 +29,7 @@ const require = createRequire(import.meta.url);
 const NoiseSecretStream = require("@hyperswarm/secret-stream");
 
 const STATE_FILE = resolve(process.cwd(), "remote-test-client-state.json");
-const PROTOCOL_VERSION = 0;
+const PROTOCOL_VERSION = 1;
 const CLIENT_NAME = "remote-test-client";
 const LAN_DIAL_TIMEOUT_MS = 4000;
 
@@ -274,14 +274,21 @@ async function connect() {
   for (const workspace of workspaces) console.log(`    - ${workspace.name} (${workspace.id})`);
   if (workspaces.length === 0) throw new Error("no workspaces to open a terminal in");
 
-  const { terminalId } = await client.request("terminal.create", {
+  const created = await client.request("terminal.create", {
     workspaceId: workspaces[0].id,
     cols: 80,
     rows: 24,
+    requestId: `terminal-create-${randomBytes(12).toString("hex")}`,
   });
+  const { terminalId, attachmentId, terminal } = created;
   console.log(`  terminal.create: ${terminalId}`);
 
-  await client.request("terminal.write", { terminalId, data: "echo hello-from-remote\n" });
+  await client.request("terminal.write", {
+    terminalId,
+    attachmentId,
+    inputSequence: terminal.nextInputSequence,
+    data: "echo hello-from-remote\n",
+  });
   // Give the shell time to start, run the command, and stream it back.
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && !terminalOutput.join("").includes("hello-from-remote")) {
@@ -294,7 +301,11 @@ async function connect() {
   }
   const echoed = output.includes("hello-from-remote");
 
-  await client.request("terminal.close", { terminalId });
+  await client.request("terminal.close", {
+    terminalId,
+    attachmentId,
+    requestId: `terminal-close-${randomBytes(12).toString("hex")}`,
+  });
   console.log("  terminal.close: ok");
   stream.destroy();
 

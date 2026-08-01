@@ -230,6 +230,7 @@ function waitForFrame(stream, timeoutMs = 5_000) {
 
 async function main() {
   const { RemoteAccessService } = await loadService();
+  const rpc = await loadRpc();
 
   /* ====================================================================== */
   /* F1: unauthenticated memory amplification and handshake deadline        */
@@ -718,7 +719,10 @@ async function main() {
       phoneStream.write(encodeFrame({
         id: 1,
         method: "hello",
-        params: { protocol: 0, device: { publicKey: clientKeyB64, name: "f5-phone", role: "phone", version: "1" } },
+        params: {
+          protocol: rpc.RPC_PROTOCOL_VERSION,
+          device: { publicKey: clientKeyB64, name: "f5-phone", role: "phone", version: "1" },
+        },
       }));
       await waitForFrame(phoneStream);
       await wait(100);
@@ -1012,7 +1016,6 @@ async function main() {
   // all is the failure. This runs over the in-process duplex because the
   // target is the parameter validator, not the socket.
   {
-    const rpc = await loadRpc();
     let tripped = null;
     const tripwire = (name) => async (input) => {
       tripped = { name, input };
@@ -1053,7 +1056,7 @@ async function main() {
     };
     const settle = () => new Promise((r) => setImmediate(r));
 
-    send(1, "hello", { protocol: 0, device: services.device });
+    send(1, "hello", { protocol: rpc.RPC_PROTOCOL_VERSION, device: services.device });
     await settle();
 
     const bigString = "x".repeat(64 * 1024);
