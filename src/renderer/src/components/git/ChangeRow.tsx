@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import type { GitFileChange } from "@shared/types";
-import { FileNodeIcon } from "../file-icons/FileNodeIcon";
+import FileNodeIcon from "../file-icons/LazyFileNodeIcon";
 import {
   IconButton,
   MinusGlyph,

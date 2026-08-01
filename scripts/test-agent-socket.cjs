@@ -27,6 +27,8 @@ const http = require("node:http");
 const ROOT = path.resolve(__dirname, "..");
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cora-socket-test-"));
 const HANDSHAKE = path.join(HOME, "agent-socket.json");
+const ACCOUNT_ACCESS_SECRET = "account-access-secret-must-never-leak";
+const ACCOUNT_REFRESH_SECRET = "account-refresh-secret-must-never-leak";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let failures = 0;
@@ -93,7 +95,94 @@ function fabricateRun(runId, extra) {
   );
 }
 
+function liveManagerTurn(runId, callId) {
+  const inputMessageId = `msg-input-${callId.slice("spark-".length)}`;
+  return {
+    conversationEpoch: 0,
+    sparkCalls: [{
+      id: callId,
+      runId,
+      mode: "chat",
+      model: "gpt-5.6",
+      status: "started",
+      inputMessageIds: [inputMessageId],
+      conversationEpoch: 0,
+      createdAt: new Date().toISOString(),
+    }],
+    humanMessages: [{
+      id: inputMessageId,
+      runId,
+      author: "user",
+      kind: "note",
+      message: "Complete this verified run.",
+      attachments: [],
+      intent: "turn",
+      deliveryState: "submitted",
+      backendTurnId: callId,
+      conversationEpoch: 0,
+      createdAt: new Date().toISOString(),
+    }],
+  };
+}
+
+function parkedManagerTurn(runId, overrides = {}) {
+  const now = new Date().toISOString();
+  const recoveryId = `recovery-${runId.slice(4)}`;
+  const callId = `spark-${runId.slice(4)}`;
+  return {
+    status: "paused",
+    chatBackend: "pi",
+    chatModel: "claude-opus-5",
+    executionMode: "orchestrated",
+    conversationEpoch: 0,
+    sparkCalls: [
+      {
+        id: callId,
+        runId,
+        mode: "chat",
+        model: "claude-opus-5",
+        status: "failed",
+        conversationEpoch: 0,
+        createdAt: now,
+        completedAt: now,
+      },
+    ],
+    managerTurnRecovery: {
+      id: recoveryId,
+      state: "parked",
+      failureKind: "provider",
+      backend: "pi",
+      managerMode: "chat",
+      conversationEpoch: 0,
+      failedSparkCallId: callId,
+      parkedAt: now,
+    },
+    autopilot: {
+      status: "paused",
+      lastAction: "chat_turn_parked",
+      pausedAt: now,
+      updatedAt: now,
+    },
+    ...overrides,
+  };
+}
+
 async function main() {
+  const piRoot = path.join(HOME, "pi-agent");
+  fs.mkdirSync(piRoot, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(piRoot, "auth.json"),
+    JSON.stringify({
+      anthropic: {
+        type: "oauth",
+        access: ACCOUNT_ACCESS_SECRET,
+        refresh: ACCOUNT_REFRESH_SECRET,
+        expires: Date.now() + 3_600_000,
+      },
+    }),
+    { mode: 0o600 },
+  );
+
   const electron = path.join(ROOT, "node_modules", ".bin", "electron");
   const app = spawn(electron, [path.join(ROOT, "out", "main", "index.js")], {
     // Isolate both Codara's durable home and Electron's Chromium userData.
@@ -124,6 +213,45 @@ async function main() {
     // Unknown method → JSON-RPC error, not a crash.
     const unknown = await rpc(handshake, "nope.nothing", {});
     check("unknown method errors", Boolean(unknown.error), JSON.stringify(unknown).slice(0, 120));
+    const unownedClose = await rpc(handshake, "terminal.close", {
+      paneId: "pane-not-created-by-agent",
+      runId: "run-socket-test",
+    });
+    check(
+      "terminal.close rejects an unowned pane",
+      unownedClose.error?.code === -32602 &&
+        /only permitted for panes created through terminal\.create/i.test(
+          unownedClose.error?.message ?? "",
+        ),
+      JSON.stringify(unownedClose).slice(0, 180),
+    );
+
+    const listedAccounts = await rpc(handshake, "accounts.list", {});
+    const account = listedAccounts.result?.accounts?.[0];
+    const serializedAccounts = JSON.stringify(listedAccounts);
+    check(
+      "accounts.list returns only the bounded sanitized account contract",
+      listedAccounts.result?.accounts?.length === 1 &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          account?.id ?? "",
+        ) &&
+        account?.provider === "anthropic" &&
+        account?.status === "configured" &&
+        account?.isDefault === true &&
+        account?.remainingPercent === null &&
+        Object.keys(account ?? {}).sort().join(",") ===
+          "id,isDefault,label,provider,remainingPercent,status",
+      serializedAccounts.slice(0, 240),
+    );
+    check(
+      "accounts.list never leaks credentials, identities, paths, or auth details",
+      !serializedAccounts.includes(ACCOUNT_ACCESS_SECRET) &&
+        !serializedAccounts.includes(ACCOUNT_REFRESH_SECRET) &&
+        !/auth\.json|pi-agent|identityFingerprint|expiresAt|canRefresh|access|refresh/i.test(
+          serializedAccounts,
+        ),
+      serializedAccounts.slice(0, 240),
+    );
 
     // Public Cora lifecycle: a directory that is not yet in spark-state is
     // registered as a workspace before its managed run starts. startAutopilot
@@ -140,14 +268,182 @@ async function main() {
       prompt: "Create a deterministic socket-test session.",
       title: "CLI socket test",
       backend: "pi",
-      // Auto is the only mode a chat can be created in; talk/plan/execute are
-      // legacy stamps the socket rejects rather than coerces.
-      mode: "auto",
+      model: "claude-opus-5",
     });
     check(
       "chat.create starts a managed Cora run",
       Boolean(created.result?.run?.id) && created.result?.run?.title === "CLI socket test",
       JSON.stringify(created).slice(0, 180),
+    );
+    const removedAccountSelect = await rpc(handshake, "accounts.select", {
+      runId: created.result?.run?.id,
+      profileId: account?.id,
+    });
+    check(
+      "accounts.select is no longer a socket method (account choice lives in Settings)",
+      Boolean(removedAccountSelect.error),
+      JSON.stringify(removedAccountSelect).slice(0, 180),
+    );
+
+    const sameAccountRunId = "run-resume-same-account";
+    fabricateRun(sameAccountRunId, parkedManagerTurn(sameAccountRunId, {
+      chatAccountProfileId: account?.id,
+    }));
+    const sameAccountResume = await rpc(handshake, "chat.resume", {
+      runId: "run-resume-same",
+    });
+    check(
+      "chat.resume claims the exact parked turn with the current account",
+      sameAccountResume.result?.runId === sameAccountRunId &&
+        sameAccountResume.result?.recoveryId === "recovery-resume-same-account" &&
+        sameAccountResume.result?.outcome === "accepted" &&
+        Object.keys(sameAccountResume.result ?? {}).sort().join(",") ===
+          "outcome,recoveryId,runId",
+      JSON.stringify(sameAccountResume).slice(0, 240),
+    );
+    const lostReplyRunId = "run-resume-lost-reply";
+    const lostReplyBase = parkedManagerTurn(lostReplyRunId);
+    fabricateRun(lostReplyRunId, {
+      ...lostReplyBase,
+      status: "running",
+      managerTurnRecovery: {
+        ...lostReplyBase.managerTurnRecovery,
+        state: "resuming",
+        resumeClaimId: "recovery-claim-lost-reply",
+        resumeRequestedAt: new Date().toISOString(),
+      },
+    });
+    const lostReplyFirst = await rpc(handshake, "chat.resume", {
+      runId: lostReplyRunId,
+    });
+    const sameAccountRepeat = await rpc(handshake, "chat.resume", {
+      runId: lostReplyRunId,
+    });
+    check(
+      "repeating a claimed recovery after a lost reply is idempotent",
+      lostReplyFirst.result?.outcome === "already-resuming" &&
+        sameAccountRepeat.result?.runId === lostReplyRunId &&
+        sameAccountRepeat.result?.recoveryId === "recovery-resume-lost-reply" &&
+        sameAccountRepeat.result?.outcome === "already-resuming",
+      JSON.stringify({ lostReplyFirst, sameAccountRepeat }).slice(0, 320),
+    );
+
+    const switchRunId = "run-resume-atomic-switch";
+    fabricateRun(switchRunId, parkedManagerTurn(switchRunId));
+    const switchedResume = await rpc(handshake, "chat.resume", {
+      runId: "run-resume-atomic",
+      profileId: account?.id,
+    });
+    const switchedOnDisk = JSON.parse(
+      fs.readFileSync(path.join(HOME, "runs", switchRunId, "run.json"), "utf8"),
+    );
+    check(
+      "chat.resume switches the Pi account in the same durable recovery claim",
+      switchedResume.result?.outcome === "accepted" &&
+        switchedResume.result?.runId === switchRunId &&
+        switchedOnDisk.chatAccountProfileId === account?.id &&
+        switchedOnDisk.managerTurnRecovery?.resumeAccountProfileId === account?.id &&
+        switchedOnDisk.managerTurnRecovery?.forceCanonicalReplay === true,
+      JSON.stringify({ response: switchedResume, stored: switchedOnDisk.managerTurnRecovery }).slice(0, 400),
+    );
+
+    const staleRunId = "run-resume-stale";
+    fabricateRun(staleRunId, parkedManagerTurn(staleRunId, { status: "running" }));
+    const staleResume = await rpc(handshake, "chat.resume", { runId: staleRunId });
+    check(
+      "chat.resume reports a stale recovery without mutating it",
+      staleResume.result?.runId === staleRunId &&
+        staleResume.result?.recoveryId === "recovery-resume-stale" &&
+        staleResume.result?.outcome === "stale" &&
+        typeof staleResume.result?.reason === "string",
+      JSON.stringify(staleResume).slice(0, 240),
+    );
+
+    const noRecoveryRunId = "run-resume-none";
+    fabricateRun(noRecoveryRunId, { status: "paused", chatBackend: "pi" });
+    const noRecovery = await rpc(handshake, "chat.resume", { runId: noRecoveryRunId });
+    check(
+      "chat.resume returns a stable no-recovery result",
+      noRecovery.result?.runId === noRecoveryRunId &&
+        noRecovery.result?.recoveryId === null &&
+        noRecovery.result?.outcome === "stale" &&
+        /No current parked/i.test(noRecovery.result?.reason ?? ""),
+      JSON.stringify(noRecovery).slice(0, 240),
+    );
+
+    const automationResumeRunId = "run-resume-automation";
+    fabricateRun(automationResumeRunId, {
+      status: "paused",
+      chatMode: "automation",
+      automationId: "automation-socket-test",
+    });
+    const automationResume = await rpc(handshake, "chat.resume", {
+      runId: automationResumeRunId,
+    });
+    check(
+      "chat.resume never treats an automation run as a Cora conversation",
+      automationResume.result?.runId === automationResumeRunId &&
+        automationResume.result?.recoveryId === null &&
+        automationResume.result?.outcome === "stale" &&
+        /Automation runs/i.test(automationResume.result?.reason ?? ""),
+      JSON.stringify(automationResume).slice(0, 240),
+    );
+
+    const nativeRunId = "run-resume-native";
+    fabricateRun(nativeRunId, parkedManagerTurn(nativeRunId, {
+      chatBackend: "codex",
+      chatModel: "gpt-5.6-sol",
+      managerTurnRecovery: {
+        ...parkedManagerTurn(nativeRunId).managerTurnRecovery,
+        backend: "codex",
+      },
+    }));
+    const nativeResume = await rpc(handshake, "chat.resume", {
+      runId: nativeRunId,
+      profileId: account?.id,
+    });
+    const nativeOnDisk = JSON.parse(
+      fs.readFileSync(path.join(HOME, "runs", nativeRunId, "run.json"), "utf8"),
+    );
+    check(
+      "chat.resume rejects a Pi profile for a native manager turn before mutation",
+      nativeResume.result?.runId === nativeRunId &&
+        nativeResume.result?.recoveryId === "recovery-resume-native" &&
+        nativeResume.result?.outcome === "account-incompatible" &&
+        /incompatible/i.test(nativeResume.result?.reason ?? "") &&
+        nativeOnDisk.status === "paused" &&
+        nativeOnDisk.chatAccountProfileId === undefined &&
+        nativeOnDisk.managerTurnRecovery?.state === "parked",
+      JSON.stringify(nativeResume).slice(0, 240),
+    );
+
+    const malformedResume = await rpc(handshake, "chat.resume", {
+      runId: noRecoveryRunId,
+      profileId: "../../auth.json",
+    });
+    check(
+      "chat.resume rejects malformed profile ids before recovery lookup",
+      malformedResume.error?.code === -32602 &&
+        /lowercase UUIDv4/i.test(malformedResume.error?.message ?? ""),
+      JSON.stringify(malformedResume).slice(0, 200),
+    );
+    const serializedResumeResults = JSON.stringify([
+      sameAccountResume,
+      sameAccountRepeat,
+      switchedResume,
+      staleResume,
+      noRecovery,
+      automationResume,
+      nativeResume,
+    ]);
+    check(
+      "chat.resume responses never expose provider credentials or run internals",
+      !serializedResumeResults.includes(ACCOUNT_ACCESS_SECRET) &&
+        !serializedResumeResults.includes(ACCOUNT_REFRESH_SECRET) &&
+        !/humanMessages|sparkCalls|auth\.json|access|refresh|cwd|artifactDir/i.test(
+          serializedResumeResults,
+        ),
+      serializedResumeResults.slice(0, 300),
     );
     check(
       "chat.create reports workspace auto-registration",
@@ -170,7 +466,17 @@ async function main() {
       Boolean(missingWorkspace.error) && /does not exist/i.test(missingWorkspace.error.message ?? ""),
       JSON.stringify(missingWorkspace).slice(0, 160),
     );
-
+    const unsupportedMode = await rpc(handshake, "chat.create", {
+      cwd: cliWorkspace,
+      prompt: "must fail",
+      mode: "execute",
+    });
+    check(
+      "chat.create rejects unsupported legacy modes",
+      unsupportedMode.error?.code === -32602 &&
+        /mode must be auto/i.test(unsupportedMode.error?.message ?? ""),
+      JSON.stringify(unsupportedMode).slice(0, 160),
+    );
     const createdRunId = created.result?.run?.id;
     if (createdRunId) {
       const sent = await rpc(handshake, "chat.send", {
@@ -250,6 +556,90 @@ async function main() {
       Array.isArray(gateB.result?.automations),
       JSON.stringify(gateB).slice(0, 140),
     );
+
+    // Imported PR runs are an enforceable socket policy, not merely a hidden
+    // tool roster. Direct bearer-authenticated calls carrying the authoritative
+    // run id must still fail for execution, persistence, and automation APIs.
+    fabricateRun("run-untrusted-pr", {
+      chatMode: "execute",
+      projectPolicyMode: "untrusted-pull-request",
+      workerTasks: [
+        {
+          id: "wt-untrusted-status",
+          title: "bounded status fixture",
+          status: "accepted",
+        },
+      ],
+      workerAttempts: [],
+    });
+    for (const [method, params] of [
+      ["terminal.read", { runId: "run-untrusted-pr", paneId: "foreign-pane" }],
+      ["terminal.create", { runId: "run-untrusted-pr", command: "id" }],
+      ["orchestrator.spawn_terminals", { runId: "run-untrusted-pr", terminals: [] }],
+      ["orchestrator.remember", {
+        runId: "run-untrusted-pr",
+        scope: "global",
+        action: "add",
+        bullets: ["poison"],
+      }],
+      ["automation.list", { runId: "run-untrusted-pr" }],
+      ["automation.create", { runId: "run-untrusted-pr" }],
+    ]) {
+      const denied = await rpc(handshake, method, params);
+      check(
+        `untrusted PR socket policy blocks ${method}`,
+        Boolean(denied.error) && /unavailable|pull-request/i.test(denied.error?.message ?? ""),
+        JSON.stringify(denied).slice(0, 180),
+      );
+    }
+    const untrustedStatus = await rpc(handshake, "orchestrator.get_worker_status", {
+      runId: "run-untrusted-pr",
+      worker_task_id: "wt-untrusted-status",
+    });
+    check(
+      "untrusted PR socket policy keeps bounded worker status",
+      untrustedStatus.result?.worker_task_id === "wt-untrusted-status" &&
+        untrustedStatus.result?.task_status === "accepted",
+      JSON.stringify(untrustedStatus).slice(0, 180),
+    );
+    for (const [label, worker] of [
+      ["shell runtime", {
+        title: "escape",
+        description: "run a command",
+        runtimePreference: "shell",
+      }],
+      ["verification command", {
+        title: "escape",
+        description: "run a command",
+        runtimePreference: "codex",
+        verificationCommands: ["npm test"],
+      }],
+      ["traversing path", {
+        title: "escape",
+        description: "read a secret",
+        runtimePreference: "claude",
+        allowedPaths: ["../.ssh"],
+      }],
+      ["git administrative path", {
+        title: "escape",
+        description: "rewrite git",
+        runtimePreference: "codex",
+        expectedOutputs: [".git/hooks/post-checkout"],
+      }],
+    ]) {
+      const denied = await rpc(handshake, "orchestrator.spawn_workers", {
+        runId: "run-untrusted-pr",
+        taskComplexity: "standard",
+        workers: [worker],
+      });
+      check(
+        `untrusted PR worker gate rejects ${label}`,
+        Boolean(denied.error) && /pull-request|unavailable|relative|Git|verification/i.test(
+          denied.error?.message ?? "",
+        ),
+        JSON.stringify(denied).slice(0, 180),
+      );
+    }
 
     // Fabricated-run read path: worker status on a fabricated execute run.
     const status = await rpc(handshake, "orchestrator.get_worker_status", { runId: "run-execute-chat" });
@@ -419,6 +809,7 @@ async function main() {
     // Same run, but now every worker task is terminal (accepted/cancelled):
     // codara_complete must go through and flip the run to complete.
     fabricateRun("run-all-terminal", {
+      ...liveManagerTurn("run-all-terminal", "spark-complete-authoritative"),
       status: "running",
       workerTasks: [
         { id: "wt-a", title: "first pass", status: "accepted" },
@@ -428,11 +819,109 @@ async function main() {
     const completeOk = await rpc(handshake, "orchestrator.complete", {
       runId: "run-all-terminal",
       summary: "all workers terminal",
+      // The provider/model is not an authority for call ownership. This fake
+      // id must be ignored in favor of the one active SparkCall above.
+      callId: "spark-model-supplied-fake",
     });
     check(
       "codara_complete accepted once all worker tasks are terminal",
       Boolean(completeOk.result?.ok) && !completeOk.error,
       JSON.stringify(completeOk).slice(0, 200),
+    );
+    const completedPath = path.join(HOME, "runs", "run-all-terminal", "run.json");
+    const completedSnapshot = JSON.parse(fs.readFileSync(completedPath, "utf8"));
+    const completedCall = completedSnapshot.sparkCalls.find(
+      (call) => call.id === "spark-complete-authoritative",
+    );
+    check(
+      "codara_complete atomically persists status, one summary, and the authoritative call receipt",
+      completedSnapshot.status === "complete" &&
+        completedSnapshot.humanMessages.filter(
+          (message) => message.message === "all workers terminal",
+        ).length === 1 &&
+        completedCall?.status === "started" &&
+        completedCall?.applicationReceipts?.length === 1 &&
+        completedCall.applicationReceipts[0]?.key ===
+          "spark-complete-authoritative:codara_complete" &&
+        completedCall.applicationReceipts[0]?.state === "effects_applied" &&
+        completedCall.applicationReceipts[0]?.result?.ok === true,
+      JSON.stringify({
+        status: completedSnapshot.status,
+        call: completedCall,
+        summaries: completedSnapshot.humanMessages.filter(
+          (message) => message.message === "all workers terminal",
+        ).length,
+      }).slice(0, 600),
+    );
+    const retryComplete = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-all-terminal",
+      summary: "all workers terminal",
+      callId: "spark-another-model-fake",
+    });
+    const retrySnapshot = JSON.parse(fs.readFileSync(completedPath, "utf8"));
+    check(
+      "an identical same-call codara_complete retry returns the stored result without duplicates",
+      retryComplete.result?.ok === true &&
+        retrySnapshot.humanMessages.filter(
+          (message) => message.message === "all workers terminal",
+        ).length === 1 &&
+        retrySnapshot.sparkCalls.find(
+          (call) => call.id === "spark-complete-authoritative",
+        )?.applicationReceipts?.length === 1,
+      JSON.stringify(retryComplete).slice(0, 240),
+    );
+    const conflictingComplete = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-all-terminal",
+      summary: "changed completion payload",
+    });
+    const conflictSnapshot = JSON.parse(fs.readFileSync(completedPath, "utf8"));
+    check(
+      "a changed same-call codara_complete payload conflicts before domain mutation",
+      /different payload/i.test(conflictingComplete.error?.message ?? "") &&
+        !conflictSnapshot.humanMessages.some(
+          (message) => message.message === "changed completion payload",
+        ) &&
+        conflictSnapshot.sparkCalls.find(
+          (call) => call.id === "spark-complete-authoritative",
+        )?.applicationReceipts?.length === 1,
+      JSON.stringify(conflictingComplete).slice(0, 260),
+    );
+
+    fabricateRun("run-complete-no-call", {
+      status: "running",
+      workerTasks: [{ id: "wt-zero", title: "done", status: "accepted" }],
+    });
+    const zeroCallComplete = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-complete-no-call",
+      summary: "must not apply",
+    });
+    check(
+      "codara_complete rejects zero authoritative active manager calls",
+      /no active current-epoch manager call/i.test(zeroCallComplete.error?.message ?? ""),
+      JSON.stringify(zeroCallComplete).slice(0, 240),
+    );
+
+    const ambiguous = liveManagerTurn("run-complete-ambiguous", "spark-complete-one");
+    ambiguous.sparkCalls.push({
+      ...ambiguous.sparkCalls[0],
+      id: "spark-complete-two",
+      inputMessageIds: [],
+    });
+    fabricateRun("run-complete-ambiguous", {
+      ...ambiguous,
+      status: "running",
+      workerTasks: [{ id: "wt-two", title: "done", status: "accepted" }],
+    });
+    const ambiguousComplete = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-complete-ambiguous",
+      summary: "must not choose",
+    });
+    check(
+      "codara_complete rejects ambiguous authoritative active manager calls",
+      /ambiguous active current-epoch manager calls/i.test(
+        ambiguousComplete.error?.message ?? "",
+      ),
+      JSON.stringify(ambiguousComplete).slice(0, 240),
     );
 
     // A MANUAL task at needs_review still blocks completion (its report is
@@ -662,6 +1151,7 @@ async function main() {
     // RPC can launch/cancel it, so blocking would make the run permanently
     // uncompletable. Only genuinely in-flight statuses gate codara_complete.
     fabricateRun("run-stuck-created", {
+      ...liveManagerTurn("run-stuck-created", "spark-complete-created"),
       status: "running",
       workerTasks: [
         { id: "wt-ok", title: "first pass", status: "accepted" },
@@ -693,7 +1183,15 @@ async function main() {
     app.kill("SIGTERM");
     await sleep(800);
     try { app.kill("SIGKILL"); } catch { /* already gone */ }
-    fs.rmSync(HOME, { recursive: true, force: true });
+    // Chromium helpers can release their last userData file a few milliseconds
+    // after the parent process exits. Let Node retry transient ENOTEMPTY/EPERM
+    // teardown races so a fully-passing socket run does not report an abort.
+    fs.rmSync(HOME, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
 
   if (failures > 0) {

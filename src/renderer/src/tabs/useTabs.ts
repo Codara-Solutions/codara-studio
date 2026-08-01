@@ -190,6 +190,23 @@ function normalizeTerminalTitles(tabs: Tab[]): Tab[] {
   return changed ? next : tabs;
 }
 
+// Which tab inherits the active slot when the active tab at index `idx`
+// closes: the nearest neighbor to the left, then to the right — skipping
+// run-owned tabs (worker terminal grid / Runs canvas / run previews). Those
+// surfaces are entered only by an explicit click (see isRunOwnedTab in
+// types.ts); the raw left neighbor of a closed editor is often the run's
+// worker grid, and promoting it silently dropped the user into the multi-pane
+// worker terminals when they closed a file to get back to their chat.
+function nearestFreeTabId(next: Tab[], idx: number): TabId | null {
+  for (let i = Math.min(idx - 1, next.length - 1); i >= 0; i -= 1) {
+    if (!isRunOwnedTab(next[i])) return next[i].id;
+  }
+  for (let i = Math.max(idx, 0); i < next.length; i += 1) {
+    if (!isRunOwnedTab(next[i])) return next[i].id;
+  }
+  return null;
+}
+
 function createTerminalTab(cwd?: string, autorun?: string, title = "terminals"): TerminalTab {
   const id = makeId("term");
   const paneId = makeId("pane");
@@ -341,6 +358,8 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     delete node.worker;
     delete node.autorun;
     delete node.origin;
+    delete node.nativeClaudeProfileId;
+    delete node.nativeCliLoginToken;
     // Scrollback is durable here: when the restore preference is off,
     // persist() already stripped it, so whatever survived to hydration is
     // meant to replay.
@@ -428,6 +447,8 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       !("worker" in node) &&
       !("autorun" in node) &&
       !("origin" in node) &&
+      !("nativeClaudeProfileId" in node) &&
+      !("nativeCliLoginToken" in node) &&
       !("bootResume" in node) &&
       !dropProcessState
     ) {
@@ -437,6 +458,8 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       worker: _worker,
       autorun: _autorun,
       origin: _origin,
+      nativeClaudeProfileId: _nativeClaudeProfileId,
+      nativeCliLoginToken: _nativeCliLoginToken,
       bootResume: _bootResume,
       ...rest
     } = node;
@@ -471,6 +494,34 @@ export function validatedTerminalAgentSession(value: unknown): TerminalAgentSess
     return null;
   }
   if (candidate.active !== undefined && typeof candidate.active !== "boolean") return null;
+  if (
+    candidate.nativeCodexProfileId !== undefined &&
+    !(
+      candidate.nativeCodexProfileId === "personal" ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        candidate.nativeCodexProfileId,
+      )
+    )
+  ) {
+    return null;
+  }
+  if (candidate.runtime !== "codex" && candidate.nativeCodexProfileId !== undefined) {
+    return null;
+  }
+  if (
+    candidate.nativeClaudeProfileId !== undefined &&
+    !(
+      candidate.nativeClaudeProfileId === "personal" ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        candidate.nativeClaudeProfileId,
+      )
+    )
+  ) {
+    return null;
+  }
+  if (candidate.runtime !== "claude" && candidate.nativeClaudeProfileId !== undefined) {
+    return null;
+  }
   return candidate as TerminalAgentSession;
 }
 
@@ -678,6 +729,7 @@ export interface AgentTerminalTabOptions {
   title?: string;
   color?: string;
   origin?: TerminalLeafOrigin;
+  nativeClaudeProfileId?: string;
 }
 
 // Pure helpers shared by the hook and the session-layout regression harness.
@@ -700,7 +752,12 @@ export function appendAgentTerminalToWorkspaceLayout(
     id: tabId,
     kind: "terminal",
     title: options?.title?.trim() || "terminals",
-    root: leaf(paneId, options?.cwd, options?.autorun, options?.origin),
+    root: {
+      ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
+      ...(options?.nativeClaudeProfileId
+        ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
+        : {}),
+    },
     activePaneId: paneId,
     ...(options?.origin?.kind === "phone"
       ? {}
@@ -804,7 +861,12 @@ export interface UseTabsApi {
   newTerminalTab: (
     cwd?: string,
     autorun?: string,
-    options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
+    options?: {
+      focus?: boolean;
+      agentSession?: TerminalAgentSession | null;
+      nativeCliLoginToken?: string;
+      title?: string;
+    },
   ) => TabId;
   // Create a terminal tab owned by a bridge caller (agent-socket
   // terminal.create or a trusted paired phone). Agent tabs are tinted; phone
@@ -1412,9 +1474,9 @@ export function useTabs(
         const next = curr.filter((t) => t.id !== id);
         setActiveId((active) => {
           if (active !== id) return active;
-          // Prefer the tab to the left, fall back to the first, else null
-          // (no tabs left → empty-workspace state).
-          return next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null;
+          // Nearest free (non-run-owned) neighbor, else null (no eligible
+          // tabs left → empty-workspace state). See nearestFreeTabId.
+          return nearestFreeTabId(next, idx);
         });
         fireDispose(id);
         return normalizeTerminalTitles(next);
@@ -1519,7 +1581,12 @@ export function useTabs(
     (
       cwd?: string,
       autorun?: string,
-      options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
+      options?: {
+        focus?: boolean;
+        agentSession?: TerminalAgentSession | null;
+        nativeCliLoginToken?: string;
+        title?: string;
+      },
     ): TabId => {
       const id = makeId("term");
       const paneId = makeId("pane");
@@ -1527,11 +1594,14 @@ export function useTabs(
       // Durable resume pointer (Claude launches only) — set at creation so it is
       // persisted immediately, independent of post-hoc discovery.
       if (options?.agentSession) root.agentSession = options.agentSession;
+      if (options?.nativeCliLoginToken) {
+        root.nativeCliLoginToken = options.nativeCliLoginToken;
+      }
       setTabs((curr) => {
         const tab: TerminalTab = {
           id,
           kind: "terminal",
-          title: "terminals",
+          title: options?.title?.trim() || "terminals",
           root,
           activePaneId: paneId,
         };
@@ -1547,7 +1617,12 @@ export function useTabs(
     (options?: AgentTerminalTabOptions): { tabId: TabId; paneId: string } => {
       const id = makeId("term");
       const paneId = makeId("pane");
-      const root = leaf(paneId, options?.cwd, options?.autorun, options?.origin);
+      const root = {
+        ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
+        ...(options?.nativeClaudeProfileId
+          ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
+          : {}),
+      };
       const title = options?.title?.trim() || "terminals";
       const color =
         options?.origin?.kind === "phone"
@@ -2997,9 +3072,7 @@ export function useTabs(
         }
         const next = curr.filter((_, i) => i !== idx);
         setActiveId((active) =>
-          active === tabId
-            ? next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null
-            : active,
+          active === tabId ? nearestFreeTabId(next, idx) : active,
         );
         fireDispose(tabId);
         return next;
@@ -3026,9 +3099,7 @@ export function useTabs(
       }
       const next = curr.filter((_, i) => i !== idx);
       setActiveId((active) =>
-        active === tabId
-          ? next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null
-          : active,
+        active === tabId ? nearestFreeTabId(next, idx) : active,
       );
       return normalizeTerminalTitles(next);
     });

@@ -25,6 +25,10 @@ import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
 } from "@shared/types";
+import type {
+  GitHubIssueSummary,
+  GitHubWorkQueueItem,
+} from "@shared/github";
 import { makeId } from "@shared/ids";
 import { backendPtySessionId } from "@shared/backend-pty";
 import WindowChrome from "./components/WindowChrome";
@@ -46,15 +50,15 @@ import ChatStack from "./tabs/ChatStack";
 import { boardBackend } from "./components/board/board-backend";
 import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
 import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
-import type {
-  GitHubIssueSummary,
-  GitHubWorkQueueItem,
-} from "@shared/github";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
-import { setCloseAgentTerminalFn, setCreateAgentTerminalFn } from "./components/Terminal/terminalRegistry";
+import {
+  setCloseAgentTerminalFn,
+  setCreateAgentTerminalFn,
+  setListShareableStudioTerminalsFn,
+} from "./components/Terminal/terminalRegistry";
 import { mergeSessionStart } from "./components/Terminal/resume-policy";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
@@ -357,6 +361,10 @@ export default function App() {
   const [createCopyError, setCreateCopyError] = useState<string | null>(null);
   const [workspaceGroups, setWorkspaceGroups] = useState<WorkspaceGroup[]>([]);
   const [workspaceRailOrder, setWorkspaceRailOrder] = useState<string[]>([]);
+  const workspaceGroupsRef = useRef(workspaceGroups);
+  workspaceGroupsRef.current = workspaceGroups;
+  const workspaceRailOrderRef = useRef(workspaceRailOrder);
+  workspaceRailOrderRef.current = workspaceRailOrder;
   const [pendingCopyDelete, setPendingCopyDelete] = useState<Workspace | null>(null);
   const [copyDeleteBusy, setCopyDeleteBusy] = useState(false);
   const [copyDeleteError, setCopyDeleteError] = useState<string | null>(null);
@@ -648,6 +656,58 @@ export default function App() {
     moveTerminalPane,
     detachTerminalPaneToNewTab,
   } = tabs;
+
+  // Settings prepares native CLI login entirely in main and dispatches only a
+  // one-time opaque token. Turn that token into a visible terminal tab; if the
+  // tab cannot be created, cancel the still-prepared plan so its profile guard
+  // is released immediately instead of waiting for TTL expiry.
+  useEffect(() => {
+    const handleNativeCliLogin = (rawEvent: Event) => {
+      const event = rawEvent as CustomEvent<{
+        launchToken?: unknown;
+        label?: unknown;
+      }>;
+      const launchToken = event.detail?.launchToken;
+      if (
+        typeof launchToken !== "string" ||
+        launchToken.length < 24 ||
+        launchToken.length > 256 ||
+        /[\u0000-\u0020\u007f]/.test(launchToken)
+      ) {
+        return;
+      }
+      if (!activeIdRef.current) {
+        void window.spark.nativeCliAccounts.cancelLogin({ launchToken });
+        return;
+      }
+      const rawLabel =
+        typeof event.detail?.label === "string"
+          ? event.detail.label.trim()
+          : "";
+      const title =
+        rawLabel && rawLabel.length <= 96 ? rawLabel : "CLI sign-in";
+      try {
+        newTerminalTab(home || undefined, undefined, {
+          focus: true,
+          nativeCliLoginToken: launchToken,
+          title,
+        });
+        setSettingsOpen(false);
+        event.preventDefault();
+      } catch {
+        void window.spark.nativeCliAccounts.cancelLogin({ launchToken });
+      }
+    };
+    window.addEventListener(
+      "spark:open-native-cli-login",
+      handleNativeCliLogin,
+    );
+    return () =>
+      window.removeEventListener(
+        "spark:open-native-cli-login",
+        handleNativeCliLogin,
+      );
+  }, [home, newTerminalTab]);
 
   // Mirror the runs list through a ref so run-selection callbacks can read
   // the latest chat titles without taking `runs` as a dependency.
@@ -1778,24 +1838,29 @@ export default function App() {
   // Mirror the workspaces list through a ref so the orchestration listener
   // doesn't re-subscribe on every workspace state change (which is often
   // — runs trigger updates).
-  const workspaceGroupsRef = useRef(workspaceGroups);
-  workspaceGroupsRef.current = workspaceGroups;
-  const workspaceRailOrderRef = useRef(workspaceRailOrder);
-  workspaceRailOrderRef.current = workspaceRailOrder;
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
 
-  // When the orchestration runner emits `envelope_prepared`, the worker is
-  // about to start and is waiting for a renderer-side PTY at sessionId =
+  // When the orchestration runner emits `launch_requested`, the worker is
+  // being launched and is waiting for a renderer-side PTY at sessionId =
   // attemptId. Cora workers live in one run-scoped terminal tab titled
   // "workers" instead of claiming arbitrary user shells. The tab stays mounted
   // across chat switches so PTYs continue running, but the tab strip only
   // reveals it while its run is the active chat.
+  //
+  // Deliberately NOT `envelope_prepared`: that one fires when the prompt is
+  // written to disk (attempt status prompt_ready), which can precede the launch
+  // by a whole manager turn — or forever, if the run pauses first. It opened a
+  // worker terminal for an agent that did not exist, and the user went looking
+  // for the agent and found an empty shell (run-ms9ikoef-mnucvq).
+  // `launch_requested` is emitted inside launchWorkerAttempt in the same commit
+  // that flips the attempt to "launching", so the pane still materializes well
+  // inside the Pi harness's renderer grace window.
   useEffect(() => {
     if (!booted) return;
 
-    const handleEnvelopePrepared = async (event: SparkEvent) => {
-      if (event.type !== "worker_task.envelope_prepared") return;
+    const handleLaunchRequested = async (event: SparkEvent) => {
+      if (event.type !== "worker_attempt.launch_requested") return;
       if (!event.runId || !event.workerTaskId || !event.attemptId) return;
       if (!event.workspaceId) return;
       // Loom workers: main owns their pty (direct-worker.ts) and the
@@ -1822,6 +1887,14 @@ export default function App() {
       let runtime: "claude" | "codex" | undefined;
       let title: string | undefined;
       let attemptOrdinal: number | undefined;
+      let nativeCodexProfileId =
+        typeof event.payload?.nativeCodexProfileId === "string"
+          ? event.payload.nativeCodexProfileId
+          : undefined;
+      let nativeClaudeProfileId =
+        typeof event.payload?.nativeClaudeProfileId === "string"
+          ? event.payload.nativeClaudeProfileId
+          : undefined;
       let harness: "pi" | "cli" | undefined;
       let startedAt: string | undefined;
       let model: string | undefined;
@@ -1837,6 +1910,8 @@ export default function App() {
         title = task?.title;
         const attempt = run?.workerAttempts.find((item) => item.id === event.attemptId);
         attemptOrdinal = attempt?.attemptNumber;
+        nativeCodexProfileId = attempt?.nativeCodexProfileId;
+        nativeClaudeProfileId = attempt?.nativeClaudeProfileId;
         harness = workerHarnessFromCommand(attempt?.command);
         startedAt = attempt?.startedAt;
         // The attempt's resolved model beats the task's hint: the planner's
@@ -1853,6 +1928,8 @@ export default function App() {
 
       const workerMeta = {
         runtime,
+        nativeCodexProfileId,
+        nativeClaudeProfileId,
         runId: event.runId,
         workerTaskId: event.workerTaskId,
         attemptId: event.attemptId,
@@ -1964,20 +2041,19 @@ export default function App() {
     };
 
     return window.spark.orchestration.onEvent((event) => {
-      void handleEnvelopePrepared(event);
+      void handleLaunchRequested(event);
       handleAttemptFinished(event);
     });
   }, [booted]);
 
   // Worker panes used to be edge-triggered: the renderer had exactly one
-  // chance to hear `worker_task.envelope_prepared`. If that event landed
-  // before this subscription mounted, during renderer reload, or while the
-  // worker's workspace was in the background, no pane existed to call
-  // pty:spawn and main eventually timed the worker out. Reconcile the durable
-  // run snapshot itself: every non-terminal attempt gets a pane whether or not
-  // its PTY exists yet. TerminalPane then creates a missing PTY or attaches to
-  // a main-owned one, making the launch level-triggered instead of a one-shot
-  // renderer event.
+  // chance to hear the launch event. If that event landed before this
+  // subscription mounted, during renderer reload, or while the worker's
+  // workspace was in the background, no pane existed to call pty:spawn and main
+  // eventually timed the worker out. Reconcile the durable run snapshot itself:
+  // every LAUNCHED attempt gets a pane whether or not its PTY exists yet.
+  // TerminalPane then creates a missing PTY or attaches to a main-owned one,
+  // making the launch level-triggered instead of a one-shot renderer event.
   useEffect(() => {
     if (!booted || !activeId) return;
 
@@ -1996,12 +2072,15 @@ export default function App() {
         // Read runs through the ref: a `runs` dep would tear down and re-arm
         // this interval (plus run an extra immediate reconcile) on every 1s
         // refresh, even when nothing changed.
+        // Launched only. "preparing"/"prompt_ready" mean a prompt on disk and
+        // no process: they own no pty to attach to and may never launch at all,
+        // so a pane for one is an empty shell wearing a worker's name. The
+        // statuses here are the same ones deriveComposerWorkerActivity calls
+        // live, so the chip, the rows and the terminal agree on what exists.
         const liveAttempts = runsRef.current.flatMap((run) =>
           run.workerAttempts
             .filter((attempt) =>
-              ["preparing", "prompt_ready", "launching", "running", "finishing"].includes(
-                attempt.status,
-              ),
+              ["launching", "running", "finishing"].includes(attempt.status),
             )
             .map((attempt) => ({ run, attempt })),
         );
@@ -2029,6 +2108,8 @@ export default function App() {
               workspacesRef.current.find((workspace) => workspace.id === workspaceId)?.cwd;
             const candidateMeta: TerminalLeafWorker = {
               runtime,
+              nativeCodexProfileId: attempt.nativeCodexProfileId,
+              nativeClaudeProfileId: attempt.nativeClaudeProfileId,
               runId: run.id,
               workerTaskId: attempt.workerTaskId,
               attemptId: attempt.id,
@@ -2492,11 +2573,11 @@ export default function App() {
   // stable for the lifetime of the component — which lets the React.memo on
   // WorkspaceRail actually skip renders.
   const handleActivateWorkspace = useCallback((id: string) => {
-    activeIdRef.current = id;
     const currentWorkspaceId = activeIdRef.current;
     if (currentWorkspaceId) {
       activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
     }
+    activeIdRef.current = id;
     setActiveId(id);
   }, []);
 
@@ -3654,7 +3735,6 @@ export default function App() {
     () => openShortcutWorkerSessions("codex"),
     [openShortcutWorkerSessions],
   );
-
   const openPaneWorkerSessions = useCallback(
     (
       runtime: WorkerSessionRuntime,
@@ -3684,11 +3764,18 @@ export default function App() {
       session: WorkerSessionSummary | null;
     }) => {
       if (request.runtime === "codex") {
-        await window.spark.agentSession.ensureCodexTrust(request.cwd).catch(() => undefined);
+        await window.spark.agentSession
+          .ensureCodexTrust(
+            request.cwd,
+            request.session?.nativeCodexProfileId,
+          )
+          .catch(() => undefined);
       }
       const pointer: TerminalAgentSession | null = request.session
         ? {
             runtime: request.runtime,
+            nativeCodexProfileId:
+              request.session.nativeCodexProfileId,
             sessionId: request.session.sessionId,
             cwd: request.cwd,
             transcriptPath: request.session.transcriptPath,
@@ -3922,6 +4009,42 @@ export default function App() {
     >(),
   );
   useEffect(() => {
+    setListShareableStudioTerminalsFn(() => {
+      const layouts: Array<{ workspaceId: string; tabs: Tab[] }> = [];
+      if (tabs.tabsWorkspaceId && validWorkspaceIds.has(tabs.tabsWorkspaceId)) {
+        layouts.push({ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs });
+      }
+      for (const layout of tabs.inactiveWorkspaceLayouts) {
+        if (validWorkspaceIds.has(layout.workspaceId)) layouts.push(layout);
+      }
+      const shared: Array<{
+        paneId: string;
+        tabId: string;
+        workspaceId: string;
+        title?: string;
+        cwd?: string;
+        profile: "shell" | "claude" | "codex";
+      }> = [];
+      for (const layout of layouts) {
+        for (const tab of layout.tabs) {
+          if (tab.kind !== "terminal") continue;
+          forEachTerminalLeaf(tab.root, (leaf) => {
+            // Phone-owned panes are already durable terminal leases, and Cora
+            // workers already have their purpose-built graph terminal surface.
+            if (leaf.origin || leaf.worker) return;
+            shared.push({
+              paneId: leaf.paneId,
+              tabId: tab.id,
+              workspaceId: layout.workspaceId,
+              title: tab.title,
+              ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
+              profile: leaf.agentSession?.runtime ?? "shell",
+            });
+          });
+        }
+      }
+      return shared;
+    });
     setCreateAgentTerminalFn((input) => {
       if (input.workspaceId && !validWorkspaceIds.has(input.workspaceId)) {
         throw new Error(
@@ -3939,6 +4062,7 @@ export default function App() {
           autorun: input.command,
           title: input.title,
           origin: input.origin,
+          nativeClaudeProfileId: input.nativeClaudeProfileId,
         });
         agentTerminalPlacementsRef.current.set(minted.tabId, {
           workspaceId: input.workspaceId,
@@ -3952,6 +4076,7 @@ export default function App() {
         autorun: input.command,
         title: input.title,
         origin: input.origin,
+        nativeClaudeProfileId: input.nativeClaudeProfileId,
       });
       const placementWorkspaceId =
         input.workspaceId ?? tabs.tabsWorkspaceId ?? activeWorkspace?.id ?? null;
@@ -3985,6 +4110,7 @@ export default function App() {
       // after a move/split it may now contain unrelated desktop panes.
     });
     return () => {
+      setListShareableStudioTerminalsFn(null);
       setCreateAgentTerminalFn(null);
       setCloseAgentTerminalFn(null);
     };
@@ -4461,7 +4587,19 @@ export default function App() {
           }
           const captureStartedAt = Date.now();
           void window.spark.agentSession
-            .capture({ runtime: capRuntime, cwd: capCwd, sinceMs: Date.now() - 60_000, excludeSessionIds })
+            .capture({
+              runtime: capRuntime,
+              paneId,
+              nativeCodexProfileId:
+                leaf.agentSession?.nativeCodexProfileId ??
+                leaf.worker?.nativeCodexProfileId,
+              nativeClaudeProfileId:
+                leaf.agentSession?.nativeClaudeProfileId ??
+                leaf.worker?.nativeClaudeProfileId,
+              cwd: capCwd,
+              sinceMs: Date.now() - 60_000,
+              excludeSessionIds,
+            })
             .then((res) => {
               if (res) {
                 // Capture polls up to 15s; a SessionStart hook event (exact
@@ -4480,6 +4618,8 @@ export default function App() {
                   sessionId: res.sessionId,
                   cwd: capCwd,
                   transcriptPath: res.transcriptPath,
+                  nativeCodexProfileId: res.nativeCodexProfileId,
+                  nativeClaudeProfileId: res.nativeClaudeProfileId,
                   capturedAt: new Date().toISOString(),
                   // Capture polls up to 15s; the agent may have exited in the
                   // meantime. Only a positively confirmed exit after capture
@@ -4962,13 +5102,13 @@ export default function App() {
             onCreate={createWs}
             onCreateRemote={handleCreateRemote}
             onCreateCopyBranch={handleCreateCopyBranch}
-            onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onSplitChange={panels.setLeftSplit}
             onToggleSection={togglePanelSection}
             onMoveSection={movePanelSection}
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
             onRunSnapshot={handleRunSnapshot}
+            onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}
             onDeleteFile={handleDeleteFile}
@@ -5100,13 +5240,13 @@ export default function App() {
             onCreate={createWs}
             onCreateRemote={handleCreateRemote}
             onCreateCopyBranch={handleCreateCopyBranch}
-            onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onSplitChange={panels.setRightSplit}
             onToggleSection={togglePanelSection}
             onMoveSection={movePanelSection}
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
             onRunSnapshot={handleRunSnapshot}
+            onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}
             onDeleteFile={handleDeleteFile}
@@ -5135,6 +5275,7 @@ export default function App() {
               shells={shells}
               defaultShell={defaultShell}
               workspaceCwd={activeWorkspace?.copyBranch?.repoCwd ?? activeWorkspace?.cwd ?? null}
+              workspaceId={activeWorkspace?.id ?? null}
               onClose={closeSettings}
               onSave={handleSaveSettings}
               onOpenRun={handleSettingsOpenRun}
@@ -5235,7 +5376,7 @@ export default function App() {
               void createCopyBranchWs(createCopyDialogWs, {
                 checkoutBranch: b.name,
                 checkoutIsRemote: b.isRemote,
-              })
+              }).catch(() => undefined)
             }
           />
         )}
@@ -6409,7 +6550,7 @@ const Workspace = React.memo(function Workspace({
         )}
         {/* The legacy hidden orchestration TerminalGrid was removed: worker
             PTYs now spawn inside the user-visible TerminalStack via the
-            envelope_prepared claim flow in App.tsx. This means worker
+            launch_requested claim flow in App.tsx. This means worker
             output is watchable, and one PTY surface (TerminalStack) carries
             both user shells and worker shells. */}
       </div>

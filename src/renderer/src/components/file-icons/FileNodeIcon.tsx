@@ -1,6 +1,6 @@
 import { fileIconUrl, folderIconUrl } from "./iconResolver";
 
-type Props = {
+export type FileNodeIconProps = {
   name: string;
   isDir: boolean;
   isOpen?: boolean;
@@ -13,7 +13,13 @@ type Props = {
  * file or folder name, then renders it as an inline data: SVG so there are no
  * runtime fetches.
  */
-export function FileNodeIcon({ name, isDir, isOpen = false, size = 14, opacity }: Props) {
+export function FileNodeIcon({
+  name,
+  isDir,
+  isOpen = false,
+  size = 14,
+  opacity,
+}: FileNodeIconProps) {
   const url = isDir ? folderIconUrl(name, isOpen) : fileIconUrl(name);
   return (
     <span

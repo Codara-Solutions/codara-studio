@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { FsEntry } from "@shared/types";
 import { CloseIcon } from "../icons";
-import { FileNodeIcon } from "../file-icons/FileNodeIcon";
+import FileNodeIcon from "../file-icons/LazyFileNodeIcon";
 import { basename, dirname } from "../../path-utils";
 
 interface Props {

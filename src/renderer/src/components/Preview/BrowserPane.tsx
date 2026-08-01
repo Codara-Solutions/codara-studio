@@ -131,6 +131,24 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   // every time readiness flips). Listeners read the ref; the state copy
   // exists only to drive the loading-overlay render.
   const domReadyRef = useRef(false);
+  // Electron logs a main-process GUEST_VIEW_MANAGER_CALL error before a
+  // renderer-side try/catch can translate calls made against a detached or
+  // exited guest. Resolve the current element through one fail-closed guard so
+  // every imperative method avoids issuing that doomed IPC in the first place.
+  const getLiveWebview = useCallback((): WebviewElement | null => {
+    const host = containerRef.current;
+    const webview = webviewRef.current;
+    if (
+      !host ||
+      !webview ||
+      !domReadyRef.current ||
+      !webview.isConnected ||
+      !host.contains(webview)
+    ) {
+      return null;
+    }
+    return webview;
+  }, []);
   // `onUrlChange` is a fresh closure on every parent render. We funnel it
   // through a ref so the create-once effect doesn't list it as a dependency
   // (and therefore doesn't tear down + rebuild the webview when the parent
@@ -241,6 +259,13 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
 
     const wv = webview;
     const onDomReady = () => {
+      if (
+        webviewRef.current !== wv ||
+        !wv.isConnected ||
+        !host.contains(wv)
+      ) {
+        return;
+      }
       domReadyRef.current = true;
       setDomReady(true);
       setCanGoBack(wv.canGoBack?.() ?? false);
@@ -289,6 +314,22 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       if (e.errorCode === -3) return;
       setError(`${e.errorDescription} (${e.errorCode})`);
     };
+    const onRenderProcessGone = (e: {
+      details?: { reason?: string; exitCode?: number };
+    }) => {
+      if (webviewRef.current !== wv) return;
+      domReadyRef.current = false;
+      setDomReady(false);
+      setCanGoBack(false);
+      setCanGoForward(false);
+      setInspecting(false);
+      const reason = e.details?.reason?.trim();
+      setError(
+        reason
+          ? `Preview renderer exited (${reason})`
+          : "Preview renderer exited",
+      );
+    };
 
     // Host-shortcut forwarding for keystrokes while focus is inside the
     // <webview> lives in main + preload (search for `before-input-event`).
@@ -316,6 +357,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     wv.addEventListener("did-navigate", onDidNavigate);
     wv.addEventListener("did-navigate-in-page", onDidNavigateInPage);
     wv.addEventListener("did-fail-load", onDidFailLoad);
+    wv.addEventListener("render-process-gone", onRenderProcessGone);
     wv.addEventListener("ipc-message", onIpcMessage);
 
     return () => {
@@ -326,6 +368,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       wv.removeEventListener("did-navigate", onDidNavigate);
       wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
       wv.removeEventListener("did-fail-load", onDidFailLoad);
+      wv.removeEventListener("render-process-gone", onRenderProcessGone);
       wv.removeEventListener("ipc-message", onIpcMessage);
     };
   }, [hasUrl, preloadReady, inspectorPreloadUrl]);
@@ -337,9 +380,8 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   // until the ref says the webview is attached.
   useEffect(() => {
     if (!url) return;
-    const webview = webviewRef.current;
+    const webview = getLiveWebview();
     if (!webview) return; // not created yet — src attribute carries the initial url
-    if (!domReadyRef.current) return; // wait for dom-ready before touching methods
     try {
       const live = webview.getURL?.() ?? "";
       if (live && live !== url) {
@@ -349,13 +391,13 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       // Webview detached between checks (very rare); fall back to src.
       webview.src = url;
     }
-  }, [url, domReady]);
+  }, [url, domReady, getLiveWebview]);
 
   // Toggle inspect mode by signalling the webview's preload. Turning it on
   // also turns off draw mode so the two never compete for pointer events.
   const toggleInspect = useCallback(() => {
-    const wv = webviewRef.current;
-    if (!wv || !domReadyRef.current) return;
+    const wv = getLiveWebview();
+    if (!wv) return;
     setInspecting((prev) => {
       const next = !prev;
       try {
@@ -369,7 +411,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       }
       return next;
     });
-  }, []);
+  }, [getLiveWebview]);
 
   // Toggle draw mode. We don't tell the webview about this — the canvas
   // sits on top of the embedded page and just intercepts pointer events.
@@ -379,14 +421,14 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       if (next) {
         setInspecting(false);
         try {
-          webviewRef.current?.send?.("spark:inspector:toggle", false);
+          getLiveWebview()?.send?.("spark:inspector:toggle", false);
         } catch {
           /* ignore */
         }
       }
       return next;
     });
-  }, []);
+  }, [getLiveWebview]);
 
   // Compose an inspector pick + the user's note into a SelectionPayload.
   // The routing menu (opened by InspectorOverlay) decides where the payload
@@ -423,8 +465,8 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   // this resolves.
   const prepareDrawingPayload = useCallback(
     async (drawingDataUrl: string, note: string): Promise<SelectionPayload | null> => {
-      const wv = webviewRef.current;
-      if (!wv || !domReadyRef.current) return null;
+      const wv = getLiveWebview();
+      if (!wv) return null;
       setDrawingBusy(true);
       try {
         const captured = await wv.capturePage?.();
@@ -447,7 +489,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         setDrawingBusy(false);
       }
     },
-    [],
+    [getLiveWebview],
   );
 
   useImperativeHandle(
@@ -455,7 +497,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     (): BrowserPaneHandle => ({
       reload: (opts) => {
         try {
-          const wv = webviewRef.current;
+          const wv = getLiveWebview();
           if (!wv) return;
           if (opts?.ignoreCache && wv.reloadIgnoringCache) {
             wv.reloadIgnoringCache();
@@ -468,35 +510,38 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       },
       goBack: () => {
         try {
-          webviewRef.current?.goBack?.();
+          getLiveWebview()?.goBack?.();
         } catch {
           /* webview not yet dom-ready */
         }
       },
       goForward: () => {
         try {
-          webviewRef.current?.goForward?.();
+          getLiveWebview()?.goForward?.();
         } catch {
           /* webview not yet dom-ready */
         }
       },
       loadURL: (next: string) => {
         try {
-          webviewRef.current?.loadURL?.(next);
+          const wv = getLiveWebview();
+          if (!wv) return;
+          wv.loadURL?.(next);
         } catch {
-          if (webviewRef.current) webviewRef.current.src = next;
+          const wv = getLiveWebview();
+          if (wv) wv.src = next;
         }
       },
       getURL: () => {
         try {
-          return webviewRef.current?.getURL?.() ?? currentUrl ?? url;
+          return getLiveWebview()?.getURL?.() ?? currentUrl ?? url;
         } catch {
           return currentUrl ?? url;
         }
       },
       openDevTools: () => {
         try {
-          webviewRef.current?.openDevTools?.();
+          getLiveWebview()?.openDevTools?.();
         } catch {
           /* webview not yet dom-ready */
         }
@@ -504,22 +549,22 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       focusAddressBar: () => addressRef.current?.focus(),
       getTitle: () => {
         try {
-          return webviewRef.current?.getTitle?.() ?? "";
+          return getLiveWebview()?.getTitle?.() ?? "";
         } catch {
           return "";
         }
       },
-      isReady: () => domReadyRef.current,
+      isReady: () => getLiveWebview() !== null,
       getWebContentsId: () => {
         try {
-          const id = webviewRef.current?.getWebContentsId?.();
+          const id = getLiveWebview()?.getWebContentsId?.();
           return typeof id === "number" ? id : null;
         } catch {
           return null;
         }
       },
       resizeViewport: (width: number, height: number) => {
-        const wv = webviewRef.current;
+        const wv = getLiveWebview();
         if (!wv) throw new Error("preview tab is not ready");
         const w = Math.max(1, Math.round(width));
         const h = Math.max(1, Math.round(height));
@@ -528,15 +573,15 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         return { width: w, height: h };
       },
       executeJavaScript: async (code: string) => {
-        const wv = webviewRef.current;
-        if (!wv || !domReadyRef.current || !wv.executeJavaScript) {
+        const wv = getLiveWebview();
+        if (!wv || !wv.executeJavaScript) {
           throw new Error("preview tab is not ready");
         }
         return wv.executeJavaScript(code, false);
       },
       capturePngDataUrl: async () => {
-        const wv = webviewRef.current;
-        if (!wv || !domReadyRef.current || !wv.capturePage) {
+        const wv = getLiveWebview();
+        if (!wv || !wv.capturePage) {
           throw new Error("preview tab is not ready");
         }
         // Hidden preview panes do not own a composited surface. Calling
@@ -619,7 +664,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         );
       },
     }),
-    [currentUrl, url, visible],
+    [currentUrl, getLiveWebview, url, visible],
   );
 
   return (
@@ -643,17 +688,19 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         drawing={drawing}
         onSubmit={(next) => {
           if (!next) return;
-          if (webviewRef.current?.loadURL) {
+          const wv = getLiveWebview();
+          if (wv?.loadURL) {
             try {
-              webviewRef.current.loadURL(next);
+              wv.loadURL(next);
             } catch {
-              if (webviewRef.current) webviewRef.current.src = next;
+              const live = getLiveWebview();
+              if (live) live.src = next;
             }
           }
           onUrlChange(next);
         }}
         onReload={({ ignoreCache }) => {
-          const wv = webviewRef.current;
+          const wv = getLiveWebview();
           if (!wv) return;
           try {
             if (ignoreCache && wv.reloadIgnoringCache) {
@@ -666,13 +713,13 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           }
         }}
         onBack={() => {
-          try { webviewRef.current?.goBack?.(); } catch { /* not dom-ready */ }
+          try { getLiveWebview()?.goBack?.(); } catch { /* not dom-ready */ }
         }}
         onForward={() => {
-          try { webviewRef.current?.goForward?.(); } catch { /* not dom-ready */ }
+          try { getLiveWebview()?.goForward?.(); } catch { /* not dom-ready */ }
         }}
         onOpenDevTools={() => {
-          try { webviewRef.current?.openDevTools?.(); } catch { /* not dom-ready */ }
+          try { getLiveWebview()?.openDevTools?.(); } catch { /* not dom-ready */ }
         }}
         onOpenExternal={(target) => {
           if (target) void window.spark.openInSystemBrowser?.(target);

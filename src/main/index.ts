@@ -33,10 +33,10 @@ import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
-import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
 import { registerTerminalBridge } from "./terminal-bridge";
+import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry } from "./agent-session-registry";
@@ -352,19 +352,30 @@ const BOOT_WATCHDOG_MS = 25_000;
 const RELAUNCHED_FLAG = "--spark-boot-relaunch";
 let bootWatchdog: NodeJS.Timeout | null = null;
 let bootFailures = 0;
+// `app:renderer-ready` is document-load scoped. React StrictMode, HMR, and
+// overlapping component teardown can all deliver the same ready signal more
+// than once; only the first one for the current WebContents load may flush
+// cleanup retries or print a boot line.
+let rendererReadyForCurrentLoad = false;
 ipcMain.on("app:renderer-ready", (e) => {
-  retryPendingAgentTerminalCleanups();
   // Same gate as the health pong: only the trusted main frame may disarm the
   // boot watchdog. App.tsx sends this after React mounts, which only happens
   // once the allowlisted document has committed, so the real signal is always
   // trusted; a forged ready from an untrusted document cannot silence the
   // watchdog.
   if (!isTrustedOnSender(e, "app:renderer-ready")) return;
+  if (rendererReadyForCurrentLoad) return;
+  rendererReadyForCurrentLoad = true;
   if (bootWatchdog) {
     clearTimeout(bootWatchdog);
     bootWatchdog = null;
   }
   bootFailures = 0;
+  // A run-owned terminal cleanup may have stopped its PTY while the previous
+  // renderer was reloading, then retained the tab ownership after the bridge
+  // timed out. React is mounted again now, so retry those exact pending
+  // destroys immediately instead of waiting for their backoff timer.
+  retryPendingAgentTerminalCleanups();
   logMain("boot", "renderer ready");
 });
 
@@ -774,10 +785,12 @@ function createWindow(): void {
       unresponsiveTimer = null;
     }
   });
-  // Boot watchdog: every main-frame load must produce a mounted React app
-  // (app:renderer-ready) within the timeout, else onBootFailure escalates.
-  // did-finish-load fires for initial load AND every recovery reload.
-  windowForEvents.webContents.on("did-finish-load", () => {
+  // Boot watchdog: arm when loading begins, not after it finishes. This covers
+  // a dev-server/module request that hangs forever and guarantees the renderer
+  // cannot signal ready and then have did-finish-load arm a stale watchdog.
+  // Initial loads and recovery/HMR reloads all cross did-start-loading.
+  windowForEvents.webContents.on("did-start-loading", () => {
+    rendererReadyForCurrentLoad = false;
     armBootWatchdog();
   });
   // The page itself failed to load (dead dev server, missing asset). Retry via
@@ -822,22 +835,16 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
-  void import("./cora-cli-install")
-    .then(({ refreshManagedCoraCliInstall }) => refreshManagedCoraCliInstall())
-    .catch((err) => console.warn("[main] Cora CLI refresh failed:", err));
-  try {
-    const { recoverGitHubPullRequestImports } = await import(
-      "./github-pull-request-workspace"
-    );
-    await recoverGitHubPullRequestImports();
-  } catch (error) {
-    console.warn("[main] GitHub pull-request import recovery failed:", error);
-  }
   // Lost the single-instance lock — another Codara Studio owns it. app.quit()
   // was already called; bail before doing any startup work or opening a window.
   if (!ownsSingleInstanceLock) return;
 
   ensureSparkHomeSync();
+  // Refresh only an explicitly installed CLI. This repairs its launcher after
+  // an app update or move, but never opts a user into command-line access.
+  void import("./cora-cli-install")
+    .then(({ refreshManagedCoraCliInstall }) => refreshManagedCoraCliInstall())
+    .catch((err) => console.warn("[main] Cora CLI refresh failed:", err));
   logMain(
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
@@ -950,6 +957,19 @@ app.whenReady().then(async () => {
     return;
   }
 
+  // Resolve durable PR-import transactions before any renderer/phone can
+  // issue a competing import and before the filesystem sandbox snapshots its
+  // workspace roots. Recovery is repair-only: it never calls GitHub, checks
+  // out code, creates/starts Cora, or treats restart as user consent.
+  try {
+    const { recoverGitHubPullRequestImports } = await import(
+      "./github-pull-request-workspace"
+    );
+    await recoverGitHubPullRequestImports();
+  } catch (err) {
+    console.warn("[main] pull-request import recovery failed:", err);
+  }
+
   // Seed the fs sandbox allowlist from saved workspaces BEFORE registering
   // IPC. The renderer's own ui:setAllowedRoots push (App.tsx) only fires
   // AFTER FileTree/ChatComposer mount and call fs:list / fs:setWatchRoot
@@ -968,6 +988,16 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
+  // Bring the terminal Active-account pointers in line with what Settings
+  // stores. Doing it on every boot repairs a pointer left dangling by an
+  // account deleted while the app was closed.
+  void import("./orchestration/native-cli-active-pointer")
+    .then(({ reconcileNativeCliActivePointers }) =>
+      reconcileNativeCliActivePointers({ homeDir: sparkHome() }),
+    )
+    .catch((err) => {
+      console.error("[main] native CLI active pointer reconcile failed:", err);
+    });
   // Give the IPC layer a handle on ensureTray/destroyTray so the
   // preferences:set handler can react to keepRunningInBackground changes
   // without creating a circular import (index → ipc is safe; ipc → index
@@ -1170,6 +1200,7 @@ app.whenReady().then(async () => {
       await runStore.recoverPendingConversationRewinds();
       await runStore.recoverAbandonedActiveRpcQuestions();
       await runStore.recoverOrphanedManagerTurns();
+      await runStore.recoverManagerTurnRecoveries();
       await runStore.recoverPendingManagerResumes();
       await runStore.recoverQueuedManagerInputs();
       // Managed runs' workers die with this process and nothing re-arms their
@@ -1287,6 +1318,12 @@ app.on("window-all-closed", async () => {
   // Tell the renderer we're quitting BEFORE the PTY teardown flips any restore
   // pointer inactive (must precede disposeAllGraceful's exit events).
   signalRendererBeforeQuit();
+  // Stop orchestration-owned workers and provider sessions first, while their
+  // handles are still live. The following PTY sweep then catches any remaining
+  // CLI-backed process. Do not load the run store solely for quit.
+  if (runStoreMod) {
+    await runStoreMod.shutdownRunRuntimeResources().catch(() => undefined);
+  }
   // Graceful (bounded) PTY teardown: closing the pseudo-console first lets
   // Claude/Codex CLIs flush their transcripts, so `--resume` works on the
   // next launch; stragglers still get taskkill'd. See disposeAllGraceful.
@@ -1339,6 +1376,12 @@ app.on("before-quit", (event) => {
 
   void (async () => {
     try {
+      // Drain orchestration-owned workers and all provider sessions before the
+      // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
+      // room for graceful PTY teardown inside the 5s hard-exit fallback.
+      if (runStoreMod) {
+        await runStoreMod.shutdownRunRuntimeResources().catch(() => undefined);
+      }
       // Graceful (bounded ≤1.5s) PTY teardown so agent CLIs can flush their
       // session transcripts before any force-kill — fits comfortably inside
       // the 5s hard-exit fallback above. See disposeAllGraceful.

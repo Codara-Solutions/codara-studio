@@ -1,4 +1,4 @@
-import type { RunState } from "@shared/types";
+import type { AgentRuntimeKind, RunState } from "@shared/types";
 import type { PaneNode, Tab } from "../tabs/types";
 
 // A live worker pane that the routing menu can address by paneId via
@@ -11,7 +11,7 @@ export interface OpenWorker {
   // (== pty session id); for manual panes it is the leaf paneId. Both are
   // registered with main as the same key, so the call site is uniform.
   injectId: string;
-  runtime: "claude" | "codex" | "opencode";
+  runtime: AgentRuntimeKind;
   source: "spark" | "manual";
   // chat title (for "Claude · Fix login form") or undefined for manual.
   runLabel?: string;
@@ -23,8 +23,6 @@ function runtimeName(runtime: OpenWorker["runtime"]): string {
       return "Claude";
     case "codex":
       return "Codex";
-    case "opencode":
-      return "OpenCode";
   }
 }
 
@@ -44,7 +42,7 @@ function walkLeaves(node: PaneNode, out: OpenWorker[], runs: RunState[]): void {
     // land at the shell, not the CLI agent, and quietly corrupt the line.
     if (worker.agentRunning === false) return;
     const runtime = worker.runtime;
-    if (runtime !== "claude" && runtime !== "codex" && runtime !== "opencode") {
+    if (runtime !== "claude" && runtime !== "codex") {
       return;
     }
     const runLabel =

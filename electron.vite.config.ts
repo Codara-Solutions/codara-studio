@@ -41,6 +41,9 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, "src/renderer"),
+    define: {
+      "process.env.NODE_ENV": JSON.stringify("production"),
+    },
     plugins: [react()],
     resolve: {
       alias: {
@@ -111,7 +114,7 @@ export default defineConfig({
             // docx-preview (+ its jszip dep) is only imported by the lazily-
             // loaded DocxPreview chunk — same reasoning as pdfjs-vendor.
             if (id.includes("docx-preview") || id.includes("jszip")) return "docx-vendor";
-            return "vendor";
+            return undefined;
           },
         },
       },

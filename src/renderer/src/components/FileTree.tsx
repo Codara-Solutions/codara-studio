@@ -4,7 +4,7 @@ import type { ChatBackendKind, FsEntry, GitFileStatus, GitStatus } from "@shared
 import { statusColor, statusGlyph } from "./git/git-ui";
 import { type EngineOption, useEngineOptions } from "./engine/engineOptions";
 import { ChevronIcon } from "./icons";
-import { FileNodeIcon } from "./file-icons/FileNodeIcon";
+import FileNodeIcon from "./file-icons/LazyFileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
 import { basename, dirname } from "../path-utils";
 import { pathToFileUrl } from "../lib/pathToFileUrl";
@@ -572,10 +572,8 @@ export default function FileTree({
   const beginRename = useCallback((entry: FsEntry) => {
     setContextMenu(null);
     setPendingCreate(null);
-    if (!entry.isDir) {
-      setSelectedFilePaths(new Set([entry.path]));
-      setSelectionAnchorPath(entry.path);
-    }
+    setSelectedFilePaths(new Set([entry.path]));
+    setSelectionAnchorPath(entry.path);
     setRenamingPath(entry.path);
   }, []);
 
@@ -603,7 +601,7 @@ export default function FileTree({
           if (!prev.has(path)) return prev;
           const next = new Set(prev);
           next.delete(path);
-          if (!renamed.isDir) next.add(renamed.path);
+          next.add(renamed.path);
           return next;
         });
         setSelectionAnchorPath((anchor) => (anchor === path ? renamed.path : anchor));
@@ -671,9 +669,14 @@ export default function FileTree({
   // Delete ----------------------------------------------------------------
   const deleteEntries = useCallback(
     async (entries: FsEntry[]) => {
-      const uniqueEntries = Array.from(
+      // De-dupe, then prune entries nested under a selected ancestor folder:
+      // trashing the folder removes its children, so deleting a child
+      // afterwards would fail on an already-gone path.
+      const dedupedEntries = Array.from(
         new Map(entries.map((entry) => [entry.path, entry])).values(),
       );
+      const keptPaths = new Set(pruneNestedPaths(dedupedEntries.map((entry) => entry.path)));
+      const uniqueEntries = dedupedEntries.filter((entry) => keptPaths.has(entry.path));
       const deletedPaths: string[] = [];
       const parentPaths = new Set(uniqueEntries.map((entry) => parentPath(entry.path)));
       setContextMenu(null);
@@ -892,9 +895,11 @@ export default function FileTree({
     }
     const path = node.entry.path;
     const selected = selectedFilePathsRef.current;
+    // Nested-path pruning: a selected folder already drags its subtree, so a
+    // simultaneously-selected child must not ride along as a second copy.
     const paths =
-      !node.entry.isDir && selected.has(path) && selected.size > 1
-        ? Array.from(selected)
+      selected.has(path) && selected.size > 1
+        ? pruneNestedPaths(Array.from(selected))
         : [path];
     event.preventDefault();
     window.spark.fs.startDrag(paths);
@@ -924,7 +929,11 @@ export default function FileTree({
     return m.size > 0 ? m : null;
   }, [gitStatus, cwd]);
 
-  const copyToClipboard = useCallback((paths: string[], mode: "copy" | "cut") => {
+  const copyToClipboard = useCallback((rawPaths: string[], mode: "copy" | "cut") => {
+    // A selected folder already carries its subtree through the recursive
+    // copy/move; keeping a simultaneously-selected child would duplicate it on
+    // copy and break the move (its source vanishes with the parent).
+    const paths = pruneNestedPaths(rawPaths);
     if (paths.length === 0) return;
     setExplorerClipboard({ mode, paths });
     // Real CF_HDROP so Windows Explorer can paste these files. The text
@@ -1061,12 +1070,18 @@ export default function FileTree({
     // Right-clicking a row anchors paste at it (folder → into it; file → into
     // its parent), matching the FileMenu Paste destination below.
     pasteAnchorRef.current = { path: entry.path, isDir: entry.isDir };
-    if (entry.isDir) {
-      setSelectedFilePaths(new Set());
-      setSelectionAnchorPath(null);
-    } else if (!selectedFilePathsRef.current.has(entry.path)) {
-      setSelectedFilePaths(new Set([entry.path]));
-      setSelectionAnchorPath(entry.path);
+    // A row already inside the selection keeps the whole selection (the menu
+    // then acts on all of it, folders included). An unselected file becomes
+    // the sole selection; an unselected folder clears it — the folder itself
+    // is the menu target and the paste destination.
+    if (!selectedFilePathsRef.current.has(entry.path)) {
+      if (entry.isDir) {
+        setSelectedFilePaths(new Set());
+        setSelectionAnchorPath(null);
+      } else {
+        setSelectedFilePaths(new Set([entry.path]));
+        setSelectionAnchorPath(entry.path);
+      }
     }
     setBlankMenu(null);
     setContextMenu({ entry, x, y });
@@ -1087,25 +1102,18 @@ export default function FileTree({
         return;
       }
 
-      if (node.kind === "dir") {
-        // A folder is a valid paste destination even though it clears the
-        // file selection below.
-        pasteAnchorRef.current = { path: node.entry.path, isDir: true };
-        void toggleDir(node);
-        if (!event.ctrlKey && !event.metaKey && !event.shiftKey) {
-          setSelectedFilePaths(new Set());
-          setSelectionAnchorPath(null);
-        }
-        return;
-      }
-
       const path = node.entry.path;
-      // A file anchors paste at its parent directory (all click variants below).
-      pasteAnchorRef.current = { path, isDir: false };
+      // Any row anchors paste: a folder pastes INTO itself, a file into its
+      // parent (all click variants below).
+      pasteAnchorRef.current = { path, isDir: node.entry.isDir };
+      // Modified clicks (Ctrl/Cmd toggle, Shift range) treat folder rows and
+      // file rows identically — a folder is one selectable entry, and a
+      // modified click never expands/collapses it. This matches the marquee,
+      // which hit-tests every visible row regardless of kind.
       const toggleSelection = event.ctrlKey || event.metaKey;
       if (event.shiftKey) {
         const anchorPath = selectionAnchorPathRef.current ?? path;
-        const range = fileRange(flatRef.current, anchorPath, path);
+        const range = rowRange(flatRef.current, anchorPath, path);
         setSelectedFilePaths((prev) => {
           const next = toggleSelection ? new Set(prev) : new Set<string>();
           for (const selectedPath of range) next.add(selectedPath);
@@ -1123,6 +1131,16 @@ export default function FileTree({
           return next;
         });
         setSelectionAnchorPath(path);
+        return;
+      }
+
+      if (node.kind === "dir") {
+        // Plain click on a folder keeps its historical role: expand/collapse
+        // and clear the selection (the paste anchor above still remembers it
+        // as the destination).
+        void toggleDir(node);
+        setSelectedFilePaths(new Set());
+        setSelectionAnchorPath(null);
         return;
       }
 
@@ -1237,11 +1255,13 @@ export default function FileTree({
     return rows;
   })();
   flatRef.current = flat;
-  const selectedFileEntries = fileEntriesForPaths(flat, selectedFilePaths);
+  const selectedEntries = entriesForPaths(flat, selectedFilePaths);
+  // Right-clicking a row that is part of the selection acts on the WHOLE
+  // selection (files and folders alike); an unselected row acts on itself only.
   const contextMenuEntries =
-    contextMenu && !contextMenu.entry.isDir && selectedFilePaths.has(contextMenu.entry.path)
-      ? selectedFileEntries.length > 0
-        ? selectedFileEntries
+    contextMenu && selectedFilePaths.has(contextMenu.entry.path)
+      ? selectedEntries.length > 0
+        ? selectedEntries
         : [contextMenu.entry]
       : contextMenu
         ? [contextMenu.entry]
@@ -1323,7 +1343,7 @@ export default function FileTree({
         node={row.node}
         depth={row.depth}
         active={row.node.entry.path === activePath}
-        selected={!row.node.entry.isDir && selectedFilePaths.has(row.node.entry.path)}
+        selected={selectedFilePaths.has(row.node.entry.path)}
         dirOpen={Boolean(dirNode?.open)}
         dirLoading={Boolean(dirNode?.loading)}
         dirLoaded={Boolean(dirNode?.loaded)}
@@ -1362,22 +1382,22 @@ export default function FileTree({
         meta={
           <span
             title={
-              selectedFileEntries.length > 1
-                ? `${selectedFileEntries.length} files selected`
+              selectedEntries.length > 1
+                ? `${selectedEntries.length} items selected`
                 : cwd
             }
             style={{
               fontFamily: "var(--font-mono)",
               fontSize: 10,
-              color: selectedFileEntries.length > 1 ? "var(--accent)" : "var(--muted)",
+              color: selectedEntries.length > 1 ? "var(--accent)" : "var(--muted)",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
               maxWidth: 132,
             }}
           >
-            {selectedFileEntries.length > 1
-              ? `${selectedFileEntries.length} selected`
+            {selectedEntries.length > 1
+              ? `${selectedEntries.length} selected`
               : basename(cwd)}
           </span>
         }
@@ -1729,7 +1749,9 @@ export default function FileTree({
           onDelete={() => void deleteEntries(contextMenuEntries)}
           deleteLabel={
             contextMenuEntries.length > 1
-              ? `Delete ${contextMenuEntries.length} files`
+              ? `Delete ${contextMenuEntries.length} ${
+                  contextMenuEntries.some((entry) => entry.isDir) ? "items" : "files"
+                }`
               : "Delete"
           }
         />
@@ -1780,16 +1802,19 @@ function flatten(node: Node, depth: number, out: FlatRow[] = []): FlatRow[] {
   return out;
 }
 
-function visibleFileRows(rows: FlatRow[]): Array<{ path: string; entry: FsEntry }> {
+// Every visible row — files AND directories — in display order. Selection is
+// per visible row (a collapsed folder is ONE entry; its hidden children are
+// not part of the selection), so range/marquee helpers walk this list.
+// Exported (with rowRange / entriesForPaths / pruneNestedPaths) for
+// scripts/test-file-tree-marquee.cjs.
+export function visibleNodeRows(rows: FlatRow[]): Array<{ path: string; entry: FsEntry }> {
   return rows.flatMap((row) =>
-    row.kind === "node" && row.node.kind === "file"
-      ? [{ path: row.node.entry.path, entry: row.node.entry }]
-      : [],
+    row.kind === "node" ? [{ path: row.node.entry.path, entry: row.node.entry }] : [],
   );
 }
 
-function fileRange(rows: FlatRow[], anchorPath: string, targetPath: string): string[] {
-  const paths = visibleFileRows(rows).map((row) => row.path);
+export function rowRange(rows: FlatRow[], anchorPath: string, targetPath: string): string[] {
+  const paths = visibleNodeRows(rows).map((row) => row.path);
   const anchorIndex = paths.indexOf(anchorPath);
   const targetIndex = paths.indexOf(targetPath);
   if (anchorIndex === -1 || targetIndex === -1) return [targetPath];
@@ -1798,11 +1823,31 @@ function fileRange(rows: FlatRow[], anchorPath: string, targetPath: string): str
   return paths.slice(start, end + 1);
 }
 
-function fileEntriesForPaths(rows: FlatRow[], paths: Set<string>): FsEntry[] {
+export function entriesForPaths(rows: FlatRow[], paths: Set<string>): FsEntry[] {
   if (paths.size === 0) return [];
-  return visibleFileRows(rows)
+  return visibleNodeRows(rows)
     .filter((row) => paths.has(row.path))
     .map((row) => row.entry);
+}
+
+// Drop every path whose ancestor directory is also in the list. A marquee over
+// an EXPANDED folder selects the folder and its visible children as separate
+// entries; acting on that set verbatim would double-handle the children —
+// delete/trash the folder then fail on its already-gone child, or move the
+// folder then hit a missing source for the child. The ancestor alone already
+// carries its subtree through every recursive operation (trash, move, copy,
+// OS drag).
+export function pruneNestedPaths(paths: string[]): string[] {
+  const set = new Set(paths);
+  return paths.filter((path) => {
+    // `dirname` is a fixed point at a filesystem root ("/x" → "/x"), so stop
+    // as soon as it stops shrinking — including on the FIRST step, where the
+    // fixed point would otherwise make a top-level path prune itself.
+    for (let prev = path, dir = parentPath(path); dir !== prev; prev = dir, dir = parentPath(dir)) {
+      if (set.has(dir)) return false;
+    }
+    return true;
+  });
 }
 
 function rectFromPoints(x1: number, y1: number, x2: number, y2: number): SelectionRect {
@@ -2110,9 +2155,9 @@ const Row = React.memo(function Row({
   const handleMouseEnter = () => setHover(true);
   const handleRowRef = useCallback(
     (element: HTMLDivElement | null) => {
-      if (!isDir) onRowElement(node.entry.path, element);
+      onRowElement(node.entry.path, element);
     },
-    [isDir, node.entry.path, onRowElement],
+    [node.entry.path, onRowElement],
   );
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -2265,7 +2310,9 @@ function FileMenu({
   // when the menu sits too close to the viewport's right edge to fit it.
   const engineFlyoutOpensLeft = Math.max(8, x) + 228 + ENGINE_FLYOUT_WIDTH > window.innerWidth - 8;
   const multiple = entries.length > 1;
-  const headerTitle = multiple ? `${entries.length} files selected` : menu.entry.name;
+  const headerTitle = multiple
+    ? `${entries.length} ${entries.some((entry) => entry.isDir) ? "items" : "files"} selected`
+    : menu.entry.name;
   const headerMeta = multiple
     ? "multiple selection"
     : menu.entry.isDir

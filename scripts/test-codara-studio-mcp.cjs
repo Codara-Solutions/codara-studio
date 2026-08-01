@@ -12,6 +12,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const assert = require("node:assert");
+const http = require("node:http");
 
 const SERVER = path.join(__dirname, "..", "resources", "codara-studio-mcp", "server.js");
 
@@ -20,7 +21,7 @@ const SERVER = path.join(__dirname, "..", "resources", "codara-studio-mcp", "ser
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "codara-studio-mcp-"));
 fs.writeFileSync(
   path.join(HOME, "agent-socket.json"),
-  JSON.stringify({ url: "http://127.0.0.1:1", token: "test" }),
+  JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }),
 );
 
 const PREVIEW_TOOLS = [
@@ -45,7 +46,12 @@ const PREVIEW_TOOLS = [
   "codara_preview_resize",
   "codara_preview_run",
 ];
-const TERMINAL_TOOLS = ["codara_terminal_create", "codara_terminal_write", "codara_terminal_read"];
+const TERMINAL_TOOLS = [
+  "codara_terminal_create",
+  "codara_terminal_write",
+  "codara_terminal_read",
+  "codara_terminal_close",
+];
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
@@ -131,7 +137,16 @@ function sortedEqual(actual, expected, label) {
 }
 
 (async () => {
+  let mockAgentSocket = null;
+  const previousHome = process.env.CODARA_HOME_DIR;
+  const previousRunId = process.env.SPARK_RUN_ID;
+  const previousAgentSocket = process.env.SPARK_AGENT_SOCKET;
+  const previousAgentToken = process.env.SPARK_AGENT_TOKEN;
+  const previousAgentCapability = process.env.SPARK_AGENT_CAPABILITY;
   try {
+    delete process.env.SPARK_AGENT_SOCKET;
+    delete process.env.SPARK_AGENT_TOKEN;
+    delete process.env.SPARK_AGENT_CAPABILITY;
     // Studio mode (unset).
     const studio = await listTools(undefined);
     assert.strictEqual(studio.serverName, "codara-studio", "serverInfo.name must be codara-studio");
@@ -182,6 +197,44 @@ function sortedEqual(actual, expected, label) {
       complete?.description ?? "",
       /Never call it for greetings, conversation, explanations, advice, read-only questions/,
       "codara_complete must not instruct Auto conversations to enter execution completion",
+    );
+    const terminalCreate = execute.definitions.find(
+      (tool) => tool.name === "codara_terminal_create",
+    );
+    assert.ok(terminalCreate, "execute roster must expose codara_terminal_create");
+    assert.deepStrictEqual(
+      terminalCreate.inputSchema.properties.retention?.enum,
+      ["temporary", "service"],
+      "terminal retention must be the closed temporary/service policy",
+    );
+    assert.equal(
+      terminalCreate.inputSchema.required?.includes("retention") ?? false,
+      false,
+      "terminal retention must remain optional so legacy callers get temporary cleanup",
+    );
+    assert.match(
+      `${terminalCreate.description} ${terminalCreate.inputSchema.properties.retention?.description}`,
+      /temporary \(default\)[\s\S]*service/i,
+      "terminal.create must document the temporary default and explicit service opt-in",
+    );
+    const terminalClose = execute.definitions.find(
+      (tool) => tool.name === "codara_terminal_close",
+    );
+    assert.ok(terminalClose, "execute roster must expose codara_terminal_close");
+    sortedEqual(
+      terminalClose.inputSchema.required,
+      ["paneId"],
+      "codara_terminal_close required fields mismatch",
+    );
+    assert.match(
+      terminalClose.description,
+      /idempotent/,
+      "codara_terminal_close must document retry safety",
+    );
+    assert.match(
+      terminalClose.description,
+      /another run's terminal/,
+      "codara_terminal_close must document run ownership",
     );
 
     // codara_remember: the two axes a manager has to get right are which file it
@@ -292,6 +345,182 @@ function sortedEqual(actual, expected, label) {
       "codara_request_next_iteration must keep nextModel steering",
     );
 
+    // The JSON schema hides runId, but the bridge must also treat the
+    // launch-time env stamp as authoritative. callToolByName is used by Pi and
+    // can be invoked directly, so discard a spoofed argument before it reaches
+    // the shared local socket.
+    const received = [];
+    const receivedAuthorization = [];
+    mockAgentSocket = http.createServer((req, res) => {
+      receivedAuthorization.push(req.headers.authorization);
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        received.push(JSON.parse(body));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
+      });
+    });
+    await new Promise((resolve, reject) => {
+      mockAgentSocket.once("error", reject);
+      mockAgentSocket.listen(0, "127.0.0.1", resolve);
+    });
+    const address = mockAgentSocket.address();
+    fs.writeFileSync(
+      path.join(HOME, "agent-socket.json"),
+      JSON.stringify({
+        url: `http://127.0.0.1:${address.port}`,
+        token: "f".repeat(64),
+      }),
+    );
+    process.env.CODARA_HOME_DIR = HOME;
+    process.env.SPARK_RUN_ID = "run-trusted";
+    delete require.cache[require.resolve(SERVER)];
+    const directBridge = require(SERVER);
+    process.env.SPARK_AGENT_CAPABILITY = "scoped";
+    process.env.SPARK_AGENT_SOCKET = `http://127.0.0.1:${address.port}`;
+    process.env.SPARK_AGENT_TOKEN = "a".repeat(64);
+    const scopedCall = await directBridge.callToolByName("codara_terminal_read", {
+      paneId: "pane-owned",
+    });
+    assert.notStrictEqual(scopedCall.isError, true);
+    assert.strictEqual(
+      receivedAuthorization.at(-1),
+      `Bearer ${"a".repeat(64)}`,
+      "a process-scoped token must take precedence over the root handshake",
+    );
+    delete process.env.SPARK_AGENT_TOKEN;
+    const partialScopedCall = await directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+    );
+    assert.strictEqual(partialScopedCall.isError, true);
+    assert.match(
+      partialScopedCall.content[0].text,
+      /scoped agent capability is unavailable/i,
+      "a partial scoped environment must fail closed instead of reading the root handshake",
+    );
+    delete process.env.SPARK_AGENT_SOCKET;
+    const missingScopedCall = await directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+    );
+    assert.strictEqual(missingScopedCall.isError, true);
+    assert.match(
+      missingScopedCall.content[0].text,
+      /scoped agent capability is unavailable/i,
+      "a scoped marker with zero credential variables must never fall back to root",
+    );
+
+    process.env.SPARK_AGENT_CAPABILITY = "future-capability";
+    const unknownCapabilityCall = await directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+    );
+    assert.strictEqual(unknownCapabilityCall.isError, true);
+    assert.match(
+      unknownCapabilityCall.content[0].text,
+      /capability marker is unsupported/i,
+      "an unknown nonempty capability marker must fail closed",
+    );
+
+    // Trusted/global children inherit process-lifetime PTY credentials. The
+    // mode-600 handshake is the rotating authority, so it must win without a
+    // scoped marker and be re-read after an app restart writes a new token.
+    delete process.env.SPARK_AGENT_CAPABILITY;
+    process.env.SPARK_AGENT_SOCKET = `http://127.0.0.1:${address.port}`;
+    process.env.SPARK_AGENT_TOKEN = "a".repeat(64);
+    const trustedCall = await directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+    );
+    assert.notStrictEqual(trustedCall.isError, true);
+    assert.strictEqual(
+      receivedAuthorization.at(-1),
+      `Bearer ${"f".repeat(64)}`,
+      "an unmarked trusted caller must prefer the current handshake over inherited credentials",
+    );
+    fs.writeFileSync(
+      path.join(HOME, "agent-socket.json"),
+      JSON.stringify({
+        url: `http://127.0.0.1:${address.port}`,
+        token: "b".repeat(64),
+      }),
+    );
+    const rotatedTrustedCall = await directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+    );
+    assert.notStrictEqual(rotatedTrustedCall.isError, true);
+    assert.strictEqual(
+      receivedAuthorization.at(-1),
+      `Bearer ${"b".repeat(64)}`,
+      "an unmarked trusted caller must adopt a rewritten handshake on its next call",
+    );
+
+    await directBridge.callToolByName("codara_terminal_close", {
+      paneId: "pane-owned",
+      runId: "run-spoofed",
+    });
+    assert.strictEqual(received.at(-1).method, "terminal.close");
+    assert.strictEqual(
+      received.at(-1).params.runId,
+      "run-trusted",
+      "terminal.close must use the trusted launch-time run identity",
+    );
+    await directBridge.callToolByName("codara_terminal_create", {
+      cwd: HOME,
+      retention: "service",
+      runId: "run-spoofed",
+    });
+    assert.strictEqual(
+      received.at(-1).params.runId,
+      "run-trusted",
+      "terminal.create must record the same trusted run identity used by close",
+    );
+    assert.strictEqual(
+      received.at(-1).params.retention,
+      "service",
+      "terminal.create must forward the schema-validated retention policy",
+    );
+    await directBridge.callToolByName("codara_terminal_write", {
+      paneId: "pane-owned",
+      text: "npm test",
+      runId: "run-spoofed",
+    });
+    assert.strictEqual(received.at(-1).method, "terminal.write");
+    assert.strictEqual(
+      received.at(-1).params.runId,
+      "run-trusted",
+      "terminal.write must use the trusted launch-time run identity",
+    );
+    delete process.env.SPARK_RUN_ID;
+    await directBridge.callToolByName("codara_terminal_close", {
+      paneId: "pane-null-scoped",
+      runId: "run-spoofed",
+    });
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"),
+      false,
+      "a null-scoped terminal caller must not be able to supply another run id",
+    );
+    await directBridge.callToolByName("codara_terminal_write", {
+      paneId: "pane-null-scoped",
+      text: "pwd",
+      runId: "run-spoofed",
+    });
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"),
+      false,
+      "a null-scoped terminal write must not be able to supply another run id",
+    );
+    const batch = await directBridge.callToolByName("codara_preview_run", {
+      steps: [{ action: "navigate", url: "http://127.0.0.1:4173/" }],
+    });
+    assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
+    assert.strictEqual(received.at(-1).method, "preview.navigate");
+
     console.log("PASS: codara-studio MCP roster matrix");
     console.log(`  studio:     ${studio.tools.length} tools`);
     console.log(`  execute:    ${execute.tools.length} tools`);
@@ -301,6 +530,19 @@ function sortedEqual(actual, expected, label) {
     console.error("FAIL:", err.message);
     process.exitCode = 1;
   } finally {
+    if (previousHome === undefined) delete process.env.CODARA_HOME_DIR;
+    else process.env.CODARA_HOME_DIR = previousHome;
+    if (previousRunId === undefined) delete process.env.SPARK_RUN_ID;
+    else process.env.SPARK_RUN_ID = previousRunId;
+    if (previousAgentSocket === undefined) delete process.env.SPARK_AGENT_SOCKET;
+    else process.env.SPARK_AGENT_SOCKET = previousAgentSocket;
+    if (previousAgentToken === undefined) delete process.env.SPARK_AGENT_TOKEN;
+    else process.env.SPARK_AGENT_TOKEN = previousAgentToken;
+    if (previousAgentCapability === undefined) delete process.env.SPARK_AGENT_CAPABILITY;
+    else process.env.SPARK_AGENT_CAPABILITY = previousAgentCapability;
+    if (mockAgentSocket) {
+      await new Promise((resolve) => mockAgentSocket.close(resolve));
+    }
     try {
       fs.rmSync(HOME, { recursive: true, force: true });
     } catch {
