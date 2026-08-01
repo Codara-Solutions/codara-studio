@@ -62,6 +62,7 @@ import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import RemoteConnectDialog from "./components/remote/RemoteConnectDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
+import { useChatSurfaces } from "./tabs/chatSurfaces";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
@@ -109,6 +110,7 @@ import {
   workerMenuLabel,
 } from "./routing/enumerate-open-workers";
 import { useGlobalRuns } from "./lib/useGlobalRuns";
+import { onSettingsChanged, publishSettings } from "./lib/useOpenAiFastMode";
 import { isRunningStatus } from "./lib/run-status";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import {
@@ -139,16 +141,17 @@ const WhiteboardStack = lazy(() => import("./tabs/WhiteboardStack"));
 // handshake is document-scoped, so send it once per evaluated renderer module
 // rather than logging/disarming the same boot twice.
 let rendererReadySignaled = false;
-const EXACT_GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
 // Stable brand label for every chat tab in the top strip. The first-message-
 // derived run.title is kept on the RunState for the chat panel header and the
 // history popover; only the workspace tab strip is forced to this constant so
 // short prompts ("hello") don't surface as truncated "He..." labels.
 const CHAT_TAB_LABEL = "Cora";
+const EXACT_GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
+  openAiFastMode: false,
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: "google/gemini-flash-latest",
@@ -2593,10 +2596,18 @@ export default function App() {
     async (nextSettings: AppSettings) => {
       const saved = await window.spark.settings.save(nextSettings);
       setSettings(saved);
+      // The composer's fast-mode toggle reads the same record; republish so it
+      // never keeps a value this save just overwrote.
+      publishSettings(saved);
       setDefaultShell(resolveDefaultShell(shells, saved, detectedDefaultShell));
     },
     [shells, detectedDefaultShell],
   );
+
+  // ...and the reverse direction: a composer fast-mode flip persists the whole
+  // AppSettings record, so App must adopt it or the next Settings save would
+  // write back the stale copy it is still holding.
+  useEffect(() => onSettingsChanged(setSettings), []);
   const handleSettingsOpenRun = useCallback(
     (runId: string, workspaceId: string) => {
       if (workspaces.some((w) => w.id === workspaceId)) {
@@ -5671,23 +5682,16 @@ const Workspace = React.memo(function Workspace({
 
   // Lifted from ChatPanel so the hoisted inner tab strip can drive the chat /
   // backend-PTY view toggle without ChatPanel keeping a separate state.
-  // Resets when the active run changes (a fresh chat starts in "chat" view).
+  // When the owning chat changes, useChatSurfaces below restores that chat's
+  // remembered sub-view (a chat never visited before starts on "chat").
   const [chatView, setChatView] = useState<CoraView>("chat");
-  // One-shot override for that reset: board.open may have to focus a
+  // One-shot override for that restore: board.open may have to focus a
   // DIFFERENT chat tab (or a fresh draft) first, and that tab switch changes
-  // activeRunId a commit later — without the marker, the reset below would
-  // stomp the just-requested "board" view back to "chat". The marker is set
-  // ONLY when the handler knows an activeRunId change is coming, so it is
-  // always consumed by exactly that reset pass.
+  // activeRunId / the owning chat a commit later — without the marker, the
+  // restore would stomp the just-requested "board" view. The marker is set
+  // ONLY when the handler knows such a change is coming, so it is always
+  // consumed by exactly that restore pass (inside useChatSurfaces).
   const pendingBoardViewRef = useRef(false);
-  useEffect(() => {
-    if (pendingBoardViewRef.current) {
-      pendingBoardViewRef.current = false;
-      setChatView("board");
-      return;
-    }
-    setChatView("chat");
-  }, [activeRunId]);
 
   // Tabs owned by the active run, grouped by kind. These power the inner tab
   // strip: Runs section and preview entries. Worker terminals stay run-owned,
@@ -5813,6 +5817,22 @@ const Workspace = React.memo(function Workspace({
     () => visibleTabs.find((tab) => tab.id === effectiveActiveId) ?? null,
     [visibleTabs, effectiveActiveId],
   );
+  // Per-chat memory of the last explicitly chosen sub-surface (CoraView pill
+  // or run-owned tab like the worker terminal grid), plus the routing that
+  // restores it when the user returns to the chat tab. All user-driven view
+  // changes below go through changeChatView so the memory stays current; the
+  // two escape effects above keep the raw setter on purpose — they are
+  // corrective bounces, not user choices, and must not overwrite what the
+  // user actually picked.
+  const { changeChatView, rememberChatView, selectTopStripTab } = useChatSurfaces({
+    activeChatTabId,
+    activeRunId,
+    activeTabForStrip,
+    visibleTabs,
+    setActiveTab,
+    setChatView,
+    pendingBoardViewRef,
+  });
   const activeViewBelongsToRun =
     Boolean(activeRunId) &&
     activeTabForStrip != null &&
@@ -5831,29 +5851,29 @@ const Workspace = React.memo(function Workspace({
     (activeTabForStrip?.kind === "chat" &&
       (chatView === "board" || isDraftChatTabId(activeTabForStrip.id)));
   const handleInnerChatClick = useCallback(() => {
+    changeChatView("chat");
     if (activeChatTabId) setActiveTab(activeChatTabId);
-    setChatView("chat");
-  }, [activeChatTabId, setActiveTab]);
+  }, [activeChatTabId, setActiveTab, changeChatView]);
   const handleInnerTerminalClick = useCallback(() => {
+    changeChatView("terminal");
     if (activeChatTabId) setActiveTab(activeChatTabId);
-    setChatView("terminal");
-  }, [activeChatTabId, setActiveTab]);
+  }, [activeChatTabId, setActiveTab, changeChatView]);
   const handleBackToRuns = useCallback(() => {
     if (runOwnedTabs.runs) {
       setActiveTab(runOwnedTabs.runs.id);
       return;
     }
+    changeChatView("chat");
     if (activeChatTabId) setActiveTab(activeChatTabId);
-    setChatView("chat");
-  }, [activeChatTabId, runOwnedTabs.runs, setActiveTab]);
+  }, [activeChatTabId, runOwnedTabs.runs, setActiveTab, changeChatView]);
   const handleInnerWhiteboardClick = useCallback(() => {
+    changeChatView("whiteboard");
     if (activeChatTabId) setActiveTab(activeChatTabId);
-    setChatView("whiteboard");
-  }, [activeChatTabId, setActiveTab]);
+  }, [activeChatTabId, setActiveTab, changeChatView]);
   const handleInnerBoardClick = useCallback(() => {
+    changeChatView("board");
     if (activeChatTabId) setActiveTab(activeChatTabId);
-    setChatView("board");
-  }, [activeChatTabId, setActiveTab]);
+  }, [activeChatTabId, setActiveTab, changeChatView]);
   // board.open chord (broadcast from App's shortcut handler): focus the active
   // chat's Board sub-view. When the active tab isn't a chat, surface one first
   // — the selected run's own chat tab if it exists, else the most recent chat
@@ -5863,7 +5883,7 @@ const Workspace = React.memo(function Workspace({
   useEffect(() => {
     const handler = () => {
       if (activeTabForStrip?.kind === "chat") {
-        setChatView("board");
+        changeChatView("board");
         return;
       }
       const chatTabs = topStripTabs.filter((tab) => tab.kind === "chat");
@@ -5873,24 +5893,47 @@ const Workspace = React.memo(function Workspace({
         null;
       const nextRunId =
         target && !isDraftChatTabId(target.id) ? target.id : null;
-      if (nextRunId !== activeRunId) pendingBoardViewRef.current = true;
-      setChatView("board");
+      // Arm the one-shot marker whenever the surface restore in
+      // useChatSurfaces WILL fire for this focus change (activeRunId changes,
+      // or the owning chat tab changes — including a fresh draft). When
+      // neither changes the restore never runs, so record the choice directly
+      // instead; a lingering marker would hijack a later, unrelated restore.
+      const restoreWillFire =
+        nextRunId !== activeRunId || (target ? target.id !== activeChatTabId : true);
+      if (restoreWillFire) {
+        pendingBoardViewRef.current = true;
+        setChatView("board");
+      } else {
+        changeChatView("board");
+      }
       if (target) setActiveTab(target.id);
       else addDraftChatTab();
     };
     window.addEventListener("spark:open-cora-board", handler);
     return () => window.removeEventListener("spark:open-cora-board", handler);
-  }, [activeTabForStrip, topStripTabs, activeRunId, setActiveTab, addDraftChatTab]);
+  }, [
+    activeTabForStrip,
+    topStripTabs,
+    activeRunId,
+    activeChatTabId,
+    setActiveTab,
+    addDraftChatTab,
+    changeChatView,
+  ]);
   // "Open chat" from a card of the embedded board: leave the Board sub-view
   // for the run's conversation ourselves — when the card's run is ALREADY the
-  // active one, activeRunId doesn't change and the run-change reset would
-  // never fire, leaving the user staring at the board they just left.
+  // active one, activeRunId doesn't change and the run-change restore would
+  // never fire, leaving the user staring at the board they just left. The
+  // TARGET run's memory is pinned to "chat" too (its tab id === run id):
+  // "Open chat" must land on the conversation even when that chat's last
+  // surface was its board or worker grid.
   const handleOpenBoardCardRunInChat = useCallback(
     (runId: string) => {
+      rememberChatView(runId, "chat");
       setChatView("chat");
       onOpenBoardCardRun(runId);
     },
-    [onOpenBoardCardRun],
+    [onOpenBoardCardRun, rememberChatView],
   );
   // First card mutation on a DRAFT chat's board: mint the run WITHOUT starting
   // autopilot, persist the cards on its board, then promote the draft tab via
@@ -5919,7 +5962,6 @@ const Workspace = React.memo(function Workspace({
         chatBackend: chip?.backend,
         chatModel: chip?.model,
         chatEffort: chip?.effort,
-        chatFastMode: chip?.fastMode,
         chat1mContext: chip?.oneMillionContext,
       });
       await api.update({
@@ -6023,10 +6065,11 @@ const Workspace = React.memo(function Workspace({
     [effectiveActiveId, visibleTabs, topStripTabs],
   );
 
-  const handleTabSelect = useCallback(
-    (id: TabId) => setActiveTab(id),
-    [setActiveTab],
-  );
+  // Top-strip selection routes through the chat-surface layer: clicking a
+  // chat pill restores that chat's remembered run-owned surface (worker grid
+  // / Runs canvas), or reads as the exit-to-conversation gesture when one of
+  // its surfaces is already on screen.
+  const handleTabSelect = selectTopStripTab;
   const handleTabClose = useCallback(
     (id: TabId) => closeTab(id),
     [closeTab],
@@ -6215,7 +6258,7 @@ const Workspace = React.memo(function Workspace({
           activeRunId={activeRunId}
           terminalScrollbackLineLimit={terminalScrollbackLineLimit}
           chatView={chatView}
-          onChatViewChange={setChatView}
+          onChatViewChange={changeChatView}
           onOpenBoardCardRun={handleOpenBoardCardRunInChat}
           onOpenBoardWorkerTerminal={handleOpenWorkerTerminal}
           onCreateBoardRun={handleCreateBoardRun}

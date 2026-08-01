@@ -476,12 +476,21 @@ function HeaderMeta({ run }: { run: RunState }) {
   // The cost pill hides itself until the run records a priced manager call;
   // the id chip is always shown so the user has something to copy and share
   // for support / debugging on every chat.
+  //
+  // The status text is the ONLY elastic member. SectionHeader's meta slot
+  // clips its overflow, and a paused run's detail is the manager-turn park
+  // reason — a whole sentence — which used to push the cost pill and the id
+  // chip past the clip line: the id became invisible and unclickable exactly
+  // when a user hit trouble and wanted to copy it (run-msa0s2t6-sz26w1).
+  // Status now ellipsizes and the chips hold their width in every run state.
   return (
     <span
       style={{
         display: "inline-flex",
         alignItems: "center",
         gap: 8,
+        minWidth: 0,
+        maxWidth: "100%",
         whiteSpace: "nowrap",
       }}
     >
@@ -940,10 +949,17 @@ function StatusMeta({ run }: { run: RunState }) {
   const color = statusToneColor(status.tone);
   return (
     <span
+      // The one shrinkable member of the header meta row: it gives up width
+      // (and ellipsizes its detail) so the cost pill and the run-id chip stay
+      // whole. The full detail survives in the tooltip.
+      title={status.detail ? `${status.label} · ${status.detail}` : status.label}
       style={{
         display: "inline-flex",
         alignItems: "center",
         gap: 5,
+        flex: "0 1 auto",
+        minWidth: 0,
+        overflow: "hidden",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         fontVariantNumeric: "tabular-nums",
@@ -968,8 +984,18 @@ function StatusMeta({ run }: { run: RunState }) {
           animation: status.tone === "live" ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
         }}
       />
-      <span style={{ color: "var(--ink-dim)" }}>{status.label}</span>
-      {status.detail && <span>{status.detail}</span>}
+      <span style={{ color: "var(--ink-dim)", flex: "0 0 auto" }}>{status.label}</span>
+      {status.detail && (
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {status.detail}
+        </span>
+      )}
     </span>
   );
 }
@@ -1001,6 +1027,8 @@ function CostPill({ run }: { run: RunState }) {
         fontSize: 10,
         fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
+        // Never the member that gives way when the status text is long.
+        flex: "0 0 auto",
       }}
     >
       <span aria-hidden style={{ color: "var(--muted)" }}>$</span>

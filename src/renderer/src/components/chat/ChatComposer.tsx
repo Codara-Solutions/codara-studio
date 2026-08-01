@@ -7,20 +7,26 @@ import type {
   FsEntry,
   RunState,
   SparkEvent,
+  UpdateChatBackendInput,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { contextWindowForModel } from "@shared/context-window";
+import { chatContextCapacityTokens } from "@shared/context-compaction";
 import {
-  chatBackendSupportsFastMode,
-  effectiveChatFastMode,
+  chatModelIsOpenAi,
   effectiveChatOneMillionContext,
   normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
-import { findOpenQuestion } from "./timeline";
+import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
+import {
+  deriveComposerWorkerActivity,
+  findOpenQuestion,
+  type ComposerWorkerActivity,
+} from "./timeline";
 import { isUnstartedChatRun } from "./cora-view";
-import { workerModelLabel } from "../runs/run-format";
 import ContextPill from "./composer/ContextPill";
+import FastModeToggle from "./composer/FastModeToggle";
 import ModelPicker from "./composer/ModelPicker";
 import ThinkingControl from "./composer/ThinkingControl";
 import {
@@ -36,6 +42,11 @@ import {
   findOptionInCatalog,
   type ChatModelOption,
 } from "./composer/types";
+import {
+  chatBackendMutationBarriers,
+  chatBackendMutationScope,
+  chatBackendMutationScopeMatchesRun,
+} from "./chat-backend-mutation-barrier";
 
 // Per-chat selector bag forwarded from the draft composer chip into the
 // new-chat creation call so the chip's choice survives draft→live. Once a run
@@ -46,7 +57,6 @@ export interface ChatComposerStartConfig {
   model?: string;
   mode?: ChatMode;
   effort?: AgentEffortLevel;
-  fastMode?: boolean;
   oneMillionContext?: boolean;
 }
 
@@ -134,7 +144,6 @@ interface ChatComposerDraftSnapshot {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
-  fastMode: boolean;
   oneMillionContext: boolean;
 }
 
@@ -166,7 +175,6 @@ export interface ChatComposerChipConfig {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
-  fastMode: boolean;
   oneMillionContext: boolean;
 }
 const liveDraftChipByKey = new Map<string, ChatComposerChipConfig>();
@@ -219,9 +227,6 @@ export default function ChatComposer({
   // model so the bar doesn't open on a model the user can't see in the
   // dropdown (e.g. a CLI default when that runtime isn't installed).
   const draftDefaultsResolved = useRef(Boolean(restoredDraft || run));
-  const [draftFastMode, setDraftFastMode] = useState<boolean>(
-    run?.chatFastMode ?? restoredDraft?.fastMode ?? false,
-  );
   const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(
     run?.chat1mContext ?? restoredDraft?.oneMillionContext ?? false,
   );
@@ -231,6 +236,9 @@ export default function ChatComposer({
   // millions/billions of tokens.
   const [tokensUsed, setTokensUsed] = useState(0);
   const [reportedContextBudget, setReportedContextBudget] = useState<number | null>(null);
+  // The ceiling this chat compacts at, as stamped onto the live Pi session.
+  // Null until a turn streams; the shared default covers that gap.
+  const [reportedCompactAt, setReportedCompactAt] = useState<number | null>(null);
   // Read by the run-change seed below, which must see the run being switched TO
   // without taking `run` as a dependency (that would re-seed on every snapshot
   // and stomp the live gauge mid-turn).
@@ -241,7 +249,15 @@ export default function ChatComposer({
   // re-rendered the busy state, which a fast double-click or Enter-key
   // repeat would otherwise slip through into a duplicate message.
   const inFlight = useRef(false);
+  const mountedRef = useRef(true);
   const suppressMentionUpdate = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Latest snapshot of every meaningful composer field, INCLUDING the selector
   // state of an empty composer. A user can choose a model before typing;
@@ -257,7 +273,6 @@ export default function ChatComposer({
     backend: draftChatBackend,
     model: draftChatModel,
     effort: draftChatEffort,
-    fastMode: draftFastMode,
     oneMillionContext: draftOneMillionContext,
   };
   // This instance's draft state belongs to the key it restored from at mount.
@@ -286,7 +301,6 @@ export default function ChatComposer({
       backend: draftChatBackend,
       model: draftChatModel,
       effort: draftChatEffort,
-      fastMode: draftFastMode,
       oneMillionContext: draftOneMillionContext,
     });
   }
@@ -301,14 +315,12 @@ export default function ChatComposer({
     if (run.chatBackend !== undefined) setDraftChatBackend(run.chatBackend);
     if (run.chatModel !== undefined) setDraftChatModel(run.chatModel);
     if (run.chatEffort !== undefined) setDraftChatEffort(run.chatEffort);
-    if (run.chatFastMode !== undefined) setDraftFastMode(run.chatFastMode);
     if (run.chat1mContext !== undefined) setDraftOneMillionContext(run.chat1mContext);
   }, [
     run?.id,
     run?.chatBackend,
     run?.chatModel,
     run?.chatEffort,
-    run?.chatFastMode,
     run?.chat1mContext,
   ]);
 
@@ -341,12 +353,10 @@ export default function ChatComposer({
         if (!first) return;
         const { baseId, oneMillion } = decomposeModelId(first.id);
         const normalizedFlags = normalizeChatFeatureFlags(first.backend, {
-          chatFastMode: draftFastMode,
           chat1mContext: oneMillion,
         });
         setDraftChatBackend(first.backend);
         setDraftChatModel(baseId);
-        setDraftFastMode(normalizedFlags.chatFastMode);
         setDraftOneMillionContext(normalizedFlags.chat1mContext);
         const allowedEfforts = effortsFor(first);
         const clamped = clampEffort(draftChatEffort, allowedEfforts);
@@ -439,6 +449,9 @@ export default function ChatComposer({
         ? call.contextWindowTokens
         : null,
     );
+    // Not persisted on the SparkCall: it is an app-wide launch value, so a
+    // reopened chat falls back to the shared default until its next turn.
+    setReportedCompactAt(null);
   }, [run?.id]);
 
   // Track the latest live context gauge. Modern backends provide
@@ -462,6 +475,10 @@ export default function ChatComposer({
       const rawBudget = payload.contextWindowTokens;
       if (typeof rawBudget === "number" && Number.isFinite(rawBudget) && rawBudget > 0) {
         setReportedContextBudget(rawBudget);
+      }
+      const rawCompactAt = payload.compactAtTokens;
+      if (typeof rawCompactAt === "number" && Number.isFinite(rawCompactAt) && rawCompactAt > 0) {
+        setReportedCompactAt(rawCompactAt);
       }
     });
     return off;
@@ -528,43 +545,12 @@ export default function ChatComposer({
   const isTerminal =
     status === "complete" || status === "failed" || status === "cancelled";
 
-  // Workers currently doing real work (not just queued waiting to launch).
-  // claimed = autopilot reserved the task; running = worker actively
-  // executing. needs_review = worker finished and the manager is reading
-  // its report — that's "manager" state, not "worker".
-  //
-  // Cross-check the worker_attempt status too: launchWorkerAttempt updates
-  // task.status synchronously but the renderer's debounced workspace flush
-  // (~250ms) can miss the brief claimed→running window. The attempt is
-  // updated in the same commit and persisted to the same snapshot, so
-  // checking both gives a more reliable "worker is doing work right now"
-  // signal — observed in run-mpodz3i7-fs8o7f where the pill never lit up
-  // even though the attempt ran for ~66s.
-  const activeAttemptStatuses = new Set(["prompt_ready", "launching", "running"]);
-  const activeWorkers = run?.workerTasks?.filter((t) => {
-    if (t.status === "running" || t.status === "claimed") return true;
-    const attempt = run.workerAttempts.find(
-      (a) => a.workerTaskId === t.id && activeAttemptStatuses.has(a.status),
-    );
-    return Boolean(attempt);
-  }) ?? [];
-  const hasActiveWorker = activeWorkers.length > 0;
-  // One engine label per active worker so the status line can state the real
-  // mix ("3 Opus 5 + 2 Sol") instead of stamping the first worker's model on
-  // the whole fleet, which read as the nonsense "Opus 5 5 workers running".
-  const activeWorkerEngines = activeWorkers.map((task) => {
-    const attempt = run?.workerAttempts?.find(
-      (a) =>
-        a.workerTaskId === task.id &&
-        a.status !== "succeeded" &&
-        a.status !== "failed" &&
-        a.status !== "cancelled",
-    );
-    const runtime = attempt?.runtime ?? task.runtimePreference;
-    const runtimeLabel =
-      runtime === "claude" ? "claude" : runtime === "codex" ? "codex" : runtime ?? "worker";
-    return workerModelLabel(attempt?.model ?? task.modelHint, runtimeLabel);
-  });
+  // What the strip may say about workers: "live" only when a worker process
+  // actually exists, "queued" for one that is owed but not spawned. The whole
+  // derivation lives in timeline.ts next to describeRunStatus, because the
+  // strip and the run header must never contradict each other — the pair used
+  // to read "Paused · step 1 of 2" and "Sonnet 5 working" at the same time.
+  const workerActivity = deriveComposerWorkerActivity(run);
   const filesForSend = collectFileReferencesForSend(draft, fileReferences, fileMentions).slice(
     0,
     Math.max(0, MAX_ATTACHMENTS - images.length),
@@ -610,12 +596,27 @@ export default function ChatComposer({
   const send = async () => {
     if (inFlight.current || disabled || pastingImages) return;
     const clientMessageId = makeId("client-msg");
+    const sendScope = run_ ? chatBackendMutationScope(run_) : null;
     inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
       const attachments = await attachmentsForCurrentDraft();
-      const message = messageForSend(draft, attachments.length);
+      // Attachment indexing can yield long enough for another picker action.
+      // Fence at the final dispatch boundary and drain replacements rather
+      // than snapshotting whichever mutation happened to exist at send start.
+      if (sendScope) {
+        await chatBackendMutationBarriers.waitForStable(sendScope);
+      }
+      if (
+        !mountedRef.current ||
+        (sendScope &&
+          !chatBackendMutationScopeMatchesRun(sendScope, runRef.current))
+      ) {
+        return;
+      }
+      const latestDraft = draftSnapshotRef.current;
+      const message = messageForSend(latestDraft?.draft ?? draft, attachments.length);
       if (!message) return;
       if (!run_ || isUnstartedChatRun(run_)) {
         // No run yet, or a run the board's draft promotion minted that has
@@ -623,12 +624,12 @@ export default function ChatComposer({
         // (OrchestrationSidebar.startChat) starts autopilot, reusing the
         // unstarted run's id instead of minting a sibling.
         const chatConfig: ChatComposerStartConfig = {
-          backend: draftChatBackend,
-          model: draftChatModel,
+          backend: latestDraft?.backend ?? draftChatBackend,
+          model: latestDraft?.model ?? draftChatModel,
           mode: lockedMode ?? DEFAULT_CHAT_MODE,
-          effort: draftChatEffort,
-          fastMode: draftFastMode,
-          oneMillionContext: draftOneMillionContext,
+          effort: latestDraft?.effort ?? draftChatEffort,
+          oneMillionContext:
+            latestDraft?.oneMillionContext ?? draftOneMillionContext,
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else if (openQuestion) {
@@ -655,25 +656,33 @@ export default function ChatComposer({
       setFileReferences([]);
       setMentionQuery(null);
     } catch (err) {
-      setError((err as Error).message);
+      if (mountedRef.current) setError((err as Error).message);
     } finally {
       inFlight.current = false;
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   };
 
   const resume = async () => {
     if (!run_ || inFlight.current) return;
+    const resumeScope = chatBackendMutationScope(run_);
     inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
+      await chatBackendMutationBarriers.waitForStable(resumeScope);
+      if (
+        !mountedRef.current ||
+        !chatBackendMutationScopeMatchesRun(resumeScope, runRef.current)
+      ) {
+        return;
+      }
       await window.spark.orchestration.resumeRun({ runId: run_.id });
     } catch (err) {
-      setError((err as Error).message);
+      if (mountedRef.current) setError((err as Error).message);
     } finally {
       inFlight.current = false;
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   };
 
@@ -883,9 +892,7 @@ export default function ChatComposer({
   const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
-  const rawFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
   const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
-  const activeFastMode: boolean = effectiveChatFastMode(activeChatBackend, rawFastMode);
   const activeOneMillionContext: boolean = effectiveChatOneMillionContext(activeChatBackend);
   // The active model's option pulled from the STATIC catalog; null for a model
   // discovered from the live catalog, which has no curated row (effortsFor
@@ -897,9 +904,14 @@ export default function ChatComposer({
     activeChatModelId,
     activeOneMillionContext,
   );
-  // Fast mode is a Codex-only feature. Claude Code always runs with 1M
-  // context, represented by the Claude 1M model rows in the picker.
-  const fastModeAvailable = chatBackendSupportsFastMode(activeChatBackend);
+  // Claude Code always runs with 1M context, represented by the Claude 1M
+  // model rows in the picker. Fast mode remains a single GLOBAL setting even
+  // though its control now lives here: the flash button writes
+  // AppSettings.openAiFastMode, and there is still no per-chat fast-mode
+  // state. It shows only for an OpenAI model — Anthropic has no priority tier
+  // and must never be offered one.
+  const fastMode = useOpenAiFastMode();
+  const fastModeAvailable = chatModelIsOpenAi(activeChatModelId);
   const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
@@ -912,40 +924,67 @@ export default function ChatComposer({
     chatBackend?: ChatBackendKind;
     chatModel?: string;
     chatEffort?: AgentEffortLevel;
-    chatFastMode?: boolean;
     chat1mContext?: boolean;
   }) => {
-    const targetBackend = changes.chatBackend ?? activeChatBackend;
+    setError(null);
+    const mutationScope = run_ ? chatBackendMutationScope(run_) : null;
+    const pendingDesired = mutationScope
+      ? chatBackendMutationBarriers.current(mutationScope)?.desired
+      : undefined;
+    const snapshot = draftSnapshotRef.current;
+    const baseBackend =
+      pendingDesired?.chatBackend ?? snapshot?.backend ?? activeChatBackend;
+    const baseOneMillionContext =
+      pendingDesired?.chat1mContext ??
+      snapshot?.oneMillionContext ??
+      rawOneMillionContext;
+    const targetBackend = changes.chatBackend ?? baseBackend;
     const normalizedFlags = normalizeChatFeatureFlags(targetBackend, {
-      chatFastMode: changes.chatFastMode ?? rawFastMode,
-      chat1mContext: changes.chat1mContext ?? rawOneMillionContext,
+      chat1mContext: changes.chat1mContext ?? baseOneMillionContext,
     });
     const normalizedChanges = { ...changes };
     if (
-      changes.chatFastMode !== undefined ||
-      normalizedFlags.chatFastMode !== rawFastMode
-    ) {
-      normalizedChanges.chatFastMode = normalizedFlags.chatFastMode;
-    }
-    if (
       changes.chat1mContext !== undefined ||
-      normalizedFlags.chat1mContext !== rawOneMillionContext
+      normalizedFlags.chat1mContext !== baseOneMillionContext
     ) {
       normalizedChanges.chat1mContext = normalizedFlags.chat1mContext;
     }
     if (normalizedChanges.chatBackend !== undefined) setDraftChatBackend(normalizedChanges.chatBackend);
     if (normalizedChanges.chatModel !== undefined) setDraftChatModel(normalizedChanges.chatModel);
     if (normalizedChanges.chatEffort !== undefined) setDraftChatEffort(normalizedChanges.chatEffort);
-    if (normalizedChanges.chatFastMode !== undefined) setDraftFastMode(normalizedChanges.chatFastMode);
     if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
-    if (!run_) return;
-    // Persist the chip change to the backend so the manager picks it up on its
-    // next turn. Best-effort — failures surface in the toast bar.
-    void window.spark.orchestration
-      .updateChatBackend({ runId: run_.id, ...normalizedChanges })
-      .catch((err: unknown) => {
+    if (!run_ || !mutationScope) return;
+
+    const desired: UpdateChatBackendInput = {
+      runId: run_.id,
+      chatBackend: targetBackend,
+      chatModel:
+        normalizedChanges.chatModel ??
+        pendingDesired?.chatModel ??
+        snapshot?.model ??
+        activeChatModelId,
+      chatEffort:
+        normalizedChanges.chatEffort ??
+        pendingDesired?.chatEffort ??
+        snapshot?.effort ??
+        activeChatEffort,
+      chat1mContext: normalizedFlags.chat1mContext,
+    };
+    const mutation = chatBackendMutationBarriers.enqueue(
+      mutationScope,
+      desired,
+      async () => {
+        await window.spark.orchestration.updateChatBackend(desired);
+      },
+    );
+    void mutation.promise.catch((err: unknown) => {
+      if (
+        mountedRef.current &&
+        chatBackendMutationBarriers.current(mutationScope) === mutation
+      ) {
         setError((err as Error).message);
-      });
+      }
+    });
   };
 
   const onPickModel = (model: ChatModelOption) => {
@@ -974,11 +1013,6 @@ export default function ChatComposer({
     applyChatBackendChange({ chatEffort: effort });
   };
 
-  const onToggleFastMode = () => {
-    if (!fastModeAvailable) return;
-    applyChatBackendChange({ chatFastMode: !activeFastMode });
-  };
-
   // 1M context used to be a standalone pill; it now lives as virtual rows
   // in the model dropdown ("Opus 4.8 1M" etc.), so onPickModel writes
   // chat1mContext directly via applyChatBackendChange. No standalone
@@ -1001,7 +1035,11 @@ export default function ChatComposer({
         : isParkedTurn
           ? run?.autopilot?.stopReason ?? "Cora's provider is unavailable. Retry runs the turn again."
           : isPaused
-          ? "Add a note, then resume."
+          // Sending into a paused run resumes it and carries the message
+          // (run-store's scheduleResumeForUserMessage), so the placeholder
+          // must not send the user hunting for the Resume button. Resume
+          // still works on its own for an empty composer.
+          ? "Send to resume — your message goes with it."
           : isActive
             ? "Queue steering for Cora's next manager turn."
             : "Reply, steer, or add context.";
@@ -1158,27 +1196,11 @@ export default function ChatComposer({
               onCycle={onPickEffort}
             />
             {fastModeAvailable && (
-              <button
-                type="button"
-                className={`composer-fast${activeFastMode ? " is-active" : ""}`}
-                title={
-                  activeFastMode
-                    ? "Fast mode on — Codex spawns with fast_mode enabled. Click to disable."
-                    : "Fast mode off — Codex spawns with fast_mode disabled. Click to enable."
-                }
-                aria-label={activeFastMode ? "Fast mode on" : "Fast mode off"}
-                aria-pressed={activeFastMode}
-                onClick={onToggleFastMode}
-              >
-                <LightningIcon />
-              </button>
+              <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
             )}
           </div>
-          {hasActiveWorker ? (
-            <WorkerActivityStatus
-              engines={activeWorkerEngines}
-              titles={activeWorkers.map((task) => task.title)}
-            />
+          {workerActivity ? (
+            <WorkerActivityStatus activity={workerActivity} steeringQueues={isActive} />
           ) : (
             <span className="composer-toolbar__hint">
               {busy
@@ -1187,7 +1209,9 @@ export default function ChatComposer({
                   ? "Adding pasted image..."
                 : isActive
                   ? "Enter to queue steering · Stop remains separate"
-                  : "Enter to send, Shift+Enter for a new line"}
+                  : isPaused
+                    ? "Enter to send and resume · Resume alone skips the note"
+                    : "Enter to send, Shift+Enter for a new line"}
             </span>
           )}
           {/* Right cluster: context gauge | capabilities | resume | send read
@@ -1197,11 +1221,19 @@ export default function ChatComposer({
           <div className="composer-toolbar__right">
             <ContextPill
               used={tokensUsed}
-              budget={
-                reportedContextBudget ?? (activeOneMillionContext && activeChatBackend === "claude"
-                  ? 1_000_000
-                  : contextWindowForModel(activeChatModelId).tokens)
-              }
+              // A Pi chat never reaches its model window: Codara compacts it at
+              // ~256k first, so that is the ceiling the meter measures against.
+              // claude/codex chats drive CLIs with their own compaction and
+              // keep reading against the full window.
+              budget={chatContextCapacityTokens({
+                contextWindowTokens:
+                  reportedContextBudget ?? (activeOneMillionContext && activeChatBackend === "claude"
+                    ? 1_000_000
+                    : contextWindowForModel(activeChatModelId).tokens),
+                backend: activeChatBackend,
+                compactAtTokens: reportedCompactAt,
+              })}
+              compactsAtBudget={activeChatBackend === "pi"}
             />
             <IconButton
               title="MCP and skills"
@@ -1220,7 +1252,15 @@ export default function ChatComposer({
               disabled={!canSend}
               label={isActive ? "Queue steering" : "Send"}
             />
-            {isActive && <StopButton onClick={onForcePauseRun} />}
+            {/* Stop follows the work, not only the run status. A soft-paused
+                run can still own a live worker process (pause stops autopilot;
+                it doesn't reach into a worker already running), and in that
+                state the user could see a worker "working" with nothing to
+                stop it. forcePauseRun kills every active worker pty, so it is
+                the right control for both cases. */}
+            {(isActive || workerActivity?.state === "live") && (
+              <StopButton onClick={onForcePauseRun} />
+            )}
           </div>
         </div>
         </div>
@@ -1236,19 +1276,25 @@ function messageForSend(draft: string, attachmentCount: number): string {
 }
 
 // Replaces the static "Queued for next manager decision" status line whenever
-// at least one worker_task is in `running` or `claimed`. A solo worker shows
-// its engine and its task title; a fleet shows the count and the real model
-// mix ("3 Opus 5 + 2 Sol"), with every task title in the tooltip. The old
-// shape prefixed the first worker's model onto the fleet count ("Opus 5 5
-// workers running") and truncated one arbitrary title, which carried no
-// information at a glance.
+// the run owns workers. A solo worker shows its engine and its task title; a
+// fleet shows the count and the real model mix ("3 Opus 5 + 2 Sol"), with every
+// task title in the tooltip. The old shape prefixed the first worker's model
+// onto the fleet count ("Opus 5 5 workers running") and truncated one arbitrary
+// title, which carried no information at a glance.
+//
+// The verb comes from the projection, never from the presence of worker rows:
+// "working"/"running" only for a worker with a live process, "queued" for one
+// waiting to launch, and a paused run says so here too so this line can never
+// imply a turn is in flight while the header says Paused.
 function WorkerActivityStatus({
-  engines,
-  titles,
+  activity,
+  steeringQueues,
 }: {
-  engines: string[];
-  titles: string[];
+  activity: ComposerWorkerActivity;
+  steeringQueues: boolean;
 }): JSX.Element {
+  const { engines, titles, state, runPaused } = activity;
+  const live = state === "live";
   const count = engines.length;
   const mix = new Map<string, number>();
   for (const engine of engines) mix.set(engine, (mix.get(engine) ?? 0) + 1);
@@ -1256,6 +1302,14 @@ function WorkerActivityStatus({
     .map(([label, n]) => (mix.size > 1 ? `${n} ${label}` : label))
     .join(" + ");
   const solo = count === 1;
+  const headline = live
+    ? solo
+      ? `${mixLabel} working`
+      : `${count} workers running`
+    : solo
+      ? `${mixLabel} queued`
+      : `${count} workers queued`;
+  const tone = live ? "var(--accent)" : "var(--muted)";
   return (
     <span
       className="composer-toolbar__hint composer-toolbar__hint--worker"
@@ -1267,14 +1321,14 @@ function WorkerActivityStatus({
           width: 6,
           height: 6,
           borderRadius: "50%",
-          background: "var(--accent)",
-          animation: "spark-pulse 1.3s ease-in-out infinite",
+          background: tone,
+          // Only a running worker pulses. A steady dot for a queued one keeps
+          // the "something is happening right now" signal honest.
+          ...(live ? { animation: "spark-pulse 1.3s ease-in-out infinite" } : {}),
           flex: "0 0 auto",
         }}
       />
-      <span style={{ color: "var(--accent)", fontWeight: 600 }}>
-        {solo ? `${mixLabel} working` : `${count} workers running`}
-      </span>
+      <span style={{ color: tone, fontWeight: 600 }}>{headline}</span>
       {/* The only elastic child: when the row runs out of room this segment
           ellipsises, rather than every child being cut mid-glyph. Sizing lives
           in .composer-toolbar__hint--worker so the rule sits with the rest of
@@ -1283,7 +1337,14 @@ function WorkerActivityStatus({
       {solo
         ? titles[0] && <span className="composer-toolbar__hint-title">· {titles[0]}</span>
         : mixLabel && <span className="composer-toolbar__hint-title">· {mixLabel}</span>}
-      <span style={{ flex: "0 0 auto" }}>· steering queues</span>
+      {/* The tail says what the composer will do with what you type, and it
+          follows the RUN, not the workers: a paused run takes notes, only a
+          run with a turn in flight queues steering. */}
+      {runPaused ? (
+        <span style={{ flex: "0 0 auto" }}>· paused</span>
+      ) : steeringQueues ? (
+        <span style={{ flex: "0 0 auto" }}>· steering queues</span>
+      ) : null}
     </span>
   );
 }
@@ -2004,15 +2065,5 @@ function TextButton({
     >
       {children}
     </button>
-  );
-}
-
-// Lightning bolt glyph for the Fast-mode toggle. Filled in the active
-// state so it reads as "on" even without a surrounding pill.
-function LightningIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
-      <path d="M8.2 0.4 L2.5 7.6 H6 L5.2 13.6 L11.2 6 H7.5 L8.2 0.4 Z" />
-    </svg>
   );
 }

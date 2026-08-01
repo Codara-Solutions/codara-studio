@@ -10,6 +10,7 @@ import type {
   WorkerTaskStatus,
 } from "@shared/types";
 import { resolveOpenRunQuestion } from "@shared/run-questions";
+import { plannedWorkerModel } from "@shared/worker-model-roster";
 import { logicalWorkers, type LogicalWorker } from "../../lib/worker-identity";
 import { WORKER_ATTEMPT_CAP, workerModelLabel } from "../runs/run-format";
 
@@ -102,20 +103,39 @@ function isDeadAttempt(attempt: WorkerAttempt): boolean {
   );
 }
 
-function pendingAttemptModel(task: WorkerTask): string {
-  return workerModelLabel(task.modelHint, runtimeLabel(task.runtimePreference));
+// Loom runs launch workers on the model the automation pinned; Cora chat runs
+// coerce every hint onto the worker roster at spawn time. The renderer has to
+// know which rule applies before it can name a queued worker's model.
+export function isAutomationRun(run: RunState): boolean {
+  return run.executionMode === "direct" && Boolean(run.automationId);
+}
+
+// The model a worker that has NOT launched yet will actually run on — the
+// roster-coerced hint, not the planner's raw one. A task hinted claude-sonnet-5
+// spawns on claude-opus-5, and a row that advertised "Sonnet 5" until the
+// attempt appeared was telling the user something the spawn would not honour
+// (run-ms9ikoef-mnucvq).
+function pendingAttemptModel(task: WorkerTask, automation: boolean): string {
+  return workerModelLabel(
+    plannedWorkerModel(task, { isAutomationRun: automation }),
+    runtimeLabel(task.runtimePreference),
+  );
 }
 
 // The model an attempt runs on. An attempt that has not launched yet
-// (prompt_ready) carries no model, so fall back to what its own task was
-// hinted to run rather than dropping to the bare runtime label: "Codex" is the
-// subscription, "Sol" is the thing doing the work.
-function attemptModel(attempt: WorkerAttempt, worker: LogicalWorker): string | undefined {
+// (prompt_ready) carries no model, so fall back to the model its own task is
+// planned to launch on rather than dropping to the bare runtime label:
+// "Codex" is the subscription, "Sol" is the thing doing the work.
+function attemptModel(
+  attempt: WorkerAttempt,
+  worker: LogicalWorker,
+  automation: boolean,
+): string | undefined {
   if (attempt.model) return attempt.model;
   const owner = [...worker.supersededTasks, worker.task].find(
     (task) => task.id === attempt.workerTaskId,
   );
-  return owner?.modelHint;
+  return owner ? plannedWorkerModel(owner, { isAutomationRun: automation }) : undefined;
 }
 
 // Worker errors arrive as provider output: multi-line, path-laden, occasionally
@@ -132,12 +152,27 @@ function compactWorkerError(error: string | undefined): string | null {
     : `${flat.slice(0, ERROR_PREVIEW_LIMIT - 3)}...`;
 }
 
+// A subscription/billing decline arrives as an opaque provider JSON envelope;
+// a truncated preview of it explains nothing. When the taxonomy classified the
+// attempt, say the condition in plain language instead. Terminology matches
+// the Settings note: "Extra Usage", "third-party harness use".
+function workerAttemptFailureDisplay(attempt: WorkerAttempt | undefined): string | null {
+  if (!attempt) return null;
+  if (attempt.failureKind === "subscription") {
+    return "The Claude account has no Extra Usage for third-party harness use — enable it at claude.ai/settings/usage or switch accounts.";
+  }
+  return compactWorkerError(attempt.error);
+}
+
 // The attempt still owed to a logical worker, if any. Null while the surviving
 // task has a live attempt of its own: that attempt IS the retry, and the row
 // reports it directly instead of promising another one. A succeeded attempt
 // also settles the row, with one exception: retry_queued means the store owes
 // a corrective attempt (verifier feedback) even though the last one succeeded.
-function pendingAttemptFor(worker: LogicalWorker): ChatPendingAttempt | null {
+function pendingAttemptFor(
+  worker: LogicalWorker,
+  automation: boolean,
+): ChatPendingAttempt | null {
   const task = worker.task;
   if (!isPendingWorkerTask(task.status)) return null;
   const ownAttempts = worker.attempts.filter((attempt) => attempt.workerTaskId === task.id);
@@ -149,21 +184,23 @@ function pendingAttemptFor(worker: LogicalWorker): ChatPendingAttempt | null {
   if (hasSucceededAttempt && task.status !== "retry_queued") return null;
   return {
     state: task.status === "claimed" || task.status === "running" ? "starting" : "queued",
-    model: pendingAttemptModel(task),
+    model: pendingAttemptModel(task, automation),
     number: worker.attempts.length + 1,
   };
 }
 
 // The model a worker row should name: the surviving task's own attempt, then
 // what its replacement was hinted to run on, then the lineage's last attempt.
-function workerRowModel(worker: LogicalWorker): string | undefined {
+function workerRowModel(worker: LogicalWorker, automation: boolean): string | undefined {
   const task = worker.task;
   for (let index = worker.attempts.length - 1; index >= 0; index -= 1) {
     const attempt = worker.attempts[index];
     if (attempt.workerTaskId === task.id && attempt.model) return attempt.model;
   }
-  if (task.modelHint) return task.modelHint;
-  return worker.latestAttempt?.model;
+  // No attempt of its own yet: name the model the spawn chokepoint will pick
+  // for this task, which is the coerced hint — never the raw one.
+  if (task.modelHint) return plannedWorkerModel(task, { isAutomationRun: automation });
+  return worker.latestAttempt?.model ?? plannedWorkerModel(task, { isAutomationRun: automation });
 }
 
 // One beat of a logical worker's retry lineage, for the expanded worker row:
@@ -222,6 +259,12 @@ export type ChatTimelineItem =
       // as a half-open [from, to) window over block timestamps. Absent on
       // unsegmented rows, which render the whole trace.
       traceWindow?: { from?: string; to?: string };
+      // The manager turn is open but suspended inside ask_user, waiting for
+      // the user's answer. The row must read as waiting, never as working:
+      // the run header already says "Needs you", and a live "Working for Ns"
+      // ticker underneath it would contradict it (and be false, nothing runs
+      // until the answer lands).
+      awaitingReply?: boolean;
       title: string;
       detail: string;
       // "queued" is a worker-only state: the lineage is between attempts, so
@@ -341,10 +384,11 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   // yet still gets its row as long as the run-store owes it an attempt, so a
   // spawned wave is visible in full instead of appearing one worker at a time
   // as each attempt happens to start.
+  const automation = isAutomationRun(run);
   const workers = logicalWorkers(run);
   for (const worker of workers) {
     if (worker.attempts.length > 0 || isPendingWorkerTask(worker.task.status)) {
-      items.push(logicalWorkerTimelineItem(worker, run.createdAt));
+      items.push(logicalWorkerTimelineItem(worker, run.createdAt, automation));
     }
   }
 
@@ -361,8 +405,8 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         status: worker.task.status,
         runtimeState: worker.latestAttempt?.runtimeState,
         attemptCount: worker.attempts.length,
-        model: workerRowModel(worker),
-        pending: pendingAttemptFor(worker) ?? undefined,
+        model: workerRowModel(worker, automation),
+        pending: pendingAttemptFor(worker, automation) ?? undefined,
       }));
     items.push({
       kind: "step",
@@ -456,6 +500,7 @@ function sparkCallTimelineItems(
   const count = questions.length + 1;
   let from: string | undefined;
   let anchor = call.createdAt;
+  let lastQuestionAnswered = false;
   questions.forEach((question, index) => {
     segments.push(
       sparkCallTimelineItem(call, {
@@ -480,6 +525,7 @@ function sparkCallTimelineItems(
     );
     from = question.createdAt;
     anchor = answer?.createdAt ?? question.createdAt;
+    if (index === questions.length - 1) lastQuestionAnswered = Boolean(answer);
   });
   segments.push(
     sparkCallTimelineItem(call, {
@@ -487,6 +533,11 @@ function sparkCallTimelineItems(
       count,
       at: anchor,
       window: { from },
+      // An open turn whose newest question has no answer yet is suspended
+      // inside ask_user: the run is blocked and "Needs you" owns the
+      // headline, so this final slice must read as waiting, not working.
+      awaitingReply:
+        call.status === "started" && !lastQuestionAnswered && run.status === "blocked",
     }),
   );
   return segments;
@@ -499,6 +550,9 @@ interface SparkCallSegment {
   count: number;
   at: string;
   window: { from?: string; to?: string };
+  // The turn is parked inside ask_user waiting on the user; only the final
+  // slice of a live call can carry this.
+  awaitingReply?: boolean;
 }
 
 function sparkCallTimelineItem(
@@ -511,6 +565,8 @@ function sparkCallTimelineItem(
   // so a failure or live pulse belongs only to the final slice.
   const failed = call.status === "failed" && isLast;
   const live = call.status === "started" && isLast;
+  // Waiting-on-the-user beats "working": the turn is open but nothing runs.
+  const awaiting = live && segment?.awaitingReply === true;
   const meta: ChatToolMeta[] = [
     { label: "Mode", value: managerModeLabel(call.mode) },
     { label: "Model", value: call.model || "manager" },
@@ -549,13 +605,17 @@ function sparkCallTimelineItem(
           : "Compacted conversation"
       : call.mode === "chat"
         ? live
-          ? "Cora is working"
+          ? awaiting
+            ? "Waiting on your reply"
+            : "Cora is working"
           : failed
             ? "Turn failed"
             : isLast && duration
               ? `Worked for ${duration}`
               : "Worked"
-        : managerModeTitle(call.mode),
+        : awaiting
+          ? "Waiting on your reply"
+          : managerModeTitle(call.mode),
     detail: failed
       ? call.error || "Manager call failed."
       : compaction
@@ -563,12 +623,15 @@ function sparkCallTimelineItem(
           ? "Summarizing the conversation to stay within the model's context window"
           : "Older history was summarized into a fresh session"
         : live
-          ? "Following the thread and choosing the next useful action"
+          ? awaiting
+            ? "The turn is on hold and picks back up when you answer"
+            : "Following the thread and choosing the next useful action"
           : isLast
             ? managerModeCompletedDetail(call)
             : "",
     status: isLast ? call.status : "completed",
     tone: failed ? "failed" : live ? "live" : "done",
+    awaitingReply: awaiting || undefined,
     at: segment?.at ?? call.createdAt,
     meta,
     files: [],
@@ -585,9 +648,10 @@ function logicalWorkerKey(worker: LogicalWorker): string {
 function logicalWorkerTimelineItem(
   worker: LogicalWorker,
   fallbackAt: string,
+  automation: boolean,
 ): Extract<ChatTimelineItem, { kind: "tool" }> {
   const attempts = worker.attempts;
-  const pending = pendingAttemptFor(worker);
+  const pending = pendingAttemptFor(worker, automation);
   // The earliest task in the chain anchors the row where the worker first
   // appeared in the conversation, even after a runtime fallback replaced it.
   const firstTask = worker.supersededTasks[0] ?? worker.task;
@@ -621,7 +685,7 @@ function logicalWorkerTimelineItem(
     // Between attempts: the row reports what is coming, not what just died.
     // The previous failure is still on the line, but as history rather than
     // as the row's verdict.
-    const previousError = compactWorkerError(attempts[attempts.length - 1]?.error);
+    const previousError = workerAttemptFailureDisplay(attempts[attempts.length - 1]);
     const ordinal = `attempt ${pending.number} of ${denominator}`;
     const detailParts: string[] =
       pending.number > 1
@@ -659,15 +723,25 @@ function logicalWorkerTimelineItem(
   const status = workerAttemptToolStatus(latest);
   const live = status === "started";
   const failed = status === "failed";
+  // Prepared, not spawned: the row exists because the attempt record does, but
+  // there is no agent behind it yet.
+  const waiting = status === "queued";
   // The row is named by the model that did the work, with the runtime label
   // as the fallback until the attempt or its task names one.
-  const engine = workerModelLabel(attemptModel(latest, worker), runtimeLabel(latest.runtime));
+  const engine = workerModelLabel(
+    attemptModel(latest, worker, automation),
+    runtimeLabel(latest.runtime),
+  );
   // The denominator is the main-process retry cap the run inspector prints, so
   // the same worker never reads "2 of 2" here and "2 of 3" there.
   const ordinal = `attempt ${attempts.length} of ${denominator}`;
   const detailParts: string[] = [];
   if (attempts.length > 1) detailParts.push(`${engine} · ${ordinal}`);
-  const latestError = failed ? compactWorkerError(latest.error) : null;
+  // A row whose only attempt is still prepared would otherwise carry no detail
+  // at all and read as ordinary in-flight work. Say what it is waiting on, in
+  // the same shape the pending branch uses ("Sol · queued").
+  else if (waiting) detailParts.push(`${engine} · queued`);
+  const latestError = failed ? workerAttemptFailureDisplay(latest) : null;
   if (latestError) detailParts.push(latestError);
 
   const meta: ChatToolMeta[] = [{ label: "Model", value: engine }];
@@ -684,7 +758,7 @@ function logicalWorkerTimelineItem(
     title: worker.task.title,
     detail: detailParts.join(" · "),
     status,
-    tone: failed ? "failed" : live ? "live" : "done",
+    tone: failed ? "failed" : live ? "live" : waiting ? "queued" : "done",
     at,
     meta,
     files: [],
@@ -737,6 +811,7 @@ export function summarizeWorkerWait(
   run: RunState,
   taskIds: string[],
 ): WorkerWaitSummary | null {
+  const automation = isAutomationRun(run);
   const workers = logicalWorkers(run);
   const byTaskId = new Map<string, LogicalWorker>();
   for (const worker of workers) {
@@ -773,7 +848,7 @@ export function summarizeWorkerWait(
       blocked += 1;
       continue;
     }
-    const pending = pendingAttemptFor(worker);
+    const pending = pendingAttemptFor(worker, automation);
     if (pending) {
       if (pending.number > 1) retrying += 1;
       else queued += 1;
@@ -799,9 +874,15 @@ export function summarizeWorkerWait(
   return { total: resolved.size, running, queued, retrying, settled, blocked, failed, label };
 }
 
-function workerAttemptToolStatus(attempt: WorkerAttempt): "started" | "completed" | "failed" {
+function workerAttemptToolStatus(
+  attempt: WorkerAttempt,
+): "started" | "completed" | "failed" | "queued" {
   if (attempt.status === "succeeded") return "completed";
   if (attempt.status === "failed" || attempt.status === "timed_out" || attempt.status === "cancelled") return "failed";
+  // A prepared attempt is a prompt on disk with no process behind it, and it
+  // can sit there indefinitely (a paused run never launches it). It reads as
+  // queued, the same word the composer chip and the pending branch above use.
+  if (PREPARED_ATTEMPT_STATUSES.has(attempt.status)) return "queued";
   return "started";
 }
 
@@ -1055,6 +1136,120 @@ export function describeRunStatus(run: RunState): ChatStatus {
     default:
       return { label: "Idle", tone: "idle" };
   }
+}
+
+// ── Composer worker activity ────────────────────────────────────────────────
+
+// Attempt statuses that mean a worker PROCESS EXISTS and is doing work.
+//
+// "preparing" and "prompt_ready" are excluded on purpose: those attempts have
+// had their prompt written to disk and nothing else — launchWorkerAttempt is
+// what spawns the process, and it flips the attempt to "launching" and the task
+// to "claimed" in the same commit, so no live worker can hide behind the
+// excluded pair. Counting prompt_ready as live is exactly what made the
+// composer announce "Sonnet 5 working" for a never-spawned worker in a paused
+// run whose header correctly read "Paused · step 1 of 2" (run-ms9ikoef-mnucvq),
+// and sent the user to an empty worker terminal.
+const LIVE_ATTEMPT_STATUSES = new Set<WorkerAttempt["status"]>([
+  "launching",
+  "running",
+  "finishing",
+]);
+
+// Attempt statuses that mean the prompt is written but nothing has spawned.
+const PREPARED_ATTEMPT_STATUSES = new Set<WorkerAttempt["status"]>([
+  "preparing",
+  "prompt_ready",
+]);
+
+export interface ComposerWorkerActivity {
+  /**
+   * "live"   — at least one worker process is running right now.
+   * "queued" — no worker is running; one or more are waiting to launch.
+   */
+  state: "live" | "queued";
+  /** Display model label per worker, in task order ("Opus 5", "Sol"). */
+  engines: string[];
+  /** Task titles, for the tooltip. */
+  titles: string[];
+  /** True when the run is paused/blocked, so the strip can say so. */
+  runPaused: boolean;
+}
+
+// What the composer's status strip may claim about workers.
+//
+// The strip sits under the run header, and the two must never disagree: the
+// header owns run status, this owns worker status, and a queued worker in a
+// paused run has to read as queued and paused, not as work in flight. A worker
+// counts as live only when a process exists for it (see LIVE_ATTEMPT_STATUSES);
+// between attempts, in retry backoff, and while an attempt sits prompt-ready it
+// is queued — real, owed, and not yet running.
+export function deriveComposerWorkerActivity(
+  run: RunState | null | undefined,
+): ComposerWorkerActivity | null {
+  if (!run) return null;
+  const automation = isAutomationRun(run);
+  const runPaused = run.status === "paused" || run.status === "blocked";
+
+  const attemptsFor = (taskId: string): WorkerAttempt[] =>
+    run.workerAttempts.filter((attempt) => attempt.workerTaskId === taskId);
+
+  const live: WorkerTask[] = [];
+  const queued: WorkerTask[] = [];
+  for (const task of run.workerTasks) {
+    const attempts = attemptsFor(task.id);
+    // The attempt lifecycle leads the task lifecycle by one debounced
+    // renderer flush in both directions, so read both: an attempt in a live
+    // status, or a task the store has already claimed/started.
+    if (
+      attempts.some((attempt) => LIVE_ATTEMPT_STATUSES.has(attempt.status)) ||
+      task.status === "running" ||
+      task.status === "claimed"
+    ) {
+      live.push(task);
+      continue;
+    }
+    // Owed but not running: a pending task with a prepared-but-unlaunched
+    // attempt, or one the store has not written an attempt for yet.
+    if (!isPendingWorkerTask(task.status)) continue;
+    const settled = attempts.some((attempt) => attempt.status === "succeeded");
+    if (settled && task.status !== "retry_queued") continue;
+    const prepared = attempts.every(
+      (attempt) =>
+        PREPARED_ATTEMPT_STATUSES.has(attempt.status) ||
+        attempt.status === "failed" ||
+        attempt.status === "timed_out" ||
+        attempt.status === "cancelled",
+    );
+    if (prepared) queued.push(task);
+  }
+
+  // A finished run is never going to launch what it still has on the books, so
+  // its leftover queued tasks say nothing. A live process in a terminal run is
+  // a different matter — that one is real and stays reported.
+  const terminal =
+    run.status === "complete" || run.status === "failed" || run.status === "cancelled";
+  const chosen = live.length > 0 ? live : terminal ? [] : queued;
+  if (chosen.length === 0) return null;
+
+  const engines = chosen.map((task) => {
+    // A live worker is named by the model its own running attempt reported; a
+    // queued one by the model the spawn chokepoint will coerce it onto.
+    const running = attemptsFor(task.id).find((attempt) =>
+      LIVE_ATTEMPT_STATUSES.has(attempt.status),
+    );
+    const runtime = running?.runtime ?? task.runtimePreference;
+    const model =
+      running?.model ?? plannedWorkerModel(task, { isAutomationRun: automation });
+    return workerModelLabel(model, runtimeLabel(runtime));
+  });
+
+  return {
+    state: live.length > 0 ? "live" : "queued",
+    engines,
+    titles: chosen.map((task) => task.title),
+    runPaused,
+  };
 }
 
 export function statusToneColor(tone: ChatStatusTone): string {

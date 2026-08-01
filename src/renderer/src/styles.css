@@ -2200,6 +2200,41 @@ a { color: inherit; }
 .composer-thinking-label {
   white-space: nowrap;
 }
+/* Glyph-only sibling of the thinking pill: same round border and accent-on
+   treatment, sized square so the row reads as [model · thinking · flash]. */
+.composer-fast {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--rule-soft);
+  color: var(--ink-dim);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.composer-fast.is-on {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-edge);
+}
+.composer-fast:hover {
+  background: var(--hover-strong);
+  color: var(--ink);
+}
+.composer-fast.is-on:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.composer-fast:active {
+  background: var(--press);
+}
 .composer-chevron {
   display: inline-flex;
   align-items: center;
@@ -2332,45 +2367,6 @@ a { color: inherit; }
   color: var(--muted);
 }
 
-/* Fast-mode toggle — an icon-only button (no pill border) so it reads as
-   a glyph among the labeled pills, matching the Conductor reference. The
-   lightning fills with the accent when fast mode is on. */
-.composer-fast {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ink-dim);
-  cursor: default;
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out);
-}
-.composer-fast:hover {
-  background: var(--hover-strong);
-  color: var(--ink);
-}
-.composer-fast:active {
-  background: var(--press);
-}
-.composer-fast.is-active {
-  color: var(--accent);
-  /* A filled accent pill so the on-state is unmistakable — color alone on a
-     26px glyph reads as "nothing happened" next to the labeled Plan/Talk
-     pill. This is the "fills when active" affordance the glyph comment
-     promised but was never wired. */
-  background: color-mix(in oklch, var(--accent) 16%, transparent);
-}
-.composer-fast.is-active:hover {
-  color: var(--accent);
-  background: color-mix(in oklch, var(--accent) 24%, transparent);
-}
-
 /* ════════════════════════════════════════════════════════════════════════════
    Codara UI kit — opt-in utility classes (additive; inline styles still work)
    Encodes the design language so the component layer can converge on one
@@ -2453,7 +2449,7 @@ a { color: inherit; }
 
 /* ── Icon button ─────────────────────────────────────────────────────────────
    Square glyph button for toolbars and row affordances. Transparent at rest,
-   ink-tint on hover — matches the .spark-tab__close / .composer-fast idiom.
+   ink-tint on hover — matches the .spark-tab__close idiom.
    Size via --spark-icon-btn-size (default 22px) for 20-26px targets. */
 /* Folder cards use backdrop-filter, which creates a stacking context. Lift the
    focused card so a workspace/folder action menu can float over the following

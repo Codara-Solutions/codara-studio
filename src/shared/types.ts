@@ -588,7 +588,7 @@ export interface AppSettings {
   // that runs on a GPT model: chat, planning, and workers. Off by default.
   // Anthropic sessions are unaffected and can never run a fast/priority tier;
   // resources/pi-cora/service-tier.ts strips one structurally.
-  openAiFastMode?: boolean;
+  openAiFastMode: boolean;
 }
 
 // Cora runs its manager and implementation workers through one pinned Pi
@@ -3648,7 +3648,6 @@ export interface CreateRunInput {
   chatBackend?: ChatBackendKind;
   chatModel?: string;
   chatMode?: ChatMode;
-  chatFastMode?: boolean;
   chatEffort?: AgentEffortLevel;
   coraExecutionPolicy?: CoraExecutionPolicy;
   chat1mContext?: boolean;

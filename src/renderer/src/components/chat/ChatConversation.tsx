@@ -61,8 +61,6 @@ interface ConversationMinimapEntry {
 // orchestration events, reconstructed by useRunExecutionRecord.
 type LiveToolCall = ExecutionToolCall;
 
-type SessionNote = { id: string; message: string; tone: "system" | "backend" };
-
 // Live worker composition for a `wait_for_workers` row, resolved against the
 // current run. A context rather than a prop: the row sits four components deep
 // inside the streamed execution trace, and a context read pierces the memo
@@ -103,8 +101,11 @@ export default function ChatConversation({ run }: { run: RunState }) {
   const items = useMemo(
     () =>
       groupCompletedActivity(
-        buildChatTimeline(run).filter((item) =>
-          shouldRenderTimelineItem(item, inspectableCalls, execution.hydrated)),
+        buildChatTimeline(run).filter(
+          (item) =>
+            !isRedundantParkedBackendFailure(item, run) &&
+            shouldRenderTimelineItem(item, inspectableCalls, execution.hydrated),
+        ),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
@@ -115,6 +116,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
       run.workerTasks,
       run.workerAttempts,
       run.steps,
+      run.managerTurnRecovery,
       run.conversationEpoch,
       run.createdAt,
     ],
@@ -198,7 +200,10 @@ export default function ChatConversation({ run }: { run: RunState }) {
   // a row; changing it refreshes visible rows without remounting the list or
   // disturbing the reader's scroll position.
   const renderContext = useMemo<ConversationRenderContext>(
-    () => ({ executionByCallId, finalAnswerByCallId }),
+    () => ({
+      executionByCallId,
+      finalAnswerByCallId,
+    }),
     [executionByCallId, finalAnswerByCallId],
   );
   // The result manifest is the worker's final-report envelope, written for
@@ -519,6 +524,58 @@ function shouldRenderTimelineItem(
   return inspectableCalls.has(timelineSparkCallId(item));
 }
 
+// Older builds persisted a synthesized "<backend> backend error" as a Cora
+// message as well as the failed SparkCall. A recoverable parked turn already
+// has an authoritative failed-call row and a Retry surface; rendering that
+// legacy message creates the duplicate error card seen in the original run.
+// New failures are never appended as dialogue by run-store, but hide the old
+// duplicate while its exact recovery token is still current.
+function isRedundantParkedBackendFailure(
+  item: ChatTimelineItem,
+  run: RunState,
+): boolean {
+  const recovery = run.managerTurnRecovery;
+  if (!recovery) return false;
+
+  // Each quiet native retry is a separate SparkCall for auditability. Once
+  // that lineage parks, show only its final failed row (the one the recovery
+  // token names), not one identical "Turn failed" row per bounded attempt.
+  if (
+    item.kind === "tool" &&
+    item.activity === "manager" &&
+    item.status === "failed"
+  ) {
+    const itemCallId = timelineSparkCallId(item);
+    if (itemCallId === recovery.failedSparkCallId) return false;
+    const itemCall = run.sparkCalls.find((call) => call.id === itemCallId);
+    const failedCall = run.sparkCalls.find(
+      (call) => call.id === recovery.failedSparkCallId,
+    );
+    const itemInputs = itemCall?.inputMessageIds;
+    const failedInputs = failedCall?.inputMessageIds;
+    return Boolean(
+      itemCall &&
+        failedCall &&
+        itemCall.status === "failed" &&
+        failedCall.status === "failed" &&
+        itemCall.mode === failedCall.mode &&
+        (itemCall.conversationEpoch ?? 0) ===
+          (failedCall.conversationEpoch ?? 0) &&
+        itemInputs &&
+        failedInputs &&
+        itemInputs.length > 0 &&
+        itemInputs.length === failedInputs.length &&
+        itemInputs.every((id, index) => id === failedInputs[index]),
+    );
+  }
+
+  if (item.kind !== "message" || item.author !== "spark") return false;
+  if (!backendFailureDetails(cleanLegacySparkOutput(item.text))) return false;
+  if (item.backendTurnId) return item.backendTurnId === recovery.failedSparkCallId;
+  if (item.targetTurnId) return item.targetTurnId === recovery.failedSparkCallId;
+  return true;
+}
+
 function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {
   const grouped: ConversationItem[] = [];
   let buffer: ToolItem[] = [];
@@ -644,9 +701,17 @@ const MessageTurn = React.memo(function MessageTurn({
     );
   }
   if (backendFailure) {
+    const quotaFailure = backendFailure.kind === "quota";
     return (
       <SparkTurn tag={<IssueChip />}>
-        <BackendFailureMessage detail={backendFailure.detail} hint={backendFailure.hint} />
+        <BackendFailureMessage
+          detail={backendFailure.detail}
+          hint={
+            quotaFailure
+              ? "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message."
+              : backendFailure.hint
+          }
+        />
       </SparkTurn>
     );
   }
@@ -739,38 +804,99 @@ function CheckGlyph() {
   );
 }
 
-function backendFailureDetails(text: string): { detail: string; hint: string } | null {
+function backendFailureDetails(
+  text: string,
+): { detail: string; hint: string; kind: "auth" | "billing" | "capacity" | "quota" | "other" } | null {
   const match = /^(Codex|Claude Code|Cora Pi) backend error:\s*(.+)$/is.exec(text.trim());
   const source = match?.[1]?.trim();
   const detail = match?.[2]?.trim();
   if (!source || !detail) return null;
-  if (/OAuth refresh failed for anthropic/i.test(detail)) {
+  const normalizedDetail = detail.replace(/[_-]+/g, " ");
+  const authFailure =
+    /OAuth refresh failed|not authenticated|no OAuth access token|OAuth session expired|token (?:has )?expired|invalid api key|missing api key|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)/i.test(
+      normalizedDetail,
+    );
+  // Billing/Extra Usage declines are tested BEFORE auth and before quota, the
+  // same order failure-taxonomy.ts uses for its `subscription` kind. An
+  // envelope carrying both a billing phrase and an auth-ish word must not park
+  // as "subscription" in main while rendering an "auth" card here. It is also
+  // not a quota window: no reset ever clears it, so the quota branch's "usage
+  // limit" wording must not claim it and promise a reset that never comes.
+  // Vocabulary matches the taxonomy and the Settings note ("Extra Usage",
+  // "third-party harness use").
+  if (
+    /extra usage|claude\.ai\/settings\/usage|credit balance is too low|insufficient credits?\b|billing (?:error|issue|problem)/i.test(
+      normalizedDetail,
+    )
+  ) {
     return {
-      detail,
+      detail: "The Claude account has no Extra Usage available for third-party harness use.",
+      hint: "Anthropic bills third-party harness use against Extra Usage, and this Claude account has none available. Enable Extra Usage at claude.ai/settings/usage, switch the active Claude account in Settings, or use Codex-provider workers.",
+      kind: "billing",
+    };
+  }
+  if (authFailure && /anthropic/i.test(detail)) {
+    return {
+      detail: "The selected Anthropic subscription could not be authenticated.",
       hint: "Reconnect your Anthropic subscription for Cora · Pi, then retry this message.",
+      kind: "auth",
     };
   }
-  if (/OAuth refresh failed for openai-codex/i.test(detail)) {
+  if (authFailure && /openai-codex/i.test(detail)) {
     return {
-      detail,
+      detail: "The selected Codex subscription could not be authenticated.",
       hint: "Reconnect your Codex subscription for Cora · Pi, then retry this message.",
+      kind: "auth",
     };
   }
-  if (/overloaded|capacity|temporarily unavailable|service unavailable/i.test(detail)) {
+  if (authFailure) {
     return {
-      detail,
-      hint: "This is a temporary provider-capacity error, not a subscription sign-in failure. Wait a moment, then retry this message.",
+      detail: "The selected provider account could not be authenticated.",
+      hint:
+        source === "Cora Pi"
+          ? "Reconnect the selected subscription in Settings, then retry this message."
+          : `Reconnect the ${source} account, then retry this message.`,
+      kind: "auth",
+    };
+  }
+  // A quota envelope can append generic service/transport prose, so its
+  // authoritative 429/usage marker must win over capacity detection.
+  if (
+    /rate ?limit|(?:status|code|error|http)[^A-Za-z0-9]{0,10}429\b|too many requests|insufficient quota|quota (?:exceeded|exhausted|reached|hit)|usage limit/i.test(
+      normalizedDetail,
+    )
+  ) {
+    return {
+      detail: "The selected provider account reached a usage limit.",
+      hint: "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message.",
+      kind: "quota",
+    };
+  }
+  if (
+    /(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:500|502|503|504|529)\b|overloaded|capacity|high demand|servers? (?:are )?(?:too )?busy|temporarily unavailable|service unavailable/i.test(
+      normalizedDetail,
+    )
+  ) {
+    return {
+      detail: "The provider is temporarily unavailable or at capacity.",
+      hint: "Wait a moment and retry this saved turn, or switch to another compatible account.",
+      kind: "capacity",
     };
   }
   return {
-    detail,
-    hint: source === "Cora Pi"
-      ? "Check the selected model's subscription sign-in, then retry this message."
-      : `Retry the message after the ${source} session is available.`,
+    detail: "The provider could not complete this turn.",
+    hint: `Retry this message. If the problem continues, inspect the ${source} technical details in Studio.`,
+    kind: "other",
   };
 }
 
-function BackendFailureMessage({ detail, hint }: { detail: string; hint: string }) {
+function BackendFailureMessage({
+  detail,
+  hint,
+}: {
+  detail: string;
+  hint: string;
+}) {
   return (
     <div
       className="cora-message cora-message--error"
@@ -782,26 +908,6 @@ function BackendFailureMessage({ detail, hint }: { detail: string; hint: string 
       <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
       <div style={BACKEND_FAILURE_HINT_STYLE}>{hint}</div>
     </div>
-  );
-}
-
-function LiveSessionDetails({ notes }: { notes: SessionNote[] }) {
-  return (
-    <details style={LIVE_DETAILS_STYLE}>
-      <summary style={LIVE_DETAILS_SUMMARY_STYLE}>
-        Technical details <span style={LIVE_DETAILS_COUNT_STYLE}>{notes.length}</span>
-      </summary>
-      <div style={LIVE_NOTE_LIST_STYLE}>
-        {notes.map((note) => (
-          <div key={note.id} style={LIVE_NOTE_STYLE}>
-            <span style={LIVE_NOTE_LABEL_STYLE}>
-              {note.tone === "backend" ? "backend" : "system"}
-            </span>
-            <span>{note.message}</span>
-          </div>
-        ))}
-      </div>
-    </details>
   );
 }
 
@@ -1641,10 +1747,11 @@ function ManagerActivityDisclosure({
 // than a disclosure. Streamed prose is full-size Markdown identical to the
 // final persisted message (so completion causes no visual jump); tool calls
 // appear as quiet single lines in provider order, with earlier calls of a
-// burst folded behind a "+N earlier actions" toggle; backend/system notes
-// stay behind the same "Technical details" affordance the completed trace
-// uses. The slim "Working for Ns" header hands off to the completed
-// disclosure's "Worked for Ns" line in the same position.
+// burst folded behind a "+N earlier actions" toggle. Backend/system notes are
+// kept in the run record but are never rendered: they are runtime bookkeeping
+// ("Cora Pi session ready · …"), not conversation. The slim "Working for Ns"
+// header hands off to the completed disclosure's "Worked for Ns" line in the
+// same position.
 function AssistantLiveTurn({
   item,
   executionTurn,
@@ -1661,9 +1768,6 @@ function AssistantLiveTurn({
         finalAnswer,
       )
     : [];
-  const notes = blocks.filter(
-    (block): block is Extract<ExecutionBlock, { kind: "note" }> => block.kind === "note",
-  );
   const segments = liveTurnSegments(blocks);
   const waiting = segments.length === 0;
   return (
@@ -1673,15 +1777,29 @@ function AssistantLiveTurn({
         data-manager-call-id={sparkCallId}
         style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}
       >
-        <div style={WORKING_LINE_STYLE}>
-          <WorkingDots />
-          <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
-            Working<ElapsedSince since={item.at} />
-          </span>
-          {waiting && (item.detail || item.title) ? (
-            <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail || item.title}</span>
-          ) : null}
-        </div>
+        {item.awaitingReply ? (
+          // The turn is open but suspended inside ask_user: the run header
+          // already says "Needs you", so this line must agree with it. No
+          // pulsing dots, no elapsed ticker — a working timer here would
+          // claim activity that is not happening until the user answers.
+          <div style={WORKING_LINE_STYLE}>
+            <StatusDot color="var(--warn)" pulse={false} size={6} />
+            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+            {item.detail ? (
+              <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
+            ) : null}
+          </div>
+        ) : (
+          <div style={WORKING_LINE_STYLE}>
+            <WorkingDots />
+            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
+              Working<ElapsedSince since={item.at} />
+            </span>
+            {waiting && (item.detail || item.title) ? (
+              <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail || item.title}</span>
+            ) : null}
+          </div>
+        )}
         {segments.map((segment) => {
           if (segment.kind === "text") {
             return (
@@ -1704,7 +1822,6 @@ function AssistantLiveTurn({
             </div>
           );
         })}
-        {notes.length > 0 && <LiveSessionDetails notes={notes} />}
       </div>
     </SparkTurn>
   );
@@ -1810,9 +1927,10 @@ function ExecutionTrace({
     blocksInTraceWindow(turn.blocks, window),
     finalAnswer,
   );
-  const notes = visibleBlocks.filter(
-    (block): block is Extract<ExecutionBlock, { kind: "note" }> => block.kind === "note",
-  );
+  // Notes stay in the record and are counted here, but nothing renders them:
+  // a slice that holds only notes still means the turn produced something, so
+  // the waiting ellipsis below must not claim otherwise.
+  const noteCount = visibleBlocks.filter((block) => block.kind === "note").length;
   const primary = visibleBlocks.filter((block) => block.kind !== "note");
   return (
     <div style={EXECUTION_TRACE_STYLE} data-testid={`execution-trace-${turn.sparkCallId}`}>
@@ -1839,8 +1957,7 @@ function ExecutionTrace({
       })}
       {/* The waiting ellipsis means "nothing streamed YET"; a windowed slice
           of settled history that happens to be empty is not waiting. */}
-      {primary.length === 0 && notes.length === 0 && !window && <LiveEllipsis />}
-      {notes.length > 0 && <LiveSessionDetails notes={notes} />}
+      {primary.length === 0 && noteCount === 0 && !window && <LiveEllipsis />}
     </div>
   );
 }
@@ -3395,58 +3512,6 @@ const LIVE_TOOL_PRE_STYLE: React.CSSProperties = {
   overflow: "auto",
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
-};
-
-const LIVE_NOTE_LIST_STYLE: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 4,
-  marginTop: 2,
-};
-
-const LIVE_DETAILS_STYLE: React.CSSProperties = {
-  marginTop: 2,
-  borderTop: "1px solid color-mix(in oklab, var(--rule-soft) 72%, transparent)",
-  paddingTop: 6,
-};
-
-const LIVE_DETAILS_SUMMARY_STYLE: React.CSSProperties = {
-  width: "fit-content",
-  color: "var(--muted)",
-  fontSize: 10.5,
-  lineHeight: 1.4,
-  cursor: "default",
-  userSelect: "none",
-};
-
-const LIVE_DETAILS_COUNT_STYLE: React.CSSProperties = {
-  marginLeft: 4,
-  color: "var(--muted-2)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-};
-
-const LIVE_NOTE_STYLE: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "auto minmax(0, 1fr)",
-  alignItems: "start",
-  gap: 6,
-  border: "1px solid var(--rule-soft)",
-  borderRadius: "var(--radius-control, 7px)",
-  background: "color-mix(in oklab, var(--ink) 3%, transparent)",
-  color: "var(--muted)",
-  fontSize: 11,
-  lineHeight: 1.4,
-  padding: "4px 7px",
-};
-
-const LIVE_NOTE_LABEL_STYLE: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase",
-  color: "var(--muted-2)",
 };
 
 const LIVE_ERROR_STYLE: React.CSSProperties = {

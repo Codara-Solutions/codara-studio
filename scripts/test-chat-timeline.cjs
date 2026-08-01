@@ -11,19 +11,27 @@
 // attempt in flight, still queued).
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
+const CHAT_CONVERSATION = path.join(
+  ROOT, "src", "renderer", "src", "components", "chat", "ChatConversation.tsx",
+);
 const TIMELINE = path.join(ROOT, "src", "renderer", "src", "components", "chat", "timeline.ts");
 const TOOL_LABELS = path.join(ROOT, "src", "renderer", "src", "components", "chat", "tool-labels.ts");
+const RUN_FORMAT = path.join(ROOT, "src", "renderer", "src", "components", "runs", "run-format.ts");
 
 async function loadContract() {
   const out = await esbuild.build({
     stdin: {
       contents:
         `export * from ${JSON.stringify(TIMELINE)};\n` +
-        `export { waitForWorkersTaskIds } from ${JSON.stringify(TOOL_LABELS)};`,
+        `export { waitForWorkersTaskIds } from ${JSON.stringify(TOOL_LABELS)};\n` +
+        // The run graph's own projection: the chip, the chat row and the graph
+        // node must agree on what counts as a running worker.
+        `export { deriveAgentStatus, attemptStatusColor } from ${JSON.stringify(RUN_FORMAT)};`,
       resolveDir: ROOT,
       loader: "ts",
     },
@@ -180,6 +188,24 @@ function wave() {
   };
 }
 
+function step(id, index, title, status, workerTaskIds) {
+  return {
+    id,
+    runId: "run-1",
+    index,
+    title,
+    goal: title,
+    kind: "worker_batch",
+    status,
+    plannedAgents: [],
+    acceptanceCriteria: [],
+    verificationCommands: [],
+    workerTaskIds,
+    createdAt: at(49),
+    updatedAt: at(56),
+  };
+}
+
 function workerRows(timeline) {
   return timeline.filter((item) => item.kind === "tool" && item.activity === "worker");
 }
@@ -258,9 +284,13 @@ async function main() {
 
   test("attempt denominators match the run inspector's cap", () => {
     const timeline = T.buildChatTimeline(run(Object.values(wave())));
+    // The replacement's attempt is prompt_ready: prepared, never spawned. It
+    // reads queued, not live — the row must not paint an agent that does not
+    // exist (the terminal behind it would be an empty shell).
     const inFlight = rowFor(timeline, "Currencies and commodities");
-    assert.equal(inFlight.status, "started");
-    assert.equal(inFlight.tone, "live");
+    assert.equal(inFlight.status, "queued");
+    assert.equal(inFlight.tone, "queued");
+    assert.equal(T.isToolRowTicking(inFlight), false);
     // The attempt has not launched and reports no model; the row names what
     // its task will run rather than falling back to the runtime ("Codex").
     assert.equal(inFlight.detail, "Sol · attempt 2 of 3");
@@ -540,6 +570,356 @@ async function main() {
     assert.equal(T.waitForWorkersTaskIds("codara_spawn_workers", { workers: [] }), null);
     assert.equal(T.waitForWorkersTaskIds("codara_wait_for_workers", {}), null);
     assert.equal(T.waitForWorkersTaskIds("codara_wait_for_workers", { worker_task_ids: [] }), null);
+  });
+
+  // ── The composer's worker status strip ────────────────────────────────────
+  //
+  // Fixture distilled from run-ms9ikoef-mnucvq: step 1's worker failed on a
+  // billing rejection, its Codex replacement was aborted by a steering
+  // message, the run force-paused for a note, and step 2's worker was planned
+  // with its prompt written but never spawned. The strip announced
+  // "Sonnet 5 working · Research Spain ... · steering queues" beside a header
+  // that read "Paused · step 1 of 2", and the user opened an empty worker
+  // terminal looking for the agent it promised.
+  function pausedRunWithQueuedWorker(extra = {}) {
+    const state = run(
+      [
+        {
+          tasks: [
+            task("task-s1-dead", { title: "Research today's Spain news", status: "cancelled" }),
+            task("task-s1-live", {
+              title: "Research today's Spain news",
+              supersedesTaskId: "task-s1-dead",
+              runtimePreference: "codex",
+              modelHint: "gpt-5.6-sol",
+              status: "needs_review",
+            }),
+          ],
+          attempts: [
+            attempt("attempt-s1-1", "task-s1-dead", {
+              model: "claude-opus-5",
+              error: "400 invalid_request_error: third-party apps draw from extra usage",
+              finishedAt: at(2),
+            }),
+            attempt("attempt-s1-2", "task-s1-live", {
+              runtime: "codex",
+              model: "gpt-5.6-sol",
+              error: "Pi worker was interrupted.",
+              finishedAt: at(33),
+            }),
+          ],
+        },
+        {
+          tasks: [
+            task("task-s2", {
+              title: "Research Spain news today",
+              stepId: "step-2",
+              modelHint: "claude-sonnet-5",
+              status: "queued",
+            }),
+          ],
+          // Prepared, never launched: no model, no clock, no process.
+          attempts: [
+            attempt("attempt-s2", "task-s2", {
+              status: "prompt_ready",
+              model: undefined,
+              startedAt: undefined,
+            }),
+          ],
+        },
+      ],
+      {
+        status: "paused",
+        autopilot: { status: "paused", updatedAt: at(33) },
+        steps: [
+          step("step-1", 1, "Research today's Spain news", "reviewing", [
+            "task-s1-dead",
+            "task-s1-live",
+          ]),
+          step("step-2", 2, "Research Spain news today", "ready", ["task-s2"]),
+        ],
+        ...extra,
+      },
+    );
+    return state;
+  }
+
+  test("a prepared-but-never-spawned worker in a paused run reads as queued", () => {
+    const activity = T.deriveComposerWorkerActivity(pausedRunWithQueuedWorker());
+    assert.deepEqual(activity, {
+      state: "queued",
+      // The task asked for Sonnet; the spawn chokepoint coerces it onto the
+      // roster, so the strip names the model that will actually run.
+      engines: ["Opus 5"],
+      titles: ["Research Spain news today"],
+      runPaused: true,
+    });
+  });
+
+  test("a launched worker is the only thing that reads as live", () => {
+    for (const status of ["launching", "running", "finishing"]) {
+      const state = pausedRunWithQueuedWorker();
+      const live = state.workerAttempts.find((entry) => entry.id === "attempt-s2");
+      live.status = status;
+      live.model = "claude-opus-5";
+      live.startedAt = at(40);
+      const activity = T.deriveComposerWorkerActivity(state);
+      assert.equal(activity.state, "live", `${status} must read as live`);
+      assert.deepEqual(activity.engines, ["Opus 5"]);
+      assert.equal(activity.runPaused, true, "a live worker does not un-pause the run");
+    }
+    for (const status of ["preparing", "prompt_ready"]) {
+      const state = pausedRunWithQueuedWorker();
+      state.workerAttempts.find((entry) => entry.id === "attempt-s2").status = status;
+      assert.equal(
+        T.deriveComposerWorkerActivity(state).state,
+        "queued",
+        `${status} means a prompt on disk, not a process`,
+      );
+    }
+  });
+
+  test("a claimed task reads as live before its attempt row lands", () => {
+    const state = pausedRunWithQueuedWorker();
+    state.workerTasks.find((entry) => entry.id === "task-s2").status = "claimed";
+    assert.equal(T.deriveComposerWorkerActivity(state).state, "live");
+  });
+
+  test("a worker between attempts is queued, never working", () => {
+    const state = pausedRunWithQueuedWorker();
+    // The prepared attempt died and the store owes a retry.
+    const attemptRow = state.workerAttempts.find((entry) => entry.id === "attempt-s2");
+    attemptRow.status = "failed";
+    attemptRow.error = "Pi worker runtime stopped.";
+    state.workerTasks.find((entry) => entry.id === "task-s2").status = "retry_queued";
+    const activity = T.deriveComposerWorkerActivity(state);
+    assert.equal(activity.state, "queued");
+    assert.deepEqual(activity.engines, ["Opus 5"]);
+  });
+
+  test("a finished run stops advertising work it will never launch", () => {
+    for (const status of ["complete", "failed", "cancelled"]) {
+      const state = pausedRunWithQueuedWorker({ status });
+      assert.equal(
+        T.deriveComposerWorkerActivity(state),
+        null,
+        `a ${status} run has no queued worker to promise`,
+      );
+    }
+  });
+
+  test("a settled run says nothing about workers", () => {
+    const state = pausedRunWithQueuedWorker();
+    state.workerTasks = state.workerTasks.filter((entry) => entry.id !== "task-s2");
+    state.workerAttempts = state.workerAttempts.filter((entry) => entry.id !== "attempt-s2");
+    assert.equal(T.deriveComposerWorkerActivity(state), null);
+    assert.equal(T.deriveComposerWorkerActivity(undefined), null);
+  });
+
+  test("a fleet reports its real mix and every live worker", () => {
+    const state = run([
+      {
+        tasks: [
+          task("task-a", { title: "A", status: "running" }),
+          task("task-b", { title: "B", status: "running" }),
+          task("task-c", { title: "C", runtimePreference: "codex", status: "running" }),
+        ],
+        attempts: [
+          attempt("attempt-a", "task-a", { status: "running", model: "claude-opus-5" }),
+          attempt("attempt-b", "task-b", { status: "running", model: "claude-fable-5" }),
+          attempt("attempt-c", "task-c", { status: "running", runtime: "codex", model: "gpt-5.6-sol" }),
+        ],
+      },
+    ]);
+    const activity = T.deriveComposerWorkerActivity(state);
+    assert.equal(activity.state, "live");
+    assert.deepEqual(activity.engines, ["Opus 5", "Fable 5", "Sol"]);
+    assert.equal(activity.runPaused, false);
+  });
+
+  test("a loom worker keeps the model its automation pinned", () => {
+    const state = pausedRunWithQueuedWorker({
+      executionMode: "direct",
+      automationId: "auto-1",
+    });
+    // Automations vet their own model, so the roster coercion must not rewrite
+    // it — the strip shows what the loom will really launch.
+    assert.deepEqual(T.deriveComposerWorkerActivity(state).engines, ["Sonnet 5"]);
+  });
+
+  test("chip, chat row and graph node agree that a prepared attempt is not running", () => {
+    const state = pausedRunWithQueuedWorker();
+    const task = state.workerTasks.find((entry) => entry.id === "task-s2");
+    const prepared = state.workerAttempts.find((entry) => entry.id === "attempt-s2");
+
+    // 1. the composer chip
+    assert.equal(T.deriveComposerWorkerActivity(state).state, "queued");
+    // 2. the chat row
+    const row = rowFor(T.buildChatTimeline(state), "Research Spain news today");
+    assert.equal(row.status, "queued");
+    assert.equal(row.tone, "queued");
+    assert.equal(row.detail, "Opus 5 · queued");
+    assert.equal(T.isToolRowTicking(row), false);
+    // 3. the graph node + the inspector's attempt dot
+    assert.equal(T.deriveAgentStatus(task, prepared, "ready"), "queued");
+    assert.equal(T.attemptStatusColor("prompt_ready"), "var(--muted)");
+    assert.equal(T.attemptStatusColor("preparing"), "var(--muted)");
+
+    // And all three flip together the moment a process exists.
+    prepared.status = "running";
+    prepared.model = "claude-opus-5";
+    prepared.startedAt = at(40);
+    assert.equal(T.deriveComposerWorkerActivity(state).state, "live");
+    const liveRow = rowFor(T.buildChatTimeline(state), "Research Spain news today");
+    assert.equal(liveRow.status, "started");
+    assert.equal(liveRow.tone, "live");
+    assert.equal(T.deriveAgentStatus(task, prepared, "running"), "running");
+    assert.equal(T.attemptStatusColor("running"), "var(--accent)");
+    assert.equal(T.attemptStatusColor("launching"), "var(--accent)");
+    assert.equal(T.attemptStatusColor("finishing"), "var(--accent)");
+  });
+
+  test("a queued worker row names the model the spawn will coerce it onto", () => {
+    const state = pausedRunWithQueuedWorker();
+    const timeline = T.buildChatTimeline(state);
+    const row = rowFor(timeline, "Research Spain news today");
+    assert.equal(row.meta.find((meta) => meta.label === "Model").value, "Opus 5");
+    const step = timeline.filter((item) => item.kind === "step").find((item) => item.id === "step-2");
+    assert.equal(step.workers[0].model, "claude-opus-5");
+  });
+
+  // ── Awaiting-answer manager turns (run-msafk7yu-zkudx6) ───────────────────
+  // A live CLI manager holds its RPC turn open while suspended inside
+  // ask_user, so the SparkCall stays "started" while the run is "blocked".
+  // The header says "Needs you"; the timeline's final live segment must not
+  // simultaneously claim Cora is working.
+
+  const managerCall = (extra = {}) => ({
+    id: "spark-live",
+    runId: "run-1",
+    mode: "chat",
+    model: "claude-opus-5",
+    status: "started",
+    createdAt: at(30),
+    ...extra,
+  });
+  const askQuestion = (extra = {}) => ({
+    id: "q-1",
+    runId: "run-1",
+    author: "spark",
+    kind: "question",
+    message: "Please approve the plan: 1. fix timeline (timeline.ts) 2. validate asks",
+    questionOptions: [],
+    attachments: [],
+    createdAt: at(40),
+    ...extra,
+  });
+  const managerRows = (timeline) =>
+    timeline.filter((item) => item.kind === "tool" && item.activity === "manager");
+
+  test("an open question turns the live manager segment into a waiting row", () => {
+    const state = run([], {
+      status: "blocked",
+      blockedOn: {
+        questionMessageId: "q-1",
+        category: "plan_approval",
+        previousStatus: "reviewing",
+        resumeStatus: "reviewing",
+        source: "live_manager_rpc",
+        resumeStrategy: "active_rpc",
+        managerMode: "chat",
+        blockedAt: at(40),
+      },
+      sparkCalls: [managerCall()],
+      humanMessages: [askQuestion()],
+      steps: [],
+    });
+    // Both status surfaces must agree: the header says "Needs you"...
+    assert.equal(T.describeRunStatus(state).label, "Needs you");
+    // ...and the timeline's final live segment says waiting, not working.
+    const rows = managerRows(T.buildChatTimeline(state));
+    assert.equal(rows.length, 2, "the question splits the turn into two segments");
+    const final = rows[rows.length - 1];
+    assert.equal(final.tone, "live");
+    assert.equal(final.awaitingReply, true);
+    assert.equal(final.title, "Waiting on your reply");
+    assert.doesNotMatch(final.detail, /Following the thread/);
+    assert.doesNotMatch(`${final.title} ${final.detail}`, /[Ww]orking/);
+    assert.equal(T.isToolRowTicking(final), false);
+    // The pre-question slice is settled history and never claims to wait.
+    assert.equal(rows[0].awaitingReply, undefined);
+  });
+
+  test("the working ticker returns once the answer lands", () => {
+    const state = run([], {
+      status: "running",
+      sparkCalls: [managerCall()],
+      humanMessages: [
+        askQuestion(),
+        {
+          id: "a-1",
+          runId: "run-1",
+          author: "user",
+          kind: "answer",
+          answersMessageId: "q-1",
+          message: "Approve all of it.",
+          questionOptions: [],
+          attachments: [],
+          createdAt: at(45),
+        },
+      ],
+      steps: [],
+    });
+    const rows = managerRows(T.buildChatTimeline(state));
+    const final = rows[rows.length - 1];
+    assert.equal(final.awaitingReply, undefined);
+    assert.equal(final.title, "Cora is working");
+    assert.match(final.detail, /Following the thread/);
+  });
+
+  test("a blocked run whose call already completed never marks awaiting", () => {
+    const state = run([], {
+      status: "blocked",
+      blockedOn: {
+        questionMessageId: "q-1",
+        category: "plan_approval",
+        previousStatus: "reviewing",
+        resumeStatus: "reviewing",
+        source: "manager_decision",
+        resumeStrategy: "schedule_manager",
+        managerMode: "chat",
+        blockedAt: at(40),
+      },
+      sparkCalls: [managerCall({ status: "completed", completedAt: at(41), durationMs: 11000 })],
+      humanMessages: [askQuestion()],
+      steps: [],
+    });
+    const rows = managerRows(T.buildChatTimeline(state));
+    for (const row of rows) {
+      assert.equal(row.awaitingReply, undefined);
+      assert.notEqual(row.tone, "live");
+    }
+  });
+
+  // The component-side wiring the projection cannot see: AssistantLiveTurn
+  // must gate the pulsing "Working for Ns" header on awaitingReply, so the
+  // waiting row renders without a ticker (no WorkingDots, no ElapsedSince).
+  test("AssistantLiveTurn suppresses the working ticker for awaiting-reply rows", () => {
+    const source = fs.readFileSync(CHAT_CONVERSATION, "utf8");
+    const start = source.indexOf("function AssistantLiveTurn");
+    const end = source.indexOf("function liveTurnSegments", start);
+    assert.notEqual(start, -1, "AssistantLiveTurn must exist");
+    assert.notEqual(end, -1, "AssistantLiveTurn boundary must exist");
+    const component = source.slice(start, end);
+    assert.match(component, /item\.awaitingReply \? \(/, "the header must branch on awaitingReply");
+    const awaitingBranch = component.slice(
+      component.indexOf("item.awaitingReply ? ("),
+      component.indexOf(") : ("),
+    );
+    assert.doesNotMatch(awaitingBranch, /WorkingDots|ElapsedSince|Working</,
+      "the awaiting branch must not render the working ticker");
+    const elseBranch = component.slice(component.indexOf(") : ("));
+    assert.match(elseBranch, /Working<ElapsedSince/, "the live branch keeps its ticker");
   });
 
   console.log(`\n${passed} chat timeline contract tests passed`);

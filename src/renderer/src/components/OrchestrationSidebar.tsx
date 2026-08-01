@@ -165,7 +165,6 @@ export default function OrchestrationSidebar({
             chatConfig.model !== undefined ||
             chatConfig.mode !== undefined ||
             chatConfig.effort !== undefined ||
-            chatConfig.fastMode !== undefined ||
             chatConfig.oneMillionContext !== undefined),
       );
       // A board-minted run that never had a conversation is reused for the
@@ -186,7 +185,6 @@ export default function OrchestrationSidebar({
           chatModel: chatConfig?.model,
           chatMode: chatConfig?.mode,
           chatEffort: chatConfig?.effort,
-          chatFastMode: chatConfig?.fastMode,
           chat1mContext: chatConfig?.oneMillionContext,
         });
         runId = created.id;

@@ -12,17 +12,29 @@ export function effectiveChatMode(mode: ChatMode | undefined): ChatMode {
 }
 
 export interface ChatFeatureFlags {
-  chatFastMode?: boolean;
   chat1mContext?: boolean;
 }
 
 export interface NormalizedChatFeatureFlags {
-  chatFastMode: boolean;
   chat1mContext: boolean;
 }
 
+// Fast mode is one global setting (AppSettings.openAiFastMode), not a per-chat
+// flag: the composer's flash button writes it, and the old per-chat pill's
+// chatFastMode write path is gone.
+// These two helpers remain because resolveChatBackendConfig still decides, per
+// backend, whether the Settings value means anything for that session.
 export function chatBackendSupportsFastMode(backend: ChatBackendKind): boolean {
   return backend === "codex";
+}
+
+/**
+ * Whether a chat model id belongs to OpenAI. The composer's fast-mode toggle
+ * is the only OpenAI-gated control: Anthropic fast mode must never exist, so
+ * anything that is not a gpt-* id answers false.
+ */
+export function chatModelIsOpenAi(model: string | undefined): boolean {
+  return model?.trim().toLowerCase().startsWith("gpt-") === true;
 }
 
 export function effectiveChatFastMode(
@@ -41,7 +53,6 @@ export function normalizeChatFeatureFlags(
   flags: ChatFeatureFlags,
 ): NormalizedChatFeatureFlags {
   return {
-    chatFastMode: effectiveChatFastMode(backend, flags.chatFastMode),
     chat1mContext: effectiveChatOneMillionContext(backend),
   };
 }

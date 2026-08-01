@@ -589,7 +589,12 @@ export default function BoardView({
                 onOpenCardRun={onOpenCardRun}
                 onOpenWorkerTerminal={(workerTaskId) => {
                   if (!onOpenWorkerTerminal(workerTaskId)) {
-                    showNotice("That worker's terminal is no longer open");
+                    // Two ways to land here, and the notice must not pick the
+                    // wrong one: the worker has not launched yet (no pane is
+                    // created until it does), or its pane was closed.
+                    showNotice(
+                      "No terminal for that worker — it hasn't launched yet, or its pane was closed",
+                    );
                   }
                 }}
                 onNoticeError={showNotice}

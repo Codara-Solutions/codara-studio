@@ -40,6 +40,7 @@ const EMPTY_SETTINGS: AppSettings = {
   agentMcpPiWorkerIds: [],
   playwrightMcpAutoInstall: true,
   autopilotSandbox: false,
+  openAiFastMode: false,
 };
 
 let cache: AppState | null = null;
@@ -215,6 +216,7 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     agentMcpPiWorkerIds: normalizeStringArray(settings.agentMcpPiWorkerIds),
     playwrightMcpAutoInstall: settings.playwrightMcpAutoInstall !== false,
     autopilotSandbox: settings.autopilotSandbox === true,
+    openAiFastMode: settings.openAiFastMode === true,
   };
 }
 
