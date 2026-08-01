@@ -822,6 +822,9 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  void import("./cora-cli-install")
+    .then(({ refreshManagedCoraCliInstall }) => refreshManagedCoraCliInstall())
+    .catch((err) => console.warn("[main] Cora CLI refresh failed:", err));
   try {
     const { recoverGitHubPullRequestImports } = await import(
       "./github-pull-request-workspace"

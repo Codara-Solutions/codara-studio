@@ -1,4 +1,5 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import type { CoraCliInstallStatus } from "@shared/cora-cli";
 import type { NativeCliTerminalSetupStatus } from "@shared/native-cli-terminal";
 import type {
   AppSettings,
@@ -1238,6 +1239,8 @@ function GeneralSettings({
         </div>
       ) : null}
 
+      <CommandLineSettings />
+
       {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
     </div>
   );
@@ -1734,6 +1737,184 @@ const CORA_CLI_EXAMPLES = [
 // Consent gate for the shell setup: nothing is written to the user's shell
 // startup file until they press the button here, and the exact block is shown
 // before they do.
+function CommandLineSettings() {
+  const [status, setStatus] = useState<CoraCliInstallStatus | null>(null);
+  const [busy, setBusy] = useState<"install" | "uninstall" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [copiedExample, setCopiedExample] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      setStatus(await window.spark.coraCli.status());
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    void window.spark.coraCli
+      .status()
+      .then((next) => {
+        if (mounted) setStatus(next);
+      })
+      .catch((cause) => {
+        if (mounted) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const mutate = async (action: "install" | "uninstall") => {
+    setBusy(action);
+    setError(null);
+    try {
+      const result =
+        action === "install"
+          ? await window.spark.coraCli.install()
+          : await window.spark.coraCli.uninstall();
+      setStatus(result.status);
+      if (!result.ok) setError(result.error);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const installLabel =
+    status?.state === "needs-repair" || status?.state === "needs-path"
+      ? "Repair command"
+      : "Install command";
+
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+      <SectionTitle
+        title="Command line"
+        detail="Install the cora command so Claude, Codex, and your own terminals can start Cora sessions and spawn or steer sibling workers. It talks only to this user's running Codara Studio over the authenticated loopback socket."
+      />
+      <div
+        style={{
+          display: "grid",
+          gap: 8,
+          padding: "12px 14px",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 8,
+        }}
+      >
+        <div style={{ color: "var(--ink)", fontSize: 12, lineHeight: 1.45 }}>
+          {status?.message ?? "Inspecting the Cora command…"}
+        </div>
+        {status?.commandPath ? (
+          <code className="spark-mono" style={{ color: "var(--muted)", fontSize: 11 }}>
+            {status.commandPath}
+          </code>
+        ) : null}
+        {status?.pathInstruction ? (
+          <div style={{ display: "grid", gap: 6 }}>
+            <code
+              className="spark-mono"
+              style={{
+                overflowWrap: "anywhere",
+                color: "var(--muted)",
+                fontSize: 11,
+              }}
+            >
+              {status.pathInstruction}
+            </code>
+            <div>
+              <FooterButton
+                onClick={() => {
+                  void window.spark.clipboard.writeText(status.pathInstruction ?? "");
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1400);
+                }}
+              >
+                {copied ? "Copied" : "Copy PATH command"}
+              </FooterButton>
+            </div>
+          </div>
+        ) : null}
+        {status?.state === "installed" ? (
+          <div style={{ display: "grid", gap: 7 }}>
+            <div style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.45 }}>
+              Start a session, delegate a worker, or steer its fleet. Replace{" "}
+              <code className="spark-mono">&lt;run&gt;</code> with a run ID or prefix.
+            </div>
+            {CORA_CLI_EXAMPLES.map((command) => (
+              <div
+                key={command}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) auto",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <code
+                  className="spark-mono"
+                  style={{
+                    minWidth: 0,
+                    overflowWrap: "anywhere",
+                    color: "var(--ink-dim)",
+                    fontSize: 10.5,
+                  }}
+                >
+                  {command}
+                </code>
+                <FooterButton
+                  onClick={() => {
+                    void window.spark.clipboard.writeText(command);
+                    setCopiedExample(command);
+                    window.setTimeout(
+                      () => setCopiedExample((current) => (current === command ? null : current)),
+                      1400,
+                    );
+                  }}
+                >
+                  {copiedExample === command ? "Copied" : "Copy"}
+                </FooterButton>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {error ? (
+          <div role="alert" style={{ color: "var(--danger)", fontSize: 11, lineHeight: 1.45 }}>
+            {error}
+          </div>
+        ) : null}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {status?.canInstall ? (
+            <FooterButton
+              primary
+              disabled={busy !== null}
+              onClick={() => void mutate("install")}
+            >
+              {busy === "install" ? "Installing…" : installLabel}
+            </FooterButton>
+          ) : null}
+          {status?.canUninstall ? (
+            <FooterButton
+              disabled={busy !== null}
+              onClick={() => void mutate("uninstall")}
+            >
+              {busy === "uninstall" ? "Uninstalling…" : "Uninstall command"}
+            </FooterButton>
+          ) : null}
+          <FooterButton disabled={busy !== null} onClick={() => void refresh()}>
+            Refresh
+          </FooterButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
   const { preferences, hydrated, setPreference } = usePreferences();
   const stored = preferences.copyBranchSetupCommandByRepo?.[workspaceCwd];

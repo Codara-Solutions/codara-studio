@@ -69,6 +69,14 @@ cora runs                # list runs straight off disk (works app-closed)
 cora rpc preview.list    # raw JSON-RPC escape hatch (any method)
 ```
 
+Claude and Codex terminals can also use the CLI as an agent-to-agent bridge:
+
+```sh
+cora start "Fix the failing tests" --cwd . --wait
+cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex
+cora agent message <run> all "Re-check the acceptance criteria"
+```
+
 ### Using a Codara account in your own terminal
 
 Every account you add in **Settings → Accounts** has its own private login

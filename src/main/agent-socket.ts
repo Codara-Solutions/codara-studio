@@ -2,7 +2,7 @@ import { app, BrowserWindow } from "electron";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
@@ -23,7 +23,10 @@ import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadState, saveState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
-import { detectAgentRuntimes } from "./agent-runtimes";
+import {
+  detectWorkerAssignableRuntimes,
+  isWorkerAssignable,
+} from "./orchestration/pi-worker-providers";
 import { broadcastPreferencesChanged } from "./ipc";
 import { publish } from "./notify";
 import {
@@ -41,7 +44,9 @@ import {
   type MemoryScope,
 } from "./orchestration/cora-memory";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
+import { blindApprovalAskProblem } from "./orchestration/run-question-policy";
 import { runProjectPolicyMode } from "./orchestration/project-policy";
+import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
@@ -231,8 +236,8 @@ export async function startAgentSocket(): Promise<ServerHandle> {
     throw new Error("[agent-socket] failed to determine listening address");
   }
   const url = `http://127.0.0.1:${address.port}`;
-  setAgentSocketCapabilityEndpoint(url);
   currentHandle = { server, url, token };
+  setAgentSocketCapabilityEndpoint(url);
   pty.setAgentSocketEnv({ url, token });
   // Persist a handshake file so MCP servers spawned by external runtimes
   // (Claude Code, Codex) - which do not inherit Codara's pty env - can pick
@@ -246,10 +251,10 @@ export async function startAgentSocket(): Promise<ServerHandle> {
 
 /** Stop the server. Safe to call multiple times. */
 export async function stopAgentSocket(): Promise<void> {
-  setAgentSocketCapabilityEndpoint(null);
   const handle = currentHandle;
   if (!handle) return;
   currentHandle = null;
+  setAgentSocketCapabilityEndpoint(null);
   pty.setAgentSocketEnv(null);
   // Remove the handshake file so any MCP server child that survived Codara's
   // shutdown returns "Codara offline" on next call instead of speaking to a
@@ -467,6 +472,9 @@ async function dispatch(
           "this capability is unavailable to the calling agent process",
         );
       }
+      // The claim, never model-authored JSON, owns run routing. This closes the
+      // global-bearer substitution hole where an imported-PR process could
+      // otherwise name a trusted sibling run in an allowed method.
       params.runId = auth.claim.runId;
     }
     if (isUntrustedPullRequestBlockedMethod(method)) {
@@ -513,6 +521,17 @@ async function dispatch(
         return await handleChatEvents(params, id, res);
       case "chat.cancel":
         return await handleChatCancel(params, id);
+      case "chat.resume":
+        if (auth.kind !== "root") {
+          return errorResponse(
+            id,
+            ERR_FORBIDDEN,
+            "manager turn recovery is available only to the user-owned Cora CLI",
+          );
+        }
+        return await handleChatResume(params, id);
+      case "accounts.list":
+        return await handleAccountsList(id);
       case "app.info":
         return handleAppInfo(id);
       case "app.screenshot":
@@ -1106,7 +1125,6 @@ async function handleChatCreate(
       "effort must be minimal, low, medium, high, xhigh, or max",
     );
   }
-
   let binding: { workspace: Workspace; created: boolean };
   try {
     binding = await ensureCliWorkspace(rawCwd, stringParam(params, "workspaceName") ?? undefined);
@@ -1163,6 +1181,37 @@ async function handleChatCreate(
       workspace: binding.workspace,
       workspaceCreated: binding.created,
       truncated: prompt.length < rawPrompt.length,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
+  try {
+    const [
+      { inspectPiAccountProfileAuthStore },
+      { inspectCachedPiSubscriptionUsageProfiles },
+      { projectRemoteSubscriptionProfiles },
+    ] = await Promise.all([
+      import("./orchestration/pi-account-auth-store"),
+      import("./orchestration/pi-subscription-usage"),
+      import("./remote-access/subscription-profile-projection"),
+    ]);
+    const inspection = await inspectPiAccountProfileAuthStore();
+    const projected = projectRemoteSubscriptionProfiles(
+      inspection,
+      inspectCachedPiSubscriptionUsageProfiles(),
+    );
+    return successResponse(id, {
+      accounts: projected.map((profile) => ({
+        id: profile.id,
+        provider: profile.provider,
+        label: profile.label,
+        status: profile.status,
+        isDefault: profile.isDefault,
+        remainingPercent: profile.usage?.remainingPercent ?? null,
+      })),
     });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
@@ -1343,6 +1392,119 @@ async function handleChatCancel(
     return successResponse(id, { run: updated });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+type PublicManagerTurnResumeOutcome =
+  | "accepted"
+  | "already-resuming"
+  | "stale"
+  | "account-unavailable"
+  | "account-incompatible";
+
+const CHAT_RESUME_REASON_MAX_CHARS = 320;
+
+function publicManagerTurnResumeReason(
+  outcome: PublicManagerTurnResumeOutcome,
+  context?: "automation" | "missing-recovery",
+): string | undefined {
+  const reason =
+    context === "automation"
+      ? "Automation runs do not have resumable Cora manager turns."
+      : context === "missing-recovery"
+        ? "No current parked Cora manager turn is available to resume."
+        : outcome === "stale"
+          ? "The parked Cora manager turn is no longer resumable."
+          : outcome === "account-unavailable"
+            ? "The selected subscription account is unavailable or needs to be reconnected."
+            : outcome === "account-incompatible"
+              ? "The selected subscription account is incompatible with this manager turn."
+              : undefined;
+  return reason
+    ? stripVTControlCharacters(reason).replace(/[\r\n\t]+/g, " ").slice(0, CHAT_RESUME_REASON_MAX_CHARS)
+    : undefined;
+}
+
+/**
+ * User-owned recovery for the exact durable manager turn currently parked on
+ * a Cora conversation. Account selection is intentionally passed into the
+ * same run-store claim; changing the account in a preceding mutation would
+ * leave the conversation switched even if another caller won the recovery.
+ */
+async function handleChatResume(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  }
+
+  let profileId: string | undefined;
+  try {
+    profileId = normalizePiAccountProfileId(
+      stringParam(params, "profileId"),
+      "profileId",
+    );
+  } catch (err) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  const run = await resolveCliRun(runIdOrPrefix);
+  if (!run) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Run not found or prefix is ambiguous: ${runIdOrPrefix}`,
+    );
+  }
+
+  if (run.automationId || run.chatMode === "automation") {
+    const outcome: PublicManagerTurnResumeOutcome = "stale";
+    return successResponse(id, {
+      runId: run.id,
+      recoveryId: null,
+      outcome,
+      reason: publicManagerTurnResumeReason(outcome, "automation"),
+    });
+  }
+
+  const recovery = run.managerTurnRecovery;
+  if (!recovery) {
+    const outcome: PublicManagerTurnResumeOutcome = "stale";
+    return successResponse(id, {
+      runId: run.id,
+      recoveryId: null,
+      outcome,
+      reason: publicManagerTurnResumeReason(outcome, "missing-recovery"),
+    });
+  }
+
+  try {
+    const result = await (await getRunStore()).resumeManagerTurnRecovery({
+      runId: run.id,
+      recoveryId: recovery.id,
+      ...(profileId
+        ? { account: { kind: "subscription" as const, profileId } }
+        : {}),
+    });
+    const reason = publicManagerTurnResumeReason(result.outcome);
+    return successResponse(id, {
+      runId: result.run.id,
+      recoveryId: recovery.id,
+      outcome: result.outcome,
+      ...(reason ? { reason } : {}),
+    });
+  } catch {
+    return errorResponse(
+      id,
+      ERR_INTERNAL,
+      "Could not claim the parked Cora manager turn.",
+    );
   }
 }
 
@@ -1754,6 +1916,79 @@ function verifierRoundCapForRun(run: RunState): number {
 // runs are long-lived - legitimate batches spread across many turns must
 // never accumulate into a force-land.
 const SYNTHETIC_STEP_CEILING = 20;
+const UNTRUSTED_PR_MAX_WORKERS_PER_BATCH = 4;
+
+function untrustedPullRequestWorkerPathError(
+  raw: unknown,
+  field: string,
+): string | null {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return `${field} entries must be non-empty relative paths`;
+  }
+  if (raw.length > 1_024 || raw.includes("\0")) {
+    return `${field} contains an invalid or oversized path`;
+  }
+  const normalized = raw.trim().replace(/\\/g, "/");
+  if (
+    isAbsolute(raw) ||
+    normalized.startsWith("/") ||
+    normalized.startsWith("//") ||
+    /^[A-Za-z]:\//.test(normalized)
+  ) {
+    return `${field} must stay relative to the imported pull-request workspace`;
+  }
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === "..")) {
+    return `${field} may not traverse outside the imported pull-request workspace`;
+  }
+  if (segments.some((segment) => segment.toLowerCase() === ".git")) {
+    return `${field} may not address Git administrative data`;
+  }
+  return null;
+}
+
+function validateUntrustedPullRequestWorkers(
+  run: RunState,
+  workers: unknown[],
+): string | null {
+  if (run.automationId || run.executionMode === "direct") {
+    return "an imported pull-request run cannot delegate through an automation or direct-worker run";
+  }
+  if (workers.length > UNTRUSTED_PR_MAX_WORKERS_PER_BATCH) {
+    return `an imported pull-request run may start at most ${UNTRUSTED_PR_MAX_WORKERS_PER_BATCH} workers per batch`;
+  }
+  for (const raw of workers) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return "each imported pull-request worker must be an object";
+    }
+    const worker = raw as Record<string, unknown>;
+    if (worker.runtimePreference !== "claude" && worker.runtimePreference !== "codex") {
+      return "imported pull-request workers must explicitly select claude or codex";
+    }
+    if (worker.verificationCommands !== undefined) {
+      if (
+        !Array.isArray(worker.verificationCommands) ||
+        worker.verificationCommands.some(
+          (command) => typeof command !== "string" || command.trim().length > 0,
+        )
+      ) {
+        return "verification commands are unavailable for imported pull-request workers";
+      }
+    }
+    for (const field of ["allowedPaths", "forbiddenPaths", "expectedOutputs"] as const) {
+      const paths = worker[field];
+      if (paths === undefined) continue;
+      if (!Array.isArray(paths) || paths.length > 64) {
+        return `${field} must be an array of at most 64 relative paths`;
+      }
+      for (const path of paths) {
+        const error = untrustedPullRequestWorkerPathError(path, field);
+        if (error) return error;
+      }
+    }
+  }
+  return null;
+}
 
 async function handleOrchestratorSpawnWorkers(
   params: Record<string, unknown>,
@@ -1772,6 +2007,14 @@ async function handleOrchestratorSpawnWorkers(
   }
   const blocked = rejectIfAutomationRun(run, id, "codara_spawn_workers");
   if (blocked) return blocked;
+  const untrustedPullRequest =
+    runProjectPolicyMode(run) === "untrusted-pull-request";
+  if (untrustedPullRequest) {
+    const untrustedError = validateUntrustedPullRequestWorkers(run, rawWorkers);
+    if (untrustedError) {
+      return errorResponse(id, ERR_FORBIDDEN, untrustedError);
+    }
+  }
   // The MCP orchestrator has no plan_analysis JSON decision to carry its
   // complexity call, so this is its only channel. Persist before the verifier
   // cap below is computed: the classification is what the cap derives from.
@@ -1920,9 +2163,11 @@ async function handleOrchestratorSpawnWorkers(
     );
     if (latestImplementation?.runtimePreference === onlyRequestedWorker.runtimePreference) {
       const opposite = latestImplementation.runtimePreference === "claude" ? "codex" : "claude";
-      const runtimes = await detectAgentRuntimes();
+      const runtimes = await detectWorkerAssignableRuntimes();
       // Cross-provider verification is valuable only when that provider is
-      // healthy: it must be installed and must not have already failed
+      // healthy: it needs a connected Pi subscription (the worker runs on the
+      // bundled Pi harness, so a CLI binary is beside the point) and must not
+      // have already failed
       // environmentally in this run (expired OAuth, launch failure, etc.) -
       // rerouting into a provider that just failed sent workers into the same
       // broken subscription twice in run-mrwp6vfh-wkticw. The sign-in probe is
@@ -1934,7 +2179,7 @@ async function handleOrchestratorSpawnWorkers(
       // refuse it. Only the explicit limitReached flag blocks the reroute; a
       // failed or missing usage read stays permissive.
       const oppositeAvailable =
-        runtimes.some((runtime) => runtime.kind === opposite && runtime.installed) &&
+        isWorkerAssignable(runtimes, opposite) &&
         !runtimeHadEnvironmentalFailure(run, opposite) &&
         !runtimeLimitReached(headroomSummary, opposite);
       if (oppositeAvailable) {
@@ -1970,9 +2215,9 @@ async function handleOrchestratorSpawnWorkers(
         !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : ""),
     );
     if (anyReroutableWorker) {
-      const detected = await detectAgentRuntimes();
+      const detected = await detectWorkerAssignableRuntimes();
       const preferredUsable =
-        detected.some((runtime) => runtime.kind === headroomPreferredRuntime && runtime.installed) &&
+        isWorkerAssignable(detected, headroomPreferredRuntime) &&
         !runtimeHadEnvironmentalFailure(run, headroomPreferredRuntime);
       if (preferredUsable) {
         headroomReroute = { from: constrainedRuntime, to: headroomPreferredRuntime };
@@ -2079,7 +2324,12 @@ async function handleOrchestratorSpawnWorkers(
       effectiveModelHint = crossProviderPeerModel(headroomReroute.to, effectiveModelHint);
       headroomReroutedTitles.push(title);
     }
-    const sanitizedModel = runStore.sanitizeWorkerModelHint(effectiveModelHint);
+    const sanitizedModel = untrustedPullRequest
+      ? rosterModelFor(
+          effectiveRuntime === "codex" ? "codex" : "claude",
+          "standard",
+        )
+      : runStore.sanitizeWorkerModelHint(effectiveModelHint);
     const updated = await runStore.createWorkerTask({
       runId,
       stepId: synthStepId,
@@ -2088,7 +2338,10 @@ async function handleOrchestratorSpawnWorkers(
       runtimePreference: effectiveRuntime as
         | "claude" | "codex" | "shell" | "manual",
       modelHint: sanitizedModel,
-      effortHint: w.effortHint,
+      effortHint:
+        untrustedPullRequest && w.effortHint === "xhigh"
+          ? "high"
+          : w.effortHint,
       allowedPaths: Array.isArray(w.allowedPaths) ? w.allowedPaths.filter((p): p is string => typeof p === "string") : [],
       forbiddenPaths: Array.isArray(w.forbiddenPaths) ? w.forbiddenPaths.filter((p): p is string => typeof p === "string") : [],
       expectedOutputs: Array.isArray(w.expectedOutputs) ? w.expectedOutputs.filter((p): p is string => typeof p === "string") : [],
@@ -2248,6 +2501,14 @@ async function handleOrchestratorAskUser(
       ERR_INVALID_PARAMS,
       `Unsupported human-blocker category: ${requestedCategory}`,
     );
+  }
+  // An approval ask must carry the content being approved. Rejecting here,
+  // before any question is posted, hands the manager a retry instruction on
+  // the still-open turn instead of blocking the run on a question the user
+  // cannot judge ("approve the plan shown above" over collapsed reports).
+  const blindAsk = blindApprovalAskProblem(question, category);
+  if (blindAsk) {
+    return errorResponse(id, ERR_INVALID_PARAMS, blindAsk);
   }
   const source = beforeAsk.executionMode === "direct" ? "direct_worker" : "live_manager_rpc";
   const managerMode = [...beforeAsk.sparkCalls]
@@ -2455,16 +2716,11 @@ async function handleOrchestratorComplete(
     );
   }
   try {
-    if (summary) {
-      await runStore.addRunMessage({
-        runId,
-        author: "spark",
-        kind: "note",
-        message: summary,
-      });
-    }
-    await runStore.completeRunFromOrchestrator(runId);
-    return successResponse(id, { ok: true });
+    const applied = await runStore.applyCodaraCompleteFromManagerCall({
+      runId,
+      summary,
+    });
+    return successResponse(id, applied.result);
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
@@ -2908,6 +3164,15 @@ async function resolveAutomationCallerRun(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return { error: errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`) };
+  if (runProjectPolicyMode(run) === "untrusted-pull-request") {
+    return {
+      error: errorResponse(
+        id,
+        ERR_FORBIDDEN,
+        "automations are unavailable for an imported pull-request run",
+      ),
+    };
+  }
   return { run };
 }
 
@@ -3581,6 +3846,8 @@ async function handleAutomationCreate(
       workspaceName,
       cwd,
       initialUserNote: promptTemplate,
+      ...(run.origin ? { origin: run.origin } : {}),
+      projectPolicyMode: runProjectPolicyMode(run),
     },
     // Record the authoring conversation whenever a real chat authored the loom,
     // whether that was the Hub's assist chat or an ordinary auto/execute chat
@@ -4002,6 +4269,13 @@ async function handleOrchestratorNameChat(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  if (runProjectPolicyMode(run) === "untrusted-pull-request") {
+    return errorResponse(
+      id,
+      ERR_FORBIDDEN,
+      "workspace and global memory are unavailable for an imported pull-request run",
+    );
+  }
   if (effectiveChatMode(run.chatMode) !== "auto") {
     return errorResponse(
       id,

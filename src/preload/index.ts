@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
-import type { NativeCliTerminalSetupResult, NativeCliTerminalSetupStatus } from "@shared/native-cli-terminal";
 import type {
   RemoteAuthPromptAnswer,
   RemoteAuthPromptRequest,
@@ -27,6 +26,14 @@ import type {
   StartGitHubPullRequestInput,
   StartGitHubPullRequestResult,
 } from "@shared/github";
+import type {
+  CoraCliInstallStatus,
+  CoraCliMutationResult,
+} from "@shared/cora-cli";
+import type {
+  NativeCliTerminalSetupResult,
+  NativeCliTerminalSetupStatus,
+} from "@shared/native-cli-terminal";
 import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
@@ -104,22 +111,22 @@ import type {
   WorkerSessionRuntime,
   WorkerSessionSummary,
   PauseRunInput,
+  PiSubscriptionAddAccountInput,
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
-  UserConstitutionSaveInput,
-  UserConstitutionDocument,
-  ProjectConstitutionWorkspaceInput,
-  ProjectConstitutionInspection,
-  PiSubscriptionRenameAccountInput,
-  PiSubscriptionReconnectAccountInput,
-  PiSubscriptionProfileLoginRequest,
-  PiSubscriptionMakeDefaultInput,
-  PiSubscriptionDeleteAccountInput,
-  PiSubscriptionAddAccountInput,
   PiCatalogModel,
+  PiSubscriptionDeleteAccountInput,
+  PiSubscriptionMakeDefaultInput,
   PiSubscriptionOverview,
+  PiSubscriptionProfileLoginRequest,
+  PiSubscriptionReconnectAccountInput,
+  PiSubscriptionRenameAccountInput,
   PiUsageOverview,
   PiSubscriptionProvider,
+  ProjectConstitutionInspection,
+  ProjectConstitutionWorkspaceInput,
+  UserConstitutionDocument,
+  UserConstitutionSaveInput,
   PlanFile,
   PrefKey,
   PreferencesChange,
@@ -260,6 +267,13 @@ const api = {
     reveal: (input: ProjectConstitutionWorkspaceInput): Promise<void> =>
       ipcRenderer.invoke("project-constitution:reveal", input),
   },
+  coraCli: {
+    status: (): Promise<CoraCliInstallStatus> => ipcRenderer.invoke("cora-cli:status"),
+    install: (): Promise<CoraCliMutationResult> => ipcRenderer.invoke("cora-cli:install"),
+    uninstall: (): Promise<CoraCliMutationResult> => ipcRenderer.invoke("cora-cli:uninstall"),
+  },
+  // "Use the Active account in your terminal". install/uninstall are the only
+  // paths that touch the user's shell startup file, and both are button-driven.
   nativeCliTerminal: {
     status: (): Promise<NativeCliTerminalSetupStatus> =>
       ipcRenderer.invoke("native-cli-terminal:status"),

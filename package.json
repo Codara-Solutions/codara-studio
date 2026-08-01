@@ -1,7 +1,7 @@
 {
   "name": "codara-studio",
   "version": "0.3.0",
-  "description": "Codara Studio — cross-platform terminal multiplexer and agent cockpit, driven by Cora, its built-in agent",
+  "description": "Codara Studio \u2014 cross-platform terminal multiplexer and agent cockpit, driven by Cora, its built-in agent",
   "main": "out/main/index.js",
   "author": "Etienne",
   "private": true,
@@ -94,7 +94,8 @@
     "test:trusted-sender": "node scripts/test-trusted-sender.cjs",
     "test:remote-access": "node scripts/test-remote-access.cjs",
     "test:remote-access-e2e": "node scripts/remote-access-e2e.mjs",
-    "test:remote-access-hostile": "node --expose-gc scripts/test-remote-access-hostile.mjs"
+    "test:remote-access-hostile": "node --expose-gc scripts/test-remote-access-hostile.mjs",
+    "test:cora-agent-cli": "node scripts/test-cora-agent-cli.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",
@@ -215,6 +216,10 @@
       {
         "from": "resources/sounds",
         "to": "sounds"
+      },
+      {
+        "from": "bin/cora.cjs",
+        "to": "cora-cli/cora.cjs"
       }
     ],
     "directories": {

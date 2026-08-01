@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
@@ -58,10 +58,37 @@ import {
   discoverClaudeSessionForCwd,
   inspectClaudeTranscriptTail,
   repairClaudeTranscriptTail,
+  resolveSafeClaudeTranscriptPath,
 } from "./orchestration/claude-paths";
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
+import { resolveCodexTranscriptPath } from "./orchestration/codex-home";
 import { latestSessionStart } from "./agent-session-registry";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
+import { parseManualAgentStartupCommand } from "./manual-agent-constitution";
+import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
+import {
+  resolveFrozenNativeCodexProfile,
+  resolveNewNativeCodexProfile,
+} from "./orchestration/native-codex-profile-runtime";
+import {
+  resolveFrozenNativeClaudeProfile,
+  resolveNewNativeClaudeProfile,
+} from "./orchestration/native-claude-profile-runtime";
+import {
+  nativeCliAccounts,
+  NativeCliAccountError,
+} from "./orchestration/native-cli-accounts";
+import { focusStudioWindow } from "./window-focus";
+import { reconcileNativeCliActivePointers } from "./orchestration/native-cli-active-pointer";
+import {
+  installNativeCliShellProfile,
+  nativeCliShellProfileStatus,
+  uninstallNativeCliShellProfile,
+} from "./orchestration/native-cli-shell-profile";
+import type {
+  NativeCliTerminalSetupResult,
+  NativeCliTerminalSetupStatus,
+} from "@shared/native-cli-terminal";
 import * as mcpInstaller from "./mcp-installer";
 import * as coraMemory from "./orchestration/cora-memory";
 import {
@@ -93,6 +120,20 @@ import type {
   RemotePairedDevice,
   RemotePairingSession,
 } from "@shared/remote-access";
+import type {
+  GitHubPublishInput,
+  GitHubPublishResult,
+  GitHubMarkReadyInput,
+  GitHubMarkReadyResult,
+  GitHubMergeInput,
+  GitHubMergeResult,
+  GitHubWorkspaceStatus,
+  GitHubWorkQueueStatus,
+  StartGitHubIssueInput,
+  StartGitHubIssueResult,
+  StartGitHubPullRequestInput,
+  StartGitHubPullRequestResult,
+} from "@shared/github";
 
 // Heavy modules deferred via dynamic import to keep cold startup snappy. Each
 // cache slot is populated on the first IPC call that needs the module and
@@ -131,6 +172,50 @@ let gitApplyMod: typeof import("./git-apply") | undefined;
 async function getGitApply(): Promise<typeof import("./git-apply")> {
   gitApplyMod ??= await import("./git-apply");
   return gitApplyMod;
+}
+
+let githubCliMod: typeof import("./github-cli") | undefined;
+async function getGitHubCli(): Promise<typeof import("./github-cli")> {
+  githubCliMod ??= await import("./github-cli");
+  return githubCliMod;
+}
+
+let githubPublishMod: typeof import("./github-publish") | undefined;
+async function getGitHubPublish(): Promise<typeof import("./github-publish")> {
+  githubPublishMod ??= await import("./github-publish");
+  return githubPublishMod;
+}
+
+let githubMergeMod: typeof import("./github-merge") | undefined;
+async function getGitHubMerge(): Promise<typeof import("./github-merge")> {
+  githubMergeMod ??= await import("./github-merge");
+  return githubMergeMod;
+}
+
+let githubReadyMod: typeof import("./github-ready") | undefined;
+async function getGitHubReady(): Promise<typeof import("./github-ready")> {
+  githubReadyMod ??= await import("./github-ready");
+  return githubReadyMod;
+}
+
+let projectConstitutionSettingsMod:
+  | typeof import("./project-constitution-settings")
+  | undefined;
+async function getProjectConstitutionSettings(): Promise<
+  typeof import("./project-constitution-settings")
+> {
+  projectConstitutionSettingsMod ??= await import("./project-constitution-settings");
+  return projectConstitutionSettingsMod;
+}
+
+let userConstitutionStoreMod:
+  | typeof import("./user-constitution-store")
+  | undefined;
+async function getUserConstitutionStore(): Promise<
+  typeof import("./user-constitution-store")
+> {
+  userConstitutionStoreMod ??= await import("./user-constitution-store");
+  return userConstitutionStoreMod;
 }
 
 async function getGitWorktrees(): Promise<typeof import("./git-worktrees")> {
@@ -292,6 +377,27 @@ import type {
   ExportFileDialogInput,
   ImportedCoraWhiteboardFile,
   PauseRunInput,
+  NativeCliAccountCancelLoginInput,
+  NativeCliAccountCreateInput,
+  NativeCliAccountDeleteResult,
+  NativeCliAccountLoginPreparation,
+  NativeCliAccountMutationResult,
+  NativeCliAccountProfileInput,
+  NativeCliAccountRenameInput,
+  NativeCliAccountsInspection,
+  NativeCliAccountRuntime,
+  PiSubscriptionAddAccountInput,
+  PiSubscriptionDeleteAccountInput,
+  PiSubscriptionMakeDefaultInput,
+  PiSubscriptionOverview,
+  PiSubscriptionProvider,
+  PiSubscriptionReconnectAccountInput,
+  PiSubscriptionRenameAccountInput,
+  ProjectConstitutionInspection,
+  ProjectConstitutionWorkspaceInput,
+  ProjectPolicyMode,
+  UserConstitutionDocument,
+  UserConstitutionSaveInput,
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
@@ -327,6 +433,380 @@ import type {
   WorkerSessionRuntime,
   WorkerSessionSummary,
 } from "@shared/types";
+
+function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
+  if (value === "claude" || value === "codex") return value;
+  throw new TypeError("Native CLI account runtime must be Claude or Codex.");
+}
+
+function nativeCliAccountProfileIdFromIpc(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 64 ||
+    /[\u0000-\u0020\u007f]/.test(value)
+  ) {
+    throw new TypeError("Native CLI account profile id is invalid.");
+  }
+  return value;
+}
+
+function nativeCliAccountLabelFromIpc(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new TypeError("Native CLI account name is required.");
+  }
+  const label = value.trim();
+  if (!label || label.length > 80 || /[\u0000-\u001f\u007f]/.test(label)) {
+    throw new TypeError("Native CLI account name must be 1 to 80 characters.");
+  }
+  return label;
+}
+
+function nativeCliLoginTokenFromIpc(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 24 ||
+    value.length > 256 ||
+    /[\u0000-\u0020\u007f]/.test(value)
+  ) {
+    throw new TypeError("Native CLI account login preparation is invalid.");
+  }
+  return value;
+}
+
+function nativeCliAccountProfileInputFromIpc(
+  value: unknown,
+): NativeCliAccountProfileInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Native CLI account input is required.");
+  }
+  const input = value as Partial<NativeCliAccountProfileInput>;
+  return {
+    runtime: nativeCliAccountRuntimeFromIpc(input.runtime),
+    profileId: nativeCliAccountProfileIdFromIpc(input.profileId),
+  };
+}
+
+function broadcastNativeCliAccountsChanged(): void {
+  for (const contents of webContents.getAllWebContents()) {
+    if (!contents.isDestroyed()) {
+      contents.send("native-cli-accounts:changed");
+    }
+  }
+  // The Active account may have moved (or been deleted), so the terminal
+  // pointers have to follow before the next shell reads them.
+  void reconcileNativeCliActivePointers({ homeDir: sparkHome() }).catch(
+    (err) => {
+      logMain("native-cli-terminal", `pointer reconcile failed: ${String(err)}`);
+    },
+  );
+}
+
+/**
+ * Renderer-safe projection of the terminal setup. No account directory, id, or
+ * label crosses this boundary — only the user's own shell file, Codara's
+ * pointer directory, and the block the button would write.
+ */
+async function nativeCliTerminalStatus(): Promise<NativeCliTerminalSetupStatus> {
+  const pointers = await reconcileNativeCliActivePointers({
+    homeDir: sparkHome(),
+  });
+  const shell = await nativeCliShellProfileStatus({ envFile: pointers.envFile });
+  return {
+    supported: shell.supported && pointers.supported,
+    installed: shell.installed,
+    ...(shell.shell ? { shell: shell.shell } : {}),
+    ...(shell.profilePath ? { profilePath: shell.profilePath } : {}),
+    pointerDirectory: pointers.directory,
+    snippet: shell.snippet,
+    ...(shell.manualInstruction
+      ? { manualInstruction: shell.manualInstruction }
+      : {}),
+    ...(pointers.error ? { error: pointers.error } : {}),
+  };
+}
+
+async function applyNativeCliTerminalSetup(
+  enable: boolean,
+): Promise<NativeCliTerminalSetupResult> {
+  try {
+    const pointers = await reconcileNativeCliActivePointers({
+      homeDir: sparkHome(),
+    });
+    if (!pointers.supported) {
+      const status = await nativeCliTerminalStatus();
+      return {
+        ok: false,
+        status,
+        error:
+          pointers.error ??
+          "Codara could not set up the Active account pointers on this system.",
+      };
+    }
+    const options = { envFile: pointers.envFile };
+    if (enable) {
+      await installNativeCliShellProfile(options);
+    } else {
+      await uninstallNativeCliShellProfile(options);
+    }
+    return { ok: true, status: await nativeCliTerminalStatus() };
+  } catch (err) {
+    return {
+      ok: false,
+      status: await nativeCliTerminalStatus(),
+      error: (err as Error).message,
+    };
+  }
+}
+
+/**
+ * Outcomes where the user is already back in Studio — they closed the login
+ * terminal, or the prepared plan lapsed before anything launched. Stealing
+ * focus for these would be noise rather than a rescue.
+ */
+function isNativeCliLoginCancellation(error: unknown): boolean {
+  if (!(error instanceof NativeCliAccountError)) return false;
+  return (
+    error.code === "NATIVE_CLI_ACCOUNT_LOGIN_SIGNAL" ||
+    error.code === "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID" ||
+    error.code === "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED"
+  );
+}
+
+async function spawnPreparedNativeCliLogin(
+  sender: WebContents,
+  input: {
+    id?: unknown;
+    cols?: unknown;
+    rows?: unknown;
+    nativeCliLoginToken?: unknown;
+  },
+): Promise<{
+  id: string;
+  pid: number;
+  startupCommandHandled?: boolean;
+  attached?: boolean;
+}> {
+  const id =
+    typeof input?.id === "string" &&
+    input.id.length > 0 &&
+    input.id.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/.test(input.id)
+      ? input.id
+      : null;
+  if (!id) throw new TypeError("Native CLI login terminal id is invalid.");
+  const cols = Number(input.cols);
+  const rows = Number(input.rows);
+  if (
+    !Number.isSafeInteger(cols) ||
+    cols < 1 ||
+    cols > 1_000 ||
+    !Number.isSafeInteger(rows) ||
+    rows < 1 ||
+    rows > 1_000
+  ) {
+    throw new TypeError("Native CLI login terminal dimensions are invalid.");
+  }
+  const launchToken = nativeCliLoginTokenFromIpc(
+    input.nativeCliLoginToken,
+  );
+
+  let resolveStarted!: (value: {
+    id: string;
+    pid: number;
+    startupCommandHandled?: boolean;
+    attached?: boolean;
+  }) => void;
+  let rejectStarted!: (reason: Error) => void;
+  let startSettled = false;
+  const started = new Promise<{
+    id: string;
+    pid: number;
+    startupCommandHandled?: boolean;
+    attached?: boolean;
+  }>((resolve, reject) => {
+    resolveStarted = (value) => {
+      if (startSettled) return;
+      startSettled = true;
+      resolve(value);
+    };
+    rejectStarted = (reason) => {
+      if (startSettled) return;
+      startSettled = true;
+      reject(reason);
+    };
+  });
+
+  void nativeCliAccounts
+    .launchPreparedLogin(launchToken, async (spec) => {
+      const launched = await pty.spawnExactExecutable({
+        id,
+        cwd: app.getPath("home"),
+        cols,
+        rows,
+        webContents: sender,
+        executable: spec.executable,
+        args: spec.args,
+        env: spec.env,
+      });
+      resolveStarted(launched.spawn);
+      const exit = await launched.exit;
+      return {
+        exitCode: exit.exitCode,
+        signal: exit.signal ? "SIGTERM" : null,
+        timedOut: false,
+        spawnFailed: false,
+      };
+    })
+    .then(
+      () => {
+        // The CLI sent the user to a browser to authorize; bring the window
+        // they started from back in front instead of leaving them there.
+        focusStudioWindow(sender);
+      },
+      (error: unknown) => {
+        rejectStarted(
+          error instanceof Error
+            ? error
+            : new Error("Native CLI account login failed."),
+        );
+        if (!isNativeCliLoginCancellation(error)) focusStudioWindow(sender);
+      },
+    )
+    .finally(() => {
+      broadcastNativeCliAccountsChanged();
+    });
+
+  return started;
+}
+
+async function projectConstitutionWorkspaceFromIpc(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("A workspace id is required.");
+  }
+  const workspaceId = (input as Partial<ProjectConstitutionWorkspaceInput>).workspaceId;
+  if (
+    typeof workspaceId !== "string" ||
+    workspaceId.length === 0 ||
+    workspaceId.length > 256 ||
+    /[\u0000-\u001f\u007f]/.test(workspaceId)
+  ) {
+    throw new TypeError("A valid workspace id is required.");
+  }
+  // Security boundary: resolve the cwd exclusively from persisted app state.
+  // Renderer payloads never supply a path for inspect/create/open/reveal.
+  const state = await loadState();
+  const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
+  if (!workspace) {
+    throw new Error("That workspace is no longer open. Reopen it and try again.");
+  }
+  return workspace;
+}
+
+const PI_ACCOUNT_PROFILE_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PI_ACCOUNT_TERMINAL_RUN_STATUSES = new Set<RunState["status"]>([
+  "complete",
+  "failed",
+  "cancelled",
+]);
+const PI_ACCOUNT_TERMINAL_ATTEMPT_STATUSES = new Set<
+  RunState["workerAttempts"][number]["status"]
+>(["succeeded", "failed", "timed_out", "cancelled"]);
+const PI_ACCOUNT_IN_USE_MESSAGE =
+  "This account is still in use by an active Cora run or worker. Finish or cancel that work before deleting it.";
+
+function piSubscriptionProviderFromIpc(value: unknown): PiSubscriptionProvider {
+  if (value === "anthropic" || value === "openai-codex") return value;
+  throw new TypeError("Unsupported Pi subscription provider");
+}
+
+function piAccountProfileIdFromIpc(value: unknown): string {
+  if (typeof value !== "string" || !PI_ACCOUNT_PROFILE_ID_PATTERN.test(value)) {
+    throw new TypeError("Pi account profile id must be a lowercase UUIDv4");
+  }
+  return value;
+}
+
+function piAccountLabelFromIpc(value: unknown, required: boolean): string | undefined {
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== "string") throw new TypeError("Account label must be a string");
+  const label = value.trim();
+  if (!label) {
+    if (!required) return undefined;
+    throw new TypeError("Account label cannot be empty");
+  }
+  return label;
+}
+
+function runOwnsActivePiAccountProfile(run: RunState, profileId: string): boolean {
+  if (!PI_ACCOUNT_TERMINAL_RUN_STATUSES.has(run.status)) {
+    if (run.chatAccountProfileId === profileId) return true;
+    // The live selector is next-turn-only. A running chat may therefore have
+    // an older actual identity stamped on its durable call after the selector
+    // has moved; keep that account until the owning run settles too.
+    if (run.sparkCalls.some((call) => call.accountProfileId === profileId)) {
+      return true;
+    }
+  }
+  return run.workerAttempts.some(
+    (attempt) =>
+      attempt.accountProfileId === profileId &&
+      !PI_ACCOUNT_TERMINAL_ATTEMPT_STATUSES.has(attempt.status),
+  );
+}
+
+async function assertPiAccountProfileIsNotActive(profileId: string): Promise<void> {
+  try {
+    const { listRuns } = await getRunStore();
+    const runs = await listRuns();
+    if (runs.some((run) => runOwnsActivePiAccountProfile(run, profileId))) {
+      throw new Error(PI_ACCOUNT_IN_USE_MESSAGE);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === PI_ACCOUNT_IN_USE_MESSAGE) throw error;
+    // Deletion is the unsafe branch when durable ownership cannot be read.
+    throw new Error(
+      "Codara could not verify whether this account is used by an active run. The account was not deleted.",
+    );
+  }
+}
+
+function broadcastPiSubscriptionChanged(provider: PiSubscriptionProvider): void {
+  for (const contents of webContents.getAllWebContents()) {
+    if (!contents.isDestroyed()) {
+      contents.send("pi-subscriptions:event", { type: "changed", provider });
+    }
+  }
+}
+
+async function inspectAfterPiAccountMetadataChange(
+  provider: PiSubscriptionProvider,
+): Promise<PiSubscriptionOverview> {
+  const [{ invalidatePiSubscriptionUsageCache }, { invalidatePiModelCatalogCache }] =
+    await Promise.all([
+      import("./orchestration/pi-subscription-usage"),
+      import("./orchestration/pi-model-catalog"),
+    ]);
+  invalidatePiSubscriptionUsageCache();
+  invalidatePiModelCatalogCache();
+  broadcastPiSubscriptionChanged(provider);
+  const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
+  return inspectPiSubscriptions();
+}
+
+async function deletePiAccountProfileWithRunGuard(
+  profileId: string,
+): Promise<PiSubscriptionOverview> {
+  const { deletePiSubscriptionProfile } = await getPiSubscriptionAuth();
+  return deletePiSubscriptionProfile(profileId, {
+    ownershipGuard: async (profile) => {
+      await assertPiAccountProfileIsNotActive(profile.id);
+      return false;
+    },
+  });
+}
+
 import {
   parseCoraWhiteboard,
   parseCoraWhiteboardFile,
@@ -458,6 +938,195 @@ export function registerIpc(): void {
     return saveSettings(settings);
   });
 
+  handle("user-constitution:load", async (): Promise<UserConstitutionDocument> => {
+    const { loadUserConstitution } = await getUserConstitutionStore();
+    return loadUserConstitution();
+  });
+
+  handle(
+    "user-constitution:save",
+    async (
+      _event,
+      input: UserConstitutionSaveInput,
+    ): Promise<UserConstitutionDocument> => {
+      const { saveUserConstitution } = await getUserConstitutionStore();
+      return saveUserConstitution(input);
+    },
+  );
+
+  handle(
+    "project-constitution:inspect",
+    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<ProjectConstitutionInspection> => {
+      const workspace = await projectConstitutionWorkspaceFromIpc(input);
+      const { inspectProjectConstitution } = await getProjectConstitutionSettings();
+      return inspectProjectConstitution(workspace);
+    },
+  );
+  handle(
+    "project-constitution:create",
+    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<ProjectConstitutionInspection> => {
+      const workspace = await projectConstitutionWorkspaceFromIpc(input);
+      const { createDefaultProjectConstitution } = await getProjectConstitutionSettings();
+      return createDefaultProjectConstitution(workspace);
+    },
+  );
+  handle(
+    "project-constitution:open",
+    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<void> => {
+      const workspace = await projectConstitutionWorkspaceFromIpc(input);
+      const { activeProjectConstitutionPath } = await getProjectConstitutionSettings();
+      const sourcePath = await activeProjectConstitutionPath(workspace);
+      const error = await shell.openPath(sourcePath);
+      if (error) {
+        throw new Error(`Could not open .codara/constitution.md: ${error}`);
+      }
+    },
+  );
+  handle(
+    "project-constitution:reveal",
+    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<void> => {
+      const workspace = await projectConstitutionWorkspaceFromIpc(input);
+      const { activeProjectConstitutionPath } = await getProjectConstitutionSettings();
+      const sourcePath = await activeProjectConstitutionPath(workspace);
+      shell.showItemInFolder(sourcePath);
+    },
+  );
+
+  handle("cora-cli:status", async () => {
+    const { inspectCoraCliInstall } = await import("./cora-cli-install");
+    return inspectCoraCliInstall();
+  });
+  handle("cora-cli:install", async () => {
+    const { installCoraCli } = await import("./cora-cli-install");
+    return installCoraCli();
+  });
+  handle("cora-cli:uninstall", async () => {
+    const { uninstallCoraCli } = await import("./cora-cli-install");
+    return uninstallCoraCli();
+  });
+
+  handle(
+    "native-cli-accounts:inspect",
+    async (): Promise<NativeCliAccountsInspection> => {
+      return nativeCliAccounts.inspect();
+    },
+  );
+  handle(
+    "native-cli-accounts:create",
+    async (
+      _event,
+      rawInput: Partial<NativeCliAccountCreateInput> | null,
+    ): Promise<NativeCliAccountMutationResult> => {
+      const input: NativeCliAccountCreateInput = {
+        runtime: nativeCliAccountRuntimeFromIpc(rawInput?.runtime),
+        label: nativeCliAccountLabelFromIpc(rawInput?.label),
+      };
+      const result = await nativeCliAccounts.create(input);
+      broadcastNativeCliAccountsChanged();
+      return result;
+    },
+  );
+  handle(
+    "native-cli-accounts:rename",
+    async (
+      _event,
+      rawInput: Partial<NativeCliAccountRenameInput> | null,
+    ): Promise<NativeCliAccountMutationResult> => {
+      const profile = nativeCliAccountProfileInputFromIpc(rawInput);
+      const input: NativeCliAccountRenameInput = {
+        ...profile,
+        label: nativeCliAccountLabelFromIpc(rawInput?.label),
+      };
+      const result = await nativeCliAccounts.rename(input);
+      broadcastNativeCliAccountsChanged();
+      return result;
+    },
+  );
+  handle(
+    "native-cli-accounts:set-default",
+    async (
+      _event,
+      rawInput: Partial<NativeCliAccountProfileInput> | null,
+    ): Promise<NativeCliAccountMutationResult> => {
+      const result = await nativeCliAccounts.setDefault(
+        nativeCliAccountProfileInputFromIpc(rawInput),
+      );
+      broadcastNativeCliAccountsChanged();
+      return result;
+    },
+  );
+  handle(
+    "native-cli-accounts:prepare-login",
+    async (
+      _event,
+      rawInput: Partial<NativeCliAccountProfileInput> | null,
+    ): Promise<NativeCliAccountLoginPreparation> => {
+      return nativeCliAccounts.prepareLogin(
+        nativeCliAccountProfileInputFromIpc(rawInput),
+      );
+    },
+  );
+  handle(
+    "native-cli-accounts:cancel-login",
+    async (
+      _event,
+      rawInput: Partial<NativeCliAccountCancelLoginInput> | null,
+    ): Promise<boolean> => {
+      const cancelled = await nativeCliAccounts.cancelPreparedLogin(
+        nativeCliLoginTokenFromIpc(rawInput?.launchToken),
+      );
+      if (cancelled) broadcastNativeCliAccountsChanged();
+      return cancelled;
+    },
+  );
+  handle(
+    "native-cli-accounts:logout",
+    async (
+      _event,
+      rawInput: Partial<NativeCliAccountProfileInput> | null,
+    ): Promise<NativeCliAccountsInspection> => {
+      await nativeCliAccounts.logout(
+        nativeCliAccountProfileInputFromIpc(rawInput),
+      );
+      broadcastNativeCliAccountsChanged();
+      return nativeCliAccounts.inspect();
+    },
+  );
+  handle(
+    "native-cli-accounts:delete",
+    async (
+      _event,
+      rawInput: Partial<NativeCliAccountProfileInput> | null,
+    ): Promise<NativeCliAccountDeleteResult> => {
+      const result = await nativeCliAccounts.delete(
+        nativeCliAccountProfileInputFromIpc(rawInput),
+      );
+      broadcastNativeCliAccountsChanged();
+      return result;
+    },
+  );
+
+  handle(
+    "native-cli-terminal:status",
+    async (): Promise<NativeCliTerminalSetupStatus> => {
+      return nativeCliTerminalStatus();
+    },
+  );
+  // Consent gate: the shell startup file is only ever written from these two
+  // handlers, each behind its own button in Settings → Accounts.
+  handle(
+    "native-cli-terminal:install",
+    async (): Promise<NativeCliTerminalSetupResult> => {
+      return applyNativeCliTerminalSetup(true);
+    },
+  );
+  handle(
+    "native-cli-terminal:uninstall",
+    async (): Promise<NativeCliTerminalSetupResult> => {
+      return applyNativeCliTerminalSetup(false);
+    },
+  );
+
   handle("pi-subscriptions:status", async () => {
     const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
     return inspectPiSubscriptions();
@@ -466,6 +1135,60 @@ export function registerIpc(): void {
     const { startPiSubscriptionLogin } = await getPiSubscriptionAuth();
     return startPiSubscriptionLogin(input?.provider, event.sender);
   });
+  handle(
+    "pi-subscriptions:add-account",
+    async (event, input?: Partial<PiSubscriptionAddAccountInput>) => {
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      const label = piAccountLabelFromIpc(input?.label, false);
+      const { startPiSubscriptionProfileLogin } = await getPiSubscriptionAuth();
+      return startPiSubscriptionProfileLogin(
+        {
+          provider,
+          ...(label ? { label } : {}),
+        },
+        event.sender,
+      );
+    },
+  );
+  handle(
+    "pi-subscriptions:reconnect-account",
+    async (event, input?: Partial<PiSubscriptionReconnectAccountInput>) => {
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const { startPiSubscriptionProfileLogin } = await getPiSubscriptionAuth();
+      return startPiSubscriptionProfileLogin(
+        { provider, profileId },
+        event.sender,
+      );
+    },
+  );
+  handle(
+    "pi-subscriptions:rename-account",
+    async (_event, input?: Partial<PiSubscriptionRenameAccountInput>) => {
+      const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const label = piAccountLabelFromIpc(input?.label, true)!;
+      const { renamePiAccountProfile } = await getPiSubscriptionAuth();
+      const profile = await renamePiAccountProfile(profileId, label);
+      return inspectAfterPiAccountMetadataChange(profile.provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:make-default",
+    async (_event, input?: Partial<PiSubscriptionMakeDefaultInput>) => {
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const { setDefaultPiAccountProfile } = await getPiSubscriptionAuth();
+      await setDefaultPiAccountProfile(provider, profileId);
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:delete-account",
+    async (_event, input?: Partial<PiSubscriptionDeleteAccountInput>) => {
+      const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      return deletePiAccountProfileWithRunGuard(profileId);
+    },
+  );
   handle(
     "pi-subscriptions:respond",
     async (event, input?: { requestId?: unknown; promptId?: unknown; value?: unknown }) => {
@@ -478,8 +1201,17 @@ export function registerIpc(): void {
     cancelPiSubscriptionLogin(input?.requestId, event.sender);
   });
   handle("pi-subscriptions:disconnect", async (_event, input?: { provider?: unknown }) => {
-    const { disconnectPiSubscription } = await getPiSubscriptionAuth();
-    return disconnectPiSubscription(input?.provider);
+    const provider = piSubscriptionProviderFromIpc(input?.provider);
+    const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
+    const overview = await inspectPiSubscriptions();
+    const target =
+      overview.profiles?.find(
+        (profile) => profile.provider === provider && profile.isDefault,
+      ) ??
+      overview.profiles?.find((profile) => profile.provider === provider);
+    return target
+      ? deletePiAccountProfileWithRunGuard(target.id)
+      : overview;
   });
   handle("pi-runtime:install", async (event) => {
     const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();
@@ -1100,6 +1832,132 @@ export function registerIpc(): void {
     return getGitLog(cwd);
   });
 
+  handle("github:status", async (_e, cwd: unknown): Promise<GitHubWorkspaceStatus> => {
+    if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+      return {
+        kind: "error",
+        message: "GitHub status requires a valid local workspace.",
+      };
+    }
+    if (isRemotePath(cwd)) {
+      return {
+        kind: "unavailable",
+        message: "GitHub status is currently available for local workspaces only.",
+      };
+    }
+    const { readGitHubWorkspaceStatus } = await getGitHubCli();
+    return readGitHubWorkspaceStatus(cwd);
+  });
+
+  handle(
+    "github:workQueue",
+    async (_e, request?: unknown): Promise<GitHubWorkQueueStatus> => {
+      if (!request || typeof request !== "object" || Array.isArray(request)) {
+        return {
+          kind: "error",
+          message: "The GitHub work queue requires an active workspace.",
+        };
+      }
+      const candidate = request as {
+        sourceWorkspaceId?: unknown;
+        refresh?: unknown;
+      };
+      const sourceWorkspaceId =
+        typeof candidate.sourceWorkspaceId === "string"
+          ? candidate.sourceWorkspaceId.trim()
+          : "";
+      if (!sourceWorkspaceId || sourceWorkspaceId.length > 256) {
+        return {
+          kind: "error",
+          message: "The GitHub work queue requires a valid active workspace.",
+        };
+      }
+      const queue = await import("./github-work-queue");
+      if (candidate.refresh === true) queue.invalidateGitHubWorkQueueCache();
+      return queue.readGitHubWorkQueue(undefined, { sourceWorkspaceId });
+    },
+  );
+
+  handle(
+    "github:publish",
+    async (
+      _e,
+      request: { cwd?: unknown; input?: GitHubPublishInput } | null,
+    ): Promise<GitHubPublishResult> => {
+      const cwd = request?.cwd;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("GitHub publish requires a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error(
+          "Publishing pull requests is currently available for local workspaces only.",
+        );
+      }
+      const { publishGitHubWorktree } = await getGitHubPublish();
+      return publishGitHubWorktree(cwd, request?.input);
+    },
+  );
+  handle(
+    "github:markReady",
+    async (
+      _e,
+      request: { cwd?: unknown; input?: GitHubMarkReadyInput } | null,
+    ): Promise<GitHubMarkReadyResult> => {
+      const cwd = request?.cwd;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("Marking a GitHub pull request ready requires a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error(
+          "Marking pull requests ready is currently available for local workspaces only.",
+        );
+      }
+      const { markGitHubPullRequestReady } = await getGitHubReady();
+      return markGitHubPullRequestReady(cwd, request?.input);
+    },
+  );
+  handle(
+    "github:merge",
+    async (
+      _e,
+      request: { cwd?: unknown; input?: GitHubMergeInput } | null,
+    ): Promise<GitHubMergeResult> => {
+      const cwd = request?.cwd;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("GitHub merge requires a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error(
+          "Merging pull requests is currently available for local workspaces only.",
+        );
+      }
+      const { mergeGitHubPullRequest } = await getGitHubMerge();
+      return mergeGitHubPullRequest(cwd, request?.input);
+    },
+  );
+  handle(
+    "github:startIssue",
+    async (
+      _e,
+      input: StartGitHubIssueInput,
+    ): Promise<StartGitHubIssueResult> => {
+      const { startGitHubIssueWorkspace } = await import("./github-issue-workspace");
+      return startGitHubIssueWorkspace(input);
+    },
+  );
+  handle(
+    "github:startPullRequest",
+    async (
+      _e,
+      input: StartGitHubPullRequestInput,
+    ): Promise<StartGitHubPullRequestResult> => {
+      const { startGitHubPullRequestWorkspace } = await import(
+        "./github-pull-request-workspace"
+      );
+      return startGitHubPullRequestWorkspace(input);
+    },
+  );
+
   handle(
     "git:diff",
     async (
@@ -1276,8 +2134,12 @@ export function registerIpc(): void {
         newBranch?: string;
       },
     ): Promise<GitCopyWorktreeResult> => {
-      const { createCopyWorktree, createCheckoutWorktree } = await getGitWorktrees();
-      const worktreesRoot = join(sparkHome(), "worktrees", basename(input.repoCwd));
+      const {
+        createCopyWorktree,
+        createCheckoutWorktree,
+        managedWorktreesRoot,
+      } = await getGitWorktrees();
+      const worktreesRoot = managedWorktreesRoot(sparkHome(), input.repoCwd);
       const result = input.checkoutBranch
         ? await createCheckoutWorktree({
             repoCwd: input.repoCwd,
@@ -1775,11 +2637,32 @@ export function registerIpc(): void {
         rows: number;
         env?: Record<string, string>;
         startupCommand?: string;
+        nativeCodexProfileId?: string;
+        nativeClaudeProfileId?: string;
+        nativeCliLoginToken?: string;
         mirror?: boolean;
         preserveSizeOnAttach?: boolean;
       },
     ) => {
       // Spawning a pty starts a real OS process; only the trusted renderer may.
+      // A native-account login token selects a main-owned exact executable,
+      // argv, and environment. None of those values can be supplied by or
+      // returned to the renderer.
+      if (args?.nativeCliLoginToken !== undefined) {
+        return spawnPreparedNativeCliLogin(e.sender, args);
+      }
+      let projectPolicyMode: ProjectPolicyMode | undefined;
+      if (parseManualAgentStartupCommand(args.startupCommand)) {
+        // Security boundary: trust for a managed agent autorun comes only from
+        // the persisted workspace origin loaded in main. The renderer supplies
+        // a process cwd, never a policy label, and cannot mark an imported pull
+        // request trusted. Plain shells skip this read and remain available.
+        const state = await loadState();
+        projectPolicyMode = await workspaceProjectPolicyModeForTerminalCwd(
+          args.cwd,
+          state.workspaces,
+        );
+      }
       return pty.spawn({
         id: args.id,
         shell: args.shell,
@@ -1788,6 +2671,9 @@ export function registerIpc(): void {
         rows: args.rows,
         env: args.env,
         startupCommand: args.startupCommand,
+        projectPolicyMode,
+        nativeCodexProfileId: args.nativeCodexProfileId,
+        nativeClaudeProfileId: args.nativeClaudeProfileId,
         mirror: args.mirror,
         preserveSizeOnAttach: args.preserveSizeOnAttach,
         webContents: e.sender,
@@ -1863,18 +2749,66 @@ export function registerIpc(): void {
     "agentSession:list",
     async (
       _e,
-      args: { runtime: WorkerSessionRuntime; cwd: string },
+      args: {
+        runtime: WorkerSessionRuntime;
+        cwd: string;
+        nativeCodexProfileId?: string;
+        nativeClaudeProfileId?: string;
+      },
     ): Promise<WorkerSessionSummary[]> => {
       if (!args || (args.runtime !== "claude" && args.runtime !== "codex")) return [];
       if (typeof args.cwd !== "string" || !args.cwd.trim()) return [];
       assertLocalWorkspace(args.cwd, "Worker session history");
-      return listWorkerSessions(args.runtime, args.cwd);
+      if (args.runtime === "claude") {
+        const execution =
+          args.nativeClaudeProfileId === undefined
+            ? await resolveNewNativeClaudeProfile()
+            : await resolveFrozenNativeClaudeProfile(
+                args.nativeClaudeProfileId,
+              );
+        const items = await listWorkerSessions(args.runtime, args.cwd, {
+          claudeStateDir:
+            execution.env.CLAUDE_CONFIG_DIR ?? null,
+        });
+        return items.map((item) => ({
+          ...item,
+          nativeClaudeProfileId: execution.profileId,
+        }));
+      }
+      const execution =
+        args.nativeCodexProfileId === undefined
+          ? await resolveNewNativeCodexProfile()
+          : await resolveFrozenNativeCodexProfile(
+              args.nativeCodexProfileId,
+            );
+      const items = await listWorkerSessions(args.runtime, args.cwd, {
+        codexHome: execution.env.CODEX_HOME,
+      });
+      return items.map((item) => ({
+        ...item,
+        nativeCodexProfileId: execution.profileId,
+      }));
     },
   );
 
   handle(
     "agentSession:listAll",
-    async (): Promise<WorkerSessionSummary[]> => listAllWorkerSessions(),
+    async (): Promise<WorkerSessionSummary[]> => {
+      const [execution, claudeExecution] = await Promise.all([
+        resolveNewNativeCodexProfile(),
+        resolveNewNativeClaudeProfile(),
+      ]);
+      const items = await listAllWorkerSessions({
+        codexHome: execution.env.CODEX_HOME,
+        claudeStateDir:
+          claudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
+      });
+      return items.map((item) =>
+        item.runtime === "codex"
+          ? { ...item, nativeCodexProfileId: execution.profileId }
+          : { ...item, nativeClaudeProfileId: claudeExecution.profileId },
+      );
+    },
   );
 
   handle(
@@ -1883,7 +2817,21 @@ export function registerIpc(): void {
       if (typeof input?.cwd === "string") {
         assertLocalWorkspace(input.cwd, "Worker session deletion");
       }
-      return deleteWorkerSession(input);
+      if (input.runtime === "claude") {
+        const execution = await resolveFrozenNativeClaudeProfile(
+          input.nativeClaudeProfileId,
+        );
+        return deleteWorkerSession(input, {
+          claudeStateDir:
+            execution.env.CLAUDE_CONFIG_DIR ?? null,
+        });
+      }
+      const execution = await resolveFrozenNativeCodexProfile(
+        input.nativeCodexProfileId,
+      );
+      return deleteWorkerSession(input, {
+        codexHome: execution.env.CODEX_HOME,
+      });
     },
   );
 
@@ -1900,6 +2848,9 @@ export function registerIpc(): void {
       _e,
       args: {
         runtime: "claude" | "codex";
+        paneId?: string;
+        nativeCodexProfileId?: string;
+        nativeClaudeProfileId?: string;
         cwd: string;
         sinceMs: number;
         // Session ids already bound to OTHER panes. Two agents launched in the
@@ -1908,17 +2859,56 @@ export function registerIpc(): void {
         // its own conversation is never restore-reachable again.
         excludeSessionIds?: string[];
       },
-    ): Promise<{ sessionId: string; transcriptPath: string } | null> => {
+    ): Promise<{
+      sessionId: string;
+      transcriptPath: string;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
+    } | null> => {
       const since = args.sinceMs;
       const spawnDate = new Date(since);
       const deadline = Date.now() + 15_000;
       const exclude = new Set(
         (args.excludeSessionIds ?? []).map((id) => id.toLowerCase()).filter(Boolean),
       );
+      const nativeCodexProfileId =
+        args.runtime === "codex"
+          ? args.nativeCodexProfileId ??
+            (args.paneId ? pty.nativeCodexProfileId(args.paneId) : undefined)
+          : undefined;
+      const nativeCodexExecution =
+        args.runtime === "codex"
+          ? await resolveFrozenNativeCodexProfile(nativeCodexProfileId)
+          : null;
+      const nativeClaudeProfileId =
+        args.runtime === "claude"
+          ? args.nativeClaudeProfileId ??
+            (args.paneId ? pty.nativeClaudeProfileId(args.paneId) : undefined)
+          : undefined;
+      const nativeClaudeExecution =
+        args.runtime === "claude"
+          ? await resolveFrozenNativeClaudeProfile(nativeClaudeProfileId)
+          : null;
       for (;;) {
-        let found: { sessionId: string; transcriptPath: string } | null = null;
+        let found: {
+          sessionId: string;
+          transcriptPath: string;
+          nativeCodexProfileId?: string;
+          nativeClaudeProfileId?: string;
+        } | null = null;
         if (args.runtime === "claude") {
-          found = await discoverClaudeSessionForCwd(args.cwd, since, exclude).catch(() => null);
+          const discovered = await discoverClaudeSessionForCwd(
+            args.cwd,
+            since,
+            exclude,
+            nativeClaudeExecution?.env.CLAUDE_CONFIG_DIR ?? null,
+          ).catch(() => null);
+          found = discovered
+            ? {
+                ...discovered,
+                nativeClaudeProfileId: nativeClaudeExecution?.profileId,
+              }
+            : null;
         } else {
           // strict: an unmatched-cwd fallback here would bind the pane to some
           // OTHER session's rollout. This poll loop retries for 15s, so a
@@ -1926,10 +2916,18 @@ export function registerIpc(): void {
           const path = await discoverRolloutForCwd(since, spawnDate, args.cwd, {
             strict: true,
             excludeSessionIds: exclude,
+            codexHome: nativeCodexExecution?.env.CODEX_HOME,
           }).catch(() => null);
           if (path) {
             const sessionId = extractSessionUuid(path);
-            if (sessionId) found = { sessionId, transcriptPath: path };
+            if (sessionId) {
+              found = {
+                sessionId,
+                transcriptPath: path,
+                nativeCodexProfileId:
+                  nativeCodexExecution?.profileId,
+              };
+            }
           }
         }
         if (found) return found;
@@ -1968,11 +2966,31 @@ export function registerIpc(): void {
     "agentSession:probe",
     async (
       _e,
-      args: { runtime: "claude" | "codex"; sessionId: string; cwd: string; transcriptPath?: string },
+      args: {
+        runtime: "claude" | "codex";
+        sessionId: string;
+        cwd: string;
+        transcriptPath?: string;
+        nativeCodexProfileId?: string;
+        nativeClaudeProfileId?: string;
+      },
     ): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> => {
       if (!args.sessionId) return { exists: false };
       if (args.runtime === "claude") {
-        const path = claudeSessionTranscriptPath(args.cwd, args.sessionId);
+        const execution = await resolveFrozenNativeClaudeProfile(
+          args.nativeClaudeProfileId,
+        );
+        const expectedPath = claudeSessionTranscriptPath(
+          args.cwd,
+          args.sessionId,
+          execution.env.CLAUDE_CONFIG_DIR ?? null,
+        );
+        const path = await resolveSafeClaudeTranscriptPath(
+          args.cwd,
+          args.sessionId,
+          execution.env.CLAUDE_CONFIG_DIR ?? null,
+        ).catch(() => null);
+        if (!path) return { exists: false, transcriptPath: expectedPath };
         const exists = await fs.access(path).then(() => true, () => false);
         if (!exists) return { exists: false, transcriptPath: path };
         // Resumability: the transcript must contain at least one real user
@@ -2004,8 +3022,21 @@ export function registerIpc(): void {
       // scan (rollout formats vary): a stillborn rollout is a few hundred bytes.
       const path = args.transcriptPath;
       if (path) {
-        const stat = await fs.stat(path).catch(() => null);
-        if (stat) return { exists: true, resumable: stat.size >= 1_024, transcriptPath: path };
+        const execution = await resolveFrozenNativeCodexProfile(
+          args.nativeCodexProfileId,
+        );
+        const safePath = resolveCodexTranscriptPath(
+          path,
+          execution.env.CODEX_HOME,
+        );
+        const stat = await fs.stat(safePath).catch(() => null);
+        if (stat) {
+          return {
+            exists: true,
+            resumable: stat.size >= 1_024,
+            transcriptPath: safePath,
+          };
+        }
       }
       return { exists: false };
     },
@@ -2013,8 +3044,20 @@ export function registerIpc(): void {
 
   // Pre-seed Codex directory trust before a resumed (or fresh) `codex --yolo`
   // pane so its TUI never stalls on the "trust this directory?" prompt.
-  handle("agentSession:ensureCodexTrust", async (_e, args: { cwd: string }): Promise<void> => {
-    await ensureCodexProjectTrust(args.cwd).catch(() => undefined);
+  handle("agentSession:ensureCodexTrust", async (
+    _e,
+    args: { cwd: string; nativeCodexProfileId?: string },
+  ): Promise<void> => {
+    const execution =
+      args.nativeCodexProfileId === undefined
+        ? await resolveNewNativeCodexProfile()
+        : await resolveFrozenNativeCodexProfile(
+            args.nativeCodexProfileId,
+          );
+    await ensureCodexProjectTrust(
+      args.cwd,
+      execution.env.CODEX_HOME,
+    ).catch(() => undefined);
   });
 
   // Repair a Claude transcript whose tail was truncated by an abrupt kill
@@ -2026,10 +3069,23 @@ export function registerIpc(): void {
     "agentSession:repairTranscript",
     async (
       _e,
-      args: { runtime: "claude" | "codex"; sessionId: string; cwd: string },
+      args: {
+        runtime: "claude" | "codex";
+        sessionId: string;
+        cwd: string;
+        nativeClaudeProfileId?: string;
+      },
     ): Promise<{ repaired: boolean }> => {
       if (args.runtime !== "claude" || !args.sessionId) return { repaired: false };
-      const path = claudeSessionTranscriptPath(args.cwd, args.sessionId);
+      const execution = await resolveFrozenNativeClaudeProfile(
+        args.nativeClaudeProfileId,
+      );
+      const path = await resolveSafeClaudeTranscriptPath(
+        args.cwd,
+        args.sessionId,
+        execution.env.CLAUDE_CONFIG_DIR ?? null,
+        { requireExisting: true },
+      );
       const repaired = await repairClaudeTranscriptTail(path).catch(() => false);
       return { repaired };
     },

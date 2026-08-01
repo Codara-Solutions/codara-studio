@@ -145,6 +145,12 @@ assert.match(
   /if \(!auth\.claim\.allowedMethods\.includes\(method\)\)[\s\S]*params\.runId = auth\.claim\.runId/,
   "dispatch must deny outside the claim before stamping its authoritative run",
 );
+assert.match(
+  socketSource,
+  /case "chat\.resume":[\s\S]*auth\.kind !== "root"[\s\S]*handleChatResume/,
+  "chat.resume must keep an explicit root-only dispatch gate even if a future scoped roster changes",
+);
+
 const bridgeSource = fs.readFileSync(
   path.join(ROOT, "resources", "codara-studio-mcp", "server.js"),
   "utf8",
