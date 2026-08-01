@@ -148,6 +148,7 @@ const MUTATING_TOOLS = new Set([
   "codara_spawn_terminals",
   "codara_terminal_create",
   "codara_terminal_write",
+  "codara_terminal_close",
 ]);
 
 function hash(value: string | Buffer): string {

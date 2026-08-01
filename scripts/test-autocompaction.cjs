@@ -165,6 +165,120 @@ async function main() {
   check("claude: 810k/1M triggers", 810_000 / claudeWindow >= RATIO);
   check("pi/codex stay non-1M", policy.effectiveChatOneMillionContext("pi") === false && policy.effectiveChatOneMillionContext("codex") === false);
 
+  // A Pi chat never reaches its model window: Codara's bundled extension
+  // compacts it at ~256k first, so both the trigger and the composer meter
+  // measure against that cap. Without this the trigger would wait for 80% of
+  // 400k (320k) on a gpt chat that already compacted at 256k, and the meter
+  // would show a denominator the conversation can never approach.
+  const compaction = await bundle(
+    "context-compaction",
+    path.join(SHARED_DIR, "context-compaction.ts"),
+  );
+  const capacity = compaction.chatContextCapacityTokens;
+  check(
+    "shared default compaction threshold is 256k",
+    compaction.DEFAULT_PI_COMPACT_AT_TOKENS === 256_000,
+    String(compaction.DEFAULT_PI_COMPACT_AT_TOKENS),
+  );
+  const piGpt = capacity({ contextWindowTokens: gpt, backend: "pi" });
+  check("pi chat on a 400k model reads against 256k", piGpt === 256_000, String(piGpt));
+  check("pi: 205k/256k triggers", 205_000 / piGpt >= RATIO);
+  check("pi: 200k/256k does not trigger", 200_000 / piGpt < RATIO);
+  // The trigger must fire BEFORE the Pi extension compacts, or Codara's own
+  // conversation summary would never run.
+  check(
+    "the ratio trigger precedes the extension's compaction",
+    RATIO * piGpt < compaction.DEFAULT_PI_COMPACT_AT_TOKENS,
+  );
+  // CLI-backed chats keep their own window: the extension does not run there.
+  check(
+    "claude CLI chat keeps its 1M window",
+    capacity({ contextWindowTokens: claudeWindow, backend: "claude" }) === 1_000_000,
+  );
+  check(
+    "codex CLI chat keeps its 400k window",
+    capacity({ contextWindowTokens: gpt, backend: "codex" }) === 400_000,
+  );
+  // A model whose window is under the threshold shows its own smaller ceiling
+  // rather than a 256k promise the session can never reach.
+  const piSmall = capacity({ contextWindowTokens: unknown, backend: "pi" });
+  check(
+    "pi chat on a 128k model reports Pi's own earlier trigger",
+    piSmall === unknown - compaction.PI_BUILTIN_COMPACT_HEADROOM_TOKENS,
+    String(piSmall),
+  );
+  check("a sub-threshold window never exceeds itself", piSmall < unknown);
+
+  // CODARA_PI_COMPACT_AT_TOKENS override: the trigger and the meter must land
+  // on the SAME capacity. They read it by different routes (the trigger
+  // resolves process.env directly, the composer takes the value pi-turn stamps
+  // onto the usage stream), so an override is exactly where they could drift.
+  // Below ~204.8k a trigger still pricing off 256k would never fire at all;
+  // above 256k it would fire at 204.8k while the meter advertised more.
+  for (const override of ["120000", "400000", "80000"]) {
+    const resolved = compaction.resolveCompactAtTokens(override);
+    const meter = capacity({
+      contextWindowTokens: gpt,
+      backend: "pi",
+      compactAtTokens: resolved,
+    });
+    const trigger = capacity({
+      contextWindowTokens: gpt,
+      backend: "pi",
+      compactAtTokens: compaction.resolveCompactAtTokens(override),
+    });
+    check(
+      `override ${override}: trigger and meter agree`,
+      meter === trigger && meter === Math.min(resolved, gpt - compaction.PI_BUILTIN_COMPACT_HEADROOM_TOKENS),
+      `${meter} vs ${trigger}`,
+    );
+    check(
+      `override ${override}: the ratio trigger still precedes compaction`,
+      RATIO * trigger < resolved,
+    );
+  }
+  // An absurd override collapses to the default on BOTH sides rather than
+  // producing two different fallbacks.
+  for (const absurd of ["0", "-1", "NaN", "nonsense"]) {
+    check(
+      `absurd override ${absurd} falls back to the default capacity`,
+      capacity({
+        contextWindowTokens: gpt,
+        backend: "pi",
+        compactAtTokens: compaction.resolveCompactAtTokens(absurd),
+      }) === 256_000,
+    );
+  }
+  // The trigger must actually resolve the override, not just accept one.
+  check(
+    "run-store's trigger resolves the env override for its capacity",
+    /compactAtTokens: resolveCompactAtTokens\(process\.env\.CODARA_PI_COMPACT_AT_TOKENS\)/.test(
+      fs.readFileSync(
+        path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
+        "utf8",
+      ),
+    ),
+  );
+
+  // Both consumers must go through the shared helper, or they drift apart the
+  // way the 200k-vs-1M Claude bug did.
+  const runStore = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
+    "utf8",
+  );
+  check(
+    "run-store's trigger measures against the shared capacity helper",
+    /const windowTokens = chatContextCapacityTokens\(\{/.test(runStore),
+  );
+  const composer = fs.readFileSync(
+    path.join(ROOT, "src", "renderer", "src", "components", "chat", "ChatComposer.tsx"),
+    "utf8",
+  );
+  check(
+    "the composer meter measures against the shared capacity helper",
+    /budget=\{chatContextCapacityTokens\(\{/.test(composer),
+  );
+
   // Finding 8: newline-bearing attachment names/paths must not forge markers.
   const evil = backend.buildManagerTurnPrompt(
     {

@@ -1,6 +1,7 @@
 import type { ChatStreamHandler } from "./spark-agent-backend";
 import type { PiRpcEvent } from "./pi-rpc-client";
 import type { CoraExecutionPolicy } from "@shared/types";
+import { resolveCompactAtTokens } from "@shared/context-compaction";
 
 export interface PiTurnToolCall {
   toolName: string;
@@ -224,6 +225,9 @@ export class PiTurnAccumulator {
         ...(this.contextWindowTokens !== null
           ? { contextWindowTokens: this.contextWindowTokens }
           : {}),
+        // The ceiling this session will actually compact at. Only Pi sessions
+        // carry it, which is exactly the set of chats the extension runs in.
+        compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
       });
       return;
     }

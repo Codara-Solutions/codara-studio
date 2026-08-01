@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
-import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
-import { revokeAgentSocketCapability } from "../agent-socket-capabilities";
+import type {
+  ChatMode,
+  CoraExecutionPolicy,
+  ProjectPolicyMode,
+} from "@shared/types";
 
 import {
   buildExecuteDecisionFromToolCalls,
@@ -11,6 +14,8 @@ import {
   cleanupPiMcpBridgeConfig,
   createCodaraPiLaunchPlan,
   promoteCodaraPiFrontierAdmission,
+  resolveCodaraPiExecutionAccount,
+  resolveCodaraPiFastMode,
 } from "./pi-runtime-electron";
 import {
   type PiManagerLaunchPlan,
@@ -18,6 +23,7 @@ import {
   type PiThinkingLevel,
 } from "./pi-runtime";
 import { PiRpcClient } from "./pi-rpc-client";
+import { piBackendSessionIdentityMatches } from "./pi-session-identity";
 import { frontierTurnHasRequiredCompletion, PiTurnAccumulator } from "./pi-turn";
 import {
   buildTalkReplyDecision,
@@ -26,24 +32,38 @@ import {
   type ManagerRequestInput,
   type SparkAgentBackend,
 } from "./spark-agent-backend";
+import {
+  isAgentSocketCapabilityActive,
+  revokeAgentSocketCapability,
+} from "../agent-socket-capabilities";
 
-interface PiBackendSession {
+interface PiProcessOwner {
   client: PiRpcClient;
   plan: PiManagerLaunchPlan;
+  generation: number;
+  cleanupPromise: Promise<void> | null;
+}
+
+interface PiBackendSession extends PiProcessOwner {
   provider: PiSubscriptionProvider;
+  accountProfileId?: string;
   model: string;
   thinking: PiThinkingLevel;
   mode: "talk" | "execute" | "automation";
   chatMode: ChatMode;
   executionPolicy: CoraExecutionPolicy;
+  projectPolicyMode: ProjectPolicyMode;
   sessionId: string;
-  generation: number;
+  fastMode: boolean;
   interrupted: boolean;
   contractPromptSha256: string | null;
   settleActiveTurn: (() => void) | null;
 }
 
+interface PendingPiBackendSession extends PiProcessOwner {}
+
 const SESSIONS = new Map<string, PiBackendSession>();
+const PENDING_SESSIONS = new Map<string, PendingPiBackendSession>();
 const GENERATIONS = new Map<string, number>();
 const PI_TURN_TIMEOUT_MS = 90 * 60 * 1000;
 const FRONTIER_CONTRACT_DRIFT_MARKER = "CORA_FRONTIER_CONTRACT_DRIFT";
@@ -56,6 +76,7 @@ interface FrontierRestartContext {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  accountProfileId?: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -137,64 +158,150 @@ function frontierContractPrompt(input: ManagerRequestInput): string {
 function sessionMatches(
   session: PiBackendSession,
   provider: PiSubscriptionProvider,
+  accountProfileId: string | undefined,
   model: string,
   thinking: PiThinkingLevel,
   mode: PiBackendSession["mode"],
   chatMode: ChatMode,
   executionPolicy: CoraExecutionPolicy,
+  projectPolicyMode: ProjectPolicyMode,
   sessionId: string,
   contractPromptSha256: string | null,
+  fastMode: boolean,
 ): boolean {
-  return session.provider === provider &&
-    session.model === model &&
-    session.thinking === thinking &&
-    session.mode === mode &&
-    session.chatMode === chatMode &&
-    session.executionPolicy === executionPolicy &&
-    session.sessionId === sessionId &&
-    session.contractPromptSha256 === contractPromptSha256 &&
-    session.client.state().phase === "running";
+  return piBackendSessionIdentityMatches(session, {
+    provider,
+    ...(accountProfileId ? { accountProfileId } : {}),
+    model,
+    thinking,
+    mode,
+    chatMode,
+    executionPolicy,
+    projectPolicyMode,
+    sessionId,
+    contractPromptSha256,
+    fastMode,
+  }) &&
+    session.client.state().phase === "running" &&
+    launchPlanCapabilityIsReusable(session.plan);
 }
 
-async function stopSession(runId: string, expected?: PiBackendSession): Promise<void> {
+function launchPlanCapabilityIsReusable(
+  plan: PiManagerLaunchPlan,
+  now = Date.now(),
+): boolean {
+  const capabilityId = plan.agentSocketCapabilityId;
+  if (!capabilityId) return true;
+  if (
+    typeof plan.agentSocketCapabilityExpiresAt === "number" &&
+    plan.agentSocketCapabilityExpiresAt <= now
+  ) {
+    return false;
+  }
+  return isAgentSocketCapabilityActive(capabilityId, now);
+}
+
+function cleanupPiProcess(owner: PiProcessOwner): Promise<void> {
+  if (owner.cleanupPromise) return owner.cleanupPromise;
+  // Revoke synchronously before waiting for process shutdown. A stuck child
+  // must not retain run authority throughout its shutdown grace period.
+  revokeAgentSocketCapability(owner.plan.agentSocketCapabilityId);
+  owner.cleanupPromise = (async () => {
+    await owner.client.stop().catch(() => undefined);
+    await cleanupPiMcpBridgeConfig(owner.plan).catch(() => undefined);
+  })();
+  return owner.cleanupPromise;
+}
+
+async function cleanupUnstartedPlan(plan: PiManagerLaunchPlan): Promise<void> {
+  revokeAgentSocketCapability(plan.agentSocketCapabilityId);
+  await cleanupPiMcpBridgeConfig(plan).catch(() => undefined);
+}
+
+async function stopSession(
+  runId: string,
+  expected?: PiProcessOwner,
+): Promise<void> {
+  const cleanup: Promise<void>[] = [];
   const session = SESSIONS.get(runId);
-  if (!session || (expected && session !== expected)) return;
-  SESSIONS.delete(runId);
-  revokeAgentSocketCapability(session.plan.agentSocketCapabilityId);
-  session.interrupted = true;
-  session.settleActiveTurn?.();
-  session.settleActiveTurn = null;
-  await session.client.stop().catch(() => undefined);
-  await cleanupPiMcpBridgeConfig(session.plan).catch(() => undefined);
+  if (session && (!expected || session === expected)) {
+    SESSIONS.delete(runId);
+    session.interrupted = true;
+    session.settleActiveTurn?.();
+    session.settleActiveTurn = null;
+    cleanup.push(cleanupPiProcess(session));
+  }
+  const pending = PENDING_SESSIONS.get(runId);
+  if (pending && (!expected || pending === expected)) {
+    PENDING_SESSIONS.delete(runId);
+    cleanup.push(cleanupPiProcess(pending));
+  }
+  await Promise.all(cleanup);
+}
+
+function supersededStartupError(): Error {
+  return new Error("Cora's Pi session startup was superseded by disposal or a newer launch");
 }
 
 async function ensureSession(
   input: ManagerRequestInput,
+  managerConstitutionBlock: string,
   onStream?: ChatStreamHandler,
+  restartAccountProfileId?: string,
 ): Promise<PiBackendSession> {
   const runId = input.run.id;
+  const observedGeneration = GENERATIONS.get(runId) ?? 0;
   const provider = piProviderForModel(input.chat.model);
   const model = input.chat.model;
   const thinking = piThinkingForEffort(input.chat.effort);
   const mode = piModeForChat(input.chat.mode);
   const executionPolicy = input.chat.executionPolicy;
+  const projectPolicyMode = "trusted" as const;
+  const [account, fastMode] = await Promise.all([
+    resolveCodaraPiExecutionAccount({
+      provider,
+      preferredAccountProfileId:
+        restartAccountProfileId ?? input.chat.accountProfileId,
+    }),
+    // Fast mode reaches the runtime only as launch-time env, so a session
+    // launched under the other value cannot be reused: resolve it here, match
+    // on it below, and hand the SAME value to the launch plan.
+    resolveCodaraPiFastMode(provider),
+  ]);
+  if ((GENERATIONS.get(runId) ?? 0) !== observedGeneration) {
+    throw supersededStartupError();
+  }
   const sessionId = safeSessionId(input);
   const contractPrompt = executionPolicy === "frontier" ? frontierContractPrompt(input) : null;
   const contractPromptSha256 = executionPolicy === "frontier"
     ? createHash("sha256").update(contractPrompt!.replaceAll("\r\n", "\n").trim()).digest("hex")
     : null;
   const current = SESSIONS.get(runId);
-  if (current && sessionMatches(current, provider, model, thinking, mode, input.chat.mode, executionPolicy, sessionId, contractPromptSha256)) {
+  const pendingCurrent = PENDING_SESSIONS.get(runId);
+  if (
+    current &&
+    current.generation === observedGeneration &&
+    sessionMatches(current, provider, account.accountProfileId, model, thinking, mode, input.chat.mode, executionPolicy, projectPolicyMode, sessionId, contractPromptSha256, fastMode)
+  ) {
     return current;
   }
+  const generation = observedGeneration + 1;
+  GENERATIONS.set(runId, generation);
   if (current) {
-    onStream?.({ kind: "system_note", message: "Restarting Cora's Pi runtime with the selected model, mode, or execution policy." });
+    onStream?.({ kind: "system_note", message: "Restarting Cora's Pi runtime with the selected model, mode, execution policy, or fast mode." });
     await stopSession(runId, current);
   }
-  const generation = (GENERATIONS.get(runId) ?? 0) + 1;
-  GENERATIONS.set(runId, generation);
+  if (pendingCurrent) {
+    await stopSession(runId, pendingCurrent);
+  }
+  if (GENERATIONS.get(runId) !== generation) {
+    throw supersededStartupError();
+  }
   const plan = await createCodaraPiLaunchPlan({
     provider,
+    accountProfileId: account.accountProfileId,
+    resolvedAccount: account,
+    openAiFastMode: fastMode,
     runId,
     sessionId,
     cwd: input.cwd,
@@ -205,21 +312,50 @@ async function ensureSession(
     thinking,
     sessionName: input.run.title,
     contractPrompt: contractPrompt ?? undefined,
+    managerConstitutionBlock: managerConstitutionBlock || undefined,
+    projectPolicyMode,
   });
-  const client = new PiRpcClient(plan, {
-    requestTimeoutMs: 120_000,
-    shutdownGraceMs: 2_000,
-  });
+  if (GENERATIONS.get(runId) !== generation) {
+    await cleanupUnstartedPlan(plan);
+    throw supersededStartupError();
+  }
+  let client: PiRpcClient;
+  try {
+    client = new PiRpcClient(plan, {
+      requestTimeoutMs: 120_000,
+      shutdownGraceMs: 2_000,
+    });
+  } catch (error) {
+    await cleanupUnstartedPlan(plan);
+    throw error;
+  }
+  const pending: PendingPiBackendSession = {
+    client,
+    plan,
+    generation,
+    cleanupPromise: null,
+  };
+  PENDING_SESSIONS.set(runId, pending);
   let state;
   try {
     state = await client.start();
   } catch (error) {
-    // The launch plan already wrote the MCP bridge config, and without a
-    // stored session there is no stopSession to clean it up, so a failed
-    // start would otherwise leak one bridge file per attempt.
-    revokeAgentSocketCapability(plan.agentSocketCapabilityId);
-    await cleanupPiMcpBridgeConfig(plan).catch(() => undefined);
+    if (PENDING_SESSIONS.get(runId) === pending) {
+      PENDING_SESSIONS.delete(runId);
+    }
+    await cleanupPiProcess(pending);
     throw error;
+  }
+  if (
+    PENDING_SESSIONS.get(runId) !== pending ||
+    GENERATIONS.get(runId) !== generation ||
+    !launchPlanCapabilityIsReusable(plan)
+  ) {
+    if (PENDING_SESSIONS.get(runId) === pending) {
+      PENDING_SESSIONS.delete(runId);
+    }
+    await cleanupPiProcess(pending);
+    throw supersededStartupError();
   }
   const reportedSessionId = typeof state.sessionId === "string" && state.sessionId
     ? state.sessionId
@@ -228,21 +364,26 @@ async function ensureSession(
     client,
     plan,
     provider,
+    accountProfileId: plan.accountProfileId,
     model,
     thinking,
     mode,
     chatMode: input.chat.mode,
     executionPolicy,
+    projectPolicyMode,
     sessionId: reportedSessionId,
+    fastMode,
     generation,
     interrupted: false,
     contractPromptSha256,
     settleActiveTurn: null,
+    cleanupPromise: pending.cleanupPromise,
   };
+  PENDING_SESSIONS.delete(runId);
   SESSIONS.set(runId, session);
   onStream?.({
     kind: "system_note",
-    message: `Cora Pi session ready · ${provider}/${model} · ${thinking} · ${executionPolicy}${plan.frontierAdmissionArtifactSha256 ? " · exact-state admission cache hit" : ""}`,
+    message: `Cora Pi session ready · ${provider}/${model} · ${thinking} thinking · ${executionPolicy} chat mode${plan.frontierAdmissionArtifactSha256 ? " · exact-state admission cache hit" : ""}`,
   });
   return session;
 }
@@ -283,7 +424,12 @@ async function requestPiDecision(
   // contract-restart re-runs this function INSIDE the parent's turn envelope,
   // and without it the restart's own startup failure would decay to turnFailed.
   try {
-    session = await ensureSession(input, onStream);
+    session = await ensureSession(
+      input,
+      input.managerConstitutionBlock ?? "",
+      onStream,
+      restartContext?.accountProfileId,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     onStream?.({ kind: "error", message });
@@ -293,7 +439,23 @@ async function requestPiDecision(
   }
   try {
     const generation = session.generation;
+    // `interrupted` belongs to the preceding turn. Generation/map ownership
+    // below distinguishes a newly resumed turn from the older request that an
+    // interrupt invalidated.
     session.interrupted = false;
+    if (
+      SESSIONS.get(runId) !== session ||
+      GENERATIONS.get(runId) !== generation ||
+      !launchPlanCapabilityIsReusable(session.plan)
+    ) {
+      return {
+        decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+        accountProfileId: session.accountProfileId,
+        turnAborted: true,
+      };
+    }
     const turn = new PiTurnAccumulator(onStream);
     let contractDriftDetected = false;
     let contractBlockerOutput: string | null = null;
@@ -321,6 +483,7 @@ async function requestPiDecision(
         decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
         durationMs: Date.now() - startedAt,
         model: input.chat.model,
+        accountProfileId: session.accountProfileId,
         turnAborted: true,
       };
     }
@@ -331,6 +494,7 @@ async function requestPiDecision(
         decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
         durationMs: Date.now() - startedAt,
         model: input.chat.model,
+        accountProfileId: session.accountProfileId,
         turnAborted: true,
       };
     }
@@ -363,6 +527,7 @@ async function requestPiDecision(
           decision: buildTalkReplyDecision(notice),
           durationMs: Date.now() - startedAt,
           model: input.chat.model,
+          accountProfileId: session.accountProfileId,
           newSessionUuid: session.sessionId,
           ...cumulativeUsage,
           ...contextUsage,
@@ -384,6 +549,7 @@ async function requestPiDecision(
         startedAt,
         promptAccepted: true,
         ...cumulativeUsage,
+        accountProfileId: session.accountProfileId,
       });
     }
     let finalText = accumulated.finalText;
@@ -405,6 +571,7 @@ async function requestPiDecision(
         model: input.chat.model,
         newSessionUuid: session.sessionId,
         ...cumulativeUsage,
+        accountProfileId: session.accountProfileId,
         ...contextUsage,
         ...providerDiagnostics,
         notice: accumulated.failure,
@@ -422,6 +589,7 @@ async function requestPiDecision(
         model: input.chat.model,
         newSessionUuid: session.sessionId,
         ...cumulativeUsage,
+        accountProfileId: session.accountProfileId,
         ...contextUsage,
         ...providerDiagnostics,
         notice,
@@ -465,6 +633,7 @@ async function requestPiDecision(
       model: input.chat.model,
       newSessionUuid: session.sessionId,
       ...cumulativeUsage,
+      accountProfileId: session.accountProfileId,
       ...contextUsage,
       ...providerDiagnostics,
       notice: contractBlocked ? "Cora Frontier found a machine-validated contract blocker; repository mutation remained locked." : undefined,
@@ -482,6 +651,7 @@ async function requestPiDecision(
       decision: buildTalkReplyDecision(`Cora Pi backend error: ${detail}`),
       durationMs: Date.now() - startedAt,
       model: input.chat.model,
+      accountProfileId: session?.accountProfileId,
       newSessionUuid: session?.sessionId,
       notice: detail,
       turnFailed: true,
@@ -501,10 +671,16 @@ export const piBackend = {
     await stopSession(runId);
   },
   interruptChat(runId) {
+    const generation = (GENERATIONS.get(runId) ?? 0) + 1;
+    GENERATIONS.set(runId, generation);
+    const pending = PENDING_SESSIONS.get(runId);
+    if (pending) {
+      PENDING_SESSIONS.delete(runId);
+      void cleanupPiProcess(pending);
+    }
     const session = SESSIONS.get(runId);
     if (!session) return;
     session.interrupted = true;
-    GENERATIONS.set(runId, (GENERATIONS.get(runId) ?? 0) + 1);
     session.settleActiveTurn?.();
     void session.client.abort().catch(() => undefined);
   },

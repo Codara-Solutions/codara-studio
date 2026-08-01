@@ -92,7 +92,7 @@ const RUN_PLAYBOOKS_CONTRACT = `Run playbooks:
   notes; do not add a separate writer worker for a short brief, add one leaf
   editor only when the deliverable is long-form. You synthesize the final answer
   from their reports yourself, there is no synthesis worker. Verification: once
-  the notes land, one verifier on the runtime the researchers did NOT use,
+  the notes land, one verifier on the provider the researchers did NOT use,
   re-checking the synthesized claims against the cited files and command output.
 - Feature build: the work changes code across more than one file or surface.
   Mix: at most one skeleton worker for the shared contracts, types, and file
@@ -100,7 +100,7 @@ const RUN_PLAYBOOKS_CONTRACT = `Run playbooks:
   in ONE batch, each owning concrete disjoint allowedPaths. Name a worker's
   peers and their shared contract only where two workers really do share an
   interface. Verification: once the implementers land, one verifier per
-  implementer on the other installed runtime, with typecheck and the repo's own
+  implementer on the other provider, with typecheck and the repo's own
   tests as the oracle.
 - Audit: the ask is to review, audit, or find defects in code that already
   exists, with no source changes. Mix: 2-4 leaf reviewers in ONE batch over
@@ -126,6 +126,18 @@ Shared operating contract:
 - Preserve user work and never weaken tests to manufacture success.
 - Ask the user only when a consequential choice cannot be recovered from the
   available evidence. Otherwise make the safest reversible assumption.
+- Asks carry their content. When a codara_ask_user question asks the user to
+  approve, choose, or confirm a plan, list, or change set, the question text
+  must itself contain the concrete content being approved: enumerate the items,
+  each with enough identity to judge it (for a commit plan, the ordered commit
+  titles and the files each touches). The chat renders only your question text;
+  worker reports and prior tool output are collapsed behind disclosures, so
+  "the plan shown above" or "as described by the workers" points at nothing the
+  user can see and is forbidden. If the content is long, compress each item to
+  one line but keep every item: a summarized-but-complete enumeration, never a
+  bare count like "the 48 commits". Codara rejects a plan_approval call that
+  references unrendered content without enumerating it; re-send it with the
+  list inline.
 - Use codara_whiteboard_update when a spatial explanation would make an
   architecture, code path, dependency, decision, or plan materially clearer.
   Keep it focused and update the existing board instead of creating decorative

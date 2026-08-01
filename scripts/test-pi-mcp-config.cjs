@@ -35,15 +35,32 @@ const bridge = loadTypeScriptModule(
 function fakePi() {
   const tools = new Map();
   const handlers = new Map();
+  const activeTools = new Set();
+  const activeToolUpdates = [];
   return {
     tools,
     handlers,
+    activeTools,
+    activeToolUpdates,
     registerTool(tool) {
       assert.equal(tools.has(tool.name), false, `duplicate tool registration: ${tool.name}`);
       tools.set(tool.name, tool);
+      activeTools.add(tool.name);
     },
     on(event, handler) {
       handlers.set(event, handler);
+    },
+    getActiveTools() {
+      return [...activeTools];
+    },
+    setActiveTools(names) {
+      const next = [...new Set(names)];
+      for (const name of next) {
+        assert.equal(tools.has(name), true, `cannot activate unregistered tool: ${name}`);
+      }
+      activeTools.clear();
+      for (const name of next) activeTools.add(name);
+      activeToolUpdates.push(next);
     },
     getAllTools() {
       return [...tools.values()].map((tool) => ({ name: tool.name }));
@@ -148,6 +165,9 @@ async function main() {
   assert.equal(long.length <= 128, true);
   assert.match(long, /^[A-Za-z0-9_-]+$/);
   assert.notEqual(long, bridge.piMcpToolName("server", `${"t".repeat(300)}x`));
+  assert.equal(bridge.EXTERNAL_TOOL_LOADER_NAME, "codara_external_tools");
+  assert.equal(bridge.EXTERNAL_SERVER_STATUS_NAME, "codara_server_status");
+  assert.notEqual(bridge.EXTERNAL_SERVER_STATUS_NAME, "mcp_status");
 
   const built = config.buildPiMcpBridgeConfig(servers, { audience: "worker" });
   assert.equal(built.version, 1);
@@ -195,12 +215,15 @@ async function main() {
     assert.equal(loaded.servers.length, 1);
     const pi = fakePi();
     const handle = bridge.registerMcpBridge(pi, loaded);
-    assert.equal(pi.tools.has("mcp_status"), true);
+    assert.equal(pi.tools.has(bridge.EXTERNAL_TOOL_LOADER_NAME), true);
+    assert.equal(pi.tools.has(bridge.EXTERNAL_SERVER_STATUS_NAME), true);
+    assert.equal(pi.tools.has("mcp_status"), false, "the provider-reserved status name must never be registered");
     await pi.handlers.get("session_start")({ type: "session_start", reason: "startup" });
-    const status = await pi.tools.get("mcp_status").execute("call-1", { action: "list" });
+    const status = await pi.tools.get(bridge.EXTERNAL_SERVER_STATUS_NAME).execute("call-1", { action: "list" });
     const text = status.content[0].text;
     assert.match(text, /offline \| stdio \| failed/);
     assert.match(handle.promptSuffix(), /Unavailable MCP servers: offline/);
+    assert.match(handle.promptSuffix(), /codara_server_status action=reconnect/);
     await pi.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
     await pi.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
 
@@ -230,14 +253,37 @@ async function main() {
     await livePi.handlers.get("session_start")({ type: "session_start", reason: "startup" });
     const echo = livePi.tools.get("mcp__fixture__echo_tool");
     assert.ok(echo, "the remote tool name is sanitized into mcp__<server>__<tool>");
+    assert.equal(livePi.activeTools.has(echo.name), false, "remote definitions start inactive");
+    assert.equal(livePi.activeTools.has("mcp__fixture__fail"), false);
+    assert.equal(livePi.activeTools.has(bridge.EXTERNAL_TOOL_LOADER_NAME), true);
+    assert.equal(livePi.activeTools.has(bridge.EXTERNAL_SERVER_STATUS_NAME), true);
+    assert.equal(livePi.activeTools.has("mcp_status"), false);
     assert.equal(echo.parameters.properties.text.type, "string");
+
+    const discovery = await livePi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
+      "call-discover",
+      { query: "echo", limit: 1 },
+    );
+    assert.deepEqual(discovery.details.activated, [echo.name]);
+    assert.equal(livePi.activeTools.has(echo.name), true, "the loader activates a matched remote tool");
+    assert.equal(livePi.activeTools.has("mcp__fixture__fail"), false, "unmatched remote tools remain inactive");
+    assert.equal(livePi.activeTools.has(bridge.EXTERNAL_TOOL_LOADER_NAME), true, "activation is additive");
+    assert.equal(livePi.activeTools.has(bridge.EXTERNAL_SERVER_STATUS_NAME), true, "status remains active");
+
     const echoed = await echo.execute("call-echo", { text: "hi" });
     assert.equal(echoed.content[0].text, "echo:hi");
     assert.deepEqual(echoed.details, { ok: true });
     // A remote isError result must reject, not return: Pi ignores isError on a
     // returned value, so a rejected mutation would otherwise read as applied.
+    const exactActivation = await livePi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
+      "call-activate",
+      { activate: ["mcp__fixture__fail"] },
+    );
+    assert.deepEqual(exactActivation.details.activated, ["mcp__fixture__fail"]);
+    assert.equal(livePi.activeTools.has("mcp__fixture__fail"), true);
     await assert.rejects(() => livePi.tools.get("mcp__fixture__fail").execute("call-fail", {}), /boom/);
     assert.match(liveHandle.promptSuffix(), /Connected MCP servers: fixture \(2 tools\)/);
+    assert.match(liveHandle.promptSuffix(), /codara_external_tools/);
     await livePi.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

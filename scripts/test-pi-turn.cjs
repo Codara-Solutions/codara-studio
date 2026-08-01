@@ -7,20 +7,39 @@ const Module = require("node:module");
 const path = require("node:path");
 const ts = require("typescript");
 
+// Transpile-and-require for a single .ts file. `@shared/*` is a tsconfig path
+// alias, not a real package, so nested requires of it are resolved here the
+// same way tsconfig.node.json maps them.
+const tsModuleCache = new Map();
+
 function loadTypeScriptModule(sourcePath) {
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const resolved = path.resolve(sourcePath);
+  const cached = tsModuleCache.get(resolved);
+  if (cached) return cached;
+  const source = fs.readFileSync(resolved, "utf8");
   const output = ts.transpileModule(source, {
-    fileName: sourcePath,
+    fileName: resolved,
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
       esModuleInterop: true,
     },
   }).outputText;
-  const loaded = new Module(sourcePath, module);
-  loaded.filename = sourcePath;
-  loaded.paths = Module._nodeModulePaths(path.dirname(sourcePath));
-  loaded._compile(output, sourcePath);
+  const loaded = new Module(resolved, module);
+  loaded.filename = resolved;
+  loaded.paths = Module._nodeModulePaths(path.dirname(resolved));
+  const nativeRequire = loaded.require.bind(loaded);
+  loaded.require = (specifier) => {
+    if (specifier.startsWith("@shared/")) {
+      return loadTypeScriptModule(
+        path.join(__dirname, "..", "src", "shared", `${specifier.slice("@shared/".length)}.ts`),
+      );
+    }
+    return nativeRequire(specifier);
+  };
+  tsModuleCache.set(resolved, loaded.exports);
+  loaded._compile(output, resolved);
+  tsModuleCache.set(resolved, loaded.exports);
   return loaded.exports;
 }
 

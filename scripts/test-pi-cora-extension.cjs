@@ -25,6 +25,7 @@ function loadTypeScriptModule(sourcePath) {
   return loaded.exports;
 }
 
+(async () => {
 const extension = loadTypeScriptModule(
   path.join(__dirname, "..", "resources", "pi-cora", "prompt.ts"),
 );
@@ -124,6 +125,7 @@ assert.equal(policy.isAutomationWorker({ SPARK_AUTOMATION_ID: "job-1" }), true);
 // harmless context, scoped to the calling run), no lifecycle tools.
 assert.equal(policy.isWorkerSafeBridgeTool("codara_preview_snapshot", false), true);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_terminal_create", false), true);
+assert.equal(policy.isWorkerSafeBridgeTool("codara_terminal_close", false), true);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_whiteboard_get", false), true);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_whiteboard_update", false), false);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_ask_user", false), false);
@@ -140,6 +142,13 @@ assert.equal(policy.isWorkerSafeBridgeTool("codara_board_update", true), false);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_whiteboard_update", true), false);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_spawn_workers", true), false);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_complete", true), false);
+assert.equal(
+  policy.isWorkerSafeBridgeTool("codara_preview_snapshot", false, {
+    CODARA_PI_PROJECT_POLICY: "untrusted-pull-request",
+  }),
+  false,
+  "an imported PR worker receives no Codara bridge tools",
+);
 
 // Every WORKER-mode bridge tool must pass the allowlist for an automation
 // worker: the roster and the allowlist may not drift apart, or a loom worker
@@ -154,6 +163,41 @@ for (const tool of workerBridge.listTools()) {
     `worker-mode bridge tool ${tool.name} must pass the automation allowlist`,
   );
 }
+
+// Imported PR defense in depth: even if the launcher selects execute mode,
+// the bridge itself exposes only the bounded manager coordination roster.
+process.env.SPARK_MCP_MODE = "execute";
+process.env.CODARA_PI_PROJECT_POLICY = "untrusted-pull-request";
+delete require.cache[require.resolve(studioBridgePath)];
+const untrustedBridge = require(studioBridgePath);
+const untrustedNames = new Set(untrustedBridge.listTools().map((tool) => tool.name));
+for (const forbidden of [
+  "codara_terminal_create",
+  "codara_terminal_read",
+  "codara_preview_evaluate",
+  "codara_remember",
+  "codara_list_automations",
+  "codara_create_automation",
+]) {
+  assert.equal(
+    untrustedNames.has(forbidden),
+    false,
+    `untrusted PR roster must omit ${forbidden}`,
+  );
+}
+for (const allowed of [
+  "codara_spawn_workers",
+  "codara_get_worker_status",
+  "codara_wait_for_workers",
+  "codara_complete",
+]) {
+  assert.equal(untrustedNames.has(allowed), true, `untrusted PR roster keeps ${allowed}`);
+}
+await assert.rejects(
+  untrustedBridge.callToolByName("codara_terminal_create", { command: "id" }),
+  /unavailable for an imported pull-request run/,
+);
+delete process.env.CODARA_PI_PROJECT_POLICY;
 
 // The access fence. Names are asserted against Pi 0.82.0's REAL tool
 // inventory (bash, edit, find, grep, ls, read, write natively; web_search +
@@ -182,6 +226,7 @@ const noInput = {};
   // preview tools stay.
   assert.equal(blocked("codara_terminal_create")?.block, true, "readonly blocks terminal create");
   assert.equal(blocked("codara_terminal_write")?.block, true, "readonly blocks terminal write");
+  assert.equal(blocked("codara_terminal_close")?.block, true, "readonly blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "readonly blocks preview evaluate");
   assert.equal(blocked("codara_preview_run")?.block, true, "readonly blocks preview run (can embed evaluate steps)");
   assert.equal(blocked("codara_preview_click")?.block, true, "readonly blocks preview click");
@@ -201,6 +246,7 @@ const noInput = {};
   assert.equal(blocked("bash")?.block, true, "edits blocks bash");
   assert.equal(blocked("url_context")?.block, true, "WebFetch maps to url_context");
   assert.equal(blocked("codara_terminal_create")?.block, true, "edits blocks terminal create");
+  assert.equal(blocked("codara_terminal_close")?.block, true, "edits blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "edits blocks preview evaluate");
   assert.equal(blocked("codara_preview_click"), undefined, "edits keeps preview click");
 }
@@ -223,6 +269,7 @@ const noInput = {};
   assert.equal(blocked("web_search")?.block, true, "WebSearch maps to web_search");
   assert.equal(blocked("bash"), undefined, "no preset means shell stays available");
   assert.equal(blocked("codara_terminal_create"), undefined, "no preset means bridge tools stay");
+  assert.equal(blocked("codara_terminal_close"), undefined, "no preset keeps terminal close");
   assert.equal(
     blocked("edit", { path: os.tmpdir() + "/anywhere.txt" }),
     undefined,
@@ -235,8 +282,8 @@ const noInput = {};
   assert.equal(policy.fencedToolNames({}).size, 0);
 }
 
-// Write containment for fenced workers: mutations stay inside the session cwd
-// plus the launcher's allow-listed dirs (report dir, chat board dir).
+// Path containment for fenced workers: reads, searches, and mutations stay
+// inside the session cwd plus the launcher's allow-listed dirs.
 {
   const allowDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fence-allow-"));
   const env = {
@@ -267,10 +314,55 @@ const noInput = {};
   );
   assert.match(
     decide("write", { path: "/etc/hosts" }).reason,
-    /outside this automation's workspace/,
+    /outside this worker's workspace/,
   );
-  assert.equal(decide("read", { path: "/etc/hosts" }), undefined, "containment covers mutations only");
+  assert.equal(
+    decide("read", { path: "/etc/hosts" })?.block,
+    true,
+    "read cannot escape to local secrets",
+  );
+  assert.equal(
+    decide("grep", { path: path.join(cwd, ".."), pattern: "secret" })?.block,
+    true,
+    "search cannot escape the workspace",
+  );
+  assert.equal(
+    decide("find", { path: path.join(allowDir, "reports") }),
+    undefined,
+    "read/search may inspect an explicitly allowed report directory",
+  );
+  assert.equal(
+    decide("ls", {}),
+    undefined,
+    "a read-ish tool with no explicit path defaults safely to cwd",
+  );
+  assert.equal(
+    decide("write", { path: path.join(cwd, ".git", "config") })?.block,
+    true,
+    "a fenced worker cannot modify Git administrative data",
+  );
   fs.rmSync(allowDir, { recursive: true, force: true });
+}
+{
+  const exactDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fence-exact-"));
+  const exactReport = path.join(exactDir, "final-report.json");
+  const env = {
+    CODARA_PI_WORKER_ACCESS: "edits",
+    CODARA_PI_WORKER_WRITE_ALLOW_FILES: JSON.stringify([exactReport]),
+  };
+  const fence = policy.fencedToolNames(env);
+  const decide = (name, input) => policy.fenceDecision(name, input, fence, env);
+  assert.equal(
+    decide("write", { path: exactReport }),
+    undefined,
+    "the exact app-owned final report remains writable",
+  );
+  assert.equal(
+    decide("write", { path: path.join(exactDir, "sibling.json") })?.block,
+    true,
+    "the report capability does not grant its whole parent directory",
+  );
+  fs.rmSync(exactDir, { recursive: true, force: true });
 }
 
 // Roster vs fence cross-check: a fenced worker's blocked bridge tools must be
@@ -292,5 +384,304 @@ const noInput = {};
   assert.equal(fenced.has("codara_preview_run"), true, "preview run must be fenced for readonly");
 }
 
+// ── Early compaction (resources/pi-cora/compaction.ts) ─────────────────────
+// Cora compacts her Pi sessions at ~256k tokens instead of waiting for Pi's
+// own contextWindow - 16384 trigger. The decision is pure, so exercise it
+// directly, then drive the real registration against a fake ExtensionAPI.
+{
+  const compaction = loadTypeScriptModule(
+    path.join(__dirname, "..", "resources", "pi-cora", "compaction.ts"),
+  );
+  const DEFAULT = compaction.DEFAULT_COMPACT_AT_TOKENS;
+  assert.equal(DEFAULT, 256000);
+
+  // Three copies of the threshold exist and must agree: @shared (the meter and
+  // the manager-level trigger), pi-runtime (what the launcher stamps), and the
+  // extension (what enforces it). resources/ cannot import from src, which is
+  // why the extension holds its own and why this assertion exists.
+  const shared = loadTypeScriptModule(
+    path.join(__dirname, "..", "src", "shared", "context-compaction.ts"),
+  );
+  assert.equal(
+    shared.DEFAULT_PI_COMPACT_AT_TOKENS,
+    DEFAULT,
+    "@shared/context-compaction and the extension must agree on the default",
+  );
+  assert.equal(
+    shared.PI_BUILTIN_COMPACT_HEADROOM_TOKENS,
+    compaction.PI_BUILTIN_COMPACT_HEADROOM_TOKENS,
+    "@shared and the extension must agree on Pi's own headroom",
+  );
+  // The shared cap helper must agree with the extension's, or the meter would
+  // promise a ceiling the session does not actually compact at.
+  for (const [window, threshold] of [
+    [1_000_000, DEFAULT],
+    [200_000, DEFAULT],
+    [400_000, DEFAULT],
+    [8_000, DEFAULT],
+    [1_000_000, 120_000],
+  ]) {
+    assert.equal(
+      shared.effectiveCompactionCapTokens(window, threshold),
+      compaction.effectiveCompactAtTokens(window, threshold),
+      `cap helpers disagree for window=${window} threshold=${threshold}`,
+    );
+  }
+  // Absurd overrides resolve identically on both sides.
+  for (const raw of ["", "0", "-1", "NaN", "nonsense", "120000", "80000.9"]) {
+    assert.equal(
+      shared.resolveCompactAtTokens(raw),
+      compaction.resolveCompactAtTokens({ CODARA_PI_COMPACT_AT_TOKENS: raw }),
+      `override parsers disagree for ${JSON.stringify(raw)}`,
+    );
+  }
+
+  // The chat capacity the meter renders.
+  const capacity = shared.chatContextCapacityTokens;
+  assert.equal(
+    capacity({ contextWindowTokens: 400_000, backend: "pi" }),
+    256_000,
+    "a gpt-5 Pi chat reads against 256k, not its 400k window",
+  );
+  assert.equal(
+    capacity({ contextWindowTokens: 1_000_000, backend: "pi" }),
+    256_000,
+    "a 1M-window Pi chat reads against 256k",
+  );
+  assert.equal(
+    capacity({ contextWindowTokens: 400_000, backend: "codex" }),
+    400_000,
+    "a codex CLI chat keeps its own window: the extension does not run there",
+  );
+  assert.equal(
+    capacity({ contextWindowTokens: 1_000_000, backend: "claude" }),
+    1_000_000,
+    "a claude CLI chat keeps its own window",
+  );
+  assert.equal(
+    capacity({ contextWindowTokens: 1_000_000, backend: "pi", compactAtTokens: 120_000 }),
+    120_000,
+    "a stamped override drives the meter",
+  );
+  // A window smaller than the cap can never reach it, so it shows its own
+  // (smaller) effective ceiling rather than a 256k promise it cannot keep.
+  assert.equal(
+    capacity({ contextWindowTokens: 128_000, backend: "pi" }),
+    128_000 - shared.PI_BUILTIN_COMPACT_HEADROOM_TOKENS,
+    "a sub-threshold window reports Pi's own earlier trigger",
+  );
+  assert.equal(
+    capacity({ contextWindowTokens: 8_000, backend: "pi" }),
+    8_000,
+    "a window below even the headroom never exceeds itself",
+  );
+
+  // Threshold resolution: default, override, and absurd values.
+  assert.equal(compaction.resolveCompactAtTokens({}), DEFAULT);
+  assert.equal(compaction.resolveCompactAtTokens({ CODARA_PI_COMPACT_AT_TOKENS: "" }), DEFAULT);
+  assert.equal(compaction.resolveCompactAtTokens({ CODARA_PI_COMPACT_AT_TOKENS: "  " }), DEFAULT);
+  assert.equal(compaction.resolveCompactAtTokens({ CODARA_PI_COMPACT_AT_TOKENS: "120000" }), 120000);
+  assert.equal(compaction.resolveCompactAtTokens({ CODARA_PI_COMPACT_AT_TOKENS: " 90000 " }), 90000);
+  assert.equal(compaction.resolveCompactAtTokens({ CODARA_PI_COMPACT_AT_TOKENS: "80000.9" }), 80000);
+  for (const absurd of ["0", "-1", "-250000", "NaN", "nonsense", "Infinity", "-Infinity"]) {
+    assert.equal(
+      compaction.resolveCompactAtTokens({ CODARA_PI_COMPACT_AT_TOKENS: absurd }),
+      DEFAULT,
+      `absurd override ${absurd} must fall back to the default`,
+    );
+  }
+
+  // Never DELAY Pi's own trigger: the effective threshold is the smaller of
+  // Codara's number and contextWindow - 16384.
+  assert.equal(compaction.effectiveCompactAtTokens(1000000, DEFAULT), DEFAULT);
+  assert.equal(compaction.effectiveCompactAtTokens(200000, DEFAULT), 200000 - 16384);
+  assert.equal(compaction.effectiveCompactAtTokens(8000, DEFAULT), DEFAULT);
+  assert.equal(compaction.effectiveCompactAtTokens(undefined, DEFAULT), DEFAULT);
+
+  const decide = (usage, compactionInFlight = false) =>
+    compaction.shouldCompactNow({ usage, thresholdTokens: DEFAULT, compactionInFlight });
+  assert.equal(decide({ tokens: 255999, contextWindow: 1000000 }), false, "below threshold is a no-op");
+  assert.equal(decide({ tokens: DEFAULT, contextWindow: 1000000 }), false, "exactly at threshold is a no-op");
+  assert.equal(decide({ tokens: 256001, contextWindow: 1000000 }), true, "above threshold compacts");
+  assert.equal(decide({ tokens: 256001, contextWindow: 1000000 }, true), false, "in-flight suppresses");
+  assert.equal(decide({ tokens: null, contextWindow: 1000000 }), false, "unknown usage is a no-op");
+  assert.equal(decide(undefined), false, "absent usage is a no-op");
+  // A small-window model still compacts on Pi's earlier trigger.
+  assert.equal(decide({ tokens: 200000, contextWindow: 200000 }), true);
+
+  // Registration: one compaction per crossing, and the in-flight latch holds
+  // until the session_compact event (or the completion callback) clears it.
+  const handlers = new Map();
+  const pi = { on: (event, handler) => { handlers.set(event, handler); } };
+  let usage = { tokens: 10, contextWindow: 1000000 };
+  let compactCalls = 0;
+  let lastOptions = null;
+  const ctx = {
+    getContextUsage: () => usage,
+    compact: (options) => { compactCalls += 1; lastOptions = options; },
+  };
+  compaction.registerContextCompaction(pi, { CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  const agentEnd = handlers.get("agent_end");
+  assert.ok(agentEnd, "agent_end must be the compaction trigger");
+
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 0, "a small context must not compact");
+
+  usage = { tokens: 1500, contextWindow: 1000000 };
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 1, "crossing the override threshold compacts");
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 1, "an in-flight compaction suppresses a second request");
+
+  // Pi's own threshold compaction latches the flag the same way.
+  handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  usage = { tokens: 20, contextWindow: 1000000 };
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 1, "usage is re-read after a compaction, not looped on");
+
+  handlers.get("session_before_compact")({ type: "session_before_compact", reason: "threshold" });
+  usage = { tokens: 1500, contextWindow: 1000000 };
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 1, "a Pi-initiated compaction suppresses ours while it runs");
+  lastOptions.onComplete?.();
+  handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 2, "the trigger re-arms once the compaction finishes");
+
+  // Both Cora extensions must actually wire the trigger up.
+  for (const file of ["index.ts", "worker.ts"]) {
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "resources", "pi-cora", file),
+      "utf8",
+    );
+    assert.match(
+      source,
+      /registerContextCompaction\(pi\)/,
+      `${file} must register the early-compaction trigger`,
+    );
+  }
+}
+
+// ── Provider service tier (resources/pi-cora/service-tier.ts) ──────────────
+// OpenAI's faster tier is opt-in from Settings; Anthropic can never carry a
+// fast/priority tier at all. The extension's before_provider_request hook is
+// the last code to touch the request body, so this is where both are decided.
+{
+  const tier = loadTypeScriptModule(
+    path.join(__dirname, "..", "resources", "pi-cora", "service-tier.ts"),
+  );
+  const apply = tier.applyServiceTierPolicy;
+  const FAST = tier.OPENAI_FAST_SERVICE_TIER;
+  // "priority" and "fast" are OpenAI aliases for the same tier (renamed to
+  // "Fast mode" on 2026-07-30). We send "priority": it is the spelling pi-ai
+  // types and prices, and the only one in the OpenAI Responses service_tier
+  // union.
+  assert.equal(FAST, "priority", "pi-ai types and prices the 'priority' spelling");
+
+  // (a) Setting OFF: no tier on an OpenAI request.
+  for (const provider of ["openai-codex", "openai"]) {
+    const body = apply({ model: "gpt-5.6-sol", input: [] }, provider, false);
+    assert.equal("service_tier" in body, false, `${provider} must carry no tier when fast mode is off`);
+  }
+  // An inherited tier is removed rather than left to ride along.
+  assert.equal(
+    "service_tier" in apply({ service_tier: "priority" }, "openai-codex", false),
+    false,
+    "fast mode off must strip a tier the body already carried",
+  );
+
+  // (b) Setting ON: the fast tier is present on OpenAI requests.
+  for (const provider of ["openai-codex", "openai"]) {
+    assert.equal(
+      apply({ model: "gpt-5.6-sol", input: [] }, provider, true).service_tier,
+      FAST,
+      `${provider} must carry the fast tier when fast mode is on`,
+    );
+  }
+
+  // (c) Anthropic NEVER carries a fast tier, either way. Not gated on the
+  // setting, not gated on anything a prompt or a future UI could reach.
+  for (const fastMode of [false, true]) {
+    const clean = apply({ model: "claude-opus-5", messages: [] }, "anthropic", fastMode);
+    assert.equal(
+      "service_tier" in clean,
+      false,
+      `anthropic must never carry a service tier (fastMode=${fastMode})`,
+    );
+    // Even when something upstream already put one there.
+    for (const key of ["service_tier", "serviceTier"]) {
+      const stripped = apply({ [key]: "priority", model: "claude-opus-5" }, "anthropic", fastMode);
+      assert.equal(
+        key in stripped,
+        false,
+        `anthropic must strip an inherited ${key} (fastMode=${fastMode})`,
+      );
+    }
+  }
+
+  // The guard keys off the provider Codara stamps, so verify the classifiers.
+  assert.equal(tier.isAnthropicProvider("anthropic"), true);
+  assert.equal(tier.isAnthropicProvider("ANTHROPIC"), true);
+  assert.equal(tier.isAnthropicProvider("openai-codex"), false);
+  assert.equal(tier.isOpenAiProvider("openai-codex"), true);
+  assert.equal(tier.isOpenAiProvider("anthropic"), false);
+
+  // An unknown provider never GAINS a tier from Codara.
+  assert.equal(
+    "service_tier" in apply({ model: "mystery" }, "some-future-provider", true),
+    false,
+    "an unrecognized provider must not be given a tier",
+  );
+
+  // Env reading: only the exact "1" stamp enables fast mode.
+  assert.equal(tier.fastModeEnabled({}), false);
+  for (const raw of ["", "0", "true", "yes", "priority"]) {
+    assert.equal(
+      tier.fastModeEnabled({ CODARA_PI_FAST_MODE: raw }),
+      false,
+      `CODARA_PI_FAST_MODE=${JSON.stringify(raw)} must not enable fast mode`,
+    );
+  }
+  assert.equal(tier.fastModeEnabled({ CODARA_PI_FAST_MODE: "1" }), true);
+
+  // A malformed payload passes through instead of failing the turn.
+  for (const odd of [null, undefined, 42, "body", []]) {
+    assert.equal(apply(odd, "openai-codex", true), odd);
+  }
+
+  // Registration wires the hook Pi actually consults.
+  const handlers = new Map();
+  tier.registerServiceTierPolicy(
+    { on: (event, handler) => handlers.set(event, handler) },
+    { CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" },
+  );
+  const hook = handlers.get("before_provider_request");
+  assert.ok(hook, "before_provider_request must be the service-tier seam");
+  assert.equal(
+    "service_tier" in hook({ type: "before_provider_request", payload: { service_tier: "priority" } }),
+    false,
+    "an anthropic session strips the tier even with fast mode stamped on",
+  );
+
+  // Both extensions must wire it up.
+  for (const file of ["index.ts", "worker.ts"]) {
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "resources", "pi-cora", file),
+      "utf8",
+    );
+    assert.match(
+      source,
+      /registerServiceTierPolicy\(pi\)/,
+      `${file} must register the service-tier policy`,
+    );
+  }
+}
+
 console.log("pi Cora mode + execution-policy prompts: ok");
 console.log("pi worker policy (roster + access fence): ok");
+console.log("pi session compaction (256k trigger): ok");
+console.log("pi provider service tier (OpenAI opt-in, Anthropic never): ok");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

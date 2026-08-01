@@ -86,7 +86,10 @@ async function main() {
     const first = await verification.discoverPiFrontierVerification(path.join(root, "src"));
     assert.equal(first.schemaVersion, 4);
     assert.equal(first.requestContract, null);
-    assert.equal(first.workspaceRoot, root);
+    // `git rev-parse --show-toplevel` resolves macOS's `/var` symlink to
+    // `/private/var`; compare canonical paths so the fixture spelling does not
+    // turn a correct repository root into a platform-only failure.
+    assert.equal(first.workspaceRoot, fs.realpathSync(root));
     assert.match(first.trackedTreeSha256, /^[a-f0-9]{64}$/);
     assert.match(first.contractTreeSha256, /^[a-f0-9]{64}$/);
     assert.equal(first.cacheEligible, true);

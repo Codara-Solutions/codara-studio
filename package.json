@@ -9,6 +9,7 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:pi-worker-harness": "node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs",
     "test:account-identity": "node scripts/test-anthropic-account-identity.cjs && node scripts/test-native-cli-accounts.cjs && node scripts/test-native-cli-account-wiring.cjs && node scripts/test-pi-account-settings-surface.cjs && node scripts/test-login-return-focus.cjs",
     "test:native-cli-active-pointer": "node scripts/test-native-cli-active-pointer.cjs",
     "test:codex-home-routing": "node scripts/test-codex-home-routing.cjs",
@@ -33,7 +34,7 @@
     "test:manager-prompt-cache": "node scripts/test-manager-prompt-cache.cjs",
     "test:cora-memory": "node scripts/test-cora-memory.cjs && node scripts/test-workspace-lessons.cjs",
     "test:completion-tail": "node scripts/test-completion-tail.cjs",
-    "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-verification.cjs && node scripts/test-pi-admission-cache.mjs && node scripts/test-pi-frontier-evidence.cjs && node scripts/test-pi-frontier-gate.mjs",
+    "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-backend-session-lifecycle.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-verification.cjs && node scripts/test-pi-admission-cache.mjs && node scripts/test-pi-frontier-evidence.cjs && node scripts/test-pi-frontier-gate.mjs && node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs",
     "test:pi-frontier-gate": "node scripts/test-pi-frontier-gate.mjs",
     "test:pi-rpc": "node scripts/test-pi-rpc-client.cjs",
     "test:pi-turn": "node scripts/test-pi-turn.cjs && node scripts/test-pi-cora-extension.cjs",

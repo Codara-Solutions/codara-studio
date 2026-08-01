@@ -144,7 +144,13 @@ try {
   const manifestSha256 = verificationManifestSha256(manifest);
   assert.equal(createHash("sha256").update(manifestText).digest("hex"), manifestSha256);
   fs.writeFileSync(manifestPath, manifestText, { mode: 0o600 });
-  assert.equal(loadFrontierVerificationManifest(manifestPath, manifestSha256).workspaceRoot, root);
+  // macOS canonicalizes /var to /private/var when the manifest resolves its
+  // workspace root. Compare canonical paths so the same fixture is stable
+  // whether TMPDIR exposes the symlinked or real prefix.
+  assert.equal(
+    loadFrontierVerificationManifest(manifestPath, manifestSha256).workspaceRoot,
+    fs.realpathSync(root),
+  );
 
   process.env.CODARA_PI_EXECUTION_POLICY = "frontier";
   process.env.SPARK_MCP_MODE = "execute";
@@ -182,6 +188,10 @@ try {
   const call = (toolCallId, toolName, input) => toolCall({ type: "tool_call", toolCallId, toolName, input });
   assert.equal((await call("pre-write", "write", {})).block, true);
   assert.equal((await call("pre-worker", "codara_spawn_workers", {})).block, true);
+  assert.equal(
+    (await call("pre-terminal-close", "codara_terminal_close", { paneId: "pane-test" })).block,
+    true,
+  );
   assert.equal((await call("pre-bash", "bash", { command: "node -e 'mutate'" })).block, true);
   assert.equal(await call("pre-read", "bash", { command: "rg answer src" }), undefined);
   assert.equal((await call("wrong-review", "subagent", { agent: "cora-frontier-contract-auditor", task: "approximately review" })).block, true);
@@ -411,6 +421,10 @@ try {
   ]);
   assert.match(admittedEvidence.admissionReport, /TOTAL_CUTS=5\nTOTAL_FAMILIES=5\nTOTAL_OPERATIONS=5\nTOTAL_DEEP_FAMILIES=0\nTOTAL_CRITICAL_FAMILIES=0\nADMISSION_CUTS_JSON=/);
   assert.equal(await call("post-admission-write", "write", {}), undefined);
+  assert.equal(
+    await call("post-admission-terminal-close", "codara_terminal_close", { paneId: "pane-test" }),
+    undefined,
+  );
 
   write("src/value.js", "export const answer = 2;\n");
   const beforeFinalComplete = await call("early-complete", "codara_complete", {});

@@ -59,6 +59,12 @@ export interface ChatBackendConfig {
   model: string;
   mode: ChatMode;
   effort: AgentEffortLevel;
+  /** Opaque Pi profile pin resolved from the run for this frozen turn. */
+  accountProfileId?: string;
+  /** Concrete native Codex CLI profile pin resolved from the run. */
+  nativeCodexProfileId?: string;
+  /** Concrete native Claude CLI profile pin resolved from the run. */
+  nativeClaudeProfileId?: string;
   /** Per-chat Pi execution depth. Non-Pi backends always resolve to Fast. */
   executionPolicy: CoraExecutionPolicy;
   /** Provider-side session UUID, when this chat already has one. Empty on
@@ -90,6 +96,8 @@ export interface ManagerRequestInput {
   availableRuntimes?: AgentRuntimeDiagnostic[];
   agentSyncContext?: string;
   settings: AppSettings;
+  /** Pre-resolved immutable global-then-project manager guidance. */
+  managerConstitutionBlock?: string;
   /** Ordered immutable user input bundled by run-store before backend startup. */
   prompt: string;
   /** Durable message ownership mirrored onto the SparkCall. */
@@ -117,6 +125,8 @@ export interface ManagerCallResult {
   decisionAlreadyApplied?: boolean;
   durationMs: number;
   model: string;
+  /** Opaque Pi profile that actually served the turn, when profile-routed. */
+  accountProfileId?: string;
   /** Optional usage metadata. Populated when the backend's JSONL transcript
    *  carries token counts; left undefined otherwise so the costs UI shows
    *  ", " instead of $0.00. */
@@ -214,6 +224,11 @@ export type ChatStreamEvent =
       /** Model's full context window in tokens, when the backend exposes it.
        *  Defaults handled renderer-side via contextWindowForModel(). */
       contextWindowTokens?: number;
+      /** Context tokens at which this session auto-compacts. Pi sessions only:
+       *  the claude and codex backends drive CLIs that compact on their own
+       *  terms. The renderer measures its meter against this, not the raw
+       *  window. Absent means "assume the shared default". */
+      compactAtTokens?: number;
     }
   | { kind: "error"; message: string };
 

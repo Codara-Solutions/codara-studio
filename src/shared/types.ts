@@ -1074,6 +1074,7 @@ export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
   installed: boolean;
+  workerAssignable?: boolean;
   // Tri-state sign-in signal. `installed` only means the binary was found on
   // PATH; a CLI can be present but signed out, which fails at launch time.
   // true/false when detection could establish credential PRESENCE (never the
@@ -1987,9 +1988,10 @@ export interface RunState {
    */
   chatSessionMode?: ChatMode;
   /**
-   * Fast-mode toggle for the chat backend. Codex-only: passed as
-   * `--enable fast_mode` (true) or `--disable fast_mode` (false) at spawn
-   * time. Claude Code and Pi ignore it. Default false (unset).
+   * LEGACY, READ-ONLY. Fast mode used to be a per-chat pill; it is now the
+   * global AppSettings.openAiFastMode. Codara never writes this field again,
+   * and nothing reads it for a launch decision. It stays declared so an
+   * existing run.json that carries it still parses.
    */
   chatFastMode?: boolean;
   /**

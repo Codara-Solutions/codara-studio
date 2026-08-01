@@ -1,6 +1,11 @@
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { ChatMode, CoraExecutionPolicy } from "@shared/types";
+import type {
+  ChatMode,
+  CoraExecutionPolicy,
+  ProjectPolicyMode,
+} from "@shared/types";
+import { resolveCompactAtTokens } from "@shared/context-compaction";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
 export const CODARA_PI_VERSION = "0.82.0";
@@ -9,6 +14,29 @@ export const CODARA_PI_VERSION = "0.82.0";
 export const CODARA_PI_WEB_SEARCH_PACKAGE = "pi-web-search";
 export const CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT =
   "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/**
+ * Context tokens at which Cora's Pi sessions compact. Pi's own trigger sits at
+ * contextWindow - 16384, which is ~984k on the 1M-window models; Codara wants
+ * a far smaller working context. The launcher stamps the effective value into
+ * CODARA_PI_COMPACT_AT_TOKENS for every manager and worker plan, and the
+ * bundled extension (resources/pi-cora/compaction.ts) is the enforcement
+ * point.
+ *
+ * The number itself lives in @shared/context-compaction so the renderer's
+ * context meter measures against the same ceiling. The extension keeps a third
+ * copy because resources/ cannot import from src;
+ * scripts/test-pi-cora-extension.cjs asserts all three agree.
+ */
+export { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
+
+/** Read the user's compaction override. Absurd values (0, negative, NaN) fall
+ *  back to the default rather than disabling compaction. */
+export function resolvePiCompactAtTokens(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): number {
+  return resolveCompactAtTokens(baseEnv.CODARA_PI_COMPACT_AT_TOKENS);
+}
 
 export type PiSubscriptionProvider = "anthropic" | "openai-codex";
 export type PiManagerMode = "talk" | "execute" | "automation";
@@ -40,6 +68,8 @@ export interface PiManagerLaunchOptions {
   runtime: PiRuntimeLocation;
   provider: PiSubscriptionProvider;
   configDir: string;
+  /** Opaque account profile whose private configDir was selected. */
+  accountProfileId?: string;
   sessionDir: string;
   sessionId: string;
   runId: string;
@@ -67,7 +97,27 @@ export interface PiManagerLaunchOptions {
   model?: string;
   thinking?: PiThinkingLevel;
   sessionName?: string;
+  /** Owner-only file containing the pre-rendered immutable manager block. */
+  managerConstitutionPromptPath?: string;
+  /** Owner-only file containing the exact attempt-scoped worker block. */
+  workerConstitutionPromptPath?: string;
+  /** Repository policy/resource discovery mode. Missing preserves legacy trusted behavior. */
+  projectPolicyMode?: ProjectPolicyMode;
+  /**
+   * Internal worker-only seam. Untrusted managers have no native Pi tools;
+   * workers keep the native file tools so the bundled tool_call fence can
+   * contain them. Never set this for a manager session.
+   */
+  retainBuiltinToolsForUntrustedWorker?: boolean;
   codaraHomeDir?: string;
+  /**
+   * The composer's fast-mode toggle (AppSettings.openAiFastMode). Applies the faster (and
+   * pricier) OpenAI service tier to this session. Anthropic sessions ignore
+   * it entirely: the bundled extension strips any tier for that provider no
+   * matter what this says. Defaults to off so a missing setting can never
+   * silently buy the 2x tier.
+   */
+  openAiFastMode?: boolean;
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -77,19 +127,28 @@ export interface PiManagerLaunchPlan {
   cwd: string;
   env: NodeJS.ProcessEnv;
   provider: PiSubscriptionProvider;
+  /** Opaque account profile that owns this process; no credential material. */
+  accountProfileId?: string;
   model: string;
   thinking: PiThinkingLevel;
   sessionId: string;
   executionPolicy: CoraExecutionPolicy;
+  projectPolicyMode: ProjectPolicyMode;
   frontierManifestPath: string | null;
   frontierManifestSha256: string | null;
   frontierAdmissionArtifactSha256: string | null;
   /** Set only when a roster was handed over, so the caller can delete the file
    * when the session ends. */
   mcpConfigPath: string | null;
-  /** Process-local revocation handle for an untrusted Pi socket claim. */
+  /** Owner-only manager constitution file; removed with the Pi process. */
+  managerConstitutionPromptPath: string | null;
+  /** Owner-only worker constitution file; removed with the Pi process. */
+  workerConstitutionPromptPath: string | null;
+  /** Process-local revocation handle for an untrusted Pi socket claim. Never
+   * serialized or exposed to the renderer. */
   agentSocketCapabilityId?: string;
-  /** Absolute lease boundary for the process-local socket claim. */
+  /** Absolute lease boundary for the process-local socket claim. Main-only;
+   * a live Pi process must be rotated instead of reusing an expired lease. */
   agentSocketCapabilityExpiresAt?: number;
 }
 
@@ -254,7 +313,9 @@ export function buildPiSubscriptionEnvironment(
     if (typeof value !== "string") continue;
     const upper = key.toUpperCase();
     if (API_CREDENTIAL_NAMES.has(upper) || upper.endsWith("_API_KEY") || upper.endsWith("_API_KEY_FILE") ||
-      upper.startsWith("CODARA_PI_") || upper === "SPARK_MCP_MODE" || upper === "SPARK_RUN_ID" ||
+      upper.startsWith("CODARA_PI_") || upper === "SPARK_AGENT_SOCKET" ||
+      upper === "SPARK_AGENT_TOKEN" || upper === "SPARK_AGENT_CAPABILITY" ||
+      upper === "SPARK_MCP_MODE" || upper === "SPARK_RUN_ID" ||
       upper === "SPARK_AUTOMATION_ID" || upper === "SPARK_NODE_ID") continue;
     env[key] = value;
   }
@@ -274,6 +335,14 @@ export function buildPiSubscriptionEnvironment(
 export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiManagerLaunchPlan {
   assertSafeSegment(options.sessionId, "Pi session id");
   assertSafeSegment(options.runId, "Codara run id");
+  if (
+    options.managerConstitutionPromptPath &&
+    options.workerConstitutionPromptPath
+  ) {
+    throw new Error(
+      "A Pi process cannot receive manager and worker constitution prompts together",
+    );
+  }
   const model = options.model?.trim() || DEFAULT_MODELS[options.provider];
   validateProviderModel(options.provider, model);
   const thinking = options.thinking ?? "high";
@@ -281,6 +350,18 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     options.executionPolicy === "deep" || options.executionPolicy === "frontier"
       ? options.executionPolicy
       : "fast";
+  const projectPolicyMode: ProjectPolicyMode =
+    options.projectPolicyMode === "untrusted-pull-request"
+      ? "untrusted-pull-request"
+      : "trusted";
+  if (
+    projectPolicyMode === "untrusted-pull-request" &&
+    executionPolicy === "frontier"
+  ) {
+    throw new Error(
+      "Frontier verification cannot run against an untrusted pull-request checkout.",
+    );
+  }
   const extensionPaths = options.extensionPaths.map((value) => resolve(value));
   if (extensionPaths.length === 0) throw new Error("Cora's Pi backend requires a bundled extension");
   const frontierGateEnabled = executionPolicy === "frontier" && options.mode === "execute";
@@ -298,7 +379,9 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     options.runtime.entrypoint,
     "--mode",
     "rpc",
-    "--approve",
+    projectPolicyMode === "untrusted-pull-request"
+      ? "--no-approve"
+      : "--approve",
     "--provider",
     options.provider,
     "--model",
@@ -311,6 +394,25 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     resolve(options.sessionDir),
     "--no-extensions",
   ];
+  if (
+    projectPolicyMode === "untrusted-pull-request" &&
+    !options.retainBuiltinToolsForUntrustedWorker
+  ) {
+    args.push(
+      "--no-builtin-tools",
+      "--no-context-files",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-themes",
+    );
+  } else if (projectPolicyMode === "untrusted-pull-request") {
+    args.push(
+      "--no-context-files",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-themes",
+    );
+  }
   if (options.sessionName?.trim()) args.push("--name", options.sessionName.trim());
   if (options.provider === "anthropic") {
     args.push("--system-prompt", CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT);
@@ -326,10 +428,40 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   env.SPARK_RUN_ID = options.runId;
   env.CODARA_PI_CHAT_MODE = options.chatMode ?? options.mode;
   env.CODARA_PI_EXECUTION_POLICY = executionPolicy;
+  env.CODARA_PI_PROJECT_POLICY = projectPolicyMode;
   env.CODARA_PI_BRIDGE_PATH = resolve(options.bridgePath);
+  // Every Cora Pi process (manager and worker) flows through this builder, so
+  // the compaction trigger is stamped once here rather than at each call site.
+  // buildPiSubscriptionEnvironment drops CODARA_PI_* from the inherited
+  // environment, which makes this the only source the extension can read.
+  env.CODARA_PI_COMPACT_AT_TOKENS = String(
+    resolvePiCompactAtTokens(options.baseEnv ?? process.env),
+  );
+  // Service-tier policy inputs. The extension's before_provider_request hook
+  // is the only seam Pi 0.82.0 gives us for the request body, and it needs to
+  // know which provider this process talks to and whether Settings enabled the
+  // faster OpenAI tier. Fast mode is stamped only for OpenAI providers: an
+  // Anthropic plan never carries the flag at all, which is the first of the
+  // two places that guarantee Anthropic can never run a priority tier.
+  env.CODARA_PI_PROVIDER = options.provider;
+  if (options.openAiFastMode === true && options.provider !== "anthropic") {
+    env.CODARA_PI_FAST_MODE = "1";
+  }
+  if (options.managerConstitutionPromptPath) {
+    env.CODARA_PI_MANAGER_CONSTITUTION_PATH = resolve(
+      options.managerConstitutionPromptPath,
+    );
+  }
+  if (options.workerConstitutionPromptPath) {
+    env.CODARA_PI_WORKER_CONSTITUTION_PATH = resolve(
+      options.workerConstitutionPromptPath,
+    );
+  }
   // Both names or neither: a half-configured bridge would leave the extension
   // unable to load the SDK and would surface as a session-start failure.
-  const mcpEnabled = Boolean(options.mcpConfigPath && options.mcpSdkDir);
+  const mcpEnabled =
+    projectPolicyMode === "trusted" &&
+    Boolean(options.mcpConfigPath && options.mcpSdkDir);
   if (mcpEnabled) {
     env.CODARA_PI_MCP_CONFIG = resolve(options.mcpConfigPath!);
     env.CODARA_PI_MCP_SDK_DIR = resolve(options.mcpSdkDir!);
@@ -350,15 +482,25 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     cwd: resolve(options.cwd),
     env,
     provider: options.provider,
+    ...(options.accountProfileId
+      ? { accountProfileId: options.accountProfileId }
+      : {}),
     model,
     thinking,
     sessionId: options.sessionId,
     executionPolicy,
+    projectPolicyMode,
     frontierManifestPath: frontierGateEnabled ? resolve(options.frontierManifestPath!) : null,
     frontierManifestSha256: frontierGateEnabled ? options.frontierManifestSha256! : null,
     frontierAdmissionArtifactSha256: frontierGateEnabled
       ? options.frontierAdmissionArtifactSha256 ?? null
       : null,
     mcpConfigPath: mcpEnabled ? resolve(options.mcpConfigPath!) : null,
+    managerConstitutionPromptPath: options.managerConstitutionPromptPath
+      ? resolve(options.managerConstitutionPromptPath)
+      : null,
+    workerConstitutionPromptPath: options.workerConstitutionPromptPath
+      ? resolve(options.workerConstitutionPromptPath)
+      : null,
   };
 }
