@@ -1,5 +1,5 @@
-// RPC v0 for phone Remote Access: versioned, length-prefixed JSON over the
-// Noise-encrypted stream (docs/remote-access.md, "RPC surface (v0)").
+// RPC v1 for phone Remote Access: versioned, length-prefixed JSON over the
+// Noise-encrypted stream (docs/remote-access.md, "Application protocol").
 //
 // The wire contract is shared with the phone app and must stay
 // field-compatible with codara-mobile src/lib/remote/types.ts:
@@ -7,7 +7,7 @@
 //   responses { id, ok: true, result } | { id, ok: false, error: { code, message } }
 //   events    { event, payload }
 // Protocol versioning happens inside `hello` (params.protocol), not in the
-// framing, so a future v1 can negotiate without breaking v0 framing.
+// framing, so future versions can negotiate without breaking the framing.
 //
 // Framing: a 4-byte big-endian unsigned length prefix, then that many bytes
 // of UTF-8 JSON. Inbound frames larger than MAX_FRAME_BYTES are a protocol
@@ -20,8 +20,24 @@
 // RemoteRpcServices, which is what lets the unit tests and the e2e harness
 // drive a real RpcSession without booting the app.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import {
+  GITHUB_PUBLISH_MAX_BODY_LENGTH,
+  GITHUB_PUBLISH_MAX_COMMIT_MESSAGE_LENGTH,
+  GITHUB_PUBLISH_MAX_TITLE_LENGTH,
+  GITHUB_ISSUE_MAX_NUMBER,
+  type GitHubMarkReadyInput,
+  type GitHubMarkReadyResult,
+  type GitHubMergeInput,
+  type GitHubMergeResult,
+  type GitHubPublishInput,
+  type GitHubPublishResult,
+  type GitHubWorkQueueStatus,
+  type GitHubWorkspaceStatus,
+  type StartGitHubIssueResult,
+  type StartGitHubPullRequestResult,
+} from "@shared/github";
 import {
   isSupportedRemoteImageMimeType,
   MAX_REMOTE_IMAGE_BYTES,
@@ -32,12 +48,29 @@ import {
   type RemoteImageUploadHandle,
   type RemoteImageUploadRequest,
 } from "./image-upload";
+import type { RemoteBoardReadProjection } from "./board-projection";
+import type {
+  RemoteTerminalLeaseDescriptor,
+  RemoteTerminalLeaseStore,
+} from "./terminal-leases";
+import {
+  coraHistoryDeltaCache,
+  CORA_HISTORY_DELTA_VERSION,
+} from "./cora-history-delta";
+import {
+  CORA_RUN_RESULT_JSON_MAX_BYTES,
+  isRemoteCoraIdentity,
+  jsonUtf8Bytes,
+} from "./remote-cora-contract";
+import type { RemoteWorkerTerminalControlStore } from "./worker-terminal-controls";
+import { MAX_REMOTE_TERMINALS_PER_DEVICE } from "./terminal-leases";
 
 /* -------------------------------------------------------------------------- */
 /* Wire types (mirror of codara-mobile src/lib/remote/types.ts)               */
 /* -------------------------------------------------------------------------- */
 
-export const RPC_PROTOCOL_VERSION = 0;
+export const RPC_PROTOCOL_VERSION = 1;
+export const GITHUB_WORK_QUEUE_FORCE_REFRESH_MIN_MS = 5_000;
 
 export type DeviceRole = "computer" | "phone";
 
@@ -58,6 +91,84 @@ export interface RemoteWorkspaceInfo {
   branch?: string;
   sessionCount?: number;
   lastActiveAt?: number;
+}
+
+export interface RemoteFleetWorkspaceOverview {
+  id: string;
+  name: string;
+  color: string;
+  branch?: string;
+  /** Ordinary Cora conversations only; automation-owned runs are excluded. */
+  conversationCount: number;
+  latestConversation?: {
+    status: RemoteCoraRunStatus;
+    updatedAt: string;
+  };
+  /** Active attempts across ordinary conversations only. */
+  activeConversationWorkers: number;
+  /** Scheduler entries whose live state is running or blocked. */
+  activeAutomations: number;
+}
+
+/**
+ * One currently-live worker across ordinary Cora conversations and
+ * automation-owned runs. Deliberately excludes paths, commands and account
+ * identity so a phone can supervise a large fleet without receiving secrets
+ * or terminal payloads.
+ */
+export interface RemoteFleetAgentOverview {
+  id: string;
+  workspaceId: string;
+  runId: string;
+  taskId: string;
+  title: string;
+  runtime: string;
+  model?: string;
+  status: RemoteCoraWorkerStatus;
+  runtimeState?: string;
+  startedAt?: string;
+  automated?: true;
+  automationId?: string;
+  automationName?: string;
+}
+
+export interface RemoteFleetOverviewProjection {
+  workspaces: RemoteFleetWorkspaceOverview[];
+  agents: RemoteFleetAgentOverview[];
+}
+
+export type RemoteSubscriptionProvider = "anthropic" | "openai-codex";
+export type RemoteSubscriptionStatus = "configured" | "unavailable" | "unknown";
+
+export interface RemoteSubscriptionUsage {
+  /** Sanitized percentage only; provider windows and account identities stay local. */
+  remainingPercent: number | null;
+  limitReached: boolean;
+}
+
+export interface RemoteSubscriptionProfile {
+  /** Opaque UUID; never derived from an email or provider account id. */
+  id: string;
+  provider: RemoteSubscriptionProvider;
+  label: string;
+  status: RemoteSubscriptionStatus;
+  isDefault: boolean;
+  usage?: RemoteSubscriptionUsage;
+}
+
+export type RemoteNativeCliAccountRuntime = "claude" | "codex";
+export type RemoteNativeCliAccountStatus =
+  | "connected"
+  | "sign_in_required"
+  | "unavailable";
+
+export interface RemoteNativeCliAccount {
+  /** Opaque local profile id. Credentials and config locations stay on Studio. */
+  id: string;
+  runtime: RemoteNativeCliAccountRuntime;
+  label: string;
+  status: RemoteNativeCliAccountStatus;
+  isDefault: boolean;
 }
 
 export interface RemoteWorkspaceGroupInfo {
@@ -183,6 +294,37 @@ export type RemoteCoraRunStatus =
   | "failed"
   | "cancelled";
 
+export type RemoteCoraThinkingLevel =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+export interface RemoteCoraModel {
+  id: string;
+  label: string;
+  provider: RemoteSubscriptionProvider;
+  thinkingLevels: RemoteCoraThinkingLevel[];
+}
+
+export type RemoteCoraRecoveryCause =
+  | "rate_limit"
+  | "provider_unavailable"
+  | "connection";
+
+export interface RemoteCoraRecoverySummary {
+  cause: RemoteCoraRecoveryCause;
+  parkedAt: string;
+}
+
+export interface RemoteCoraRecovery extends RemoteCoraRecoverySummary {
+  id: string;
+  state: "parked" | "resuming";
+  failedAccountProfileId?: string;
+}
+
 export interface RemoteCoraRunSummary {
   id: string;
   workspaceId: string;
@@ -217,6 +359,9 @@ export interface RemoteCoraRunSummary {
   // the newest task's model hint) so the phone can chip the model on the row
   // without opening the run. Absent on non-automation runs.
   model?: string;
+  effort?: RemoteCoraThinkingLevel;
+  /** Content-free explanation that a manager turn is recoverable. */
+  recovery?: RemoteCoraRecoverySummary;
 }
 
 export interface RemoteCoraMessage {
@@ -240,6 +385,8 @@ export type RemoteCoraWorkerStatus =
 
 export interface RemoteCoraWorker {
   id: string;
+  /** Owning plan step, so remote clients can preserve the desktop graph. */
+  stepId?: string;
   title: string;
   runtime: string;
   // The model the attempt actually launched on, falling back to the owning
@@ -275,10 +422,12 @@ export type RemoteCoraStepStatus =
   | "failed"
   | "skipped";
 
-// One line of the run's plan. Deliberately thin: the phone shows progress
-// ("3 of 5 steps"), not the goal, acceptance criteria or verification commands
-// the desktop step inspector carries.
+// One line of the run's plan. Deliberately thin: the phone shows the graph and
+// progress, not the goal, acceptance criteria or verification commands the
+// desktop step inspector carries.
 export interface RemoteCoraStep {
+  /** Opaque run-local identity used only to connect workers to this step. */
+  id?: string;
   title: string;
   status: RemoteCoraStepStatus;
 }
@@ -294,8 +443,18 @@ export interface RemoteCoraRunTruncation {
 
 export interface RemoteCoraRun extends RemoteCoraRunSummary {
   messages: RemoteCoraMessage[];
+  /** Manager transport for account routing. Older phones safely ignore it. */
+  backend?: "pi" | "claude" | "codex";
+  /** Read-only attribution: the opaque account this run is pinned to; no provider identity or credential crosses the wire. */
+  accountProfileId?: string;
+  /** Read-only attribution: the opaque direct-CLI account this run is pinned to. */
+  nativeAccountProfileId?: string;
+  /** Exact compare-and-swap token appears only on an opened run. */
+  recovery?: RemoteCoraRecovery;
   workers?: RemoteCoraWorker[];
   blockedQuestion?: RemoteCoraBlockedQuestion;
+  /** Active graph node. May name a step omitted by the bounded projection. */
+  currentStepId?: string;
   // The run's plan in step order, capped. Absent when the run has no plan.
   steps?: RemoteCoraStep[];
   // Totals over the WHOLE plan, so a truncated `steps` list can never make the
@@ -309,6 +468,7 @@ export interface RemoteCoraRun extends RemoteCoraRunSummary {
   // Nodes on this chat's whiteboard. Only the count rides the run poll; the
   // diagram itself is fetched on demand through cora.whiteboard.get.
   whiteboardNodes?: number;
+  /** Exact, content-free account of records omitted from this bounded DTO. */
   truncation?: RemoteCoraRunTruncation;
 }
 
@@ -330,6 +490,26 @@ export interface RemoteCoraRunProjection {
   messageDelta?: RemoteCoraMessageDelta & { messages: RemoteCoraMessage[] };
 }
 
+export type RemoteCoraResumeOutcome =
+  | "accepted"
+  | "already-resuming"
+  | "stale"
+  | "account-unavailable"
+  | "account-incompatible";
+
+export type RemoteCoraResumeAccount =
+  | { kind: "subscription"; profileId: string }
+  | {
+      kind: "native-cli";
+      runtime: RemoteNativeCliAccountRuntime;
+      profileId: string;
+    };
+
+export interface RemoteCoraResumeResult {
+  outcome: RemoteCoraResumeOutcome;
+  recoveryId: string;
+  reason?: string;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Cora whiteboard (this chat's diagram, flattened for a phone)               */
@@ -346,7 +526,8 @@ export type RemoteWhiteboardNodeKind =
   | "risk"
   | "note";
 
-export type RemoteWhiteboardTone = "default" | "accent" | "success" | "warning" | "danger";
+export type RemoteWhiteboardTone =
+  "default" | "accent" | "success" | "warning" | "danger";
 
 // The canvas coordinates are deliberately dropped: the phone renders the
 // whiteboard as a grouped list, never as a diagram, so x/y/width/height would
@@ -385,13 +566,7 @@ export interface RemoteWhiteboard {
 /* -------------------------------------------------------------------------- */
 
 export type RemoteBoardCardStatus =
-  | "idea"
-  | "queued"
-  | "running"
-  | "blocked"
-  | "review"
-  | "done"
-  | "failed";
+  "idea" | "queued" | "running" | "blocked" | "review" | "done" | "failed";
 
 export interface RemoteBoardCard {
   id: string;
@@ -441,19 +616,10 @@ export interface RemoteBoardUpdateResult {
 }
 
 export type RemoteAutomationStatus =
-  | "idle"
-  | "running"
-  | "paused"
-  | "stopped"
-  | "blocked";
+  "idle" | "running" | "paused" | "stopped" | "blocked";
 
 export type RemoteAutomationTriggerKind =
-  | "cron"
-  | "interval"
-  | "folder"
-  | "manual"
-  | "continuous"
-  | "chain";
+  "cron" | "interval" | "folder" | "manual" | "continuous" | "chain";
 
 export interface RemoteAutomationInfo {
   id: string;
@@ -494,6 +660,19 @@ export interface RemoteAutomationRunRecord {
   stopReason?: string;
 }
 
+// Compact, message-free projection of the automation's current run. The
+// worker objects are the same bounded roster used by cora.get, so the phone
+// can open the existing worker-terminal path without loading a conversation.
+export interface RemoteAutomationLiveRun {
+  id: string;
+  status: RemoteCoraRunStatus;
+  workers: RemoteCoraWorker[];
+  currentStepId?: string;
+  steps?: RemoteCoraStep[];
+  stepsTotal?: number;
+  stepsFinished?: number;
+}
+
 export interface RemoteAutomationDetail extends RemoteAutomationInfo {
   model?: string;
   effort?: string;
@@ -504,6 +683,9 @@ export interface RemoteAutomationDetail extends RemoteAutomationInfo {
   promptTruncated?: boolean;
   // Most recent pass first, capped.
   history: RemoteAutomationRunRecord[];
+  // Present only while the scheduler owns a current run. It carries the
+  // bounded step/worker graph, never conversation messages or board payloads.
+  liveRun?: RemoteAutomationLiveRun;
 }
 
 export interface RemoteWorkerSessionInfo {
@@ -517,7 +699,8 @@ export interface RemoteWorkerSessionInfo {
 // desktop picker's one checkbox. "claude-project" is only legal for Claude and
 // "codex-all" only for Codex; the pairing is checked here AND again in
 // worker-sessions' own validator.
-export type RemoteWorkerSessionMemoryScope = "none" | "claude-project" | "codex-all";
+export type RemoteWorkerSessionMemoryScope =
+  "none" | "claude-project" | "codex-all";
 
 export const WORKER_SESSION_MEMORY_SCOPES: Readonly<
   Record<"claude" | "codex", readonly RemoteWorkerSessionMemoryScope[]>
@@ -547,7 +730,8 @@ export interface RemoteWorkerSessionDeleteResult {
 // Mirrors the desktop notify pipeline's run/automation alerts for the phone:
 // blocked = a run needs an answer, completed/failed = run outcomes, and
 // automation = loom lifecycle (needs an answer, finished, failed).
-export type RemotePhoneNotificationKind = "blocked" | "completed" | "failed" | "automation";
+export type RemotePhoneNotificationKind =
+  "blocked" | "completed" | "failed" | "automation";
 
 export interface RemotePhoneNotification {
   // Journal event id; the phone dedupes on it because a device briefly
@@ -561,6 +745,16 @@ export interface RemotePhoneNotification {
   runId?: string;
   automationId?: string;
   createdAt: string;
+}
+
+// A tiny cache invalidation hint, never a projection of the journal event
+// itself. The phone conditionally re-reads history/run state using its last
+// revision, so messages, tool output, and event payloads never cross here.
+export interface RemoteCoraChangedEvent {
+  workspaceId: string;
+  runId?: string;
+  // Journal sequence is per run and therefore only accompanies a run id.
+  sequence?: number;
 }
 
 // Per-kind delivery preferences a phone registers alongside its optional
@@ -587,6 +781,12 @@ export type RpcErrorCode =
   | "unsupported-protocol"
   | "unknown-method"
   | "invalid-params"
+  | "mutation-conflict"
+  | "mutation-outcome-unknown"
+  | "message-too-large"
+  | "rate-limited"
+  | "terminal-control-busy"
+  | "terminal-control-lost"
   | "unknown-terminal"
   | "unknown-upload"
   | "unknown-workspace"
@@ -780,6 +980,10 @@ export class FrameDecoder {
 export interface RemoteTerminalHandle {
   // Renderer-owned tab metadata for a terminal shared with the desktop.
   desktopTabId?: string;
+  // Stable server-derived identity for an automation worker PTY. It is never
+  // sent by the phone and is required before the control registry will write.
+  controlTargetId?: string;
+  controlCapability?: "pty" | "steer";
   title?: string;
   write(data: string): void;
   resize(cols: number, rows: number): void | Promise<void>;
@@ -807,18 +1011,36 @@ export interface RemoteTerminalCreateRequest {
   onExit(): void;
 }
 
+export interface RemoteWorkerTerminalOpenRequest {
+  workspaceId: string;
+  runId: string;
+  workerId: string;
+  onData(data: string): void;
+  onExit(): void;
+}
+
 // What the RPC layer needs from the rest of the app. index.ts implements
 // this over storage + pty-manager; the harness and tests implement it over
 // fakes or a bare node-pty.
 export interface RemoteRpcServices {
   device: DeviceInfo;
+  // Called once after this encrypted session proves it speaks the current RPC
+  // protocol. The service uses it to fence older sockets for the same phone.
+  onSessionProven?(): void;
   // Trusted pairing-store identity for the authenticated peer. The hello frame
   // cannot choose terminal origin metadata.
   peerDevice?: DeviceInfo;
   listWorkspaces(): Promise<RemoteWorkspaceInfo[]>;
+  getFleetOverview?(): Promise<RemoteFleetOverviewProjection>;
+  listSubscriptionProfiles?(): Promise<RemoteSubscriptionProfile[]>;
+  listCoraModels?(): Promise<RemoteCoraModel[]>;
+  listNativeCliAccounts?(): Promise<RemoteNativeCliAccount[]>;
   listWorkspaceOrganization?(): Promise<RemoteWorkspaceOrganization>;
   listDirectories?(path?: string): Promise<RemoteDirectoryListing>;
-  addWorkspace?(input: { path: string; name?: string }): Promise<RemoteWorkspaceInfo>;
+  addWorkspace?(input: {
+    path: string;
+    name?: string;
+  }): Promise<RemoteWorkspaceInfo>;
   createWorkspaceGroup?(name: string): Promise<RemoteWorkspaceGroupInfo>;
   updateWorkspaceGroup?(input: {
     groupId: string;
@@ -836,8 +1058,14 @@ export interface RemoteRpcServices {
     itemId: string;
     beforeItemId?: string | null;
   }): Promise<void>;
-  listFiles?(input: { workspaceId: string; path?: string }): Promise<RemoteFileListing>;
-  readFile?(input: { workspaceId: string; path: string }): Promise<RemoteFileContent>;
+  listFiles?(input: {
+    workspaceId: string;
+    path?: string;
+  }): Promise<RemoteFileListing>;
+  readFile?(input: {
+    workspaceId: string;
+    path: string;
+  }): Promise<RemoteFileContent>;
   createFileEntry?(input: {
     workspaceId: string;
     parentPath?: string;
@@ -853,31 +1081,94 @@ export interface RemoteRpcServices {
     workspaceId: string;
     path: string;
     destinationPath?: string;
+    requestId?: string;
   }): Promise<RemoteFileInfo>;
   deleteFileEntry?(input: {
     workspaceId: string;
     path: string;
   }): Promise<RemoteFileDeleteResult>;
   getGitStatus?(workspaceId: string): Promise<RemoteGitStatus>;
-  getGitLog?(input: { workspaceId: string; limit: number }): Promise<RemoteGitLog>;
+  getGitLog?(input: {
+    workspaceId: string;
+    limit: number;
+  }): Promise<RemoteGitLog>;
   getGitCommitDetail?(input: {
     workspaceId: string;
     hash: string;
   }): Promise<RemoteGitCommitDetail>;
+  getGitHubStatus?(workspaceId: string): Promise<GitHubWorkspaceStatus>;
+  getGitHubWorkQueue?(input: {
+    refresh: boolean;
+  }): Promise<GitHubWorkQueueStatus>;
+  publishGitHub?(input: {
+    workspaceId: string;
+    requestId: string;
+    input: GitHubPublishInput;
+  }): Promise<GitHubPublishResult>;
+  markGitHubReady?(input: {
+    workspaceId: string;
+    requestId: string;
+    input: GitHubMarkReadyInput;
+  }): Promise<GitHubMarkReadyResult>;
+  mergeGitHub?(input: {
+    workspaceId: string;
+    requestId: string;
+    input: GitHubMergeInput;
+  }): Promise<GitHubMergeResult>;
+  startGitHubIssue?(input: {
+    sourceWorkspaceId: string;
+    issueNumber: number;
+    requestId: string;
+  }): Promise<StartGitHubIssueResult>;
+  startGitHubPullRequest?(input: {
+    sourceWorkspaceId: string;
+    repositoryUrl: string;
+    pullRequestNumber: number;
+    expectedHeadCommitOid: string;
+    requestId: string;
+  }): Promise<StartGitHubPullRequestResult>;
   listCoraHistory?(workspaceId: string): Promise<RemoteCoraRunSummary[]>;
-  getCoraRun?(input: { workspaceId: string; runId: string }): Promise<RemoteCoraRun>;
+  getCoraRun?(input: {
+    workspaceId: string;
+    runId: string;
+    afterCursor?: string;
+  }): Promise<RemoteCoraRunProjection>;
+  /** Message-free run relationships for the phone's graph-only surfaces. */
+  getCoraGraph?(input: {
+    workspaceId: string;
+    runId: string;
+  }): Promise<RemoteCoraRun>;
+  deleteCoraRun?(input: {
+    workspaceId: string;
+    runId: string;
+    requestId?: string;
+  }): Promise<void>;
   sendCoraMessage?(input: {
     workspaceId: string;
     runId?: string;
     message: string;
     clientMessageId: string;
-  }): Promise<RemoteCoraRun>;
+    afterCursor?: string;
+    model?: string;
+    effort?: RemoteCoraThinkingLevel;
+  }): Promise<RemoteCoraRunProjection>;
+  resumeCoraRun?(input: {
+    workspaceId: string;
+    runId: string;
+    recoveryId: string;
+    requestId: string;
+    account?: RemoteCoraResumeAccount;
+  }): Promise<RemoteCoraResumeResult>;
   // Resolves null when the chat has no whiteboard yet.
   getCoraWhiteboard?(input: {
     workspaceId: string;
     runId: string;
   }): Promise<RemoteWhiteboard | null>;
-  getCoraBoard?(input: { workspaceId: string; runId: string }): Promise<RemoteBoard>;
+  getCoraBoard?(input: {
+    workspaceId: string;
+    runId: string;
+    ifRevision?: string;
+  }): Promise<RemoteBoardReadProjection>;
   // Card title/description arrive pre-trimmed and length-checked; the service
   // still owns the revision guard and every board invariant.
   updateCoraBoard?(input: {
@@ -924,9 +1215,25 @@ export interface RemoteRpcServices {
   // The session's peer identity is bound by the service wiring (index.ts), so
   // a registration can never name another device.
   registerNotifications?(input: RemoteNotificationRegistration): Promise<void>;
-  beginImageUpload?(input: RemoteImageUploadRequest): Promise<RemoteImageUploadHandle>;
+  beginImageUpload?(
+    input: RemoteImageUploadRequest,
+  ): Promise<RemoteImageUploadHandle>;
+  attachWorkerTerminal?(
+    request: RemoteWorkerTerminalOpenRequest,
+  ): Promise<RemoteTerminalHandle>;
+  // Production shares this device-scoped store across authenticated socket
+  // generations. Tests and the interop harness may omit it to exercise the
+  // legacy one-connection lifecycle.
+  terminalLeases?: RemoteTerminalLeaseStore;
+  /** Desktop-owned terminals mirrored safely to authenticated phones. */
+  studioTerminalLeases?: RemoteTerminalLeaseStore;
+  // Shared across authenticated sessions so two phones cannot steer the same
+  // automation worker concurrently.
+  workerTerminalControls?: RemoteWorkerTerminalControlStore;
   // Rejects with an Error whose message is safe to send to the peer.
-  createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
+  createTerminal(
+    request: RemoteTerminalCreateRequest,
+  ): Promise<RemoteTerminalHandle>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -962,6 +1269,7 @@ export const MAX_PENDING_WRITE_BYTES = 4 * 1024 * 1024;
 // One terminal.data event must remain comfortably below MAX_FRAME_BYTES even
 // after JSON escapes ANSI control bytes (ESC becomes six wire bytes).
 const MAX_TERMINAL_EVENT_DATA_BYTES = 128 * 1024;
+const MAX_WORKER_TERMINAL_INPUT_BYTES = 16 * 1024;
 // Output produced while a visible renderer terminal is still being created is
 // held until the terminal.create response gives the phone its terminalId.
 const MAX_TERMINAL_BOOTSTRAP_BYTES = 256 * 1024;
@@ -1000,12 +1308,18 @@ const REVOKE_FLUSH_GRACE_MS = 1_000;
 // suspended and Expo push is the only channel that still reaches it.
 export const PUSH_LIVENESS_WINDOW_MS = 25_000;
 
-// One authenticated connection's RPC state machine. Every terminal remains
-// owned by the authenticated session: disconnect and revoke close it, including
-// production terminals that also have a visible renderer tab.
+// One authenticated connection's RPC state machine. Production terminal
+// handles live in a device-scoped lease store so a socket handoff detaches the
+// subscriber without killing the PTY. Harnesses may omit that store and retain
+// the original one-connection ownership semantics.
 export class RpcSession {
   private readonly decoder = new FrameDecoder();
   private readonly terminals = new Map<string, RemoteTerminalHandle>();
+  private readonly legacyTerminalSequences = new Map<string, number>();
+  private readonly leasedTerminalAttachments = new Map<string, string>();
+  private readonly workerControlLeases = new Map<string, string>();
+  private readonly workerControlTargets = new Map<string, string>();
+  private readonly terminalLeaseSubscriberId = randomUUID();
   private readonly imageUploads = new Map<string, SessionImageUpload>();
   private imageBytesAccepted = 0;
   // Creates that passed the cap check but whose pty is still spawning. The
@@ -1027,6 +1341,7 @@ export class RpcSession {
   // When the peer last sent us anything (any decrypted inbound chunk counts —
   // pings, requests, terminal keystrokes). Drives isPushLive().
   private lastInboundAtMs: number;
+  private lastGitHubQueueForceRefreshAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly stream: DuplexLike,
@@ -1067,12 +1382,15 @@ export class RpcSession {
       this.stream.destroy();
       return;
     }
-    const forceClose = setTimeout(() => this.stream.destroy(), REVOKE_FLUSH_GRACE_MS);
+    const forceClose = setTimeout(
+      () => this.stream.destroy(),
+      REVOKE_FLUSH_GRACE_MS,
+    );
     forceClose.unref?.();
   }
 
   terminalCount(): number {
-    return this.terminals.size;
+    return this.terminals.size + this.leasedTerminalAttachments.size;
   }
 
   // Whether this session has proved liveness: a valid `hello` has completed.
@@ -1089,12 +1407,24 @@ export class RpcSession {
   // right now: proven, and the phone has spoken within the liveness window.
   // See PUSH_LIVENESS_WINDOW_MS for why writability alone is not enough.
   isPushLive(nowMs: number): boolean {
-    return this.helloDone && nowMs - this.lastInboundAtMs <= PUSH_LIVENESS_WINDOW_MS;
+    return (
+      this.helloDone && nowMs - this.lastInboundAtMs <= PUSH_LIVENESS_WINDOW_MS
+    );
   }
 
   private teardown(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.services.terminalLeases?.detachSubscriber(
+      this.terminalLeaseSubscriberId,
+    );
+    this.services.studioTerminalLeases?.detachSubscriber(
+      this.terminalLeaseSubscriberId,
+    );
+    this.services.workerTerminalControls?.releaseHolder(
+      this.terminalLeaseSubscriberId,
+    );
+    this.leasedTerminalAttachments.clear();
     for (const terminal of this.terminals.values()) {
       try {
         terminal.close();
@@ -1103,6 +1433,9 @@ export class RpcSession {
       }
     }
     this.terminals.clear();
+    this.legacyTerminalSequences.clear();
+    this.workerControlLeases.clear();
+    this.workerControlTargets.clear();
     for (const upload of this.imageUploads.values()) {
       clearTimeout(upload.timer);
       void upload.handle.abort().catch(() => undefined);
@@ -1139,7 +1472,9 @@ export class RpcSession {
     let frame = encodeFrame(value);
     if (frame.length - LENGTH_PREFIX_BYTES > MAX_FRAME_BYTES) {
       const id =
-        value && typeof value === "object" && typeof (value as { id?: unknown }).id === "number"
+        value &&
+        typeof value === "object" &&
+        typeof (value as { id?: unknown }).id === "number"
           ? (value as { id: number }).id
           : null;
       this.log("dropping oversized outbound RPC frame");
@@ -1147,7 +1482,10 @@ export class RpcSession {
       frame = encodeFrame({
         id,
         ok: false,
-        error: { code: "internal", message: "The response was too large for Remote Access." },
+        error: {
+          code: "internal",
+          message: "The response was too large for Remote Access.",
+        },
       });
     }
     // Every outbound frame flows through here, replies included. A false
@@ -1180,43 +1518,99 @@ export class RpcSession {
     this.pushEvent("cora.notify", payload);
   }
 
+  pushCoraChanged(payload: RemoteCoraChangedEvent): void {
+    this.pushEvent("cora.changed", payload);
+  }
+
   // Terminal output specifically: unsolicited, unbounded in volume, and the
   // one thing a slow peer can use to grow our memory. While the socket is
   // backed up we first try to stop the pty at the OS level; if the handle
   // cannot pause, we account for what we have queued and start dropping
   // once it passes the cap.
-  private pushTerminalData(terminalId: string, data: string): void {
+  private pushTerminalData(
+    terminalId: string,
+    data: string,
+    sequence?: number,
+  ): void {
     if (this.destroyed) return;
     if (Buffer.byteLength(data, "utf8") > MAX_TERMINAL_EVENT_DATA_BYTES) {
+      // Lease-store chunks are already bounded before they receive a sequence.
+      // Splitting one here would give multiple wire chunks the same cursor and
+      // make the phone's deduplicator discard bytes.
+      if (sequence !== undefined) {
+        this.log(
+          `dropping oversized sequenced terminal output for ${terminalId}`,
+        );
+        return;
+      }
       const bytes = Buffer.from(data, "utf8");
       const decoder = new StringDecoder("utf8");
-      for (let offset = 0; offset < bytes.length; offset += MAX_TERMINAL_EVENT_DATA_BYTES) {
+      for (
+        let offset = 0;
+        offset < bytes.length;
+        offset += MAX_TERMINAL_EVENT_DATA_BYTES
+      ) {
         const part = decoder.write(
-          bytes.subarray(offset, Math.min(bytes.length, offset + MAX_TERMINAL_EVENT_DATA_BYTES)),
+          bytes.subarray(
+            offset,
+            Math.min(bytes.length, offset + MAX_TERMINAL_EVENT_DATA_BYTES),
+          ),
         );
-        if (part) this.pushTerminalDataChunk(terminalId, part);
+        if (part) {
+          this.pushTerminalDataChunk(
+            terminalId,
+            part,
+            this.nextLegacyTerminalSequence(terminalId),
+          );
+        }
       }
       const final = decoder.end();
-      if (final) this.pushTerminalDataChunk(terminalId, final);
+      if (final) {
+        this.pushTerminalDataChunk(
+          terminalId,
+          final,
+          this.nextLegacyTerminalSequence(terminalId),
+        );
+      }
       return;
     }
-    this.pushTerminalDataChunk(terminalId, data);
+    this.pushTerminalDataChunk(
+      terminalId,
+      data,
+      sequence ?? this.nextLegacyTerminalSequence(terminalId),
+    );
   }
 
-  private pushTerminalDataChunk(terminalId: string, data: string): void {
+  private nextLegacyTerminalSequence(terminalId: string): number {
+    const sequence = (this.legacyTerminalSequences.get(terminalId) ?? 0) + 1;
+    this.legacyTerminalSequences.set(terminalId, sequence);
+    return sequence;
+  }
+
+  private pushTerminalDataChunk(
+    terminalId: string,
+    data: string,
+    sequence?: number,
+  ): void {
     if (this.destroyed) return;
     if (this.backpressured) {
       const bytes = Buffer.byteLength(data, "utf8");
       if (this.pendingEventBytes + bytes > MAX_PENDING_EVENT_BYTES) {
         if (!this.droppedOutput) {
           this.droppedOutput = true;
-          this.log(`dropping terminal output for ${terminalId}: peer is not keeping up`);
+          this.log(
+            `dropping terminal output for ${terminalId}: peer is not keeping up`,
+          );
         }
         return;
       }
       this.pendingEventBytes += bytes;
     }
-    this.pushEvent("terminal.data", { terminalId, data });
+    this.pushEvent("terminal.data", {
+      terminalId,
+      data,
+      ...(sequence !== undefined ? { sequence } : {}),
+    });
   }
 
   private onBackpressure(): void {
@@ -1259,8 +1653,16 @@ export class RpcSession {
       this.destroy();
       return;
     }
-    const { id, method, params } = frame as { id?: unknown; method?: unknown; params?: unknown };
-    if (typeof id !== "number" || !Number.isInteger(id) || typeof method !== "string") {
+    const { id, method, params } = frame as {
+      id?: unknown;
+      method?: unknown;
+      params?: unknown;
+    };
+    if (
+      typeof id !== "number" ||
+      !Number.isInteger(id) ||
+      typeof method !== "string"
+    ) {
       // Not a well-formed request. v0 peers never send us responses or
       // events, so anything else is protocol noise; drop the connection.
       this.destroy();
@@ -1273,7 +1675,11 @@ export class RpcSession {
       return;
     }
     if (this.inFlightRequests >= MAX_IN_FLIGHT_REQUESTS) {
-      this.replyError(id, "internal", "Too many Remote Access requests are already in progress.");
+      this.replyError(
+        id,
+        "internal",
+        "Too many Remote Access requests are already in progress.",
+      );
       return;
     }
     this.inFlightRequests += 1;
@@ -1289,18 +1695,128 @@ export class RpcSession {
           const workspaces = await this.services.listWorkspaces();
           const organization = this.services.listWorkspaceOrganization
             ? await this.services.listWorkspaceOrganization()
-            : { groups: [], railOrder: workspaces.map((workspace) => workspace.id) };
+            : {
+                groups: [],
+                railOrder: workspaces.map((workspace) => workspace.id),
+              };
           this.reply(id, { workspaces, ...organization });
+          return;
+        }
+        case "fleet.overview": {
+          if (!this.services.getFleetOverview) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "The workspace fleet overview is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as { ifRevision?: unknown };
+          if (
+            p.ifRevision !== undefined &&
+            !isBoundedString(p.ifRevision, 128)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "fleet.overview ifRevision must be a bounded string.",
+            );
+            return;
+          }
+          const projection = await this.services.getFleetOverview();
+          const revision = projectionRevision(projection);
+          if (p.ifRevision === revision) {
+            this.reply(id, { notModified: true, revision });
+          } else {
+            this.reply(id, { ...projection, revision });
+          }
+          return;
+        }
+        case "subscriptions.list": {
+          if (!this.services.listSubscriptionProfiles) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Subscription profiles are not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as { ifRevision?: unknown };
+          if (
+            p.ifRevision !== undefined &&
+            !isBoundedString(p.ifRevision, 128)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "subscriptions.list ifRevision must be a bounded string.",
+            );
+            return;
+          }
+          const profiles = await this.services.listSubscriptionProfiles();
+          const revision = projectionRevision(profiles);
+          if (p.ifRevision === revision) {
+            this.reply(id, { notModified: true, revision });
+          } else {
+            this.reply(id, { profiles, revision });
+          }
+          return;
+        }
+        case "cora.models": {
+          if (!this.services.listCoraModels) {
+            this.replyError(id, "unknown-method", "Cora models are not available.");
+            return;
+          }
+          const models = await this.services.listCoraModels();
+          this.reply(id, { models });
+          return;
+        }
+        case "nativeCliAccounts.list": {
+          if (!this.services.listNativeCliAccounts) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Native CLI accounts are not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as { ifRevision?: unknown };
+          if (
+            p.ifRevision !== undefined &&
+            !isBoundedString(p.ifRevision, 128)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "nativeCliAccounts.list ifRevision must be a bounded string.",
+            );
+            return;
+          }
+          const profiles = await this.services.listNativeCliAccounts();
+          const revision = projectionRevision(profiles);
+          if (p.ifRevision === revision) {
+            this.reply(id, { notModified: true, revision });
+          } else {
+            this.reply(id, { profiles, revision });
+          }
           return;
         }
         case "directories.list": {
           if (!this.services.listDirectories) {
-            this.replyError(id, "unknown-method", "Directory browsing is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Directory browsing is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { path?: unknown };
           if (p.path !== undefined && typeof p.path !== "string") {
-            this.replyError(id, "invalid-params", "directories.list path must be a string.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "directories.list path must be a string.",
+            );
             return;
           }
           const result = await this.services.listDirectories(p.path);
@@ -1309,7 +1825,11 @@ export class RpcSession {
         }
         case "workspaces.add": {
           if (!this.services.addWorkspace) {
-            this.replyError(id, "unknown-method", "Adding workspaces is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Adding workspaces is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { path?: unknown; name?: unknown };
@@ -1318,7 +1838,11 @@ export class RpcSession {
             p.path.trim().length === 0 ||
             (p.name !== undefined && typeof p.name !== "string")
           ) {
-            this.replyError(id, "invalid-params", "workspaces.add needs a path and optional name.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "workspaces.add needs a path and optional name.",
+            );
             return;
           }
           const workspace = await this.services.addWorkspace({
@@ -1332,7 +1856,11 @@ export class RpcSession {
         }
         case "workspaces.group.create": {
           if (!this.services.createWorkspaceGroup) {
-            this.replyError(id, "unknown-method", "Workspace folders are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Workspace folders are not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { name?: unknown };
@@ -1354,7 +1882,11 @@ export class RpcSession {
         }
         case "workspaces.group.update": {
           if (!this.services.updateWorkspaceGroup) {
-            this.replyError(id, "unknown-method", "Workspace folders are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Workspace folders are not available.",
+            );
             return;
           }
           const p = (params ?? {}) as {
@@ -1383,14 +1915,20 @@ export class RpcSession {
           const group = await this.services.updateWorkspaceGroup({
             groupId: p.groupId,
             ...(typeof p.name === "string" ? { name: p.name.trim() } : {}),
-            ...(typeof p.collapsed === "boolean" ? { collapsed: p.collapsed } : {}),
+            ...(typeof p.collapsed === "boolean"
+              ? { collapsed: p.collapsed }
+              : {}),
           });
           this.reply(id, { group });
           return;
         }
         case "workspaces.group.delete": {
           if (!this.services.deleteWorkspaceGroup) {
-            this.replyError(id, "unknown-method", "Workspace folders are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Workspace folders are not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { groupId?: unknown };
@@ -1399,7 +1937,11 @@ export class RpcSession {
             p.groupId.length === 0 ||
             p.groupId.length > 256
           ) {
-            this.replyError(id, "invalid-params", "workspaces.group.delete needs a groupId.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "workspaces.group.delete needs a groupId.",
+            );
             return;
           }
           await this.services.deleteWorkspaceGroup(p.groupId);
@@ -1408,7 +1950,11 @@ export class RpcSession {
         }
         case "workspaces.move": {
           if (!this.services.moveWorkspace) {
-            this.replyError(id, "unknown-method", "Workspace organization is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Workspace organization is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as {
@@ -1459,10 +2005,17 @@ export class RpcSession {
         }
         case "workspaces.rail.move": {
           if (!this.services.reorderWorkspaceRail) {
-            this.replyError(id, "unknown-method", "Workspace organization is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Workspace organization is not available.",
+            );
             return;
           }
-          const p = (params ?? {}) as { itemId?: unknown; beforeItemId?: unknown };
+          const p = (params ?? {}) as {
+            itemId?: unknown;
+            beforeItemId?: unknown;
+          };
           if (
             typeof p.itemId !== "string" ||
             p.itemId.length === 0 ||
@@ -1491,7 +2044,11 @@ export class RpcSession {
         }
         case "files.list": {
           if (!this.services.listFiles) {
-            this.replyError(id, "unknown-method", "The file explorer is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "The file explorer is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { workspaceId?: unknown; path?: unknown };
@@ -1499,7 +2056,11 @@ export class RpcSession {
             typeof p.workspaceId !== "string" ||
             (p.path !== undefined && typeof p.path !== "string")
           ) {
-            this.replyError(id, "invalid-params", "files.list needs workspaceId and optional path.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "files.list needs workspaceId and optional path.",
+            );
             return;
           }
           const result = await this.services.listFiles({
@@ -1511,12 +2072,24 @@ export class RpcSession {
         }
         case "files.read": {
           if (!this.services.readFile) {
-            this.replyError(id, "unknown-method", "File reading is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "File reading is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { workspaceId?: unknown; path?: unknown };
-          if (typeof p.workspaceId !== "string" || typeof p.path !== "string" || !p.path) {
-            this.replyError(id, "invalid-params", "files.read needs workspaceId and path.");
+          if (
+            typeof p.workspaceId !== "string" ||
+            typeof p.path !== "string" ||
+            !p.path
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "files.read needs workspaceId and path.",
+            );
             return;
           }
           const file = await this.services.readFile({
@@ -1528,7 +2101,11 @@ export class RpcSession {
         }
         case "files.create": {
           if (!this.services.createFileEntry) {
-            this.replyError(id, "unknown-method", "Creating files is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Creating files is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as {
@@ -1552,7 +2129,9 @@ export class RpcSession {
           }
           const entry = await this.services.createFileEntry({
             workspaceId: p.workspaceId,
-            ...(typeof p.parentPath === "string" ? { parentPath: p.parentPath } : {}),
+            ...(typeof p.parentPath === "string"
+              ? { parentPath: p.parentPath }
+              : {}),
             name: p.name,
             kind: p.kind,
           });
@@ -1561,7 +2140,11 @@ export class RpcSession {
         }
         case "files.rename": {
           if (!this.services.renameFileEntry) {
-            this.replyError(id, "unknown-method", "Renaming files is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Renaming files is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as {
@@ -1575,7 +2158,11 @@ export class RpcSession {
             !p.path ||
             typeof p.name !== "string"
           ) {
-            this.replyError(id, "invalid-params", "files.rename needs workspaceId, path and name.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "files.rename needs workspaceId, path and name.",
+            );
             return;
           }
           const entry = await this.services.renameFileEntry({
@@ -1588,24 +2175,31 @@ export class RpcSession {
         }
         case "files.move": {
           if (!this.services.moveFileEntry) {
-            this.replyError(id, "unknown-method", "Moving files is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Moving files is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as {
             workspaceId?: unknown;
             path?: unknown;
             destinationPath?: unknown;
+            requestId?: unknown;
           };
           if (
             typeof p.workspaceId !== "string" ||
             typeof p.path !== "string" ||
             !p.path ||
-            (p.destinationPath !== undefined && typeof p.destinationPath !== "string")
+            (p.destinationPath !== undefined &&
+              typeof p.destinationPath !== "string") ||
+            (p.requestId !== undefined && !isBoundedString(p.requestId, 256))
           ) {
             this.replyError(
               id,
               "invalid-params",
-              "files.move needs workspaceId, path and optional destinationPath.",
+              "files.move needs workspaceId, path, optional destinationPath and an optional bounded requestId.",
             );
             return;
           }
@@ -1615,13 +2209,18 @@ export class RpcSession {
             ...(typeof p.destinationPath === "string"
               ? { destinationPath: p.destinationPath }
               : {}),
+            ...(p.requestId ? { requestId: p.requestId } : {}),
           });
           this.reply(id, { entry });
           return;
         }
         case "files.delete": {
           if (!this.services.deleteFileEntry) {
-            this.replyError(id, "unknown-method", "Deleting files is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Deleting files is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { workspaceId?: unknown; path?: unknown };
@@ -1630,7 +2229,11 @@ export class RpcSession {
             typeof p.path !== "string" ||
             !p.path
           ) {
-            this.replyError(id, "invalid-params", "files.delete needs workspaceId and path.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "files.delete needs workspaceId and path.",
+            );
             return;
           }
           const deleted = await this.services.deleteFileEntry({
@@ -1654,12 +2257,20 @@ export class RpcSession {
           return;
         case "git.status": {
           if (!this.services.getGitStatus) {
-            this.replyError(id, "unknown-method", "Source control is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Source control is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { workspaceId?: unknown };
           if (typeof p.workspaceId !== "string") {
-            this.replyError(id, "invalid-params", "git.status needs workspaceId.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "git.status needs workspaceId.",
+            );
             return;
           }
           const status = await this.services.getGitStatus(p.workspaceId);
@@ -1668,10 +2279,17 @@ export class RpcSession {
         }
         case "git.log": {
           if (!this.services.getGitLog) {
-            this.replyError(id, "unknown-method", "Git history is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Git history is not available.",
+            );
             return;
           }
-          const p = (params ?? {}) as { workspaceId?: unknown; limit?: unknown };
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            limit?: unknown;
+          };
           if (
             typeof p.workspaceId !== "string" ||
             (p.limit !== undefined &&
@@ -1696,7 +2314,11 @@ export class RpcSession {
         }
         case "git.commitDetail": {
           if (!this.services.getGitCommitDetail) {
-            this.replyError(id, "unknown-method", "Commit details are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Commit details are not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { workspaceId?: unknown; hash?: unknown };
@@ -1719,40 +2341,457 @@ export class RpcSession {
           this.reply(id, { commit });
           return;
         }
-        case "cora.history": {
-          if (!this.services.listCoraHistory) {
-            this.replyError(id, "unknown-method", "Cora history is not available.");
+        case "github.status": {
+          if (!this.services.getGitHubStatus) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "GitHub publishing is not available.",
+            );
             return;
           }
-          const p = (params ?? {}) as { workspaceId?: unknown };
-          if (typeof p.workspaceId !== "string") {
-            this.replyError(id, "invalid-params", "cora.history needs workspaceId.");
+          const statusParams = githubStatusParams(params);
+          if (!statusParams) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "github.status needs a bounded workspaceId and optional revision.",
+            );
+            return;
+          }
+          const status = await this.services.getGitHubStatus(statusParams.workspaceId);
+          const revision = projectionRevision(status);
+          if (statusParams.ifRevision === revision) {
+            this.reply(id, { notModified: true, revision });
+          } else {
+            this.reply(id, { status, revision });
+          }
+          return;
+        }
+        case "github.workQueue": {
+          if (!this.services.getGitHubWorkQueue) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "The GitHub work queue is not available.",
+            );
+            return;
+          }
+          const queueParams = githubWorkQueueParams(params);
+          if (!queueParams) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "github.workQueue accepts only an optional bounded revision.",
+            );
+            return;
+          }
+          if (
+            queueParams.refresh &&
+            this.now() - this.lastGitHubQueueForceRefreshAt <
+              GITHUB_WORK_QUEUE_FORCE_REFRESH_MIN_MS
+          ) {
+            this.replyError(
+              id,
+              "rate-limited",
+              "Wait a few seconds before forcing another GitHub queue refresh.",
+            );
+            return;
+          }
+          if (queueParams.refresh) {
+            this.lastGitHubQueueForceRefreshAt = this.now();
+          }
+          const status = await this.services.getGitHubWorkQueue({
+            refresh: queueParams.refresh === true,
+          });
+          const revision = githubWorkQueueRevision(status);
+          if (queueParams.ifRevision === revision) {
+            this.reply(id, {
+              notModified: true,
+              revision,
+              ...(status.kind === "ready"
+                ? { refreshedAt: status.refreshedAt }
+                : {}),
+            });
+          } else {
+            this.reply(id, {
+              status,
+              revision,
+              ...(status.kind === "ready"
+                ? { refreshedAt: status.refreshedAt }
+                : {}),
+            });
+          }
+          return;
+        }
+        case "github.publish": {
+          if (!this.services.publishGitHub) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "GitHub publishing is not available.",
+            );
+            return;
+          }
+          const publish = githubPublishParams(params);
+          if (!publish) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "github.publish needs bounded workspaceId, requestId, title, body, draft, and optional commitMessage fields.",
+            );
+            return;
+          }
+          const result = await this.services.publishGitHub(publish);
+          this.reply(id, { result });
+          return;
+        }
+        case "github.ready": {
+          if (!this.services.markGitHubReady) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "GitHub pull request readiness is not available.",
+            );
+            return;
+          }
+          const ready = githubMarkReadyParams(params);
+          if (!ready) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "github.ready needs bounded workspaceId, requestId, repository, pull request, base/head branches, and head commit fields.",
+            );
+            return;
+          }
+          const result = await this.services.markGitHubReady(ready);
+          this.reply(id, { result });
+          return;
+        }
+        case "github.merge": {
+          if (!this.services.mergeGitHub) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "GitHub pull request merging is not available.",
+            );
+            return;
+          }
+          const merge = githubMergeParams(params);
+          if (!merge) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "github.merge needs bounded workspaceId, requestId, repository, pull request, base/head branches, head commit, and strategy fields.",
+            );
+            return;
+          }
+          const result = await this.services.mergeGitHub(merge);
+          this.reply(id, { result });
+          return;
+        }
+        case "github.issue.start": {
+          if (!this.services.startGitHubIssue) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "GitHub issue workspaces are not available.",
+            );
+            return;
+          }
+          const start = githubIssueStartParams(params);
+          if (!start) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "github.issue.start needs exactly one bounded sourceWorkspaceId, positive issueNumber, and requestId.",
+            );
+            return;
+          }
+          const result = await this.services.startGitHubIssue(start);
+          this.reply(id, { result });
+          return;
+        }
+        case "github.pullRequest.start": {
+          if (!this.services.startGitHubPullRequest) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "GitHub pull-request workspaces are not available.",
+            );
+            return;
+          }
+          const start = githubPullRequestStartParams(params);
+          if (!start) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "github.pullRequest.start needs exactly one bounded sourceWorkspaceId, canonical repositoryUrl, positive pullRequestNumber, exact expectedHeadCommitOid, and requestId.",
+            );
+            return;
+          }
+          const result = await this.services.startGitHubPullRequest(start);
+          this.reply(id, { result });
+          return;
+        }
+        case "cora.history": {
+          if (!this.services.listCoraHistory) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Cora history is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            ifRevision?: unknown;
+            deltaVersion?: unknown;
+          };
+          if (
+            !isRemoteCoraIdentity(p.workspaceId) ||
+            (p.ifRevision !== undefined &&
+              !isBoundedString(p.ifRevision, 128)) ||
+            (p.deltaVersion !== undefined &&
+              p.deltaVersion !== CORA_HISTORY_DELTA_VERSION)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.history needs workspaceId.",
+            );
             return;
           }
           const runs = await this.services.listCoraHistory(p.workspaceId);
-          this.reply(id, { runs });
+          // The helper hashes the exact bounded wire projection, not only
+          // updatedAt. Retained bases only encode a smaller equivalent reply;
+          // the freshly read projection remains authoritative.
+          this.reply(
+            id,
+            coraHistoryDeltaCache.project({
+              workspaceId: p.workspaceId,
+              runs,
+              ...(typeof p.ifRevision === "string"
+                ? { ifRevision: p.ifRevision }
+                : {}),
+              ...(p.deltaVersion === CORA_HISTORY_DELTA_VERSION
+                ? { deltaVersion: p.deltaVersion }
+                : {}),
+            }),
+          );
           return;
         }
         case "cora.get": {
           if (!this.services.getCoraRun) {
-            this.replyError(id, "unknown-method", "Cora history is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Cora history is not available.",
+            );
             return;
           }
-          const p = (params ?? {}) as { workspaceId?: unknown; runId?: unknown };
-          if (typeof p.workspaceId !== "string" || typeof p.runId !== "string") {
-            this.replyError(id, "invalid-params", "cora.get needs workspaceId and runId.");
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+            ifRevision?: unknown;
+            afterCursor?: unknown;
+          };
+          if (
+            !isRemoteCoraIdentity(p.workspaceId) ||
+            !isRemoteCoraIdentity(p.runId) ||
+            (p.ifRevision !== undefined &&
+              !isBoundedString(p.ifRevision, 128)) ||
+            (p.afterCursor !== undefined &&
+              !isBoundedString(p.afterCursor, 128))
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.get needs workspaceId and runId.",
+            );
             return;
           }
-          const run = await this.services.getCoraRun({
+          // cora.get is a pure read: the phone polls it, so composer model and
+          // effort are only ever applied by cora.send, never by a read.
+          const projection = await this.services.getCoraRun({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+            ...(p.afterCursor !== undefined
+              ? { afterCursor: p.afterCursor }
+              : {}),
+          });
+          // updatedAt is a storage revision, not necessarily a wire-projection
+          // revision: joined worker/automation metadata can change around it.
+          // Hash the exact FULL bounded DTO so "not modified" can never hide a
+          // server-side projection change and the digest never depends on
+          // whether this caller qualified for a message delta.
+          const revision = projectionRevision(projection.run);
+          const requiresMessageReset =
+            p.afterCursor !== undefined &&
+            projection.messageDelta === undefined;
+          if (p.ifRevision === revision && !requiresMessageReset) {
+            this.reply(id, {
+              notModified: true,
+              revision,
+              cursor: projection.cursor,
+            });
+          } else {
+            this.reply(id, buildCoraRunWireResult(projection, revision));
+          }
+          return;
+        }
+        case "cora.graph.get": {
+          if (!this.services.getCoraGraph) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Cora run graphs are not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+          };
+          if (
+            !isRemoteCoraIdentity(p.workspaceId) ||
+            !isRemoteCoraIdentity(p.runId)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.graph.get needs workspaceId and runId.",
+            );
+            return;
+          }
+          const run = await this.services.getCoraGraph({
             workspaceId: p.workspaceId,
             runId: p.runId,
           });
           this.reply(id, { run });
           return;
         }
+        case "cora.delete": {
+          if (!this.services.deleteCoraRun) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Deleting Cora conversations is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+            requestId?: unknown;
+          };
+          if (
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.runId, 256) ||
+            (p.requestId !== undefined && !isBoundedString(p.requestId, 256))
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.delete needs workspaceId, runId and an optional bounded requestId.",
+            );
+            return;
+          }
+          await this.services.deleteCoraRun({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+            ...(p.requestId ? { requestId: p.requestId } : {}),
+          });
+          this.reply(id, {});
+          return;
+        }
+        case "cora.resume": {
+          if (!this.services.resumeCoraRun) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Recovering Cora manager turns is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+            recoveryId?: unknown;
+            requestId?: unknown;
+            account?: unknown;
+          };
+          let account: RemoteCoraResumeAccount | undefined;
+          if (p.account !== undefined) {
+            if (!p.account || typeof p.account !== "object" || Array.isArray(p.account)) {
+              this.replyError(
+                id,
+                "invalid-params",
+                "cora.resume account must be a subscription or native-cli selector.",
+              );
+              return;
+            }
+            const candidate = p.account as Record<string, unknown>;
+            if (
+              candidate.kind === "subscription" &&
+              isBoundedString(candidate.profileId, 256) &&
+              ACCOUNT_PROFILE_ID_PATTERN.test(candidate.profileId)
+            ) {
+              account = {
+                kind: "subscription",
+                profileId: candidate.profileId,
+              };
+            } else if (
+              candidate.kind === "native-cli" &&
+              (candidate.runtime === "claude" || candidate.runtime === "codex") &&
+              isBoundedString(candidate.profileId, 256) &&
+              NATIVE_CLI_PROFILE_ID_PATTERN.test(candidate.profileId)
+            ) {
+              account = {
+                kind: "native-cli",
+                runtime: candidate.runtime,
+                profileId: candidate.profileId,
+              };
+            } else {
+              this.replyError(
+                id,
+                "invalid-params",
+                "cora.resume account must name a valid compatible profile.",
+              );
+              return;
+            }
+          }
+          if (
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.runId, 256) ||
+            !isBoundedString(p.recoveryId, 256) ||
+            !p.recoveryId.startsWith("recovery-") ||
+            !isBoundedString(p.requestId, 256)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.resume needs workspaceId, runId, recoveryId and requestId.",
+            );
+            return;
+          }
+          const result = await this.services.resumeCoraRun({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+            recoveryId: p.recoveryId,
+            requestId: p.requestId,
+            ...(account ? { account } : {}),
+          });
+          this.reply(id, result);
+          return;
+        }
         case "cora.send": {
           if (!this.services.sendCoraMessage) {
-            this.replyError(id, "unknown-method", "Cora messaging is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Cora messaging is not available.",
+            );
             return;
           }
           const p = (params ?? {}) as {
@@ -1760,38 +2799,66 @@ export class RpcSession {
             runId?: unknown;
             message?: unknown;
             clientMessageId?: unknown;
+            afterCursor?: unknown;
+            model?: unknown;
+            effort?: unknown;
           };
+          const clientMessageId =
+            typeof p.clientMessageId === "string"
+              ? p.clientMessageId.trim()
+              : p.clientMessageId;
           if (
-            typeof p.workspaceId !== "string" ||
+            !isRemoteCoraIdentity(p.workspaceId) ||
             typeof p.message !== "string" ||
             !p.message.trim() ||
-            typeof p.clientMessageId !== "string" ||
-            !p.clientMessageId.trim() ||
-            (p.runId !== undefined && typeof p.runId !== "string")
+            !isRemoteCoraIdentity(clientMessageId) ||
+            (p.runId !== undefined && !isRemoteCoraIdentity(p.runId)) ||
+            (p.afterCursor !== undefined &&
+              !isBoundedString(p.afterCursor, 128)) ||
+            (p.model !== undefined && !isRemoteCoraModelId(p.model)) ||
+            (p.effort !== undefined && !isRemoteCoraThinkingLevel(p.effort))
           ) {
             this.replyError(
               id,
               "invalid-params",
-              "cora.send needs workspaceId, message, clientMessageId, and optional runId.",
+              "cora.send needs workspaceId, message, clientMessageId, and optional runId, model, and effort.",
             );
             return;
           }
-          const run = await this.services.sendCoraMessage({
+          const projection = await this.services.sendCoraMessage({
             workspaceId: p.workspaceId,
-            ...(typeof p.runId === "string" && p.runId ? { runId: p.runId } : {}),
+            ...(typeof p.runId === "string" && p.runId
+              ? { runId: p.runId }
+              : {}),
             message: p.message.trim(),
-            clientMessageId: p.clientMessageId,
+            clientMessageId,
+            ...(p.afterCursor !== undefined
+              ? { afterCursor: p.afterCursor }
+              : {}),
+            ...(p.model !== undefined ? { model: p.model } : {}),
+            ...(p.effort !== undefined ? { effort: p.effort } : {}),
           });
-          this.reply(id, { run });
+          const revision = projectionRevision(projection.run);
+          this.reply(id, buildCoraRunWireResult(projection, revision));
           return;
         }
         case "cora.whiteboard.get": {
           if (!this.services.getCoraWhiteboard) {
-            this.replyError(id, "unknown-method", "The Cora whiteboard is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "The Cora whiteboard is not available.",
+            );
             return;
           }
-          const p = (params ?? {}) as { workspaceId?: unknown; runId?: unknown };
-          if (!isBoundedString(p.workspaceId, 256) || !isBoundedString(p.runId, 256)) {
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+          };
+          if (
+            !isBoundedString(p.workspaceId, 256) ||
+            !isBoundedString(p.runId, 256)
+          ) {
             this.replyError(
               id,
               "invalid-params",
@@ -1808,31 +2875,55 @@ export class RpcSession {
         }
         case "cora.board.get": {
           if (!this.services.getCoraBoard) {
-            this.replyError(id, "unknown-method", "The Cora Board is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "The Cora Board is not available.",
+            );
             return;
           }
-          const p = (params ?? {}) as { workspaceId?: unknown; runId?: unknown };
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+            ifRevision?: unknown;
+          };
           if (
             !isBoundedString(p.workspaceId, 256) ||
-            !isBoundedString(p.runId, 256)
+            !isBoundedString(p.runId, 256) ||
+            (p.ifRevision !== undefined &&
+              !isBoundedString(p.ifRevision, 128))
           ) {
             this.replyError(
               id,
               "invalid-params",
-              "cora.board.get needs workspaceId and runId.",
+              "cora.board.get needs workspaceId and runId; ifRevision must be a bounded string.",
             );
             return;
           }
-          const board = await this.services.getCoraBoard({
+          const projection = await this.services.getCoraBoard({
             workspaceId: p.workspaceId,
             runId: p.runId,
+            ...(typeof p.ifRevision === "string"
+              ? { ifRevision: p.ifRevision }
+              : {}),
           });
-          this.reply(id, { board });
+          if (p.ifRevision === projection.revision) {
+            this.reply(id, {
+              revision: projection.revision,
+              notModified: true,
+            });
+          } else {
+            this.reply(id, projection);
+          }
           return;
         }
         case "cora.board.update": {
           if (!this.services.updateCoraBoard) {
-            this.replyError(id, "unknown-method", "The Cora Board is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "The Cora Board is not available.",
+            );
             return;
           }
           const p = boardUpdateParams(params);
@@ -1850,10 +2941,17 @@ export class RpcSession {
         }
         case "workerSessions.list": {
           if (!this.services.listWorkerSessions) {
-            this.replyError(id, "unknown-method", "Worker session history is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Worker session history is not available.",
+            );
             return;
           }
-          const p = (params ?? {}) as { workspaceId?: unknown; runtime?: unknown };
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runtime?: unknown;
+          };
           if (
             typeof p.workspaceId !== "string" ||
             p.workspaceId.length === 0 ||
@@ -1930,7 +3028,11 @@ export class RpcSession {
         }
         case "automations.list": {
           if (!this.services.listAutomations) {
-            this.replyError(id, "unknown-method", "Automations are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Automations are not available.",
+            );
             return;
           }
           const p = (params ?? {}) as { workspaceId?: unknown };
@@ -1939,16 +3041,26 @@ export class RpcSession {
             p.workspaceId.length === 0 ||
             p.workspaceId.length > 256
           ) {
-            this.replyError(id, "invalid-params", "automations.list needs workspaceId.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.list needs workspaceId.",
+            );
             return;
           }
-          const automations = await this.services.listAutomations(p.workspaceId);
+          const automations = await this.services.listAutomations(
+            p.workspaceId,
+          );
           this.reply(id, { automations });
           return;
         }
         case "automations.get": {
           if (!this.services.getAutomation) {
-            this.replyError(id, "unknown-method", "Automation detail is not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Automation detail is not available.",
+            );
             return;
           }
           const p = automationActionParams(params);
@@ -1966,7 +3078,11 @@ export class RpcSession {
         }
         case "automations.run": {
           if (!this.services.runAutomation) {
-            this.replyError(id, "unknown-method", "Automations are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Automations are not available.",
+            );
             return;
           }
           const p = automationActionParams(params);
@@ -1984,7 +3100,11 @@ export class RpcSession {
         }
         case "automations.pause": {
           if (!this.services.pauseAutomation) {
-            this.replyError(id, "unknown-method", "Automations are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Automations are not available.",
+            );
             return;
           }
           const p = automationActionParams(params);
@@ -2002,7 +3122,11 @@ export class RpcSession {
         }
         case "automations.resume": {
           if (!this.services.resumeAutomation) {
-            this.replyError(id, "unknown-method", "Automations are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Automations are not available.",
+            );
             return;
           }
           const p = automationActionParams(params);
@@ -2020,7 +3144,11 @@ export class RpcSession {
         }
         case "automations.setEnabled": {
           if (!this.services.setAutomationEnabled) {
-            this.replyError(id, "unknown-method", "Automations are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Automations are not available.",
+            );
             return;
           }
           const base = automationActionParams(params);
@@ -2033,13 +3161,134 @@ export class RpcSession {
             );
             return;
           }
-          const automation = await this.services.setAutomationEnabled({ ...base, enabled });
+          const automation = await this.services.setAutomationEnabled({
+            ...base,
+            enabled,
+          });
           this.reply(id, { automation });
+          return;
+        }
+        case "automations.workerTerminal.open":
+          await this.handleWorkerTerminalOpen(id, params);
+          return;
+        case "automations.workerTerminal.acquire": {
+          const p = (params ?? {}) as { terminalId?: unknown };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["terminalId"]) ||
+            !isBoundedString(p.terminalId, 128)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.workerTerminal.acquire needs terminalId.",
+            );
+            return;
+          }
+          const { terminal, targetId } = this.workerControlTerminal(
+            p.terminalId,
+          );
+          void terminal;
+          const lease = this.services.workerTerminalControls!.acquire(
+            this.terminalLeaseOwnerKey(),
+            this.terminalLeaseSubscriberId,
+            targetId,
+          );
+          this.workerControlLeases.set(p.terminalId, lease.controlLeaseId);
+          this.reply(id, lease);
+          return;
+        }
+        case "automations.workerTerminal.write": {
+          const p = (params ?? {}) as {
+            terminalId?: unknown;
+            controlLeaseId?: unknown;
+            inputSequence?: unknown;
+            data?: unknown;
+          };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, [
+              "terminalId",
+              "controlLeaseId",
+              "inputSequence",
+              "data",
+            ]) ||
+            !isBoundedString(p.terminalId, 128) ||
+            !isBoundedString(p.controlLeaseId, 128) ||
+            !Number.isSafeInteger(p.inputSequence) ||
+            (p.inputSequence as number) <= 0 ||
+            typeof p.data !== "string" ||
+            p.data.includes("\0") ||
+            Buffer.byteLength(p.data, "utf8") >
+              MAX_WORKER_TERMINAL_INPUT_BYTES
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.workerTerminal.write needs a control lease, positive input sequence, and bounded string data.",
+            );
+            return;
+          }
+          const { terminal, targetId } = this.workerControlTerminal(
+            p.terminalId,
+          );
+          const lease = this.services.workerTerminalControls!.write(
+            this.terminalLeaseOwnerKey(),
+            this.terminalLeaseSubscriberId,
+            targetId,
+            p.controlLeaseId,
+            p.inputSequence as number,
+            p.data,
+            terminal,
+          );
+          this.workerControlLeases.set(p.terminalId, lease.controlLeaseId);
+          this.reply(id, {
+            nextInputSequence: lease.nextInputSequence,
+            expiresAt: lease.expiresAt,
+          });
+          return;
+        }
+        case "automations.workerTerminal.release": {
+          const p = (params ?? {}) as {
+            terminalId?: unknown;
+            controlLeaseId?: unknown;
+          };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["terminalId", "controlLeaseId"]) ||
+            !isBoundedString(p.terminalId, 128) ||
+            !isBoundedString(p.controlLeaseId, 128)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "automations.workerTerminal.release needs terminalId and controlLeaseId.",
+            );
+            return;
+          }
+          const { targetId } = this.workerControlTerminal(p.terminalId);
+          this.services.workerTerminalControls!.release(
+            this.terminalLeaseOwnerKey(),
+            this.terminalLeaseSubscriberId,
+            targetId,
+            p.controlLeaseId,
+          );
+          if (
+            this.workerControlLeases.get(p.terminalId) ===
+            p.controlLeaseId
+          ) {
+            this.workerControlLeases.delete(p.terminalId);
+          }
+          this.reply(id, {});
           return;
         }
         case "notifications.register": {
           if (!this.services.registerNotifications) {
-            this.replyError(id, "unknown-method", "Phone notifications are not available.");
+            this.replyError(
+              id,
+              "unknown-method",
+              "Phone notifications are not available.",
+            );
             return;
           }
           const registration = parseNotificationRegistration(params);
@@ -2055,13 +3304,180 @@ export class RpcSession {
           this.reply(id, {});
           return;
         }
+        case "terminal.list": {
+          if (!this.services.terminalLeases) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Terminal reconnection is not available.",
+            );
+            return;
+          }
+          if (!isPlainRecord(params) || !hasExactlyKeys(params, [])) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "terminal.list does not accept parameters.",
+            );
+            return;
+          }
+          this.reply(id, {
+            terminals: [
+              ...(await this.services.terminalLeases.list(
+                this.terminalLeaseOwnerKey(),
+              )),
+              ...(this.services.studioTerminalLeases
+                ? await this.services.studioTerminalLeases.list(
+                    this.terminalLeaseOwnerKey(),
+                  )
+                : []),
+            ],
+          });
+          return;
+        }
+        case "terminal.attach": {
+          if (!this.services.terminalLeases) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Terminal reconnection is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            terminalId?: unknown;
+            afterSequence?: unknown;
+          };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["terminalId", "afterSequence"]) ||
+            !isBoundedString(p.terminalId, 128) ||
+            !Number.isSafeInteger(p.afterSequence) ||
+            (p.afterSequence as number) < 0
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "terminal.attach needs terminalId and afterSequence.",
+            );
+            return;
+          }
+          if (
+            !this.leasedTerminalAttachments.has(p.terminalId) &&
+            this.leasedTerminalAttachments.size >=
+              MAX_REMOTE_TERMINALS_PER_DEVICE
+          ) {
+            this.replyError(
+              id,
+              "internal",
+              `This connection already has ${MAX_TERMINALS_PER_CONNECTION} terminals open.`,
+            );
+            return;
+          }
+          const result = this.attachTerminalLease(
+            p.terminalId,
+            p.afterSequence as number,
+          );
+          this.leasedTerminalAttachments.set(
+            p.terminalId,
+            result.attachmentId,
+          );
+          this.reply(id, result);
+          return;
+        }
+        case "terminal.detach": {
+          if (!this.services.terminalLeases) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Terminal reconnection is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            terminalId?: unknown;
+            attachmentId?: unknown;
+          };
+          if (
+            !isPlainRecord(params) ||
+            !hasExactlyKeys(params, ["terminalId", "attachmentId"]) ||
+            !isBoundedString(p.terminalId, 128) ||
+            !isBoundedString(p.attachmentId, 128)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "terminal.detach needs terminalId.",
+            );
+            return;
+          }
+          this.terminalLeaseStoreFor(p.terminalId).detach(
+            this.terminalLeaseOwnerKey(),
+            p.terminalId,
+            this.terminalLeaseSubscriberId,
+            p.attachmentId,
+          );
+          if (
+            this.leasedTerminalAttachments.get(p.terminalId) ===
+            p.attachmentId
+          ) {
+            this.leasedTerminalAttachments.delete(p.terminalId);
+          }
+          this.reply(id, {});
+          return;
+        }
         case "terminal.create":
           await this.handleTerminalCreate(id, params);
           return;
         case "terminal.write":
+          if (this.services.terminalLeases) {
+            const p = (params ?? {}) as {
+              terminalId?: unknown;
+              attachmentId?: unknown;
+              inputSequence?: unknown;
+              data?: unknown;
+            };
+            if (
+              !isPlainRecord(params) ||
+              !hasExactlyKeys(params, [
+                "terminalId",
+                "attachmentId",
+                "inputSequence",
+                "data",
+              ]) ||
+              !isBoundedString(p.terminalId, 128) ||
+              !isBoundedString(p.attachmentId, 128) ||
+              !Number.isSafeInteger(p.inputSequence) ||
+              (p.inputSequence as number) <= 0 ||
+              typeof p.data !== "string" ||
+              Buffer.byteLength(p.data, "utf8") >
+                MAX_TERMINAL_EVENT_DATA_BYTES
+            ) {
+              this.replyError(
+                id,
+                "invalid-params",
+                "terminal.write needs terminalId, inputSequence, and string data.",
+              );
+              return;
+            }
+            this.terminalLeaseStoreFor(p.terminalId).write(
+              this.terminalLeaseOwnerKey(),
+              p.terminalId,
+              this.terminalLeaseSubscriberId,
+              p.attachmentId,
+              p.inputSequence as number,
+              p.data,
+            );
+            this.reply(id, {});
+            return;
+          }
           this.withTerminal(id, params, (terminal, p) => {
             if (typeof p.data !== "string") {
-              this.replyError(id, "invalid-params", "terminal.write needs string data.");
+              this.replyError(
+                id,
+                "invalid-params",
+                "terminal.write needs string data.",
+              );
               return;
             }
             terminal.write(p.data);
@@ -2075,15 +3491,52 @@ export class RpcSession {
             this.replyError(id, "invalid-params", "A terminalId is required.");
             return;
           }
-          const terminal = this.terminals.get(terminalId);
-          if (!terminal) {
-            this.replyError(id, "unknown-terminal", `No terminal ${terminalId} on this connection.`);
-            return;
-          }
           const cols = normalizeDimension(p.cols);
           const rows = normalizeDimension(p.rows);
           if (cols === null || rows === null) {
-            this.replyError(id, "invalid-params", "terminal.resize needs cols and rows.");
+            this.replyError(
+              id,
+              "invalid-params",
+              "terminal.resize needs cols and rows.",
+            );
+            return;
+          }
+          if (this.services.terminalLeases) {
+            if (
+              !isPlainRecord(params) ||
+              !hasExactlyKeys(params, [
+                "terminalId",
+                "attachmentId",
+                "cols",
+                "rows",
+              ]) ||
+              !isBoundedString(p.attachmentId, 128)
+            ) {
+              this.replyError(
+                id,
+                "invalid-params",
+                "terminal.resize accepts only terminalId, cols, and rows.",
+              );
+              return;
+            }
+            await this.terminalLeaseStoreFor(terminalId).resize(
+              this.terminalLeaseOwnerKey(),
+              terminalId,
+              this.terminalLeaseSubscriberId,
+              p.attachmentId,
+              cols,
+              rows,
+            );
+            this.reply(id, {});
+            return;
+          }
+          const terminal = this.terminals.get(terminalId);
+          if (!terminal) {
+            this.replyError(
+              id,
+              "unknown-terminal",
+              `No terminal ${terminalId} on this connection.`,
+            );
             return;
           }
           await terminal.resize(cols, rows);
@@ -2091,9 +3544,97 @@ export class RpcSession {
           return;
         }
         case "terminal.close":
+          if (this.services.terminalLeases) {
+            // Automation worker terminals are connection-scoped read-only
+            // mirrors, not durable interactive leases. An exact one-field
+            // close may only reach that private map; knowing a durable
+            // terminal id is never enough to close its PTY.
+            if (
+              isPlainRecord(params) &&
+              hasExactlyKeys(params, ["terminalId"]) &&
+              isBoundedString(params.terminalId, 128)
+            ) {
+              const workerTerminal = this.terminals.get(params.terminalId);
+              if (!workerTerminal) {
+                this.replyError(
+                  id,
+                  "unknown-terminal",
+                  "That worker terminal is no longer open on this connection.",
+                );
+                return;
+              }
+              workerTerminal.close();
+              const controlLeaseId = this.workerControlLeases.get(
+                params.terminalId,
+              );
+              if (controlLeaseId && workerTerminal.controlTargetId) {
+                try {
+                  this.services.workerTerminalControls?.release(
+                    this.terminalLeaseOwnerKey(),
+                    this.terminalLeaseSubscriberId,
+                    workerTerminal.controlTargetId,
+                    controlLeaseId,
+                  );
+                } catch {
+                  // Closing a read mirror is idempotent even if its short
+                  // control lease already expired.
+                }
+              }
+              this.terminals.delete(params.terminalId);
+              this.legacyTerminalSequences.delete(params.terminalId);
+              this.workerControlLeases.delete(params.terminalId);
+              if (workerTerminal.controlTargetId) {
+                this.workerControlTargets.delete(
+                  workerTerminal.controlTargetId,
+                );
+              }
+              this.reply(id, {});
+              return;
+            }
+            const p = (params ?? {}) as {
+              terminalId?: unknown;
+              attachmentId?: unknown;
+              requestId?: unknown;
+            };
+            if (
+              !isPlainRecord(params) ||
+              !hasExactlyKeys(params, [
+                "terminalId",
+                "attachmentId",
+                "requestId",
+              ]) ||
+              !isBoundedString(p.terminalId, 128) ||
+              !isBoundedString(p.attachmentId, 128) ||
+              !isBoundedRequestId(p.requestId)
+            ) {
+              this.replyError(
+                id,
+                "invalid-params",
+                "terminal.close needs terminalId.",
+              );
+              return;
+            }
+            this.terminalLeaseStoreFor(p.terminalId).close(
+              this.terminalLeaseOwnerKey(),
+              p.terminalId,
+              this.terminalLeaseSubscriberId,
+              p.attachmentId,
+              p.requestId,
+            );
+            if (
+              this.leasedTerminalAttachments.get(p.terminalId) ===
+              p.attachmentId
+            ) {
+              this.leasedTerminalAttachments.delete(p.terminalId);
+            }
+            this.reply(id, {});
+            return;
+          }
           this.withTerminal(id, params, (terminal, p) => {
             terminal.close();
-            this.terminals.delete(String(p.terminalId));
+            const terminalId = String(p.terminalId);
+            this.terminals.delete(terminalId);
+            this.legacyTerminalSequences.delete(terminalId);
             this.reply(id, {});
           });
           return;
@@ -2111,7 +3652,117 @@ export class RpcSession {
       // splits these out (a "conflict" or "gone" code), it belongs here, and
       // the phone's catch blocks in board-panel.tsx and terminal.tsx are the
       // consumers to update alongside it.
-      this.replyError(id, "internal", (err as Error).message || "Internal error.");
+      const code = (err as { code?: unknown }).code;
+      if (code === "MUTATION_REQUEST_CONFLICT") {
+        this.replyError(
+          id,
+          "mutation-conflict",
+          "This retry id was already used for a different change. Refresh and try again.",
+        );
+      } else if (code === "MUTATION_OUTCOME_UNKNOWN") {
+        this.replyError(
+          id,
+          "mutation-outcome-unknown",
+          (err as Error).message ||
+            "The change may have completed. Refresh before trying a different request.",
+        );
+      } else if (code === "CORA_MESSAGE_TOO_LARGE") {
+        this.replyError(
+          id,
+          "message-too-large",
+          (err as Error).message || "This Cora message is too large.",
+        );
+      } else if (
+        code === "UNKNOWN_REMOTE_TERMINAL" ||
+        code === "REMOTE_TERMINAL_ENDED" ||
+        code === "STALE_TERMINAL_ATTACHMENT" ||
+        code === "TERMINAL_CREATE_GONE"
+      ) {
+        this.replyError(
+          id,
+          "unknown-terminal",
+          (err as Error).message ||
+            "That remote terminal is no longer available.",
+        );
+      } else if (
+        code === "TERMINAL_CREATE_CONFLICT" ||
+        code === "TERMINAL_CLOSE_CONFLICT"
+      ) {
+        this.replyError(
+          id,
+          "mutation-conflict",
+          (err as Error).message ||
+            "That terminal retry id was already used for different input.",
+        );
+      } else if (code === "TERMINAL_INPUT_CONFLICT") {
+        this.replyError(
+          id,
+          "mutation-conflict",
+          (err as Error).message ||
+            "That terminal input sequence was already used for different data.",
+        );
+      } else if (code === "TERMINAL_INPUT_OUTCOME_UNKNOWN") {
+        this.replyError(
+          id,
+          "mutation-outcome-unknown",
+          (err as Error).message ||
+            "Terminal input may have completed. Reattach before retrying.",
+        );
+      } else if (code === "WORKER_TERMINAL_CONTROL_BUSY") {
+        this.replyError(
+          id,
+          "terminal-control-busy",
+          (err as Error).message ||
+            "This worker terminal is already controlled from another phone.",
+        );
+      } else if (code === "WORKER_TERMINAL_CONTROL_LOST") {
+        this.replyError(
+          id,
+          "terminal-control-lost",
+          (err as Error).message ||
+            "Worker terminal control expired or moved to another session.",
+        );
+      } else if (code === "WORKER_TERMINAL_INPUT_CONFLICT") {
+        this.replyError(
+          id,
+          "mutation-conflict",
+          (err as Error).message ||
+            "That worker input sequence was already used for different data.",
+        );
+      } else if (code === "WORKER_TERMINAL_INPUT_OUTCOME_UNKNOWN") {
+        this.replyError(
+          id,
+          "mutation-outcome-unknown",
+          (err as Error).message ||
+            "Worker input may have completed. Check output before sending more.",
+        );
+      } else if (
+        code === "INVALID_TERMINAL_CREATE_REQUEST" ||
+        code === "INVALID_TERMINAL_CLOSE_REQUEST" ||
+        code === "INVALID_TERMINAL_CURSOR" ||
+        code === "INVALID_TERMINAL_INPUT_SEQUENCE" ||
+        code === "TERMINAL_INPUT_GAP" ||
+        code === "WORKER_TERMINAL_INPUT_GAP"
+      ) {
+        this.replyError(
+          id,
+          "invalid-params",
+          (err as Error).message || "The terminal request was not valid.",
+        );
+      } else if (code === "REMOTE_TERMINAL_CREATE_OUTCOME_UNKNOWN") {
+        this.replyError(
+          id,
+          "mutation-outcome-unknown",
+          (err as Error).message ||
+            "The terminal may have been created. Retry with the same request id.",
+        );
+      } else {
+        this.replyError(
+          id,
+          "internal",
+          (err as Error).message || "Internal error.",
+        );
+      }
     } finally {
       this.inFlightRequests = Math.max(0, this.inFlightRequests - 1);
     }
@@ -2127,18 +3778,33 @@ export class RpcSession {
       );
       return;
     }
+    const firstHello = !this.helloDone;
     this.helloDone = true;
-    this.reply(id, { protocol: RPC_PROTOCOL_VERSION, device: this.services.device });
+    if (firstHello) this.services.onSessionProven?.();
+    this.reply(id, {
+      protocol: RPC_PROTOCOL_VERSION,
+      device: this.services.device,
+    });
   }
 
   private handlePing(id: number, params: unknown): void {
     const p = (params ?? {}) as { nonce?: unknown };
-    this.reply(id, { nonce: typeof p.nonce === "string" ? p.nonce : "", at: Date.now() });
+    this.reply(id, {
+      nonce: typeof p.nonce === "string" ? p.nonce : "",
+      at: Date.now(),
+    });
   }
 
-  private async handleImageUploadBegin(id: number, params: unknown): Promise<void> {
+  private async handleImageUploadBegin(
+    id: number,
+    params: unknown,
+  ): Promise<void> {
     if (!this.services.beginImageUpload) {
-      this.replyError(id, "unknown-method", "Image attachments are not available.");
+      this.replyError(
+        id,
+        "unknown-method",
+        "Image attachments are not available.",
+      );
       return;
     }
     const p = (params ?? {}) as {
@@ -2168,10 +3834,17 @@ export class RpcSession {
       return;
     }
     if (this.imageUploads.size >= MAX_REMOTE_IMAGE_UPLOADS_PER_CONNECTION) {
-      this.replyError(id, "internal", "Too many image uploads are already in progress.");
+      this.replyError(
+        id,
+        "internal",
+        "Too many image uploads are already in progress.",
+      );
       return;
     }
-    if (this.imageBytesAccepted + p.size > MAX_REMOTE_IMAGE_BYTES_PER_CONNECTION) {
+    if (
+      this.imageBytesAccepted + p.size >
+      MAX_REMOTE_IMAGE_BYTES_PER_CONNECTION
+    ) {
       this.replyError(
         id,
         "internal",
@@ -2203,8 +3876,15 @@ export class RpcSession {
     this.reply(id, { uploadId, chunkBytes: REMOTE_IMAGE_CHUNK_BYTES });
   }
 
-  private async handleImageUploadChunk(id: number, params: unknown): Promise<void> {
-    const p = (params ?? {}) as { uploadId?: unknown; offset?: unknown; data?: unknown };
+  private async handleImageUploadChunk(
+    id: number,
+    params: unknown,
+  ): Promise<void> {
+    const p = (params ?? {}) as {
+      uploadId?: unknown;
+      offset?: unknown;
+      data?: unknown;
+    };
     if (
       typeof p.uploadId !== "string" ||
       typeof p.offset !== "number" ||
@@ -2221,15 +3901,27 @@ export class RpcSession {
     }
     const upload = this.imageUploads.get(p.uploadId);
     if (!upload) {
-      this.replyError(id, "unknown-upload", "This image upload has expired or does not exist.");
+      this.replyError(
+        id,
+        "unknown-upload",
+        "This image upload has expired or does not exist.",
+      );
       return;
     }
     if (upload.busy) {
-      this.replyError(id, "invalid-params", "Wait for the previous image chunk to finish.");
+      this.replyError(
+        id,
+        "invalid-params",
+        "Wait for the previous image chunk to finish.",
+      );
       return;
     }
     if (p.offset !== upload.received) {
-      this.replyError(id, "invalid-params", `The next image byte offset is ${upload.received}.`);
+      this.replyError(
+        id,
+        "invalid-params",
+        `The next image byte offset is ${upload.received}.`,
+      );
       return;
     }
 
@@ -2241,7 +3933,11 @@ export class RpcSession {
       return;
     }
     if (upload.received + data.length > upload.expectedSize) {
-      this.replyError(id, "invalid-params", "The image data exceeds its declared size.");
+      this.replyError(
+        id,
+        "invalid-params",
+        "The image data exceeds its declared size.",
+      );
       return;
     }
 
@@ -2261,7 +3957,10 @@ export class RpcSession {
     }
   }
 
-  private async handleImageUploadFinish(id: number, params: unknown): Promise<void> {
+  private async handleImageUploadFinish(
+    id: number,
+    params: unknown,
+  ): Promise<void> {
     const p = (params ?? {}) as { uploadId?: unknown };
     if (typeof p.uploadId !== "string") {
       this.replyError(id, "invalid-params", "An uploadId is required.");
@@ -2269,11 +3968,19 @@ export class RpcSession {
     }
     const upload = this.imageUploads.get(p.uploadId);
     if (!upload) {
-      this.replyError(id, "unknown-upload", "This image upload has expired or does not exist.");
+      this.replyError(
+        id,
+        "unknown-upload",
+        "This image upload has expired or does not exist.",
+      );
       return;
     }
     if (upload.busy) {
-      this.replyError(id, "invalid-params", "Wait for the current image chunk to finish.");
+      this.replyError(
+        id,
+        "invalid-params",
+        "Wait for the current image chunk to finish.",
+      );
       return;
     }
     if (upload.received !== upload.expectedSize) {
@@ -2297,7 +4004,10 @@ export class RpcSession {
     }
   }
 
-  private async handleImageUploadCancel(id: number, params: unknown): Promise<void> {
+  private async handleImageUploadCancel(
+    id: number,
+    params: unknown,
+  ): Promise<void> {
     const p = (params ?? {}) as { uploadId?: unknown };
     if (typeof p.uploadId !== "string") {
       this.replyError(id, "invalid-params", "An uploadId is required.");
@@ -2311,7 +4021,11 @@ export class RpcSession {
       return;
     }
     if (upload.busy) {
-      this.replyError(id, "invalid-params", "Wait for the current image chunk to finish.");
+      this.replyError(
+        id,
+        "invalid-params",
+        "Wait for the current image chunk to finish.",
+      );
       return;
     }
     clearTimeout(upload.timer);
@@ -2320,7 +4034,9 @@ export class RpcSession {
     this.reply(id, {});
   }
 
-  private armImageUploadTimeout(uploadId: string): ReturnType<typeof setTimeout> {
+  private armImageUploadTimeout(
+    uploadId: string,
+  ): ReturnType<typeof setTimeout> {
     const timer = setTimeout(() => {
       const upload = this.imageUploads.get(uploadId);
       if (!upload || upload.busy) {
@@ -2335,7 +4051,183 @@ export class RpcSession {
     return timer;
   }
 
-  private async handleTerminalCreate(id: number, params: unknown): Promise<void> {
+  private async handleWorkerTerminalOpen(
+    id: number,
+    params: unknown,
+  ): Promise<void> {
+    if (this.destroyed) return;
+    if (!this.services.attachWorkerTerminal) {
+      this.replyError(
+        id,
+        "unknown-method",
+        "Live automation worker terminals are not available.",
+      );
+      return;
+    }
+    const p = (params ?? {}) as {
+      workspaceId?: unknown;
+      runId?: unknown;
+      workerId?: unknown;
+    };
+    if (
+      !isPlainRecord(params) ||
+      !hasExactlyKeys(params, ["workspaceId", "runId", "workerId"]) ||
+      !isBoundedString(p.workspaceId, 256) ||
+      !isBoundedString(p.runId, 256) ||
+      !isBoundedString(p.workerId, 256)
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "automations.workerTerminal.open needs workspaceId, runId, and workerId.",
+      );
+      return;
+    }
+    if (
+      this.terminals.size + this.pendingTerminalCreates >=
+      MAX_TERMINALS_PER_CONNECTION
+    ) {
+      this.replyError(
+        id,
+        "internal",
+        `This connection already has ${MAX_TERMINALS_PER_CONNECTION} terminals open.`,
+      );
+      return;
+    }
+
+    const terminalId = `rt-${randomUUID()}`;
+    let handle: RemoteTerminalHandle;
+    let exitedBeforeRegistration = false;
+    const bootstrapOutput: string[] = [];
+    let bootstrapBytes = 0;
+    let droppedBootstrap = false;
+    this.pendingTerminalCreates += 1;
+    try {
+      if (this.destroyed) return;
+      handle = await this.services.attachWorkerTerminal({
+        workspaceId: p.workspaceId,
+        runId: p.runId,
+        workerId: p.workerId,
+        onData: (data) => {
+          if (this.terminals.has(terminalId)) {
+            this.pushTerminalData(terminalId, data);
+            return;
+          }
+          const remaining = MAX_TERMINAL_BOOTSTRAP_BYTES - bootstrapBytes;
+          if (remaining <= 0) {
+            droppedBootstrap = true;
+            return;
+          }
+          const chunk = utf8Prefix(data, remaining);
+          if (chunk) {
+            bootstrapOutput.push(chunk);
+            bootstrapBytes += Buffer.byteLength(chunk, "utf8");
+          }
+          if (
+            Buffer.byteLength(data, "utf8") > Buffer.byteLength(chunk, "utf8")
+          ) {
+            droppedBootstrap = true;
+          }
+        },
+        onExit: () => {
+          if (!this.terminals.has(terminalId)) {
+            exitedBeforeRegistration = true;
+            return;
+          }
+          this.terminals.delete(terminalId);
+          const controlLeaseId = this.workerControlLeases.get(terminalId);
+          if (controlLeaseId && handle?.controlTargetId) {
+            try {
+              this.services.workerTerminalControls?.release(
+                this.terminalLeaseOwnerKey(),
+                this.terminalLeaseSubscriberId,
+                handle.controlTargetId,
+                controlLeaseId,
+              );
+            } catch {
+              // The timer or another teardown path already released it.
+            }
+          }
+          this.workerControlLeases.delete(terminalId);
+          if (handle?.controlTargetId) {
+            this.workerControlTargets.delete(handle.controlTargetId);
+          }
+          const sequence = this.nextLegacyTerminalSequence(terminalId);
+          this.pushEvent("terminal.exit", { terminalId, sequence });
+          this.legacyTerminalSequences.delete(terminalId);
+        },
+      });
+    } catch (err) {
+      const message =
+        (err as Error).message || "Could not open the worker terminal.";
+      this.replyError(
+        id,
+        /workspace/i.test(message) ? "unknown-workspace" : "internal",
+        message,
+      );
+      return;
+    } finally {
+      this.pendingTerminalCreates -= 1;
+    }
+    if (this.destroyed) {
+      try {
+        handle.close();
+      } catch {
+        // Best effort.
+      }
+      return;
+    }
+    if (exitedBeforeRegistration) {
+      try {
+        handle.close();
+      } catch {
+        // Best effort; the worker already exited.
+      }
+      this.replyError(
+        id,
+        "internal",
+        "The worker terminal ended before it was ready.",
+      );
+      return;
+    }
+    if (
+      handle.controlTargetId &&
+      this.workerControlTargets.has(handle.controlTargetId)
+    ) {
+      try {
+        handle.close();
+      } catch {
+        // Best effort; the first mirror remains canonical.
+      }
+      this.replyError(
+        id,
+        "mutation-conflict",
+        "This worker terminal is already open on this phone.",
+      );
+      return;
+    }
+
+    this.terminals.set(terminalId, handle);
+    if (handle.controlTargetId) {
+      this.workerControlTargets.set(handle.controlTargetId, terminalId);
+    }
+    this.reply(id, {
+      terminalId,
+      ...(handle.title ? { title: handle.title } : {}),
+      ...(handle.controlCapability
+        ? { controlCapability: handle.controlCapability }
+        : {}),
+    });
+    for (const data of bootstrapOutput) this.pushTerminalData(terminalId, data);
+    if (droppedBootstrap) {
+      this.log(`truncated worker terminal bootstrap output for ${terminalId}`);
+    }
+  }
+
+  private async handleTerminalCreate(
+    id: number,
+    params: unknown,
+  ): Promise<void> {
     if (this.destroyed) return;
     const p = (params ?? {}) as {
       workspaceId?: unknown;
@@ -2345,15 +4237,50 @@ export class RpcSession {
       profile?: unknown;
       resumeSessionId?: unknown;
       title?: unknown;
+      requestId?: unknown;
     };
-    const cols = normalizeDimension(p.cols);
-    const rows = normalizeDimension(p.rows);
-    if (typeof p.workspaceId !== "string" || cols === null || rows === null) {
-      this.replyError(id, "invalid-params", "terminal.create needs workspaceId, cols, rows.");
+    if (
+      this.services.terminalLeases &&
+      (!isPlainRecord(params) ||
+        !hasExactlyKeys(
+          params,
+          ["workspaceId", "cols", "rows", "requestId"],
+          ["cwd", "profile", "resumeSessionId", "title"],
+        ))
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "terminal.create contains unsupported fields.",
+      );
       return;
     }
-    if (p.cwd !== undefined && typeof p.cwd !== "string") {
-      this.replyError(id, "invalid-params", "terminal.create cwd must be a string.");
+    const cols = normalizeDimension(p.cols);
+    const rows = normalizeDimension(p.rows);
+    if (
+      typeof p.workspaceId !== "string" ||
+      (this.services.terminalLeases &&
+        !isBoundedString(p.workspaceId, 256)) ||
+      cols === null ||
+      rows === null
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "terminal.create needs workspaceId, cols, rows.",
+      );
+      return;
+    }
+    if (
+      p.cwd !== undefined &&
+      (typeof p.cwd !== "string" ||
+        (this.services.terminalLeases && p.cwd.length > 4096))
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "terminal.create cwd must be a string.",
+      );
       return;
     }
     if (
@@ -2362,7 +4289,11 @@ export class RpcSession {
       p.profile !== "claude" &&
       p.profile !== "codex"
     ) {
-      this.replyError(id, "invalid-params", "terminal.create profile is not supported.");
+      this.replyError(
+        id,
+        "invalid-params",
+        "terminal.create profile is not supported.",
+      );
       return;
     }
     if (
@@ -2378,16 +4309,87 @@ export class RpcSession {
       );
       return;
     }
-    if (p.title !== undefined && typeof p.title !== "string") {
-      this.replyError(id, "invalid-params", "terminal.create title must be a string.");
+    if (
+      p.title !== undefined &&
+      (typeof p.title !== "string" ||
+        (this.services.terminalLeases && p.title.length > 240))
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "terminal.create title must be a string.",
+      );
       return;
     }
-    if (this.terminals.size + this.pendingTerminalCreates >= MAX_TERMINALS_PER_CONNECTION) {
+    if (
+      this.services.terminalLeases &&
+      !isBoundedRequestId(p.requestId)
+    ) {
+      this.replyError(
+        id,
+        "invalid-params",
+        "terminal.create needs a stable requestId.",
+      );
+      return;
+    }
+    if (
+      !this.services.terminalLeases &&
+      this.terminalCount() + this.pendingTerminalCreates >=
+      MAX_TERMINALS_PER_CONNECTION
+    ) {
       this.replyError(
         id,
         "internal",
         `This connection already has ${MAX_TERMINALS_PER_CONNECTION} terminals open.`,
       );
+      return;
+    }
+    if (this.services.terminalLeases) {
+      this.pendingTerminalCreates += 1;
+      try {
+        const descriptor =
+          await this.services.terminalLeases.createInteractive(
+            this.terminalLeaseOwnerKey(),
+            p.requestId as string,
+            {
+              workspaceId: p.workspaceId,
+              cols,
+              rows,
+              cwd: p.cwd,
+              profile: p.profile ?? "shell",
+              ...(typeof p.resumeSessionId === "string"
+                ? { resumeSessionId: p.resumeSessionId }
+                : {}),
+              title:
+                typeof p.title === "string" && p.title.trim()
+                  ? p.title.trim().slice(0, 120)
+                  : undefined,
+              origin: {
+                kind: "phone",
+                deviceName: this.services.peerDevice?.name || "Phone",
+              },
+            },
+          );
+        if (this.destroyed) return;
+        const attached = this.attachTerminalLease(
+          descriptor.terminalId,
+          0,
+        );
+        this.leasedTerminalAttachments.set(
+          descriptor.terminalId,
+          attached.attachmentId,
+        );
+        this.reply(id, {
+          terminalId: descriptor.terminalId,
+          ...(descriptor.desktopTabId
+            ? { desktopTabId: descriptor.desktopTabId }
+            : {}),
+          ...(descriptor.title ? { title: descriptor.title } : {}),
+          ...attached,
+        });
+      } finally {
+        this.pendingTerminalCreates -= 1;
+      }
       return;
     }
     // The phone retains ended sessions in its strip. A per-connection counter
@@ -2438,7 +4440,9 @@ export class RpcSession {
             bootstrapOutput.push(chunk);
             bootstrapBytes += Buffer.byteLength(chunk, "utf8");
           }
-          if (Buffer.byteLength(data, "utf8") > Buffer.byteLength(chunk, "utf8")) {
+          if (
+            Buffer.byteLength(data, "utf8") > Buffer.byteLength(chunk, "utf8")
+          ) {
             droppedBootstrap = true;
           }
         },
@@ -2448,12 +4452,19 @@ export class RpcSession {
             return;
           }
           this.terminals.delete(terminalId);
-          this.pushEvent("terminal.exit", { terminalId });
+          const sequence = this.nextLegacyTerminalSequence(terminalId);
+          this.pushEvent("terminal.exit", { terminalId, sequence });
+          this.legacyTerminalSequences.delete(terminalId);
         },
       });
     } catch (err) {
-      const message = (err as Error).message || "Could not create the terminal.";
-      this.replyError(id, /workspace/i.test(message) ? "unknown-workspace" : "internal", message);
+      const message =
+        (err as Error).message || "Could not create the terminal.";
+      this.replyError(
+        id,
+        /workspace/i.test(message) ? "unknown-workspace" : "internal",
+        message,
+      );
       return;
     } finally {
       this.pendingTerminalCreates -= 1;
@@ -2473,7 +4484,11 @@ export class RpcSession {
       } catch {
         // Best effort; the process already exited.
       }
-      this.replyError(id, "internal", "The terminal exited before it was ready.");
+      this.replyError(
+        id,
+        "internal",
+        "The terminal exited before it was ready.",
+      );
       return;
     }
     this.terminals.set(terminalId, handle);
@@ -2501,10 +4516,102 @@ export class RpcSession {
     }
   }
 
+  private terminalLeaseOwnerKey(): string {
+    const ownerKey = this.services.peerDevice?.publicKey;
+    if (!ownerKey) {
+      throw Object.assign(
+        new Error("The authenticated phone identity is unavailable."),
+        { code: "UNKNOWN_REMOTE_TERMINAL" },
+      );
+    }
+    return ownerKey;
+  }
+
+  private workerControlTerminal(terminalId: string): {
+    terminal: RemoteTerminalHandle;
+    targetId: string;
+  } {
+    const controls = this.services.workerTerminalControls;
+    const terminal = this.terminals.get(terminalId);
+    if (
+      !controls ||
+      !terminal?.controlTargetId ||
+      this.workerControlTargets.get(terminal.controlTargetId) !== terminalId
+    ) {
+      throw Object.assign(
+        new Error(
+          "That worker terminal is no longer open or cannot be controlled.",
+        ),
+        { code: "WORKER_TERMINAL_CONTROL_LOST" },
+      );
+    }
+    return { terminal, targetId: terminal.controlTargetId };
+  }
+
+  private attachTerminalLease(
+    terminalId: string,
+    afterSequence: number,
+  ): {
+    terminal: RemoteTerminalLeaseDescriptor;
+    replay: Array<{ sequence: number; data: string }>;
+    truncated: boolean;
+    attachmentId: string;
+  } {
+    const store = this.terminalLeaseStoreFor(terminalId);
+    let attachmentId = "";
+    const result = store.attach(
+      this.terminalLeaseOwnerKey(),
+      terminalId,
+      afterSequence,
+      this.terminalLeaseSubscriberId,
+      {
+        onData: (event) => {
+          if (
+            this.leasedTerminalAttachments.get(event.terminalId) !==
+            attachmentId
+          ) {
+            return;
+          }
+          this.pushTerminalData(
+            event.terminalId,
+            event.data,
+            event.sequence,
+          );
+        },
+        onExit: (event) => {
+          if (
+            this.leasedTerminalAttachments.get(event.terminalId) !==
+            attachmentId
+          ) {
+            return;
+          }
+          this.leasedTerminalAttachments.delete(event.terminalId);
+          this.pushEvent("terminal.exit", event);
+        },
+      },
+    );
+    attachmentId = result.attachmentId;
+    return result;
+  }
+
+  private terminalLeaseStoreFor(terminalId: string): RemoteTerminalLeaseStore {
+    if (terminalId.startsWith("studio-")) {
+      const shared = this.services.studioTerminalLeases;
+      if (!shared) throw new Error("Studio terminal sharing is not available.");
+      return shared;
+    }
+    const owned = this.services.terminalLeases;
+    if (!owned) throw new Error("Terminal reconnection is not available.");
+    return owned;
+  }
+
   private withTerminal(
     id: number,
     params: unknown,
-    fn: (terminal: RemoteTerminalHandle, params: Record<string, unknown>) => void,
+    fn: (
+      terminal: RemoteTerminalHandle,
+      params: Record<string, unknown>,
+    ) => void,
   ): void {
     const p = (params ?? {}) as Record<string, unknown>;
     const terminalId = p.terminalId;
@@ -2514,11 +4621,58 @@ export class RpcSession {
     }
     const terminal = this.terminals.get(terminalId);
     if (!terminal) {
-      this.replyError(id, "unknown-terminal", `No terminal ${terminalId} on this connection.`);
+      this.replyError(
+        id,
+        "unknown-terminal",
+        `No terminal ${terminalId} on this connection.`,
+      );
       return;
     }
     fn(terminal, p);
   }
+}
+
+function projectionRevision(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("base64url");
+}
+
+export function buildCoraRunWireResult(
+  projection: RemoteCoraRunProjection,
+  revision: string,
+): {
+  run: RemoteCoraRun;
+  revision: string;
+  cursor: string;
+  messageDelta?: RemoteCoraMessageDelta;
+} {
+  const full = {
+    run: projection.run,
+    revision,
+    cursor: projection.cursor,
+  };
+  const fullBytes = jsonUtf8Bytes(full);
+  if (fullBytes > CORA_RUN_RESULT_JSON_MAX_BYTES) {
+    throw new RangeError("Full Cora run result exceeded its serialized JSON budget.");
+  }
+  if (!projection.messageDelta) return full;
+
+  const { messages, ...messageDelta } = projection.messageDelta;
+  const delta = {
+    run: { ...projection.run, messages },
+    revision,
+    cursor: projection.cursor,
+    messageDelta,
+  };
+  const deltaBytes = jsonUtf8Bytes(delta);
+  return deltaBytes < fullBytes && deltaBytes <= CORA_RUN_RESULT_JSON_MAX_BYTES
+    ? delta
+    : full;
+}
+
+function githubWorkQueueRevision(status: GitHubWorkQueueStatus): string {
+  if (status.kind !== "ready") return projectionRevision(status);
+  const { refreshedAt: _refreshedAt, ...semanticStatus } = status;
+  return projectionRevision(semanticStatus);
 }
 
 function parseNotificationRegistration(
@@ -2541,7 +4695,9 @@ function parseNotificationRegistration(
     typeof prefs.completed !== "boolean" ||
     typeof prefs.automations !== "boolean" ||
     (p.token !== undefined &&
-      (typeof p.token !== "string" || p.token.length === 0 || p.token.length > 512)) ||
+      (typeof p.token !== "string" ||
+        p.token.length === 0 ||
+        p.token.length > 512)) ||
     (p.deviceName !== undefined &&
       (typeof p.deviceName !== "string" || p.deviceName.length > 120))
   ) {
@@ -2563,9 +4719,394 @@ function parseNotificationRegistration(
 
 /** Mirrors worker-sessions' own session-id validator. */
 const WORKER_SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const ACCOUNT_PROFILE_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const NATIVE_CLI_PROFILE_ID_PATTERN =
+  /^(?:personal|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+  return (
+    typeof value === "string" && value.length > 0 && value.length <= maxLength
+  );
+}
+
+const REMOTE_CORA_THINKING_LEVELS: readonly RemoteCoraThinkingLevel[] = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+// The provider is derived from this prefix downstream, so the shape is pinned
+// here; the service still rejects a well-formed id it cannot route.
+function isRemoteCoraModelId(value: unknown): value is string {
+  return (
+    isBoundedString(value, 128) &&
+    /^(?:claude|gpt)-[a-zA-Z0-9._:-]+$/.test(value)
+  );
+}
+
+function isRemoteCoraThinkingLevel(
+  value: unknown,
+): value is RemoteCoraThinkingLevel {
+  return (
+    typeof value === "string" &&
+    (REMOTE_CORA_THINKING_LEVELS as readonly string[]).includes(value)
+  );
+}
+
+function isBoundedRequestId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[a-zA-Z0-9][a-zA-Z0-9_-]{7,127}$/.test(value)
+  );
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactlyKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const keys = Object.keys(value);
+  if (required.some((key) => !Object.prototype.hasOwnProperty.call(value, key)))
+    return false;
+  const allowed = new Set([...required, ...optional]);
+  return keys.every((key) => allowed.has(key));
+}
+
+function githubStatusParams(params: unknown): {
+  workspaceId: string;
+  ifRevision?: string;
+} | null {
+  if (
+    !isPlainRecord(params) ||
+    !hasExactlyKeys(params, ["workspaceId"], ["ifRevision"]) ||
+    !isBoundedString(params.workspaceId, 256) ||
+    (params.ifRevision !== undefined &&
+      !isBoundedString(params.ifRevision, 128))
+  ) {
+    return null;
+  }
+  return {
+    workspaceId: params.workspaceId,
+    ...(typeof params.ifRevision === "string"
+      ? { ifRevision: params.ifRevision }
+      : {}),
+  };
+}
+
+function githubWorkQueueParams(params: unknown): {
+  ifRevision?: string;
+  refresh?: true;
+} | null {
+  const value = params ?? {};
+  if (
+    !isPlainRecord(value) ||
+    !hasExactlyKeys(value, [], ["ifRevision", "refresh"]) ||
+    (value.ifRevision !== undefined &&
+      !isBoundedString(value.ifRevision, 128)) ||
+    (value.refresh !== undefined && value.refresh !== true)
+  ) {
+    return null;
+  }
+  return {
+    ...(typeof value.ifRevision === "string"
+      ? { ifRevision: value.ifRevision }
+      : {}),
+    ...(value.refresh === true ? { refresh: true as const } : {}),
+  };
+}
+
+/**
+ * Parse and canonicalize the complete publish mutation before it reaches the
+ * durable ledger. That makes retries with semantically identical text hash to
+ * one receipt, while unknown fields and unbounded phone input never reach git.
+ */
+function githubPublishParams(params: unknown): {
+  workspaceId: string;
+  requestId: string;
+  input: GitHubPublishInput;
+} | null {
+  if (
+    !isPlainRecord(params) ||
+    !hasExactlyKeys(params, ["workspaceId", "requestId", "input"]) ||
+    !isBoundedString(params.workspaceId, 256) ||
+    !isBoundedString(params.requestId, 256) ||
+    !isPlainRecord(params.input) ||
+    !hasExactlyKeys(params.input, ["title", "body", "draft"], ["commitMessage"])
+  ) {
+    return null;
+  }
+
+  const title =
+    typeof params.input.title === "string" ? params.input.title.trim() : "";
+  if (!title || title.length > GITHUB_PUBLISH_MAX_TITLE_LENGTH) return null;
+  if (
+    typeof params.input.body !== "string" ||
+    params.input.body.length > GITHUB_PUBLISH_MAX_BODY_LENGTH ||
+    typeof params.input.draft !== "boolean"
+  ) {
+    return null;
+  }
+
+  let commitMessage: string | undefined;
+  if (params.input.commitMessage !== undefined) {
+    if (typeof params.input.commitMessage !== "string") return null;
+    commitMessage = params.input.commitMessage.trim();
+    if (
+      !commitMessage ||
+      commitMessage.length > GITHUB_PUBLISH_MAX_COMMIT_MESSAGE_LENGTH
+    ) {
+      return null;
+    }
+  }
+
+  return {
+    workspaceId: params.workspaceId,
+    requestId: params.requestId,
+    input: {
+      title,
+      body: params.input.body,
+      draft: params.input.draft,
+      ...(commitMessage !== undefined ? { commitMessage } : {}),
+    },
+  };
+}
+
+function githubMergeParams(params: unknown): {
+  workspaceId: string;
+  requestId: string;
+  input: GitHubMergeInput;
+} | null {
+  if (
+    !isPlainRecord(params) ||
+    !hasExactlyKeys(params, ["workspaceId", "requestId", "input"]) ||
+    !isBoundedString(params.workspaceId, 256) ||
+    !isBoundedString(params.requestId, 256) ||
+    !isPlainRecord(params.input) ||
+    !hasExactlyKeys(params.input, [
+      "repository",
+      "pullRequestNumber",
+      "baseBranch",
+      "headBranch",
+      "expectedHeadCommitOid",
+      "strategy",
+    ])
+  ) {
+    return null;
+  }
+  const repository =
+    typeof params.input.repository === "string"
+      ? params.input.repository.trim()
+      : "";
+  const baseBranch =
+    typeof params.input.baseBranch === "string"
+      ? params.input.baseBranch.trim()
+      : "";
+  const headBranch =
+    typeof params.input.headBranch === "string"
+      ? params.input.headBranch.trim()
+      : "";
+  const expectedHeadCommitOid =
+    typeof params.input.expectedHeadCommitOid === "string"
+      ? params.input.expectedHeadCommitOid.trim().toLowerCase()
+      : "";
+  const strategy = params.input.strategy;
+  if (
+    !repository ||
+    repository.length > 240 ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+    !Number.isSafeInteger(params.input.pullRequestNumber) ||
+    (params.input.pullRequestNumber as number) < 1 ||
+    !baseBranch ||
+    baseBranch.length > 1_024 ||
+    /[\0\r\n]/.test(baseBranch) ||
+    !headBranch ||
+    headBranch.length > 1_024 ||
+    /[\0\r\n]/.test(headBranch) ||
+    !/^[0-9a-f]{40,64}$/.test(expectedHeadCommitOid) ||
+    (strategy !== "squash" && strategy !== "merge" && strategy !== "rebase")
+  ) {
+    return null;
+  }
+  return {
+    workspaceId: params.workspaceId,
+    requestId: params.requestId,
+    input: {
+      repository,
+      pullRequestNumber: params.input.pullRequestNumber as number,
+      baseBranch,
+      headBranch,
+      expectedHeadCommitOid,
+      strategy,
+    },
+  };
+}
+
+function githubMarkReadyParams(params: unknown): {
+  workspaceId: string;
+  requestId: string;
+  input: GitHubMarkReadyInput;
+} | null {
+  if (
+    !isPlainRecord(params) ||
+    !hasExactlyKeys(params, ["workspaceId", "requestId", "input"]) ||
+    !isBoundedString(params.workspaceId, 256) ||
+    !isBoundedString(params.requestId, 256) ||
+    !isPlainRecord(params.input) ||
+    !hasExactlyKeys(params.input, [
+      "repository",
+      "pullRequestNumber",
+      "baseBranch",
+      "headBranch",
+      "expectedHeadCommitOid",
+    ])
+  ) {
+    return null;
+  }
+  const repository =
+    typeof params.input.repository === "string"
+      ? params.input.repository.trim()
+      : "";
+  const baseBranch =
+    typeof params.input.baseBranch === "string"
+      ? params.input.baseBranch.trim()
+      : "";
+  const headBranch =
+    typeof params.input.headBranch === "string"
+      ? params.input.headBranch.trim()
+      : "";
+  const expectedHeadCommitOid =
+    typeof params.input.expectedHeadCommitOid === "string"
+      ? params.input.expectedHeadCommitOid.trim().toLowerCase()
+      : "";
+  if (
+    !repository ||
+    repository.length > 240 ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+    !Number.isSafeInteger(params.input.pullRequestNumber) ||
+    (params.input.pullRequestNumber as number) < 1 ||
+    !baseBranch ||
+    baseBranch.length > 1_024 ||
+    /[\0\r\n]/.test(baseBranch) ||
+    !headBranch ||
+    headBranch.length > 1_024 ||
+    /[\0\r\n]/.test(headBranch) ||
+    !/^[0-9a-f]{40,64}$/.test(expectedHeadCommitOid)
+  ) {
+    return null;
+  }
+  return {
+    workspaceId: params.workspaceId,
+    requestId: params.requestId,
+    input: {
+      repository,
+      pullRequestNumber: params.input.pullRequestNumber as number,
+      baseBranch,
+      headBranch,
+      expectedHeadCommitOid,
+    },
+  };
+}
+
+function githubIssueStartParams(params: unknown): {
+  sourceWorkspaceId: string;
+  issueNumber: number;
+  requestId: string;
+} | null {
+  if (
+    !isPlainRecord(params) ||
+    !hasExactlyKeys(params, ["sourceWorkspaceId", "issueNumber", "requestId"]) ||
+    !isBoundedString(params.sourceWorkspaceId, 256) ||
+    !isBoundedRequestId(params.requestId) ||
+    !Number.isSafeInteger(params.issueNumber) ||
+    (params.issueNumber as number) < 1 ||
+    (params.issueNumber as number) > GITHUB_ISSUE_MAX_NUMBER
+  ) {
+    return null;
+  }
+  return {
+    sourceWorkspaceId: params.sourceWorkspaceId,
+    issueNumber: params.issueNumber as number,
+    requestId: params.requestId,
+  };
+}
+
+function githubPullRequestStartParams(params: unknown): {
+  sourceWorkspaceId: string;
+  repositoryUrl: string;
+  pullRequestNumber: number;
+  expectedHeadCommitOid: string;
+  requestId: string;
+} | null {
+  if (
+    !isPlainRecord(params) ||
+    !hasExactlyKeys(params, [
+      "sourceWorkspaceId",
+      "repositoryUrl",
+      "pullRequestNumber",
+      "expectedHeadCommitOid",
+      "requestId",
+    ]) ||
+    !isBoundedString(params.sourceWorkspaceId, 256) ||
+    !isBoundedString(params.repositoryUrl, 2_048) ||
+    !isBoundedString(params.expectedHeadCommitOid, 64) ||
+    !isBoundedRequestId(params.requestId) ||
+    !Number.isSafeInteger(params.pullRequestNumber) ||
+    (params.pullRequestNumber as number) < 1 ||
+    (params.pullRequestNumber as number) > GITHUB_ISSUE_MAX_NUMBER
+  ) {
+    return null;
+  }
+  const repositoryUrl = canonicalGitHubRepositoryUrl(params.repositoryUrl);
+  const expectedHeadCommitOid =
+    params.expectedHeadCommitOid.trim().toLowerCase();
+  if (
+    !repositoryUrl ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(expectedHeadCommitOid)
+  ) {
+    return null;
+  }
+  return {
+    sourceWorkspaceId: params.sourceWorkspaceId,
+    repositoryUrl,
+    pullRequestNumber: params.pullRequestNumber as number,
+    expectedHeadCommitOid,
+    requestId: params.requestId,
+  };
+}
+
+function canonicalGitHubRepositoryUrl(value: string): string | null {
+  try {
+    const url = new URL(value.trim());
+    if (
+      url.protocol !== "https:" ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      url.port ||
+      url.search ||
+      url.hash ||
+      url.pathname.includes("%") ||
+      url.pathname.split("/").filter(Boolean).length !== 2
+    ) {
+      return null;
+    }
+    // GitHub owner/repository identity is case-insensitive. Canonicalize
+    // before the durable mutation ledger hashes params so a lost-reply retry
+    // cannot conflict merely because the queue refreshed with different case.
+    return `${url.origin}${url.pathname.replace(/\/+$/u, "")}`.toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2592,7 +5133,8 @@ function boardUpdateParams(params: unknown): {
     title?: unknown;
     description?: unknown;
   };
-  if (!isBoundedString(p.workspaceId, 256) || !isBoundedString(p.runId, 256)) return null;
+  if (!isBoundedString(p.workspaceId, 256) || !isBoundedString(p.runId, 256))
+    return null;
   // isSafeInteger, not isInteger: past 2^53 the doubles stop being distinct,
   // so Number.MAX_SAFE_INTEGER + 2 is an "integer" that no longer compares
   // meaningfully against a real revision. A revision counts accepted writes,
@@ -2604,7 +5146,8 @@ function boardUpdateParams(params: unknown): {
   ) {
     return null;
   }
-  if (p.action !== "add-idea" && p.action !== "queue" && p.action !== "delete") return null;
+  if (p.action !== "add-idea" && p.action !== "queue" && p.action !== "delete")
+    return null;
   const action: RemoteBoardAction = p.action;
   const base = {
     workspaceId: p.workspaceId,
@@ -2617,8 +5160,10 @@ function boardUpdateParams(params: unknown): {
     if (typeof p.title !== "string") return null;
     const title = p.title.trim();
     if (!title || title.length > MAX_BOARD_CARD_TITLE_LENGTH) return null;
-    if (p.description !== undefined && typeof p.description !== "string") return null;
-    const description = typeof p.description === "string" ? p.description.trim() : "";
+    if (p.description !== undefined && typeof p.description !== "string")
+      return null;
+    const description =
+      typeof p.description === "string" ? p.description.trim() : "";
     if (description.length > MAX_BOARD_CARD_DESCRIPTION_LENGTH) return null;
     return { ...base, title, ...(description ? { description } : {}) };
   }
@@ -2665,13 +5210,17 @@ function decodeImageChunk(value: string): Buffer {
     value.length < 4 ||
     value.length > maxBase64Bytes ||
     value.length % 4 !== 0 ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      value,
+    )
   ) {
     throw new Error("Image chunk data is not valid bounded base64.");
   }
   const decoded = Buffer.from(value, "base64");
   if (decoded.length < 1 || decoded.length > REMOTE_IMAGE_CHUNK_BYTES) {
-    throw new Error(`Image chunks are limited to ${REMOTE_IMAGE_CHUNK_BYTES / 1024} KiB.`);
+    throw new Error(
+      `Image chunks are limited to ${REMOTE_IMAGE_CHUNK_BYTES / 1024} KiB.`,
+    );
   }
   return decoded;
 }

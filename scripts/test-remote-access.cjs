@@ -70,7 +70,8 @@ let failures = 0;
 const check = (name, cond, detail) => {
   if (!cond) {
     failures += 1;
-    if (detail !== undefined) console.log(`     got: ${JSON.stringify(detail)}`);
+    if (detail !== undefined)
+      console.log(`     got: ${JSON.stringify(detail)}`);
   }
   console.log(`${cond ? "PASS" : "FAIL"} ${name}`);
 };
@@ -83,6 +84,53 @@ async function main() {
   const rpc = await bundle(
     path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
     "remote-access-rpc-test.cjs",
+  );
+  const boardProjection = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "board-projection.ts",
+    ),
+    "remote-access-board-projection-test.cjs",
+  );
+  {
+    const empty = boardProjection.projectRemoteBoardRead({
+      revision: 0,
+      cards: [],
+    });
+    const sameEmpty = boardProjection.projectRemoteBoardRead({
+      revision: 0,
+      cards: [],
+    });
+    const changed = boardProjection.projectRemoteBoardRead({
+      revision: 1,
+      cards: [],
+    });
+    check(
+      "bounded board projection gives an empty board a stable bounded revision",
+      empty.revision === sameEmpty.revision &&
+        empty.revision.length > 0 &&
+        empty.revision.length <= 128 &&
+        empty.board.cards.length === 0,
+      { empty, sameEmpty },
+    );
+    check(
+      "bounded board projection revision changes with the projected board",
+      changed.revision !== empty.revision,
+      { empty: empty.revision, changed: changed.revision },
+    );
+  }
+  const workerTerminalControls = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "worker-terminal-controls.ts",
+    ),
+    "worker-terminal-controls-test.cjs",
   );
   const identity = await bundle(
     path.join(ROOT, "src", "main", "remote-access", "identity.ts"),
@@ -104,6 +152,626 @@ async function main() {
     path.join(ROOT, "src", "main", "remote-access", "cora-policy.ts"),
     "remote-access-cora-policy-test.cjs",
   );
+  const coraSendReceipts = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "cora-send-receipts.ts",
+    ),
+    "remote-access-cora-send-receipts-test.cjs",
+  );
+  const coraMessagePolicy = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "cora-message-policy.ts",
+    ),
+    "remote-access-cora-message-policy-test.cjs",
+  );
+  const coraHistoryDelta = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "cora-history-delta.ts",
+    ),
+    "remote-access-cora-history-delta-test.cjs",
+  );
+  {
+    const history = Array.from({ length: 50 }, (_, index) => ({
+      id: `run-${index}`,
+      workspaceId: "workspace-a",
+      title: `Conversation ${index} ${"x".repeat(80)}`,
+      status: "running",
+      createdAt: `2026-01-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+      updatedAt: `2026-01-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+      messageCount: index,
+      lastMessage: `message ${index} ${"y".repeat(120)}`,
+      activeWorkers: 0,
+    }));
+    const cache = new coraHistoryDelta.CoraHistoryDeltaCache();
+    const full = cache.project({ workspaceId: "workspace-a", runs: history });
+    const unchanged = cache.project({
+      workspaceId: "workspace-a",
+      runs: history,
+      ifRevision: full.revision,
+      deltaVersion: 1,
+    });
+    const changedHistory = history.map((run, index) =>
+      index === 17 ? { ...run, status: "blocked", activeWorkers: 1 } : run,
+    );
+    const changed = cache.project({
+      workspaceId: "workspace-a",
+      runs: changedHistory,
+      ifRevision: full.revision,
+      deltaVersion: 1,
+    });
+    const materialized = new Map(full.runs.map((run) => [run.id, run]));
+    for (const run of changed.historyDelta?.upserts ?? []) {
+      materialized.set(run.id, run);
+    }
+    const reconstructed = changed.historyDelta?.order.map((id) =>
+      materialized.get(id),
+    );
+    check(
+      "Cora history delta reconstructs the exact changed full projection",
+      unchanged.notModified === true &&
+        changed.historyDelta?.baseRevision === full.revision &&
+        changed.historyDelta?.upserts.length === 1 &&
+        JSON.stringify(reconstructed) === JSON.stringify(changedHistory) &&
+        Buffer.byteLength(JSON.stringify(changed), "utf8") <
+          Buffer.byteLength(JSON.stringify({ runs: changedHistory }), "utf8"),
+      { unchanged, changed },
+    );
+    const unknownBase = cache.project({
+      workspaceId: "workspace-a",
+      runs: changedHistory,
+      ifRevision: "not-retained",
+      deltaVersion: 1,
+    });
+    const crossWorkspace = cache.project({
+      workspaceId: "workspace-b",
+      runs: changedHistory.map((run) => ({
+        ...run,
+        workspaceId: "workspace-b",
+      })),
+      ifRevision: full.revision,
+      deltaVersion: 1,
+    });
+    check(
+      "unknown and cross-workspace Cora history bases fall back to full",
+      Array.isArray(unknownBase.runs) && Array.isArray(crossWorkspace.runs),
+      { unknownBase, crossWorkspace },
+    );
+    for (let index = 0; index < 30; index += 1) {
+      cache.project({
+        workspaceId: `bounded-${index}`,
+        runs: [
+          {
+            ...history[0],
+            id: `bounded-run-${index}`,
+            workspaceId: `bounded-${index}`,
+          },
+        ],
+      });
+    }
+    check(
+      "Cora history retained bases have bounded workspace and byte cost",
+      cache.workspaceCountForTest() <= 24 &&
+        cache.retainedBytesForTest() <= 4 * 1024 * 1024,
+      {
+        workspaces: cache.workspaceCountForTest(),
+        bytes: cache.retainedBytesForTest(),
+      },
+    );
+  }
+  {
+    const exactAscii = "a".repeat(coraMessagePolicy.CORA_MESSAGE_MAX_BYTES);
+    const exactEmoji = "😀".repeat(
+      coraMessagePolicy.CORA_MESSAGE_MAX_BYTES / 4,
+    );
+    check(
+      "Cora message policy trims then accepts exact 16 KiB UTF-8 boundaries",
+      coraMessagePolicy.normalizeCoraMessage(`  ${exactAscii}  `) ===
+        exactAscii &&
+        coraMessagePolicy.normalizeCoraMessage(exactEmoji) === exactEmoji,
+    );
+    for (const oversized of [
+      `${exactAscii}a`,
+      `${exactEmoji}😀`,
+      "界".repeat(Math.floor(coraMessagePolicy.CORA_MESSAGE_MAX_BYTES / 3) + 1),
+    ]) {
+      let error;
+      try {
+        coraMessagePolicy.normalizeCoraMessage(oversized);
+      } catch (cause) {
+        error = cause;
+      }
+      check(
+        "Cora message policy rejects over-limit UTF-8 input without truncation",
+        error?.code === "CORA_MESSAGE_TOO_LARGE" &&
+          error.actualBytes > coraMessagePolicy.CORA_MESSAGE_MAX_BYTES,
+        error,
+      );
+    }
+  }
+  {
+    const selected = coraPolicy.selectRemoteConversationRuns(
+      [
+        { id: "run-chat-1" },
+        { id: "run-automation", automationId: "automation-1" },
+        { id: "run-chat-2" },
+      ],
+      2,
+    );
+    check(
+      "Cora history excludes automation runs before applying its page limit",
+      selected.map((run) => run.id).join(",") === "run-chat-1,run-chat-2",
+      selected,
+    );
+  }
+  const fleetOverview = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "fleet-overview.ts"),
+    "remote-access-fleet-overview-test.cjs",
+  );
+  const subscriptionProfiles = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "subscription-profile-projection.ts",
+    ),
+    "remote-access-subscription-profile-projection-test.cjs",
+  );
+  const nativeCliAccounts = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "native-cli-account-projection.ts",
+    ),
+    "remote-access-native-cli-account-projection-test.cjs",
+  );
+  {
+    const profileId = "11111111-1111-4111-8111-111111111111";
+    const refreshableId = "22222222-2222-4222-8222-222222222222";
+    const unavailableId = "33333333-3333-4333-8333-333333333333";
+    const inspection = {
+      snapshot: {
+        profiles: [
+          {
+            id: profileId,
+            provider: "openai-codex",
+            label: "Codex work",
+            identityFingerprint: "must-not-cross-remote-boundary",
+            // The Settings card shows this address; a phone never does.
+            accountEmail: "codex-user@must-not-cross.example",
+          },
+          {
+            id: refreshableId,
+            provider: "anthropic",
+            label: "Claude refreshable",
+          },
+          {
+            id: unavailableId,
+            provider: "anthropic",
+            label: "Claude unavailable",
+          },
+        ],
+        defaults: {
+          "openai-codex": profileId,
+          anthropic: refreshableId,
+        },
+      },
+      statuses: [
+        {
+          profileId,
+          connected: true,
+          expired: false,
+          authFile: "/private/pi-agent/accounts/profile/auth.json",
+        },
+        {
+          profileId: refreshableId,
+          connected: true,
+          expired: true,
+          canRefresh: true,
+          error: "refresh-secret and /private/auth/path",
+          accountEmail: "claude-user@must-not-cross.example",
+          accountFingerprint: "must-not-cross-remote-boundary",
+        },
+        {
+          profileId: unavailableId,
+          connected: false,
+          expired: false,
+        },
+      ],
+    };
+    const cached = [
+      {
+        profileId,
+        provider: "openai-codex",
+        label: "Codex work",
+        isDefault: true,
+        status: "ok",
+        checkedAt: "2026-07-31T08:00:00.000Z",
+        windows: [
+          {
+            id: "short",
+            label: "5-hour",
+            scope: { kind: "general" },
+            usedPercent: 20,
+            remainingPercent: 80,
+          },
+          {
+            id: "code-review",
+            label: "Code review 7-day",
+            scope: { kind: "code_review" },
+            usedPercent: 100,
+            remainingPercent: 0,
+          },
+        ],
+        generalLimitReached: false,
+        limitReached: true,
+        message: "raw provider error must stay local",
+        accountId: "vendor-account-id",
+        token: "access-secret",
+      },
+      {
+        profileId: refreshableId,
+        provider: "anthropic",
+        label: "Claude refreshable",
+        isDefault: true,
+        status: "ok",
+        checkedAt: "2026-07-31T08:00:00.000Z",
+        windows: [
+          {
+            id: "short",
+            label: "5-hour",
+            usedPercent: 10,
+            remainingPercent: 90,
+          },
+        ],
+        limitReached: false,
+      },
+    ];
+    const projected = subscriptionProfiles.projectRemoteSubscriptionProfiles(
+      inspection,
+      cached,
+    );
+    check(
+      "remote subscription usage ignores a dedicated code-review limit for normal chat",
+      projected.find((entry) => entry.id === profileId)?.status ===
+        "configured" &&
+        projected.find((entry) => entry.id === profileId)?.usage
+          ?.remainingPercent === 80 &&
+        projected.find((entry) => entry.id === profileId)?.usage
+          ?.limitReached === false,
+      projected,
+    );
+    check(
+      "expired-but-refreshable subscription credentials remain selectable",
+      projected.find((entry) => entry.id === refreshableId)?.status ===
+        "configured" &&
+        projected.find((entry) => entry.id === refreshableId)?.usage
+          ?.remainingPercent === 90,
+      projected,
+    );
+    check(
+      "remote subscription profiles omit cached quota for unavailable credentials",
+      projected.find((entry) => entry.id === unavailableId)?.status ===
+        "unavailable" &&
+        projected.find((entry) => entry.id === unavailableId)?.usage ===
+          undefined,
+      projected,
+    );
+    const serialized = JSON.stringify(projected);
+    check(
+      "remote subscription projection allowlists fields and leaks no identity, path, token, or raw error",
+      !serialized.includes("must-not-cross") &&
+        !serialized.includes("@") &&
+        !serialized.includes("accountEmail") &&
+        !serialized.includes("/private/") &&
+        !serialized.includes("refresh-secret") &&
+        !serialized.includes("vendor-account") &&
+        !serialized.includes("access-secret") &&
+        !serialized.includes("raw provider error"),
+      projected,
+    );
+    const staleOrFailed =
+      subscriptionProfiles.projectRemoteSubscriptionProfiles(inspection, [
+        {
+          ...cached[0],
+          status: "error",
+          windows: [
+            { id: "bad", label: "bad", usedPercent: 0, remainingPercent: 100 },
+          ],
+        },
+      ]);
+    check(
+      "remote subscription projection ignores non-ok cached usage",
+      staleOrFailed.find((profile) => profile.id === profileId)?.usage ===
+        undefined,
+      staleOrFailed,
+    );
+  }
+  {
+    const projected = nativeCliAccounts.projectRemoteNativeCliAccounts({
+      runtimes: [
+        {
+          runtime: "claude",
+          defaultProfileId: "personal",
+          profiles: [
+            {
+              runtime: "claude",
+              id: "personal",
+              label: "Claude personal",
+              managed: false,
+              isDefault: true,
+              connected: true,
+              inUse: true,
+              status: "connected",
+              configDir: "/must-not-cross",
+              token: "must-not-cross",
+              // Local Settings shows the account's address and pairing digest;
+              // the phone projection must drop both.
+              email: "claude-user@must-not-cross.example",
+              accountFingerprint: "must-not-cross-remote-boundary",
+            },
+          ],
+        },
+        {
+          runtime: "codex",
+          defaultProfileId: "11111111-1111-4111-8111-111111111111",
+          profiles: [
+            {
+              runtime: "codex",
+              id: "11111111-1111-4111-8111-111111111111",
+              label: "Codex Max",
+              managed: true,
+              isDefault: true,
+              connected: false,
+              inUse: false,
+              status: "unsafe",
+              homeDir: "/must-not-cross",
+              env: { OPENAI_API_KEY: "must-not-cross" },
+              email: "codex-user@must-not-cross.example",
+              accountFingerprint: "must-not-cross-remote-boundary",
+            },
+          ],
+        },
+      ],
+    });
+    const serialized = JSON.stringify(projected);
+    check(
+      "remote native CLI account projection exposes only opaque routing metadata",
+      projected[0]?.runtime === "claude" &&
+        projected[0]?.status === "connected" &&
+        projected[1]?.runtime === "codex" &&
+        projected[1]?.status === "unavailable" &&
+        !serialized.includes("/must-not-cross") &&
+        !serialized.includes("OPENAI_API_KEY") &&
+        !serialized.includes("token") &&
+        !serialized.includes("@") &&
+        !serialized.includes("email") &&
+        !serialized.includes("accountFingerprint") &&
+        !serialized.includes("inUse"),
+      projected,
+    );
+  }
+  {
+    const workspaces = [
+      {
+        id: "ws-1",
+        name: "Studio",
+        path: "/private/studio",
+        color: "#123456",
+        branch: "feature/mobile",
+      },
+      {
+        id: "ws-2",
+        name: "Website",
+        path: "/private/website",
+        color: "#abcdef",
+      },
+    ];
+    const attempt = (id, status, overrides = {}) => ({
+      id,
+      status,
+      workerTaskId: `task-${id}`,
+      attemptNumber: 1,
+      runtime: "claude",
+      ...overrides,
+    });
+    const runs = [
+      {
+        id: "chat-old",
+        workspaceId: "ws-1",
+        status: "running",
+        createdAt: "2026-07-30T08:00:00.000Z",
+        updatedAt: "2026-07-30T08:10:00.000Z",
+        workerAttempts: [
+          attempt("active-1", "running", {
+            model: "claude-opus-5",
+            runtimeState: "working",
+            startedAt: "2026-07-30T08:01:00.000Z",
+          }),
+          attempt("settled-1", "succeeded"),
+        ],
+        workerTasks: [
+          { id: "task-active-1", title: "Audit remote transport" },
+          { id: "task-settled-1", title: "Finished task" },
+        ],
+      },
+      {
+        id: "chat-latest",
+        workspaceId: "ws-1",
+        status: "blocked",
+        createdAt: "2026-07-30T08:30:00.000Z",
+        updatedAt: "2026-07-30T09:00:00.000Z",
+        workerAttempts: [attempt("active-2", "finishing")],
+        workerTasks: [{ id: "task-active-2", title: "Verify mobile cache" }],
+      },
+      {
+        id: "automation-newest",
+        workspaceId: "ws-1",
+        automationId: "loom-1",
+        status: "running",
+        createdAt: "2026-07-30T09:30:00.000Z",
+        updatedAt: "2026-07-30T10:00:00.000Z",
+        workerAttempts: [
+          attempt("loom-worker-1", "running"),
+          attempt("loom-worker-2", "launching"),
+        ],
+        workerTasks: [
+          { id: "task-loom-worker-1", title: "Automation pass" },
+          { id: "task-loom-worker-2", title: "Automation verifier" },
+        ],
+      },
+      {
+        id: "chat-other",
+        workspaceId: "ws-2",
+        status: "complete",
+        createdAt: "2026-07-30T07:00:00.000Z",
+        updatedAt: "2026-07-30T07:30:00.000Z",
+        workerAttempts: [],
+        workerTasks: [],
+      },
+    ];
+    const automations = [
+      {
+        id: "loom-1",
+        name: "Nightly audit",
+        input: { workspaceId: "ws-1" },
+        state: { status: "running" },
+      },
+      { input: { workspaceId: "ws-1" }, state: { status: "blocked" } },
+      { input: { workspaceId: "ws-1" }, state: { status: "paused" } },
+      { input: { workspaceId: "ws-2" }, state: { status: "idle" } },
+    ];
+    const projection = fleetOverview.projectRemoteFleetOverview(
+      workspaces,
+      runs,
+      automations,
+    );
+    check(
+      "fleet projection excludes automation runs from every conversation aggregate",
+      projection.workspaces[0]?.conversationCount === 2 &&
+        projection.workspaces[0]?.latestConversation?.status === "blocked" &&
+        projection.workspaces[0]?.latestConversation?.updatedAt ===
+          "2026-07-30T09:00:00.000Z" &&
+        projection.workspaces[0]?.activeConversationWorkers === 2,
+      projection,
+    );
+    check(
+      "fleet projection carries compact workspace identity and active automation counts",
+      projection.workspaces[0]?.id === "ws-1" &&
+        projection.workspaces[0]?.name === "Studio" &&
+        projection.workspaces[0]?.color === "#123456" &&
+        projection.workspaces[0]?.branch === "feature/mobile" &&
+        projection.workspaces[0]?.activeAutomations === 2 &&
+        !JSON.stringify(projection).includes("/private/"),
+      projection,
+    );
+    check(
+      "fleet projection exposes a path-free live agent roster across chats and automations",
+      projection.agents.length === 4 &&
+        projection.agents.some(
+          (agent) =>
+            agent.id === "active-1" &&
+            agent.title === "Audit remote transport" &&
+            agent.runtime === "claude" &&
+            agent.model === "claude-opus-5" &&
+            agent.runtimeState === "working" &&
+            agent.automated !== true,
+        ) &&
+        projection.agents.some(
+          (agent) =>
+            agent.id === "loom-worker-1" &&
+            agent.automated === true &&
+            agent.automationId === "loom-1" &&
+            agent.automationName === "Nightly audit",
+        ) &&
+        !JSON.stringify(projection.agents).includes("/private/"),
+      projection.agents,
+    );
+    const oneRow = fleetOverview.projectRemoteFleetOverview(
+      workspaces,
+      runs,
+      automations,
+      { maxRows: 1 },
+    );
+    check(
+      "fleet projection obeys its explicit row cap",
+      oneRow.workspaces.length === 1 && oneRow.workspaces[0]?.id === "ws-1",
+      oneRow,
+    );
+    const oneAgent = fleetOverview.projectRemoteFleetOverview(
+      workspaces,
+      runs,
+      automations,
+      { maxAgents: 1 },
+    );
+    check(
+      "fleet projection obeys its explicit agent cap",
+      oneAgent.agents.length === 1,
+      oneAgent,
+    );
+    const hundredPlusAttempts = Array.from({ length: 120 }, (_, index) =>
+      attempt(`scale-${index + 1}`, "running", {
+        runtime: index % 2 ? "codex" : "claude",
+      }),
+    );
+    const hundredPlus = fleetOverview.projectRemoteFleetOverview(
+      workspaces,
+      [
+        {
+          id: "scale-run",
+          workspaceId: "ws-1",
+          status: "running",
+          createdAt: "2026-07-30T10:00:00.000Z",
+          updatedAt: "2026-07-30T10:01:00.000Z",
+          workerAttempts: hundredPlusAttempts,
+          workerTasks: hundredPlusAttempts.map((entry, index) => ({
+            id: entry.workerTaskId,
+            title: `Scale worker ${index + 1}`,
+          })),
+        },
+      ],
+      [],
+    );
+    check(
+      "fleet projection can supervise more than one hundred active agents in one bounded snapshot",
+      hundredPlus.agents.length === 120 &&
+        Buffer.byteLength(JSON.stringify(hundredPlus), "utf8") <=
+          fleetOverview.REMOTE_FLEET_BUDGET_BYTES,
+      {
+        agents: hundredPlus.agents.length,
+        bytes: Buffer.byteLength(JSON.stringify(hundredPlus), "utf8"),
+      },
+    );
+    const emptyBytes = Buffer.byteLength(
+      JSON.stringify({ workspaces: [] }),
+      "utf8",
+    );
+    const byteBounded = fleetOverview.projectRemoteFleetOverview(
+      workspaces,
+      runs,
+      automations,
+      { maxBytes: emptyBytes + 1 },
+    );
+    check(
+      "fleet projection applies a byte budget before adding a row",
+      byteBounded.workspaces.length === 0,
+      byteBounded,
+    );
+  }
   const stablePort = await bundle(
     path.join(ROOT, "src", "main", "remote-access", "stable-port.ts"),
     "remote-access-stable-port-test.cjs",
@@ -120,10 +788,142 @@ async function main() {
     path.join(ROOT, "src", "main", "remote-access", "production.ts"),
     "utf8",
   );
+  const runStoreSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
+    "utf8",
+  );
   const rpcSource = fs.readFileSync(
     path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
     "utf8",
   );
+  check(
+    "production coalesces journal invalidations without delaying semantic notifications",
+    productionSource.includes(
+      "createCoraChangedCoalescer<RemoteCoraChangedEvent>",
+    ) &&
+      productionSource.includes("changedCoalescer.push(changed)") &&
+      /changedCoalescer\.push\(changed\);\s*void \(async \(\) => \{\s*const notification/.test(
+        productionSource,
+      ),
+  );
+  {
+    const broadcastDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-cora-changed-"),
+    );
+    try {
+      const service = new remoteAccess.RemoteAccessService({
+        remoteDir: broadcastDir,
+        deviceName: "Cora Changed Test Studio",
+        appVersion: "test",
+        listWorkspaces: async () => [],
+        createTerminal: async () => {
+          throw new Error("not used");
+        },
+        log: () => {},
+      });
+      const provenEvents = [];
+      const secondProvenEvents = [];
+      const unprovenEvents = [];
+      service.sessions.set(
+        "device-1",
+        new Set([
+          {
+            isProven: () => true,
+            pushCoraChanged: (event) => provenEvents.push(event),
+          },
+          {
+            isProven: () => false,
+            pushCoraChanged: (event) => unprovenEvents.push(event),
+          },
+        ]),
+      );
+      service.sessions.set(
+        "device-2",
+        new Set([
+          {
+            isProven: () => true,
+            pushCoraChanged: (event) => secondProvenEvents.push(event),
+          },
+        ]),
+      );
+      const changed = { workspaceId: "ws-1", runId: "run-1", sequence: 42 };
+      service.broadcastCoraChanged(changed);
+      check(
+        "Cora invalidation broadcasts only tiny metadata to every proven session",
+        provenEvents.length === 1 &&
+          secondProvenEvents.length === 1 &&
+          unprovenEvents.length === 0 &&
+          JSON.stringify(provenEvents[0]) === JSON.stringify(changed) &&
+          JSON.stringify(secondProvenEvents[0]) === JSON.stringify(changed),
+        { provenEvents, secondProvenEvents, unprovenEvents },
+      );
+    } finally {
+      fs.rmSync(broadcastDir, { recursive: true, force: true });
+    }
+  }
+  {
+    const promotionDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-session-promotion-"),
+    );
+    try {
+      const service = new remoteAccess.RemoteAccessService({
+        remoteDir: promotionDir,
+        deviceName: "Session Promotion Test Studio",
+        appVersion: "test",
+        listWorkspaces: async () => [],
+        createTerminal: async () => {
+          throw new Error("not used");
+        },
+        log: () => {},
+      });
+      const destroyed = [];
+      const oldProven = {
+        isProven: () => true,
+        destroy: () => destroyed.push("old-proven"),
+      };
+      const oldUnproven = {
+        isProven: () => false,
+        destroy: () => destroyed.push("old-unproven"),
+      };
+      const current = {
+        isProven: () => true,
+        destroy: () => destroyed.push("current"),
+      };
+      service.sessions.set(
+        "same-phone",
+        new Set([oldProven, oldUnproven, current]),
+      );
+      service.promoteSession("same-phone", current);
+      check(
+        "the newest proven phone session fences every older socket",
+        service.sessionCountFor("same-phone") === 1 &&
+          service.sessions.get("same-phone").has(current) &&
+          destroyed.includes("old-proven") &&
+          destroyed.includes("old-unproven") &&
+          !destroyed.includes("current"),
+        { destroyed },
+      );
+
+      const healthy = {
+        isProven: () => true,
+        destroy: () => destroyed.push("healthy"),
+      };
+      const replay = {
+        isProven: () => false,
+        destroy: () => destroyed.push("replay"),
+      };
+      service.sessions.set("replay-phone", new Set([healthy, replay]));
+      service.promoteSession("replay-phone", replay);
+      check(
+        "an unproven replay cannot evict a healthy phone session",
+        service.sessionCountFor("replay-phone") === 2 &&
+          !destroyed.includes("healthy"),
+        { destroyed },
+      );
+    } finally {
+      fs.rmSync(promotionDir, { recursive: true, force: true });
+    }
+  }
   const rendererTerminalRpcSource = fs.readFileSync(
     path.join(
       ROOT,
@@ -157,11 +957,11 @@ async function main() {
     productionSource.includes("initialCols: request.cols") &&
       productionSource.includes("initialRows: request.rows") &&
       productionSource.includes('"resize"') &&
-      productionSource.includes(
-        "pty.resize(result.paneId, cols, rows)",
-      ) &&
+      productionSource.includes("pty.resize(result.paneId, cols, rows)") &&
       rpcSource.includes("await terminal.resize(cols, rows)") &&
-      rendererTerminalRpcSource.includes("setExternalTerminalSize(paneId, cols, rows)") &&
+      rendererTerminalRpcSource.includes(
+        "setExternalTerminalSize(paneId, cols, rows)",
+      ) &&
       terminalSessionSource.includes(
         "term.resize(externalGrid.cols, externalGrid.rows)",
       ) &&
@@ -183,7 +983,9 @@ async function main() {
     );
     check(
       "natural terminal exit notifies the phone before closing its desktop tab",
-      exitNotify >= 0 && exitTabClose > exitNotify && exitTabClose - exitNotify < 500,
+      exitNotify >= 0 &&
+        exitTabClose > exitNotify &&
+        exitTabClose - exitNotify < 500,
       { exitNotify, exitTabClose },
     );
   }
@@ -191,8 +993,12 @@ async function main() {
     "the phone can never name the files a session delete touches",
     // RemoteWorkerSessionInfo deliberately omits cwd and transcriptPath, so the
     // delete has to rebuild both from the computer's own workspace listing.
-    !/export interface RemoteWorkerSessionInfo \{[^}]*(cwd|transcriptPath)/.test(rpcSource) &&
-      productionSource.includes("const sessions = await listLocalWorkerSessions(input.runtime, root)") &&
+    !/export interface RemoteWorkerSessionInfo \{[^}]*(cwd|transcriptPath)/.test(
+      rpcSource,
+    ) &&
+      productionSource.includes(
+        "const sessions = await listLocalWorkerSessions(input.runtime, root)",
+      ) &&
       productionSource.includes("cwd: match.cwd") &&
       productionSource.includes("transcriptPath: match.transcriptPath"),
   );
@@ -207,59 +1013,141 @@ async function main() {
     // board-nudge drops any run carrying an automationId, so the queue lane
     // there would be a promise nothing keeps. The phone hides the action; the
     // server must not accept it either.
-    productionSource.includes("if (run.automationId) {") &&
+    /if\s*\(run\.automationId\)\s*\{/.test(productionSource) &&
       productionSource.includes("cannot be queued from the phone") &&
       // and the phone is told which runs those are
       productionSource.includes(
-        "...(run.automationId ? { automated: true, automationId: run.automationId } : {})",
+        'requireRemoteCoraIdentity(run.automationId, "run.automationId")',
+      ) &&
+      /\.\.\.\(automationId\s*\?\s*\{\s*automated:\s*true,\s*automationId\s*\}\s*:\s*\{\}\)/s.test(
+        productionSource,
       ),
   );
   check(
     "run summary carries the owning automation's identity, gated on automationId",
     // automationName/iteration come from the scheduler join and must be
     // impossible on a plain chat: every spread is guarded by run.automationId.
-    productionSource.includes("automationName: truncateUtf8(automation.name, 200)") &&
-      productionSource.includes("...(run.automationId && automation?.name") &&
-      productionSource.includes("...(run.automationId && automation?.iteration !== undefined") &&
-      productionSource.includes("{ iteration: automation.iteration }"),
+    productionSource.includes(
+      "automationName: truncateUtf8(automation.name, 200)",
+    ) &&
+      productionSource.includes("...(automationId && automation?.name") &&
+      productionSource.includes("Number.isSafeInteger(automationIteration)") &&
+      productionSource.includes("{ iteration: automationIteration }"),
   );
   check(
     "automation rows carry a summary-level model chip, attempt model over task hint",
-    productionSource.includes(
-      "[...run.workerAttempts].reverse().find((attempt) => attempt.model)?.model",
+    /\[\.\.\.run\.workerAttempts\]\.reverse\(\)\.find\(\(attempt\)\s*=>\s*attempt\.model\)\s*\?\.\s*model/s.test(
+      productionSource,
     ) &&
-      productionSource.includes(
-        "[...run.workerTasks].reverse().find((task) => task.modelHint)?.modelHint",
+      /\[\.\.\.run\.workerTasks\]\.reverse\(\)\.find\(\(task\)\s*=>\s*task\.modelHint\)\s*\?\.\s*modelHint/s.test(
+        productionSource,
       ) &&
-      productionSource.includes("...(automationModel ? { model: truncateUtf8(automationModel, 120) } : {})"),
+      /typeof displayedModel === "string"\s*&&\s*displayedModel\s*\?\s*\{\s*model:\s*truncateUtf8\(displayedModel,\s*120\)\s*\}\s*:\s*\{\}/s.test(
+        productionSource,
+      ),
   );
   check(
     "the automation join reads the job store once per listing, not once per run",
     productionSource.includes("sliced.some((run) => run.automationId)") &&
       productionSource.includes("buildAutomationJoin(await listJobs()"),
   );
+  {
+    const fleetReader =
+      productionSource.match(
+        /async function getFleetOverviewForRemote\(\)[\s\S]*?\n\}/,
+      )?.[0] ?? "";
+    const occurrences = (needle) => fleetReader.split(needle).length - 1;
+    check(
+      "fleet overview reads workspaces, runs and automations once each",
+      occurrences("listWorkspacesForRemote()") === 1 &&
+        occurrences("listRuns()") === 1 &&
+        occurrences("listJobs()") === 1 &&
+        fleetReader.includes(
+          "projectRemoteFleetOverview(workspaces, runs, automations)",
+        ),
+      fleetReader,
+    );
+  }
   check(
     "remote costUsd is measured spend only and the estimate travels apart",
     // costUsd = totalCostUsd + measuredWorkerCostUsd; estimatedWorkerCostUsd
     // may only ever appear as estimatedCostUsd. The old combined sum
     // (totalCostUsd + estimatedWorkerCostUsd) must be gone.
-    productionSource.includes("(run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0)") &&
-      productionSource.includes("...(estimatedCostUsd ? { estimatedCostUsd } : {})") &&
-      !productionSource.includes("(run.totalCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0)"),
+    productionSource.includes(
+      "(run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0)",
+    ) &&
+      productionSource.includes(
+        "...(estimatedCostUsd ? { estimatedCostUsd } : {})",
+      ) &&
+      !productionSource.includes(
+        "(run.totalCostUsd ?? 0) + (run.estimatedWorkerCostUsd ?? 0)",
+      ),
   );
   check(
     "automation spend splits measured spentUsd from the estimate remainder",
-    productionSource.includes("usdRemainder(job.state.spentUsd, measuredSpentUsd)") &&
-      productionSource.includes("...(measuredSpentUsd ? { spentUsd: measuredSpentUsd } : {})") &&
-      productionSource.includes("...(estimatedSpentUsd ? { estimatedSpentUsd } : {})") &&
-      productionSource.includes("...(record.measuredCostUsd ? { costUsd: record.measuredCostUsd } : {})"),
+    productionSource.includes(
+      "usdRemainder(job.state.spentUsd, measuredSpentUsd)",
+    ) &&
+      productionSource.includes(
+        "...(measuredSpentUsd ? { spentUsd: measuredSpentUsd } : {})",
+      ) &&
+      productionSource.includes(
+        "...(estimatedSpentUsd ? { estimatedSpentUsd } : {})",
+      ) &&
+      productionSource.includes(
+        "...(record.measuredCostUsd ? { costUsd: record.measuredCostUsd } : {})",
+      ),
   );
   check(
     "remote worker rows fall back to the task's model hint and carry effort/runtimeState",
     productionSource.includes("attempt.model || task?.modelHint") &&
-      productionSource.includes("...(task?.effortHint ? { effort: truncateUtf8(task.effortHint, 40) } : {})") &&
-      productionSource.includes("{ runtimeState: truncateUtf8(attempt.runtimeState, 200) }"),
+      /typeof task\?\.effortHint === "string"\s*&&\s*task\.effortHint\s*\?\s*\{\s*effort:\s*truncateUtf8\(task\.effortHint,\s*40\)\s*\}\s*:\s*\{\}/s.test(
+        productionSource,
+      ) &&
+      /\{\s*runtimeState:\s*truncateUtf8\(attempt\.runtimeState,\s*200\)\s*\}/s.test(
+        productionSource,
+      ),
   );
+  {
+    const liveRunProjection = productionSource.slice(
+      productionSource.indexOf("async function toRemoteAutomationLiveRun("),
+      productionSource.indexOf("// The loom's detail:"),
+    );
+    const liveRunContract = rpcSource.slice(
+      rpcSource.indexOf("export interface RemoteAutomationLiveRun"),
+      rpcSource.indexOf("export interface RemoteAutomationDetail"),
+    );
+    check(
+      "automation detail projects a message-free live run graph and shared worker roster",
+      liveRunProjection.includes("id: run.id") &&
+        liveRunProjection.includes("status: run.status") &&
+        liveRunProjection.includes("workers: toRemoteRunWorkers(run)") &&
+        liveRunProjection.includes("steps: plan.steps") &&
+        liveRunProjection.includes("currentStepId: run.currentStepId") &&
+        !liveRunProjection.includes("messages") &&
+        !liveRunProjection.includes("toRemoteRun(") &&
+        liveRunContract.includes("id: string") &&
+        liveRunContract.includes("status: RemoteCoraRunStatus") &&
+        liveRunContract.includes("workers: RemoteCoraWorker[]") &&
+        liveRunContract.includes("steps?: RemoteCoraStep[]") &&
+        !liveRunContract.includes("messages"),
+      { liveRunProjection, liveRunContract },
+    );
+    check(
+      "the shared remote worker roster is capped by count and serialized bytes",
+      productionSource.includes("const MAX_CORA_RUN_WORKERS = 12") &&
+        productionSource.includes(
+          "const CORA_WORKER_ROSTER_MAX_BYTES = 16 * 1024",
+        ) &&
+        productionSource.includes(".slice(0, MAX_CORA_RUN_WORKERS)") &&
+        productionSource.includes(
+          'Buffer.byteLength(JSON.stringify(worker), "utf8") + 1',
+        ) &&
+        productionSource.includes(
+          "usedBytes + bytes > CORA_WORKER_ROSTER_MAX_BYTES",
+        ),
+    );
+  }
   check(
     "concurrent session deletes serialize per runtime, not per session",
     // Two deletes of different sessions still rewrite the same provider
@@ -275,31 +1163,92 @@ async function main() {
       productionSource.includes("MAX_CORA_RUN_STEPS"),
   );
   check(
-    "production serializes and persistently looks up Cora retry keys",
-    productionSource.includes("coraMessageMutations.run") &&
-      productionSource.includes("findRemoteCoraRetry(await listRuns(workspace.id)"),
+    "production serializes and persistently indexes Cora retry keys without scanning every run",
+    productionSource.includes("coraRunMutations.run") &&
+      productionSource.includes("receipts.resolve(receiptInput, getRun)") &&
+      productionSource.includes("listRecentRunsForRetryRepair()") &&
+      productionSource.includes("receipts.record(receiptInput, run.id)") &&
+      productionSource.includes("if (!retry && repair.truncated)") &&
+      runStoreSource.includes("const RUN_RETRY_REPAIR_READ_LIMIT = 64") &&
+      runStoreSource.includes("candidates.length > recent.length") &&
+      !productionSource.includes(
+        "findRemoteCoraRetry(await listRuns(workspace.id)",
+      ),
+  );
+  check(
+    "run retention and explicit deletion remove compact Cora send routes",
+    runStoreSource.includes("for (const listener of runDeletedListeners)") &&
+      productionSource.includes("onRunDeleted(async ({ workspaceId, runId })") &&
+      productionSource.includes(".removeRun(workspaceId, runId)"),
+  );
+  check(
+    "Cora deletion is replay-safe across lost replies",
+    productionSource.includes("const run = await getRun(input.runId)") &&
+      productionSource.includes(
+        "if (!run || run.workspaceId !== input.workspaceId) return",
+      ) &&
+      remoteIndexSource.includes("method: string") &&
+      remoteIndexSource.includes('"cora.delete"') &&
+      remoteIndexSource.includes("ledger.execute("),
+  );
+  check(
+    "per-chat Cora account switching is removed while sanitized listing survives",
+    !remoteIndexSource.includes('"cora.account.select"') &&
+      !remoteIndexSource.includes('"cora.nativeCliAccount.select"') &&
+      !productionSource.includes("chatAccountProfileId: profile.id") &&
+      !productionSource.includes("selectCoraAccountForRemote") &&
+      productionSource.includes("projectRemoteSubscriptionProfiles(") &&
+      productionSource.includes("inspectPiAccountProfileAuthStore()") &&
+      productionSource.includes("inspectCachedPiSubscriptionUsageProfiles()"),
+  );
+  check(
+    "Explorer moves use the authenticated device mutation ledger",
+    remoteIndexSource.includes('"files.move"') &&
+      remoteIndexSource.includes("input.requestId") &&
+      remoteIndexSource.includes("callerNamespace") &&
+      remoteIndexSource.includes("ledger.execute("),
+  );
+  check(
+    "GitHub mutations resolve local workspaces and use the authenticated device mutation ledger",
+      productionSource.includes("getGitHubStatusForRemote") &&
+      productionSource.includes("publishGitHubForRemote") &&
+      productionSource.includes("markGitHubReadyForRemote") &&
+      productionSource.includes("mergeGitHubForRemote") &&
+      productionSource.includes("startGitHubIssueForRemote") &&
+      productionSource.includes("startGitHubPullRequestForRemote") &&
+      productionSource.includes("startGitHubIssueWorkspace(input)") &&
+      productionSource.includes("startGitHubPullRequestWorkspace(input)") &&
+      productionSource.includes("requireLocalWorkspace(workspaceId)") &&
+      productionSource.includes("requireLocalWorkspace(input.workspaceId)") &&
+      remoteIndexSource.includes('"github.publish"') &&
+      remoteIndexSource.includes('"github.ready"') &&
+      remoteIndexSource.includes('"github.merge"') &&
+      remoteIndexSource.includes('"github.issue.start"') &&
+      remoteIndexSource.includes('"github.pullRequest.start"') &&
+      remoteIndexSource.includes("input.requestId") &&
+      remoteIndexSource.includes("keyB64") &&
+      remoteIndexSource.includes("ledger.execute("),
   );
   check(
     "production listener uses identity-derived candidates unless an exact test port is present",
-    remoteIndexSource.includes(
-      "this.deps.port !== undefined",
-    ) &&
-      remoteIndexSource.includes(
-        "portCandidates: stableRemoteAccessPortCandidates(this.identity.publicKey)",
+    remoteIndexSource.includes("this.deps.port !== undefined") &&
+      /portCandidates:\s*stableRemoteAccessPortCandidates\(\s*this\.identity\.publicKey,\s*\)/s.test(
+        remoteIndexSource,
       ),
   );
   check(
     "the listener advances candidates only for an occupied bind",
     remoteIndexSource.includes("portCandidates:") &&
       fs
-        .readFileSync(path.join(ROOT, "src", "main", "remote-access", "listener.ts"), "utf8")
+        .readFileSync(
+          path.join(ROOT, "src", "main", "remote-access", "listener.ts"),
+          "utf8",
+        )
         .includes('code !== "EADDRINUSE"'),
   );
   check(
     "an explicit test port of zero is not mistaken for an absent override",
-    remoteIndexSource.includes(
-      "this.deps.port !== undefined",
-    ),
+    remoteIndexSource.includes("this.deps.port !== undefined"),
   );
   {
     const keys = [
@@ -312,13 +1261,17 @@ async function main() {
       "identity-derived listener candidates are bounded, complete, and distinct",
       keys.every((key) => {
         const ports = stablePort.stableRemoteAccessPortCandidates(key);
-        return ports.length === stablePort.REMOTE_ACCESS_PORT_CANDIDATE_COUNT &&
+        return (
+          ports.length === stablePort.REMOTE_ACCESS_PORT_CANDIDATE_COUNT &&
           new Set(ports).size === ports.length &&
           ports.every(
             (port) =>
               port >= stablePort.REMOTE_ACCESS_PORT_MIN &&
-              port < stablePort.REMOTE_ACCESS_PORT_MIN + stablePort.REMOTE_ACCESS_PORT_SPAN,
-          );
+              port <
+                stablePort.REMOTE_ACCESS_PORT_MIN +
+                  stablePort.REMOTE_ACCESS_PORT_SPAN,
+          )
+        );
       }),
       keys.map((key) => stablePort.stableRemoteAccessPortCandidates(key)),
     );
@@ -331,19 +1284,25 @@ async function main() {
           (key) =>
             JSON.stringify(stablePort.stableRemoteAccessPortCandidates(key)) ===
             JSON.stringify(
-              mobileStablePort.stableRemoteAccessPortCandidates(key.toString("base64")),
+              mobileStablePort.stableRemoteAccessPortCandidates(
+                key.toString("base64"),
+              ),
             ),
         ),
       );
     } else {
-      console.log("SKIP mobile restart-port parity (codara-mobile checkout not found)");
+      console.log(
+        "SKIP mobile restart-port parity (codara-mobile checkout not found)",
+      );
     }
   }
   {
     // The real service lifecycle (with relay disabled and loopback-only) must
     // release and rebind the same derived port. This is the exact sequence a
     // stopped/restarted `npm run dev` process performs.
-    const restartDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-restart-"));
+    const restartDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-restart-"),
+    );
     const restartDeps = {
       remoteDir: restartDir,
       deviceName: "Restart Test Studio",
@@ -386,7 +1345,9 @@ async function main() {
     // Occupy candidate zero like an unrelated dev server or an ephemeral
     // socket could. A production service must remain reachable on the next
     // deterministic candidate; the phone derives the same ordered set.
-    const fallbackDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-fallback-"));
+    const fallbackDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-fallback-"),
+    );
     const key = identity.loadOrCreateIdentity(fallbackDir).publicKey;
     const candidates = stablePort.stableRemoteAccessPortCandidates(key);
     const blocker = net.createServer();
@@ -430,7 +1391,9 @@ async function main() {
     }
   }
   {
-    const zeroDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-zero-port-"));
+    const zeroDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-zero-port-"),
+    );
     const zeroService = new remoteAccess.RemoteAccessService({
       remoteDir: zeroDir,
       deviceName: "Zero Port Test Studio",
@@ -461,10 +1424,16 @@ async function main() {
   if (fs.existsSync(MOBILE_RPC_TYPES)) {
     const mobileTypesSource = fs.readFileSync(MOBILE_RPC_TYPES, "utf8");
     const interfaceKeys = (source, name) => {
-      const body = source.match(
-        new RegExp(`export interface ${name} \\{([\\s\\S]*?)^\\}`, "m"),
-      )?.[1] ?? "";
-      return [...body.matchAll(/^\s*(?:'([^']+)'|([A-Za-z][A-Za-z0-9]*))\s*:/gm)]
+      const body =
+        source.match(
+          new RegExp(`export interface ${name} \\{([\\s\\S]*?)^\\}`, "m"),
+        )?.[1] ?? "";
+      // RpcMethods/RpcEvents are formatted with two-space top-level members.
+      // Matching arbitrary whitespace also captures nested `params`/`result`
+      // fields as fake RPC methods as soon as Prettier wraps a member.
+      return [
+        ...body.matchAll(/^ {2}(?:'([^']+)'|([A-Za-z][A-Za-z0-9]*))\s*:/gm),
+      ]
         .map((match) => match[1] || match[2])
         .sort();
     };
@@ -482,16 +1451,22 @@ async function main() {
     check(
       "desktop emits every live mobile RPC event",
       mobileEvents.length > 0 &&
-        mobileEvents.every((event) => rpcSource.includes(`pushEvent("${event}"`)),
+        mobileEvents.every((event) =>
+          rpcSource.includes(`pushEvent("${event}"`),
+        ),
       mobileEvents,
     );
     check(
       "desktop and mobile negotiate the same RPC protocol version",
       rpc.RPC_PROTOCOL_VERSION ===
-        Number(mobileTypesSource.match(/RPC_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1]),
+        Number(
+          mobileTypesSource.match(/RPC_PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1],
+        ),
     );
   } else {
-    console.log("SKIP mobile RPC contract parity (codara-mobile checkout not found)");
+    console.log(
+      "SKIP mobile RPC contract parity (codara-mobile checkout not found)",
+    );
   }
 
   /* ---- pairing window: expiry and single use ---------------------------- */
@@ -500,9 +1475,18 @@ async function main() {
   const win = new pairing.PairingWindow(T0);
   const secret = Buffer.from(win.secretB64(), "base64");
   check("pairing secret is 32 bytes", secret.length === 32);
-  check("pairing window expires exactly at ttl", win.expiresAt === T0 + 2 * 60 * 1000);
-  check("wrong secret is refused", win.consume(Buffer.alloc(32, 7), T0 + 1000) === false);
-  check("wrong-length proof is refused", win.consume(secret.subarray(0, 16), T0 + 1000) === false);
+  check(
+    "pairing window expires exactly at ttl",
+    win.expiresAt === T0 + 2 * 60 * 1000,
+  );
+  check(
+    "wrong secret is refused",
+    win.consume(Buffer.alloc(32, 7), T0 + 1000) === false,
+  );
+  check(
+    "wrong-length proof is refused",
+    win.consume(secret.subarray(0, 16), T0 + 1000) === false,
+  );
   check("a refused proof does not consume the window", win.isUsed() === false);
   check("correct secret is accepted", win.consume(secret, T0 + 1000) === true);
   check("the window is single use", win.consume(secret, T0 + 1001) === false);
@@ -532,21 +1516,40 @@ async function main() {
   });
   const parsedQr = JSON.parse(qr);
   check("qr: v is 1", parsedQr.v === 1);
-  check("qr: pk is canonical padded base64 of 32 bytes", parsedQr.pk === identityKey.toString("base64"));
+  check(
+    "qr: pk is canonical padded base64 of 32 bytes",
+    parsedQr.pk === identityKey.toString("base64"),
+  );
   check("qr: iat is included", parsedQr.iat === T0);
-  check("qr: secret decodes to 32 bytes", Buffer.from(parsedQr.secret, "base64").length === 32);
+  check(
+    "qr: secret decodes to 32 bytes",
+    Buffer.from(parsedQr.secret, "base64").length === 32,
+  );
   check("qr: name is control-stripped", !/[\u0000-\u001f]/.test(parsedQr.name));
 
   if (fs.existsSync(MOBILE_PARSER)) {
-    const mobile = await bundle(MOBILE_PARSER, "remote-access-mobile-parser-test.cjs");
+    const mobile = await bundle(
+      MOBILE_PARSER,
+      "remote-access-mobile-parser-test.cjs",
+    );
     const accepted = mobile.parsePairingPayload(qr, T0 + 30_000);
     check("phone parser accepts our payload", accepted.ok === true, accepted);
     if (accepted.ok) {
-      check("phone parser keeps our canonical pk", accepted.payload.pk === parsedQr.pk);
-      check("phone parser keeps our addrs", accepted.payload.addrs.length === 2);
+      check(
+        "phone parser keeps our canonical pk",
+        accepted.payload.pk === parsedQr.pk,
+      );
+      check(
+        "phone parser keeps our addrs",
+        accepted.payload.addrs.length === 2,
+      );
     }
     const stale = mobile.parsePairingPayload(qr, T0 + 2 * 60 * 1000 + 1);
-    check("phone parser expires our payload after 2 minutes", stale.ok === false && stale.code === "expired", stale);
+    check(
+      "phone parser expires our payload after 2 minutes",
+      stale.ok === false && stale.code === "expired",
+      stale,
+    );
   } else {
     console.log("SKIP phone-parser interop (codara-mobile checkout not found)");
   }
@@ -556,24 +1559,68 @@ async function main() {
   // Pairing accepts a peer only from a local address; lanAddresses only
   // advertises the same, so the "same network" property is enforced, not
   // just claimed.
-  check("loopback is local", pairing.isPrivateOrLocalAddress("127.0.0.1") === true);
+  check(
+    "loopback is local",
+    pairing.isPrivateOrLocalAddress("127.0.0.1") === true,
+  );
   check("10/8 is local", pairing.isPrivateOrLocalAddress("10.4.5.6") === true);
-  check("172.16/12 is local", pairing.isPrivateOrLocalAddress("172.20.1.1") === true);
-  check("172.32 is NOT local", pairing.isPrivateOrLocalAddress("172.32.0.1") === false);
-  check("192.168/16 is local", pairing.isPrivateOrLocalAddress("192.168.1.24") === true);
-  check("169.254/16 link-local is local", pairing.isPrivateOrLocalAddress("169.254.10.10") === true);
-  check("a public IPv4 is NOT local", pairing.isPrivateOrLocalAddress("8.8.8.8") === false);
-  check("a routable IPv4 is NOT local", pairing.isPrivateOrLocalAddress("203.0.113.7") === false);
-  check("IPv4-mapped loopback is local", pairing.isPrivateOrLocalAddress("::ffff:127.0.0.1") === true);
-  check("IPv4-mapped public is NOT local", pairing.isPrivateOrLocalAddress("::ffff:8.8.8.8") === false);
-  check("IPv6 loopback is local", pairing.isPrivateOrLocalAddress("::1") === true);
-  check("IPv6 link-local is local", pairing.isPrivateOrLocalAddress("fe80::1%en0") === true);
-  check("IPv6 unique-local is local", pairing.isPrivateOrLocalAddress("fd00::1234") === true);
-  check("public IPv6 is NOT local", pairing.isPrivateOrLocalAddress("2606:4700:4700::1111") === false);
-  check("empty/undefined address is NOT local", pairing.isPrivateOrLocalAddress(undefined) === false);
+  check(
+    "172.16/12 is local",
+    pairing.isPrivateOrLocalAddress("172.20.1.1") === true,
+  );
+  check(
+    "172.32 is NOT local",
+    pairing.isPrivateOrLocalAddress("172.32.0.1") === false,
+  );
+  check(
+    "192.168/16 is local",
+    pairing.isPrivateOrLocalAddress("192.168.1.24") === true,
+  );
+  check(
+    "169.254/16 link-local is local",
+    pairing.isPrivateOrLocalAddress("169.254.10.10") === true,
+  );
+  check(
+    "a public IPv4 is NOT local",
+    pairing.isPrivateOrLocalAddress("8.8.8.8") === false,
+  );
+  check(
+    "a routable IPv4 is NOT local",
+    pairing.isPrivateOrLocalAddress("203.0.113.7") === false,
+  );
+  check(
+    "IPv4-mapped loopback is local",
+    pairing.isPrivateOrLocalAddress("::ffff:127.0.0.1") === true,
+  );
+  check(
+    "IPv4-mapped public is NOT local",
+    pairing.isPrivateOrLocalAddress("::ffff:8.8.8.8") === false,
+  );
+  check(
+    "IPv6 loopback is local",
+    pairing.isPrivateOrLocalAddress("::1") === true,
+  );
+  check(
+    "IPv6 link-local is local",
+    pairing.isPrivateOrLocalAddress("fe80::1%en0") === true,
+  );
+  check(
+    "IPv6 unique-local is local",
+    pairing.isPrivateOrLocalAddress("fd00::1234") === true,
+  );
+  check(
+    "public IPv6 is NOT local",
+    pairing.isPrivateOrLocalAddress("2606:4700:4700::1111") === false,
+  );
+  check(
+    "empty/undefined address is NOT local",
+    pairing.isPrivateOrLocalAddress(undefined) === false,
+  );
   check(
     "lanAddresses advertises only local addresses",
-    pairing.lanAddresses().every((addr) => pairing.isPrivateOrLocalAddress(addr)),
+    pairing
+      .lanAddresses()
+      .every((addr) => pairing.isPrivateOrLocalAddress(addr)),
     pairing.lanAddresses(),
   );
 
@@ -601,39 +1648,64 @@ async function main() {
     store.addDevice(keyA, "Phone A", T0);
     check("paired key is authorized", store.isAuthorized(keyA) === true);
     check("unknown key is rejected", store.isAuthorized(keyB) === false);
-    check("wrong-length key is rejected", pairing.isAuthorizedKey(Buffer.alloc(16, 1), store.list()) === false);
+    check(
+      "wrong-length key is rejected",
+      pairing.isAuthorizedKey(Buffer.alloc(16, 1), store.list()) === false,
+    );
 
     // Persistence: a new store over the same dir sees the same devices.
     const reread = new pairing.PairedDeviceStore(dir);
-    check("devices persist across store instances", reread.isAuthorized(keyA) === true);
-    check("persisted record keeps name and addedAt", (() => {
-      const record = reread.list()[0];
-      return record.name === "Phone A" && record.addedAt === T0;
-    })());
+    check(
+      "devices persist across store instances",
+      reread.isAuthorized(keyA) === true,
+    );
+    check(
+      "persisted record keeps name and addedAt",
+      (() => {
+        const record = reread.list()[0];
+        return record.name === "Phone A" && record.addedAt === T0;
+      })(),
+    );
 
     if (process.platform !== "win32") {
-      const mode = fs.statSync(path.join(dir, "paired-devices.json")).mode & 0o777;
+      const mode =
+        fs.statSync(path.join(dir, "paired-devices.json")).mode & 0o777;
       check("paired-devices.json is 0600", mode === 0o600, mode.toString(8));
     }
 
     // Re-pairing the same key updates in place instead of duplicating.
     store.addDevice(keyA, "Phone A renamed", T0 + 5);
     check("re-pair does not duplicate", store.list().length === 1);
-    check("re-pair updates the name", store.list()[0].name === "Phone A renamed");
+    check(
+      "re-pair updates the name",
+      store.list()[0].name === "Phone A renamed",
+    );
     check("re-pair keeps the original addedAt", store.list()[0].addedAt === T0);
 
     // Revocation: key gone, persisted, and the firewall refuses it again.
     store.addDevice(keyB, "Phone B", T0 + 10);
-    check("revoke reports removal", (await store.revokeDevice(keyA.toString("base64"))) === true);
+    check(
+      "revoke reports removal",
+      (await store.revokeDevice(keyA.toString("base64"))) === true,
+    );
     check("revoked key is rejected", store.isAuthorized(keyA) === false);
     check("other devices survive a revoke", store.isAuthorized(keyB) === true);
-    check("revoke persists", new pairing.PairedDeviceStore(dir).isAuthorized(keyA) === false);
-    check("revoking an unknown key is a no-op", (await store.revokeDevice(keyA.toString("base64"))) === false);
+    check(
+      "revoke persists",
+      new pairing.PairedDeviceStore(dir).isAuthorized(keyA) === false,
+    );
+    check(
+      "revoking an unknown key is a no-op",
+      (await store.revokeDevice(keyA.toString("base64"))) === false,
+    );
 
     // A corrupt trust store fails closed: nobody is authorized.
     fs.writeFileSync(path.join(dir, "paired-devices.json"), "{not json");
     const corrupt = new pairing.PairedDeviceStore(dir);
-    check("corrupt device file authorizes nothing", corrupt.isAuthorized(keyB) === false);
+    check(
+      "corrupt device file authorizes nothing",
+      corrupt.isAuthorized(keyB) === false,
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -642,14 +1714,23 @@ async function main() {
 
   {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-root-"));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-outside-"));
+    const outside = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-outside-"),
+    );
     try {
       fs.mkdirSync(path.join(root, "project", "src"), { recursive: true });
-      fs.writeFileSync(path.join(root, "project", "src", "index.ts"), "export {};\n");
-      const nested = await localPolicy.resolveExistingInside(root, "project/src", {
-        directory: true,
-        rejectSymlinks: true,
-      });
+      fs.writeFileSync(
+        path.join(root, "project", "src", "index.ts"),
+        "export {};\n",
+      );
+      const nested = await localPolicy.resolveExistingInside(
+        root,
+        "project/src",
+        {
+          directory: true,
+          rejectSymlinks: true,
+        },
+      );
       check(
         "filesystem policy resolves an ordinary directory inside its root",
         nested.path === fs.realpathSync(path.join(root, "project", "src")),
@@ -676,11 +1757,16 @@ async function main() {
 
       let traversalError = null;
       try {
-        await localPolicy.resolveExistingInside(root, "../", { directory: true });
+        await localPolicy.resolveExistingInside(root, "../", {
+          directory: true,
+        });
       } catch (err) {
         traversalError = err;
       }
-      check("filesystem policy rejects lexical parent traversal", Boolean(traversalError));
+      check(
+        "filesystem policy rejects lexical parent traversal",
+        Boolean(traversalError),
+      );
 
       let outsideError = null;
       try {
@@ -691,10 +1777,16 @@ async function main() {
       } catch (err) {
         outsideError = err;
       }
-      check("filesystem policy rejects an absolute path outside its root", Boolean(outsideError));
+      check(
+        "filesystem policy rejects an absolute path outside its root",
+        Boolean(outsideError),
+      );
 
       if (process.platform !== "win32") {
-        fs.symlinkSync(path.join(root, "project", "src"), path.join(root, "linked-src"));
+        fs.symlinkSync(
+          path.join(root, "project", "src"),
+          path.join(root, "linked-src"),
+        );
         let symlinkError = null;
         try {
           await localPolicy.resolveExistingInside(root, "linked-src/index.ts", {
@@ -712,18 +1804,24 @@ async function main() {
         fs.symlinkSync(outside, path.join(root, "escape"));
         let symlinkEscapeError = null;
         try {
-          await localPolicy.resolveExistingInside(root, "escape", { directory: true });
+          await localPolicy.resolveExistingInside(root, "escape", {
+            directory: true,
+          });
         } catch (err) {
           symlinkEscapeError = err;
         }
-        check("filesystem policy rejects a symlink escape from the root", Boolean(symlinkEscapeError));
+        check(
+          "filesystem policy rejects a symlink escape from the root",
+          Boolean(symlinkEscapeError),
+        );
       }
 
       const glyphs = "🙂".repeat(100);
       const truncated = localPolicy.truncateUtf8(glyphs, 33);
       check(
         "UTF-8 truncation stays inside its byte budget without a broken glyph",
-        Buffer.byteLength(truncated, "utf8") <= 33 && !truncated.includes("\ufffd"),
+        Buffer.byteLength(truncated, "utf8") <= 33 &&
+          !truncated.includes("\ufffd"),
         { bytes: Buffer.byteLength(truncated, "utf8"), truncated },
       );
     } finally {
@@ -735,8 +1833,12 @@ async function main() {
   /* ---- workspace-bound file mutations --------------------------------- */
 
   {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-mutate-"));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-mutate-outside-"));
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-mutate-"),
+    );
+    const outside = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-mutate-outside-"),
+    );
     try {
       fs.mkdirSync(path.join(root, "src"));
       fs.mkdirSync(path.join(root, "archive"));
@@ -763,7 +1865,9 @@ async function main() {
       });
       check(
         "remote Explorer creates a folder without recursive path injection",
-        folder.path === "notes" && folder.isDir && fs.statSync(path.join(root, "notes")).isDirectory(),
+        folder.path === "notes" &&
+          folder.isDir &&
+          fs.statSync(path.join(root, "notes")).isDirectory(),
         folder,
       );
 
@@ -791,7 +1895,8 @@ async function main() {
       check(
         "remote rename refuses to overwrite an existing entry",
         /already exists/i.test(collisionError?.message ?? "") &&
-          fs.readFileSync(path.join(root, "src", "existing.ts"), "utf8") === "keep" &&
+          fs.readFileSync(path.join(root, "src", "existing.ts"), "utf8") ===
+            "keep" &&
           fs.existsSync(path.join(root, "src", "renamed.ts")),
         collisionError?.message,
       );
@@ -807,6 +1912,47 @@ async function main() {
           fs.existsSync(path.join(root, "archive", "renamed.ts")),
         moved,
       );
+      fs.writeFileSync(path.join(root, "src", "collision.ts"), "source");
+      fs.writeFileSync(
+        path.join(root, "archive", "collision.ts"),
+        "destination",
+      );
+      let ambiguousMoveError = null;
+      try {
+        await fileMutations.moveRemoteWorkspaceEntry(root, {
+          path: "src/collision.ts",
+          destinationPath: "archive",
+        });
+      } catch (err) {
+        ambiguousMoveError = err;
+      }
+      check(
+        "remote move replay does not hide an ambiguous destination collision",
+        /already exists/i.test(ambiguousMoveError?.message ?? "") &&
+          fs.readFileSync(path.join(root, "src", "collision.ts"), "utf8") ===
+            "source" &&
+          fs.readFileSync(
+            path.join(root, "archive", "collision.ts"),
+            "utf8",
+          ) === "destination",
+        ambiguousMoveError?.message,
+      );
+
+      let missingSourceError = null;
+      try {
+        await fileMutations.moveRemoteWorkspaceEntry(root, {
+          path: "src/renamed.ts",
+          destinationPath: "archive",
+        });
+      } catch (err) {
+        missingSourceError = err;
+      }
+      check(
+        "a first move with a missing source never claims an unrelated target",
+        Boolean(missingSourceError) &&
+          fs.existsSync(path.join(root, "archive", "renamed.ts")),
+        missingSourceError?.message,
+      );
 
       let traversalError = null;
       try {
@@ -820,7 +1966,8 @@ async function main() {
       }
       check(
         "remote create cannot traverse outside its workspace",
-        Boolean(traversalError) && !fs.existsSync(path.join(path.dirname(root), "escape.txt")),
+        Boolean(traversalError) &&
+          !fs.existsSync(path.join(path.dirname(root), "escape.txt")),
         traversalError?.message,
       );
 
@@ -886,7 +2033,8 @@ async function main() {
         check(
           "remote delete rejects a symlink escape and preserves the outside target",
           Boolean(symlinkMutationError) &&
-            fs.readFileSync(path.join(outside, "outside.txt"), "utf8") === "outside",
+            fs.readFileSync(path.join(outside, "outside.txt"), "utf8") ===
+              "outside",
           symlinkMutationError?.message,
         );
       }
@@ -899,7 +2047,8 @@ async function main() {
       }
       check(
         "remote delete can never remove the workspace root",
-        /workspace root/i.test(rootDeleteError?.message ?? "") && fs.existsSync(root),
+        /workspace root/i.test(rootDeleteError?.message ?? "") &&
+          fs.existsSync(root),
         rootDeleteError?.message,
       );
 
@@ -923,7 +2072,9 @@ async function main() {
   /* ---- Remote terminal image uploads ---------------------------------- */
 
   {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codara-remote-image-test-"));
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-image-test-"),
+    );
     const imageDirectory = path.join(directory, "image dir");
     try {
       const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
@@ -949,12 +2100,15 @@ async function main() {
         attachment,
       );
 
-      const partial = await imageUpload.createRemoteImageUpload(imageDirectory, {
-        workspaceId: "ws1",
-        name: "partial.jpg",
-        mimeType: "image/jpeg",
-        size: jpeg.length,
-      });
+      const partial = await imageUpload.createRemoteImageUpload(
+        imageDirectory,
+        {
+          workspaceId: "ws1",
+          name: "partial.jpg",
+          mimeType: "image/jpeg",
+          size: jpeg.length,
+        },
+      );
       await partial.write(jpeg.subarray(0, 3));
       const beforeAbort = fs.readdirSync(imageDirectory).length;
       await partial.abort();
@@ -993,15 +2147,17 @@ async function main() {
     const persistedRun = {
       id: "run-persisted",
       workspaceId: "ws1",
-      humanMessages: [{
-        id: "message-1",
-        clientMessageId: "phone-retry-1",
-        runId: "run-persisted",
-        author: "user",
-        kind: "note",
-        message: "Build the feature",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      }],
+      humanMessages: [
+        {
+          id: "message-1",
+          clientMessageId: "phone-retry-1",
+          runId: "run-persisted",
+          author: "user",
+          kind: "note",
+          message: "Build the feature",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
     };
     const retry = coraPolicy.findRemoteCoraRetry([persistedRun], {
       workspaceId: "ws1",
@@ -1078,11 +2234,17 @@ async function main() {
       order,
     );
     await Promise.resolve();
-    check("settled Cora retry keys leave no queue entry", queue.size() === 0, queue.size());
+    check(
+      "settled Cora retry keys leave no queue entry",
+      queue.size() === 0,
+      queue.size(),
+    );
 
-    await queue.run("ws1:phone-retry-failed", async () => {
-      throw new Error("simulated first delivery failure");
-    }).catch(() => undefined);
+    await queue
+      .run("ws1:phone-retry-failed", async () => {
+        throw new Error("simulated first delivery failure");
+      })
+      .catch(() => undefined);
     const recovered = await queue.run(
       "ws1:phone-retry-failed",
       async () => "retry-ran",
@@ -1094,10 +2256,210 @@ async function main() {
     );
   }
 
+  /* ---- compact durable Cora send receipts ----------------------------- */
+
+  {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-cora-send-receipts-"),
+    );
+    let now = 1_800_000_000_000;
+    const input = {
+      workspaceId: "ws1",
+      message: "TOP SECRET feature request",
+      clientMessageId: "phone-lost-reply-1",
+    };
+    const persistedRun = {
+      id: "run-receipt",
+      workspaceId: "ws1",
+      humanMessages: [
+        {
+          clientMessageId: input.clientMessageId,
+          author: "user",
+          kind: "note",
+          message: input.message,
+        },
+      ],
+    };
+    try {
+      const first = await coraSendReceipts.CoraSendReceiptIndex.open({
+        rootDir: directory,
+        now: () => now,
+        maxRecords: 3,
+        retentionMs: 1_000,
+      });
+      await Promise.all([
+        first.record(input, persistedRun.id),
+        first.record(input, persistedRun.id),
+      ]);
+      const durableText = fs.readFileSync(first.filePath, "utf8");
+      check(
+        "Cora send receipt persists only routing identities and a message digest",
+        !durableText.includes(input.message) &&
+          durableText.includes(input.clientMessageId) &&
+          /"messageSha256":"[0-9a-f]{64}"/.test(durableText) &&
+          first.listRecordsForTest().length === 1,
+        durableText,
+      );
+
+      const restarted = await coraSendReceipts.CoraSendReceiptIndex.open({
+        rootDir: directory,
+        now: () => now,
+        maxRecords: 3,
+        retentionMs: 1_000,
+      });
+      let runReads = 0;
+      const recovered = await restarted.resolve(input, async (runId) => {
+        runReads += 1;
+        return runId === persistedRun.id ? persistedRun : null;
+      });
+      check(
+        "a lost-reply retry survives restart with exactly one indexed run read",
+        recovered === persistedRun && runReads === 1,
+        { recovered: recovered?.id, runReads },
+      );
+
+      let collision = null;
+      runReads = 0;
+      try {
+        await restarted.resolve(
+          { ...input, message: "different request" },
+          async () => {
+            runReads += 1;
+            return persistedRun;
+          },
+        );
+      } catch (error) {
+        collision = error;
+      }
+      check(
+        "receipt hash collisions are rejected before any run body read",
+        collision?.code === "CORA_SEND_RECEIPT_CONFLICT" && runReads === 0,
+        { message: collision?.message, runReads },
+      );
+
+      let wrongRun = null;
+      try {
+        await restarted.resolve(
+          { ...input, runId: "run-other" },
+          async () => persistedRun,
+        );
+      } catch (error) {
+        wrongRun = error;
+      }
+      check(
+        "receipt routes cannot be replayed into another run",
+        wrongRun?.code === "CORA_SEND_RECEIPT_CONFLICT",
+        wrongRun?.message,
+      );
+
+      let authoritativeCollision = null;
+      runReads = 0;
+      try {
+        await restarted.resolve(input, async () => {
+          runReads += 1;
+          return {
+            ...persistedRun,
+            humanMessages: [
+              {
+                ...persistedRun.humanMessages[0],
+                message: "tampered authoritative message",
+              },
+            ],
+          };
+        });
+      } catch (error) {
+        authoritativeCollision = error;
+      }
+      check(
+        "receipt matches are collision-checked against the authoritative run message",
+        authoritativeCollision?.code === "CORA_SEND_RECEIPT_CONFLICT" &&
+          runReads === 1,
+        { message: authoritativeCollision?.message, runReads },
+      );
+
+      const stale = await restarted.resolve(input, async () => ({
+        ...persistedRun,
+        humanMessages: [],
+      }));
+      const afterStaleRestart =
+        await coraSendReceipts.CoraSendReceiptIndex.open({
+          rootDir: directory,
+          now: () => now,
+          maxRecords: 3,
+          retentionMs: 1_000,
+        });
+      check(
+        "a stale receipt whose authoritative message vanished is removed safely",
+        stale === null &&
+          afterStaleRestart.listRecordsForTest().length === 0,
+        afterStaleRestart.listRecordsForTest(),
+      );
+
+      await afterStaleRestart.record(input, persistedRun.id);
+      const removed = await afterStaleRestart.removeRun("ws1", persistedRun.id);
+      const afterDelete = await coraSendReceipts.CoraSendReceiptIndex.open({
+        rootDir: directory,
+        now: () => now,
+      });
+      check(
+        "run deletion prunes all of its Cora send receipts durably",
+        removed === 1 && afterDelete.listRecordsForTest().length === 0,
+        { removed, records: afterDelete.listRecordsForTest() },
+      );
+
+      fs.writeFileSync(afterDelete.filePath, "{not-json", "utf8");
+      const logs = [];
+      const repaired = await coraSendReceipts.CoraSendReceiptIndex.open({
+        rootDir: directory,
+        now: () => now,
+        log: (line) => logs.push(line),
+      });
+      await repaired.record(input, persistedRun.id);
+      const afterCorruptRepair =
+        await coraSendReceipts.CoraSendReceiptIndex.open({
+          rootDir: directory,
+          now: () => now,
+          retentionMs: 1_000,
+        });
+      check(
+        "a corrupt receipt index fails closed and repairs on the next committed receipt",
+        logs.some((line) => /corrupt index/i.test(line)) &&
+          afterCorruptRepair.listRecordsForTest().length === 1,
+        { logs, records: afterCorruptRepair.listRecordsForTest() },
+      );
+
+      now += 1_001;
+      await afterCorruptRepair.record(
+        {
+          workspaceId: "ws1",
+          message: "fresh",
+          clientMessageId: "phone-fresh",
+        },
+        "run-fresh",
+      );
+      check(
+        "receipt retention prunes expired run routes instead of growing forever",
+        afterCorruptRepair
+          .listRecordsForTest()
+          .every((record) => record.clientMessageId !== input.clientMessageId),
+        afterCorruptRepair.listRecordsForTest(),
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
   /* ---- framing ---------------------------------------------------------- */
 
-  const frameA = rpc.encodeFrame({ id: 1, method: "ping", params: { nonce: "n" } });
-  check("frame length prefix matches body", frameA.readUInt32BE(0) === frameA.length - 4);
+  const frameA = rpc.encodeFrame({
+    id: 1,
+    method: "ping",
+    params: { nonce: "n" },
+  });
+  check(
+    "frame length prefix matches body",
+    frameA.readUInt32BE(0) === frameA.length - 4,
+  );
 
   const decoder = new rpc.FrameDecoder();
   // Two frames delivered across pathological chunk boundaries.
@@ -1105,10 +2467,15 @@ async function main() {
   const joined = Buffer.concat([frameA, frameB]);
   let decoded = [];
   for (let i = 0; i < joined.length; i += 3) {
-    decoded = decoded.concat(decoder.push(joined.subarray(i, Math.min(i + 3, joined.length))));
+    decoded = decoded.concat(
+      decoder.push(joined.subarray(i, Math.min(i + 3, joined.length))),
+    );
   }
   check("decoder reassembles frames across chunk splits", decoded.length === 2);
-  check("decoded frame round-trips", decoded[0].method === "ping" && decoded[1].id === 2);
+  check(
+    "decoded frame round-trips",
+    decoded[0].method === "ping" && decoded[1].id === 2,
+  );
 
   // Oversize: the declared length alone must reject, before any body bytes.
   const big = Buffer.alloc(4);
@@ -1119,11 +2486,17 @@ async function main() {
   } catch (err) {
     limitErr = err;
   }
-  check("oversized declared frame throws FrameLimitError", limitErr?.name === "FrameLimitError");
+  check(
+    "oversized declared frame throws FrameLimitError",
+    limitErr?.name === "FrameLimitError",
+  );
 
   const atLimit = new rpc.FrameDecoder(64);
   const smallFrame = rpc.encodeFrame({ pad: "x".repeat(20) });
-  check("frames under a custom limit pass", atLimit.push(smallFrame).length === 1);
+  check(
+    "frames under a custom limit pass",
+    atLimit.push(smallFrame).length === 1,
+  );
 
   /* ---- frame-count cap and linear buffering (item 2) -------------------- */
 
@@ -1133,19 +2506,30 @@ async function main() {
   // every frame with no cap.
   {
     const tiny = rpc.encodeFrame(0);
-    const flood = Buffer.concat(Array.from({ length: rpc.MAX_FRAMES_PER_PUSH + 5 }, () => tiny));
+    const flood = Buffer.concat(
+      Array.from({ length: rpc.MAX_FRAMES_PER_PUSH + 5 }, () => tiny),
+    );
     let countErr = null;
     try {
       new rpc.FrameDecoder().push(flood);
     } catch (err) {
       countErr = err;
     }
-    check("a chunk over the per-push frame cap throws FrameCountError", countErr?.name === "FrameCountError", countErr?.name);
+    check(
+      "a chunk over the per-push frame cap throws FrameCountError",
+      countErr?.name === "FrameCountError",
+      countErr?.name,
+    );
 
     // Exactly at the cap is still accepted: the cap is a ceiling, not an
     // off-by-one.
-    const atCap = Buffer.concat(Array.from({ length: rpc.MAX_FRAMES_PER_PUSH }, () => tiny));
-    check("a chunk exactly at the per-push frame cap is accepted", new rpc.FrameDecoder().push(atCap).length === rpc.MAX_FRAMES_PER_PUSH);
+    const atCap = Buffer.concat(
+      Array.from({ length: rpc.MAX_FRAMES_PER_PUSH }, () => tiny),
+    );
+    check(
+      "a chunk exactly at the per-push frame cap is accepted",
+      new rpc.FrameDecoder().push(atCap).length === rpc.MAX_FRAMES_PER_PUSH,
+    );
 
     // The declared-length cap still rejects before the body is buffered, even
     // when the body bytes never arrive: only the 4-byte prefix is present.
@@ -1157,7 +2541,10 @@ async function main() {
     } catch (err) {
       limitErr2 = err;
     }
-    check("oversize is rejected from the length prefix alone, no body", limitErr2?.name === "FrameLimitError");
+    check(
+      "oversize is rejected from the length prefix alone, no body",
+      limitErr2?.name === "FrameLimitError",
+    );
 
     // Byte-at-a-time delivery of a large frame reassembles correctly and
     // stays linear (the chunk-list buffer never re-copies consumed bytes).
@@ -1169,8 +2556,15 @@ async function main() {
     for (let i = 0; i < bigFrame.length; i += 1) {
       dripped = dripped.concat(dripDecoder.push(bigFrame.subarray(i, i + 1)));
     }
-    check("byte-at-a-time delivery reassembles the frame", dripped.length === 1 && dripped[0].blob.length === 200_000);
-    check("byte-at-a-time delivery stays fast (linear, not quadratic)", Date.now() - started < 4000, Date.now() - started);
+    check(
+      "byte-at-a-time delivery reassembles the frame",
+      dripped.length === 1 && dripped[0].blob.length === 200_000,
+    );
+    check(
+      "byte-at-a-time delivery stays fast (linear, not quadratic)",
+      Date.now() - started < 4000,
+      Date.now() - started,
+    );
   }
 
   /* ---- rpc session ------------------------------------------------------ */
@@ -1213,9 +2607,308 @@ async function main() {
     };
   }
 
+  // Device-scoped terminal store double. The registry itself has its own
+  // focused tests; this double keeps the RPC suite about the wire contract:
+  // stable retries, attachment generations, sequence cursors and disconnect
+  // ownership.
+  function makeTerminalLeaseStore(createTerminal) {
+    const leases = new Map();
+    const createReceipts = new Map();
+    const closeReceipts = new Map();
+    const calls = [];
+    let terminalSerial = 0;
+    let attachmentSerial = 0;
+
+    const leaseError = (code, message) =>
+      Object.assign(new Error(message), { code });
+    const copyDescriptor = (lease) => ({ ...lease.descriptor });
+    const requireOwned = (ownerKey, terminalId) => {
+      const lease = leases.get(terminalId);
+      if (!lease || lease.ownerKey !== ownerKey) {
+        throw leaseError(
+          "UNKNOWN_REMOTE_TERMINAL",
+          "That remote terminal is no longer available.",
+        );
+      }
+      return lease;
+    };
+    const requireAttached = (
+      ownerKey,
+      terminalId,
+      subscriberId,
+      attachmentId,
+    ) => {
+      const lease = requireOwned(ownerKey, terminalId);
+      if (
+        lease.subscriber?.subscriberId !== subscriberId ||
+        lease.subscriber?.attachmentId !== attachmentId
+      ) {
+        throw leaseError(
+          "STALE_TERMINAL_ATTACHMENT",
+          "This terminal moved to a newer connection.",
+        );
+      }
+      return lease;
+    };
+
+    return {
+      calls,
+      leases,
+      async createInteractive(ownerKey, requestId, request) {
+        calls.push(["createInteractive", ownerKey, requestId, request]);
+        const fingerprint = JSON.stringify(request);
+        const receiptKey = `${ownerKey}\0${requestId}`;
+        const prior = createReceipts.get(receiptKey);
+        if (prior) {
+          if (prior.fingerprint !== fingerprint) {
+            throw leaseError(
+              "TERMINAL_CREATE_CONFLICT",
+              "That create retry id was reused for different input.",
+            );
+          }
+          return copyDescriptor(requireOwned(ownerKey, prior.terminalId));
+        }
+        const terminalId = `lease-${++terminalSerial}`;
+        const lease = {
+          ownerKey,
+          descriptor: {
+            terminalId,
+            workspaceId: request.workspaceId,
+            kind: "interactive",
+            phase: "starting",
+            profile: request.profile,
+            cols: request.cols,
+            rows: request.rows,
+            createdAt: 1_700_000_000_000 + terminalSerial,
+            sequence: 0,
+            nextInputSequence: 1,
+          },
+          replay: [],
+          subscriber: null,
+          acceptedInputs: new Map(),
+          handle: null,
+        };
+        leases.set(terminalId, lease);
+        createReceipts.set(receiptKey, { fingerprint, terminalId });
+        const handle = await createTerminal({
+          ...request,
+          onData(data) {
+            lease.descriptor.sequence += 1;
+            const event = {
+              terminalId,
+              sequence: lease.descriptor.sequence,
+              data,
+            };
+            lease.replay.push(event);
+            lease.subscriber?.callbacks.onData(event);
+          },
+          onExit() {
+            if (lease.descriptor.phase === "ended") return;
+            lease.descriptor.phase = "ended";
+            lease.descriptor.sequence += 1;
+            lease.subscriber?.callbacks.onExit({
+              terminalId,
+              sequence: lease.descriptor.sequence,
+            });
+          },
+        });
+        lease.handle = handle;
+        lease.descriptor.phase = "live";
+        if (handle.desktopTabId)
+          lease.descriptor.desktopTabId = handle.desktopTabId;
+        if (handle.title) lease.descriptor.title = handle.title;
+        return copyDescriptor(lease);
+      },
+      list(ownerKey) {
+        calls.push(["list", ownerKey]);
+        return [...leases.values()]
+          .filter((lease) => lease.ownerKey === ownerKey)
+          .map(copyDescriptor);
+      },
+      attach(ownerKey, terminalId, afterSequence, subscriberId, callbacks) {
+        calls.push([
+          "attach",
+          ownerKey,
+          terminalId,
+          afterSequence,
+          subscriberId,
+        ]);
+        const lease = requireOwned(ownerKey, terminalId);
+        if (
+          !Number.isSafeInteger(afterSequence) ||
+          afterSequence < 0 ||
+          afterSequence > lease.descriptor.sequence
+        ) {
+          throw leaseError(
+            "INVALID_TERMINAL_CURSOR",
+            "That terminal cursor is invalid.",
+          );
+        }
+        const attachmentId = `attachment-${++attachmentSerial}`;
+        lease.subscriber = { subscriberId, attachmentId, callbacks };
+        return {
+          terminal: copyDescriptor(lease),
+          replay: lease.replay
+            .filter((event) => event.sequence > afterSequence)
+            .map(({ sequence, data }) => ({ sequence, data })),
+          truncated: false,
+          attachmentId,
+        };
+      },
+      detach(ownerKey, terminalId, subscriberId, attachmentId) {
+        calls.push([
+          "detach",
+          ownerKey,
+          terminalId,
+          subscriberId,
+          attachmentId,
+        ]);
+        const lease = requireOwned(ownerKey, terminalId);
+        if (
+          lease.subscriber?.subscriberId === subscriberId &&
+          lease.subscriber?.attachmentId === attachmentId
+        ) {
+          lease.subscriber = null;
+        }
+      },
+      detachSubscriber(subscriberId) {
+        calls.push(["detachSubscriber", subscriberId]);
+        for (const lease of leases.values()) {
+          if (lease.subscriber?.subscriberId === subscriberId) {
+            lease.subscriber = null;
+          }
+        }
+      },
+      write(
+        ownerKey,
+        terminalId,
+        subscriberId,
+        attachmentId,
+        inputSequence,
+        data,
+      ) {
+        calls.push([
+          "write",
+          ownerKey,
+          terminalId,
+          subscriberId,
+          attachmentId,
+          inputSequence,
+          data,
+        ]);
+        const lease = requireAttached(
+          ownerKey,
+          terminalId,
+          subscriberId,
+          attachmentId,
+        );
+        const accepted = lease.acceptedInputs.get(inputSequence);
+        if (accepted !== undefined) {
+          if (accepted !== data) {
+            throw leaseError(
+              "TERMINAL_INPUT_CONFLICT",
+              "That input sequence was reused for different data.",
+            );
+          }
+          return;
+        }
+        if (inputSequence !== lease.descriptor.nextInputSequence) {
+          throw leaseError(
+            "TERMINAL_INPUT_GAP",
+            "Terminal input arrived out of order.",
+          );
+        }
+        lease.acceptedInputs.set(inputSequence, data);
+        lease.descriptor.nextInputSequence += 1;
+        lease.handle.write(data);
+      },
+      async resize(
+        ownerKey,
+        terminalId,
+        subscriberId,
+        attachmentId,
+        cols,
+        rows,
+      ) {
+        calls.push([
+          "resize",
+          ownerKey,
+          terminalId,
+          subscriberId,
+          attachmentId,
+          cols,
+          rows,
+        ]);
+        const lease = requireAttached(
+          ownerKey,
+          terminalId,
+          subscriberId,
+          attachmentId,
+        );
+        await lease.handle.resize(cols, rows);
+        lease.descriptor.cols = cols;
+        lease.descriptor.rows = rows;
+      },
+      close(
+        ownerKey,
+        terminalId,
+        subscriberId,
+        attachmentId,
+        requestId,
+      ) {
+        calls.push([
+          "close",
+          ownerKey,
+          terminalId,
+          subscriberId,
+          attachmentId,
+          requestId,
+        ]);
+        const receiptKey = `${ownerKey}\0${requestId}`;
+        const prior = closeReceipts.get(receiptKey);
+        if (prior) {
+          if (prior !== terminalId) {
+            throw leaseError(
+              "TERMINAL_CLOSE_CONFLICT",
+              "That close retry id was reused for another terminal.",
+            );
+          }
+          return;
+        }
+        const lease = requireAttached(
+          ownerKey,
+          terminalId,
+          subscriberId,
+          attachmentId,
+        );
+        closeReceipts.set(receiptKey, terminalId);
+        lease.handle.close();
+        leases.delete(terminalId);
+      },
+      revokeOwner(ownerKey) {
+        calls.push(["revokeOwner", ownerKey]);
+        for (const [terminalId, lease] of leases) {
+          if (lease.ownerKey !== ownerKey) continue;
+          lease.handle?.close();
+          leases.delete(terminalId);
+        }
+      },
+      shutdown() {
+        calls.push(["shutdown"]);
+        for (const lease of leases.values()) lease.handle?.close();
+        leases.clear();
+      },
+    };
+  }
+
   const madeTerminals = [];
   const services = {
-    device: { publicKey: "pk", name: "Studio", role: "computer", version: "0.0.0" },
+    device: {
+      publicKey: "pk",
+      name: "Studio",
+      role: "computer",
+      version: "0.0.0",
+    },
     listWorkspaces: async () => [{ id: "ws1", name: "One", path: "/tmp/one" }],
     createTerminal: async (request) => {
       const terminal = {
@@ -1244,14 +2937,16 @@ async function main() {
 
   const stream = makeFakeStream();
   const session = new rpc.RpcSession(stream, services);
-  const request = (id, method, params) => stream.inject(rpc.encodeFrame({ id, method, params }));
+  const request = (id, method, params) =>
+    stream.inject(rpc.encodeFrame({ id, method, params }));
   const flush = () => new Promise((resolve) => setImmediate(resolve));
 
   request(1, "workspaces.list", {});
   await flush();
   check(
     "methods before hello are refused",
-    stream.outbox[0]?.ok === false && stream.outbox[0]?.error.code === "not-connected",
+    stream.outbox[0]?.ok === false &&
+      stream.outbox[0]?.error.code === "not-connected",
     stream.outbox[0],
   );
 
@@ -1259,61 +2954,95 @@ async function main() {
   await flush();
   check(
     "wrong protocol version is refused",
-    stream.outbox[1]?.ok === false && stream.outbox[1]?.error.code === "unsupported-protocol",
+    stream.outbox[1]?.ok === false &&
+      stream.outbox[1]?.error.code === "unsupported-protocol",
   );
 
-  request(3, "hello", { protocol: 0, device: { publicKey: "c", name: "Phone", role: "phone", version: "1" } });
+  request(3, "hello", {
+    protocol: rpc.RPC_PROTOCOL_VERSION,
+    device: { publicKey: "c", name: "Phone", role: "phone", version: "1" },
+  });
   await flush();
   check(
     "hello succeeds and reports our device",
-    stream.outbox[2]?.ok === true && stream.outbox[2]?.result.device.role === "computer",
+    stream.outbox[2]?.ok === true &&
+      stream.outbox[2]?.result.device.role === "computer",
     stream.outbox[2],
   );
 
   request(4, "workspaces.list", {});
   await flush();
-  check("workspaces.list answers", stream.outbox[3]?.result.workspaces[0].id === "ws1");
+  check(
+    "workspaces.list answers",
+    stream.outbox[3]?.result.workspaces[0].id === "ws1",
+  );
 
   request(5, "terminal.create", { workspaceId: "ws1", cols: 80, rows: 24 });
   await flush();
   const terminalId = stream.outbox[4]?.result?.terminalId;
-  check("terminal.create returns an id", typeof terminalId === "string", stream.outbox[4]);
+  check(
+    "terminal.create returns an id",
+    typeof terminalId === "string",
+    stream.outbox[4],
+  );
 
   madeTerminals[0].request.onData("hi from pty");
   check(
-    "pty output arrives as a terminal.data event",
-    stream.outbox[5]?.event === "terminal.data" && stream.outbox[5]?.payload.data === "hi from pty",
+    "legacy pty output arrives as a sequenced terminal.data event",
+    stream.outbox[5]?.event === "terminal.data" &&
+      stream.outbox[5]?.payload.data === "hi from pty" &&
+      stream.outbox[5]?.payload.sequence === 1,
     stream.outbox[5],
   );
 
   request(6, "terminal.write", { terminalId, data: "echo x\n" });
   await flush();
-  check("terminal.write reaches the pty", madeTerminals[0].written[0] === "echo x\n");
+  check(
+    "terminal.write reaches the pty",
+    madeTerminals[0].written[0] === "echo x\n",
+  );
 
   request(7, "terminal.write", { terminalId: "rt-nope", data: "x" });
   await flush();
   check(
     "unknown terminal id errors cleanly",
-    stream.outbox[7]?.ok === false && stream.outbox[7]?.error.code === "unknown-terminal",
+    stream.outbox[7]?.ok === false &&
+      stream.outbox[7]?.error.code === "unknown-terminal",
   );
 
   // Per-connection terminal cap.
   for (let i = 0; i < rpc.MAX_TERMINALS_PER_CONNECTION; i += 1) {
-    request(10 + i, "terminal.create", { workspaceId: "ws1", cols: 80, rows: 24 });
+    request(10 + i, "terminal.create", {
+      workspaceId: "ws1",
+      cols: 80,
+      rows: 24,
+    });
   }
   await flush();
   // Replies interleave (cap refusals are synchronous, successes resolve a
   // spawn later), so search rather than assume ordering: of the 8 creates,
   // 7 fill the cap (one terminal already exists) and exactly 1 is refused.
   const refused = stream.outbox.filter(
-    (frame) => frame?.ok === false && /terminals open/.test(frame?.error?.message ?? ""),
+    (frame) =>
+      frame?.ok === false && /terminals open/.test(frame?.error?.message ?? ""),
   );
-  check("terminal cap refuses the create over the limit", refused.length === 1, refused.length);
-  check("session tracks the capped terminal count", session.terminalCount() === rpc.MAX_TERMINALS_PER_CONNECTION);
+  check(
+    "terminal cap refuses the create over the limit",
+    refused.length === 1,
+    refused.length,
+  );
+  check(
+    "session tracks the capped terminal count",
+    session.terminalCount() === rpc.MAX_TERMINALS_PER_CONNECTION,
+  );
 
-  // destroy() (the revoke path) closes every terminal the session owns.
+  // A bare RpcSession has no process-wide lease store. It deliberately keeps
+  // the old connection-owned behavior used by isolated embedders and tests.
   session.destroy();
-  check("destroy closes all session terminals", madeTerminals.every((t) => t.closed));
+  check(
+    "a bare RpcSession disconnect closes every legacy session-owned terminal",
+    madeTerminals.every((t) => t.closed),
+  );
   check("destroy tears the stream down", stream.destroyed === true);
 
   // Revocation is an authenticated terminal condition, unlike an ordinary
@@ -1326,7 +3055,10 @@ async function main() {
       rpc.encodeFrame({
         id: 1,
         method: "hello",
-        params: { protocol: 0, device: services.device },
+        params: {
+          protocol: rpc.RPC_PROTOCOL_VERSION,
+          device: services.device,
+        },
       }),
     );
     await flush();
@@ -1338,7 +3070,9 @@ async function main() {
         revokedStream.ended === true,
       revokedStream.outbox.slice(before),
     );
-    revokedStream.inject(rpc.encodeFrame({ id: 2, method: "ping", params: { nonce: "late" } }));
+    revokedStream.inject(
+      rpc.encodeFrame({ id: 2, method: "ping", params: { nonce: "late" } }),
+    );
     await flush();
     check(
       "a revoked session cannot process another request while its notice flushes",
@@ -1353,8 +3087,14 @@ async function main() {
   const evil = Buffer.alloc(4);
   evil.writeUInt32BE(rpc.MAX_FRAME_BYTES + 1, 0);
   stream2.inject(evil);
-  check("oversized inbound frame destroys the session", stream2.destroyed === true);
-  check("no reply is sent for a framing violation", stream2.outbox.length === 0);
+  check(
+    "oversized inbound frame destroys the session",
+    stream2.destroyed === true,
+  );
+  check(
+    "no reply is sent for a framing violation",
+    stream2.outbox.length === 0,
+  );
 
   // Individually valid async requests still need a concurrency ceiling. A
   // paired but compromised phone must not fan out unbounded filesystem/git/
@@ -1373,8 +3113,13 @@ async function main() {
     const limitedRequest = (id, method, params) =>
       limitedStream.inject(rpc.encodeFrame({ id, method, params }));
     limitedRequest(1, "hello", {
-      protocol: 0,
-      device: { publicKey: "phone", name: "Phone", role: "phone", version: "1" },
+      protocol: rpc.RPC_PROTOCOL_VERSION,
+      device: {
+        publicKey: "phone",
+        name: "Phone",
+        role: "phone",
+        version: "1",
+      },
     });
     await flush();
     for (let i = 0; i < rpc.MAX_IN_FLIGHT_REQUESTS + 1; i += 1) {
@@ -1419,11 +3164,24 @@ async function main() {
   {
     const stream3 = makeFakeStream();
     void new rpc.RpcSession(stream3, services);
-    stream3.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0, device: services.device } }));
+    stream3.inject(
+      rpc.encodeFrame({
+        id: 1,
+        method: "hello",
+        params: {
+          protocol: rpc.RPC_PROTOCOL_VERSION,
+          device: services.device,
+        },
+      }),
+    );
     await flush();
     const before = madeTerminals.length;
     const malformed = rpc.encodeFrame(12345); // a bare number is not a request
-    const create = rpc.encodeFrame({ id: 2, method: "terminal.create", params: { workspaceId: "ws1", cols: 80, rows: 24 } });
+    const create = rpc.encodeFrame({
+      id: 2,
+      method: "terminal.create",
+      params: { workspaceId: "ws1", cols: 80, rows: 24 },
+    });
     stream3.inject(Buffer.concat([malformed, create]));
     await flush();
     check("a fatal frame destroys the session", stream3.destroyed === true);
@@ -1440,7 +3198,10 @@ async function main() {
   void new rpc.RpcSession(bpStream, services);
   const bpRequest = (id, method, params) =>
     bpStream.inject(rpc.encodeFrame({ id, method, params }));
-  bpRequest(1, "hello", { protocol: 0, device: services.device });
+  bpRequest(1, "hello", {
+    protocol: rpc.RPC_PROTOCOL_VERSION,
+    device: services.device,
+  });
   await flush();
   bpRequest(2, "terminal.create", { workspaceId: "ws1", cols: 80, rows: 24 });
   await flush();
@@ -1469,15 +3230,22 @@ async function main() {
   check("drain resumes the pty", bpTerminal.paused === false);
   const afterDrain = bpStream.outbox.length;
   bpTerminal.request.onData("z");
-  check("output flows again after drain", bpStream.outbox.length === afterDrain + 1);
+  check(
+    "output flows again after drain",
+    bpStream.outbox.length === afterDrain + 1,
+  );
 
   /* ---- all writes gated, paused-birth terminals (item 6) --------------- */
 
   {
     const g = makeFakeStream();
     void new rpc.RpcSession(g, services);
-    const greq = (id, method, params) => g.inject(rpc.encodeFrame({ id, method, params }));
-    greq(1, "hello", { protocol: 0, device: services.device });
+    const greq = (id, method, params) =>
+      g.inject(rpc.encodeFrame({ id, method, params }));
+    greq(1, "hello", {
+      protocol: rpc.RPC_PROTOCOL_VERSION,
+      device: services.device,
+    });
     await flush();
     // Back the peer up first, then create a terminal: it must be born paused
     // so its opening burst is held at the pty, not produced into a paused
@@ -1488,7 +3256,10 @@ async function main() {
     greq(3, "terminal.create", { workspaceId: "ws1", cols: 80, rows: 24 });
     await flush();
     const born = madeTerminals[madeTerminals.length - 1];
-    check("a terminal created while backpressured is born paused", born.paused === true);
+    check(
+      "a terminal created while backpressured is born paused",
+      born.paused === true,
+    );
 
     // A peer that never drains but keeps forcing replies must not grow our
     // write queue without bound: past MAX_PENDING_WRITE_BYTES the session is
@@ -1501,16 +3272,25 @@ async function main() {
       if (guard % 200 === 0) await flush();
     }
     await flush();
-    check("a peer that will not drain replies has its session closed", g.destroyed === true, guard);
+    check(
+      "a peer that will not drain replies has its session closed",
+      g.destroyed === true,
+      guard,
+    );
   }
 
   /* ---- additive desktop services + terminal event ordering ------------- */
 
   {
     const calls = [];
+    let coraHistoryTitle = "Remote work";
     let sharedTerminal = null;
+    const sharedTerminals = [];
+    let sharedWorkerTerminal = null;
     const uploadedImageChunks = [];
     let imageUploadAborts = 0;
+    const workerControlRegistry =
+      new workerTerminalControls.WorkerTerminalControlRegistry();
     const extendedServices = {
       ...services,
       peerDevice: {
@@ -1542,6 +3322,57 @@ async function main() {
         groups: [{ id: "group-studio", name: "Studio", collapsed: false }],
         railOrder: ["group-studio"],
       }),
+      getFleetOverview: async () => {
+        calls.push(["fleet.overview"]);
+        return {
+          workspaces: [
+            {
+              id: "ws1",
+              name: "One",
+              color: "#2AA298",
+              branch: "main",
+              conversationCount: 3,
+              latestConversation: {
+                status: "running",
+                updatedAt: "2026-07-30T09:00:00.000Z",
+              },
+              activeConversationWorkers: 2,
+              activeAutomations: 1,
+            },
+          ],
+        };
+      },
+      listSubscriptionProfiles: async () => {
+        calls.push(["subscriptions.list"]);
+        return [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            provider: "openai-codex",
+            label: "Codex Max 2",
+            status: "unknown",
+            isDefault: true,
+          },
+        ];
+      },
+      listNativeCliAccounts: async () => {
+        calls.push(["nativeCliAccounts.list"]);
+        return [
+          {
+            id: "personal",
+            runtime: "claude",
+            label: "Claude personal",
+            status: "connected",
+            isDefault: true,
+          },
+          {
+            id: "22222222-2222-4222-8222-222222222222",
+            runtime: "codex",
+            label: "Codex Max 2",
+            status: "connected",
+            isDefault: false,
+          },
+        ];
+      },
       createWorkspaceGroup: async (name) => {
         calls.push(["workspaces.group.create", name]);
         return { id: "group-new", name, collapsed: false };
@@ -1600,10 +3431,24 @@ async function main() {
         const parent = input.path.includes("/")
           ? input.path.slice(0, input.path.lastIndexOf("/") + 1)
           : "";
-        return { name: input.name, path: `${parent}${input.name}`, isDir: false };
+        return {
+          name: input.name,
+          path: `${parent}${input.name}`,
+          isDir: false,
+        };
       },
       moveFileEntry: async (input) => {
         calls.push(["files.move", input]);
+        if (input.requestId === "move-conflict") {
+          throw Object.assign(new Error("conflicting replay"), {
+            code: "MUTATION_REQUEST_CONFLICT",
+          });
+        }
+        if (input.requestId === "move-unknown") {
+          throw Object.assign(new Error("move may already have completed"), {
+            code: "MUTATION_OUTCOME_UNKNOWN",
+          });
+        }
         const name = input.path.split("/").at(-1);
         return {
           name,
@@ -1637,16 +3482,18 @@ async function main() {
         calls.push(["git.log", input]);
         return {
           isRepo: true,
-          commits: [{
-            hash: "a".repeat(40),
-            shortHash: "aaaaaaa",
-            subject: "Remote history",
-            author: "Codara",
-            relativeDate: "now",
-            parentHashes: [],
-            refs: ["main"],
-            isHead: true,
-          }],
+          commits: [
+            {
+              hash: "a".repeat(40),
+              shortHash: "aaaaaaa",
+              subject: "Remote history",
+              author: "Codara",
+              relativeDate: "now",
+              parentHashes: [],
+              refs: ["main"],
+              isHead: true,
+            },
+          ],
         };
       },
       getGitCommitDetail: async (input) => {
@@ -1663,31 +3510,219 @@ async function main() {
           parentHashes: [],
           refs: ["main"],
           isHead: true,
-          files: [{
-            path: "src/index.ts",
-            status: "modified",
-            additions: 2,
-            deletions: 1,
-          }],
+          files: [
+            {
+              path: "src/index.ts",
+              status: "modified",
+              additions: 2,
+              deletions: 1,
+            },
+          ],
+        };
+      },
+      getGitHubStatus: async (workspaceId) => {
+        calls.push(["github.status", workspaceId]);
+        return {
+          kind: "ready",
+          repository: {
+            owner: "codara",
+            name: "studio",
+            nameWithOwner: "codara/studio",
+            url: "https://github.com/codara/studio",
+            hostname: "github.com",
+            defaultBranch: "main",
+          },
+          pullRequest: null,
+          issues: [],
+        };
+      },
+      getGitHubWorkQueue: async (input) => {
+        const callsSoFar = calls.filter(
+          ([method]) => method === "github.workQueue",
+        ).length;
+        calls.push(["github.workQueue", input]);
+        return {
+          kind: "ready",
+          refreshedAt: new Date(
+            Date.UTC(2026, 6, 31, 12, 0, callsSoFar),
+          ).toISOString(),
+          repositoriesScanned: 1,
+          items: [],
+          errors: [],
+          truncated: {
+            sourceRootsOmitted: 0,
+            repositoriesOmitted: 0,
+            workspaceJoinsOmitted: 0,
+            errorsOmitted: 0,
+            itemsOmitted: 0,
+            payloadBytes: false,
+          },
+        };
+      },
+      publishGitHub: async (input) => {
+        calls.push(["github.publish", input]);
+        if (input.requestId === "publish-conflict") {
+          throw Object.assign(new Error("conflicting publish replay"), {
+            code: "MUTATION_REQUEST_CONFLICT",
+          });
+        }
+        return {
+          ok: true,
+          receipts: [
+            {
+              phase: "validate",
+              status: "completed",
+              message: "Input validated.",
+            },
+            {
+              phase: "create",
+              status: "completed",
+              message: "Pull request created.",
+            },
+          ],
+          branch: "feature/remote-publish",
+          base: "main",
+          committed: true,
+          commitHash: "b".repeat(40),
+          pushed: true,
+          outcome: "created",
+          pullRequest: {
+            number: 42,
+            title: input.input.title,
+            url: "https://github.com/codara/studio/pull/42",
+            state: "OPEN",
+            isDraft: input.input.draft,
+            baseBranch: "main",
+            headBranch: "feature/remote-publish",
+            checks: { total: 0, successful: 0, failed: 0, pending: 0 },
+          },
+        };
+      },
+      markGitHubReady: async (input) => {
+        calls.push(["github.ready", input]);
+        if (input.requestId === "ready-conflict") {
+          throw Object.assign(new Error("conflicting mark-ready replay"), {
+            code: "MUTATION_REQUEST_CONFLICT",
+          });
+        }
+        return {
+          ok: true,
+          outcome: "ready",
+          receipts: [
+            {
+              phase: "verify",
+              status: "completed",
+              message: "Confirmed ready for review.",
+            },
+          ],
+          pullRequest: {
+            number: input.input.pullRequestNumber,
+            title: "Ready for review",
+            url: "https://github.com/codara/studio/pull/42",
+            state: "OPEN",
+            isDraft: false,
+            baseBranch: input.input.baseBranch,
+            headBranch: input.input.headBranch,
+            headCommitOid: input.input.expectedHeadCommitOid,
+            checks: { total: 0, successful: 0, failed: 0, pending: 0 },
+          },
+        };
+      },
+      mergeGitHub: async (input) => {
+        calls.push(["github.merge", input]);
+        if (input.requestId === "merge-conflict") {
+          throw Object.assign(new Error("conflicting merge replay"), {
+            code: "MUTATION_REQUEST_CONFLICT",
+          });
+        }
+        return {
+          ok: true,
+          outcome: "merged",
+          strategy: input.input.strategy,
+          receipts: [
+            {
+              phase: "verify",
+              status: "completed",
+              message: "Confirmed merged.",
+            },
+          ],
+          pullRequest: {
+            number: input.input.pullRequestNumber,
+            title: "Merged safely",
+            url: "https://github.com/codara/studio/pull/42",
+            state: "MERGED",
+            isDraft: false,
+            baseBranch: input.input.baseBranch,
+            headBranch: input.input.headBranch,
+            headCommitOid: input.input.expectedHeadCommitOid,
+            reviewDecision: "APPROVED",
+            mergeStateStatus: "UNKNOWN",
+            checks: { total: 2, successful: 2, failed: 0, pending: 0 },
+          },
+        };
+      },
+      startGitHubIssue: async (input) => {
+        calls.push(["github.issue.start", input]);
+        if (input.requestId === "issue-start-conflict") {
+          throw Object.assign(new Error("conflicting issue replay"), {
+            code: "MUTATION_REQUEST_CONFLICT",
+          });
+        }
+        return {
+          ok: true,
+          outcome: "created",
+          workspaceId: "ws-issue-123",
+          runId: "run-issue-123",
+          branch: "codara/issue-123-fix-mobile",
+          activated: true,
+        };
+      },
+      startGitHubPullRequest: async (input) => {
+        calls.push(["github.pullRequest.start", input]);
+        if (input.requestId === "pr-start-conflict") {
+          throw Object.assign(new Error("conflicting PR replay"), {
+            code: "MUTATION_REQUEST_CONFLICT",
+          });
+        }
+        return {
+          ok: true,
+          outcome: "created",
+          workspaceId: "ws-pr-42",
+          runId: "run-pr-42",
+          branch: "codara/pr/example/42/mobile-queue",
+          activated: true,
         };
       },
       listCoraHistory: async (workspaceId) => {
         calls.push(["cora.history", workspaceId]);
-        return [{
-          id: "run-1",
-          workspaceId,
-          title: "Remote work",
-          status: "running",
-          createdAt: "2026-01-01T00:00:00.000Z",
-          updatedAt: "2026-01-01T00:01:00.000Z",
-          messageCount: 1,
-          lastMessage: "hello",
-          activeWorkers: 1,
-        }];
+        return [
+          {
+            id: "run-1",
+            workspaceId,
+            title: coraHistoryTitle,
+            status: "running",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:01:00.000Z",
+            messageCount: 1,
+            lastMessage: "hello",
+            activeWorkers: 1,
+          },
+          ...Array.from({ length: 11 }, (_, index) => ({
+            id: `run-history-${index + 2}`,
+            workspaceId,
+            title: `Older conversation ${index + 2}`,
+            status: "complete",
+            createdAt: `2025-12-31T23:59:${String(index).padStart(2, "0")}.000Z`,
+            updatedAt: `2026-01-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+            messageCount: index + 2,
+            lastMessage: "older summary",
+            activeWorkers: 0,
+          })),
+        ];
       },
       getCoraRun: async (input) => {
         calls.push(["cora.get", input]);
-        return {
+        const run = {
           id: input.runId,
           workspaceId: input.workspaceId,
           title: "Remote work",
@@ -1696,43 +3731,124 @@ async function main() {
           updatedAt: "2026-01-01T00:01:00.000Z",
           messageCount: 1,
           activeWorkers: 1,
-          messages: [{
-            id: "message-1",
-            author: "cora",
-            kind: "note",
-            message: "hello",
-            createdAt: "2026-01-01T00:01:00.000Z",
-          }],
+          messages: [
+            {
+              id: "message-1",
+              author: "cora",
+              kind: "note",
+              message: "hello",
+              createdAt: "2026-01-01T00:01:00.000Z",
+            },
+          ],
+        };
+        return {
+          run,
+          cursor: "cursor-current",
+          ...(input.afterCursor === "cursor-base"
+            ? {
+                messageDelta: {
+                  afterCursor: input.afterCursor,
+                  windowStartId: "message-1",
+                  windowEndId: "message-1",
+                  windowCount: 1,
+                  messages: run.messages,
+                },
+              }
+            : {}),
+        };
+      },
+      getCoraGraph: async (input) => {
+        calls.push(["cora.graph.get", input]);
+        return {
+          id: input.runId,
+          workspaceId: input.workspaceId,
+          title: "Remote work",
+          status: "running",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:01:00.000Z",
+          messageCount: 200,
+          activeWorkers: 1,
+          messages: [],
+          currentStepId: "step-1",
+          steps: [{ id: "step-1", title: "Implement", status: "running" }],
+          stepsTotal: 1,
+          stepsFinished: 0,
+          workers: [
+            {
+              id: "attempt-1",
+              stepId: "step-1",
+              title: "Implement",
+              runtime: "codex",
+              status: "running",
+            },
+          ],
+        };
+      },
+      deleteCoraRun: async (input) => {
+        calls.push(["cora.delete", input]);
+      },
+      resumeCoraRun: async (input) => {
+        calls.push(["cora.resume", input]);
+        return {
+          outcome: "accepted",
+          recoveryId: input.recoveryId,
         };
       },
       sendCoraMessage: async (input) => {
         calls.push(["cora.send", input]);
-        return {
+        if (input.clientMessageId === "phone-message-too-large-service") {
+          throw Object.assign(
+            new Error("Cora messages are limited to 16 KiB."),
+            { code: "CORA_MESSAGE_TOO_LARGE" },
+          );
+        }
+        const fullMessages = Array.from({ length: 200 }, (_, index) => ({
+          id: `message-${index + 1}`,
+          author: index === 199 ? "user" : "cora",
+          kind: "note",
+          message:
+            index === 199
+              ? input.message
+              : `${String(index + 1).padStart(3, "0")}:${"x".repeat(1024)}`,
+          createdAt: "2026-01-01T00:01:00.000Z",
+        }));
+        const run = {
           id: input.runId ?? "run-new",
           workspaceId: input.workspaceId,
           title: "Remote work",
           status: "planning",
           createdAt: "2026-01-01T00:00:00.000Z",
           updatedAt: "2026-01-01T00:01:00.000Z",
-          messageCount: 1,
+          messageCount: fullMessages.length,
           activeWorkers: 0,
-          messages: [{
-            id: "message-user",
-            author: "user",
-            kind: "note",
-            message: input.message,
-            createdAt: "2026-01-01T00:01:00.000Z",
-          }],
+          messages: fullMessages,
+        };
+        return {
+          run,
+          cursor: "cursor-after-send",
+          ...(input.afterCursor === "cursor-before-send"
+            ? {
+                messageDelta: {
+                  afterCursor: input.afterCursor,
+                  windowStartId: "message-2",
+                  windowEndId: "message-200",
+                  windowCount: 200,
+                  messages: [fullMessages.at(-1)],
+                },
+              }
+            : {}),
         };
       },
       listWorkerSessions: async (input) => {
         calls.push(["workerSessions.list", input]);
-        return [{
-          runtime: input.runtime,
-          sessionId: "session-codex-1",
-          title: "Continue the mobile terminal",
-          updatedAt: "2026-07-28T20:00:00.000Z",
-        }];
+        return [
+          {
+            runtime: input.runtime,
+            sessionId: "session-codex-1",
+            title: "Continue the mobile terminal",
+            updatedAt: "2026-07-28T20:00:00.000Z",
+          },
+        ];
       },
       deleteWorkerSession: async (input) => {
         calls.push(["workerSessions.delete", input]);
@@ -1756,16 +3872,32 @@ async function main() {
           model: "claude-opus-5",
           effort: "high",
           prompt: "Review yesterday's diffs",
-          history: [{
-            iteration: 2,
-            runId: "run-loom-2",
-            startedAt: "2026-07-29T02:00:00.000Z",
-            finishedAt: "2026-07-29T02:11:00.000Z",
-            status: "complete",
-            summary: "Nothing to fix",
-            costUsd: 0.42,
-            stopReason: "agent-done",
-          }],
+          liveRun: {
+            id: "run-loom-live",
+            status: "running",
+            workers: [
+              {
+                id: "attempt-live-1",
+                title: "Inspect the renderer",
+                runtime: "codex",
+                model: "gpt-5.6-codex",
+                status: "running",
+                runtimeState: "working",
+              },
+            ],
+          },
+          history: [
+            {
+              iteration: 2,
+              runId: "run-loom-2",
+              startedAt: "2026-07-29T02:00:00.000Z",
+              finishedAt: "2026-07-29T02:11:00.000Z",
+              status: "complete",
+              summary: "Nothing to fix",
+              costUsd: 0.42,
+              stopReason: "agent-done",
+            },
+          ],
         };
       },
       getCoraWhiteboard: async (input) => {
@@ -1784,16 +3916,22 @@ async function main() {
       },
       getCoraBoard: async (input) => {
         calls.push(["cora.board.get", input]);
-        return {
-          revision: 4,
-          cards: [{
-            id: "card-1",
-            title: "Ship the phone board",
-            status: "idea",
-            order: 1,
-            updatedAt: "2026-07-29T09:00:00.000Z",
-          }],
-        };
+        return boardProjection.projectRemoteBoardRead(
+          input.runId === "run-empty"
+            ? { revision: 0, cards: [] }
+            : {
+                revision: 4,
+                cards: [
+                  {
+                    id: "card-1",
+                    title: "Ship the phone board",
+                    status: "idea",
+                    order: 1,
+                    updatedAt: "2026-07-29T09:00:00.000Z",
+                  },
+                ],
+              },
+        );
       },
       updateCoraBoard: async (input) => {
         calls.push(["cora.board.update", input]);
@@ -1804,13 +3942,15 @@ async function main() {
           applied,
           board: {
             revision: applied ? 5 : 4,
-            cards: [{
-              id: "card-1",
-              title: "Ship the phone board",
-              status: applied && input.action === "queue" ? "queued" : "idea",
-              order: 1,
-              updatedAt: "2026-07-29T09:05:00.000Z",
-            }],
+            cards: [
+              {
+                id: "card-1",
+                title: "Ship the phone board",
+                status: applied && input.action === "queue" ? "queued" : "idea",
+                order: 1,
+                updatedAt: "2026-07-29T09:05:00.000Z",
+              },
+            ],
           },
         };
       },
@@ -1834,6 +3974,25 @@ async function main() {
           },
         };
       },
+      attachWorkerTerminal: async (request) => {
+        calls.push(["automations.workerTerminal.open", request]);
+        request.onData("worker bootstrap");
+        sharedWorkerTerminal = {
+          closed: false,
+          written: [],
+          write(data) {
+            this.written.push(data);
+          },
+          resize() {},
+          close() {
+            this.closed = true;
+          },
+          title: "Automation worker",
+          controlTargetId: "automation-worker:ws1:run-loom-live:attempt-live-1:g1",
+          controlCapability: "steer",
+        };
+        return sharedWorkerTerminal;
+      },
       createTerminal: async (request) => {
         calls.push(["terminal.create", request]);
         // A renderer-backed shell can print its prompt before the awaited
@@ -1844,8 +4003,14 @@ async function main() {
           request,
           closed: false,
           detached: false,
-          write() {},
-          resize() {},
+          written: [],
+          sizes: [],
+          write(data) {
+            this.written.push(data);
+          },
+          resize(cols, rows) {
+            this.sizes.push([cols, rows]);
+          },
           close() {
             this.closed = true;
           },
@@ -1855,15 +4020,27 @@ async function main() {
           desktopTabId: "term-desktop",
           title: "Etienne's iPhone · Codex",
         };
+        sharedTerminals.push(sharedTerminal);
         return sharedTerminal;
       },
     };
+    const terminalLeaseStore = makeTerminalLeaseStore((request) =>
+      extendedServices.createTerminal(request),
+    );
+    extendedServices.terminalLeases = terminalLeaseStore;
+    extendedServices.workerTerminalControls = workerControlRegistry;
     const ex = makeFakeStream();
     const exSession = new rpc.RpcSession(ex, extendedServices);
-    const exReq = (id, method, params) => ex.inject(rpc.encodeFrame({ id, method, params }));
+    const exReq = (id, method, params) =>
+      ex.inject(rpc.encodeFrame({ id, method, params }));
     exReq(1, "hello", {
-      protocol: 0,
-      device: { publicKey: "forged", name: "Forged name", role: "phone", version: "1" },
+      protocol: rpc.RPC_PROTOCOL_VERSION,
+      device: {
+        publicKey: "forged",
+        name: "Forged name",
+        role: "phone",
+        version: "1",
+      },
     });
     await flush();
 
@@ -1875,6 +4052,73 @@ async function main() {
         ex.outbox.at(-1)?.result?.railOrder?.[0] === "group-studio",
       ex.outbox.at(-1),
     );
+    exReq(110, "fleet.overview", {});
+    await flush();
+    const fleetRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "fleet.overview returns a compact revisioned workspace projection",
+      ex.outbox.at(-1)?.result?.workspaces?.[0]?.conversationCount === 3 &&
+        ex.outbox.at(-1)?.result?.workspaces?.[0]?.activeConversationWorkers ===
+          2 &&
+        ex.outbox.at(-1)?.result?.workspaces?.[0]?.activeAutomations === 1 &&
+        typeof fleetRevision === "string" &&
+        fleetRevision.length > 20,
+      ex.outbox.at(-1),
+    );
+    exReq(111, "fleet.overview", { ifRevision: fleetRevision });
+    await flush();
+    check(
+      "fleet.overview omits unchanged rows when the revision matches",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.revision === fleetRevision &&
+        ex.outbox.at(-1)?.result?.workspaces === undefined,
+      ex.outbox.at(-1),
+    );
+    exReq(112, "subscriptions.list", {});
+    await flush();
+    const subscriptionsRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "subscriptions.list returns only a sanitized revisioned account projection",
+      ex.outbox.at(-1)?.result?.profiles?.[0]?.label === "Codex Max 2" &&
+        ex.outbox.at(-1)?.result?.profiles?.[0]?.provider === "openai-codex" &&
+        !("identityFingerprint" in ex.outbox.at(-1).result.profiles[0]) &&
+        !("path" in ex.outbox.at(-1).result.profiles[0]) &&
+        typeof subscriptionsRevision === "string",
+      ex.outbox.at(-1),
+    );
+    exReq(113, "subscriptions.list", { ifRevision: subscriptionsRevision });
+    await flush();
+    check(
+      "subscriptions.list omits unchanged profile rows",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.profiles === undefined &&
+        ex.outbox.at(-1)?.result?.revision === subscriptionsRevision,
+      ex.outbox.at(-1),
+    );
+    exReq(114, "nativeCliAccounts.list", {});
+    await flush();
+    const nativeAccountsRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "nativeCliAccounts.list returns a sanitized revisioned routing projection",
+      ex.outbox.at(-1)?.result?.profiles?.[0]?.id === "personal" &&
+        ex.outbox.at(-1)?.result?.profiles?.[0]?.runtime === "claude" &&
+        ex.outbox.at(-1)?.result?.profiles?.[1]?.label === "Codex Max 2" &&
+        !("path" in ex.outbox.at(-1).result.profiles[0]) &&
+        !("env" in ex.outbox.at(-1).result.profiles[0]) &&
+        typeof nativeAccountsRevision === "string",
+      ex.outbox.at(-1),
+    );
+    exReq(115, "nativeCliAccounts.list", {
+      ifRevision: nativeAccountsRevision,
+    });
+    await flush();
+    check(
+      "nativeCliAccounts.list omits unchanged profile rows",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.profiles === undefined &&
+        ex.outbox.at(-1)?.result?.revision === nativeAccountsRevision,
+      ex.outbox.at(-1),
+    );
     exReq(2, "directories.list", { path: "/Users/e/Projects" });
     await flush();
     check(
@@ -1882,7 +4126,10 @@ async function main() {
       ex.outbox.at(-1)?.result?.directories?.[0]?.name === "Codara",
       ex.outbox.at(-1),
     );
-    exReq(3, "workspaces.add", { path: "/Users/e/Projects/Codara", name: "  Mobile  " });
+    exReq(3, "workspaces.add", {
+      path: "/Users/e/Projects/Codara",
+      name: "  Mobile  ",
+    });
     await flush();
     check(
       "workspaces.add trims its display name and returns appearance metadata",
@@ -1960,10 +4207,16 @@ async function main() {
     );
     exReq(4, "files.list", { workspaceId: "ws1", path: "" });
     await flush();
-    check("files.list returns workspace-relative entries", ex.outbox.at(-1)?.result?.entries?.[0]?.path === "src");
+    check(
+      "files.list returns workspace-relative entries",
+      ex.outbox.at(-1)?.result?.entries?.[0]?.path === "src",
+    );
     exReq(5, "files.read", { workspaceId: "ws1", path: "src/index.ts" });
     await flush();
-    check("files.read wraps its file DTO", ex.outbox.at(-1)?.result?.file?.content === "export {};");
+    check(
+      "files.read wraps its file DTO",
+      ex.outbox.at(-1)?.result?.file?.content === "export {};",
+    );
     exReq(51, "files.create", {
       workspaceId: "ws1",
       parentPath: "src",
@@ -1993,13 +4246,56 @@ async function main() {
       workspaceId: "ws1",
       path: "src/phone.ts",
       destinationPath: "archive",
+      requestId: "move-phone-1",
     });
     await flush();
     check(
       "files.move delegates a destination folder instead of an arbitrary target path",
       calls.at(-1)?.[1]?.destinationPath === "archive" &&
+        calls.at(-1)?.[1]?.requestId === "move-phone-1" &&
         ex.outbox.at(-1)?.result?.entry?.path === "archive/phone.ts",
       { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeBadMoveId = calls.length;
+    exReq(531, "files.move", {
+      workspaceId: "ws1",
+      path: "src/phone.ts",
+      destinationPath: "archive",
+      requestId: "x".repeat(257),
+    });
+    await flush();
+    check(
+      "files.move rejects an unbounded retry id before mutating",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeBadMoveId,
+      ex.outbox.at(-1),
+    );
+    exReq(532, "files.move", {
+      workspaceId: "ws1",
+      path: "src/phone.ts",
+      destinationPath: "archive",
+      requestId: "move-conflict",
+    });
+    await flush();
+    check(
+      "files.move exposes durable retry-key conflicts to the phone",
+      ex.outbox.at(-1)?.error?.code === "mutation-conflict",
+      ex.outbox.at(-1),
+    );
+    exReq(533, "files.move", {
+      workspaceId: "ws1",
+      path: "src/phone.ts",
+      destinationPath: "archive",
+      requestId: "move-unknown",
+    });
+    await flush();
+    check(
+      "files.move exposes an unknown durable outcome instead of retrying blindly",
+      ex.outbox.at(-1)?.error?.code === "mutation-outcome-unknown" &&
+        /may already have completed/i.test(
+          ex.outbox.at(-1)?.error?.message ?? "",
+        ),
+      ex.outbox.at(-1),
     );
     exReq(54, "files.delete", { workspaceId: "ws1", path: "archive/phone.ts" });
     await flush();
@@ -2020,7 +4316,8 @@ async function main() {
     check(
       "files.imageUpload.begin returns a session-owned bounded chunk size",
       typeof imageUploadId === "string" &&
-        ex.outbox.at(-1)?.result?.chunkBytes === imageUpload.REMOTE_IMAGE_CHUNK_BYTES,
+        ex.outbox.at(-1)?.result?.chunkBytes ===
+          imageUpload.REMOTE_IMAGE_CHUNK_BYTES,
       ex.outbox.at(-1),
     );
     exReq(56, "files.imageUpload.chunk", {
@@ -2031,7 +4328,8 @@ async function main() {
     await flush();
     check(
       "files.imageUpload.chunk rejects out-of-order offsets before writing",
-      ex.outbox.at(-1)?.error?.code === "invalid-params" && uploadedImageChunks.length === 0,
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        uploadedImageChunks.length === 0,
       ex.outbox.at(-1),
     );
     exReq(57, "files.imageUpload.chunk", {
@@ -2050,13 +4348,16 @@ async function main() {
     await flush();
     check(
       "files.imageUpload.finish exposes only the server-created attachment",
-      ex.outbox.at(-1)?.result?.attachment?.inputToken === "/tmp/phone-image.jpg" &&
-        imageUploadAborts === 0,
+      ex.outbox.at(-1)?.result?.attachment?.inputToken ===
+        "/tmp/phone-image.jpg" && imageUploadAborts === 0,
       ex.outbox.at(-1),
     );
     exReq(6, "git.status", { workspaceId: "ws1" });
     await flush();
-    check("git.status returns source-control changes", ex.outbox.at(-1)?.result?.status?.unstaged?.length === 1);
+    check(
+      "git.status returns source-control changes",
+      ex.outbox.at(-1)?.result?.status?.unstaged?.length === 1,
+    );
     exReq(61, "git.log", { workspaceId: "ws1", limit: 25 });
     await flush();
     check(
@@ -2094,26 +4395,900 @@ async function main() {
       ex.outbox.at(-1)?.ok === false &&
         ex.outbox.at(-1)?.error?.code === "invalid-params" &&
         calls.length === callsBeforeBadHash,
-      { callsBeforeBadHash, callsAfter: calls.length, response: ex.outbox.at(-1) },
+      {
+        callsBeforeBadHash,
+        callsAfter: calls.length,
+        response: ex.outbox.at(-1),
+      },
+    );
+    exReq(65, "github.status", { workspaceId: "ws1" });
+    await flush();
+    check(
+      "github.status returns the bounded GitHub readiness projection",
+      calls.at(-1)?.[0] === "github.status" &&
+        calls.at(-1)?.[1] === "ws1" &&
+        ex.outbox.at(-1)?.result?.status?.repository?.nameWithOwner ===
+          "codara/studio" &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const githubRevision = ex.outbox.at(-1)?.result?.revision;
+    exReq(650, "github.status", {
+      workspaceId: "ws1",
+      ifRevision: githubRevision,
+    });
+    await flush();
+    check(
+      "github.status omits an unchanged snapshot when its revision matches",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.revision === githubRevision &&
+        ex.outbox.at(-1)?.result?.status === undefined,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMalformedGitHubStatus = calls.length;
+    exReq(651, "github.status", {
+      workspaceId: "ws1",
+      cwd: "/private/worktree",
+    });
+    await flush();
+    check(
+      "github.status rejects phone-supplied paths and unknown fields",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMalformedGitHubStatus,
+      ex.outbox.at(-1),
+    );
+    exReq(652, "github.workQueue", {});
+    await flush();
+    check(
+      "github.workQueue returns one bounded host-wide projection",
+      calls.at(-1)?.[0] === "github.workQueue" &&
+        ex.outbox.at(-1)?.result?.status?.kind === "ready" &&
+        ex.outbox.at(-1)?.result?.status?.repositoriesScanned === 1 &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string" &&
+        typeof ex.outbox.at(-1)?.result?.refreshedAt === "string",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const queueRevision = ex.outbox.at(-1)?.result?.revision;
+    exReq(653, "github.workQueue", { ifRevision: queueRevision });
+    await flush();
+    check(
+      "github.workQueue revision ignores timestamp-only refreshes",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.revision === queueRevision &&
+        ex.outbox.at(-1)?.result?.status === undefined &&
+        ex.outbox.at(-1)?.result?.refreshedAt !== undefined,
+      ex.outbox.at(-1),
+    );
+    exReq(655, "github.workQueue", {
+      ifRevision: queueRevision,
+      refresh: true,
+    });
+    await flush();
+    check(
+      "github.workQueue explicit refresh reaches the bounded server service",
+      calls.at(-1)?.[0] === "github.workQueue" &&
+        calls.at(-1)?.[1]?.refresh === true &&
+        ex.outbox.at(-1)?.result?.notModified === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeRateLimitedRefresh = calls.length;
+    exReq(656, "github.workQueue", { refresh: true });
+    await flush();
+    check(
+      "github.workQueue throttles repeated forced provider refreshes per session",
+      ex.outbox.at(-1)?.error?.code === "rate-limited" &&
+        calls.length === callsBeforeRateLimitedRefresh,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMalformedQueue = calls.length;
+    exReq(654, "github.workQueue", {
+      repository: "someone/else",
+      workspaceId: "ws1",
+    });
+    await flush();
+    check(
+      "github.workQueue rejects phone-controlled repository fan-out",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMalformedQueue,
+      ex.outbox.at(-1),
+    );
+    exReq(66, "github.publish", {
+      workspaceId: "ws1",
+      requestId: "publish-ws1-1",
+      input: {
+        title: "  Publish from phone  ",
+        body: "Ready for review.",
+        draft: true,
+        commitMessage: "  Publish remote changes  ",
+      },
+    });
+    await flush();
+    check(
+      "github.publish delegates canonical input plus a stable retry id",
+      calls.at(-1)?.[0] === "github.publish" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        calls.at(-1)?.[1]?.requestId === "publish-ws1-1" &&
+        calls.at(-1)?.[1]?.input?.title === "Publish from phone" &&
+        calls.at(-1)?.[1]?.input?.commitMessage === "Publish remote changes" &&
+        ex.outbox.at(-1)?.result?.result?.pullRequest?.number === 42 &&
+        ex.outbox.at(-1)?.result?.result?.base === "main",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforePublishWithoutReceipt = calls.length;
+    exReq(661, "github.publish", {
+      workspaceId: "ws1",
+      input: { title: "Publish", body: "", draft: false },
+    });
+    await flush();
+    check(
+      "github.publish requires a stable retry id before mutation",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforePublishWithoutReceipt,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMalformedPublish = calls.length;
+    exReq(662, "github.publish", {
+      workspaceId: "ws1",
+      requestId: "publish-invalid-1",
+      input: {
+        title: "Publish",
+        body: "",
+        draft: false,
+        token: "must-not-be-forwarded",
+      },
+    });
+    await flush();
+    check(
+      "github.publish rejects unknown input fields before invoking git or gh",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMalformedPublish,
+      ex.outbox.at(-1),
+    );
+    exReq(663, "github.publish", {
+      workspaceId: "ws1",
+      requestId: "publish-invalid-2",
+      input: { title: "x".repeat(257), body: "", draft: false },
+    });
+    await flush();
+    check(
+      "github.publish rejects an oversized title before invoking git or gh",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMalformedPublish,
+      ex.outbox.at(-1),
+    );
+    exReq(664, "github.publish", {
+      workspaceId: "ws1",
+      requestId: "publish-conflict",
+      input: { title: "Publish", body: "", draft: false },
+    });
+    await flush();
+    check(
+      "github.publish exposes durable retry conflicts as a typed wire error",
+      ex.outbox.at(-1)?.error?.code === "mutation-conflict",
+      ex.outbox.at(-1),
+    );
+    exReq(66401, "github.ready", {
+      workspaceId: "ws1",
+      requestId: "ready-ws1-42",
+      input: {
+        repository: "  codara/studio  ",
+        pullRequestNumber: 42,
+        baseBranch: "  main  ",
+        headBranch: "  feature/remote-publish  ",
+        expectedHeadCommitOid: "B".repeat(40),
+      },
+    });
+    await flush();
+    check(
+      "github.ready delegates only the exact canonical pins plus stable retry id",
+      calls.at(-1)?.[0] === "github.ready" &&
+        JSON.stringify(calls.at(-1)?.[1]) ===
+          JSON.stringify({
+            workspaceId: "ws1",
+            requestId: "ready-ws1-42",
+            input: {
+              repository: "codara/studio",
+              pullRequestNumber: 42,
+              baseBranch: "main",
+              headBranch: "feature/remote-publish",
+              expectedHeadCommitOid: "b".repeat(40),
+            },
+          }) &&
+        ex.outbox.at(-1)?.result?.result?.pullRequest?.isDraft === false,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeReadyWithoutReceipt = calls.length;
+    exReq(66402, "github.ready", {
+      workspaceId: "ws1",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        baseBranch: "main",
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+      },
+    });
+    await flush();
+    check(
+      "github.ready requires a stable retry id before mutation",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeReadyWithoutReceipt,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMalformedReady = calls.length;
+    exReq(66403, "github.ready", {
+      workspaceId: "ws1",
+      requestId: "ready-invalid",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        baseBranch: "main",
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+        force: true,
+      },
+    });
+    await flush();
+    check(
+      "github.ready rejects force and unknown phone fields",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMalformedReady,
+      ex.outbox.at(-1),
+    );
+    exReq(66404, "github.ready", {
+      workspaceId: "ws1",
+      requestId: "ready-conflict",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        baseBranch: "main",
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+      },
+    });
+    await flush();
+    check(
+      "github.ready exposes durable retry conflicts as a typed wire error",
+      ex.outbox.at(-1)?.error?.code === "mutation-conflict",
+      ex.outbox.at(-1),
+    );
+    exReq(6641, "github.merge", {
+      workspaceId: "ws1",
+      requestId: "merge-ws1-42",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        baseBranch: "main",
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+        strategy: "squash",
+      },
+    });
+    await flush();
+    check(
+      "github.merge delegates only an exact pinned merge plus stable retry id",
+      calls.at(-1)?.[0] === "github.merge" &&
+        JSON.stringify(calls.at(-1)?.[1]) ===
+          JSON.stringify({
+            workspaceId: "ws1",
+            requestId: "merge-ws1-42",
+            input: {
+              repository: "codara/studio",
+              pullRequestNumber: 42,
+              baseBranch: "main",
+              headBranch: "feature/remote-publish",
+              expectedHeadCommitOid: "b".repeat(40),
+              strategy: "squash",
+            },
+          }) &&
+        ex.outbox.at(-1)?.result?.result?.pullRequest?.state === "MERGED",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeMergeWithoutBase = calls.length;
+    exReq(66411, "github.merge", {
+      workspaceId: "ws1",
+      requestId: "merge-ws1-42-no-base",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+        strategy: "squash",
+      },
+    });
+    await flush();
+    check(
+      "github.merge requires the reviewed base branch before mutation",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMergeWithoutBase,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMergeWithoutReceipt = calls.length;
+    exReq(6642, "github.merge", {
+      workspaceId: "ws1",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        baseBranch: "main",
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+        strategy: "squash",
+      },
+    });
+    await flush();
+    check(
+      "github.merge requires a stable retry id before mutation",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMergeWithoutReceipt,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMalformedMerge = calls.length;
+    exReq(6643, "github.merge", {
+      workspaceId: "ws1",
+      requestId: "merge-invalid",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        baseBranch: "main",
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+        strategy: "squash",
+        deleteBranch: true,
+      },
+    });
+    await flush();
+    check(
+      "github.merge rejects branch deletion and unknown phone fields",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMalformedMerge,
+      ex.outbox.at(-1),
+    );
+    exReq(6644, "github.merge", {
+      workspaceId: "ws1",
+      requestId: "merge-conflict",
+      input: {
+        repository: "codara/studio",
+        pullRequestNumber: 42,
+        baseBranch: "main",
+        headBranch: "feature/remote-publish",
+        expectedHeadCommitOid: "b".repeat(40),
+        strategy: "squash",
+      },
+    });
+    await flush();
+    check(
+      "github.merge exposes durable retry conflicts as a typed wire error",
+      ex.outbox.at(-1)?.error?.code === "mutation-conflict",
+      ex.outbox.at(-1),
+    );
+    exReq(665, "github.issue.start", {
+      sourceWorkspaceId: "ws1",
+      issueNumber: 123,
+      requestId: "issue-start-ws1-123",
+    });
+    await flush();
+    check(
+      "github.issue.start delegates only the authoritative source, issue number, and stable retry id",
+      calls.at(-1)?.[0] === "github.issue.start" &&
+        JSON.stringify(calls.at(-1)?.[1]) ===
+          JSON.stringify({
+            sourceWorkspaceId: "ws1",
+            issueNumber: 123,
+            requestId: "issue-start-ws1-123",
+          }) &&
+        ex.outbox.at(-1)?.result?.result?.workspaceId === "ws-issue-123" &&
+        ex.outbox.at(-1)?.result?.result?.runId === "run-issue-123",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeIssueWithoutReceipt = calls.length;
+    exReq(666, "github.issue.start", {
+      sourceWorkspaceId: "ws1",
+      issueNumber: 123,
+    });
+    await flush();
+    check(
+      "github.issue.start requires a stable retry id before mutation",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeIssueWithoutReceipt,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMalformedIssueStart = calls.length;
+    exReq(667, "github.issue.start", {
+      sourceWorkspaceId: "ws1",
+      issueNumber: 123,
+      requestId: "issue-start-invalid-1",
+      cwd: "/private/worktree",
+    });
+    await flush();
+    check(
+      "github.issue.start rejects phone-supplied paths and unknown fields",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeMalformedIssueStart,
+      ex.outbox.at(-1),
+    );
+    for (const [id, issueNumber] of [
+      [668, 0],
+      [669, 2_147_483_648],
+    ]) {
+      exReq(id, "github.issue.start", {
+        sourceWorkspaceId: "ws1",
+        issueNumber,
+        requestId: `issue-start-invalid-${id}`,
+      });
+      await flush();
+      check(
+        `github.issue.start rejects unsafe issue number ${issueNumber}`,
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+          calls.length === callsBeforeMalformedIssueStart,
+        ex.outbox.at(-1),
+      );
+    }
+    exReq(670, "github.issue.start", {
+      sourceWorkspaceId: "ws1",
+      issueNumber: 123,
+      requestId: "issue-start-conflict",
+    });
+    await flush();
+    check(
+      "github.issue.start exposes durable retry conflicts as a typed wire error",
+      ex.outbox.at(-1)?.error?.code === "mutation-conflict",
+      ex.outbox.at(-1),
+    );
+    exReq(671, "github.pullRequest.start", {
+      sourceWorkspaceId: "ws1",
+      repositoryUrl: "https://github.com/CODARA/STUDIO/",
+      pullRequestNumber: 42,
+      expectedHeadCommitOid: "B".repeat(40),
+      requestId: "pr-start-ws1-42-b",
+    });
+    await flush();
+    check(
+      "github.pullRequest.start delegates only canonical pinned queue identity and a stable retry id",
+      calls.at(-1)?.[0] === "github.pullRequest.start" &&
+        JSON.stringify(calls.at(-1)?.[1]) ===
+          JSON.stringify({
+            sourceWorkspaceId: "ws1",
+            repositoryUrl: "https://github.com/codara/studio",
+            pullRequestNumber: 42,
+            expectedHeadCommitOid: "b".repeat(40),
+            requestId: "pr-start-ws1-42-b",
+          }) &&
+        ex.outbox.at(-1)?.result?.result?.workspaceId === "ws-pr-42" &&
+        ex.outbox.at(-1)?.result?.result?.runId === "run-pr-42",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforePrWithoutReceipt = calls.length;
+    exReq(672, "github.pullRequest.start", {
+      sourceWorkspaceId: "ws1",
+      repositoryUrl: "https://github.com/codara/studio",
+      pullRequestNumber: 42,
+      expectedHeadCommitOid: "b".repeat(40),
+    });
+    await flush();
+    check(
+      "github.pullRequest.start requires a stable retry id before mutation",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforePrWithoutReceipt,
+      ex.outbox.at(-1),
+    );
+    for (const [id, override] of [
+      [673, { cwd: "/private/worktree" }],
+      [674, { repositoryUrl: "https://user@github.com/codara/studio" }],
+      [675, { repositoryUrl: "https://github.com/codara/studio?ref=main" }],
+      [676, { expectedHeadCommitOid: "b".repeat(39) }],
+      [677, { pullRequestNumber: 0 }],
+      [679, { requestId: " bad\n" }],
+      [680, { requestId: "short" }],
+      [681, { requestId: "x".repeat(129) }],
+    ]) {
+      exReq(id, "github.pullRequest.start", {
+        sourceWorkspaceId: "ws1",
+        repositoryUrl: "https://github.com/codara/studio",
+        pullRequestNumber: 42,
+        expectedHeadCommitOid: "b".repeat(40),
+        requestId: `pr-start-invalid-${id}`,
+        ...override,
+      });
+      await flush();
+      check(
+        `github.pullRequest.start rejects unsafe or excess fields (${id})`,
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+          calls.length === callsBeforePrWithoutReceipt,
+        ex.outbox.at(-1),
+      );
+    }
+    exReq(678, "github.pullRequest.start", {
+      sourceWorkspaceId: "ws1",
+      repositoryUrl: "https://github.com/codara/studio",
+      pullRequestNumber: 42,
+      expectedHeadCommitOid: "b".repeat(40),
+      requestId: "pr-start-conflict",
+    });
+    await flush();
+    check(
+      "github.pullRequest.start exposes durable retry conflicts as a typed wire error",
+      ex.outbox.at(-1)?.error?.code === "mutation-conflict",
+      ex.outbox.at(-1),
     );
     exReq(7, "cora.history", { workspaceId: "ws1" });
     await flush();
-    check("cora.history returns workspace runs", ex.outbox.at(-1)?.result?.runs?.[0]?.id === "run-1");
+    const historyRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "cora.history returns workspace runs with a content revision",
+      ex.outbox.at(-1)?.result?.runs?.[0]?.id === "run-1" &&
+        typeof historyRevision === "string" &&
+        historyRevision.length > 20,
+    );
+    exReq(71, "cora.history", {
+      workspaceId: "ws1",
+      ifRevision: historyRevision,
+    });
+    await flush();
+    check(
+      "cora.history omits an unchanged history projection",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.revision === historyRevision &&
+        ex.outbox.at(-1)?.result?.runs === undefined,
+      ex.outbox.at(-1),
+    );
+    coraHistoryTitle = `Remote work ${"changed ".repeat(30)}`;
+    exReq(72, "cora.history", {
+      workspaceId: "ws1",
+      ifRevision: historyRevision,
+      deltaVersion: 1,
+    });
+    await flush();
+    check(
+      "cora.history capability returns a revision-based summary delta",
+      ex.outbox.at(-1)?.result?.historyDelta?.version === 1 &&
+        ex.outbox.at(-1)?.result?.historyDelta?.baseRevision ===
+          historyRevision &&
+        ex.outbox.at(-1)?.result?.historyDelta?.upserts?.[0]?.title ===
+          coraHistoryTitle &&
+        ex.outbox.at(-1)?.result?.runs === undefined,
+      ex.outbox.at(-1),
+    );
     exReq(8, "cora.get", { workspaceId: "ws1", runId: "run-1" });
     await flush();
-    check("cora.get returns bounded messages", ex.outbox.at(-1)?.result?.run?.messages?.[0]?.author === "cora");
+    const runRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "cora.get returns bounded messages with an exact projection revision",
+      ex.outbox.at(-1)?.result?.run?.messages?.[0]?.author === "cora" &&
+        typeof runRevision === "string" &&
+        runRevision.length > 20 &&
+        ex.outbox.at(-1)?.result?.cursor === "cursor-current" &&
+        ex.outbox.at(-1)?.result?.messageDelta === undefined,
+    );
+    exReq(814, "cora.graph.get", { workspaceId: "ws1", runId: "run-1" });
+    await flush();
+    check(
+      "cora.graph.get returns graph relationships without the transcript",
+      calls.at(-1)?.[0] === "cora.graph.get" &&
+        ex.outbox.at(-1)?.result?.run?.messages?.length === 0 &&
+        ex.outbox.at(-1)?.result?.run?.steps?.[0]?.id === "step-1" &&
+        ex.outbox.at(-1)?.result?.run?.workers?.[0]?.stepId === "step-1",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(81, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: runRevision,
+    });
+    await flush();
+    check(
+      "cora.get omits an unchanged transcript",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.run === undefined &&
+        ex.outbox.at(-1)?.result?.revision === runRevision &&
+        ex.outbox.at(-1)?.result?.cursor === "cursor-current",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(811, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      afterCursor: "cursor-base",
+    });
+    await flush();
+    check(
+      "cora.get forwards a bounded cursor and falls back to full when the delta is larger",
+      calls.at(-1)?.[0] === "cora.get" &&
+        calls.at(-1)?.[1]?.afterCursor === "cursor-base" &&
+        ex.outbox.at(-1)?.result?.run?.messages?.[0]?.id === "message-1" &&
+        ex.outbox.at(-1)?.result?.messageDelta === undefined,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(813, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: runRevision,
+      afterCursor: "cursor-invalid",
+    });
+    await flush();
+    check(
+      "cora.get sends a full reset when an opaque cursor cannot prove the cached base",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        ex.outbox.at(-1)?.result?.run?.messages?.[0]?.id === "message-1" &&
+        ex.outbox.at(-1)?.result?.messageDelta === undefined &&
+        ex.outbox.at(-1)?.result?.cursor === "cursor-current",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeOversizedCoraCursor = calls.length;
+    exReq(812, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      afterCursor: "x".repeat(129),
+    });
+    await flush();
+    check(
+      "cora.get rejects an oversized message cursor before projection",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeOversizedCoraCursor,
+      {
+        callsBeforeOversizedCoraCursor,
+        callsAfter: calls.length,
+        response: ex.outbox.at(-1),
+      },
+    );
+    const callsBeforeRemovedAccountSelect = calls.length;
+    exReq(82, "cora.account.select", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      profileId: "11111111-1111-4111-8111-111111111111",
+      requestId: "account-run-1",
+    });
+    await flush();
+    check(
+      "cora.account.select is no longer a phone surface (account choice lives in Settings)",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "unknown-method" &&
+        calls.length === callsBeforeRemovedAccountSelect,
+      ex.outbox.at(-1),
+    );
+    const callsBeforeRemovedNativeSelect = calls.length;
+    exReq(85, "cora.nativeCliAccount.select", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      runtime: "claude",
+      profileId: "personal",
+      requestId: "native-account-run-1",
+    });
+    await flush();
+    check(
+      "cora.nativeCliAccount.select is no longer a phone surface",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "unknown-method" &&
+        calls.length === callsBeforeRemovedNativeSelect,
+      ex.outbox.at(-1),
+    );
+    exReq(87, "cora.resume", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      recoveryId: "recovery-ms7-run-1",
+      requestId: "resume-recovery-1",
+      account: {
+        kind: "subscription",
+        profileId: "11111111-1111-4111-8111-111111111111",
+      },
+    });
+    await flush();
+    check(
+      "cora.resume delegates one exact recovery token, stable receipt, and bounded account selector",
+      calls.at(-1)?.[0] === "cora.resume" &&
+        JSON.stringify(calls.at(-1)?.[1]) ===
+          JSON.stringify({
+            workspaceId: "ws1",
+            runId: "run-1",
+            recoveryId: "recovery-ms7-run-1",
+            requestId: "resume-recovery-1",
+            account: {
+              kind: "subscription",
+              profileId: "11111111-1111-4111-8111-111111111111",
+            },
+          }) &&
+        ex.outbox.at(-1)?.result?.outcome === "accepted" &&
+        ex.outbox.at(-1)?.result?.recoveryId === "recovery-ms7-run-1",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const callsBeforeMalformedResume = calls.length;
+    for (const [id, params] of [
+      [
+        871,
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          recoveryId: "spark-not-a-recovery",
+          requestId: "resume-bad-token",
+        },
+      ],
+      [
+        872,
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          recoveryId: "recovery-ms7-run-1",
+          requestId: "resume-bad-account",
+          account: { kind: "native-cli", runtime: "codex", profileId: "../../auth.json" },
+        },
+      ],
+      [
+        873,
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          recoveryId: "recovery-ms7-run-1",
+        },
+      ],
+    ]) {
+      exReq(id, "cora.resume", params);
+      await flush();
+      check(
+        `cora.resume rejects malformed or receipt-less input before mutation (${id})`,
+        ex.outbox.at(-1)?.error?.code === "invalid-params",
+        ex.outbox.at(-1),
+      );
+    }
+    check(
+      "invalid cora.resume requests never reach the recovery service",
+      calls.length === callsBeforeMalformedResume,
+      { before: callsBeforeMalformedResume, after: calls.length },
+    );
+    exReq(10, "cora.delete", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      requestId: "delete-run-1",
+    });
+    await flush();
+    check(
+      "cora.delete delegates the workspace-scoped run id",
+      calls.at(-1)?.[0] === "cora.delete" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        calls.at(-1)?.[1]?.runId === "run-1" &&
+        calls.at(-1)?.[1]?.requestId === "delete-run-1" &&
+        ex.outbox.at(-1)?.ok === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
     exReq(9, "cora.send", {
       workspaceId: "ws1",
       runId: "run-1",
       message: "  keep going  ",
       clientMessageId: "phone-message-1",
+      afterCursor: "cursor-before-send",
+      model: "claude-opus-5",
+      effort: "xhigh",
+    });
+    await flush();
+    const sendDeltaResult = ex.outbox.at(-1)?.result;
+    const sendDeltaBytes = Buffer.byteLength(
+      JSON.stringify(sendDeltaResult),
+      "utf8",
+    );
+    check(
+      "cora.send trims, delegates its stable id, message cursor, model and effort",
+      calls.at(-1)?.[1]?.message === "keep going" &&
+        calls.at(-1)?.[1]?.clientMessageId === "phone-message-1" &&
+        calls.at(-1)?.[1]?.afterCursor === "cursor-before-send" &&
+        calls.at(-1)?.[1]?.model === "claude-opus-5" &&
+        calls.at(-1)?.[1]?.effort === "xhigh" &&
+        sendDeltaResult?.run?.messages?.length === 1 &&
+        sendDeltaResult?.cursor === "cursor-after-send" &&
+        typeof sendDeltaResult?.revision === "string" &&
+        sendDeltaResult?.messageDelta?.afterCursor ===
+          "cursor-before-send" &&
+        !("messages" in sendDeltaResult.messageDelta),
+      { call: calls.at(-1), result: sendDeltaResult },
+    );
+    exReq(91, "cora.send", {
+      workspaceId: "ws1",
+      message: "start a fresh conversation",
+      clientMessageId: "phone-message-new",
+    });
+    await flush();
+    const sendFullResult = ex.outbox.at(-1)?.result;
+    const sendFullBytes = Buffer.byteLength(
+      JSON.stringify(sendFullResult),
+      "utf8",
+    );
+    check(
+      "an existing-run send with 200 long messages is below 2% of the bounded full-window payload",
+      sendFullResult?.run?.messages?.length === 200 &&
+        sendDeltaBytes / sendFullBytes < 0.02,
+      {
+        sendDeltaBytes,
+        sendFullBytes,
+        ratio: sendDeltaBytes / sendFullBytes,
+      },
+    );
+    const callsBeforeOversizedSendCursor = calls.length;
+    exReq(92, "cora.send", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      message: "keep going",
+      clientMessageId: "phone-message-oversized",
+      afterCursor: "x".repeat(129),
     });
     await flush();
     check(
-      "cora.send trims and delegates a stable client message id",
-      calls.at(-1)?.[1]?.message === "keep going" &&
-        calls.at(-1)?.[1]?.clientMessageId === "phone-message-1",
+      "cora.send rejects an oversized message cursor before mutation",
+      ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+        calls.length === callsBeforeOversizedSendCursor,
+      {
+        callsBeforeOversizedSendCursor,
+        callsAfter: calls.length,
+        response: ex.outbox.at(-1),
+      },
+    );
+    check(
+      "a send that omits model and effort leaves the run's composer alone",
+      !("model" in (calls.at(-1)?.[1] ?? {})) &&
+        !("effort" in (calls.at(-1)?.[1] ?? {})),
       calls.at(-1),
+    );
+    for (const [id, params] of [
+      [
+        940,
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          message: "keep going",
+          clientMessageId: "phone-message-bad-model",
+          model: "llama-3",
+        },
+      ],
+      [
+        941,
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          message: "keep going",
+          clientMessageId: "phone-message-path-model",
+          model: "claude-../../etc/passwd",
+        },
+      ],
+      [
+        942,
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          message: "keep going",
+          clientMessageId: "phone-message-bad-effort",
+          effort: "ultra",
+        },
+      ],
+      [
+        943,
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          message: "keep going",
+          clientMessageId: "phone-message-object-effort",
+          effort: { level: "high" },
+        },
+      ],
+    ]) {
+      const callsBeforeBadComposer = calls.length;
+      exReq(id, "cora.send", params);
+      await flush();
+      check(
+        `cora.send rejects an unroutable model or effort before mutation (${id})`,
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+          calls.length === callsBeforeBadComposer,
+        { response: ex.outbox.at(-1), call: calls.at(-1) },
+      );
+    }
+    exReq(93, "cora.send", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      message: "oversized after service normalization",
+      clientMessageId: "phone-message-too-large-service",
+    });
+    await flush();
+    check(
+      "cora.send exposes a permanent message-too-large error code",
+      ex.outbox.at(-1)?.error?.code === "message-too-large" &&
+        ex.outbox.at(-1)?.error?.message ===
+          "Cora messages are limited to 16 KiB.",
+      ex.outbox.at(-1),
     );
 
     exReq(95, "workerSessions.list", {
@@ -2125,7 +5300,8 @@ async function main() {
       "workerSessions.list returns workspace-scoped resumable workers",
       calls.at(-1)?.[0] === "workerSessions.list" &&
         calls.at(-1)?.[1]?.workspaceId === "ws1" &&
-        ex.outbox.at(-1)?.result?.sessions?.[0]?.sessionId === "session-codex-1",
+        ex.outbox.at(-1)?.result?.sessions?.[0]?.sessionId ===
+          "session-codex-1",
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
 
@@ -2141,7 +5317,12 @@ async function main() {
       "workerSessions.delete delegates only a workspace, runtime, session id and scope",
       calls.at(-1)?.[0] === "workerSessions.delete" &&
         JSON.stringify(Object.keys(calls.at(-1)?.[1] ?? {}).sort()) ===
-          JSON.stringify(["memoryScope", "runtime", "sessionId", "workspaceId"]) &&
+          JSON.stringify([
+            "memoryScope",
+            "runtime",
+            "sessionId",
+            "workspaceId",
+          ]) &&
         // An omitted scope is the narrow one, never a wider delete.
         calls.at(-1)?.[1]?.memoryScope === "none" &&
         ex.outbox.at(-1)?.result?.deleted === true &&
@@ -2184,7 +5365,10 @@ async function main() {
       await flush();
       const refusals = ex.outbox
         .slice(-mismatched.length)
-        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+        .filter(
+          (frame) =>
+            frame?.ok === false && frame?.error?.code === "invalid-params",
+        );
       check(
         "a memory scope from the other runtime is refused, never widened",
         refusals.length === mismatched.length && calls.length === callsBefore,
@@ -2195,7 +5379,12 @@ async function main() {
       // A phone cannot name a path here, so the only injection surface left is
       // the session id itself; it must be refused before any service runs.
       const callsBefore = calls.length;
-      for (const sessionId of ["../../etc/passwd", "", "-leading-dash", "a".repeat(200)]) {
+      for (const sessionId of [
+        "../../etc/passwd",
+        "",
+        "-leading-dash",
+        "a".repeat(200),
+      ]) {
         exReq(97, "workerSessions.delete", {
           workspaceId: "ws1",
           runtime: "codex",
@@ -2210,7 +5399,10 @@ async function main() {
       await flush();
       const refusals = ex.outbox
         .slice(-5)
-        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+        .filter(
+          (frame) =>
+            frame?.ok === false && frame?.error?.code === "invalid-params",
+        );
       check(
         "workerSessions.delete refuses a malformed session id or runtime without calling the service",
         refusals.length === 5 && calls.length === callsBefore,
@@ -2220,32 +5412,154 @@ async function main() {
 
     /* ---- automation detail --------------------------------------------- */
 
-    exReq(97, "automations.get", { workspaceId: "ws1", automationId: "loom-1" });
+    exReq(97, "automations.get", {
+      workspaceId: "ws1",
+      automationId: "loom-1",
+    });
     await flush();
     check(
       "automations.get returns the loom's worker, prompt and pass history",
       calls.at(-1)?.[0] === "automations.get" &&
         calls.at(-1)?.[1]?.workspaceId === "ws1" &&
         ex.outbox.at(-1)?.result?.automation?.model === "claude-opus-5" &&
-        ex.outbox.at(-1)?.result?.automation?.history?.[0]?.stopReason === "agent-done" &&
-        ex.outbox.at(-1)?.result?.automation?.history?.[0]?.costUsd === 0.42,
+        ex.outbox.at(-1)?.result?.automation?.history?.[0]?.stopReason ===
+          "agent-done" &&
+        ex.outbox.at(-1)?.result?.automation?.history?.[0]?.costUsd === 0.42 &&
+        ex.outbox.at(-1)?.result?.automation?.liveRun?.id ===
+          "run-loom-live" &&
+        ex.outbox.at(-1)?.result?.automation?.liveRun?.workers?.[0]?.id ===
+          "attempt-live-1" &&
+        ex.outbox.at(-1)?.result?.automation?.liveRun?.messages === undefined,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
     {
       const callsBefore = calls.length;
-      for (const params of [null, { workspaceId: "ws1" }, { automationId: "loom-1" }]) {
+      for (const params of [
+        null,
+        { workspaceId: "ws1" },
+        { automationId: "loom-1" },
+      ]) {
         exReq(971, "automations.get", params);
       }
       await flush();
       const refusals = ex.outbox
         .slice(-3)
-        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+        .filter(
+          (frame) =>
+            frame?.ok === false && frame?.error?.code === "invalid-params",
+        );
       check(
         "automations.get refuses a request that does not name both the workspace and the loom",
         refusals.length === 3 && calls.length === callsBefore,
         { refusals: refusals.length, newCalls: calls.length - callsBefore },
       );
     }
+
+    const workerTerminalBefore = ex.outbox.length;
+    exReq(972, "automations.workerTerminal.open", {
+      workspaceId: "ws1",
+      runId: "run-loom-live",
+      workerId: "attempt-live-1",
+    });
+    await flush();
+    const workerTerminalFrames = ex.outbox.slice(workerTerminalBefore);
+    const workerTerminalResponse = workerTerminalFrames.find(
+      (frame) => frame?.id === 972,
+    );
+    const workerTerminalData = workerTerminalFrames.find(
+      (frame) => frame?.event === "terminal.data",
+    );
+    check(
+      "automation worker terminal validates ownership inputs and streams after its response",
+      calls.at(-1)?.[0] === "automations.workerTerminal.open" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        calls.at(-1)?.[1]?.runId === "run-loom-live" &&
+        calls.at(-1)?.[1]?.workerId === "attempt-live-1" &&
+        workerTerminalResponse?.ok === true &&
+        workerTerminalResponse?.result?.controlCapability === "steer" &&
+        workerTerminalData?.payload?.terminalId ===
+          workerTerminalResponse?.result?.terminalId &&
+        workerTerminalData?.payload?.sequence === 1 &&
+        workerTerminalFrames.indexOf(workerTerminalResponse) <
+          workerTerminalFrames.indexOf(workerTerminalData),
+      { call: calls.at(-1), frames: workerTerminalFrames },
+    );
+    const beforeWorkerLive = ex.outbox.length;
+    calls.at(-1)?.[1]?.onData("worker live");
+    const workerLiveData = ex.outbox.slice(beforeWorkerLive).find(
+      (frame) => frame?.event === "terminal.data",
+    );
+    check(
+      "automation worker live output continues the terminal sequence",
+      workerLiveData?.payload?.terminalId ===
+        workerTerminalResponse?.result?.terminalId &&
+        workerLiveData?.payload?.sequence === 2 &&
+        workerLiveData?.payload?.data === "worker live",
+      workerLiveData,
+    );
+    const workerTerminalId = workerTerminalResponse?.result?.terminalId;
+    exReq(9721, "automations.workerTerminal.acquire", {
+      terminalId: workerTerminalId,
+    });
+    await flush();
+    const controlLease = ex.outbox.at(-1)?.result;
+    check(
+      "an authenticated phone explicitly acquires a short worker control lease",
+      ex.outbox.at(-1)?.ok === true &&
+        typeof controlLease?.controlLeaseId === "string" &&
+        controlLease?.nextInputSequence === 1 &&
+        Number.isSafeInteger(controlLease?.expiresAt),
+      ex.outbox.at(-1),
+    );
+    exReq(9722, "automations.workerTerminal.write", {
+      terminalId: workerTerminalId,
+      controlLeaseId: controlLease?.controlLeaseId,
+      inputSequence: 1,
+      data: "check the failing test\r",
+    });
+    await flush();
+    exReq(9723, "automations.workerTerminal.write", {
+      terminalId: workerTerminalId,
+      controlLeaseId: controlLease?.controlLeaseId,
+      inputSequence: 1,
+      data: "check the failing test\r",
+    });
+    await flush();
+    check(
+      "worker input retries are exactly once through the RPC boundary",
+      sharedWorkerTerminal?.written?.length === 1 &&
+        sharedWorkerTerminal.written[0] === "check the failing test\r" &&
+        ex.outbox.at(-1)?.ok === true &&
+        ex.outbox.at(-1)?.result?.nextInputSequence === 2,
+      {
+        writes: sharedWorkerTerminal?.written,
+        response: ex.outbox.at(-1),
+      },
+    );
+    exReq(9724, "automations.workerTerminal.write", {
+      terminalId: workerTerminalId,
+      controlLeaseId: "forged-worker-control",
+      inputSequence: 2,
+      data: "must not run\r",
+    });
+    await flush();
+    check(
+      "a forged worker control lease cannot write",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "terminal-control-lost" &&
+        sharedWorkerTerminal?.written?.length === 1,
+      ex.outbox.at(-1),
+    );
+    exReq(973, "terminal.close", { terminalId: workerTerminalId });
+    await flush();
+    check(
+      "a durable-terminal session still closes its connection-scoped worker mirror with {terminalId}",
+      ex.outbox.at(-1)?.id === 973 &&
+        ex.outbox.at(-1)?.ok === true &&
+        sharedWorkerTerminal?.closed === true,
+      { response: ex.outbox.at(-1), worker: sharedWorkerTerminal },
+    );
+    workerControlRegistry.shutdown();
 
     /* ---- Cora whiteboard ------------------------------------------------ */
 
@@ -2255,15 +5569,20 @@ async function main() {
       "cora.whiteboard.get returns nodes and edges without canvas geometry",
       calls.at(-1)?.[0] === "cora.whiteboard.get" &&
         ex.outbox.at(-1)?.result?.whiteboard?.nodes?.length === 2 &&
-        ex.outbox.at(-1)?.result?.whiteboard?.edges?.[0]?.label === "bounded by" &&
+        ex.outbox.at(-1)?.result?.whiteboard?.edges?.[0]?.label ===
+          "bounded by" &&
         !("x" in (ex.outbox.at(-1)?.result?.whiteboard?.nodes?.[0] ?? {})),
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
-    exReq(991, "cora.whiteboard.get", { workspaceId: "ws1", runId: "run-blank" });
+    exReq(991, "cora.whiteboard.get", {
+      workspaceId: "ws1",
+      runId: "run-blank",
+    });
     await flush();
     check(
       "a chat with no whiteboard answers null rather than an error",
-      ex.outbox.at(-1)?.ok === true && ex.outbox.at(-1)?.result?.whiteboard === null,
+      ex.outbox.at(-1)?.ok === true &&
+        ex.outbox.at(-1)?.result?.whiteboard === null,
       ex.outbox.at(-1),
     );
 
@@ -2275,8 +5594,75 @@ async function main() {
       "cora.board.get returns the chat's revisioned card list",
       calls.at(-1)?.[0] === "cora.board.get" &&
         ex.outbox.at(-1)?.result?.board?.revision === 4 &&
-        ex.outbox.at(-1)?.result?.board?.cards?.[0]?.id === "card-1",
+        ex.outbox.at(-1)?.result?.board?.cards?.[0]?.id === "card-1" &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string",
       { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    const boardReadRevision = ex.outbox.at(-1)?.result?.revision;
+    exReq(9100, "cora.board.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: boardReadRevision,
+    });
+    await flush();
+    check(
+      "cora.board.get omits cards when the bounded revision is unchanged",
+      calls.at(-1)?.[1]?.ifRevision === boardReadRevision &&
+        ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.revision === boardReadRevision &&
+        !("board" in (ex.outbox.at(-1)?.result ?? {})),
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(9101, "cora.board.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: "stale-board-revision",
+    });
+    await flush();
+    check(
+      "cora.board.get returns current cards when the bounded revision changed",
+      ex.outbox.at(-1)?.result?.notModified !== true &&
+        ex.outbox.at(-1)?.result?.board?.cards?.[0]?.id === "card-1" &&
+        ex.outbox.at(-1)?.result?.revision === boardReadRevision,
+      ex.outbox.at(-1),
+    );
+    exReq(9102, "cora.board.get", {
+      workspaceId: "ws1",
+      runId: "run-empty",
+    });
+    await flush();
+    check(
+      "cora.board.get returns an empty board as a full valid projection",
+      ex.outbox.at(-1)?.result?.board?.cards?.length === 0 &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string",
+      ex.outbox.at(-1),
+    );
+    const callsBeforeMalformedBoardRead = calls.length;
+    exReq(9103, "cora.board.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: 4,
+    });
+    await flush();
+    check(
+      "cora.board.get rejects a malformed conditional revision before service dispatch",
+      calls.length === callsBeforeMalformedBoardRead &&
+        ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "invalid-params",
+      { calls: calls.slice(callsBeforeMalformedBoardRead), response: ex.outbox.at(-1) },
+    );
+    exReq(9104, "cora.board.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: "x".repeat(129),
+    });
+    await flush();
+    check(
+      "cora.board.get bounds a conditional revision before service dispatch",
+      calls.length === callsBeforeMalformedBoardRead &&
+        ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "invalid-params",
+      { calls: calls.slice(callsBeforeMalformedBoardRead), response: ex.outbox.at(-1) },
     );
     exReq(101, "cora.board.update", {
       workspaceId: "ws1",
@@ -2330,8 +5716,19 @@ async function main() {
       const callsBefore = calls.length;
       const badWrites = [
         // add-idea without a usable title
-        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "add-idea" },
-        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "add-idea", title: "   " },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 4,
+          action: "add-idea",
+        },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 4,
+          action: "add-idea",
+          title: "   ",
+        },
         {
           workspaceId: "ws1",
           runId: "run-1",
@@ -2340,19 +5737,56 @@ async function main() {
           title: "x".repeat(rpc.MAX_BOARD_CARD_TITLE_LENGTH + 1),
         },
         // card actions without a card
-        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "queue" },
-        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "delete", cardId: "" },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 4,
+          action: "queue",
+        },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 4,
+          action: "delete",
+          cardId: "",
+        },
         // lanes the phone may not assign, and revisions that are not one
-        { workspaceId: "ws1", runId: "run-1", baseRevision: 4, action: "done", cardId: "card-1" },
-        { workspaceId: "ws1", runId: "run-1", baseRevision: -1, action: "queue", cardId: "card-1" },
-        { workspaceId: "ws1", runId: "run-1", baseRevision: 1.5, action: "queue", cardId: "card-1" },
-        { workspaceId: "ws1", baseRevision: 4, action: "queue", cardId: "card-1" },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 4,
+          action: "done",
+          cardId: "card-1",
+        },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: -1,
+          action: "queue",
+          cardId: "card-1",
+        },
+        {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 1.5,
+          action: "queue",
+          cardId: "card-1",
+        },
+        {
+          workspaceId: "ws1",
+          baseRevision: 4,
+          action: "queue",
+          cardId: "card-1",
+        },
       ];
       for (const params of badWrites) exReq(104, "cora.board.update", params);
       await flush();
       const refusals = ex.outbox
         .slice(-badWrites.length)
-        .filter((frame) => frame?.ok === false && frame?.error?.code === "invalid-params");
+        .filter(
+          (frame) =>
+            frame?.ok === false && frame?.error?.code === "invalid-params",
+        );
       check(
         "cora.board.update refuses every malformed write before the board is touched",
         refusals.length === badWrites.length && calls.length === callsBefore,
@@ -2361,24 +5795,29 @@ async function main() {
     }
 
     const beforeCreate = ex.outbox.length;
-    exReq(10, "terminal.create", {
+    const durableCreate = {
       workspaceId: "ws1",
       cols: 92,
       rows: 31,
       profile: "codex",
       resumeSessionId: "session-codex-1",
       title: "Phone worker",
-    });
+      requestId: "create-phone-worker-0001",
+    };
+    exReq(10, "terminal.create", durableCreate);
     await flush();
     const createdFrames = ex.outbox.slice(beforeCreate);
-    const createResponse = createdFrames[0];
-    const createData = createdFrames[1];
+    const createResponse = createdFrames.find((frame) => frame?.id === 10);
+    const terminalId = createResponse?.result?.terminalId;
+    const firstAttachmentId = createResponse?.result?.attachmentId;
     check(
-      "terminal.create response precedes bootstrap terminal.data",
+      "durable terminal.create returns bootstrap output as sequenced replay",
       createResponse?.id === 10 &&
         createResponse?.ok === true &&
-        createData?.event === "terminal.data" &&
-        createData?.payload?.terminalId === createResponse?.result?.terminalId,
+        createResponse?.result?.terminal?.terminalId === terminalId &&
+        createResponse?.result?.replay?.[0]?.sequence === 1 &&
+        createResponse?.result?.replay?.[0]?.data === "opening prompt" &&
+        !createdFrames.some((frame) => frame?.event === "terminal.data"),
       createdFrames,
     );
     check(
@@ -2390,11 +5829,239 @@ async function main() {
       { response: createResponse, origin: calls.at(-1)?.[1]?.origin },
     );
 
+    const spawnCountAfterCreate = sharedTerminals.length;
+    exReq(1005, "terminal.create", durableCreate);
+    await flush();
+    const retryCreateResponse = ex.outbox.find(
+      (frame) => frame?.id === 1005,
+    );
+    const retryAttachmentId = retryCreateResponse?.result?.attachmentId;
+    check(
+      "a stable terminal.create requestId retries the same lease without spawning twice",
+      retryCreateResponse?.ok === true &&
+        retryCreateResponse?.result?.terminalId === terminalId &&
+        retryAttachmentId !== firstAttachmentId &&
+        sharedTerminals.length === spawnCountAfterCreate,
+      {
+        response: retryCreateResponse,
+        spawns: sharedTerminals.length - spawnCountAfterCreate,
+      },
+    );
+
+    exReq(1006, "terminal.list", {});
+    await flush();
+    check(
+      "terminal.list returns only the authenticated phone's durable descriptors",
+      ex.outbox.at(-1)?.id === 1006 &&
+        ex.outbox.at(-1)?.result?.terminals?.length === 1 &&
+        ex.outbox.at(-1)?.result?.terminals?.[0]?.terminalId === terminalId &&
+        terminalLeaseStore.calls.at(-1)?.[0] === "list" &&
+        terminalLeaseStore.calls.at(-1)?.[1] === "trusted-phone-key",
+      {
+        response: ex.outbox.at(-1),
+        storeCall: terminalLeaseStore.calls.at(-1),
+      },
+    );
+
+    const beforeLiveData = ex.outbox.length;
+    sharedTerminals[0].request.onData("live output");
+    const liveData = ex.outbox.slice(beforeLiveData).find(
+      (frame) => frame?.event === "terminal.data",
+    );
+    check(
+      "a durable live terminal emits an increasing output sequence",
+      liveData?.payload?.terminalId === terminalId &&
+        liveData?.payload?.sequence === 2 &&
+        liveData?.payload?.data === "live output",
+      liveData,
+    );
+
+    exReq(1007, "terminal.detach", {
+      terminalId,
+      attachmentId: retryAttachmentId,
+    });
+    await flush();
+    const beforeDetachedOutput = ex.outbox.length;
+    sharedTerminals[0].request.onData("while detached");
+    check(
+      "terminal.detach stops socket delivery without closing the leased PTY",
+      ex.outbox.length === beforeDetachedOutput &&
+        sharedTerminals[0].closed === false,
+      ex.outbox.slice(beforeDetachedOutput),
+    );
+
+    exReq(1008, "terminal.attach", {
+      terminalId,
+      afterSequence: 2,
+    });
+    await flush();
+    const attachResponse = ex.outbox.at(-1);
+    const replayAttachmentId = attachResponse?.result?.attachmentId;
+    check(
+      "terminal.attach resumes after a sequence cursor with bounded replay",
+      attachResponse?.id === 1008 &&
+        attachResponse?.ok === true &&
+        attachResponse?.result?.terminal?.terminalId === terminalId &&
+        attachResponse?.result?.replay?.length === 1 &&
+        attachResponse?.result?.replay?.[0]?.sequence === 3 &&
+        attachResponse?.result?.replay?.[0]?.data === "while detached" &&
+        attachResponse?.result?.truncated === false,
+      attachResponse,
+    );
+
+    exReq(1009, "terminal.attach", {
+      terminalId,
+      afterSequence: 3,
+    });
+    await flush();
+    const newestAttachmentId = ex.outbox.at(-1)?.result?.attachmentId;
+    exReq(1010, "terminal.write", {
+      terminalId,
+      attachmentId: replayAttachmentId,
+      inputSequence: 1,
+      data: "stale\n",
+    });
+    await flush();
+    check(
+      "a newer terminal.attach fences writes from the stale attachment",
+      ex.outbox.at(-1)?.id === 1010 &&
+        ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "unknown-terminal" &&
+        sharedTerminals[0].written.length === 0,
+      ex.outbox.at(-1),
+    );
+
+    const sequencedWrite = {
+      terminalId,
+      attachmentId: newestAttachmentId,
+      inputSequence: 1,
+      data: "echo durable\n",
+    };
+    exReq(1011, "terminal.write", sequencedWrite);
+    await flush();
+    exReq(1012, "terminal.write", sequencedWrite);
+    await flush();
+    check(
+      "terminal.write is exactly-once for a repeated inputSequence and payload",
+      ex.outbox.at(-1)?.id === 1012 &&
+        ex.outbox.at(-1)?.ok === true &&
+        sharedTerminals[0].written.join("") === "echo durable\n",
+      {
+        response: ex.outbox.at(-1),
+        written: sharedTerminals[0].written,
+      },
+    );
+    exReq(1013, "terminal.write", {
+      ...sequencedWrite,
+      data: "different\n",
+    });
+    await flush();
+    check(
+      "terminal.write refuses different input under an accepted inputSequence",
+      ex.outbox.at(-1)?.id === 1013 &&
+        ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "mutation-conflict" &&
+        sharedTerminals[0].written.length === 1,
+      ex.outbox.at(-1),
+    );
+
+    exReq(1014, "terminal.resize", {
+      terminalId,
+      attachmentId: newestAttachmentId,
+      cols: 100,
+      rows: 40,
+    });
+    await flush();
+    check(
+      "terminal.resize is fenced by the current attachment generation",
+      ex.outbox.at(-1)?.id === 1014 &&
+        ex.outbox.at(-1)?.ok === true &&
+        sharedTerminals[0].sizes?.[0]?.join("x") === "100x40",
+      {
+        response: ex.outbox.at(-1),
+        sizes: sharedTerminals[0].sizes,
+      },
+    );
+
+    const closeParams = {
+      terminalId,
+      attachmentId: newestAttachmentId,
+      requestId: "close-phone-worker-0001",
+    };
+    exReq(1015, "terminal.close", closeParams);
+    await flush();
+    exReq(1016, "terminal.close", closeParams);
+    await flush();
+    check(
+      "terminal.close is idempotent under its stable requestId",
+      ex.outbox.at(-1)?.id === 1016 &&
+        ex.outbox.at(-1)?.ok === true &&
+        sharedTerminals[0].closed === true &&
+        terminalLeaseStore.leases.has(terminalId) === false,
+      {
+        response: ex.outbox.at(-1),
+        terminal: sharedTerminals[0],
+      },
+    );
+
+    exReq(1017, "terminal.list", {});
+    await flush();
+    check(
+      "terminal.list drops an explicitly closed lease",
+      ex.outbox.at(-1)?.result?.terminals?.length === 0,
+      ex.outbox.at(-1),
+    );
+
+    // The OpenCode / Cursor / Grok terminal providers were removed. A phone
+    // still running an older build can ask for one of those profiles, so the
+    // request must be rejected as unsupported rather than silently starting a
+    // bare shell that the user believes is a coding agent.
+    const removedProfiles = ["opencode", "cursor", "grok"];
+    const removedCreates = [];
+    for (let index = 0; index < removedProfiles.length; index += 1) {
+      const profile = removedProfiles[index];
+      exReq(1100 + index, "terminal.create", {
+        workspaceId: "ws1",
+        cols: 80,
+        rows: 24,
+        profile,
+        requestId: `create-${profile}-phone-0001`,
+      });
+      await flush();
+      const response = ex.outbox.at(-1);
+      removedCreates.push({
+        profile,
+        ok: response?.ok,
+        code: response?.error?.code,
+      });
+    }
+    check(
+      "phone terminal.create rejects the removed experimental CLI profiles",
+      removedCreates.every(
+        (entry) => entry.ok === false && entry.code === "invalid-params",
+      ),
+      removedCreates,
+    );
+
+    exReq(1018, "terminal.create", {
+      workspaceId: "ws1",
+      cols: 80,
+      rows: 24,
+      requestId: "create-survive-disconnect-0001",
+    });
+    await flush();
+    const survivingTerminal = sharedTerminals.at(-1);
     exSession.destroy();
     check(
-      "disconnect closes a visible shared terminal instead of detaching it",
-      sharedTerminal?.closed === true && sharedTerminal?.detached === false,
-      sharedTerminal,
+      "production disconnect detaches its subscriber while preserving the durable PTY",
+      survivingTerminal?.closed === false &&
+        terminalLeaseStore.leases.size === 1 &&
+        terminalLeaseStore.calls.at(-1)?.[0] === "detachSubscriber",
+      {
+        terminal: survivingTerminal,
+        leases: terminalLeaseStore.leases.size,
+        storeCall: terminalLeaseStore.calls.at(-1),
+      },
     );
   }
 
@@ -2406,36 +6073,78 @@ async function main() {
     // unknown so it hides the affordance instead of showing a dead control.
     const old = makeFakeStream();
     void new rpc.RpcSession(old, services);
-    old.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0 } }));
+    old.inject(
+      rpc.encodeFrame({
+        id: 1,
+        method: "hello",
+        params: { protocol: rpc.RPC_PROTOCOL_VERSION },
+      }),
+    );
     await flush();
     const before = old.outbox.length;
-    old.inject(rpc.encodeFrame({
-      id: 2,
-      method: "cora.board.get",
-      params: { workspaceId: "ws1", runId: "run-1" },
-    }));
-    old.inject(rpc.encodeFrame({
-      id: 5,
-      method: "cora.whiteboard.get",
-      params: { workspaceId: "ws1", runId: "run-1" },
-    }));
-    old.inject(rpc.encodeFrame({
-      id: 3,
-      method: "cora.board.update",
-      params: { workspaceId: "ws1", runId: "run-1", baseRevision: 0, action: "queue", cardId: "c" },
-    }));
-    old.inject(rpc.encodeFrame({
-      id: 4,
-      method: "workerSessions.delete",
-      params: { workspaceId: "ws1", runtime: "claude", sessionId: "abc" },
-    }));
+    old.inject(
+      rpc.encodeFrame({
+        id: 2,
+        method: "cora.board.get",
+        params: { workspaceId: "ws1", runId: "run-1" },
+      }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 5,
+        method: "cora.whiteboard.get",
+        params: { workspaceId: "ws1", runId: "run-1" },
+      }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 3,
+        method: "cora.board.update",
+        params: {
+          workspaceId: "ws1",
+          runId: "run-1",
+          baseRevision: 0,
+          action: "queue",
+          cardId: "c",
+        },
+      }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 4,
+        method: "workerSessions.delete",
+        params: { workspaceId: "ws1", runtime: "claude", sessionId: "abc" },
+      }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 6,
+        method: "automations.workerTerminal.open",
+        params: { workspaceId: "ws1", runId: "run-1", workerId: "attempt-1" },
+      }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 7,
+        method: "fleet.overview",
+        params: {},
+      }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 8,
+        method: "github.workQueue",
+        params: {},
+      }),
+    );
     await flush();
     const answers = old.outbox.slice(before);
     check(
-      "an older Studio answers unknown-method for the board, whiteboard and session delete",
-      answers.length === 4 &&
+      "an older Studio answers unknown-method for newer phone surfaces",
+      answers.length === 7 &&
         answers.every(
-          (frame) => frame?.ok === false && frame?.error?.code === "unknown-method",
+          (frame) =>
+            frame?.ok === false && frame?.error?.code === "unknown-method",
         ),
       answers,
     );
@@ -2453,14 +6162,22 @@ async function main() {
       },
     };
     void new rpc.RpcSession(early, earlyServices);
-    early.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0 } }));
+    early.inject(
+      rpc.encodeFrame({
+        id: 1,
+        method: "hello",
+        params: { protocol: rpc.RPC_PROTOCOL_VERSION },
+      }),
+    );
     await flush();
     const before = early.outbox.length;
-    early.inject(rpc.encodeFrame({
-      id: 2,
-      method: "terminal.create",
-      params: { workspaceId: "ws1", cols: 80, rows: 24 },
-    }));
+    early.inject(
+      rpc.encodeFrame({
+        id: 2,
+        method: "terminal.create",
+        params: { workspaceId: "ws1", cols: 80, rows: 24 },
+      }),
+    );
     await flush();
     const frames = early.outbox.slice(before);
     check(
@@ -2477,15 +6194,25 @@ async function main() {
     const huge = makeFakeStream();
     void new rpc.RpcSession(huge, {
       ...services,
-      listWorkspaces: async () => [{
-        id: "huge",
-        name: "x".repeat(rpc.MAX_FRAME_BYTES + 100),
-        path: "/tmp",
-      }],
+      listWorkspaces: async () => [
+        {
+          id: "huge",
+          name: "x".repeat(rpc.MAX_FRAME_BYTES + 100),
+          path: "/tmp",
+        },
+      ],
     });
-    huge.inject(rpc.encodeFrame({ id: 1, method: "hello", params: { protocol: 0 } }));
+    huge.inject(
+      rpc.encodeFrame({
+        id: 1,
+        method: "hello",
+        params: { protocol: rpc.RPC_PROTOCOL_VERSION },
+      }),
+    );
     await flush();
-    huge.inject(rpc.encodeFrame({ id: 2, method: "workspaces.list", params: {} }));
+    huge.inject(
+      rpc.encodeFrame({ id: 2, method: "workspaces.list", params: {} }),
+    );
     await flush();
     check(
       "an oversized service response becomes a compact RPC error",

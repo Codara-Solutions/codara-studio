@@ -13,9 +13,23 @@ import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
 import { makeId } from "@shared/ids";
+import type {
+  GitHubMarkReadyInput,
+  GitHubMarkReadyResult,
+  GitHubPublishInput,
+  GitHubPublishResult,
+  GitHubMergeInput,
+  GitHubMergeResult,
+  GitHubWorkspaceStatus,
+  StartGitHubIssueInput,
+  StartGitHubIssueResult,
+  StartGitHubPullRequestInput,
+  StartGitHubPullRequestResult,
+} from "@shared/github";
 import { isRemotePath } from "@shared/remote";
 import type {
   AppState,
+  AgentEffortLevel,
   AutomationTrigger,
   BoardCard,
   BoardCardStatus,
@@ -35,17 +49,40 @@ import {
   getGitLog as readGitLog,
   getGitStatus as readGitStatus,
 } from "../git-ops";
+import { readGitHubWorkspaceStatus } from "../github-cli";
+import {
+  invalidateGitHubWorkQueueCache,
+  readGitHubWorkQueue,
+} from "../github-work-queue";
+import { markGitHubPullRequestReady } from "../github-ready";
+import { mergeGitHubPullRequest } from "../github-merge";
+import { publishGitHubWorkspace } from "../github-publish";
+import { startGitHubIssueWorkspace } from "../github-issue-workspace";
+import { startGitHubPullRequestWorkspace } from "../github-pull-request-workspace";
 import {
   addRunMessage,
+  activeWorkerInputDescriptor,
   answerRunQuestion,
+  deleteRun,
   getRun,
   getRunBoard,
+  listRecentRunsForRetryRepair,
   listRuns,
+  onRunDeleted,
+  resumeManagerTurnRecovery,
   startAutopilot,
+  updateChatBackend,
   updateRunBoard,
+  writeActiveWorkerInput,
 } from "../orchestration/run-store";
+import { inspectPiAccountProfileAuthStore } from "../orchestration/pi-account-auth-store";
+import { inspectPiModelCatalog } from "../orchestration/pi-model-catalog";
+import { PiAccountProfileRegistry } from "../orchestration/pi-account-profiles";
+import { inspectCachedPiSubscriptionUsageProfiles } from "../orchestration/pi-subscription-usage";
+import { nativeCliAccounts } from "../orchestration/native-cli-accounts";
 import { BOARD_MAX_CARDS } from "../orchestration/board-store";
 import { ensureCodexProjectTrust } from "../orchestration/codex-trust";
+import { resolveNewNativeClaudeProfile } from "../orchestration/native-claude-profile-runtime";
 import { subscribeToEvents } from "../orchestration/event-log";
 import {
   getJob,
@@ -77,8 +114,30 @@ import {
   RemoteAccessService,
   type RemoteTerminalCreateRequest,
   type RemoteTerminalHandle,
+  type RemoteWorkerTerminalOpenRequest,
 } from "./index";
-import { findRemoteCoraRetry, KeyedSerialQueue } from "./cora-policy";
+import { StudioTerminalShareStore } from "./studio-terminal-share";
+import {
+  findRemoteCoraRetry,
+  KeyedSerialQueue,
+  selectRemoteConversationRuns,
+} from "./cora-policy";
+import { CoraSendReceiptIndex } from "./cora-send-receipts";
+import { normalizeCoraMessage } from "./cora-message-policy";
+import { projectBoundedRemoteCoraRun } from "./cora-run-projection";
+import {
+  CORA_HISTORY_RUNS_JSON_MAX_BYTES,
+  isOneOf,
+  isRemoteCoraIdentity,
+  isRemoteCoraTimestamp,
+  requireRemoteCoraIdentity,
+  requireRemoteCoraTimestamp,
+  takeJsonArrayPrefixWithinBudget,
+} from "./remote-cora-contract";
+import {
+  projectRemoteBoardRead,
+  type RemoteBoardReadProjection,
+} from "./board-projection";
 import {
   createRemoteWorkspaceEntry,
   deleteRemoteWorkspaceEntry,
@@ -100,6 +159,7 @@ import {
 import type {
   RemoteAutomationDetail,
   RemoteAutomationInfo,
+  RemoteAutomationLiveRun,
   RemoteAutomationRunRecord,
   RemoteAutomationTriggerKind,
   RemoteBoard,
@@ -107,7 +167,9 @@ import type {
   RemoteBoardCard,
   RemoteBoardUpdateResult,
   RemoteCoraMessage,
+  RemoteCoraModel,
   RemoteCoraRun,
+  RemoteCoraRunProjection,
   RemoteCoraRunSummary,
   RemoteCoraStep,
   RemoteCoraWorker,
@@ -121,6 +183,10 @@ import type {
   RemoteFileDeleteResult,
   RemoteFileInfo,
   RemoteFileListing,
+  RemoteFleetOverviewProjection,
+  RemoteNativeCliAccount,
+  RemoteSubscriptionProfile,
+  RemoteSubscriptionProvider,
   RemoteGitChange,
   RemoteGitCommitDetail,
   RemoteGitCommitFile,
@@ -132,14 +198,28 @@ import type {
   RemoteWorkspaceOrganization,
   RemoteWorkerSessionDeleteResult,
   RemoteWorkerSessionInfo,
-} from "./rpc";
+  RemoteCoraChangedEvent,
+  RemoteCoraResumeAccount,
+  RemoteCoraResumeResult,
+  RemoteCoraThinkingLevel,
+  } from "./rpc";
+import { createCoraChangedCoalescer } from "./cora-change-coalescer";
+import { projectRemoteFleetOverview } from "./fleet-overview";
+import { projectRemoteNativeCliAccounts } from "./native-cli-account-projection";
+import { projectRemoteSubscriptionProfiles } from "./subscription-profile-projection";
 
 let singleton: RemoteAccessService | null = null;
 let stateSavedSubscriptionInstalled = false;
+let coraSendReceiptCleanupInstalled = false;
+let coraSendReceiptIndexPromise: Promise<CoraSendReceiptIndex> | null = null;
 let workspaceMutation: Promise<void> = Promise.resolve();
-const coraMessageMutations = new KeyedSerialQueue();
+// Every mutation that can affect the NEXT manager turn shares one per-run
+// lane. Account selection, recovery, and message send must never overtake one
+// another merely because they arrived over different RPC methods.
+const coraRunMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
 let lastRemoteImagePruneAt = 0;
+let accountProfileRegistry: PiAccountProfileRegistry | null = null;
 
 const WORKSPACE_COLORS = [
   "#2AA298",
@@ -156,7 +236,6 @@ const WORKSPACE_COLORS = [
 // ceiling for JSON escaping and the response envelope.
 const COLLECTION_BUDGET_BYTES = 384 * 1024;
 const REMOTE_FILE_MAX_BYTES = 384 * 1024;
-const CORA_MESSAGE_MAX_BYTES = 32 * 1024;
 const MAX_REMOTE_WORKSPACES = 200;
 const MAX_REMOTE_WORKSPACE_GROUPS = 100;
 const MAX_DIRECTORY_ENTRIES = 500;
@@ -168,6 +247,7 @@ const MAX_GIT_COMMIT_FILES = 500;
 const MAX_REMOTE_WORKER_SESSIONS = 40;
 const MAX_REMOTE_AUTOMATIONS = 50;
 const MAX_CORA_RUN_WORKERS = 12;
+const CORA_WORKER_ROSTER_MAX_BYTES = 16 * 1024;
 const MAX_CORA_RUN_STEPS = 12;
 // A desktop board can hold BOARD_MAX_CARDS (500). The phone is a review
 // surface, so it takes the head of the pipeline order and reports the rest as
@@ -183,8 +263,7 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 const TERMINAL_SPAWN_SETTLE_MS = 150;
 const TERMINAL_BOOTSTRAP_BYTES = 256 * 1024;
 const READ_ONLY_NO_FOLLOW_FLAGS =
-  fsConstants.O_RDONLY |
-  ((fsConstants.O_NOFOLLOW as number | undefined) ?? 0);
+  fsConstants.O_RDONLY | ((fsConstants.O_NOFOLLOW as number | undefined) ?? 0);
 
 const ACTIVE_WORKER_ATTEMPT_STATUSES = new Set([
   "preparing",
@@ -193,6 +272,10 @@ const ACTIVE_WORKER_ATTEMPT_STATUSES = new Set([
   "running",
   "finishing",
 ]);
+const ACCOUNT_PROFILE_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const NATIVE_CLI_PROFILE_ID_PATTERN =
+  /^(?:personal|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 
 export function getRemoteAccessService(): RemoteAccessService {
   if (!singleton) {
@@ -201,6 +284,10 @@ export function getRemoteAccessService(): RemoteAccessService {
       deviceName: hostname(),
       appVersion: app.getVersion(),
       listWorkspaces: listWorkspacesForRemote,
+      getFleetOverview: getFleetOverviewForRemote,
+      listSubscriptionProfiles: listSubscriptionProfilesForRemote,
+      listCoraModels: listCoraModelsForRemote,
+      listNativeCliAccounts: listNativeCliAccountsForRemote,
       listWorkspaceOrganization: listWorkspaceOrganizationForRemote,
       listDirectories: listDirectoriesForRemote,
       addWorkspace: addWorkspaceForRemote,
@@ -218,9 +305,19 @@ export function getRemoteAccessService(): RemoteAccessService {
       getGitStatus: getGitStatusForRemote,
       getGitLog: getGitLogForRemote,
       getGitCommitDetail: getGitCommitDetailForRemote,
+      getGitHubStatus: getGitHubStatusForRemote,
+      getGitHubWorkQueue: getGitHubWorkQueueForRemote,
+      publishGitHub: publishGitHubForRemote,
+      markGitHubReady: markGitHubReadyForRemote,
+      mergeGitHub: mergeGitHubForRemote,
+      startGitHubIssue: startGitHubIssueForRemote,
+      startGitHubPullRequest: startGitHubPullRequestForRemote,
       listCoraHistory: listCoraHistoryForRemote,
       getCoraRun: getCoraRunForRemote,
+      getCoraGraph: getCoraGraphForRemote,
+      deleteCoraRun: deleteCoraRunForRemote,
       sendCoraMessage: sendCoraMessageForRemote,
+      resumeCoraRun: resumeCoraRunForRemote,
       getCoraWhiteboard: getCoraWhiteboardForRemote,
       getCoraBoard: getCoraBoardForRemote,
       updateCoraBoard: updateCoraBoardForRemote,
@@ -234,6 +331,8 @@ export function getRemoteAccessService(): RemoteAccessService {
       setAutomationEnabled: setAutomationEnabledForRemote,
       registerNotifications: registerNotificationsForRemote,
       beginImageUpload: beginImageUploadForRemote,
+      attachWorkerTerminal: attachRemoteWorkerTerminal,
+      studioTerminalLeases: new StudioTerminalShareStore(),
       createTerminal: createRemoteTerminal,
       log: (line) => logMain("remote-access", line),
     });
@@ -242,8 +341,22 @@ export function getRemoteAccessService(): RemoteAccessService {
     stateSavedSubscriptionInstalled = true;
     onStateSaved(() => singleton?.notifyWorkspacesChanged());
   }
+  if (!coraSendReceiptCleanupInstalled) {
+    coraSendReceiptCleanupInstalled = true;
+    onRunDeleted(async ({ workspaceId, runId }) => {
+      await (await getCoraSendReceiptIndex()).removeRun(workspaceId, runId);
+    });
+  }
   startPhoneNotificationBridge(singleton);
   return singleton;
+}
+
+function getCoraSendReceiptIndex(): Promise<CoraSendReceiptIndex> {
+  coraSendReceiptIndexPromise ??= CoraSendReceiptIndex.open({
+    rootDir: join(sparkHome(), "remote"),
+    log: (line) => logMain("remote-access", line),
+  });
+  return coraSendReceiptIndexPromise;
 }
 
 // Boot hook, called from index.ts once the app is ready: re-enable the
@@ -258,7 +371,9 @@ export function initRemoteAccessAtBoot(): void {
   }
   void getRemoteAccessService()
     .setEnabled(true)
-    .catch((err) => logMain("remote-access", `boot enable failed: ${(err as Error).message}`));
+    .catch((err) =>
+      logMain("remote-access", `boot enable failed: ${(err as Error).message}`),
+    );
 }
 
 // The phone lists local workspaces only. SSH workspaces are skipped because
@@ -277,6 +392,172 @@ async function listWorkspacesForRemote(): Promise<RemoteWorkspaceInfo[]> {
     usedBytes += bytes;
   }
   return result;
+}
+
+async function getFleetOverviewForRemote(): Promise<RemoteFleetOverviewProjection> {
+  // One read per backing collection. In particular, runs are loaded globally
+  // once rather than once per workspace; the pure projector performs every
+  // workspace aggregation over that one snapshot.
+  const [workspaces, runs, automations] = await Promise.all([
+    listWorkspacesForRemote(),
+    listRuns(),
+    listJobs(),
+  ]);
+  return projectRemoteFleetOverview(workspaces, runs, automations);
+}
+
+function getAccountProfileRegistry(): PiAccountProfileRegistry {
+  // Metadata sits beside Pi's app-owned configuration, never in the remote
+  // directory or a phone-readable auth store. The registry itself rejects
+  // token-shaped/unknown fields and exposes only opaque ids + labels.
+  accountProfileRegistry ??= new PiAccountProfileRegistry(
+    join(sparkHome(), "pi-agent"),
+  );
+  return accountProfileRegistry;
+}
+
+async function listSubscriptionProfilesForRemote(): Promise<
+  RemoteSubscriptionProfile[]
+> {
+  // Authentication is inspected in main and projected to one coarse status.
+  // The phone receives no token, provider identity, expiry timestamp or auth
+  // path, but it also never presents a stale metadata row as selectable when
+  // its credentials are missing. Usage is a synchronous peek at the fresh
+  // in-memory cache only: listing profiles never starts vendor/network I/O.
+  const inspection = await inspectPiAccountProfileAuthStore();
+  return projectRemoteSubscriptionProfiles(
+    inspection,
+    inspectCachedPiSubscriptionUsageProfiles(),
+  );
+}
+
+const REMOTE_CORA_THINKING_LEVELS = new Set<RemoteCoraThinkingLevel>([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+async function listCoraModelsForRemote(): Promise<RemoteCoraModel[]> {
+  const live = await inspectPiModelCatalog();
+  const models = live.length > 0
+    ? live
+    : [
+        {
+          id: "claude-fable-5",
+          label: "Claude Fable 5",
+          provider: "anthropic" as const,
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        },
+        {
+          id: "claude-opus-5",
+          label: "Claude Opus 5",
+          provider: "anthropic" as const,
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        },
+        {
+          id: "claude-sonnet-5",
+          label: "Claude Sonnet 5",
+          provider: "anthropic" as const,
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          label: "GPT-5.6 Sol",
+          provider: "openai-codex" as const,
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        },
+        {
+          id: "gpt-5.6-terra",
+          label: "GPT-5.6 Terra",
+          provider: "openai-codex" as const,
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        },
+        {
+          id: "gpt-5.6-luna",
+          label: "GPT-5.6 Luna",
+          provider: "openai-codex" as const,
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        },
+      ];
+  return models
+    .map((model) => ({
+      id: truncateUtf8(model.id, 128),
+      label: truncateUtf8(model.label, 160),
+      provider: model.provider,
+      thinkingLevels: model.thinkingLevels.filter(
+        (level): level is RemoteCoraThinkingLevel =>
+          REMOTE_CORA_THINKING_LEVELS.has(level as RemoteCoraThinkingLevel),
+      ),
+    }))
+    // Claude is deliberately first on every client surface.
+    .sort(
+      (left, right) =>
+        (left.provider === "anthropic" ? 0 : 1) -
+          (right.provider === "anthropic" ? 0 : 1) ||
+        left.label.localeCompare(right.label),
+    );
+}
+
+async function listNativeCliAccountsForRemote(): Promise<
+  RemoteNativeCliAccount[]
+> {
+  return projectRemoteNativeCliAccounts(await nativeCliAccounts.inspect());
+}
+
+function providerForRemoteModel(model: string | undefined): RemoteSubscriptionProvider | null {
+  const normalized = model?.trim().toLowerCase();
+  if (normalized?.startsWith("claude-")) return "anthropic";
+  if (normalized?.startsWith("gpt-")) return "openai-codex";
+  return null;
+}
+
+async function resumeCoraRunForRemote(input: {
+  workspaceId: string;
+  runId: string;
+  recoveryId: string;
+  account?: RemoteCoraResumeAccount;
+}): Promise<RemoteCoraResumeResult> {
+  await requireLocalWorkspace(input.workspaceId);
+  return coraRunMutations.run(
+    JSON.stringify([input.workspaceId, input.runId]),
+    async () => {
+      const run = await requireOwnedRun(input.workspaceId, input.runId);
+      if (run.automationId) {
+        return {
+          outcome: "stale",
+          recoveryId: input.recoveryId,
+          reason: "Automation runs are resumed from Automations.",
+        };
+      }
+      const account = input.account
+        ? input.account.kind === "subscription"
+          ? {
+              kind: "subscription" as const,
+              profileId: input.account.profileId,
+            }
+          : {
+              kind: "native-cli" as const,
+              backend: input.account.runtime,
+              profileId: input.account.profileId,
+            }
+        : undefined;
+      const result = await resumeManagerTurnRecovery({
+        runId: run.id,
+        recoveryId: input.recoveryId,
+        ...(account ? { account } : {}),
+      });
+      return {
+        outcome: result.outcome,
+        recoveryId: input.recoveryId,
+        ...(result.reason
+          ? { reason: truncateUtf8(result.reason, 512) }
+          : {}),
+      };
+    },
+  );
 }
 
 async function listWorkspaceOrganizationForRemote(): Promise<RemoteWorkspaceOrganization> {
@@ -319,18 +600,24 @@ function workspaceGroupInfo(group: WorkspaceGroup): RemoteWorkspaceGroupInfo {
 
 function remoteWorkspaceGroupName(value: string): string {
   const name = truncateUtf8(
-    value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim(),
+    value
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
     512,
   );
   if (!name) throw new Error("Workspace folder names cannot be empty.");
   return name;
 }
 
-async function workspaceInfo(workspace: Workspace): Promise<RemoteWorkspaceInfo> {
+async function workspaceInfo(
+  workspace: Workspace,
+): Promise<RemoteWorkspaceInfo> {
   let branch: string | undefined;
   try {
     const status = await readGitStatus(workspace.cwd);
-    if (status.isRepo && status.branch) branch = truncateUtf8(status.branch, 240);
+    if (status.isRepo && status.branch)
+      branch = truncateUtf8(status.branch, 240);
   } catch {
     // A workspace remains selectable even if git cannot inspect it.
   }
@@ -344,7 +631,9 @@ async function workspaceInfo(workspace: Workspace): Promise<RemoteWorkspaceInfo>
   };
 }
 
-async function listDirectoriesForRemote(rawPath?: string): Promise<RemoteDirectoryListing> {
+async function listDirectoriesForRemote(
+  rawPath?: string,
+): Promise<RemoteDirectoryListing> {
   const resolved = await resolveExistingInside(homedir(), rawPath, {
     allowAbsolute: true,
     directory: true,
@@ -359,8 +648,12 @@ async function listDirectoriesForRemote(rawPath?: string): Promise<RemoteDirecto
   const directories: RemoteDirectoryListing["directories"] = [];
   let usedBytes = 2;
   for (const entry of entries
-    .filter((candidate) => candidate.isDirectory() && !candidate.isSymbolicLink())
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))) {
+    .filter(
+      (candidate) => candidate.isDirectory() && !candidate.isSymbolicLink(),
+    )
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+    )) {
     if (directories.length >= MAX_DIRECTORY_ENTRIES) break;
     const item = {
       name: entry.name,
@@ -391,18 +684,26 @@ async function addWorkspaceForRemote(input: {
     const state = await loadState();
     for (const workspace of state.workspaces) {
       if (isRemotePath(workspace.cwd)) continue;
-      const existing = await realpath(resolve(workspace.cwd)).catch(() => resolve(workspace.cwd));
+      const existing = await realpath(resolve(workspace.cwd)).catch(() =>
+        resolve(workspace.cwd),
+      );
       if (existing === selected.path) return workspaceInfo(workspace);
     }
 
-    const usedColors = new Set(state.workspaces.map((workspace) => workspace.color.toLowerCase()));
+    const usedColors = new Set(
+      state.workspaces.map((workspace) => workspace.color.toLowerCase()),
+    );
     const color =
-      WORKSPACE_COLORS.find((candidate) => !usedColors.has(candidate.toLowerCase())) ??
-      WORKSPACE_COLORS[state.workspaces.length % WORKSPACE_COLORS.length];
+      WORKSPACE_COLORS.find(
+        (candidate) => !usedColors.has(candidate.toLowerCase()),
+      ) ?? WORKSPACE_COLORS[state.workspaces.length % WORKSPACE_COLORS.length];
     const requestedName = input.name?.trim();
     const workspace: Workspace = {
       id: `ws-mobile-${randomUUID()}`,
-      name: truncateUtf8(requestedName || basename(selected.path) || "workspace", 512),
+      name: truncateUtf8(
+        requestedName || basename(selected.path) || "workspace",
+        512,
+      ),
       cwd: selected.path,
       color,
       workers: [],
@@ -420,11 +721,15 @@ async function addWorkspaceForRemote(input: {
   });
 }
 
-async function createWorkspaceGroupForRemote(name: string): Promise<RemoteWorkspaceGroupInfo> {
+async function createWorkspaceGroupForRemote(
+  name: string,
+): Promise<RemoteWorkspaceGroupInfo> {
   return serializeWorkspaceMutation(async () => {
     const state = await loadState();
     if (state.workspaceGroups.length >= MAX_REMOTE_WORKSPACE_GROUPS) {
-      throw new Error(`Codara Studio supports at most ${MAX_REMOTE_WORKSPACE_GROUPS} remote workspace folders.`);
+      throw new Error(
+        `Codara Studio supports at most ${MAX_REMOTE_WORKSPACE_GROUPS} remote workspace folders.`,
+      );
     }
     const group: WorkspaceGroup = {
       id: `workspace-group-mobile-${randomUUID()}`,
@@ -452,7 +757,9 @@ async function updateWorkspaceGroupForRemote(input: {
 }): Promise<RemoteWorkspaceGroupInfo> {
   return serializeWorkspaceMutation(async () => {
     const state = await loadState();
-    const index = state.workspaceGroups.findIndex((group) => group.id === input.groupId);
+    const index = state.workspaceGroups.findIndex(
+      (group) => group.id === input.groupId,
+    );
     if (index < 0) throw new Error("This workspace folder no longer exists.");
     const current = state.workspaceGroups[index];
     const updated: WorkspaceGroup = {
@@ -472,9 +779,14 @@ async function updateWorkspaceGroupForRemote(input: {
 async function deleteWorkspaceGroupForRemote(groupId: string): Promise<void> {
   return serializeWorkspaceMutation(async () => {
     const state = await loadState();
-    const groupIndex = state.workspaceGroups.findIndex((group) => group.id === groupId);
-    if (groupIndex < 0) throw new Error("This workspace folder no longer exists.");
-    const workspaceGroups = state.workspaceGroups.filter((group) => group.id !== groupId);
+    const groupIndex = state.workspaceGroups.findIndex(
+      (group) => group.id === groupId,
+    );
+    if (groupIndex < 0)
+      throw new Error("This workspace folder no longer exists.");
+    const workspaceGroups = state.workspaceGroups.filter(
+      (group) => group.id !== groupId,
+    );
     const releasedIds: string[] = [];
     const workspaces = state.workspaces.map((workspace) => {
       if (workspace.groupId !== groupId) return workspace;
@@ -488,7 +800,9 @@ async function deleteWorkspaceGroupForRemote(groupId: string): Promise<void> {
       (itemId) => itemId !== groupId && !releasedIds.includes(itemId),
     );
     withoutGroup.splice(
-      oldIndex >= 0 ? Math.min(oldIndex, withoutGroup.length) : withoutGroup.length,
+      oldIndex >= 0
+        ? Math.min(oldIndex, withoutGroup.length)
+        : withoutGroup.length,
       0,
       ...releasedIds,
     );
@@ -526,11 +840,14 @@ async function moveWorkspaceForRemote(input: {
       throw new Error("The destination workspace folder no longer exists.");
     }
     if (input.groupId !== null && input.beforeRailItemId !== undefined) {
-      throw new Error("A workspace folder position cannot use a top-level destination.");
+      throw new Error(
+        "A workspace folder position cannot use a top-level destination.",
+      );
     }
     if (
       input.beforeWorkspaceId === input.workspaceId ||
-      ((sourceIndex >= 0 && !state.workspaces[sourceIndex].groupId) &&
+      (sourceIndex >= 0 &&
+        !state.workspaces[sourceIndex].groupId &&
         input.beforeRailItemId === input.workspaceId)
     ) {
       return workspaceInfo(state.workspaces[sourceIndex]);
@@ -544,7 +861,9 @@ async function moveWorkspaceForRemote(input: {
         isRemotePath(before.cwd) ||
         (before.groupId ?? null) !== input.groupId
       ) {
-        throw new Error("The requested workspace position is no longer available.");
+        throw new Error(
+          "The requested workspace position is no longer available.",
+        );
       }
     }
 
@@ -559,7 +878,9 @@ async function moveWorkspaceForRemote(input: {
           return ungrouped;
         })();
     let insertAt = input.beforeWorkspaceId
-      ? remaining.findIndex((workspace) => workspace.id === input.beforeWorkspaceId)
+      ? remaining.findIndex(
+          (workspace) => workspace.id === input.beforeWorkspaceId,
+        )
       : -1;
     if (insertAt < 0) {
       let lastInDestination = -1;
@@ -568,7 +889,8 @@ async function moveWorkspaceForRemote(input: {
           lastInDestination = index;
         }
       }
-      insertAt = lastInDestination >= 0 ? lastInDestination + 1 : remaining.length;
+      insertAt =
+        lastInDestination >= 0 ? lastInDestination + 1 : remaining.length;
     }
     const workspaces = remaining.slice();
     workspaces.splice(insertAt, 0, moved);
@@ -581,17 +903,25 @@ async function moveWorkspaceForRemote(input: {
     if (input.groupId === null) {
       if (
         input.beforeRailItemId &&
-        !state.workspaceGroups.some((group) => group.id === input.beforeRailItemId) &&
+        !state.workspaceGroups.some(
+          (group) => group.id === input.beforeRailItemId,
+        ) &&
         !state.workspaces.some(
           (workspace) =>
             workspace.id === input.beforeRailItemId &&
             !isRemotePath(workspace.cwd) &&
             workspace.id !== input.workspaceId &&
-            !(workspace.groupId &&
-              state.workspaceGroups.some((group) => group.id === workspace.groupId)),
+            !(
+              workspace.groupId &&
+              state.workspaceGroups.some(
+                (group) => group.id === workspace.groupId,
+              )
+            ),
         )
       ) {
-        throw new Error("The requested top-level position is no longer available.");
+        throw new Error(
+          "The requested top-level position is no longer available.",
+        );
       }
       const railInsertAt = input.beforeRailItemId
         ? railOrder.indexOf(input.beforeRailItemId)
@@ -607,7 +937,11 @@ async function moveWorkspaceForRemote(input: {
       workspaces,
       state.workspaceGroups,
     );
-    await persistRemoteWorkspaceState({ ...state, workspaces, workspaceRailOrder: railOrder });
+    await persistRemoteWorkspaceState({
+      ...state,
+      workspaces,
+      workspaceRailOrder: railOrder,
+    });
     return workspaceInfo(moved);
   });
 }
@@ -634,7 +968,9 @@ async function reorderWorkspaceRailForRemote(input: {
       input.beforeItemId !== null &&
       !isVisibleRailItem(input.beforeItemId)
     ) {
-      throw new Error("The requested workspace rail position no longer exists.");
+      throw new Error(
+        "The requested workspace rail position no longer exists.",
+      );
     }
     if (input.beforeItemId === input.itemId) return;
     const current = normalizeWorkspaceRailOrderForRemote(
@@ -647,7 +983,9 @@ async function reorderWorkspaceRailForRemote(input: {
       ? remaining.indexOf(input.beforeItemId)
       : remaining.length;
     if (input.beforeItemId && insertAt < 0) {
-      throw new Error("The requested workspace rail position no longer exists.");
+      throw new Error(
+        "The requested workspace rail position no longer exists.",
+      );
     }
     const workspaceRailOrder = remaining.slice();
     workspaceRailOrder.splice(insertAt, 0, input.itemId);
@@ -661,7 +999,9 @@ function normalizeWorkspaceRailOrderForRemote(
   groups: readonly WorkspaceGroup[],
 ): string[] {
   const eligible = new Set([
-    ...workspaces.filter((workspace) => !workspace.groupId).map((workspace) => workspace.id),
+    ...workspaces
+      .filter((workspace) => !workspace.groupId)
+      .map((workspace) => workspace.id),
     ...groups.map((group) => group.id),
   ]);
   const result: string[] = [];
@@ -683,7 +1023,9 @@ async function persistRemoteWorkspaceState(state: AppState): Promise<void> {
   broadcastStateChanged(state);
 }
 
-function serializeWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+function serializeWorkspaceMutation<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
   const result = workspaceMutation.catch(() => undefined).then(operation);
   workspaceMutation = result.then(
     () => undefined,
@@ -708,12 +1050,18 @@ async function requireLocalWorkspace(
   workspaceId: string,
 ): Promise<{ workspace: Workspace; root: string }> {
   const state = await loadState();
-  const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
+  const workspace = state.workspaces.find(
+    (candidate) => candidate.id === workspaceId,
+  );
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   if (isRemotePath(workspace.cwd)) {
-    throw new Error("This workspace lives on an SSH host; open it on the computer instead.");
+    throw new Error(
+      "This workspace lives on an SSH host; open it on the computer instead.",
+    );
   }
-  const resolved = await resolveExistingInside(workspace.cwd, undefined, { directory: true });
+  const resolved = await resolveExistingInside(workspace.cwd, undefined, {
+    directory: true,
+  });
   return { workspace, root: resolved.root };
 }
 
@@ -749,7 +1097,9 @@ async function listFilesForRemote(input: {
   for (const entry of sorted) {
     if (result.length >= MAX_FILE_ENTRIES) break;
     const absolute = join(target.path, entry.name);
-    const extension = entry.isFile() ? extname(entry.name).slice(1).toLowerCase() : "";
+    const extension = entry.isFile()
+      ? extname(entry.name).slice(1).toLowerCase()
+      : "";
     const item: RemoteFileInfo = {
       name: entry.name,
       path: toWireRelative(root, absolute),
@@ -764,7 +1114,11 @@ async function listFilesForRemote(input: {
   const path = toWireRelative(root, target.path);
   return {
     path,
-    parentPath: path ? (posix.dirname(path) === "." ? "" : posix.dirname(path)) : null,
+    parentPath: path
+      ? posix.dirname(path) === "."
+        ? ""
+        : posix.dirname(path)
+      : null,
     entries: result,
   };
 }
@@ -781,7 +1135,9 @@ async function readFileForRemote(input: {
   // swap window between the policy realpath/lstat checks above and open().
   // Intermediate components remain canonicalized by resolveExistingInside;
   // the open handle then pins the selected inode for the bounded read below.
-  const handle = await open(target.path, READ_ONLY_NO_FOLLOW_FLAGS).catch(() => null);
+  const handle = await open(target.path, READ_ONLY_NO_FOLLOW_FLAGS).catch(
+    () => null,
+  );
   if (!handle) throw new Error("This file cannot be opened.");
   try {
     const info = await handle.stat();
@@ -794,7 +1150,12 @@ async function readFileForRemote(input: {
     const data = Buffer.alloc(info.size);
     let offset = 0;
     while (offset < data.length) {
-      const read = await handle.read(data, offset, data.length - offset, offset);
+      const read = await handle.read(
+        data,
+        offset,
+        data.length - offset,
+        offset,
+      );
       if (read.bytesRead === 0) break;
       offset += read.bytesRead;
     }
@@ -829,7 +1190,9 @@ async function createFileEntryForRemote(input: {
   return fileMutations.run(input.workspaceId, async () => {
     const { root } = await requireLocalWorkspace(input.workspaceId);
     return createRemoteWorkspaceEntry(root, {
-      ...(input.parentPath !== undefined ? { parentPath: input.parentPath } : {}),
+      ...(input.parentPath !== undefined
+        ? { parentPath: input.parentPath }
+        : {}),
       name: input.name,
       kind: input.kind,
     });
@@ -896,7 +1259,9 @@ async function beginImageUploadForRemote(
   return createRemoteImageUpload(directory, input);
 }
 
-async function getGitStatusForRemote(workspaceId: string): Promise<RemoteGitStatus> {
+async function getGitStatusForRemote(
+  workspaceId: string,
+): Promise<RemoteGitStatus> {
   const { root } = await requireLocalWorkspace(workspaceId);
   const status = await readGitStatus(root);
   let usedBytes = 2;
@@ -905,7 +1270,9 @@ async function getGitStatusForRemote(workspaceId: string): Promise<RemoteGitStat
     for (const change of changes) {
       const item: RemoteGitChange = {
         path: truncateUtf8(change.path, 4096),
-        ...(change.oldPath ? { oldPath: truncateUtf8(change.oldPath, 4096) } : {}),
+        ...(change.oldPath
+          ? { oldPath: truncateUtf8(change.oldPath, 4096) }
+          : {}),
         status: change.status,
       };
       const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
@@ -919,7 +1286,9 @@ async function getGitStatusForRemote(workspaceId: string): Promise<RemoteGitStat
     isRepo: status.isRepo,
     ...(status.branch ? { branch: truncateUtf8(status.branch, 240) } : {}),
     detached: status.detached,
-    ...(status.upstream ? { upstream: truncateUtf8(status.upstream, 500) } : {}),
+    ...(status.upstream
+      ? { upstream: truncateUtf8(status.upstream, 500) }
+      : {}),
     ahead: status.ahead,
     behind: status.behind,
     staged: fitChanges(status.staged),
@@ -929,13 +1298,70 @@ async function getGitStatusForRemote(workspaceId: string): Promise<RemoteGitStat
   };
 }
 
+async function getGitHubStatusForRemote(
+  workspaceId: string,
+): Promise<GitHubWorkspaceStatus> {
+  const { root } = await requireLocalWorkspace(workspaceId);
+  return readGitHubWorkspaceStatus(root);
+}
+
+async function getGitHubWorkQueueForRemote(input: { refresh: boolean }) {
+  if (input.refresh) invalidateGitHubWorkQueueCache();
+  return readGitHubWorkQueue();
+}
+
+async function publishGitHubForRemote(input: {
+  workspaceId: string;
+  input: GitHubPublishInput;
+}): Promise<GitHubPublishResult> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  return publishGitHubWorkspace(root, input.input);
+}
+
+async function markGitHubReadyForRemote(input: {
+  workspaceId: string;
+  input: GitHubMarkReadyInput;
+}): Promise<GitHubMarkReadyResult> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  return markGitHubPullRequestReady(root, input.input);
+}
+
+async function mergeGitHubForRemote(input: {
+  workspaceId: string;
+  input: GitHubMergeInput;
+}): Promise<GitHubMergeResult> {
+  const { root } = await requireLocalWorkspace(input.workspaceId);
+  return mergeGitHubPullRequest(root, input.input);
+}
+
+async function startGitHubIssueForRemote(
+  input: StartGitHubIssueInput,
+): Promise<StartGitHubIssueResult> {
+  // The transaction resolves the source workspace locally and treats the
+  // phone's issue number as the only selector; title, URL, branch, path, and
+  // setup command are all authoritative desktop-side data.
+  return startGitHubIssueWorkspace(input);
+}
+
+async function startGitHubPullRequestForRemote(
+  input: StartGitHubPullRequestInput,
+): Promise<StartGitHubPullRequestResult> {
+  // The phone echoes only the queue's canonical repository and pinned head.
+  // The desktop re-resolves both immediately before checkout and refuses a
+  // moved head, so a delayed or replayed tap cannot silently import new code.
+  return startGitHubPullRequestWorkspace(input);
+}
+
 async function getGitLogForRemote(input: {
   workspaceId: string;
   limit: number;
 }): Promise<RemoteGitLog> {
   const { root } = await requireLocalWorkspace(input.workspaceId);
   const log = await readGitLog(root);
-  const limit = Math.max(1, Math.min(MAX_GIT_LOG_COMMITS, Math.floor(input.limit)));
+  const limit = Math.max(
+    1,
+    Math.min(MAX_GIT_LOG_COMMITS, Math.floor(input.limit)),
+  );
   const commits: RemoteGitCommitSummary[] = [];
   let usedBytes = 2;
 
@@ -991,7 +1417,10 @@ async function getGitCommitDetailForRemote(input: {
     isHead: false,
   };
   const files: RemoteGitCommitFile[] = [];
-  let usedBytes = Buffer.byteLength(JSON.stringify({ ...base, files: [] }), "utf8");
+  let usedBytes = Buffer.byteLength(
+    JSON.stringify({ ...base, files: [] }),
+    "utf8",
+  );
   for (const file of detail.files) {
     if (files.length >= MAX_GIT_COMMIT_FILES) break;
     const item: RemoteGitCommitFile = {
@@ -1015,31 +1444,86 @@ async function listCoraHistoryForRemote(
 ): Promise<RemoteCoraRunSummary[]> {
   await requireLocalWorkspace(workspaceId);
   const runs = await listRuns(workspaceId);
-  const sliced = runs.slice(0, MAX_CORA_RUNS);
+  // Automation passes have their own list/detail/history RPCs. Keeping them
+  // out here makes "conversation history" true at the data boundary instead
+  // of making every client download them and remember to hide them.
+  const sliced = selectRemoteConversationRuns(runs, MAX_CORA_RUNS);
   // One job-store read joined against the whole page, only when an automation
   // run is actually present.
   const join = sliced.some((run) => run.automationId)
     ? buildAutomationJoin(await listJobs().catch(() => [] as ScheduledJob[]))
     : () => undefined;
-  const result: RemoteCoraRunSummary[] = [];
-  let usedBytes = 2;
+  const candidates: RemoteCoraRunSummary[] = [];
   for (const run of sliced) {
-    const summary = toRemoteRunSummary(run, join(run));
-    const bytes = Buffer.byteLength(JSON.stringify(summary), "utf8") + 1;
-    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
-    result.push(summary);
-    usedBytes += bytes;
+    let summary: RemoteCoraRunSummary;
+    try {
+      summary = toRemoteRunSummary(run, join(run));
+    } catch {
+      // One hand-edited/legacy identity must not make every healthy history
+      // row disappear. Detail requests for the malformed run still fail
+      // explicitly at the same validation boundary.
+      continue;
+    }
+    candidates.push(summary);
   }
-  return result;
+  return takeJsonArrayPrefixWithinBudget(
+    candidates,
+    CORA_HISTORY_RUNS_JSON_MAX_BYTES,
+  );
 }
 
 async function getCoraRunForRemote(input: {
   workspaceId: string;
   runId: string;
+  afterCursor?: string;
+}): Promise<RemoteCoraRunProjection> {
+  await requireLocalWorkspace(input.workspaceId);
+  const run = await requireOwnedRun(input.workspaceId, input.runId);
+  return projectCoraRunForRemote(run, input.afterCursor);
+}
+
+async function getCoraGraphForRemote(input: {
+  workspaceId: string;
+  runId: string;
 }): Promise<RemoteCoraRun> {
   await requireLocalWorkspace(input.workspaceId);
   const run = await requireOwnedRun(input.workspaceId, input.runId);
-  return toRemoteRun(run, await automationJoinForRun(run));
+  // Deliberately bypass the message-window projector. This route exists for
+  // the graph, so sending a 400 KiB transcript after a pass tap would undo the
+  // mobile data savings that the bounded step/worker projection provides.
+  return toRemoteRun(run, await automationJoinForRun(run), []);
+}
+
+async function projectCoraRunForRemote(
+  run: RunState,
+  afterCursor?: string,
+): Promise<RemoteCoraRunProjection> {
+  const runId = requireRemoteCoraIdentity(run.id, "run.id");
+  const base = toRemoteRun(run, await automationJoinForRun(run), []);
+  const sourceMessages = remoteCoraSourceMessages(run);
+  return projectBoundedRemoteCoraRun({
+    base,
+    runId,
+    conversationEpoch: run.conversationEpoch ?? 0,
+    sourceMessages,
+    projectMessage: toRemoteCoraMessage,
+    ...(afterCursor !== undefined ? { afterCursor } : {}),
+    maxMessageCount: MAX_CORA_MESSAGES,
+    maxMessageBytes: COLLECTION_BUDGET_BYTES,
+  });
+}
+
+async function deleteCoraRunForRemote(input: {
+  workspaceId: string;
+  runId: string;
+}): Promise<void> {
+  await requireLocalWorkspace(input.workspaceId);
+  const run = await getRun(input.runId);
+  // Deletion is intentionally idempotent. A phone can lose the successful
+  // reply, reconnect, and retry after the run directory is already gone.
+  // A run owned by another workspace is treated as absent and never touched.
+  if (!run || run.workspaceId !== input.workspaceId) return;
+  await deleteRun(run.id);
 }
 
 async function sendCoraMessageForRemote(input: {
@@ -1047,29 +1531,64 @@ async function sendCoraMessageForRemote(input: {
   runId?: string;
   message: string;
   clientMessageId: string;
-}): Promise<RemoteCoraRun> {
+  afterCursor?: string;
+  model?: string;
+  effort?: RemoteCoraThinkingLevel;
+}): Promise<RemoteCoraRunProjection> {
   const { workspace, root } = await requireLocalWorkspace(input.workspaceId);
-  const message = input.message.trim();
-  if (Buffer.byteLength(message, "utf8") > CORA_MESSAGE_MAX_BYTES) {
-    throw new Error(`Cora messages are limited to ${CORA_MESSAGE_MAX_BYTES / 1024} KiB.`);
-  }
+  const message = normalizeCoraMessage(input.message);
   const clientMessageId = input.clientMessageId.trim();
   if (!clientMessageId || Buffer.byteLength(clientMessageId, "utf8") > 256) {
     throw new Error("clientMessageId is invalid.");
   }
+  const model = input.model?.trim();
+  const provider = providerForRemoteModel(model);
+  if (model && !provider) {
+    throw new Error("That Cora model is not supported.");
+  }
 
-  const mutationKey = JSON.stringify([workspace.id, clientMessageId]);
-  return coraMessageMutations.run(mutationKey, async () => {
-    // This lookup is deliberately inside the key queue and reads persisted run
-    // messages. It covers a reply lost after commit, a reconnect retry, and
-    // concurrent deliveries before a new conversation has a run id.
-    const retry = findRemoteCoraRetry(await listRuns(workspace.id), {
+  const mutationKey = input.runId
+    ? JSON.stringify([workspace.id, input.runId])
+    : JSON.stringify([workspace.id, "new", clientMessageId]);
+  return coraRunMutations.run(mutationKey, async () => {
+    const receiptInput = {
       workspaceId: workspace.id,
       ...(input.runId ? { runId: input.runId } : {}),
       message,
       clientMessageId,
-    });
-    if (retry) return toRemoteRun(retry, await automationJoinForRun(retry));
+    };
+    const receipts = await getCoraSendReceiptIndex();
+    // A normal retry or a restart reads exactly the indexed run. The receipt
+    // stores identities + a message digest only; the authoritative message in
+    // run.json still decides whether this is the same request.
+    let retry: RunState | undefined =
+      (await receipts.resolve(receiptInput, getRun)) ?? undefined;
+    let existing: RunState | undefined;
+    if (!retry && input.runId) {
+      // Existing-conversation first deliveries already identify the only run
+      // that may be mutated. This O(1) authoritative read also repairs a
+      // missing legacy receipt without touching sibling run bodies.
+      existing = await requireOwnedRun(workspace.id, input.runId);
+      retry = findRemoteCoraRetry([existing], receiptInput);
+    } else if (!retry) {
+      // A legacy new-conversation retry has no run id. Inspect at most the
+      // newest retained run bodies once, then persist the repaired O(1) route.
+      const repair = await listRecentRunsForRetryRepair();
+      retry = findRemoteCoraRetry(repair.runs, receiptInput);
+      if (!retry && repair.truncated) {
+        // Starting a second run would be unsafe because an older legacy
+        // delivery may sit beyond the explicit repair bound. Retention keeps
+        // normal workspaces below this boundary; ask for a retry after it has
+        // reconciled rather than guessing.
+        throw new Error(
+          "Could not safely reconcile this Cora retry key within the retained run window. Please retry.",
+        );
+      }
+    }
+    if (retry) {
+      await receipts.record(receiptInput, retry.id);
+      return projectCoraRunForRemote(retry, input.afterCursor);
+    }
 
     let run: RunState;
     if (!input.runId) {
@@ -1079,9 +1598,23 @@ async function sendCoraMessageForRemote(input: {
         cwd: root,
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
+        chatBackend: "pi",
+        ...(model ? { chatModel: model } : {}),
+        ...(input.effort ? { chatEffort: input.effort as AgentEffortLevel } : {}),
       });
     } else {
-      const existing = await requireOwnedRun(workspace.id, input.runId);
+      existing ??= await requireOwnedRun(workspace.id, input.runId);
+      if (existing.automationId) {
+        throw new Error("Automation-owned runs cannot be continued as Cora chats.");
+      }
+      if (model || input.effort) {
+        existing = await updateChatBackend({
+          runId: existing.id,
+          chatBackend: "pi",
+          ...(model ? { chatModel: model } : {}),
+          ...(input.effort ? { chatEffort: input.effort as AgentEffortLevel } : {}),
+        });
+      }
       run = existing.blockedOn?.questionMessageId
         ? await answerRunQuestion({
             runId: existing.id,
@@ -1097,11 +1630,17 @@ async function sendCoraMessageForRemote(input: {
             clientMessageId,
           });
     }
-    return toRemoteRun(run, await automationJoinForRun(run));
+    // Commit the compact route before replying. A lost reply can now recover
+    // after restart with one run read and no full-run mutation result ledger.
+    await receipts.record(receiptInput, run.id);
+    return projectCoraRunForRemote(run, input.afterCursor);
   });
 }
 
-async function requireOwnedRun(workspaceId: string, runId: string): Promise<RunState> {
+async function requireOwnedRun(
+  workspaceId: string,
+  runId: string,
+): Promise<RunState> {
   const run = await getRun(runId);
   if (!run || run.workspaceId !== workspaceId) {
     throw new Error(`Cora run not found in this workspace: ${runId}`);
@@ -1138,80 +1677,225 @@ function buildAutomationJoin(
 ): (run: RunState) => RemoteAutomationJoin | undefined {
   const byId = new Map(jobs.map((job) => [job.id, job]));
   return (run) =>
-    run.automationId ? automationJoinFromJob(byId.get(run.automationId), run) : undefined;
+    run.automationId
+      ? automationJoinFromJob(byId.get(run.automationId), run)
+      : undefined;
 }
 
-async function automationJoinForRun(run: RunState): Promise<RemoteAutomationJoin | undefined> {
+async function automationJoinForRun(
+  run: RunState,
+): Promise<RemoteAutomationJoin | undefined> {
   if (!run.automationId) return undefined;
   const job = await getJob(run.automationId).catch(() => undefined);
   return automationJoinFromJob(job ?? undefined, run);
+}
+
+const REMOTE_CORA_RUN_STATUSES = new Set<RemoteCoraRun["status"]>([
+  "idle",
+  "planning",
+  "running",
+  "reviewing",
+  "blocked",
+  "paused",
+  "complete",
+  "failed",
+  "cancelled",
+]);
+const REMOTE_CORA_MESSAGE_AUTHORS = new Set<RemoteCoraMessage["author"]>([
+  "user",
+  "cora",
+  "system",
+]);
+const REMOTE_CORA_MESSAGE_KINDS = new Set<RemoteCoraMessage["kind"]>([
+  "note",
+  "question",
+  "answer",
+  "decision",
+  "assistant_stream",
+]);
+const REMOTE_CORA_WORKER_STATUSES = new Set<RemoteCoraWorker["status"]>([
+  "preparing",
+  "prompt_ready",
+  "launching",
+  "running",
+  "finishing",
+  "succeeded",
+  "failed",
+  "timed_out",
+  "cancelled",
+]);
+const REMOTE_CORA_WORKER_RUNTIMES = new Set([
+  "claude",
+  "codex",
+  "shell",
+  "manual",
+] as const);
+const REMOTE_CORA_STEP_STATUSES = new Set<RemoteCoraStep["status"]>([
+  "queued",
+  "planning",
+  "ready",
+  "running",
+  "reviewing",
+  "complete",
+  "completed_unverified",
+  "blocked",
+  "failed",
+  "skipped",
+]);
+
+function remoteCoraRecoverySummary(
+  run: RunState,
+): RemoteCoraRunSummary["recovery"] {
+  const recovery = run.managerTurnRecovery;
+  if (
+    !recovery ||
+    run.automationId ||
+    (recovery.failureKind !== "provider" &&
+      recovery.failureKind !== "transport" &&
+      recovery.failureKind !== "rate_limit") ||
+    !isRemoteCoraTimestamp(recovery.parkedAt)
+  ) {
+    return undefined;
+  }
+  return {
+    cause:
+      recovery.failureKind === "provider"
+        ? "provider_unavailable"
+        : recovery.failureKind === "transport"
+          ? "connection"
+          : "rate_limit",
+    parkedAt: recovery.parkedAt,
+  };
 }
 
 function toRemoteRunSummary(
   run: RunState,
   automation?: RemoteAutomationJoin,
 ): RemoteCoraRunSummary {
-  const lastMessage = run.humanMessages.at(-1)?.message;
+  const id = requireRemoteCoraIdentity(run.id, "run.id");
+  const workspaceId = requireRemoteCoraIdentity(
+    run.workspaceId,
+    "run.workspaceId",
+  );
+  if (!isOneOf(run.status, REMOTE_CORA_RUN_STATUSES)) {
+    throw new TypeError("run.status is not a supported remote Cora status.");
+  }
+  const createdAt = requireRemoteCoraTimestamp(run.createdAt, "run.createdAt");
+  const updatedAt = requireRemoteCoraTimestamp(run.updatedAt, "run.updatedAt");
+  const projectedMessages = remoteCoraSourceMessages(run);
+  const lastMessage = projectedMessages.at(-1)?.message;
   // Honest split: costUsd carries ONLY measured spend (metered manager calls
   // plus worker attempts whose transport reported real cost); the placeholder
   // estimate for unmeasured attempts travels apart as estimatedCostUsd. The
   // rollup guarantees the two never cover the same attempt.
-  const costUsd =
+  const computedCostUsd =
     run.totalCostUsd !== undefined || run.measuredWorkerCostUsd !== undefined
       ? (run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0)
       : undefined;
-  const estimatedCostUsd = run.estimatedWorkerCostUsd;
+  const costUsd = Number.isFinite(computedCostUsd)
+    ? computedCostUsd
+    : undefined;
+  const estimatedCostUsd = Number.isFinite(run.estimatedWorkerCostUsd)
+    ? run.estimatedWorkerCostUsd
+    : undefined;
   // Model chip for automation rows: the newest attempt's resolved model wins
   // (what actually launched), else the newest task's hint (what will launch).
   const automationModel = run.automationId
-    ? [...run.workerAttempts].reverse().find((attempt) => attempt.model)?.model ||
+    ? [...run.workerAttempts].reverse().find((attempt) => attempt.model)
+        ?.model ||
       [...run.workerTasks].reverse().find((task) => task.modelHint)?.modelHint
     : undefined;
+  const displayedModel =
+    automationModel || (!run.automationId ? run.chatModel : undefined);
+  const automationIteration = automation?.iteration;
+  const automationId = run.automationId
+    ? requireRemoteCoraIdentity(run.automationId, "run.automationId")
+    : undefined;
   return {
-    id: run.id,
-    workspaceId: run.workspaceId,
-    title: truncateUtf8(run.title, 512),
+    id,
+    workspaceId,
+    title: truncateUtf8(typeof run.title === "string" ? run.title : "", 512),
     status: run.status,
-    createdAt: run.createdAt,
-    updatedAt: run.updatedAt,
-    messageCount: run.humanMessages.length,
-    ...(lastMessage ? { lastMessage: truncateUtf8(lastMessage, 512) } : {}),
+    createdAt,
+    updatedAt,
+    messageCount: projectedMessages.length,
+    ...(typeof lastMessage === "string" && lastMessage
+      ? { lastMessage: truncateUtf8(lastMessage, 512) }
+      : {}),
     activeWorkers: run.workerAttempts.filter((attempt) =>
       ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status),
     ).length,
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(estimatedCostUsd ? { estimatedCostUsd } : {}),
-    ...(run.automationId ? { automated: true, automationId: run.automationId } : {}),
-    ...(run.automationId && automation?.name
+    ...(automationId
+      ? { automated: true, automationId }
+      : {}),
+    ...(automationId && automation?.name
       ? { automationName: truncateUtf8(automation.name, 200) }
       : {}),
-    ...(run.automationId && automation?.iteration !== undefined
-      ? { iteration: automation.iteration }
+    ...(automationId &&
+    Number.isSafeInteger(automationIteration) &&
+    automationIteration! >= 0
+      ? { iteration: automationIteration }
       : {}),
-    ...(automationModel ? { model: truncateUtf8(automationModel, 120) } : {}),
+    ...(typeof displayedModel === "string" && displayedModel
+      ? { model: truncateUtf8(displayedModel, 120) }
+      : {}),
+    ...(!run.automationId && run.chatEffort
+      ? { effort: run.chatEffort as RemoteCoraThinkingLevel }
+      : {}),
+    ...(remoteCoraRecoverySummary(run)
+      ? { recovery: remoteCoraRecoverySummary(run) }
+      : {}),
   };
 }
 
 // Worker roster for the phone's run header: active attempts first, then the
 // most recent settled ones, capped so a long run cannot bloat every poll.
-function toRemoteRunWorkers(run: RunState): RemoteCoraWorker[] {
+function toRemoteRunWorkers(run: RunState): {
+  workers: RemoteCoraWorker[];
+  total: number;
+} {
   const tasks = new Map(run.workerTasks.map((task) => [task.id, task]));
-  const toWorker = (attempt: RunState["workerAttempts"][number]): RemoteCoraWorker => {
+  const toWorker = (
+    attempt: RunState["workerAttempts"][number],
+  ): RemoteCoraWorker | undefined => {
     const task = tasks.get(attempt.workerTaskId);
+    if (
+      !isRemoteCoraIdentity(attempt.id) ||
+      !isOneOf(attempt.status, REMOTE_CORA_WORKER_STATUSES) ||
+      !isOneOf(attempt.runtime, REMOTE_CORA_WORKER_RUNTIMES)
+    ) {
+      return undefined;
+    }
     // The attempt only records a model once the launch resolved one; before
     // that (and for legacy attempts) the owning task's hint is what Studio
     // itself displays, so the phone gets the same fallback.
     const model = attempt.model || task?.modelHint;
     return {
       id: attempt.id,
-      title: truncateUtf8(task?.title || "Worker", 300),
+      ...(typeof task?.stepId === "string" && isRemoteCoraIdentity(task.stepId)
+        ? { stepId: task.stepId }
+        : {}),
+      title: truncateUtf8(
+        typeof task?.title === "string" && task.title ? task.title : "Worker",
+        300,
+      ),
       runtime: attempt.runtime,
-      ...(model ? { model: truncateUtf8(model, 120) } : {}),
-      ...(task?.effortHint ? { effort: truncateUtf8(task.effortHint, 40) } : {}),
+      ...(typeof model === "string" && model
+        ? { model: truncateUtf8(model, 120) }
+        : {}),
+      ...(typeof task?.effortHint === "string" && task.effortHint
+        ? { effort: truncateUtf8(task.effortHint, 40) }
+        : {}),
       status: attempt.status,
-      ...(attempt.startedAt ? { startedAt: attempt.startedAt } : {}),
-      ...(attempt.finishedAt ? { finishedAt: attempt.finishedAt } : {}),
-      ...(attempt.runtimeState
+      ...(isRemoteCoraTimestamp(attempt.startedAt)
+        ? { startedAt: attempt.startedAt }
+        : {}),
+      ...(isRemoteCoraTimestamp(attempt.finishedAt)
+        ? { finishedAt: attempt.finishedAt }
+        : {}),
+      ...(typeof attempt.runtimeState === "string" && attempt.runtimeState
         ? { runtimeState: truncateUtf8(attempt.runtimeState, 200) }
         : {}),
     };
@@ -1225,12 +1909,28 @@ function toRemoteRunWorkers(run: RunState): RemoteCoraWorker[] {
   // slice(-0) would return the whole array, so the settled fill is guarded.
   const settledBudget = Math.max(0, MAX_CORA_RUN_WORKERS - active.length);
   const recentSettled = settledBudget > 0 ? settled.slice(-settledBudget) : [];
-  return [...active, ...recentSettled].slice(0, MAX_CORA_RUN_WORKERS).map(toWorker);
+  const projected = [...active, ...recentSettled]
+    .slice(0, MAX_CORA_RUN_WORKERS)
+    .map(toWorker)
+    .filter((worker): worker is RemoteCoraWorker => worker !== undefined);
+  const bounded: RemoteCoraWorker[] = [];
+  let usedBytes = 2;
+  for (const worker of projected) {
+    const bytes = Buffer.byteLength(JSON.stringify(worker), "utf8") + 1;
+    if (usedBytes + bytes > CORA_WORKER_ROSTER_MAX_BYTES) break;
+    bounded.push(worker);
+    usedBytes += bytes;
+  }
+  return { workers: bounded, total: run.workerAttempts.length };
 }
 
 // Steps a step will never leave: the plan progress line counts all three as
 // finished so a skipped step cannot stall the count at "3 of 5" forever.
-const FINISHED_STEP_STATUSES = new Set(["complete", "completed_unverified", "skipped"]);
+const FINISHED_STEP_STATUSES = new Set([
+  "complete",
+  "completed_unverified",
+  "skipped",
+]);
 
 // Plan progress for the phone's run header. The list is capped but the totals
 // are computed over the whole plan, so a long plan still reports honestly.
@@ -1239,58 +1939,217 @@ function toRemoteRunSteps(run: RunState): {
   total: number;
   finished: number;
 } {
-  const ordered = [...run.steps].sort((left, right) => left.index - right.index);
+  const ordered = [...run.steps].sort(
+    (left, right) => left.index - right.index,
+  );
   return {
-    steps: ordered.slice(0, MAX_CORA_RUN_STEPS).map((step) => ({
-      title: truncateUtf8(step.title, 300),
-      status: step.status,
-    })),
+    steps: ordered
+      .slice(0, MAX_CORA_RUN_STEPS)
+      .filter((step) => isOneOf(step.status, REMOTE_CORA_STEP_STATUSES))
+      .map((step) => ({
+        ...(isRemoteCoraIdentity(step.id) ? { id: step.id } : {}),
+        title: truncateUtf8(
+          typeof step.title === "string" ? step.title : "",
+          300,
+        ),
+        status: step.status,
+      })),
     total: ordered.length,
-    finished: ordered.filter((step) => FINISHED_STEP_STATUSES.has(step.status)).length,
+    finished: ordered.filter((step) => FINISHED_STEP_STATUSES.has(step.status))
+      .length,
   };
 }
 
-function toRemoteRun(run: RunState, automation?: RemoteAutomationJoin): RemoteCoraRun {
-  const messages: RemoteCoraMessage[] = [];
-  let usedBytes = 2;
-  for (const message of run.humanMessages.slice(-MAX_CORA_MESSAGES).reverse()) {
-    const item: RemoteCoraMessage = {
-      id: message.id,
-      author: message.author === "spark" ? "cora" : message.author,
-      kind: message.kind,
-      message: truncateUtf8(message.message, 16 * 1024),
-      createdAt: message.createdAt,
-    };
-    const bytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
-    if (usedBytes + bytes > COLLECTION_BUDGET_BYTES) break;
-    messages.push(item);
-    usedBytes += bytes;
+function toRemoteCoraMessage(
+  message: RunState["humanMessages"][number],
+): RemoteCoraMessage {
+  const author = message.author === "spark" ? "cora" : message.author;
+  if (!isOneOf(author, REMOTE_CORA_MESSAGE_AUTHORS)) {
+    throw new TypeError("message.author is not a supported remote Cora author.");
   }
-  messages.reverse();
-  const workers = toRemoteRunWorkers(run);
+  if (!isOneOf(message.kind, REMOTE_CORA_MESSAGE_KINDS)) {
+    throw new TypeError("message.kind is not a supported remote Cora kind.");
+  }
+  return {
+    id: requireRemoteCoraIdentity(message.id, "message.id"),
+    author,
+    kind: message.kind,
+    message: truncateUtf8(publicRemoteCoraMessage(message), 16 * 1024),
+    createdAt: requireRemoteCoraTimestamp(
+      message.createdAt,
+      "message.createdAt",
+    ),
+  };
+}
+
+const LEGACY_CORA_BACKEND_FAILURE =
+  /^(Codex|Claude Code|Cora Pi) backend error:\s*(.+)$/is;
+
+function legacyCoraBackendFailureDetail(
+  message: RunState["humanMessages"][number],
+): string | null {
+  if (message.author !== "spark" || typeof message.message !== "string") {
+    return null;
+  }
+  return LEGACY_CORA_BACKEND_FAILURE.exec(message.message.trim())?.[2]?.trim() ?? null;
+}
+
+/**
+ * Legacy builds wrote raw provider envelopes into Cora dialogue. Remote and
+ * mobile projections never need request ids, response bodies, paths, or token
+ * fragments, so collapse those records to a small evidence-based sentence.
+ */
+function publicRemoteCoraMessage(
+  message: RunState["humanMessages"][number],
+): string {
+  const raw = typeof message.message === "string" ? message.message : "";
+  const detail = legacyCoraBackendFailureDetail(message);
+  if (!detail) return raw;
+  const normalized = detail.replace(/[_-]+/g, " ");
+  if (
+    /not authenticated|no OAuth access token|OAuth (?:refresh failed|session expired)|token (?:has )?expired|invalid api key|missing api key|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)/i.test(
+      normalized,
+    )
+  ) {
+    return "Cora could not authenticate the selected provider account. Reconnect it in Studio, then retry.";
+  }
+  if (
+    /rate ?limit|(?:status|code|error|http)[^A-Za-z0-9]{0,10}429\b|too many requests|insufficient quota|quota (?:exceeded|exhausted|reached|hit)|usage limit/i.test(
+      normalized,
+    )
+  ) {
+    return "The selected provider account reached its usage limit. Switch accounts or retry after quota resets.";
+  }
+  if (
+    /(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:500|502|503|504|529)\b|overloaded|capacity|high demand|servers? (?:are )?(?:too )?busy|temporarily unavailable|service unavailable/i.test(
+      normalized,
+    )
+  ) {
+    return "The provider is temporarily unavailable or at capacity. Retry shortly or switch accounts.";
+  }
+  if (/socket|connection|ECONN|EPIPE|network|fetch failed|websocket/i.test(normalized)) {
+    return "Studio lost the provider connection. Retry when the connection is stable.";
+  }
+  return "Cora could not complete this provider turn. Retry from Studio.";
+}
+
+function remoteCoraSourceMessages(run: RunState): RunState["humanMessages"] {
+  return run.humanMessages
+    .filter(
+      (message) =>
+        !run.managerTurnRecovery || legacyCoraBackendFailureDetail(message) === null,
+    )
+    .map((message) => ({
+      ...message,
+      message: publicRemoteCoraMessage(message),
+    }));
+}
+
+function toRemoteRun(
+  run: RunState,
+  automation?: RemoteAutomationJoin,
+  messages: RemoteCoraMessage[] = [],
+): RemoteCoraRun {
+  const workerProjection = toRemoteRunWorkers(run);
+  const workers = workerProjection.workers;
   const plan = toRemoteRunSteps(run);
   const boardCards = run.board?.cards.length ?? 0;
   const whiteboardNodes = run.whiteboard?.nodes.length ?? 0;
   const blockedMessage = run.blockedOn
-    ? run.humanMessages.find((message) => message.id === run.blockedOn?.questionMessageId)
+    ? run.humanMessages.find(
+        (message) => message.id === run.blockedOn?.questionMessageId,
+      )
     : undefined;
+  const accountProfileId =
+    typeof run.chatAccountProfileId === "string" &&
+    ACCOUNT_PROFILE_ID_PATTERN.test(run.chatAccountProfileId)
+      ? run.chatAccountProfileId
+      : undefined;
+  const backend =
+    run.chatBackend === "claude" || run.chatBackend === "codex"
+      ? run.chatBackend
+      : run.chatBackend === "pi" || run.chatBackend === undefined
+        ? "pi"
+        : undefined;
+  const nativeAccountProfileId =
+    backend === "claude" &&
+    typeof run.nativeClaudeProfileId === "string" &&
+    NATIVE_CLI_PROFILE_ID_PATTERN.test(run.nativeClaudeProfileId)
+      ? run.nativeClaudeProfileId
+      : backend === "codex" &&
+          typeof run.nativeCodexProfileId === "string" &&
+          NATIVE_CLI_PROFILE_ID_PATTERN.test(run.nativeCodexProfileId)
+        ? run.nativeCodexProfileId
+        : undefined;
+  const recoverySummary = remoteCoraRecoverySummary(run);
+  const failedRecoveryAccount = run.managerTurnRecovery?.failedAccountProfileId;
+  const recovery =
+    run.managerTurnRecovery &&
+    recoverySummary &&
+    isRemoteCoraIdentity(run.managerTurnRecovery.id) &&
+    (run.managerTurnRecovery.state === "parked" ||
+      run.managerTurnRecovery.state === "resuming")
+      ? {
+          ...recoverySummary,
+          id: run.managerTurnRecovery.id,
+          state: run.managerTurnRecovery.state,
+          ...(failedRecoveryAccount &&
+          (ACCOUNT_PROFILE_ID_PATTERN.test(failedRecoveryAccount) ||
+            NATIVE_CLI_PROFILE_ID_PATTERN.test(failedRecoveryAccount))
+            ? { failedAccountProfileId: failedRecoveryAccount }
+            : {}),
+        }
+      : undefined;
+  const {
+    recovery: _summaryRecovery,
+    ...summary
+  } = toRemoteRunSummary(run, automation);
+  const projectedBlockedMessage = blockedMessage
+    ? toRemoteCoraMessage(blockedMessage)
+    : undefined;
+  const workersOmitted = Math.max(0, workerProjection.total - workers.length);
+  const stepsOmitted = Math.max(0, plan.total - plan.steps.length);
+  const blockedQuestionBodyTruncated = Boolean(
+    blockedMessage &&
+      projectedBlockedMessage &&
+      blockedMessage.message !== projectedBlockedMessage.message,
+  );
+  const truncation = {
+    ...(workersOmitted > 0 ? { workersOmitted } : {}),
+    ...(stepsOmitted > 0 ? { stepsOmitted } : {}),
+    ...(blockedQuestionBodyTruncated
+      ? { blockedQuestionBodyTruncated: true as const }
+      : {}),
+  };
   return {
-    ...toRemoteRunSummary(run, automation),
+    ...summary,
     messages,
+    ...(backend ? { backend } : {}),
+    ...(backend === "pi" && accountProfileId ? { accountProfileId } : {}),
+    ...(nativeAccountProfileId ? { nativeAccountProfileId } : {}),
+    ...(recovery ? { recovery } : {}),
     ...(workers.length > 0 ? { workers } : {}),
+    ...(isRemoteCoraIdentity(run.currentStepId)
+      ? { currentStepId: run.currentStepId }
+      : {}),
     ...(plan.total > 0
-      ? { steps: plan.steps, stepsTotal: plan.total, stepsFinished: plan.finished }
+      ? {
+          steps: plan.steps,
+          stepsTotal: plan.total,
+          stepsFinished: plan.finished,
+        }
       : {}),
     ...(boardCards > 0 ? { boardCards } : {}),
     ...(whiteboardNodes > 0 ? { whiteboardNodes } : {}),
-    ...(run.blockedOn && blockedMessage
+    ...(run.blockedOn && projectedBlockedMessage
       ? {
           blockedQuestion: {
-            messageId: blockedMessage.id,
-            message: truncateUtf8(blockedMessage.message, 16 * 1024),
+            messageId: projectedBlockedMessage.id,
+            message: projectedBlockedMessage.message,
           },
         }
       : {}),
+    ...(Object.keys(truncation).length > 0 ? { truncation } : {}),
   };
 }
 
@@ -1327,9 +2186,13 @@ async function deleteWorkerSessionForRemote(input: {
     JSON.stringify(["workerSession.delete", input.workspaceId, input.runtime]),
     async () => {
       const sessions = await listLocalWorkerSessions(input.runtime, root);
-      const match = sessions.find((session) => session.sessionId === input.sessionId);
+      const match = sessions.find(
+        (session) => session.sessionId === input.sessionId,
+      );
       if (!match) {
-        throw new Error("That session is no longer in this workspace's history.");
+        throw new Error(
+          "That session is no longer in this workspace's history.",
+        );
       }
       const result = await deleteLocalWorkerSession({
         runtime: match.runtime,
@@ -1342,7 +2205,9 @@ async function deleteWorkerSessionForRemote(input: {
         deleted: result.deleted,
         memoryDeleted: result.memoryDeleted,
         memoryScope: result.memoryScope,
-        warnings: result.warnings.slice(0, 4).map((warning) => truncateUtf8(warning, 512)),
+        warnings: result.warnings
+          .slice(0, 4)
+          .map((warning) => truncateUtf8(warning, 512)),
       };
     },
   );
@@ -1441,13 +2306,22 @@ function toRemoteBoardCard(card: BoardCard): RemoteBoardCard {
     id: card.id,
     title: truncateUtf8(card.title, REMOTE_BOARD_TITLE_MAX_BYTES),
     ...(card.description
-      ? { description: truncateUtf8(card.description, REMOTE_BOARD_DESCRIPTION_MAX_BYTES) }
+      ? {
+          description: truncateUtf8(
+            card.description,
+            REMOTE_BOARD_DESCRIPTION_MAX_BYTES,
+          ),
+        }
       : {}),
     status: card.status,
     order: card.order,
-    ...(card.workerTaskId ? { workerTaskId: truncateUtf8(card.workerTaskId, 200) } : {}),
+    ...(card.workerTaskId
+      ? { workerTaskId: truncateUtf8(card.workerTaskId, 200) }
+      : {}),
     ...(card.createdBy ? { createdBy: card.createdBy } : {}),
-    ...(card.error ? { error: truncateUtf8(card.error, REMOTE_BOARD_ERROR_MAX_BYTES) } : {}),
+    ...(card.error
+      ? { error: truncateUtf8(card.error, REMOTE_BOARD_ERROR_MAX_BYTES) }
+      : {}),
     ...(card.imagePaths && card.imagePaths.length > 0
       ? { imageCount: card.imagePaths.length }
       : {}),
@@ -1480,10 +2354,11 @@ function toRemoteBoard(board: RunBoard): RemoteBoard {
 async function getCoraBoardForRemote(input: {
   workspaceId: string;
   runId: string;
-}): Promise<RemoteBoard> {
+  ifRevision?: string;
+}): Promise<RemoteBoardReadProjection> {
   await requireLocalWorkspace(input.workspaceId);
   await requireOwnedRun(input.workspaceId, input.runId);
-  return toRemoteBoard(await getRunBoard(input.runId));
+  return projectRemoteBoardRead(toRemoteBoard(await getRunBoard(input.runId)));
 }
 
 /**
@@ -1527,7 +2402,9 @@ async function updateCoraBoardForRemote(input: {
   if (input.action === "add-idea") {
     if (!input.title) throw new Error("A card needs a title.");
     if (cards.length >= BOARD_MAX_CARDS) {
-      throw new Error("This board is full. Clear some cards in Codara Studio first.");
+      throw new Error(
+        "This board is full. Clear some cards in Codara Studio first.",
+      );
     }
     const lane = cards.filter((card) => card.status === "idea");
     next = [
@@ -1537,7 +2414,8 @@ async function updateCoraBoardForRemote(input: {
         title: input.title,
         ...(input.description ? { description: input.description } : {}),
         status: "idea",
-        order: lane.length > 0 ? Math.max(...lane.map((card) => card.order)) + 1 : 1,
+        order:
+          lane.length > 0 ? Math.max(...lane.map((card) => card.order)) + 1 : 1,
         createdAt: now,
         updatedAt: now,
       },
@@ -1558,15 +2436,23 @@ async function updateCoraBoardForRemote(input: {
       // would be a promise nothing keeps. The phone hides the action; this is
       // the enforcement behind it.
       if (run.automationId) {
-        throw new Error("Cards on an automation's chat cannot be queued from the phone.");
+        throw new Error(
+          "Cards on an automation's chat cannot be queued from the phone.",
+        );
       }
       // Queueing is the go signal: the board write emits run.board_updated,
       // which is what wakes this chat's Cora (orchestration/board-nudge).
       const lane = cards.filter((card) => card.status === "queued");
-      const order = lane.length > 0 ? Math.max(...lane.map((card) => card.order)) + 1 : 1;
+      const order =
+        lane.length > 0 ? Math.max(...lane.map((card) => card.order)) + 1 : 1;
       next = cards.map((card) =>
         card.id === target.id
-          ? { ...card, status: "queued" as BoardCardStatus, order, updatedAt: now }
+          ? {
+              ...card,
+              status: "queued" as BoardCardStatus,
+              order,
+              updatedAt: now,
+            }
           : card,
       );
     }
@@ -1602,9 +2488,15 @@ function describeAutomationTrigger(trigger: AutomationTrigger): {
 } {
   switch (trigger.kind) {
     case "cron":
-      return { kind: "cron", summary: `On schedule (${truncateUtf8(trigger.expr, 60)})` };
+      return {
+        kind: "cron",
+        summary: `On schedule (${truncateUtf8(trigger.expr, 60)})`,
+      };
     case "interval":
-      return { kind: "interval", summary: `Every ${formatIntervalMs(trigger.everyMs)}` };
+      return {
+        kind: "interval",
+        summary: `Every ${formatIntervalMs(trigger.everyMs)}`,
+      };
     case "folder":
       return {
         kind: "folder",
@@ -1621,9 +2513,13 @@ function describeAutomationTrigger(trigger: AutomationTrigger): {
 
 // Round a derived USD remainder to the ledger's 6-decimal precision and clamp
 // float dust so "measured == total" reliably yields no estimated field.
-function usdRemainder(total: number | undefined, measured: number | undefined): number {
+function usdRemainder(
+  total: number | undefined,
+  measured: number | undefined,
+): number {
   if (total === undefined) return 0;
-  const remainder = Math.round((total - (measured ?? 0)) * 1_000_000) / 1_000_000;
+  const remainder =
+    Math.round((total - (measured ?? 0)) * 1_000_000) / 1_000_000;
   return remainder > 0 ? remainder : 0;
 }
 
@@ -1658,7 +2554,9 @@ async function listAutomationsForRemote(
   workspaceId: string,
 ): Promise<RemoteAutomationInfo[]> {
   await requireLocalWorkspace(workspaceId);
-  const jobs = (await listJobs()).filter((job) => job.input.workspaceId === workspaceId);
+  const jobs = (await listJobs()).filter(
+    (job) => job.input.workspaceId === workspaceId,
+  );
   const result: RemoteAutomationInfo[] = [];
   let usedBytes = 2;
   for (const job of jobs.slice(0, MAX_REMOTE_AUTOMATIONS)) {
@@ -1674,29 +2572,72 @@ async function listAutomationsForRemote(
 const MAX_REMOTE_AUTOMATION_HISTORY = 10;
 const REMOTE_AUTOMATION_PROMPT_CHARS = 500;
 
+async function toRemoteAutomationLiveRun(
+  job: ScheduledJob,
+): Promise<RemoteAutomationLiveRun | undefined> {
+  const runId = job.state.currentRunId;
+  if (!runId) return undefined;
+  const run = await getRun(runId);
+  if (
+    !run ||
+    run.workspaceId !== job.input.workspaceId ||
+    run.automationId !== job.id
+  ) {
+    return undefined;
+  }
+  const plan = toRemoteRunSteps(run);
+  return {
+    id: run.id,
+    status: run.status,
+    workers: toRemoteRunWorkers(run).workers,
+    ...(isRemoteCoraIdentity(run.currentStepId)
+      ? { currentStepId: run.currentStepId }
+      : {}),
+    ...(plan.total > 0
+      ? {
+          steps: plan.steps,
+          stepsTotal: plan.total,
+          stepsFinished: plan.finished,
+        }
+      : {}),
+  };
+}
+
 // The loom's detail: what it is asking for, which worker runs it, and how the
-// recent passes went. Read only; authoring and the node graph stay desktop-side.
+// recent passes went. Read only; authoring stays desktop-side while the bounded
+// live plan projection lets the phone render the same run relationships.
 async function getAutomationForRemote(input: {
   workspaceId: string;
   automationId: string;
 }): Promise<RemoteAutomationDetail> {
-  const job = await requireOwnedAutomation(input.workspaceId, input.automationId);
+  const job = await requireOwnedAutomation(
+    input.workspaceId,
+    input.automationId,
+  );
   const template = job.prompt?.template ?? job.input.initialUserNote ?? "";
   const prompt = template.slice(0, REMOTE_AUTOMATION_PROMPT_CHARS);
+  const liveRun = await toRemoteAutomationLiveRun(job);
 
   const history: RemoteAutomationRunRecord[] = [];
   let usedBytes = 2;
-  for (const record of [...job.history].reverse().slice(0, MAX_REMOTE_AUTOMATION_HISTORY)) {
+  for (const record of [...job.history]
+    .reverse()
+    .slice(0, MAX_REMOTE_AUTOMATION_HISTORY)) {
     // Per-pass honest split, mirroring toRemoteAutomation: costUsd measured
     // only, estimatedCostUsd the estimate-only remainder.
-    const estimatedCostUsd = usdRemainder(record.costUsd, record.measuredCostUsd);
+    const estimatedCostUsd = usdRemainder(
+      record.costUsd,
+      record.measuredCostUsd,
+    );
     const item: RemoteAutomationRunRecord = {
       iteration: record.iteration,
       runId: record.runId,
       startedAt: record.startedAt,
       ...(record.finishedAt ? { finishedAt: record.finishedAt } : {}),
       status: record.status,
-      ...(record.summary ? { summary: truncateUtf8(record.summary, 1000) } : {}),
+      ...(record.summary
+        ? { summary: truncateUtf8(record.summary, 1000) }
+        : {}),
       ...(record.measuredCostUsd ? { costUsd: record.measuredCostUsd } : {}),
       ...(estimatedCostUsd ? { estimatedCostUsd } : {}),
       ...(record.stopReason ? { stopReason: record.stopReason } : {}),
@@ -1709,7 +2650,9 @@ async function getAutomationForRemote(input: {
 
   return {
     ...toRemoteAutomation(job),
-    ...(job.worker?.model ? { model: truncateUtf8(job.worker.model, 120) } : {}),
+    ...(job.worker?.model
+      ? { model: truncateUtf8(job.worker.model, 120) }
+      : {}),
     ...(job.worker?.effort ? { effort: job.worker.effort } : {}),
     ...(job.worker?.timeoutMinutes !== undefined
       ? { timeoutMinutes: job.worker.timeoutMinutes }
@@ -1717,6 +2660,7 @@ async function getAutomationForRemote(input: {
     ...(prompt ? { prompt } : {}),
     ...(template.length > prompt.length ? { promptTruncated: true } : {}),
     history,
+    ...(liveRun ? { liveRun } : {}),
   };
 }
 
@@ -1741,7 +2685,8 @@ async function runAutomationForRemote(input: {
   await requireOwnedAutomation(input.workspaceId, input.automationId);
   const run = await runJobNow(input.automationId);
   const job = await getJob(input.automationId);
-  if (!job) throw new Error("That automation no longer exists in this workspace.");
+  if (!job)
+    throw new Error("That automation no longer exists in this workspace.");
   return { automation: toRemoteAutomation(job), runId: run.id };
 }
 
@@ -1751,7 +2696,8 @@ async function pauseAutomationForRemote(input: {
 }): Promise<RemoteAutomationInfo> {
   await requireOwnedAutomation(input.workspaceId, input.automationId);
   const job = await pauseJob(input.automationId);
-  if (!job) throw new Error("That automation no longer exists in this workspace.");
+  if (!job)
+    throw new Error("That automation no longer exists in this workspace.");
   return toRemoteAutomation(job);
 }
 
@@ -1761,7 +2707,8 @@ async function resumeAutomationForRemote(input: {
 }): Promise<RemoteAutomationInfo> {
   await requireOwnedAutomation(input.workspaceId, input.automationId);
   const job = await resumeJob(input.automationId);
-  if (!job) throw new Error("That automation no longer exists in this workspace.");
+  if (!job)
+    throw new Error("That automation no longer exists in this workspace.");
   return toRemoteAutomation(job);
 }
 
@@ -1771,7 +2718,9 @@ async function setAutomationEnabledForRemote(input: {
   enabled: boolean;
 }): Promise<RemoteAutomationInfo> {
   await requireOwnedAutomation(input.workspaceId, input.automationId);
-  return toRemoteAutomation(await setJobEnabled(input.automationId, input.enabled));
+  return toRemoteAutomation(
+    await setJobEnabled(input.automationId, input.enabled),
+  );
 }
 
 /* ---------------------------------------------------- phone notifications */
@@ -1789,8 +2738,9 @@ const handledPhoneNotifyEventIds = new Set<string>();
 const MAX_HANDLED_PHONE_NOTIFY_EVENT_IDS = 4_096;
 
 function getPhoneNotifyStore(): PhoneNotificationStore {
-  phoneNotifyStore ??= new PhoneNotificationStore(join(sparkHome(), "remote"), (line) =>
-    logMain("remote-access", line),
+  phoneNotifyStore ??= new PhoneNotificationStore(
+    join(sparkHome(), "remote"),
+    (line) => logMain("remote-access", line),
   );
   return phoneNotifyStore;
 }
@@ -1801,7 +2751,8 @@ function claimPhoneNotifyEvent(eventId: string): boolean {
   if (handledPhoneNotifyEventIds.has(eventId)) return false;
   handledPhoneNotifyEventIds.add(eventId);
   if (handledPhoneNotifyEventIds.size > MAX_HANDLED_PHONE_NOTIFY_EVENT_IDS) {
-    const oldest = handledPhoneNotifyEventIds.values().next().value as string | undefined;
+    const oldest = handledPhoneNotifyEventIds.values().next().value as
+      string | undefined;
     if (oldest) handledPhoneNotifyEventIds.delete(oldest);
   }
   return true;
@@ -1819,11 +2770,15 @@ async function registerNotificationsForRemote(
   });
 }
 
-async function remoteWorkspaceName(workspaceId: string): Promise<string | undefined> {
+async function remoteWorkspaceName(
+  workspaceId: string,
+): Promise<string | undefined> {
   if (!workspaceId) return undefined;
   try {
     const state = await loadState();
-    const name = state.workspaces.find((workspace) => workspace.id === workspaceId)?.name;
+    const name = state.workspaces.find(
+      (workspace) => workspace.id === workspaceId,
+    )?.name;
     return name ? truncateUtf8(name, 120) : undefined;
   } catch {
     return undefined;
@@ -1848,25 +2803,30 @@ async function buildPhoneNotification(
         }
       | undefined;
     const status =
-      typeof payload?.status === "string" ? (payload.status as RunStatus) : undefined;
+      typeof payload?.status === "string"
+        ? (payload.status as RunStatus)
+        : undefined;
     const prevStatus =
       typeof payload?.previousStatus === "string"
         ? (payload.previousStatus as RunStatus)
         : undefined;
     const automationId =
-      typeof payload?.automationId === "string" && payload.automationId.length > 0
+      typeof payload?.automationId === "string" &&
+      payload.automationId.length > 0
         ? payload.automationId
         : undefined;
     const runId = event.runId;
     if (!status || !runId || prevStatus === status) return null;
-    if (status !== "blocked" && status !== "complete" && status !== "failed") return null;
+    if (status !== "blocked" && status !== "complete" && status !== "failed")
+      return null;
     if (!claimPhoneNotifyEvent(event.id)) return null;
     // Mirror the desktop policy's context gates (notify/policy.ts decide()):
     // DND mutes every alert, and a completion for the run the user is
     // actively watching in Studio is suppressed. "Needs you" survives
     // watching on the desktop, so it survives here too.
     if (getPreferenceCached("notificationsDnd") === true) return null;
-    if ((status === "complete" || status === "failed") && isWatchingRun(runId)) return null;
+    if ((status === "complete" || status === "failed") && isWatchingRun(runId))
+      return null;
 
     if (status === "blocked") {
       const hasUserBlocker =
@@ -1884,7 +2844,8 @@ async function buildPhoneNotification(
           id: event.id,
           kind: "blocked",
           title: "Automation needs your answer",
-          body: event.message?.trim() || "An automation is waiting on your answer.",
+          body:
+            event.message?.trim() || "An automation is waiting on your answer.",
           workspaceId: event.workspaceId,
           ...(workspaceName ? { workspaceName } : {}),
           runId,
@@ -1913,7 +2874,8 @@ async function buildPhoneNotification(
       kind: ok ? "completed" : "failed",
       title: ok ? "Run complete" : "Run failed",
       body:
-        event.message?.trim() || (ok ? "Cora finished a run." : "A run failed."),
+        event.message?.trim() ||
+        (ok ? "Cora finished a run." : "A run failed."),
       workspaceId: event.workspaceId,
       ...(workspaceName ? { workspaceName } : {}),
       runId,
@@ -1925,7 +2887,10 @@ async function buildPhoneNotification(
     const payload = event.payload as
       | { automationId?: unknown; status?: unknown; iteration?: unknown }
       | undefined;
-    if (payload?.status !== "stopped" || typeof payload.automationId !== "string") {
+    if (
+      payload?.status !== "stopped" ||
+      typeof payload.automationId !== "string"
+    ) {
       return null;
     }
     if (!claimPhoneNotifyEvent(event.id)) return null;
@@ -1945,7 +2910,8 @@ async function buildPhoneNotification(
     if (reason === "user-stop") return null;
     const failed = reason === "iteration-failed" || reason === "engine-missing";
     const iterations =
-      typeof payload.iteration === "number" && Number.isFinite(payload.iteration)
+      typeof payload.iteration === "number" &&
+      Number.isFinite(payload.iteration)
         ? payload.iteration
         : job.state.iteration;
     const passes = `${iterations} iteration${iterations === 1 ? "" : "s"}`;
@@ -1980,10 +2946,12 @@ async function deliverPhoneNotification(
     // preferences; the registered prefs gate only server-initiated push.
     // Stale-but-open sessions still receive the event (the phone dedupes by
     // event id), but only recent inbound activity counts as delivered.
-    if (service.pushPhoneNotificationToDevice(devicePublicKey, notification)) continue;
+    if (service.pushPhoneNotificationToDevice(devicePublicKey, notification))
+      continue;
     const registration = await store.get(devicePublicKey);
     if (!registration?.enabled || !registration.token) continue;
-    if (!phoneNotificationKindAllowed(notification.kind, registration.prefs)) continue;
+    if (!phoneNotificationKindAllowed(notification.kind, registration.prefs))
+      continue;
     pushTargets.push({ devicePublicKey, token: registration.token });
   }
   // Earlier sends' tickets are due a verdict by now; resolve them before
@@ -1993,10 +2961,12 @@ async function deliverPhoneNotification(
   const outcomes = await sendExpoPushMessages(pushTargets, notification);
   for (const outcome of outcomes) {
     if (outcome.ok) {
-      if (outcome.ticketId) expoReceipts.add(outcome.ticketId, outcome.devicePublicKey);
+      if (outcome.ticketId)
+        expoReceipts.add(outcome.ticketId, outcome.devicePublicKey);
       continue;
     }
-    if (outcome.deviceNotRegistered) await store.clearToken(outcome.devicePublicKey);
+    if (outcome.deviceNotRegistered)
+      await store.clearToken(outcome.devicePublicKey);
     logMain(
       "remote-access",
       `expo push to ${outcome.devicePublicKey.slice(0, 8)} failed: ${outcome.detail}`,
@@ -2013,7 +2983,8 @@ async function pollExpoReceipts(): Promise<void> {
   const store = getPhoneNotifyStore();
   const failures = await expoReceipts.poll();
   for (const failure of failures) {
-    if (failure.deviceNotRegistered) await store.clearToken(failure.devicePublicKey);
+    if (failure.deviceNotRegistered)
+      await store.clearToken(failure.devicePublicKey);
     logMain(
       "remote-access",
       `expo push receipt for ${failure.devicePublicKey.slice(0, 8)} failed: ${failure.detail}`,
@@ -2024,13 +2995,32 @@ async function pollExpoReceipts(): Promise<void> {
 function startPhoneNotificationBridge(service: RemoteAccessService): void {
   if (phoneNotifyStarted) return;
   phoneNotifyStarted = true;
+  const changedCoalescer = createCoraChangedCoalescer<RemoteCoraChangedEvent>(
+    (changed) => service.broadcastCoraChanged(changed),
+  );
   subscribeToEvents((event) => {
+    const changed: RemoteCoraChangedEvent = {
+      workspaceId: event.workspaceId,
+      ...(event.runId ? { runId: event.runId } : {}),
+      ...(event.runId &&
+      Number.isSafeInteger(event.sequence) &&
+      (event.sequence as number) > 0
+        ? { sequence: event.sequence as number }
+        : {}),
+    };
+    // assistant_block can append many journal records per second. Keep the
+    // invalidation live without mirroring that stream rate onto every phone;
+    // notifications below remain immediate and use their own semantic gate.
+    changedCoalescer.push(changed);
     void (async () => {
       const notification = await buildPhoneNotification(event);
       if (!notification) return;
       await deliverPhoneNotification(service, notification);
     })().catch((err) => {
-      logMain("remote-access", `phone notify failed: ${(err as Error).message}`);
+      logMain(
+        "remote-access",
+        `phone notify failed: ${(err as Error).message}`,
+      );
     });
   });
   // Backstop for quiet periods: without another send, a pending receipt would
@@ -2041,10 +3031,106 @@ function startPhoneNotificationBridge(service: RemoteAccessService): void {
   receiptTimer.unref?.();
 }
 
-// Phone terminals are real renderer-owned tabs. The bridge mints the leaf,
-// TerminalPane spawns its PTY, and this service taps that same PTY for the
-// encrypted phone stream. The session remains the lifecycle owner: disconnect
-// or revoke closes both the PTY and its visible desktop tab.
+// A live automation terminal observes the exact worker PTY shown by Studio.
+// Writes and resizes are exposed only to the authenticated, process-scoped
+// worker control registry; closing the phone sheet still removes only this tap
+// and can never kill the canonical worker process.
+async function attachRemoteWorkerTerminal(
+  request: RemoteWorkerTerminalOpenRequest,
+): Promise<RemoteTerminalHandle> {
+  await requireLocalWorkspace(request.workspaceId);
+  const run = await requireOwnedRun(request.workspaceId, request.runId);
+  if (!run.automationId) {
+    throw new Error("That run is not owned by an automation.");
+  }
+  const attempt = run.workerAttempts.find(
+    (candidate) => candidate.id === request.workerId,
+  );
+  if (!attempt) {
+    throw new Error("That worker is not part of this automation pass.");
+  }
+  if (
+    !ACTIVE_WORKER_ATTEMPT_STATUSES.has(attempt.status) ||
+    !pty.exists(attempt.id)
+  ) {
+    throw new Error("That worker terminal is no longer running.");
+  }
+
+  const task = run.workerTasks.find(
+    (candidate) => candidate.id === attempt.workerTaskId,
+  );
+  const title = truncateUtf8(task?.title || "Automation worker", 240);
+  const inputDescriptor = activeWorkerInputDescriptor(attempt.id);
+  const inputCapability =
+    attempt.status === "running" && inputDescriptor?.capability === "steer"
+      ? (inputDescriptor?.capability ?? "none")
+      : "none";
+  const decoder = new StringDecoder("utf8");
+  const notifyExit = request.onExit;
+  let closed = false;
+
+  // readTail() and tap() are synchronous on the main event loop, so output
+  // cannot slip between replaying the bounded tail and subscribing live.
+  const bootstrap = pty.readTail(attempt.id, TERMINAL_BOOTSTRAP_BYTES);
+  if (bootstrap === null) {
+    throw new Error("That worker terminal is no longer running.");
+  }
+  if (bootstrap.length > 0) {
+    const text = decoder.write(bootstrap);
+    if (text) request.onData(text);
+  }
+  const untap = pty.tap(attempt.id, (chunk) => {
+    if (closed) return;
+    const text = decoder.write(chunk);
+    if (text) request.onData(text);
+  });
+  const offExit = pty.onExit(attempt.id, () => {
+    if (closed) return;
+    closed = true;
+    untap();
+    offExit();
+    const final = decoder.end();
+    if (final) request.onData(final);
+    notifyExit();
+  });
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    untap();
+    offExit();
+    decoder.end();
+  };
+
+  return {
+    title,
+    ...(inputCapability !== "none"
+      ? {
+          controlTargetId: `automation-worker:${request.workspaceId}:${request.runId}:${attempt.id}:${inputDescriptor!.processGenerationId}`,
+          controlCapability: inputCapability,
+        }
+      : {}),
+    write: (data) => {
+      if (
+        !inputDescriptor ||
+        !writeActiveWorkerInput(
+          attempt.id,
+          inputDescriptor.processGenerationId,
+          data,
+        )
+      ) {
+        throw new Error("That automation worker no longer accepts input.");
+      }
+    },
+    resize: () => undefined,
+    close,
+  };
+}
+
+// Phone-created terminals are real renderer-owned tabs. The bridge mints the
+// leaf, TerminalPane spawns its PTY, and this service taps that same PTY for
+// the encrypted phone stream. The authenticated device lease remains the
+// lifecycle owner across ordinary socket handoffs; revoke, expiry, explicit
+// close, or Remote Access shutdown closes the PTY and visible desktop tab.
 async function createRemoteTerminal(
   request: RemoteTerminalCreateRequest,
 ): Promise<RemoteTerminalHandle> {
@@ -2058,14 +3144,29 @@ async function createRemoteTerminal(
     request.profile === "claude" || request.profile === "codex"
       ? request.profile
       : null;
+  const nativeClaudeExecution =
+    request.profile === "claude"
+      ? await resolveNewNativeClaudeProfile()
+      : null;
   const resumeSession =
     request.resumeSessionId && resumableRuntime
       ? (
-          await listLocalWorkerSessions(resumableRuntime, cwd.path)
-        ).find((session) => session.sessionId === request.resumeSessionId)
+          await listLocalWorkerSessions(resumableRuntime, cwd.path, {
+            ...(nativeClaudeExecution
+              ? {
+                  claudeStateDir:
+                    nativeClaudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
+                }
+              : {}),
+          })
+        ).find(
+          (session) => session.sessionId === request.resumeSessionId,
+        )
       : null;
   if (request.resumeSessionId && !resumeSession) {
-    throw new Error("That worker session is no longer resumable in this workspace.");
+    throw new Error(
+      "That worker session is no longer resumable in this workspace.",
+    );
   }
   if (request.profile === "codex") {
     await ensureCodexProjectTrust(cwd.path).catch(() => undefined);
@@ -2089,28 +3190,49 @@ async function createRemoteTerminal(
   const title =
     request.title?.trim() ||
     `${truncateUtf8(request.origin.deviceName, 80)} · ${profileLabel}`;
-  const result = await requestTerminalOp<{
+  let result: {
     tabId: string;
     paneId: string;
     cwd: string;
-  }>(
-    "create",
-    {
-      cwd: cwd.path,
-      ...(command ? { command } : {}),
-      title: truncateUtf8(title, 240),
-      workspaceId: workspace.id,
-      workspaceCwd: root,
-      origin: {
-        ...request.origin,
-        initialCols: request.cols,
-        initialRows: request.rows,
+  };
+  try {
+    result = await requestTerminalOp<{
+      tabId: string;
+      paneId: string;
+      cwd: string;
+    }>(
+      "create",
+      {
+        cwd: cwd.path,
+        ...(command ? { command } : {}),
+        ...(nativeClaudeExecution
+          ? { nativeClaudeProfileId: nativeClaudeExecution.profileId }
+          : {}),
+        title: truncateUtf8(title, 240),
+        workspaceId: workspace.id,
+        workspaceCwd: root,
+        origin: {
+          ...request.origin,
+          initialCols: request.cols,
+          initialRows: request.rows,
+        },
       },
-    },
-    { timeoutMs: 15_000 },
-  );
+      { timeoutMs: 15_000 },
+    );
+  } catch (cause) {
+    throw Object.assign(
+      new Error(
+        (cause as Error).message ||
+          "The terminal create outcome could not be confirmed.",
+      ),
+      { code: "REMOTE_TERMINAL_CREATE_OUTCOME_UNKNOWN" },
+    );
+  }
   if (!result?.tabId || !result.paneId) {
-    throw new Error("Codara did not create the terminal tab.");
+    throw Object.assign(
+      new Error("Codara did not confirm the created terminal tab."),
+      { code: "REMOTE_TERMINAL_CREATE_OUTCOME_UNKNOWN" },
+    );
   }
 
   const decoder = new StringDecoder("utf8");
@@ -2170,7 +3292,9 @@ async function createRemoteTerminal(
       tabId: result.tabId,
       paneId: result.paneId,
     }).catch(() => undefined);
-    throw new Error("The terminal failed to start. Check that its directory is accessible.");
+    throw new Error(
+      "The terminal failed to start. Check that its directory is accessible.",
+    );
   }
   ready = true;
 
@@ -2203,7 +3327,10 @@ async function createRemoteTerminal(
         { paneId: result.paneId, cols, rows },
         { timeoutMs: 2_000 },
       ).catch((err) => {
-        logMain("remote-access", `desktop terminal resize mirror missed: ${(err as Error).message}`);
+        logMain(
+          "remote-access",
+          `desktop terminal resize mirror missed: ${(err as Error).message}`,
+        );
       });
       pty.resize(result.paneId, cols, rows);
     },

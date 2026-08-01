@@ -15,7 +15,25 @@ import type {
   RemotePairingSession,
   RemotePairingState,
 } from "@shared/remote-access";
-import { keyFingerprint, loadOrCreateIdentity, shortKey, type RemoteIdentity } from "./identity";
+import type {
+  GitHubMarkReadyInput,
+  GitHubMarkReadyResult,
+  GitHubPublishInput,
+  GitHubPublishResult,
+  GitHubMergeInput,
+  GitHubMergeResult,
+  GitHubWorkspaceStatus,
+  StartGitHubIssueInput,
+  StartGitHubIssueResult,
+  StartGitHubPullRequestInput,
+  StartGitHubPullRequestResult,
+} from "@shared/github";
+import {
+  keyFingerprint,
+  loadOrCreateIdentity,
+  shortKey,
+  type RemoteIdentity,
+} from "./identity";
 import {
   buildQrPayloadString,
   lanAddresses,
@@ -31,15 +49,29 @@ import {
   encodeFrame,
   FrameDecoder,
   RpcSession,
+  type RemoteCoraChangedEvent,
+  type RemoteCoraResumeAccount,
+  type RemoteCoraResumeResult,
   type RemoteNotificationRegistration,
   type RemotePhoneNotification,
   type RemoteRpcServices,
   type RemoteTerminalCreateRequest,
   type RemoteTerminalHandle,
+  type RemoteWorkerTerminalOpenRequest,
 } from "./rpc";
+import { DurableMutationLedger } from "./mutation-ledger";
 import { stableRemoteAccessPortCandidates } from "./stable-port";
+import {
+  RemoteTerminalLeaseRegistry,
+  type RemoteTerminalLeaseStore,
+} from "./terminal-leases";
+import { WorkerTerminalControlRegistry } from "./worker-terminal-controls";
 
-export type { RemoteTerminalCreateRequest, RemoteTerminalHandle };
+export type {
+  RemoteTerminalCreateRequest,
+  RemoteTerminalHandle,
+  RemoteWorkerTerminalOpenRequest,
+};
 
 // A pairing candidate gets this long to send its one proof frame before the
 // stream is dropped. Generous for a same-LAN phone, small enough that idle
@@ -74,6 +106,11 @@ export interface RemoteAccessDeps {
   // Studio version reported in hello.
   appVersion: string;
   listWorkspaces: RemoteRpcServices["listWorkspaces"];
+  getFleetOverview?: RemoteRpcServices["getFleetOverview"];
+  listSubscriptionProfiles?: RemoteRpcServices["listSubscriptionProfiles"];
+  listCoraModels?: RemoteRpcServices["listCoraModels"];
+  studioTerminalLeases?: RemoteTerminalLeaseStore;
+  listNativeCliAccounts?: RemoteRpcServices["listNativeCliAccounts"];
   listWorkspaceOrganization?: RemoteRpcServices["listWorkspaceOrganization"];
   listDirectories?: RemoteRpcServices["listDirectories"];
   addWorkspace?: RemoteRpcServices["addWorkspace"];
@@ -91,9 +128,35 @@ export interface RemoteAccessDeps {
   getGitStatus?: RemoteRpcServices["getGitStatus"];
   getGitLog?: RemoteRpcServices["getGitLog"];
   getGitCommitDetail?: RemoteRpcServices["getGitCommitDetail"];
+  getGitHubStatus?(workspaceId: string): Promise<GitHubWorkspaceStatus>;
+  getGitHubWorkQueue?: RemoteRpcServices["getGitHubWorkQueue"];
+  publishGitHub?(input: {
+    workspaceId: string;
+    input: GitHubPublishInput;
+  }): Promise<GitHubPublishResult>;
+  markGitHubReady?(input: {
+    workspaceId: string;
+    input: GitHubMarkReadyInput;
+  }): Promise<GitHubMarkReadyResult>;
+  mergeGitHub?(input: {
+    workspaceId: string;
+    input: GitHubMergeInput;
+  }): Promise<GitHubMergeResult>;
+  startGitHubIssue?(input: StartGitHubIssueInput): Promise<StartGitHubIssueResult>;
+  startGitHubPullRequest?(
+    input: StartGitHubPullRequestInput,
+  ): Promise<StartGitHubPullRequestResult>;
   listCoraHistory?: RemoteRpcServices["listCoraHistory"];
   getCoraRun?: RemoteRpcServices["getCoraRun"];
+  getCoraGraph?: RemoteRpcServices["getCoraGraph"];
+  deleteCoraRun?(input: { workspaceId: string; runId: string }): Promise<void>;
   sendCoraMessage?: RemoteRpcServices["sendCoraMessage"];
+  resumeCoraRun?(input: {
+    workspaceId: string;
+    runId: string;
+    recoveryId: string;
+    account?: RemoteCoraResumeAccount;
+  }): Promise<RemoteCoraResumeResult>;
   getCoraWhiteboard?: RemoteRpcServices["getCoraWhiteboard"];
   getCoraBoard?: RemoteRpcServices["getCoraBoard"];
   updateCoraBoard?: RemoteRpcServices["updateCoraBoard"];
@@ -111,7 +174,10 @@ export interface RemoteAccessDeps {
     input: RemoteNotificationRegistration & { devicePublicKey: string },
   ) => Promise<void>;
   beginImageUpload?: RemoteRpcServices["beginImageUpload"];
-  createTerminal(request: RemoteTerminalCreateRequest): Promise<RemoteTerminalHandle>;
+  attachWorkerTerminal?: RemoteRpcServices["attachWorkerTerminal"];
+  createTerminal(
+    request: RemoteTerminalCreateRequest,
+  ): Promise<RemoteTerminalHandle>;
   log(line: string): void;
   // Test/harness overrides. Production leaves all of these unset.
   host?: string;
@@ -163,14 +229,73 @@ export class RemoteAccessService {
   private readonly sessions = new Map<string, Set<RpcSession>>();
   // Per-session reaper timers for the hello deadline (see onAuthorizedStream).
   private readonly sessionHelloTimers = new Map<RpcSession, NodeJS.Timeout>();
-  private readonly statusListeners = new Set<(status: RemoteAccessStatus) => void>();
-  private readonly pairingListeners = new Set<(state: RemotePairingState) => void>();
+  private readonly statusListeners = new Set<
+    (status: RemoteAccessStatus) => void
+  >();
+  private readonly pairingListeners = new Set<
+    (state: RemotePairingState) => void
+  >();
   // Serializes enable/disable so a fast toggle cannot interleave a start
   // and a stop of the same listener.
   private lifecycle: Promise<void> = Promise.resolve();
+  // Open lazily so a corrupt receipt file fails only mutating RPCs; read-only
+  // remote access and terminal recovery remain available for reconciliation.
+  private mutationLedger: Promise<DurableMutationLedger> | null = null;
+  // Process-scoped PTY ownership, keyed by the Noise-authenticated phone key.
+  // Socket generations only attach subscribers to these leases.
+  private readonly terminalLeases: RemoteTerminalLeaseRegistry;
+  private readonly workerTerminalControls: WorkerTerminalControlRegistry;
 
   constructor(private readonly deps: RemoteAccessDeps) {
     this.devices = new PairedDeviceStore(deps.remoteDir, deps.log);
+    this.terminalLeases = new RemoteTerminalLeaseRegistry({
+      createTerminal: deps.createTerminal,
+      now: deps.now,
+      log: deps.log,
+    });
+    this.workerTerminalControls = new WorkerTerminalControlRegistry({
+      now: deps.now,
+      log: deps.log,
+    });
+  }
+
+  private getMutationLedger(): Promise<DurableMutationLedger> {
+    this.mutationLedger ??= DurableMutationLedger.open({
+      rootDir: this.deps.remoteDir,
+    });
+    return this.mutationLedger;
+  }
+
+  private async executeMutation<T>(
+    callerNamespace: string,
+    requestId: string | undefined,
+    method: string,
+    params: unknown,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
+    // Compatibility for an older paired phone. Current clients always send a
+    // stable request id, which is what makes a lost-reply retry safe.
+    if (!requestId) return operation();
+    const ledger = await this.getMutationLedger();
+    return ledger.execute(
+      { callerNamespace, requestId, method, params },
+      operation,
+    );
+  }
+
+  private async executeRecoverableMutation<T>(
+    callerNamespace: string,
+    requestId: string | undefined,
+    method: string,
+    params: unknown,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
+    if (!requestId) return operation();
+    const ledger = await this.getMutationLedger();
+    return ledger.executeRecoverable(
+      { callerNamespace, requestId, method, params },
+      operation,
+    );
   }
 
   /* ---------------------------------------------------------------- status */
@@ -196,6 +321,17 @@ export class RemoteAccessService {
   notifyWorkspacesChanged(): void {
     for (const sessions of this.sessions.values()) {
       for (const session of sessions) session.pushWorkspacesChanged();
+    }
+  }
+
+  // Journal activity is only an invalidation hint. Broadcast the same tiny
+  // metadata envelope to every session that completed hello; an authenticated
+  // stream that has not proved liveness must not receive unsolicited state.
+  broadcastCoraChanged(event: RemoteCoraChangedEvent): void {
+    for (const sessions of this.sessions.values()) {
+      for (const session of sessions) {
+        if (session.isProven()) session.pushCoraChanged(event);
+      }
     }
   }
 
@@ -240,7 +376,9 @@ export class RemoteAccessService {
   /* ------------------------------------------------------------- lifecycle */
 
   async setEnabled(enabled: boolean): Promise<RemoteAccessStatus> {
-    const run = this.lifecycle.then(() => (enabled ? this.start() : this.stop()));
+    const run = this.lifecycle.then(() =>
+      enabled ? this.start() : this.stop(),
+    );
     // Keep the chain alive whether or not this transition failed.
     this.lifecycle = run.then(
       () => undefined,
@@ -252,15 +390,24 @@ export class RemoteAccessService {
 
   private async start(): Promise<void> {
     if (this.listener) return;
-    this.setStatus({ state: "starting", detail: "", port: null, relayReady: false });
+    this.setStatus({
+      state: "starting",
+      detail: "",
+      port: null,
+      relayReady: false,
+    });
     try {
       this.identity ??= loadOrCreateIdentity(this.deps.remoteDir);
       let listener!: RemoteListener;
       listener = new RemoteListener({
-        keyPair: { publicKey: this.identity.publicKey, secretKey: this.identity.secretKey },
+        keyPair: {
+          publicKey: this.identity.publicKey,
+          secretKey: this.identity.secretKey,
+        },
         isAuthorized: (publicKey) => this.devices.isAuthorized(publicKey),
         onAuthorizedStream: (stream) => this.onAuthorizedStream(stream),
-        onPairingCandidateStream: (stream, promote) => this.onPairingCandidateStream(stream, promote),
+        onPairingCandidateStream: (stream, promote) =>
+          this.onPairingCandidateStream(stream, promote),
         log: this.deps.log,
         host: this.deps.host,
         // Tests and the interop harness may request an exact port (including
@@ -268,10 +415,17 @@ export class RemoteAccessService {
         // persistent identity. The listener advances only on EADDRINUSE.
         ...(this.deps.port !== undefined
           ? { port: this.deps.port }
-          : { portCandidates: stableRemoteAccessPortCandidates(this.identity.publicKey) }),
-        ...(this.deps.relayUrl !== undefined ? { relayUrl: this.deps.relayUrl } : {}),
+          : {
+              portCandidates: stableRemoteAccessPortCandidates(
+                this.identity.publicKey,
+              ),
+            }),
+        ...(this.deps.relayUrl !== undefined
+          ? { relayUrl: this.deps.relayUrl }
+          : {}),
         onRelayReadyChanged: (relayReady) => {
-          if (this.listener !== listener || this.status.state !== "reachable") return;
+          if (this.listener !== listener || this.status.state !== "reachable")
+            return;
           this.setStatus({ ...this.status, relayReady });
         },
       });
@@ -303,13 +457,21 @@ export class RemoteAccessService {
       for (const session of sessions) session.destroy();
     }
     this.sessions.clear();
+    this.terminalLeases.shutdown();
+    this.deps.studioTerminalLeases?.shutdown();
+    this.workerTerminalControls.shutdown();
     if (listener) {
       await listener.stop();
       this.relayActive = listener.isRelayActive();
     }
     // Land any coalesced last-seen timestamps before going quiet.
     await this.devices.flushPendingWrites();
-    this.setStatus({ state: "disabled", detail: "", port: null, relayReady: false });
+    this.setStatus({
+      state: "disabled",
+      detail: "",
+      port: null,
+      relayReady: false,
+    });
   }
 
   /* --------------------------------------------------------------- pairing */
@@ -352,7 +514,11 @@ export class RemoteAccessService {
     this.closePairingWindow();
     const hadPending = this.pendingApproval !== null;
     this.abandonPendingApproval();
-    if (hadPending || this.pairingState.phase === "waiting" || this.pairingState.phase === "pending-approval") {
+    if (
+      hadPending ||
+      this.pairingState.phase === "waiting" ||
+      this.pairingState.phase === "pending-approval"
+    ) {
       this.setPairingState({ phase: "idle" });
     }
   }
@@ -369,7 +535,10 @@ export class RemoteAccessService {
   // A stranger connected while a pairing window is open. One frame decides:
   // a valid proof pairs the device, anything else destroys the stream with
   // no reply (silent-listener rule).
-  private onPairingCandidateStream(stream: EncryptedPeerStream, promote: () => void): void {
+  private onPairingCandidateStream(
+    stream: EncryptedPeerStream,
+    promote: () => void,
+  ): void {
     const decoder = new FrameDecoder(PAIRING_MAX_FRAME_BYTES);
     let settled = false;
     const timer = setTimeout(() => {
@@ -402,7 +571,11 @@ export class RemoteAccessService {
     });
   }
 
-  private completePairing(stream: EncryptedPeerStream, frame: unknown, promote: () => void): void {
+  private completePairing(
+    stream: EncryptedPeerStream,
+    frame: unknown,
+    promote: () => void,
+  ): void {
     const window = this.pairing;
     const request = parsePairRequestFrame(frame);
     const now = this.deps.now?.() ?? Date.now();
@@ -430,20 +603,32 @@ export class RemoteAccessService {
     const publicKey = Buffer.from(stream.remotePublicKey);
     const displayName = sanitizeDeviceName(request.name);
     const fingerprint = keyFingerprint(publicKey.toString("base64"));
-    const timeoutMs = this.deps.approvalTimeoutMs ?? PAIRING_APPROVAL_TIMEOUT_MS;
+    const timeoutMs =
+      this.deps.approvalTimeoutMs ?? PAIRING_APPROVAL_TIMEOUT_MS;
     const timer = setTimeout(() => this.denyPairing("timeout"), timeoutMs);
     timer.unref?.();
-    const pending: PendingApproval = { stream, publicKey, displayName, fingerprint, timer };
+    const pending: PendingApproval = {
+      stream,
+      publicKey,
+      displayName,
+      fingerprint,
+      timer,
+    };
     this.pendingApproval = pending;
     // If the phone gives up and disconnects while we wait, drop the request.
     stream.on("close", () => {
       if (this.pendingApproval === pending) {
         this.abandonPendingApproval();
-        if (this.pairingState.phase === "pending-approval") this.setPairingState({ phase: "idle" });
+        if (this.pairingState.phase === "pending-approval")
+          this.setPairingState({ phase: "idle" });
       }
     });
     this.deps.log(`pairing request awaiting approval: ${fingerprint}`);
-    this.setPairingState({ phase: "pending-approval", deviceName: displayName, fingerprint });
+    this.setPairingState({
+      phase: "pending-approval",
+      deviceName: displayName,
+      fingerprint,
+    });
   }
 
   // The desktop user approved the device waiting in pending-approval: write
@@ -455,8 +640,15 @@ export class RemoteAccessService {
     clearTimeout(pending.timer);
     this.pendingApproval = null;
     const now = this.deps.now?.() ?? Date.now();
-    const record = this.devices.addDevice(pending.publicKey, pending.displayName, now);
-    const response: PairResponseFrame = { t: "paired", name: this.deps.deviceName };
+    const record = this.devices.addDevice(
+      pending.publicKey,
+      pending.displayName,
+      now,
+    );
+    const response: PairResponseFrame = {
+      t: "paired",
+      name: this.deps.deviceName,
+    };
     try {
       pending.stream.write(encodeFrame(response));
       pending.stream.end();
@@ -464,7 +656,9 @@ export class RemoteAccessService {
       // The phone vanished between approval and the reply; the device is
       // still trusted and will connect on its next attempt.
     }
-    this.deps.log(`paired device ${shortKey(record.publicKey)} (${record.name})`);
+    this.deps.log(
+      `paired device ${shortKey(record.publicKey)} (${record.name})`,
+    );
     this.setPairingState({ phase: "paired", deviceName: record.name });
   }
 
@@ -506,6 +700,8 @@ export class RemoteAccessService {
   // on disk with no other trust-file write outstanding, so a crash after it
   // resolves cannot bring the device back.
   async revokeDevice(publicKeyB64: string): Promise<boolean> {
+    this.terminalLeases.revokeOwner(publicKeyB64);
+    this.workerTerminalControls.revokeOwner(publicKeyB64);
     const sessions = this.sessions.get(publicKeyB64);
     if (sessions) {
       for (const session of sessions) {
@@ -537,7 +733,9 @@ export class RemoteAccessService {
     // would lock the user out of their own computer. Globally we refuse,
     // since that path means several devices are already at their limit.
     if (this.totalSessionCount() >= MAX_TOTAL_SESSIONS) {
-      this.deps.log(`refused session for ${shortKey(keyB64)}: global session cap reached`);
+      this.deps.log(
+        `refused session for ${shortKey(keyB64)}: global session cap reached`,
+      );
       stream.destroy();
       return;
     }
@@ -557,7 +755,9 @@ export class RemoteAccessService {
         }
       }
       if (victim) {
-        this.deps.log(`evicting an unproven session for ${shortKey(keyB64)}: per-device cap reached`);
+        this.deps.log(
+          `evicting an unproven session for ${shortKey(keyB64)}: per-device cap reached`,
+        );
         this.reapSession(keyB64, victim);
       } else {
         this.deps.log(
@@ -571,6 +771,7 @@ export class RemoteAccessService {
     const pairedDevice = this.devices
       .list()
       .find((device) => device.publicKey === keyB64);
+    let session!: RpcSession;
     const services: RemoteRpcServices = {
       device: {
         publicKey: this.identity?.publicKeyB64 ?? "",
@@ -578,6 +779,11 @@ export class RemoteAccessService {
         role: "computer",
         version: this.deps.appVersion,
       },
+      // RpcSession installs its stream listener in the constructor; defer the
+      // promotion so even an already-buffered hello runs after this session is
+      // registered in the service's per-device set.
+      onSessionProven: () =>
+        queueMicrotask(() => this.promoteSession(keyB64, session)),
       peerDevice: {
         publicKey: keyB64,
         name: pairedDevice?.name || "Phone",
@@ -585,6 +791,10 @@ export class RemoteAccessService {
         version: "",
       },
       listWorkspaces: this.deps.listWorkspaces,
+      getFleetOverview: this.deps.getFleetOverview,
+      listSubscriptionProfiles: this.deps.listSubscriptionProfiles,
+      listCoraModels: this.deps.listCoraModels,
+      listNativeCliAccounts: this.deps.listNativeCliAccounts,
       listWorkspaceOrganization: this.deps.listWorkspaceOrganization,
       listDirectories: this.deps.listDirectories,
       addWorkspace: this.deps.addWorkspace,
@@ -597,14 +807,166 @@ export class RemoteAccessService {
       readFile: this.deps.readFile,
       createFileEntry: this.deps.createFileEntry,
       renameFileEntry: this.deps.renameFileEntry,
-      moveFileEntry: this.deps.moveFileEntry,
+      moveFileEntry: this.deps.moveFileEntry
+        ? (input) =>
+            this.executeMutation(
+              keyB64,
+              input.requestId,
+              "files.move",
+              {
+                workspaceId: input.workspaceId,
+                path: input.path,
+                ...(input.destinationPath !== undefined
+                  ? { destinationPath: input.destinationPath }
+                  : {}),
+              },
+              () =>
+                this.deps.moveFileEntry!({
+                  workspaceId: input.workspaceId,
+                  path: input.path,
+                  ...(input.destinationPath !== undefined
+                    ? { destinationPath: input.destinationPath }
+                    : {}),
+                }),
+            )
+        : undefined,
       deleteFileEntry: this.deps.deleteFileEntry,
       getGitStatus: this.deps.getGitStatus,
       getGitLog: this.deps.getGitLog,
       getGitCommitDetail: this.deps.getGitCommitDetail,
+      getGitHubStatus: this.deps.getGitHubStatus,
+      getGitHubWorkQueue: this.deps.getGitHubWorkQueue,
+      publishGitHub: this.deps.publishGitHub
+        ? (input) =>
+            this.executeMutation(
+              keyB64,
+              input.requestId,
+              "github.publish",
+              {
+                workspaceId: input.workspaceId,
+                input: input.input,
+              },
+              () =>
+                this.deps.publishGitHub!({
+                  workspaceId: input.workspaceId,
+                  input: input.input,
+                }),
+            )
+        : undefined,
+      markGitHubReady: this.deps.markGitHubReady
+        ? (input) =>
+            this.executeMutation(
+              keyB64,
+              input.requestId,
+              "github.ready",
+              {
+                workspaceId: input.workspaceId,
+                input: input.input,
+              },
+              () =>
+                this.deps.markGitHubReady!({
+                  workspaceId: input.workspaceId,
+                  input: input.input,
+                }),
+            )
+        : undefined,
+      mergeGitHub: this.deps.mergeGitHub
+        ? (input) =>
+            this.executeMutation(
+              keyB64,
+              input.requestId,
+              "github.merge",
+              {
+                workspaceId: input.workspaceId,
+                input: input.input,
+              },
+              () =>
+                this.deps.mergeGitHub!({
+                  workspaceId: input.workspaceId,
+                  input: input.input,
+                }),
+            )
+        : undefined,
+      startGitHubIssue: this.deps.startGitHubIssue
+        ? (input) =>
+            this.executeMutation(
+              keyB64,
+              input.requestId,
+              "github.issue.start",
+              {
+                sourceWorkspaceId: input.sourceWorkspaceId,
+                issueNumber: input.issueNumber,
+              },
+              () =>
+                this.deps.startGitHubIssue!({
+                  sourceWorkspaceId: input.sourceWorkspaceId,
+                  issueNumber: input.issueNumber,
+                }),
+            )
+        : undefined,
+      startGitHubPullRequest: this.deps.startGitHubPullRequest
+        ? (input) =>
+            // PR import owns a second, exact-OID transaction journal and is
+            // safe to reconcile after an ambiguous remote receipt. Other
+            // generic mutations remain fail-closed in executeMutation().
+            this.executeRecoverableMutation(
+              keyB64,
+              input.requestId,
+              "github.pullRequest.start",
+              {
+                sourceWorkspaceId: input.sourceWorkspaceId,
+                repositoryUrl: input.repositoryUrl,
+                pullRequestNumber: input.pullRequestNumber,
+                expectedHeadCommitOid: input.expectedHeadCommitOid,
+              },
+              () =>
+                this.deps.startGitHubPullRequest!({
+                  sourceWorkspaceId: input.sourceWorkspaceId,
+                  repositoryUrl: input.repositoryUrl,
+                  pullRequestNumber: input.pullRequestNumber,
+                  expectedHeadCommitOid: input.expectedHeadCommitOid,
+                }),
+            )
+        : undefined,
       listCoraHistory: this.deps.listCoraHistory,
       getCoraRun: this.deps.getCoraRun,
+      getCoraGraph: this.deps.getCoraGraph,
+      deleteCoraRun: this.deps.deleteCoraRun
+        ? (input) =>
+            this.executeMutation(
+              keyB64,
+              input.requestId,
+              "cora.delete",
+              { workspaceId: input.workspaceId, runId: input.runId },
+              () =>
+                this.deps.deleteCoraRun!({
+                  workspaceId: input.workspaceId,
+                  runId: input.runId,
+                }),
+            )
+        : undefined,
       sendCoraMessage: this.deps.sendCoraMessage,
+      resumeCoraRun: this.deps.resumeCoraRun
+        ? (input) =>
+            this.executeRecoverableMutation(
+              keyB64,
+              input.requestId,
+              "cora.resume",
+              {
+                workspaceId: input.workspaceId,
+                runId: input.runId,
+                recoveryId: input.recoveryId,
+                account: input.account,
+              },
+              () =>
+                this.deps.resumeCoraRun!({
+                  workspaceId: input.workspaceId,
+                  runId: input.runId,
+                  recoveryId: input.recoveryId,
+                  ...(input.account ? { account: input.account } : {}),
+                }),
+            )
+        : undefined,
       getCoraWhiteboard: this.deps.getCoraWhiteboard,
       getCoraBoard: this.deps.getCoraBoard,
       updateCoraBoard: this.deps.updateCoraBoard,
@@ -617,12 +979,25 @@ export class RemoteAccessService {
       resumeAutomation: this.deps.resumeAutomation,
       setAutomationEnabled: this.deps.setAutomationEnabled,
       registerNotifications: this.deps.registerNotifications
-        ? (input) => this.deps.registerNotifications!({ ...input, devicePublicKey: keyB64 })
+        ? (input) =>
+            this.deps.registerNotifications!({
+              ...input,
+              devicePublicKey: keyB64,
+            })
         : undefined,
       beginImageUpload: this.deps.beginImageUpload,
+      attachWorkerTerminal: this.deps.attachWorkerTerminal,
+      terminalLeases: this.terminalLeases,
+      studioTerminalLeases: this.deps.studioTerminalLeases,
+      workerTerminalControls: this.workerTerminalControls,
       createTerminal: (request) => this.deps.createTerminal(request),
     };
-    const session = new RpcSession(stream, services, this.deps.log, this.deps.now);
+    session = new RpcSession(
+      stream,
+      services,
+      this.deps.log,
+      this.deps.now,
+    );
     let set = this.sessions.get(keyB64);
     if (!set) {
       set = new Set();
@@ -632,11 +1007,14 @@ export class RemoteAccessService {
     // Reap a session that authenticates but never speaks. Without this an
     // unproven phantom (a replayed IK first flight) would sit in the
     // per-device set indefinitely, taking a slot from real reconnects.
-    const helloDeadline = this.deps.sessionHelloDeadlineMs ?? SESSION_HELLO_DEADLINE_MS;
+    const helloDeadline =
+      this.deps.sessionHelloDeadlineMs ?? SESSION_HELLO_DEADLINE_MS;
     const helloTimer = setTimeout(() => {
       this.sessionHelloTimers.delete(session);
       if (!session.isProven()) {
-        this.deps.log(`reaping unproven session for ${shortKey(keyB64)}: no hello within the deadline`);
+        this.deps.log(
+          `reaping unproven session for ${shortKey(keyB64)}: no hello within the deadline`,
+        );
         session.destroy();
       }
     }, helloDeadline);
@@ -654,6 +1032,24 @@ export class RemoteAccessService {
       if (current.size === 0) this.sessions.delete(keyB64);
     });
     this.deps.log(`session opened for device ${shortKey(keyB64)}`);
+  }
+
+  // A phone reconnect may overlap its old, already-authenticated socket. A
+  // terminal lease deliberately has one subscriber, so keeping both proven
+  // sessions would let a delayed attach on the old socket steal output from
+  // the new one. Last successful hello wins; unproven sessions cannot trigger
+  // this promotion and therefore cannot evict a healthy phone.
+  private promoteSession(keyB64: string, session: RpcSession): void {
+    const set = this.sessions.get(keyB64);
+    if (!set?.has(session) || !session.isProven()) return;
+    const timer = this.sessionHelloTimers.get(session);
+    if (timer) {
+      clearTimeout(timer);
+      this.sessionHelloTimers.delete(session);
+    }
+    for (const other of [...set]) {
+      if (other !== session) this.reapSession(keyB64, other);
+    }
   }
 
   // Destroys a session and removes it from its device set and reaper map
@@ -692,7 +1088,9 @@ export class RemoteAccessService {
 
 function plainLanguageStartError(err: Error): string {
   const code = (err as NodeJS.ErrnoException).code;
-  if (code === "EADDRINUSE") return "The listening port is already in use by another app.";
-  if (code === "EACCES") return "The system refused to open the listening port.";
+  if (code === "EADDRINUSE")
+    return "The listening port is already in use by another app.";
+  if (code === "EACCES")
+    return "The system refused to open the listening port.";
   return err.message || "Remote access could not start.";
 }
