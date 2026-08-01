@@ -283,6 +283,15 @@ export interface RemoteCoraStep {
   status: RemoteCoraStepStatus;
 }
 
+export interface RemoteCoraRunTruncation {
+  messagesOmitted?: number;
+  workersOmitted?: number;
+  stepsOmitted?: number;
+  lastMessageOmitted?: true;
+  workerDetailsOmitted?: true;
+  blockedQuestionBodyTruncated?: true;
+}
+
 export interface RemoteCoraRun extends RemoteCoraRunSummary {
   messages: RemoteCoraMessage[];
   workers?: RemoteCoraWorker[];
@@ -300,7 +309,27 @@ export interface RemoteCoraRun extends RemoteCoraRunSummary {
   // Nodes on this chat's whiteboard. Only the count rides the run poll; the
   // diagram itself is fetched on demand through cora.whiteboard.get.
   whiteboardNodes?: number;
+  truncation?: RemoteCoraRunTruncation;
 }
+
+export interface RemoteCoraMessageDelta {
+  afterCursor: string;
+  windowStartId: string | null;
+  windowEndId: string | null;
+  windowCount: number;
+}
+
+/**
+ * Internal service result for cora.get. `run` is always the complete
+ * authoritative projection so its revision is independent of whether the
+ * wire response carries a full message window or an append delta.
+ */
+export interface RemoteCoraRunProjection {
+  run: RemoteCoraRun;
+  cursor: string;
+  messageDelta?: RemoteCoraMessageDelta & { messages: RemoteCoraMessage[] };
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* Cora whiteboard (this chat's diagram, flattened for a phone)               */

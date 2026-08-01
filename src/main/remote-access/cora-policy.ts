@@ -7,6 +7,24 @@ export interface RemoteCoraRetryInput {
   clientMessageId: string;
 }
 
+// Conversation history is a domain boundary, not a presentation filter.
+// Automation passes have their own list/detail/history surface and must never
+// consume this page's byte budget or churn its conditional revision.
+export function selectRemoteConversationRuns<T extends Pick<RunState, "automationId">>(
+  runs: readonly T[],
+  limit: number,
+): T[] {
+  const boundedLimit = Math.max(0, Math.floor(limit));
+  if (boundedLimit === 0) return [];
+  const result: T[] = [];
+  for (const run of runs) {
+    if (run.automationId) continue;
+    result.push(run);
+    if (result.length >= boundedLimit) break;
+  }
+  return result;
+}
+
 // Find the durable user message written by an earlier delivery of the same
 // phone request. New-conversation retries do not yet know a run id, so the
 // client key must be searched across the workspace rather than only inside a

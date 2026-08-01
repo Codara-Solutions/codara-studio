@@ -298,7 +298,10 @@ async function main() {
       "production mirrors the desktop DND and watching suppressions",
       /getPreferenceCached\("notificationsDnd"\) === true\) return null/.test(
         productionSource,
-      ) && /isWatchingRun\(runId\)\) return null/.test(productionSource),
+      ) &&
+        /isWatchingRun\(runId\)\)\s*\n?\s*return null/.test(
+          productionSource,
+        ),
     );
   }
 
@@ -343,7 +346,7 @@ async function main() {
         id: 1,
         method: "hello",
         params: {
-          protocol: 0,
+          protocol: rpc.RPC_PROTOCOL_VERSION,
           device: { publicKey: "c", name: "Phone", role: "phone", version: "1" },
         },
       }),

@@ -9,6 +9,9 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:cora-run-interop": "node scripts/test-cora-run-interop.cjs",
+    "test:cora-history-interop": "node scripts/test-cora-history-interop.cjs",
+    "test:remote-cora-contract": "node scripts/test-remote-cora-contract.cjs",
     "test:github-work-queue": "node scripts/test-github-work-queue.cjs",
     "test:github-pr-import": "node scripts/test-github-pull-request-git.cjs && node scripts/test-github-pull-request-import-journal.cjs && node scripts/test-github-pull-request-workspace.cjs && node scripts/test-untrusted-pr-policy.cjs && node scripts/test-github-pull-request-surface.cjs",
     "test:user-message-resume": "node scripts/test-user-message-resume.cjs",
