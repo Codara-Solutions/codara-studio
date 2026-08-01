@@ -79,16 +79,8 @@ import {
   NativeCliAccountError,
 } from "./orchestration/native-cli-accounts";
 import { focusStudioWindow } from "./window-focus";
-import { reconcileNativeCliActivePointers } from "./orchestration/native-cli-active-pointer";
-import {
-  installNativeCliShellProfile,
-  nativeCliShellProfileStatus,
-  uninstallNativeCliShellProfile,
-} from "./orchestration/native-cli-shell-profile";
-import type {
-  NativeCliTerminalSetupResult,
-  NativeCliTerminalSetupStatus,
-} from "@shared/native-cli-terminal";
+import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
+import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import * as mcpInstaller from "./mcp-installer";
 import * as coraMemory from "./orchestration/cora-memory";
 import {
@@ -492,70 +484,6 @@ function broadcastNativeCliAccountsChanged(): void {
     if (!contents.isDestroyed()) {
       contents.send("native-cli-accounts:changed");
     }
-  }
-  // The Active account may have moved (or been deleted), so the terminal
-  // pointers have to follow before the next shell reads them.
-  void reconcileNativeCliActivePointers({ homeDir: sparkHome() }).catch(
-    (err) => {
-      logMain("native-cli-terminal", `pointer reconcile failed: ${String(err)}`);
-    },
-  );
-}
-
-/**
- * Renderer-safe projection of the terminal setup. No account directory, id, or
- * label crosses this boundary — only the user's own shell file, Codara's
- * pointer directory, and the block the button would write.
- */
-async function nativeCliTerminalStatus(): Promise<NativeCliTerminalSetupStatus> {
-  const pointers = await reconcileNativeCliActivePointers({
-    homeDir: sparkHome(),
-  });
-  const shell = await nativeCliShellProfileStatus({ envFile: pointers.envFile });
-  return {
-    supported: shell.supported && pointers.supported,
-    installed: shell.installed,
-    ...(shell.shell ? { shell: shell.shell } : {}),
-    ...(shell.profilePath ? { profilePath: shell.profilePath } : {}),
-    pointerDirectory: pointers.directory,
-    snippet: shell.snippet,
-    ...(shell.manualInstruction
-      ? { manualInstruction: shell.manualInstruction }
-      : {}),
-    ...(pointers.error ? { error: pointers.error } : {}),
-  };
-}
-
-async function applyNativeCliTerminalSetup(
-  enable: boolean,
-): Promise<NativeCliTerminalSetupResult> {
-  try {
-    const pointers = await reconcileNativeCliActivePointers({
-      homeDir: sparkHome(),
-    });
-    if (!pointers.supported) {
-      const status = await nativeCliTerminalStatus();
-      return {
-        ok: false,
-        status,
-        error:
-          pointers.error ??
-          "Codara could not set up the Active account pointers on this system.",
-      };
-    }
-    const options = { envFile: pointers.envFile };
-    if (enable) {
-      await installNativeCliShellProfile(options);
-    } else {
-      await uninstallNativeCliShellProfile(options);
-    }
-    return { ok: true, status: await nativeCliTerminalStatus() };
-  } catch (err) {
-    return {
-      ok: false,
-      status: await nativeCliTerminalStatus(),
-      error: (err as Error).message,
-    };
   }
 }
 
@@ -1106,24 +1034,14 @@ export function registerIpc(): void {
     },
   );
 
+  // READ-ONLY: reports whether a shell startup file still carries the block
+  // the retired "Active account in your terminal" feature appended, so the
+  // Accounts panel can tell the user how to delete it themselves. Codara no
+  // longer writes to shell startup files anywhere.
   handle(
-    "native-cli-terminal:status",
-    async (): Promise<NativeCliTerminalSetupStatus> => {
-      return nativeCliTerminalStatus();
-    },
-  );
-  // Consent gate: the shell startup file is only ever written from these two
-  // handlers, each behind its own button in Settings → Accounts.
-  handle(
-    "native-cli-terminal:install",
-    async (): Promise<NativeCliTerminalSetupResult> => {
-      return applyNativeCliTerminalSetup(true);
-    },
-  );
-  handle(
-    "native-cli-terminal:uninstall",
-    async (): Promise<NativeCliTerminalSetupResult> => {
-      return applyNativeCliTerminalSetup(false);
+    "native-cli-shell-leftover:status",
+    async (): Promise<NativeCliShellProfileLeftover | null> => {
+      return detectNativeCliShellProfileLeftover();
     },
   );
 

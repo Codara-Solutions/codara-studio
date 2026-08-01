@@ -1,6 +1,6 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { CoraCliInstallStatus } from "@shared/cora-cli";
-import type { NativeCliTerminalSetupStatus } from "@shared/native-cli-terminal";
+import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type {
   AppSettings,
   EditorThemeId,
@@ -1627,114 +1627,48 @@ const CORA_CLI_EXAMPLES = [
   'cora agent message <run> all "Re-check the acceptance criteria"',
 ] as const;
 
-// Consent gate for the shell setup: nothing is written to the user's shell
-// startup file until they press the button here, and the exact block is shown
-// before they do.
-function TerminalAccountSetting() {
-  const [status, setStatus] = useState<NativeCliTerminalSetupStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [showSnippet, setShowSnippet] = useState(false);
+// The "Use the Active account in your terminal" feature was removed: plain
+// `claude` keeps its chats, settings, agents, and commands inside the config
+// directory that setting redirected, so switching accounts made the terminal
+// lose all of that state. This note only appears while the block the old
+// feature added is still in the user's shell startup file, and tells them how
+// to delete it themselves — Codara no longer edits shell startup files at all.
+function TerminalAccountLeftoverNote() {
+  const [leftover, setLeftover] = useState<NativeCliShellProfileLeftover | null>(null);
 
   useEffect(() => {
     let mounted = true;
-    void window.spark.nativeCliTerminal
+    void window.spark.nativeCliShellLeftover
       .status()
       .then((next) => {
-        if (mounted) setStatus(next);
+        if (mounted) setLeftover(next);
       })
-      .catch((cause) => {
-        if (mounted) setError(cause instanceof Error ? cause.message : String(cause));
+      .catch(() => {
+        // Detection is best-effort; a failed read just means no note.
       });
     return () => {
       mounted = false;
     };
   }, []);
 
-  const toggle = async () => {
-    if (!status) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = status.installed
-        ? await window.spark.nativeCliTerminal.uninstall()
-        : await window.spark.nativeCliTerminal.install();
-      setStatus(result.status);
-      if (!result.ok) setError(result.error);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  if (!leftover) return null;
   return (
     <div
       style={{
-        display: "grid",
-        gap: 8,
-        padding: "12px 14px",
+        padding: "10px 14px",
         border: "1px solid var(--rule-soft)",
         borderRadius: 8,
+        color: "var(--muted)",
+        fontSize: 12,
+        lineHeight: 1.45,
       }}
     >
-      <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 600 }}>
-        Use the Active account in your terminal
-      </div>
-      <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
-        When this is on, running <code className="spark-mono">claude</code> or{" "}
-        <code className="spark-mono">codex</code> in a new terminal window signs
-        you in as whichever account is marked Active above, instead of the login
-        your terminal had before. Codara adds a few lines to{" "}
-        <code className="spark-mono">{status?.profilePath ?? "your shell startup file"}</code>{" "}
-        and keeps a copy of the original. Turning it off removes those lines
-        again. Terminals you already have open keep what they started with.
-      </div>
-      {status && !status.supported ? (
-        <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.45 }}>
-          {status.manualInstruction ??
-            status.error ??
-            "This system's shell cannot be set up automatically."}
-        </div>
-      ) : null}
-      {showSnippet && status ? (
-        <pre
-          className="spark-mono"
-          style={{
-            margin: 0,
-            padding: 8,
-            overflowX: "auto",
-            fontSize: 11,
-            color: "var(--muted)",
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 6,
-          }}
-        >
-          {status.snippet}
-        </pre>
-      ) : null}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <FooterButton
-          onClick={() => void toggle()}
-          disabled={busy || !status || !status.supported}
-        >
-          {busy
-            ? "Working…"
-            : status?.installed
-              ? "Turn off"
-              : "Turn on"}
-        </FooterButton>
-        {status ? (
-          <FooterButton onClick={() => setShowSnippet((value) => !value)}>
-            {showSnippet ? "Hide the lines" : "Show the lines"}
-          </FooterButton>
-        ) : null}
-      </div>
-      {error ? (
-        <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>
-          {error}
-        </div>
-      ) : null}
+      The "Use the Active account in your terminal" setting was removed — it
+      made plain <code className="spark-mono">claude</code> lose its chats and
+      settings. To finish tidying up, open{" "}
+      <code className="spark-mono">{leftover.profilePath}</code> and delete the
+      lines from <code className="spark-mono">{leftover.markerBegin}</code>{" "}
+      through <code className="spark-mono">{leftover.markerEnd}</code>.
     </div>
   );
 }
@@ -3066,7 +3000,7 @@ function AccountsSettings() {
         ) : null}
       </div>
 
-      <TerminalAccountSetting />
+      <TerminalAccountLeftoverNote />
 
       {login ? (
         <PiLoginPanel

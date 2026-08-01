@@ -795,8 +795,8 @@ function saveImage(result, file, fallbackName) {
 //
 // Codara Studio keeps each managed Claude Code / Codex account in its own state
 // directory under the Codara home, and marks one per runtime as Active. This
-// command only reports that list so a terminal can tell which account the
-// "use the Active account in your terminal" setting currently points at.
+// command only reports that list so a terminal can tell which account
+// Codara-launched CLI terminals will use.
 //
 // Nothing here mutates: the account list file is parsed, account directories
 // are stat'ed, and no file inside them is ever opened. Accounts are created,
@@ -947,7 +947,7 @@ function printNativeCliAccounts(listings) {
   }
   console.log("→ marks the Active account for that CLI.");
   console.log(
-    "Turn on Settings → Accounts → \"Use the Active account in your terminal\" to make new terminals follow it.",
+    "Terminals launched from Codara Studio use the Active account; change it in Settings → Accounts.",
   );
 }
 

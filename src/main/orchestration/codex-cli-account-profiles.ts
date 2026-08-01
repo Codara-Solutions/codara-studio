@@ -205,8 +205,8 @@ export function codaraCodexCliAccountRootDir(): string {
 }
 
 /**
- * Codex re-reads CODEX_HOME on every run and the generated env.sh exports the
- * Active account's pointer, so a Studio launched from such a shell inherits a
+ * A retired feature exported CODEX_HOME from the user's shell profile, so a
+ * Studio launched from a shell that still carries that export inherits a
  * selector that names a Codara-managed directory. That is never the user's own
  * login (see codara-managed-cli-roots.ts); a custom directory outside Codara's
  * roots still is.

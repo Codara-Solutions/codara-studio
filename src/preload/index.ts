@@ -30,10 +30,7 @@ import type {
   CoraCliInstallStatus,
   CoraCliMutationResult,
 } from "@shared/cora-cli";
-import type {
-  NativeCliTerminalSetupResult,
-  NativeCliTerminalSetupStatus,
-} from "@shared/native-cli-terminal";
+import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
@@ -272,15 +269,12 @@ const api = {
     install: (): Promise<CoraCliMutationResult> => ipcRenderer.invoke("cora-cli:install"),
     uninstall: (): Promise<CoraCliMutationResult> => ipcRenderer.invoke("cora-cli:uninstall"),
   },
-  // "Use the Active account in your terminal". install/uninstall are the only
-  // paths that touch the user's shell startup file, and both are button-driven.
-  nativeCliTerminal: {
-    status: (): Promise<NativeCliTerminalSetupStatus> =>
-      ipcRenderer.invoke("native-cli-terminal:status"),
-    install: (): Promise<NativeCliTerminalSetupResult> =>
-      ipcRenderer.invoke("native-cli-terminal:install"),
-    uninstall: (): Promise<NativeCliTerminalSetupResult> =>
-      ipcRenderer.invoke("native-cli-terminal:uninstall"),
+  // READ-ONLY leftover check for the retired "Use the Active account in your
+  // terminal" feature. Codara never writes to shell startup files; this only
+  // reports a block the removed feature left behind so the user can delete it.
+  nativeCliShellLeftover: {
+    status: (): Promise<NativeCliShellProfileLeftover | null> =>
+      ipcRenderer.invoke("native-cli-shell-leftover:status"),
   },
   nativeCliAccounts: {
     inspect: (): Promise<NativeCliAccountsInspection> =>

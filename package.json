@@ -76,7 +76,7 @@
     "test:codex-cli-profile-execution": "node scripts/test-codex-cli-profile-execution.cjs",
     "test:claude-cli-account-profiles": "node scripts/test-claude-cli-account-profiles.cjs",
     "test:account-identity": "node scripts/test-anthropic-account-identity.cjs && node scripts/test-native-cli-accounts.cjs && node scripts/test-native-cli-account-wiring.cjs && node scripts/test-pi-account-settings-surface.cjs && node scripts/test-login-return-focus.cjs",
-    "test:native-cli-active-pointer": "node scripts/test-native-cli-active-pointer.cjs",
+    "test:native-cli-terminal-removal": "node scripts/test-native-cli-terminal-removal.cjs",
     "test:claude-cli-profile-execution": "node scripts/test-claude-cli-profile-execution.cjs",
     "test:codex-home-routing": "node scripts/test-codex-home-routing.cjs",
     "test:pty-resource-governor": "node scripts/test-pty-spawn-serialization.cjs",

@@ -77,42 +77,29 @@ cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime cod
 cora agent message <run> all "Re-check the acceptance criteria"
 ```
 
-### Using a Codara account in your own terminal
+### CLI accounts
 
 Every account you add in **Settings → Accounts** has its own private login
-directory, and one account per CLI is marked **Active**. Turning on *"Use the
-Active account in your terminal"* (same panel) makes a plain `claude` or `codex`
-in a new terminal window sign in as that account instead of the login your
-terminal had before.
-
-How it works: Codara keeps two stable pointers plus a generated env file under
-`~/.Codara/cli/active/`, and appends a marked block to your `~/.zshrc` (or
-`~/.bashrc`) that sources it. A copy of the original file is kept once, and
-turning the setting off removes exactly that block. The pointers are rebuilt
-whenever the Active account changes and every time the app starts, so deleting
-the Active account falls back to your own login rather than dangling.
+directory, and one account per CLI is marked **Active**. Terminals that Codara
+Studio launches use the Active account (each one gets its config directory at
+spawn). Your own terminals are untouched: a plain `claude` or `codex` outside
+Codara keeps whatever login — and, for Claude Code, whatever chats, settings,
+agents, and commands — it always had. Codara never edits your shell startup
+files or exports `CLAUDE_CONFIG_DIR` / `CODEX_HOME` into your shell.
 
 ```sh
 cora accounts cli    # which accounts exist, and which is Active (works app-closed)
 ```
 
-Two details worth knowing:
-
-- **Codex** follows the pointer live — switching the Active account applies to
-  terminals you already have open, because `CODEX_HOME` is exported as the
-  symlink and Codex re-reads it on every run.
-- **Claude Code** is pinned when the shell starts. `CLAUDE_CONFIG_DIR` is
-  exported as the resolved account directory, not the symlink, because Claude
-  Code derives its macOS Keychain item from that exact string — a shared
-  symlink path would put every account in one credential slot. Open terminals
-  keep the account they started with; new ones pick up the current Active
-  account.
-- When the Active account is your **existing terminal login**, nothing is
-  exported at all. For Claude Code an exported path is never equivalent to an
-  unset one, so unset is the only setting that keeps your original sign-in.
-
 Codara never reads, copies, or refreshes a credential for any of this: it points
 directories, and the CLIs own everything inside them.
+
+(An earlier build offered "Use the Active account in your terminal", which
+sourced a generated env file from `~/.zshrc` / `~/.bashrc`. It was removed:
+Claude Code stores its chats and settings in the redirected config directory,
+so switching accounts made a plain `claude` lose them. Studio deletes the old
+pointer files under `~/.Codara/cli/active/` on start, and Settings → Accounts
+shows how to remove the leftover shell block if you had turned it on.)
 
 `cora help` lists everything. The app-level commands (`shot`, `eval`, `notify`,
 `prefs`, `glass`) ride the dev-gated `app.*` RPC namespace: always available in

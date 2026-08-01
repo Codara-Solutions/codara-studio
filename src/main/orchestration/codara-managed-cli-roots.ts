@@ -6,15 +6,16 @@ import { join, resolve, sep } from "node:path";
  * The directories Codara owns for the native CLIs, and the one question every
  * "personal account" resolution has to ask about the inherited environment.
  *
- * Studio can itself be launched from a terminal that sources the generated
- * env.sh — that is the whole point of the shell block — so CLAUDE_CONFIG_DIR or
- * CODEX_HOME may arrive already pointing at a *managed* account directory, or
- * at the pointer symlink that follows the Active account. Reading that as the
- * user's own login makes the Personal card show a managed account's identity,
- * attaches pairing to the wrong account, and lets "Sign out" on Personal hit
- * the account currently in use. A selector inside these roots therefore never
- * counts as a personal override; a genuinely custom directory outside them
- * still does.
+ * A retired feature once exported CLAUDE_CONFIG_DIR / CODEX_HOME from the
+ * user's shell profile, so Studio may still be launched from a shell whose
+ * selector points at a *managed* account directory, or at the old Active
+ * pointer symlink. Reading that as the user's own login makes the Personal
+ * card show a managed account's identity, attaches pairing to the wrong
+ * account, and lets "Sign out" on Personal hit the account currently in use.
+ * A selector inside these roots therefore never counts as a personal
+ * override; a genuinely custom directory outside them still does. The active/
+ * root stays listed for exactly that defense even though nothing creates it
+ * anymore.
  */
 
 export const CODARA_CLAUDE_CLI_DIRNAME = "claude-cli";

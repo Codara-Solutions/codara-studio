@@ -988,15 +988,23 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
-  // Bring the terminal Active-account pointers in line with what Settings
-  // stores. Doing it on every boot repairs a pointer left dangling by an
-  // account deleted while the app was closed.
-  void import("./orchestration/native-cli-active-pointer")
-    .then(({ reconcileNativeCliActivePointers }) =>
-      reconcileNativeCliActivePointers({ homeDir: sparkHome() }),
+  // One-time tidy-up after the retired "Active account in your terminal"
+  // feature: delete the pointer symlinks and generated env.sh it kept under
+  // <codara-home>/cli/active/. Once they are gone this is a no-op, and
+  // anything unrecognized in that directory is left alone and logged.
+  void import("./orchestration/native-cli-terminal-cleanup")
+    .then(({ cleanupNativeCliActivePointerArtifacts }) =>
+      cleanupNativeCliActivePointerArtifacts(sparkHome()),
     )
+    .then((result) => {
+      for (const refusal of result.refused) {
+        console.warn(
+          `[main] native CLI pointer cleanup left ${refusal.path} in place: ${refusal.reason}`,
+        );
+      }
+    })
     .catch((err) => {
-      console.error("[main] native CLI active pointer reconcile failed:", err);
+      console.error("[main] native CLI pointer cleanup failed:", err);
     });
   // Give the IPC layer a handle on ensureTray/destroyTray so the
   // preferences:set handler can react to keepRunningInBackground changes

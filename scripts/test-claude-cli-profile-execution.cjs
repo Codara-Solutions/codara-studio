@@ -355,11 +355,6 @@ async function main() {
     [
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
-      // The terminal Active-account pointer is not a launch surface: it uses
-      // the pure path helpers and the account list file to point a symlink at
-      // the Active account's directory. It builds no environment, constructs
-      // no store, and starts no CLI.
-      "src/main/orchestration/native-cli-active-pointer.ts",
       "src/main/pty-manager.ts",
     ],
   );
