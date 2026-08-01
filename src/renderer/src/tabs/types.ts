@@ -7,7 +7,11 @@
 // owns the active id. Mounting is the contract that keeps editor cursors,
 // terminal PTYs, and dev-server iframes alive across tab switches.
 
-import type { FsEntry, RuntimeState } from "@shared/types";
+import type {
+  AgentRuntimeKind,
+  FsEntry,
+  RuntimeState,
+} from "@shared/types";
 
 export type TabId = string;
 
@@ -43,6 +47,10 @@ export interface EditorTab extends BaseTab {
 // Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
 export interface TerminalAgentSession {
   runtime: "claude" | "codex";
+  /** Frozen native Claude account. Undefined is legacy personal/unset. */
+  nativeClaudeProfileId?: string;
+  /** Frozen native Codex account home. Undefined is legacy/personal. */
+  nativeCodexProfileId?: string;
   // Claude: UUID we forced with `--session-id`. Codex: UUID discovered from the
   // rollout filename after launch. Empty string means "capture still pending"
   // (Codex, before discovery resolves).
@@ -113,10 +121,20 @@ export interface TerminalLeaf {
   // Runtime-only, one-shot cold-restore marker. It is derived from a validated
   // active agentSession during hydration and is never written to localStorage.
   bootResume?: boolean;
+  // Runtime-only frozen account for a phone-created Claude pane before its
+  // durable session pointer has been discovered.
+  nativeClaudeProfileId?: string;
+  // Runtime-only one-shot native-account login plan. This is an opaque token;
+  // executable/argv/environment/config paths never enter the renderer.
+  nativeCliLoginToken?: string;
 }
 
 export interface TerminalLeafWorker {
-  runtime?: "claude" | "codex" | "opencode";
+  runtime?: AgentRuntimeKind;
+  /** Frozen native Codex account for CLI-backed worker panes. */
+  nativeCodexProfileId?: string;
+  /** Frozen native Claude account for CLI-backed worker panes. */
+  nativeClaudeProfileId?: string;
   runId: string;
   workerTaskId: string;
   attemptId: string;

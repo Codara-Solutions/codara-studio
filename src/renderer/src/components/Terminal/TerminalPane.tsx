@@ -101,6 +101,9 @@ interface Props {
   // Durable Claude/Codex session pointer for this pane; drives capture (fresh
   // Codex) and restore (reopened panes). See useTerminalSession.
   agentSession?: TerminalAgentSession | null;
+  nativeCodexProfileId?: string;
+  nativeClaudeProfileId?: string;
+  nativeCliLoginToken?: string;
   // One-shot hydration marker: true only on the pane's first mount after app
   // boot when its agent was running at quit. Gates the restore in
   // useTerminalSession; consumed via onBootResumeConsumed.
@@ -142,6 +145,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onAgentState,
       onRuntimeState,
       agentSession,
+      nativeCodexProfileId,
+      nativeClaudeProfileId,
+      nativeCliLoginToken,
       bootResume,
       onResumeUnavailable,
       onResumeFallback,
@@ -220,6 +226,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onAgentState,
       onRuntimeState,
       agentSession,
+      nativeCodexProfileId,
+      nativeClaudeProfileId,
+      nativeCliLoginToken,
       bootResume,
       onResumeUnavailable,
       onResumeFallback,

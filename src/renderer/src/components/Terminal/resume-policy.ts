@@ -48,6 +48,7 @@ export function decideResume(
 // this module stays dep-free for the node test harnesses.
 export interface AgentSessionPointer {
   runtime: "claude" | "codex";
+  nativeClaudeProfileId?: string;
   sessionId: string;
   cwd: string;
   transcriptPath?: string;
@@ -60,6 +61,7 @@ export interface AgentSessionPointer {
 export interface SessionStartRecord {
   paneId?: string;
   runtime: "claude";
+  nativeClaudeProfileId?: string;
   sessionId: string;
   transcriptPath?: string;
   cwd?: string;
@@ -99,6 +101,7 @@ export function mergeSessionStart(
     if (!start.cwd) return null;
     return {
       runtime: "claude",
+      nativeClaudeProfileId: start.nativeClaudeProfileId,
       sessionId: start.sessionId,
       cwd: start.cwd,
       transcriptPath: start.transcriptPath,
@@ -115,12 +118,16 @@ export function mergeSessionStart(
     if (pointer.transcriptPath || !start.transcriptPath) return null;
     return {
       ...pointer,
+      nativeClaudeProfileId:
+        start.nativeClaudeProfileId ?? pointer.nativeClaudeProfileId,
       transcriptPath: start.transcriptPath,
       capturedAt: new Date(startTs).toISOString(),
     };
   }
   return {
     runtime: "claude",
+    nativeClaudeProfileId:
+      start.nativeClaudeProfileId ?? pointer.nativeClaudeProfileId,
     sessionId: start.sessionId,
     cwd: start.cwd ?? pointer.cwd,
     transcriptPath: start.transcriptPath,

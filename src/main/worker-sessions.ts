@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { spawn } from "node:child_process";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 
 import type {
   DeleteWorkerSessionInput,
@@ -10,11 +10,18 @@ import type {
 } from "@shared/types";
 
 import {
+  assertSafeClaudeStoragePath,
   claudeConfigDir,
   claudeProjectsDirForCwd,
   claudeSessionTranscriptPath,
+  resolveSafeClaudeTranscriptPath,
 } from "./orchestration/claude-paths";
-import { codexHomeDir, extractSessionUuid } from "./orchestration/codex-sessions";
+import { buildCodexCliProfileEnvironment } from "./orchestration/codex-cli-profile-execution";
+import {
+  resolveCodexHomePaths,
+  resolveCodexTranscriptPath,
+} from "./orchestration/codex-home";
+import { extractSessionUuid } from "./orchestration/codex-sessions";
 import { codexProvider } from "./providers/codex";
 
 const TRANSCRIPT_HEAD_BYTES = 256 * 1024;
@@ -22,6 +29,13 @@ const SESSION_SCAN_CONCURRENCY = 16;
 const TITLE_LIMIT = 96;
 
 type JsonRecord = Record<string, unknown>;
+
+export interface CodexWorkerSessionOptions {
+  /** Exact resolved native Codex home. Omission preserves personal-home use. */
+  codexHome?: string | null;
+  /** Exact native Claude state root. Omission means legacy ~/.claude. */
+  claudeStateDir?: string | null;
+}
 
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -66,6 +80,31 @@ async function sessionIdsFromHistory(path: string): Promise<Set<string>> {
     if (id) ids.add(id.toLowerCase());
   }
   return ids;
+}
+
+async function safeClaudeSessionIdsFromHistory(
+  stateDir?: string | null,
+): Promise<Set<string>> {
+  const root = claudeConfigDir(stateDir);
+  const historyPath = join(root, "history.jsonl");
+  await assertSafeClaudeStoragePath(root, historyPath, {
+    includeLeaf: true,
+    leafType: "file",
+  });
+  return sessionIdsFromHistory(historyPath);
+}
+
+async function safeClaudeTranscriptStatAndHead(
+  path: string,
+  stateDir?: string | null,
+): Promise<{ mtimeMs: number; head: string }> {
+  await assertSafeClaudeStoragePath(claudeConfigDir(stateDir), path, {
+    includeLeaf: true,
+    requireLeaf: true,
+    leafType: "file",
+  });
+  const stat = await fs.lstat(path);
+  return { mtimeMs: Number(stat.mtimeMs), head: await readHead(path) };
 }
 
 function textFromContent(content: unknown): string | null {
@@ -217,9 +256,19 @@ async function mapLimited<T, R>(
   return output;
 }
 
-async function listClaudeSessions(cwd: string): Promise<WorkerSessionSummary[]> {
-  const dir = claudeProjectsDirForCwd(cwd);
-  const interactiveIds = await sessionIdsFromHistory(join(claudeConfigDir(), "history.jsonl"));
+async function listClaudeSessions(
+  cwd: string,
+  stateDir?: string | null,
+): Promise<WorkerSessionSummary[]> {
+  const dir = claudeProjectsDirForCwd(cwd, stateDir);
+  await assertSafeClaudeStoragePath(
+    claudeConfigDir(stateDir),
+    dir,
+    { includeLeaf: true, leafType: "directory" },
+  ).catch(() => {
+    throw new Error("Claude session directory is unsafe.");
+  });
+  const interactiveIds = await safeClaudeSessionIdsFromHistory(stateDir);
   const names = await fs.readdir(dir).catch(() => [] as string[]);
   const paths = names
     .filter(
@@ -231,7 +280,10 @@ async function listClaudeSessions(cwd: string): Promise<WorkerSessionSummary[]> 
 
   return mapLimited(paths, async (path) => {
     try {
-      const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
+      const { mtimeMs, head } = await safeClaudeTranscriptStatAndHead(
+        path,
+        stateDir,
+      );
       const preview = parseClaudeSessionHead(head);
       if (!preview.hasUser) return null;
       return {
@@ -240,7 +292,7 @@ async function listClaudeSessions(cwd: string): Promise<WorkerSessionSummary[]> 
         title: preview.title ?? "Untitled session",
         cwd,
         cwdExists: true,
-        updatedAt: new Date(stat.mtimeMs).toISOString(),
+        updatedAt: new Date(mtimeMs).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {
@@ -267,11 +319,14 @@ async function collectCodexRollouts(root: string): Promise<string[]> {
   return paths;
 }
 
-async function listCodexSessions(cwd: string): Promise<WorkerSessionSummary[]> {
-  const root = join(codexHomeDir(), "sessions");
+async function listCodexSessions(
+  cwd: string,
+  codexHome?: string | null,
+): Promise<WorkerSessionSummary[]> {
+  const pathsForHome = resolveCodexHomePaths(codexHome);
   const [paths, interactiveIds] = await Promise.all([
-    collectCodexRollouts(root),
-    sessionIdsFromHistory(join(codexHomeDir(), "history.jsonl")),
+    collectCodexRollouts(pathsForHome.sessionsRoot),
+    sessionIdsFromHistory(pathsForHome.historyPath),
   ]);
   const targetCwd = normalizedPath(cwd);
 
@@ -307,9 +362,12 @@ async function listCodexSessions(cwd: string): Promise<WorkerSessionSummary[]> {
 export async function listWorkerSessions(
   runtime: WorkerSessionRuntime,
   cwd: string,
+  options: CodexWorkerSessionOptions = {},
 ): Promise<WorkerSessionSummary[]> {
   const sessions =
-    runtime === "claude" ? await listClaudeSessions(cwd) : await listCodexSessions(cwd);
+    runtime === "claude"
+      ? await listClaudeSessions(cwd, options.claudeStateDir)
+      : await listCodexSessions(cwd, options.codexHome);
   return sessions.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
@@ -318,11 +376,20 @@ async function pathIsDirectory(path: string): Promise<boolean> {
   return stat?.isDirectory() === true;
 }
 
-async function listAllClaudeSessions(): Promise<WorkerSessionSummary[]> {
-  const projectsRoot = join(claudeConfigDir(), "projects");
+async function listAllClaudeSessions(
+  stateDir?: string | null,
+): Promise<WorkerSessionSummary[]> {
+  const projectsRoot = join(claudeConfigDir(stateDir), "projects");
+  await assertSafeClaudeStoragePath(
+    claudeConfigDir(stateDir),
+    projectsRoot,
+    { includeLeaf: true, leafType: "directory" },
+  ).catch(() => {
+    throw new Error("Claude projects directory is unsafe.");
+  });
   const [projectDirs, interactiveIds] = await Promise.all([
     fs.readdir(projectsRoot, { withFileTypes: true }).catch(() => []),
-    sessionIdsFromHistory(join(claudeConfigDir(), "history.jsonl")),
+    safeClaudeSessionIdsFromHistory(stateDir),
   ]);
   const paths = (
     await Promise.all(
@@ -330,6 +397,15 @@ async function listAllClaudeSessions(): Promise<WorkerSessionSummary[]> {
         .filter((entry) => entry.isDirectory())
         .map(async (entry) => {
           const dir = join(projectsRoot, entry.name);
+          await assertSafeClaudeStoragePath(
+            claudeConfigDir(stateDir),
+            dir,
+            {
+              includeLeaf: true,
+              requireLeaf: true,
+              leafType: "directory",
+            },
+          );
           const children = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
           return children
             .filter(
@@ -344,7 +420,10 @@ async function listAllClaudeSessions(): Promise<WorkerSessionSummary[]> {
   ).flat();
   return mapLimited(paths, async (path) => {
     try {
-      const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
+      const { mtimeMs, head } = await safeClaudeTranscriptStatAndHead(
+        path,
+        stateDir,
+      );
       const preview = parseClaudeSessionHead(head);
       if (!preview.hasUser || !preview.cwd || !isAbsolute(preview.cwd)) return null;
       return {
@@ -353,7 +432,7 @@ async function listAllClaudeSessions(): Promise<WorkerSessionSummary[]> {
         title: preview.title ?? "Untitled session",
         cwd: preview.cwd,
         cwdExists: await pathIsDirectory(preview.cwd),
-        updatedAt: new Date(Math.max(stat.mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
+        updatedAt: new Date(Math.max(mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {
@@ -383,13 +462,16 @@ async function collectJsonlFiles(
   return paths;
 }
 
-async function listAllCodexSessions(): Promise<WorkerSessionSummary[]> {
+async function listAllCodexSessions(
+  codexHome?: string | null,
+): Promise<WorkerSessionSummary[]> {
+  const pathsForHome = resolveCodexHomePaths(codexHome);
   const [paths, interactiveIds] = await Promise.all([
     collectJsonlFiles(
-      join(codexHomeDir(), "sessions"),
+      pathsForHome.sessionsRoot,
       (name) => name.startsWith("rollout-"),
     ),
-    sessionIdsFromHistory(join(codexHomeDir(), "history.jsonl")),
+    sessionIdsFromHistory(pathsForHome.historyPath),
   ]);
   return mapLimited(paths, async (path) => {
     try {
@@ -420,19 +502,23 @@ async function listAllCodexSessions(): Promise<WorkerSessionSummary[]> {
   });
 }
 
-export async function listAllWorkerSessions(): Promise<WorkerSessionSummary[]> {
-  const [claude, codex] = await Promise.all([listAllClaudeSessions(), listAllCodexSessions()]);
+export async function listAllWorkerSessions(
+  options: CodexWorkerSessionOptions = {},
+): Promise<WorkerSessionSummary[]> {
+  const [claude, codex] = await Promise.all([
+    listAllClaudeSessions(options.claudeStateDir),
+    listAllCodexSessions(options.codexHome),
+  ]);
   return [...claude, ...codex].sort(
     (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
   );
 }
 
-function pathInside(root: string, candidate: string): boolean {
-  const rel = relative(resolve(root), resolve(candidate));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function validateDeleteInput(input: DeleteWorkerSessionInput): void {
+async function validateDeleteInput(
+  input: DeleteWorkerSessionInput,
+  codexHome?: string | null,
+  claudeStateDir?: string | null,
+): Promise<void> {
   if (input.runtime !== "claude" && input.runtime !== "codex") {
     throw new Error("Unknown worker session runtime.");
   }
@@ -452,28 +538,75 @@ function validateDeleteInput(input: DeleteWorkerSessionInput): void {
   }
 
   if (input.runtime === "claude") {
-    const expected = claudeSessionTranscriptPath(input.cwd, input.sessionId);
+    const expected = claudeSessionTranscriptPath(
+      input.cwd,
+      input.sessionId,
+      claudeStateDir,
+    );
     if (resolve(expected) !== resolve(input.transcriptPath)) {
       throw new Error("Claude transcript path does not match the selected session.");
     }
+    await resolveSafeClaudeTranscriptPath(
+      input.cwd,
+      input.sessionId,
+      claudeStateDir,
+      { requireExisting: true },
+    );
+    await assertSafeClaudeCompanionState(
+      input.sessionId,
+      claudeStateDir,
+      input.memoryScope === "claude-project"
+        ? join(dirname(input.transcriptPath), "memory")
+        : null,
+    );
     return;
   }
 
-  const sessionsRoot = join(codexHomeDir(), "sessions");
-  if (!pathInside(sessionsRoot, input.transcriptPath)) {
-    throw new Error("Codex transcript is outside the session store.");
-  }
+  resolveCodexTranscriptPath(input.transcriptPath, codexHome, {
+    requireExisting: true,
+  });
   if (extractSessionUuid(input.transcriptPath)?.toLowerCase() !== input.sessionId.toLowerCase()) {
     throw new Error("Codex transcript path does not match the selected session.");
   }
 }
 
+async function assertSafeClaudeCompanionState(
+  sessionId: string,
+  stateDir?: string | null,
+  memoryPath: string | null = null,
+): Promise<void> {
+  const root = claudeConfigDir(stateDir);
+  await assertSafeClaudeStoragePath(root, root);
+  for (const name of ["file-history", "tasks", "debug", "session-env"]) {
+    await assertSafeClaudeStoragePath(root, join(root, name, sessionId));
+  }
+  await assertSafeClaudeStoragePath(root, join(root, "history.jsonl"), {
+    includeLeaf: true,
+  });
+  if (memoryPath) {
+    await assertSafeClaudeStoragePath(root, memoryPath);
+  }
+}
+
 async function removeIfPresent(path: string): Promise<void> {
+  const stat = await fs.lstat(path).catch(() => null);
+  if (!stat) return;
+  // Never recurse through a link. This matters for selected-home memory and
+  // shell-snapshot cleanup, where a malicious link must not reach another
+  // account (or any path outside Codex state).
+  if (stat.isSymbolicLink()) {
+    await fs.unlink(path).catch(() => undefined);
+    return;
+  }
   await fs.rm(path, { recursive: true, force: true });
 }
 
-async function removeClaudeCompanionState(sessionId: string): Promise<void> {
-  const root = claudeConfigDir();
+async function removeClaudeCompanionState(
+  sessionId: string,
+  stateDir?: string | null,
+): Promise<void> {
+  const root = claudeConfigDir(stateDir);
+  await assertSafeClaudeCompanionState(sessionId, stateDir);
   await Promise.all(
     ["file-history", "tasks", "debug", "session-env"].map((name) =>
       removeIfPresent(join(root, name, sessionId)),
@@ -520,18 +653,27 @@ async function removeSessionHistoryEntries(path: string, sessionId: string): Pro
   }
 }
 
-async function removeCodexCompanionState(sessionId: string): Promise<void> {
-  const root = codexHomeDir();
-  await removeSessionHistoryEntries(join(root, "history.jsonl"), sessionId);
-  const snapshots = await fs.readdir(join(root, "shell_snapshots")).catch(() => [] as string[]);
+async function removeCodexCompanionState(
+  sessionId: string,
+  codexHome?: string | null,
+): Promise<void> {
+  const pathsForHome = resolveCodexHomePaths(codexHome);
+  await removeSessionHistoryEntries(pathsForHome.historyPath, sessionId);
+  const snapshots = await fs
+    .readdir(pathsForHome.shellSnapshotsRoot)
+    .catch(() => [] as string[]);
   await Promise.all(
     snapshots
       .filter((name) => name === sessionId || name.startsWith(`${sessionId}.`))
-      .map((name) => removeIfPresent(join(root, "shell_snapshots", name))),
+      .map((name) => removeIfPresent(join(pathsForHome.shellSnapshotsRoot, name))),
   );
 }
 
-async function runCodexDelete(sessionId: string): Promise<string | null> {
+async function runCodexDelete(
+  sessionId: string,
+  codexHome?: string | null,
+): Promise<string | null> {
+  const { homeDir } = resolveCodexHomePaths(codexHome);
   const binary = await codexProvider.resolveBinary();
   if (!binary) return "Codex CLI was not found; the rollout file was removed directly.";
   const args = ["delete", "--force", sessionId];
@@ -558,7 +700,7 @@ async function runCodexDelete(sessionId: string): Promise<string | null> {
         : { exe: binary, args };
   const result = await new Promise<{ code: number | null; stderr: string }>((done) => {
     const child = spawn(launch.exe, launch.args, {
-      env: process.env,
+      env: buildCodexCliProfileEnvironment(process.env, homeDir),
       stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
     });
@@ -582,8 +724,9 @@ async function runCodexDelete(sessionId: string): Promise<string | null> {
 
 export async function deleteWorkerSession(
   input: DeleteWorkerSessionInput,
+  options: CodexWorkerSessionOptions = {},
 ): Promise<DeleteWorkerSessionResult> {
-  validateDeleteInput(input);
+  await validateDeleteInput(input, options.codexHome, options.claudeStateDir);
   const head = await readHead(input.transcriptPath).catch(() => "");
   if (head) {
     const recordedCwd =
@@ -597,21 +740,26 @@ export async function deleteWorkerSession(
 
   const warnings: string[] = [];
   if (input.runtime === "codex") {
-    const warning = await runCodexDelete(input.sessionId);
+    const warning = await runCodexDelete(input.sessionId, options.codexHome);
     if (warning) warnings.push(warning);
     await removeIfPresent(input.transcriptPath);
-    await removeCodexCompanionState(input.sessionId);
+    await removeCodexCompanionState(input.sessionId, options.codexHome);
   } else {
     await removeIfPresent(input.transcriptPath);
-    await removeClaudeCompanionState(input.sessionId);
+    await removeClaudeCompanionState(input.sessionId, options.claudeStateDir);
   }
 
   let memoryDeleted = false;
   if (input.memoryScope === "claude-project") {
+    await assertSafeClaudeStoragePath(
+      claudeConfigDir(options.claudeStateDir),
+      join(dirname(input.transcriptPath), "memory"),
+    );
     await removeIfPresent(join(dirname(input.transcriptPath), "memory"));
     memoryDeleted = true;
   } else if (input.memoryScope === "codex-all") {
-    await removeIfPresent(join(codexHomeDir(), "memories"));
+    const { memoriesRoot } = resolveCodexHomePaths(options.codexHome);
+    await removeIfPresent(memoriesRoot);
     memoryDeleted = true;
   }
 

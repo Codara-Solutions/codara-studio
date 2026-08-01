@@ -24,6 +24,8 @@ export interface SessionStartRecord {
   paneId: string;
   // Hooks are Claude-only today; Codex keeps the discovery heuristic.
   runtime: "claude";
+  /** Frozen native Claude account. Missing records are legacy personal. */
+  nativeClaudeProfileId?: string;
   sessionId: string;
   transcriptPath?: string;
   cwd?: string;

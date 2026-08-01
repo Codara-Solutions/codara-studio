@@ -252,8 +252,72 @@ async function main() {
       "",
     ].join("\n"),
   );
+  const otherCodexHome = path.join(fixtureRoot, "other-codex-home");
+  const otherCodexId = "66666666-6666-4666-8666-666666666666";
+  const otherCodexDir = path.join(otherCodexHome, "sessions", "2026", "07", "17");
+  const otherCodexTranscript = path.join(
+    otherCodexDir,
+    `rollout-2026-07-17T10-03-00-${otherCodexId}.jsonl`,
+  );
+  fs.mkdirSync(otherCodexDir, { recursive: true });
+  fs.writeFileSync(
+    otherCodexTranscript,
+    jsonl(
+      {
+        type: "session_meta",
+        payload: {
+          id: otherCodexId,
+          cwd: workspace,
+          source: "cli",
+          timestamp: "2026-07-17T10:03:00.000Z",
+        },
+      },
+      {
+        type: "event_msg",
+        payload: { type: "user_message", message: "Other Codex account session" },
+      },
+    ),
+  );
+  fs.writeFileSync(
+    path.join(otherCodexHome, "history.jsonl"),
+    `${JSON.stringify({ session_id: otherCodexId, ts: 4, text: "other" })}\n`,
+  );
+  fs.mkdirSync(path.join(otherCodexHome, "memories"), { recursive: true });
+  fs.writeFileSync(path.join(otherCodexHome, "memories", "keep.md"), "keep");
 
-  const allSessions = await listAllWorkerSessions();
+  const otherClaudeHome = path.join(fixtureRoot, "other-claude-home");
+  const otherClaudeId = "77777777-7777-4777-8777-777777777777";
+  const otherClaudeProject = path.join(
+    otherClaudeHome,
+    "projects",
+    workspace.replace(/[^a-zA-Z0-9]/g, "-"),
+  );
+  const otherClaudeTranscript = path.join(
+    otherClaudeProject,
+    `${otherClaudeId}.jsonl`,
+  );
+  fs.mkdirSync(otherClaudeProject, { recursive: true });
+  fs.writeFileSync(
+    otherClaudeTranscript,
+    jsonl({
+      type: "user",
+      cwd: workspace,
+      sessionId: otherClaudeId,
+      timestamp: "2026-07-17T10:04:00.000Z",
+      message: { role: "user", content: "Other Claude account session" },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(otherClaudeHome, "history.jsonl"),
+    `${JSON.stringify({ sessionId: otherClaudeId, project: workspace })}\n`,
+  );
+  fs.mkdirSync(path.join(otherClaudeHome, "file-history", otherClaudeId), {
+    recursive: true,
+  });
+
+  const allSessions = await listAllWorkerSessions({
+    claudeStateDir: process.env.CLAUDE_CONFIG_DIR,
+  });
   check("All-session scan finds Claude fixture", allSessions.some((item) => item.sessionId === claudeId));
   check("All-session scan finds Codex fixture", allSessions.some((item) => item.sessionId === codexId));
   check(
@@ -271,8 +335,10 @@ async function main() {
   check("All-session scan reports an existing cwd", allSessions.every((item) => item.cwdExists));
 
   const [claudeSessions, codexSessions] = await Promise.all([
-    listWorkerSessions("claude", workspace),
-    listWorkerSessions("codex", workspace),
+    listWorkerSessions("claude", workspace, {
+      claudeStateDir: process.env.CLAUDE_CONFIG_DIR,
+    }),
+    listWorkerSessions("codex", workspace, { codexHome: process.env.CODEX_HOME }),
   ]);
   check(
     "Directory picker lists only the interactive Claude session",
@@ -281,6 +347,66 @@ async function main() {
   check(
     "Directory picker lists only the interactive Codex session",
     codexSessions.length === 1 && codexSessions[0].sessionId === codexId,
+  );
+  const otherCodexSessions = await listWorkerSessions("codex", workspace, {
+    codexHome: otherCodexHome,
+  });
+  check(
+    "Explicit Codex homes list only their own resumable sessions",
+    otherCodexSessions.length === 1 &&
+      otherCodexSessions[0].sessionId === otherCodexId &&
+      codexSessions.every((item) => item.sessionId !== otherCodexId),
+  );
+  const otherClaudeSessions = await listWorkerSessions("claude", workspace, {
+    claudeStateDir: otherClaudeHome,
+  });
+  check(
+    "Explicit Claude homes list only their own resumable sessions",
+    otherClaudeSessions.length === 1 &&
+      otherClaudeSessions[0].sessionId === otherClaudeId &&
+      claudeSessions.every((item) => item.sessionId !== otherClaudeId),
+  );
+
+  let rejectedCrossClaudeHome = false;
+  try {
+    await deleteWorkerSession(
+      {
+        runtime: "claude",
+        sessionId: otherClaudeId,
+        cwd: workspace,
+        transcriptPath: otherClaudeTranscript,
+        memoryScope: "none",
+      },
+      { claudeStateDir: process.env.CLAUDE_CONFIG_DIR },
+    );
+  } catch {
+    rejectedCrossClaudeHome = true;
+  }
+  check(
+    "Deletion rejects another Claude home's transcript",
+    rejectedCrossClaudeHome && fs.existsSync(otherClaudeTranscript),
+  );
+
+  let rejectedCrossHome = false;
+  try {
+    await deleteWorkerSession(
+      {
+        runtime: "codex",
+        sessionId: otherCodexId,
+        cwd: workspace,
+        transcriptPath: otherCodexTranscript,
+        memoryScope: "codex-all",
+      },
+      { codexHome: process.env.CODEX_HOME },
+    );
+  } catch {
+    rejectedCrossHome = true;
+  }
+  check("Deletion rejects another Codex home's transcript", rejectedCrossHome);
+  check(
+    "Rejected cross-home deletion preserves transcript and memory",
+    fs.existsSync(otherCodexTranscript) &&
+      fs.existsSync(path.join(otherCodexHome, "memories", "keep.md")),
   );
 
   let rejectedOutsideStore = false;
@@ -325,30 +451,289 @@ async function main() {
   }
   check("Deletion rejects another provider's memory scope", rejectedWrongMemoryScope);
 
-  await deleteWorkerSession({
-    runtime: "claude",
-    sessionId: claudeId,
-    cwd: workspace,
-    transcriptPath: claudeTranscript,
-    memoryScope: "claude-project",
-  });
+  let rejectedForgedTranscript = false;
+  try {
+    await deleteWorkerSession(
+      {
+        runtime: "codex",
+        sessionId: codexId,
+        cwd: workspace,
+        transcriptPath: path.join(
+          codexDir,
+          `rollout-forged-${codexId}.jsonl`,
+        ),
+        memoryScope: "codex-all",
+      },
+      { codexHome: process.env.CODEX_HOME },
+    );
+  } catch {
+    rejectedForgedTranscript = true;
+  }
+  check(
+    "Deletion rejects a forged in-home transcript path that does not exist",
+    rejectedForgedTranscript,
+  );
+  check(
+    "Forged deletion cannot remove Codex history or memory",
+    fs
+      .readFileSync(path.join(process.env.CODEX_HOME, "history.jsonl"), "utf8")
+      .includes(codexId) &&
+      fs.existsSync(path.join(process.env.CODEX_HOME, "memories", "fixture.md")),
+  );
+
+  // Selected Claude homes are hostile-input boundaries: listings and deletes
+  // must never follow a transcript leaf, history file, projects root, encoded
+  // project directory, or companion-state ancestor symlink.
+  const hostileOutside = path.join(fixtureRoot, "hostile-outside");
+  fs.mkdirSync(hostileOutside, { recursive: true });
+  const hostileLeafId = "88888888-8888-4888-8888-888888888888";
+  const hostileLeafHome = path.join(fixtureRoot, "hostile-leaf-home");
+  const hostileLeafProject = path.join(
+    hostileLeafHome,
+    "projects",
+    workspace.replace(/[^a-zA-Z0-9]/g, "-"),
+  );
+  fs.mkdirSync(hostileLeafProject, { recursive: true });
+  const outsideLeafTranscript = path.join(hostileOutside, "outside-leaf.jsonl");
+  fs.writeFileSync(
+    outsideLeafTranscript,
+    jsonl({
+      type: "user",
+      cwd: workspace,
+      sessionId: hostileLeafId,
+      message: { role: "user", content: "must not be read" },
+    }),
+  );
+  fs.symlinkSync(
+    outsideLeafTranscript,
+    path.join(hostileLeafProject, `${hostileLeafId}.jsonl`),
+  );
+  fs.writeFileSync(
+    path.join(hostileLeafHome, "history.jsonl"),
+    `${JSON.stringify({ sessionId: hostileLeafId })}\n`,
+  );
+  const hostileLeafSessions = await listWorkerSessions(
+    "claude",
+    workspace,
+    { claudeStateDir: hostileLeafHome },
+  );
+  check(
+    "Claude listing refuses a transcript leaf symlink",
+    hostileLeafSessions.length === 0 && fs.existsSync(outsideLeafTranscript),
+  );
+
+  const hostileHistoryHome = path.join(fixtureRoot, "hostile-history-home");
+  const hostileHistoryProject = path.join(
+    hostileHistoryHome,
+    "projects",
+    workspace.replace(/[^a-zA-Z0-9]/g, "-"),
+  );
+  fs.mkdirSync(hostileHistoryProject, { recursive: true });
+  fs.writeFileSync(
+    path.join(hostileHistoryProject, `${hostileLeafId}.jsonl`),
+    jsonl({
+      type: "user",
+      cwd: workspace,
+      sessionId: hostileLeafId,
+      message: { role: "user", content: "safe transcript" },
+    }),
+  );
+  const outsideHistory = path.join(hostileOutside, "history.jsonl");
+  fs.writeFileSync(
+    outsideHistory,
+    `${JSON.stringify({ sessionId: hostileLeafId })}\n`,
+  );
+  fs.symlinkSync(outsideHistory, path.join(hostileHistoryHome, "history.jsonl"));
+  let rejectedHistoryListing = false;
+  try {
+    await listWorkerSessions("claude", workspace, {
+      claudeStateDir: hostileHistoryHome,
+    });
+  } catch {
+    rejectedHistoryListing = true;
+  }
+  check("Claude listing refuses a history symlink", rejectedHistoryListing);
+
+  const hostileProjectsHome = path.join(fixtureRoot, "hostile-projects-home");
+  fs.mkdirSync(hostileProjectsHome, { recursive: true });
+  fs.symlinkSync(
+    path.join(hostileLeafHome, "projects"),
+    path.join(hostileProjectsHome, "projects"),
+    "dir",
+  );
+  let rejectedProjectsListing = false;
+  try {
+    await listWorkerSessions("claude", workspace, {
+      claudeStateDir: hostileProjectsHome,
+    });
+  } catch {
+    rejectedProjectsListing = true;
+  }
+  check(
+    "Claude listing refuses a projects-directory symlink",
+    rejectedProjectsListing,
+  );
+
+  const hostileEncodedHome = path.join(fixtureRoot, "hostile-encoded-home");
+  fs.mkdirSync(path.join(hostileEncodedHome, "projects"), { recursive: true });
+  fs.symlinkSync(
+    hostileLeafProject,
+    path.join(
+      hostileEncodedHome,
+      "projects",
+      workspace.replace(/[^a-zA-Z0-9]/g, "-"),
+    ),
+    "dir",
+  );
+  let rejectedEncodedListing = false;
+  try {
+    await listWorkerSessions("claude", workspace, {
+      claudeStateDir: hostileEncodedHome,
+    });
+  } catch {
+    rejectedEncodedListing = true;
+  }
+  check(
+    "Claude listing refuses an encoded-project-directory symlink",
+    rejectedEncodedListing,
+  );
+
+  const makeDeleteFixture = (home, id) => {
+    const project = path.join(
+      home,
+      "projects",
+      workspace.replace(/[^a-zA-Z0-9]/g, "-"),
+    );
+    fs.mkdirSync(project, { recursive: true });
+    const transcript = path.join(project, `${id}.jsonl`);
+    fs.writeFileSync(
+      transcript,
+      jsonl({
+        type: "user",
+        cwd: workspace,
+        sessionId: id,
+        message: { role: "user", content: "preserve on rejection" },
+      }),
+    );
+    return transcript;
+  };
+  const companionAttackHome = path.join(fixtureRoot, "hostile-companion-home");
+  const companionAttackId = "99999999-9999-4999-8999-999999999999";
+  const companionAttackTranscript = makeDeleteFixture(
+    companionAttackHome,
+    companionAttackId,
+  );
+  const outsideCompanions = path.join(hostileOutside, "companions");
+  fs.mkdirSync(outsideCompanions, { recursive: true });
+  fs.writeFileSync(path.join(outsideCompanions, "sentinel"), "keep");
+  fs.symlinkSync(
+    outsideCompanions,
+    path.join(companionAttackHome, "file-history"),
+    "dir",
+  );
+  fs.writeFileSync(path.join(companionAttackHome, "history.jsonl"), "");
+  let rejectedCompanionDelete = false;
+  try {
+    await deleteWorkerSession(
+      {
+        runtime: "claude",
+        sessionId: companionAttackId,
+        cwd: workspace,
+        transcriptPath: companionAttackTranscript,
+        memoryScope: "none",
+      },
+      { claudeStateDir: companionAttackHome },
+    );
+  } catch {
+    rejectedCompanionDelete = true;
+  }
+  check(
+    "Claude deletion rejects a companion-directory symlink before mutation",
+    rejectedCompanionDelete &&
+      fs.existsSync(companionAttackTranscript) &&
+      fs.existsSync(path.join(outsideCompanions, "sentinel")),
+  );
+
+  const historyAttackHome = path.join(fixtureRoot, "hostile-delete-history-home");
+  const historyAttackId = "aaaaaaaa-1111-4aaa-8aaa-111111111111";
+  const historyAttackTranscript = makeDeleteFixture(
+    historyAttackHome,
+    historyAttackId,
+  );
+  fs.symlinkSync(outsideHistory, path.join(historyAttackHome, "history.jsonl"));
+  let rejectedHistoryDelete = false;
+  try {
+    await deleteWorkerSession(
+      {
+        runtime: "claude",
+        sessionId: historyAttackId,
+        cwd: workspace,
+        transcriptPath: historyAttackTranscript,
+        memoryScope: "none",
+      },
+      { claudeStateDir: historyAttackHome },
+    );
+  } catch {
+    rejectedHistoryDelete = true;
+  }
+  check(
+    "Claude deletion rejects a history symlink before mutation",
+    rejectedHistoryDelete &&
+      fs.existsSync(historyAttackTranscript) &&
+      fs.readFileSync(outsideHistory, "utf8").includes(hostileLeafId),
+  );
+
+  await deleteWorkerSession(
+    {
+      runtime: "claude",
+      sessionId: claudeId,
+      cwd: workspace,
+      transcriptPath: claudeTranscript,
+      memoryScope: "claude-project",
+    },
+    { claudeStateDir: process.env.CLAUDE_CONFIG_DIR },
+  );
   check("Claude deletion removes transcript", !fs.existsSync(claudeTranscript));
   check("Claude deletion removes companion state", !fs.existsSync(path.join(process.env.CLAUDE_CONFIG_DIR, "file-history", claudeId)));
   check("Claude deletion removes selected project memory", !fs.existsSync(path.join(claudeProject, "memory")));
   check("Claude deletion filters prompt history", fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "history.jsonl"), "utf8") === "");
 
-  await deleteWorkerSession({
-    runtime: "codex",
-    sessionId: codexId,
-    cwd: workspace,
-    transcriptPath: codexTranscript,
-    memoryScope: "codex-all",
-  });
+  await deleteWorkerSession(
+    {
+      runtime: "claude",
+      sessionId: otherClaudeId,
+      cwd: workspace,
+      transcriptPath: otherClaudeTranscript,
+      memoryScope: "none",
+    },
+    { claudeStateDir: otherClaudeHome },
+  );
+  check(
+    "Claude deletion is routed to the explicitly selected home",
+    !fs.existsSync(otherClaudeTranscript) &&
+      !fs.existsSync(path.join(otherClaudeHome, "file-history", otherClaudeId)),
+  );
+
+  await deleteWorkerSession(
+    {
+      runtime: "codex",
+      sessionId: codexId,
+      cwd: workspace,
+      transcriptPath: codexTranscript,
+      memoryScope: "codex-all",
+    },
+    { codexHome: process.env.CODEX_HOME },
+  );
   check("Codex deletion removes transcript", !fs.existsSync(codexTranscript));
   check("Codex deletion removes selected global memory", !fs.existsSync(path.join(process.env.CODEX_HOME, "memories")));
   check(
     "Codex deletion filters only the selected prompt history",
     !fs.readFileSync(path.join(process.env.CODEX_HOME, "history.jsonl"), "utf8").includes(codexId),
+  );
+  check(
+    "codex-all is scoped to the explicitly selected home",
+    fs.existsSync(path.join(otherCodexHome, "memories", "keep.md")) &&
+      fs.readFileSync(path.join(otherCodexHome, "history.jsonl"), "utf8").includes(otherCodexId),
   );
 
   if (failures > 0) {

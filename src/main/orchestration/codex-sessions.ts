@@ -9,23 +9,29 @@
 // can find and identify a rollout after spawning `codex`.
 
 import { promises as fs } from "node:fs";
-import { homedir } from "node:os";
+import type { Dirent } from "node:fs";
 import { join } from "node:path";
+
+import {
+  resolveCodexHomeDir,
+  resolveCodexHomePaths,
+  resolveCodexSessionDirectoryPath,
+  resolveCodexTranscriptPath,
+} from "./codex-home";
 
 export const ROLLOUT_FILENAME_UUID_RE = /rollout-.*-([0-9a-f-]{36})\.jsonl$/i;
 
-export function codexHomeDir(): string {
-  const configured = process.env.CODEX_HOME?.trim();
-  return configured || join(homedir(), ".codex");
+export function codexHomeDir(explicitHome?: string | null): string {
+  return resolveCodexHomeDir(explicitHome);
 }
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
-export function sessionsDirFor(date: Date): string {
+export function sessionsDirFor(date: Date, explicitHome?: string | null): string {
   return join(
-    codexHomeDir(),
+    codexHomeDir(explicitHome),
     "sessions",
     String(date.getFullYear()),
     pad2(date.getMonth() + 1),
@@ -42,10 +48,17 @@ export function extractSessionUuid(rolloutPath: string): string | null {
 // the spawn day, and the day before the spawn day. Codex names the file from the
 // local time at run start, so a slow startup can leave it one folder back, and a
 // midnight rollover during the spawn window is likewise covered.
-function candidateDirs(spawnDate: Date, today: Date): Set<string> {
-  const dirs = new Set<string>([sessionsDirFor(today), sessionsDirFor(spawnDate)]);
+function candidateDirs(
+  spawnDate: Date,
+  today: Date,
+  explicitHome?: string | null,
+): Set<string> {
+  const dirs = new Set<string>([
+    sessionsDirFor(today, explicitHome),
+    sessionsDirFor(spawnDate, explicitHome),
+  ]);
   const previous = new Date(spawnDate.getTime() - 24 * 60 * 60 * 1000);
-  dirs.add(sessionsDirFor(previous));
+  dirs.add(sessionsDirFor(previous, explicitHome));
   return dirs;
 }
 
@@ -66,24 +79,38 @@ async function listCandidates(
   since: number,
   spawnDate: Date,
   today: Date,
+  explicitHome?: string | null,
 ): Promise<RolloutCandidate[]> {
+  resolveCodexHomePaths(explicitHome);
   const paths: string[] = [];
-  for (const dir of candidateDirs(spawnDate, today)) {
-    let entries: string[];
+  for (const dir of candidateDirs(spawnDate, today, explicitHome)) {
+    const safeDir = resolveCodexSessionDirectoryPath(dir, explicitHome);
+    let entries: Dirent[];
     try {
-      entries = await fs.readdir(dir);
+      entries = await fs.readdir(safeDir, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const name of entries) {
-      if (!name.startsWith("rollout-") || !name.endsWith(".jsonl")) continue;
-      paths.push(join(dir, name));
+    for (const entry of entries) {
+      if (
+        !entry.isFile() ||
+        !entry.name.startsWith("rollout-") ||
+        !entry.name.endsWith(".jsonl")
+      ) {
+        continue;
+      }
+      const candidate = join(safeDir, entry.name);
+      resolveCodexTranscriptPath(candidate, explicitHome, {
+        requireExisting: true,
+      });
+      paths.push(candidate);
     }
   }
   const out: RolloutCandidate[] = [];
   for (const path of paths) {
     try {
-      const stat = await fs.stat(path);
+      const stat = await fs.lstat(path);
+      if (!stat.isFile() || stat.isSymbolicLink()) continue;
       if (stat.mtimeMs + 5 < since) continue; // 5ms slack for clock skew
       out.push({ path, mtimeMs: stat.mtimeMs });
     } catch {
@@ -99,8 +126,17 @@ async function listCandidates(
  * the original mtime-only heuristic used by the managed chat backend, which
  * spawns codex serially and can assume the newest file is its own.
  */
-export async function discoverRolloutPath(since: number, spawnDate: Date): Promise<string | null> {
-  const candidates = await listCandidates(since, spawnDate, new Date());
+export async function discoverRolloutPath(
+  since: number,
+  spawnDate: Date,
+  explicitHome?: string | null,
+): Promise<string | null> {
+  const candidates = await listCandidates(
+    since,
+    spawnDate,
+    new Date(),
+    explicitHome,
+  );
   return candidates.length > 0 ? candidates[0].path : null;
 }
 
@@ -111,18 +147,33 @@ export async function discoverRolloutPath(since: number, spawnDate: Date): Promi
  * the process we just launched. Excluding this snapshot gives fresh sessions
  * an important ownership boundary: only a newly-created rollout may attach.
  */
-export async function snapshotRolloutPaths(spawnDate: Date): Promise<Set<string>> {
+export async function snapshotRolloutPaths(
+  spawnDate: Date,
+  explicitHome?: string | null,
+): Promise<Set<string>> {
+  resolveCodexHomePaths(explicitHome);
   const paths = new Set<string>();
-  for (const dir of candidateDirs(spawnDate, new Date())) {
-    let entries: string[];
+  for (const dir of candidateDirs(spawnDate, new Date(), explicitHome)) {
+    const safeDir = resolveCodexSessionDirectoryPath(dir, explicitHome);
+    let entries: Dirent[];
     try {
-      entries = await fs.readdir(dir);
+      entries = await fs.readdir(safeDir, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const name of entries) {
-      if (!name.startsWith("rollout-") || !name.endsWith(".jsonl")) continue;
-      paths.add(join(dir, name));
+    for (const entry of entries) {
+      if (
+        !entry.isFile() ||
+        !entry.name.startsWith("rollout-") ||
+        !entry.name.endsWith(".jsonl")
+      ) {
+        continue;
+      }
+      const candidate = join(safeDir, entry.name);
+      resolveCodexTranscriptPath(candidate, explicitHome, {
+        requireExisting: true,
+      });
+      paths.add(candidate);
     }
   }
   return paths;
@@ -166,10 +217,14 @@ function extractStartedAtMs(entry: unknown): number | null {
 // chunk for a `cwd` string at any of the shapes Codex has used. Reads only the
 // head of the file (session_meta is the first line) to stay cheap on long
 // transcripts. Returns null when no cwd can be found.
-export async function readRolloutMetadata(path: string): Promise<RolloutMetadata> {
+export async function readRolloutMetadata(
+  path: string,
+  explicitHome?: string | null,
+): Promise<RolloutMetadata> {
+  const safePath = resolveCodexTranscriptPath(path, explicitHome);
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
-    handle = await fs.open(path, "r");
+    handle = await fs.open(safePath, "r");
     const buf = Buffer.alloc(16384);
     const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
     const text = buf.subarray(0, bytesRead).toString("utf8");
@@ -198,8 +253,11 @@ export async function readRolloutMetadata(path: string): Promise<RolloutMetadata
 
 // Read only the cwd for existing callers (manual-terminal capture). Keeping
 // this wrapper avoids making those call sites care about rollout timestamps.
-export async function readRolloutCwd(path: string): Promise<string | null> {
-  return (await readRolloutMetadata(path)).cwd;
+export async function readRolloutCwd(
+  path: string,
+  explicitHome?: string | null,
+): Promise<string | null> {
+  return (await readRolloutMetadata(path, explicitHome)).cwd;
 }
 
 // Compare paths case-insensitively with separators unified so a Windows
@@ -233,9 +291,16 @@ export async function discoverRolloutForCwd(
     sessionUuid?: string;
     /** Lowercased session UUIDs already bound to other panes — never rebind. */
     excludeSessionIds?: ReadonlySet<string>;
+    /** Exact resolved Codex home selected for this session. */
+    codexHome?: string;
   },
 ): Promise<string | null> {
-  const candidates = await listCandidates(since, spawnDate, new Date());
+  const candidates = await listCandidates(
+    since,
+    spawnDate,
+    new Date(),
+    opts?.codexHome,
+  );
   if (candidates.length === 0) return null;
   const target = normalizePath(cwd);
   let fallback: string | null = null;
@@ -251,7 +316,7 @@ export async function discoverRolloutForCwd(
     ) {
       continue;
     }
-    const metadata = await readRolloutMetadata(candidate.path);
+    const metadata = await readRolloutMetadata(candidate.path, opts?.codexHome);
     if (opts?.createdAfter != null) {
       // Small slack covers timestamp serialization and filesystem clock
       // granularity without admitting a pre-existing interactive session.

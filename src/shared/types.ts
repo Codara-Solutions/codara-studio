@@ -192,6 +192,92 @@ export interface PiSubscriptionOverview {
    * shows the in-progress state instead of an idle Install button. */
   runtimeInstalling?: boolean;
   connections: PiSubscriptionConnection[];
+  /** Multi-account rows. Absent on older main processes. */
+}
+
+// Native Claude Code / Codex CLI account profiles are local CLI config homes,
+// distinct from the Pi subscriptions above. These are the only account fields
+// allowed across renderer IPC: profile ids are opaque routing values and no
+// config path, credential, process environment, argv, or child output is
+// represented here. Provider identity crosses only as the one-way
+// accountFingerprint digest and the account's own email address below — never
+// as a raw account id, and never onto a phone: the remote projections in
+// src/main/remote-access strip the email.
+export type NativeCliAccountRuntime = "claude" | "codex";
+
+export type NativeCliAccountConnectionStatus =
+  | "connected"
+  | "sign_in_required"
+  | "unsafe"
+  | "unavailable";
+
+export interface NativeCliAccountProfile {
+  runtime: NativeCliAccountRuntime;
+  id: string;
+  label: string;
+  managed: boolean;
+  isDefault: boolean;
+  connected: boolean;
+  inUse: boolean;
+  status: NativeCliAccountConnectionStatus;
+  /** The email address this sign-in belongs to, for display on its card. */
+  email?: string;
+  /**
+   * Anonymous sha256 of the vendor account id, computed in the main process
+   * with the same scheme as PiSubscriptionProfileConnection.accountFingerprint
+   * so equal digests mean the same account. The digest is taken from the
+   * account id the CLI recorded when it signed in — Codex in its stored
+   * sign-in file, Claude Code in its stored config — which the main process
+   * reads and never rewrites. Absent while a profile is signed out.
+   */
+  accountFingerprint?: string;
+}
+
+export interface NativeCliAccountRuntimeInspection {
+  runtime: NativeCliAccountRuntime;
+  defaultProfileId: string;
+  profiles: NativeCliAccountProfile[];
+}
+
+export interface NativeCliAccountsInspection {
+  runtimes: NativeCliAccountRuntimeInspection[];
+}
+
+export interface NativeCliAccountProfileInput {
+  runtime: NativeCliAccountRuntime;
+  profileId: string;
+}
+
+export interface NativeCliAccountCreateInput {
+  runtime: NativeCliAccountRuntime;
+  label: string;
+}
+
+export interface NativeCliAccountRenameInput extends NativeCliAccountProfileInput {
+  label: string;
+}
+
+export interface NativeCliAccountMutationResult {
+  profile: NativeCliAccountProfile;
+  inspection: NativeCliAccountRuntimeInspection;
+}
+
+export interface NativeCliAccountDeleteResult {
+  runtime: NativeCliAccountRuntime;
+  profileId: string;
+  deleted: boolean;
+}
+
+/** One-time renderer-safe handle for a main-owned interactive login launch. */
+export interface NativeCliAccountLoginPreparation {
+  runtime: NativeCliAccountRuntime;
+  profileId: string;
+  launchToken: string;
+  expiresAt: number;
+}
+
+export interface NativeCliAccountCancelLoginInput {
+  launchToken: string;
 }
 
 /**
@@ -470,6 +556,11 @@ export interface AppPreferences {
   // that had already exited still open as fresh shells. Off = fresh shells on
   // every relaunch.
   restoreAgentSessions?: boolean;
+  // Codara-side display names for command-line sign-ins the CLI itself has no
+  // name field for (the built-in "Personal" one), keyed "<runtime>:<profileId>"
+  // (e.g. "claude:personal"). Purely cosmetic — never sent to the CLI or used
+  // for routing; Settings falls back to "Personal" when no entry exists.
+  nativeCliAccountLabels: Record<string, string>;
   // Opt-in (default off): the phone Remote Access listener
   // (docs/remote-access.md). While on, paired devices can reach this
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
@@ -607,6 +698,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
+  nativeCliAccountLabels: {},
   restoreAgentSessions: false,
   remoteAccessEnabled: false,
 };
@@ -795,6 +887,10 @@ export type WorkerSessionRuntime = "claude" | "codex";
 // manual-worker session picker. The transcript itself never crosses IPC.
 export interface WorkerSessionSummary {
   runtime: WorkerSessionRuntime;
+  /** Frozen native Claude configuration. Undefined is legacy personal/unset. */
+  nativeClaudeProfileId?: string;
+  /** Frozen native Codex account home. Undefined is legacy/personal. */
+  nativeCodexProfileId?: string;
   sessionId: string;
   title: string;
   cwd: string;
@@ -807,6 +903,10 @@ export type WorkerSessionMemoryScope = "none" | "claude-project" | "codex-all";
 
 export interface DeleteWorkerSessionInput {
   runtime: WorkerSessionRuntime;
+  /** Claude configuration that owns transcriptPath. Undefined is personal. */
+  nativeClaudeProfileId?: string;
+  /** Home that owns transcriptPath. Undefined is legacy/personal. */
+  nativeCodexProfileId?: string;
   sessionId: string;
   cwd: string;
   transcriptPath: string;

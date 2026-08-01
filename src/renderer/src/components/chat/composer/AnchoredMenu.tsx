@@ -14,11 +14,20 @@ import { createPortal } from "react-dom";
  * the root backdrop, so its glass samples the real workbench underneath.
  *
  * Positioning is therefore `fixed`, anchored to the trigger's viewport rect and
- * opening UPWARD (composer menus sit above the bar). The rect is re-read on
- * every open, on window resize, and whenever the anchor itself changes size
- * (the composer textarea autosizes as you type). A scroll only closes the menu
- * when it actually moved the anchor; see onScroll for why the broader version
- * of that test was a bug.
+ * opening UPWARD (composer menus sit above the bar) unless `placement="below"`
+ * asks for a dropdown that hangs under its trigger — Settings uses that, and a
+ * below-menu still flips up on its own when the viewport bottom is too close.
+ * The rect is re-read on every open, on window resize, and whenever the anchor
+ * itself changes size (the composer textarea autosizes as you type). A scroll
+ * only closes the menu when it actually moved the anchor; see onScroll for why
+ * the broader version of that test was a bug.
+ *
+ * The Settings → Accounts menus are the reason this is shared rather than
+ * composer-private: any popover authored as position:absolute inside the
+ * Settings content pane is clipped by that pane's `overflow: auto` — the part
+ * that hangs past the pane paints nowhere and its clicks land on the nav
+ * column instead. Portalling is the fix for that class of bug, so new
+ * dropdowns should come here instead of hand-rolling `position: absolute`.
  */
 interface Props {
   /** The trigger element the menu is anchored to. */
@@ -36,6 +45,19 @@ interface Props {
    */
   matchAnchorWidth?: boolean;
   inset?: number;
+  /**
+   * Which side of the trigger the menu hangs on. "above" (default) is the
+   * composer behavior; "below" is the usual dropdown, and it flips back above
+   * on its own when the viewport bottom would cut it off.
+   */
+  placement?: "above" | "below";
+  /** Which trigger edge the menu lines up with. "end" right-aligns. */
+  align?: "start" | "end";
+  /**
+   * Stack position for surfaces that must clear more than the workbench — the
+   * Settings dialog sits at z 100, so its menus pass something above that.
+   */
+  zIndex?: number;
   children: React.ReactNode;
 }
 
@@ -43,6 +65,17 @@ interface Props {
 const EDGE_PAD = 8;
 /** Matches the old `bottom: calc(100% + 6px)` offset above the trigger. */
 const ANCHOR_GAP = 6;
+
+/**
+ * At most ONE AnchoredMenu is open at a time, app-wide. Click-outside cannot
+ * be trusted to enforce that on its own: the Settings dialog surface stops
+ * mousedown propagation (SettingsDialog, to keep inside-clicks off the
+ * wrapper's close-on-scrim handler), which used to also starve the document
+ * listener below — so opening one account card's "···" left the previous
+ * card's menu standing. Opening therefore registers here and deterministically
+ * closes whichever menu was open before, no document event required.
+ */
+let activeMenu: { id: symbol; close: () => void } | null = null;
 
 export default function AnchoredMenu({
   anchorRef,
@@ -53,12 +86,24 @@ export default function AnchoredMenu({
   ariaLabel,
   matchAnchorWidth,
   inset = 0,
+  placement = "above",
+  align = "start",
+  zIndex = 60,
   children,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
+  // Identity in the single-open registry; stable for this menu's lifetime.
+  const menuIdRef = useRef<symbol | null>(null);
+  if (menuIdRef.current === null) menuIdRef.current = Symbol("AnchoredMenu");
+  // Callers rebuild onClose every render; the registry must call the latest.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  // Exactly one of `top` / `bottom` is set: `bottom` grows the menu upward
+  // from the trigger, `top` hangs it underneath.
   const [position, setPosition] = useState<{
     left: number;
-    bottom: number;
+    top?: number;
+    bottom?: number;
     width?: number;
   } | null>(null);
 
@@ -76,16 +121,34 @@ export default function AnchoredMenu({
     }
     // Clamp against the menu's own width so a trigger near the right edge does
     // not push the panel off-screen. Falls back to the rect before the first
-    // paint, when the menu has no measured width yet.
+    // paint, when the menu has no measured width yet. (In practice the menu is
+    // in the DOM — hidden — by the time this layout effect runs, so the
+    // offsetWidth/offsetHeight reads are real from the first pass.)
     const width = menuRef.current?.offsetWidth ?? rect.width;
     const maxLeft = Math.max(EDGE_PAD, window.innerWidth - width - EDGE_PAD);
-    setPosition({
-      left: Math.min(Math.max(EDGE_PAD, rect.left), maxLeft),
-      // `bottom` is measured from the viewport bottom, so the menu grows
-      // upward from the trigger exactly as the absolute version did.
-      bottom: Math.max(EDGE_PAD, window.innerHeight - rect.top + ANCHOR_GAP),
-    });
-  }, [anchorRef, matchAnchorWidth, inset]);
+    const rawLeft = align === "end" ? rect.right - width : rect.left;
+    const left = Math.min(Math.max(EDGE_PAD, rawLeft), maxLeft);
+    // `bottom` is measured from the viewport bottom, so the menu grows
+    // upward from the trigger exactly as the absolute version did.
+    const bottomAnchored = Math.max(
+      EDGE_PAD,
+      window.innerHeight - rect.top + ANCHOR_GAP,
+    );
+    if (placement === "below") {
+      const top = rect.bottom + ANCHOR_GAP;
+      const height = menuRef.current?.offsetHeight ?? 0;
+      // Flip above the trigger when the panel would spill past the viewport
+      // bottom — the last account card's menu, with Settings scrolled to the
+      // end, is the case this exists for.
+      if (height > 0 && top + height > window.innerHeight - EDGE_PAD) {
+        setPosition({ left, bottom: bottomAnchored });
+      } else {
+        setPosition({ left, top });
+      }
+      return;
+    }
+    setPosition({ left, bottom: bottomAnchored });
+  }, [anchorRef, matchAnchorWidth, inset, placement, align]);
 
   // Measure before paint so the menu never flashes at the wrong coordinates,
   // then again after it has a width so the right-edge clamp is real.
@@ -104,6 +167,21 @@ export default function AnchoredMenu({
     // effect only through its null -> value transition.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, position === null]);
+
+  // Single-open coordination (see `activeMenu` above). Runs before the
+  // listener effect below on open; on any close — Escape, outside click,
+  // trigger toggle, unmount — the cleanup hands the slot back, but only if a
+  // newer menu has not already claimed it (its open effect ran first and
+  // closed us, so the slot is theirs).
+  useEffect(() => {
+    if (!open) return;
+    const id = menuIdRef.current!;
+    if (activeMenu !== null && activeMenu.id !== id) activeMenu.close();
+    activeMenu = { id, close: () => onCloseRef.current() };
+    return () => {
+      if (activeMenu?.id === id) activeMenu = null;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -154,13 +232,19 @@ export default function AnchoredMenu({
       typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measure());
     if (anchor && observer) observer.observe(anchor);
 
-    document.addEventListener("mousedown", onPointerDown);
+    // Capture-phase for the same reason as scroll: bubbling cannot be trusted.
+    // The Settings dialog surface calls stopPropagation on mousedown, so a
+    // bubble-phase document listener never hears clicks inside the dialog and
+    // the account menus refused to close on them. Capture runs before any
+    // stopPropagation can bite; the anchor/menu containment guards above keep
+    // inside clicks harmless.
+    document.addEventListener("mousedown", onPointerDown, true);
     document.addEventListener("keydown", onKey);
     window.addEventListener("resize", measure);
     window.addEventListener("scroll", onScroll, true);
     return () => {
       observer?.disconnect();
-      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("mousedown", onPointerDown, true);
       document.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", onScroll, true);
@@ -178,11 +262,12 @@ export default function AnchoredMenu({
       style={{
         position: "fixed",
         left: position?.left ?? 0,
-        bottom: position?.bottom ?? 0,
+        top: position?.top,
+        bottom: position?.top === undefined ? (position?.bottom ?? 0) : undefined,
         width: position?.width,
         // Hidden until measured so it cannot paint at (0,0) for one frame.
         visibility: position ? "visible" : "hidden",
-        zIndex: 60,
+        zIndex,
       }}
     >
       {children}

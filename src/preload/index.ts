@@ -69,6 +69,14 @@ import type {
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   NavigationTarget,
+  NativeCliAccountCancelLoginInput,
+  NativeCliAccountCreateInput,
+  NativeCliAccountDeleteResult,
+  NativeCliAccountLoginPreparation,
+  NativeCliAccountMutationResult,
+  NativeCliAccountProfileInput,
+  NativeCliAccountRenameInput,
+  NativeCliAccountsInspection,
   NotificationCenterEntry,
   NotificationCenterSummary,
   NotificationSoundKind,
@@ -778,6 +786,11 @@ const api = {
       rows: number;
       env?: Record<string, string>;
       startupCommand?: string;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
+      // Opaque, one-shot login handle. Main resolves the direct executable,
+      // argv, config home, and exact child environment.
+      nativeCliLoginToken?: string;
       // Mirror attach: observe an EXISTING session without touching its
       // state (no resize / no sink change / no tail replay). Set by readOnly
       // TerminalPanes; throws if the session does not exist.
@@ -788,7 +801,14 @@ const api = {
       // Result `attached` is true when spawn bound to an EXISTING session
       // (remount / mirror) instead of creating a fresh pty — startupCommand
       // is never delivered in that case.
-    }): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> =>
+    }): Promise<{
+      id: string;
+      pid: number;
+      startupCommandHandled?: boolean;
+      attached?: boolean;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
+    }> =>
       ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
       ipcRenderer.invoke("pty:write", { id, data }),
@@ -838,6 +858,8 @@ const api = {
     list: (args: {
       runtime: WorkerSessionRuntime;
       cwd: string;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
     }): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:list", args),
     listAll: (): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:listAll"),
     delete: (input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> =>
@@ -847,12 +869,20 @@ const api = {
     // null on timeout.
     capture: (args: {
       runtime: "claude" | "codex";
+      paneId?: string;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
       cwd: string;
       sinceMs: number;
       // Session ids already bound to other panes — discovery must never rebind
       // them to this pane (same-cwd concurrent-launch race).
       excludeSessionIds?: string[];
-    }): Promise<{ sessionId: string; transcriptPath: string } | null> =>
+    }): Promise<{
+      sessionId: string;
+      transcriptPath: string;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
+    } | null> =>
       ipcRenderer.invoke("agentSession:capture", args),
     // Fire-and-forget diagnostic trail: restore decisions land in
     // <sparkHome>/logs/main.log so "this pane didn't resume" is debuggable.
@@ -867,17 +897,26 @@ const api = {
       sessionId: string;
       cwd: string;
       transcriptPath?: string;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
     }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
     // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
-    ensureCodexTrust: (cwd: string): Promise<void> =>
-      ipcRenderer.invoke("agentSession:ensureCodexTrust", { cwd }),
+    ensureCodexTrust: (
+      cwd: string,
+      nativeCodexProfileId?: string,
+    ): Promise<void> =>
+      ipcRenderer.invoke("agentSession:ensureCodexTrust", {
+        cwd,
+        nativeCodexProfileId,
+      }),
     // Repair a Claude transcript whose tail a sleep/crash truncated, so
     // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
     repairTranscript: (args: {
       runtime: "claude" | "codex";
       sessionId: string;
       cwd: string;
+      nativeClaudeProfileId?: string;
     }): Promise<{ repaired: boolean }> =>
       ipcRenderer.invoke("agentSession:repairTranscript", args),
     // Newest SessionStart hook record for a pane — the EXACT session identity

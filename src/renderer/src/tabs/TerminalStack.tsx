@@ -1011,14 +1011,25 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               shell={shell}
               initialCwd={leaf.cwd}
               initialCommand={leaf.autorun}
+              nativeCliLoginToken={leaf.nativeCliLoginToken}
               showCodaraIntro={
                 !leaf.autorun &&
+                !leaf.nativeCliLoginToken &&
                 !leaf.worker &&
                 !leaf.agentSession &&
                 tab.scope?.kind !== "workers" &&
                 !tab.color
               }
               agentSession={leaf.agentSession}
+              nativeCodexProfileId={
+                leaf.agentSession?.nativeCodexProfileId ??
+                leaf.worker?.nativeCodexProfileId
+              }
+              nativeClaudeProfileId={
+                leaf.agentSession?.nativeClaudeProfileId ??
+                leaf.worker?.nativeClaudeProfileId ??
+                leaf.nativeClaudeProfileId
+              }
               bootResume={leaf.bootResume === true}
               visible={visible && !placeOffScreen}
               // An opened workspace terminal is a live in-memory surface, even
@@ -2706,9 +2717,7 @@ function WorkerPaneHeader({
       ? "Claude"
       : worker.runtime === "codex"
         ? "Codex"
-        : worker.runtime === "opencode"
-          ? "OpenCode"
-          : null;
+        : null;
   const harnessLabel =
     worker.harness === "pi" ? (runtimeLabel ? `Pi · ${runtimeLabel}` : "Pi") : runtimeLabel;
   // Name the MODEL, not the harness. Under Pi every worker runs the same

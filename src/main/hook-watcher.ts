@@ -28,6 +28,7 @@ import { watch as fsWatch } from "node:fs";
 import { join } from "node:path";
 
 import { recordSessionStart } from "./agent-session-registry";
+import { nativeClaudeProfileId } from "./pty-manager";
 import { sparkHome } from "./spark-home";
 
 type RunStoreModule = typeof import("./orchestration/run-store");
@@ -816,6 +817,7 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
       recordSessionStart({
         paneId: envelope.paneId,
         runtime: "claude",
+        nativeClaudeProfileId: nativeClaudeProfileId(envelope.paneId),
         sessionId: boundSessionId,
         transcriptPath: stringField(payloadObj, ["transcript_path", "transcriptPath"]),
         cwd: stringField(payloadObj, ["cwd"]),

@@ -22,6 +22,7 @@ export interface CreateAgentTerminalInput {
   // of the active one. Absent for user-facing/non-run agents.
   workspaceId?: string;
   workspaceCwd?: string;
+  nativeClaudeProfileId?: string;
   // Trusted device origin supplied by main. Phone-created terminals use this
   // for a live tab badge and tooltip instead of the amber agent tint.
   origin?: TerminalLeafOrigin;

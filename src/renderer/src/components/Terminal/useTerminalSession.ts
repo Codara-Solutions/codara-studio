@@ -121,6 +121,9 @@ const RECENT_AGENT_INPUT_GRACE_MS = 10_000;
 // Survives component re-mounts (StrictMode dev, HMR) since the PTY itself
 // persists past the renderer-side React tree. See the autorun block below.
 const autorunFiredSessions = new Set<string>();
+// Prepared native-account login tokens are one-shot. A React/HMR remount may
+// attach to the same PTY, but it must never submit the consumed token again.
+const nativeCliLoginTokenFiredSessions = new Set<string>();
 // Per-sessionId timestamps of in-place auto-resume attempts (a PTY that died
 // while an agent was live got its shell respawned with `--resume`). Module-level
 // so the crash-loop guard survives StrictMode/HMR remounts, like the set above.
@@ -186,6 +189,8 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       sessionId: restore.sessionId,
       cwd: restore.cwd,
       transcriptPath: restore.transcriptPath ?? undefined,
+      nativeCodexProfileId: restore.nativeCodexProfileId,
+      nativeClaudeProfileId: restore.nativeClaudeProfileId,
     })
     .catch(() => ({ exists: false as const }));
   const decision = decideResume(probe as ResumeProbe, restore.runtime);
@@ -196,13 +201,23 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
   );
   if (decision.kind === "resume" || decision.kind === "repair-resume") {
     if (restore.runtime === "codex") {
-      await window.spark.agentSession.ensureCodexTrust(restore.cwd).catch(() => undefined);
+      await window.spark.agentSession
+        .ensureCodexTrust(
+          restore.cwd,
+          restore.nativeCodexProfileId,
+        )
+        .catch(() => undefined);
     } else if (decision.kind === "repair-resume") {
       // The transcript's last line is a truncated partial write (sleep/crash).
       // Repair it in place (keeps a .bak) so `claude --resume` accepts it and
       // the conversation is preserved.
       await window.spark.agentSession
-        .repairTranscript({ runtime: "claude", cwd: restore.cwd, sessionId: restore.sessionId })
+        .repairTranscript({
+          runtime: "claude",
+          cwd: restore.cwd,
+          sessionId: restore.sessionId,
+          nativeClaudeProfileId: restore.nativeClaudeProfileId,
+        })
         .catch(() => undefined);
     }
     return {
@@ -383,6 +398,10 @@ interface Options {
   // exists and, if so, types the `--resume` command to relaunch the session.
   // Fresh launches are captured elsewhere (the App-level agent-detection hook).
   agentSession?: TerminalAgentSession | null;
+  /** Frozen profile while capture has not produced agentSession yet. */
+  nativeCodexProfileId?: string;
+  nativeClaudeProfileId?: string;
+  nativeCliLoginToken?: string;
   // One-shot boot-restore marker, minted on the leaf ONLY at hydration
   // (useTabs.loadPersisted) when the persisted pointer was `active` (agent
   // running at quit). The restore precompute below requires it, so a restore
@@ -437,6 +456,9 @@ export function useTerminalSession({
   onAgentState,
   onRuntimeState,
   agentSession,
+  nativeCodexProfileId,
+  nativeClaudeProfileId,
+  nativeCliLoginToken,
   bootResume,
   onResumeUnavailable,
   onResumeFallback,
@@ -2505,6 +2527,10 @@ export function useTerminalSession({
             rows: rrows,
             env: { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" },
             startupCommand: plan.resumeCommand,
+            nativeCodexProfileId:
+              session.nativeCodexProfileId ?? nativeCodexProfileId,
+            nativeClaudeProfileId:
+              session.nativeClaudeProfileId ?? nativeClaudeProfileId,
           });
           if (disposed) return;
           if (!spawnResult.startupCommandHandled) {
@@ -2689,6 +2715,14 @@ export function useTerminalSession({
       const spawnEnv = agentPane
         ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" }
         : extraEnv;
+      const preparedNativeCliLoginToken =
+        nativeCliLoginToken &&
+        !nativeCliLoginTokenFiredSessions.has(sessionId)
+          ? nativeCliLoginToken
+          : undefined;
+      if (preparedNativeCliLoginToken) {
+        nativeCliLoginTokenFiredSessions.add(sessionId);
+      }
       try {
         const spawnResult = await window.spark.pty.spawn({
           id: sessionId,
@@ -2698,6 +2732,15 @@ export function useTerminalSession({
           rows,
           env: spawnEnv,
           startupCommand: cmd || resumeCommand || undefined,
+          nativeCodexProfileId:
+            agentSessionRef.current?.nativeCodexProfileId ??
+            agentSession?.nativeCodexProfileId ??
+            nativeCodexProfileId,
+          nativeClaudeProfileId:
+            agentSessionRef.current?.nativeClaudeProfileId ??
+            agentSession?.nativeClaudeProfileId ??
+            nativeClaudeProfileId,
+          nativeCliLoginToken: preparedNativeCliLoginToken,
           // Read-only mirror panes attach to a session whose canonical xterm
           // lives elsewhere. The mirror flag makes main's existing-session
           // branch a pure no-op — critically it skips the pty resize to OUR

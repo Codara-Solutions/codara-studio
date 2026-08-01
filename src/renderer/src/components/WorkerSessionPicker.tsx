@@ -105,9 +105,11 @@ export default function WorkerSessionPicker({
 
   if (!request) return null;
 
-  const prepareCodex = async () => {
+  const prepareCodex = async (nativeCodexProfileId?: string) => {
     if (request.runtime === "codex") {
-      await window.spark.agentSession.ensureCodexTrust(request.cwd).catch(() => undefined);
+      await window.spark.agentSession
+        .ensureCodexTrust(request.cwd, nativeCodexProfileId)
+        .catch(() => undefined);
     }
   };
 
@@ -125,9 +127,10 @@ export default function WorkerSessionPicker({
   const resume = async (session: WorkerSessionSummary) => {
     if (launching) return;
     setLaunching(true);
-    await prepareCodex();
+    await prepareCodex(session.nativeCodexProfileId);
     const pointer: TerminalAgentSession = {
       runtime: session.runtime,
+      nativeCodexProfileId: session.nativeCodexProfileId,
       sessionId: session.sessionId,
       cwd: request.cwd,
       transcriptPath: session.transcriptPath,
@@ -164,18 +167,6 @@ export default function WorkerSessionPicker({
     refocusDialog();
   };
 
-  // Background re-list after a delete. The row is already gone from the local
-  // list, so a failure here is not worth surfacing — the store is re-read the
-  // next time the picker opens.
-  const relist = (target: WorkerSessionPickerRequest) => {
-    void window.spark.agentSession
-      .list({ runtime: target.runtime, cwd: target.cwd })
-      .then((items) => {
-        if (activeRequestRef.current === target) setSessions(items);
-      })
-      .catch(() => undefined);
-  };
-
   const confirmDelete = async (session: WorkerSessionSummary) => {
     const key = sessionKey(session);
     // The picker can be closed and reopened for another runtime/cwd while the
@@ -202,6 +193,7 @@ export default function WorkerSessionPicker({
     try {
       const result = await deleteSession({
         runtime: session.runtime,
+        nativeCodexProfileId: session.nativeCodexProfileId,
         sessionId: session.sessionId,
         cwd: session.cwd || target.cwd,
         transcriptPath: session.transcriptPath,
@@ -218,7 +210,16 @@ export default function WorkerSessionPicker({
             ? "Session and the selected local memory scope were deleted."
             : "Session deleted.",
       );
-      relist(target);
+      void window.spark.agentSession
+        .list({
+          runtime: target.runtime,
+          cwd: target.cwd,
+          nativeCodexProfileId: session.nativeCodexProfileId,
+        })
+        .then((items) => {
+          if (activeRequestRef.current === target) setSessions(items);
+        })
+        .catch(() => undefined);
       refocusDialog();
     } catch (reason: unknown) {
       if (activeRequestRef.current !== target) return;

@@ -9,7 +9,9 @@
 // which codex never matched, so every spawn in a fresh cwd hit the prompt.)
 
 import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
+
+import { writeFileAtomic } from "../fs-atomic";
+import { resolveCodexHomePaths } from "./codex-home";
 
 // Process-local serialization for the ~/.codex/config.toml read-modify-write
 // so two concurrent spawns for distinct cwds don't race the window and emit
@@ -22,23 +24,29 @@ const codexConfigLocks = new Map<string, Promise<unknown>>();
 // format is picked up next launch.
 const codexTrustedCwds = new Map<string, Set<string>>();
 
-export async function ensureCodexProjectTrust(cwd: string): Promise<void> {
+export async function ensureCodexProjectTrust(
+  cwd: string,
+  codexHome?: string | null,
+): Promise<void> {
   if (!cwd) return;
-  const homeDir = process.env.USERPROFILE || process.env.HOME;
-  if (!homeDir) return;
-  const configPath = join(homeDir, ".codex", "config.toml");
+  const { configPath, homeDir } = resolveCodexHomePaths(codexHome);
   const cached = codexTrustedCwds.get(configPath);
   if (cached?.has(cwd)) return;
   const prior = codexConfigLocks.get(configPath) ?? Promise.resolve();
-  const next = prior.then(() => writeCodexProjectTrustEntry(configPath, cwd)).catch(() => undefined);
+  const next = prior
+    .catch(() => undefined)
+    .then(() => writeCodexProjectTrustEntry(homeDir, configPath, cwd));
   codexConfigLocks.set(configPath, next);
-  await next;
-  if (codexConfigLocks.get(configPath) === next) {
-    codexConfigLocks.delete(configPath);
+  try {
+    await next;
+    const set = codexTrustedCwds.get(configPath) ?? new Set<string>();
+    set.add(cwd);
+    codexTrustedCwds.set(configPath, set);
+  } finally {
+    if (codexConfigLocks.get(configPath) === next) {
+      codexConfigLocks.delete(configPath);
+    }
   }
-  const set = codexTrustedCwds.get(configPath) ?? new Set<string>();
-  set.add(cwd);
-  codexTrustedCwds.set(configPath, set);
 }
 
 // Codex itself writes basic (double-quoted) keys; earlier Codara versions
@@ -53,18 +61,28 @@ function escapeTomlBasic(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-async function writeCodexProjectTrustEntry(configPath: string, cwd: string): Promise<void> {
+async function writeCodexProjectTrustEntry(
+  codexHome: string,
+  configPath: string,
+  cwd: string,
+): Promise<void> {
   const entry = `[projects."${escapeTomlBasic(cwd)}"]\ntrust_level = "trusted"\n`;
   let existing = "";
+  let mode = 0o600;
   try {
     existing = await fs.readFile(configPath, "utf8");
+    mode = await fs
+      .stat(configPath)
+      .then((stat) => stat.mode & 0o777)
+      .catch(() => 0o600);
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return;
-    await fs.mkdir(dirname(configPath), { recursive: true }).catch(() => undefined);
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    await fs.mkdir(codexHome, { recursive: true, mode: 0o700 });
   }
   if (projectHeaderCandidates(cwd).some((header) => existing.includes(header))) {
     return;
   }
   const sep = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
-  await fs.appendFile(configPath, `${sep}\n${entry}`, "utf8");
+  resolveCodexHomePaths(codexHome);
+  await writeFileAtomic(configPath, `${existing}${sep}\n${entry}`, { mode });
 }

@@ -45,6 +45,7 @@ import type {
 import { resolveBinary } from "./binary-resolver";
 import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
+import { resolveCodexHomePaths } from "./orchestration/codex-home";
 import { sparkHome } from "./spark-home";
 
 // The merged built-in server. Was two servers (cora-preview + cora-orchestrator)
@@ -119,6 +120,7 @@ const SPARK_STUDIO_TOOLS = [
   "codara_terminal_create",
   "codara_terminal_write",
   "codara_terminal_read",
+  "codara_terminal_close",
 ];
 
 const SPARK_ORCHESTRATION_TOOLS = [
@@ -152,8 +154,23 @@ const SPARK_ORCHESTRATION_TOOLS = [
 const SPARK_BUILTIN_TOOLS = [...new Set([...SPARK_STUDIO_TOOLS, ...SPARK_ORCHESTRATION_TOOLS])];
 
 const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");
-const CODEX_USER_CONFIG = join(homedir(), ".codex", "config.toml");
-const CODEX_DIR = join(homedir(), ".codex");
+
+export interface CodexMcpHomeOptions {
+  /** Exact resolved native Codex home. Omission preserves personal-home use. */
+  codexHome?: string | null;
+}
+
+export interface CodexMcpConfigTarget {
+  codexHome: string;
+  configPath: string;
+}
+
+export function resolveCodexMcpConfigTarget(
+  codexHome?: string | null,
+): CodexMcpConfigTarget {
+  const paths = resolveCodexHomePaths(codexHome);
+  return { codexHome: paths.homeDir, configPath: paths.configPath };
+}
 
 const CODEX_BLOCK_START = "# >>> SPARK_AGENT_BUILTIN_MCP";
 const CODEX_BLOCK_END = "# <<< SPARK_AGENT_BUILTIN_MCP";
@@ -227,14 +244,21 @@ function buildServerEnv(): Record<string, string> {
 
 // Install (or refresh) the codara-studio entry and remove any old Codara-
 // managed entries from previous versions.
-export async function installPlaywrightMcp(): Promise<void> {
+export async function installPlaywrightMcp(
+  options: CodexMcpHomeOptions = {},
+): Promise<void> {
   // Keep the old function name so existing callers stay compatible — the
   // wrapper just delegates. New code should call installSparkPreviewMcp.
-  await installSparkPreviewMcp();
+  await installSparkPreviewMcp(options);
 }
 
-export async function installSparkPreviewMcp(): Promise<void> {
-  await Promise.all([installForClaude(), installForCodex()]);
+export async function installSparkPreviewMcp(
+  options: CodexMcpHomeOptions = {},
+): Promise<void> {
+  await Promise.all([
+    installForClaude(),
+    installForCodex(false, undefined, options.codexHome),
+  ]);
 }
 
 // Repair-only pass over both runtimes: reports which config files it had to
@@ -243,10 +267,12 @@ export async function installSparkPreviewMcp(): Promise<void> {
 // no longer exists) is repaired on demand, not only at the next launch. It never
 // installs from absent: a runtime the user just removed the built-in from stays
 // removed until the next launch or an explicit install.
-export async function repairSparkBuiltinEntries(): Promise<{ claude: boolean; codex: boolean }> {
+export async function repairSparkBuiltinEntries(
+  input: CodexMcpHomeOptions = {},
+): Promise<{ claude: boolean; codex: boolean }> {
   const [claude, codex] = await Promise.all([
     installForClaude(false, { repairOnly: true }),
-    installForCodex(false, { repairOnly: true }),
+    installForCodex(false, { repairOnly: true }, input.codexHome),
   ]);
   return { claude, codex };
 }
@@ -278,8 +304,11 @@ export async function installSparkPreviewMcpForClaude(createIfMissing = false): 
   await installForClaude(createIfMissing);
 }
 
-export async function installSparkPreviewMcpForCodex(createIfMissing = false): Promise<void> {
-  await installForCodex(createIfMissing);
+export async function installSparkPreviewMcpForCodex(
+  createIfMissing = false,
+  options: CodexMcpHomeOptions = {},
+): Promise<void> {
+  await installForCodex(createIfMissing, undefined, options.codexHome);
 }
 
 // Back-compat aliases: the Execute/Automation backends call these lazily before
@@ -291,8 +320,11 @@ export async function installOrchestratorMcpForCC(createIfMissing = false): Prom
   await installForClaude(createIfMissing);
 }
 
-export async function installOrchestratorMcpForCodex(createIfMissing = false): Promise<void> {
-  await installForCodex(createIfMissing);
+export async function installOrchestratorMcpForCodex(
+  createIfMissing = false,
+  options: CodexMcpHomeOptions = {},
+): Promise<void> {
+  await installForCodex(createIfMissing, undefined, options.codexHome);
 }
 
 // ---------------------------------------------------------------------------
@@ -422,25 +454,28 @@ function matchesCurrent(value: unknown): boolean {
 async function installForCodex(
   createIfMissing = false,
   options?: { repairOnly?: boolean },
+  codexHome?: string | null,
 ): Promise<boolean> {
   if (isSandboxedHome()) return false;
-  const dirExists = directoryExists(CODEX_DIR);
+  let target = resolveCodexMcpConfigTarget(codexHome);
+  const dirExists = directoryExists(target.codexHome);
   if (!dirExists && !createIfMissing) return false;
   if (!dirExists) {
     try {
-      await fs.mkdir(CODEX_DIR, { recursive: true });
+      await fs.mkdir(target.codexHome, { recursive: true, mode: 0o700 });
+      target = resolveCodexMcpConfigTarget(codexHome);
     } catch (err) {
-      console.warn("[mcp-installer] could not create ~/.codex:", err);
+      console.warn("[mcp-installer] could not create the selected Codex home:", err);
       return false;
     }
   }
 
   let existing = "";
   try {
-    existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+    existing = await fs.readFile(target.configPath, "utf8");
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn("[mcp-installer] could not read ~/.codex/config.toml:", err);
+      console.warn("[mcp-installer] could not read the selected Codex config:", err);
       return false;
     }
   }
@@ -466,10 +501,11 @@ async function installForCodex(
   if (next === existing) return false;
 
   try {
-    await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
+    resolveCodexMcpConfigTarget(codexHome);
+    await writeFileAtomic(target.configPath, next, { mode: 0o600 });
     return true;
   } catch (err) {
-    console.warn("[mcp-installer] failed to write ~/.codex/config.toml:", err);
+    console.warn("[mcp-installer] failed to write the selected Codex config:", err);
     return false;
   }
 }
@@ -707,12 +743,14 @@ function tomlString(value: string): string {
 export function isSparkPreviewMcpAvailable(input: {
   cwd: string | null;
   autoInstallEnabled: boolean;
+  codexHome?: string | null;
 }): boolean {
+  const codexTarget = resolveCodexMcpConfigTarget(input.codexHome);
   if (input.autoInstallEnabled) {
     if (existsSync(CLAUDE_USER_CONFIG)) return true;
-    if (existsSync(CODEX_DIR)) return true;
+    if (existsSync(codexTarget.codexHome)) return true;
   }
-  return detectUserSparkEntry(input.cwd);
+  return detectUserSparkEntry(input.cwd, input.codexHome);
 }
 
 // Back-compat shim — orchestration code still imports this name. Will be
@@ -720,11 +758,15 @@ export function isSparkPreviewMcpAvailable(input: {
 export function isPlaywrightMcpAvailable(input: {
   cwd: string | null;
   autoInstallEnabled: boolean;
+  codexHome?: string | null;
 }): boolean {
   return isSparkPreviewMcpAvailable(input);
 }
 
-function detectUserSparkEntry(cwd: string | null): boolean {
+function detectUserSparkEntry(
+  cwd: string | null,
+  codexHome?: string | null,
+): boolean {
   const jsonCandidates = [
     CLAUDE_USER_CONFIG,
     join(homedir(), ".mcp.json"),
@@ -738,7 +780,7 @@ function detectUserSparkEntry(cwd: string | null): boolean {
   for (const path of jsonCandidates) {
     if (jsonHasServer(path, SERVER_NAME)) return true;
   }
-  const tomlCandidates = [CODEX_USER_CONFIG];
+  const tomlCandidates = [resolveCodexMcpConfigTarget(codexHome).configPath];
   if (cwd) tomlCandidates.push(join(cwd, ".codex", "config.toml"));
   for (const path of tomlCandidates) {
     if (tomlHasUserCodaraStudioSectionAt(path)) return true;
@@ -801,6 +843,7 @@ function tomlHasUserCodaraStudioSectionAt(path: string): boolean {
 // write. Retained under the old name because the backends import it.
 export async function isSparkOrchestratorMcpInstalled(
   target: "claude" | "codex",
+  options: CodexMcpHomeOptions = {},
 ): Promise<boolean> {
   if (target === "claude") {
     if (!existsSync(CLAUDE_USER_CONFIG)) return false;
@@ -829,10 +872,11 @@ export async function isSparkOrchestratorMcpInstalled(
   }
 
   // target === "codex"
-  if (!directoryExists(CODEX_DIR)) return false;
+  const codexTarget = resolveCodexMcpConfigTarget(options.codexHome);
+  if (!directoryExists(codexTarget.codexHome)) return false;
   let existing = "";
   try {
-    existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+    existing = await fs.readFile(codexTarget.configPath, "utf8");
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     return false;
@@ -885,13 +929,14 @@ export async function getSparkBuiltinStatus(input: {
   claudeRuntimeAvailable: boolean;
   codexRuntimeAvailable: boolean;
   autoInstallEnabled: boolean;
+  codexHome?: string | null;
 }): Promise<SparkBuiltinMcpStatus[]> {
   const metas = builtinMeta(input.autoInstallEnabled);
   return Promise.all(
     metas.map(async (meta) => {
       const [claude, codex] = await Promise.all([
         detectClaudeBuiltinState(meta.serverName, input.claudeRuntimeAvailable),
-        detectCodexBuiltinState(input.codexRuntimeAvailable),
+        detectCodexBuiltinState(input.codexRuntimeAvailable, input.codexHome),
       ]);
       return {
         id: meta.id,
@@ -910,10 +955,11 @@ export async function getSparkBuiltinStatus(input: {
 export async function installSparkBuiltin(
   _id: SparkBuiltinMcpId,
   runtime: SparkBuiltinRuntime,
+  options: CodexMcpHomeOptions = {},
 ): Promise<SparkBuiltinActionResult> {
   try {
     if (runtime === "claude") await installForClaude(true);
-    else await installForCodex(true);
+    else await installForCodex(true, undefined, options.codexHome);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -923,10 +969,11 @@ export async function installSparkBuiltin(
 export async function uninstallSparkBuiltin(
   _id: SparkBuiltinMcpId,
   runtime: SparkBuiltinRuntime,
+  options: CodexMcpHomeOptions = {},
 ): Promise<SparkBuiltinActionResult> {
   try {
     if (runtime === "claude") return await uninstallManagedClaudeServer(SERVER_NAME);
-    return await uninstallCodexBuiltinBlock();
+    return await uninstallCodexBuiltinBlock(options.codexHome);
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -948,19 +995,21 @@ async function detectClaudeBuiltinState(
 
 async function detectCodexBuiltinState(
   runtimeAvailable: boolean,
+  codexHome?: string | null,
 ): Promise<SparkBuiltinRuntimeStatus> {
+  const target = resolveCodexMcpConfigTarget(codexHome);
   let existing = "";
-  if (existsSync(CODEX_USER_CONFIG)) {
+  if (existsSync(target.configPath)) {
     try {
-      existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+      existing = await fs.readFile(target.configPath, "utf8");
     } catch {
       existing = "";
     }
   }
-  if (hasUserCodaraStudioSection(existing)) return { state: "user-managed", configPath: CODEX_USER_CONFIG };
+  if (hasUserCodaraStudioSection(existing)) return { state: "user-managed", configPath: target.configPath };
   const managed = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  if (managed) return { state: "installed", configPath: CODEX_USER_CONFIG };
-  return { state: runtimeAvailable ? "available" : "unavailable", configPath: CODEX_USER_CONFIG };
+  if (managed) return { state: "installed", configPath: target.configPath };
+  return { state: runtimeAvailable ? "available" : "unavailable", configPath: target.configPath };
 }
 
 async function readClaudeServerEntry(serverName: string): Promise<unknown | undefined> {
@@ -1024,11 +1073,14 @@ async function uninstallManagedClaudeServer(serverName: string): Promise<SparkBu
 
 // Strip the Codara-managed Codex block. Refuses when the user keeps their own
 // codara-studio section outside the managed markers.
-async function uninstallCodexBuiltinBlock(): Promise<SparkBuiltinActionResult> {
-  if (!existsSync(CODEX_USER_CONFIG)) return { ok: true };
+async function uninstallCodexBuiltinBlock(
+  codexHome?: string | null,
+): Promise<SparkBuiltinActionResult> {
+  const target = resolveCodexMcpConfigTarget(codexHome);
+  if (!existsSync(target.configPath)) return { ok: true };
   let existing: string;
   try {
-    existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+    existing = await fs.readFile(target.configPath, "utf8");
   } catch (err) {
     return { ok: false, error: `Could not read ~/.codex/config.toml: ${(err as Error).message}` };
   }
@@ -1042,7 +1094,8 @@ async function uninstallCodexBuiltinBlock(): Promise<SparkBuiltinActionResult> {
   const next = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
   if (next === existing) return { ok: true };
   try {
-    await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
+    resolveCodexMcpConfigTarget(codexHome);
+    await writeFileAtomic(target.configPath, next, { mode: 0o600 });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: `Could not write ~/.codex/config.toml: ${(err as Error).message}` };
@@ -1057,7 +1110,9 @@ export const __test = {
   LEGACY_SERVER_NAMES,
   SPARK_VERSION,
   CLAUDE_USER_CONFIG,
-  CODEX_USER_CONFIG,
+  get CODEX_USER_CONFIG() {
+    return resolveCodexMcpConfigTarget().configPath;
+  },
   CODEX_BLOCK_START,
   CODEX_BLOCK_END,
   CODEX_ORCHESTRATOR_BLOCK_START,

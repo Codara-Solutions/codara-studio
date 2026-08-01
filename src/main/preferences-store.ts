@@ -165,15 +165,16 @@ function normalizeNotificationChannels(
   };
 }
 
-// Validate the per-repo copy-branch setup-command map: string keys → non-empty
-// string values. Anything malformed is dropped so a hand-edited prefs file
-// cannot inject non-strings.
-function normalizeCopyBranchSetupCommands(value: unknown): Record<string, string> {
+// Validate a string→string preference map (per-repo copy-branch setup
+// commands, native CLI display names): string keys → non-empty string values.
+// Anything malformed is dropped so a hand-edited prefs file cannot inject
+// non-strings.
+function normalizeStringMap(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object") return {};
   const out: Record<string, string> = {};
-  for (const [repo, cmd] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof repo === "string" && repo.trim() && typeof cmd === "string" && cmd.trim()) {
-      out[repo] = cmd;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof key === "string" && key.trim() && typeof entry === "string" && entry.trim()) {
+      out[key] = entry;
     }
   }
   return out;
@@ -240,9 +241,12 @@ function normalize(
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview
         : DEFAULT_PREFERENCES.autoOpenPreview,
-    copyBranchSetupCommandByRepo: normalizeCopyBranchSetupCommands(
+    copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
     ),
+    // Cosmetic display names for CLI sign-ins that have no name field of
+    // their own (see AppPreferences.nativeCliAccountLabels).
+    nativeCliAccountLabels: normalizeStringMap(src.nativeCliAccountLabels),
     // Opt-in: relaunches only resume agent sessions when the user enabled the
     // Settings toggle. Absent/invalid values fall back to the default (off),
     // which preserves the fresh-shell behavior for existing preference files.

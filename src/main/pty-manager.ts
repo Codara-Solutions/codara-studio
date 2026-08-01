@@ -117,6 +117,10 @@ interface Session {
   // SIGHUP, which surfaces as exitCode 0 + signal 1, so exit status alone can
   // never make that distinction.
   sanctioned: boolean;
+  nativeCodexProfileId?: string;
+  releaseNativeCodexProfileLease?: () => void;
+  nativeClaudeProfileId?: string;
+  releaseNativeClaudeProfileLease?: () => void;
 }
 
 const sessions = new Map<string, Session>();
@@ -125,6 +129,14 @@ let nextSessionGeneration = 0;
 function createSessionGeneration(id: string): string {
   nextSessionGeneration += 1;
   return `${id}:${Date.now().toString(36)}:${nextSessionGeneration.toString(36)}`;
+}
+function releaseNativeProfileSessionLeases(session: Session): void {
+  const release = session.releaseNativeCodexProfileLease;
+  session.releaseNativeCodexProfileLease = undefined;
+  release?.();
+  const releaseClaude = session.releaseNativeClaudeProfileLease;
+  session.releaseNativeClaudeProfileLease = undefined;
+  releaseClaude?.();
 }
 // Listeners for "session id became available" — orchestration uses this to
 // wait until the renderer-side TerminalView has called pty:spawn before we
@@ -295,6 +307,87 @@ export interface SpawnOptions {
   // desktop view. Unlike `mirror`, this may create a missing session and does
   // not suppress the renderer sink, input, tail replay, or lifecycle duties.
   preserveSizeOnAttach?: boolean;
+  /** Frozen native Codex account for a resume/worker pane. */
+  nativeCodexProfileId?: string;
+  /** Main-process-only resolved home; never accepted directly over IPC. */
+  nativeCodexHome?: string;
+  /** Main-process-only lease ownership transferred to the spawned session. */
+  releaseNativeCodexProfileLease?: () => void;
+  /** Frozen native Claude account for a resume/worker/manual pane. */
+  nativeClaudeProfileId?: string;
+  /** Main-process-only exact selector. Null preserves legacy unset. */
+  nativeClaudeConfigDirEnv?: string | null;
+  /** Main-process-only lease ownership transferred to the spawned session. */
+  releaseNativeClaudeProfileLease?: () => void;
+  /**
+   * Main-process-only exact child environment. When present, pty-manager does
+   * not inherit, enrich, or append Studio/provider variables. Renderer IPC
+   * deliberately never forwards this field.
+   */
+  exactEnvironment?: NodeJS.ProcessEnv;
+  /** Main-process-only: a prepared login must never attach to another PTY. */
+  requireFreshSession?: boolean;
+}
+
+export interface ExactExecutablePtyOptions {
+  id: string;
+  cwd: string;
+  cols: number;
+  rows: number;
+  webContents: WebContents | null;
+  executable: string;
+  args: readonly string[];
+  env: NodeJS.ProcessEnv;
+}
+
+export interface ExactExecutablePtyLaunch {
+  spawn: {
+    id: string;
+    pid: number;
+    startupCommandHandled?: boolean;
+    attached?: boolean;
+  };
+  exit: Promise<PtyExitInfo>;
+}
+
+/**
+ * Main-only direct-executable seam for interactive native-account login.
+ * Register the exit waiter before spawning so even an immediately exiting CLI
+ * keeps the account mutation guard alive through its complete PTY lifetime.
+ */
+export async function spawnExactExecutable(
+  opts: ExactExecutablePtyOptions,
+): Promise<ExactExecutablePtyLaunch> {
+  let resolveExit!: (info: PtyExitInfo) => void;
+  const exit = new Promise<PtyExitInfo>((resolve) => {
+    resolveExit = resolve;
+  });
+  const offExit = onExit(opts.id, (info) => {
+    offExit();
+    resolveExit(info);
+  });
+  try {
+    const spawned = await spawn({
+      id: opts.id,
+      shell: {
+        id: "native-cli-account-login",
+        label: "Native CLI account sign-in",
+        exe: opts.executable,
+        args: [...opts.args],
+        family: "other",
+      },
+      cwd: opts.cwd,
+      cols: opts.cols,
+      rows: opts.rows,
+      webContents: opts.webContents,
+      exactEnvironment: { ...opts.env },
+      requireFreshSession: true,
+    });
+    return { spawn: spawned, exit };
+  } catch (error) {
+    offExit();
+    throw error;
+  }
 }
 
 // node-pty on POSIX (macOS/Linux) never execs the target program directly.
@@ -1399,6 +1492,14 @@ export function killIfGeneration(
   return true;
 }
 
+export function nativeCodexProfileId(id: string): string | undefined {
+  return sessions.get(id)?.nativeCodexProfileId;
+}
+
+export function nativeClaudeProfileId(id: string): string | undefined {
+  return sessions.get(id)?.nativeClaudeProfileId;
+}
+
 export function write(id: string, data: string): void {
   const s = sessions.get(id);
   if (!s) return;
@@ -1733,6 +1834,7 @@ export function sweepDeadSessions(): string[] {
     }
     if (!strandedBindings.has(id)) stashWebContents(id, s);
     if (s.flushTimer) clearTimeout(s.flushTimer);
+    releaseNativeProfileSessionLeases(s);
     sessions.delete(id);
     const waiters = exitWaiters.get(id) ?? [];
     exitWaiters.delete(id);
@@ -1800,6 +1902,7 @@ export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
     s.tailHead = 0;
     s.detachedBacklog = [];
     s.detachedBacklogBytes = 0;
+    releaseNativeProfileSessionLeases(s);
     sessions.delete(id);
   }
   if (process.platform !== "win32") {
@@ -1914,5 +2017,6 @@ function killNow(id: string): void {
   s.tailHead = 0;
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
+  releaseNativeProfileSessionLeases(s);
   sessions.delete(id);
 }

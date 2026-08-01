@@ -9,7 +9,7 @@
 
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 /**
  * Mirror Claude Code's project-dir naming: EVERY non-alphanumeric character in
@@ -24,20 +24,107 @@ export function encodeCwdForClaudeProjects(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
-export function claudeConfigDir(): string {
-  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
-  return configured || join(homedir(), ".claude");
+export function claudeConfigDir(stateDir?: string | null): string {
+  return stateDir || join(homedir(), ".claude");
 }
 
-export function claudeProjectsDirForCwd(cwd: string): string {
-  return join(claudeConfigDir(), "projects", encodeCwdForClaudeProjects(cwd));
+export function claudeProjectsDirForCwd(
+  cwd: string,
+  stateDir?: string | null,
+): string {
+  return join(
+    claudeConfigDir(stateDir),
+    "projects",
+    encodeCwdForClaudeProjects(cwd),
+  );
 }
 
 // Deterministic path to a session's transcript. Because Codara forces the
 // session id at launch (`claude --session-id <uuid>`), this path is knowable
 // before the process starts and is exactly what a resume probe stats.
-export function claudeSessionTranscriptPath(cwd: string, sessionId: string): string {
-  return join(claudeProjectsDirForCwd(cwd), `${sessionId}.jsonl`);
+export function claudeSessionTranscriptPath(
+  cwd: string,
+  sessionId: string,
+  stateDir?: string | null,
+): string {
+  return join(
+    claudeProjectsDirForCwd(cwd, stateDir),
+    `${sessionId}.jsonl`,
+  );
+}
+
+export async function assertSafeClaudeStoragePath(
+  stateDir: string,
+  targetPath: string,
+  options: {
+    includeLeaf?: boolean;
+    requireLeaf?: boolean;
+    leafType?: "file" | "directory";
+  } = {},
+): Promise<string> {
+  const root = resolve(stateDir);
+  const target = resolve(targetPath);
+  const rel = relative(root, target);
+  if (
+    rel === ".." ||
+    rel.startsWith(`..${sep}`) ||
+    rel.startsWith("/") ||
+    rel.startsWith("\\")
+  ) {
+    throw new Error("Claude storage path escapes the selected account.");
+  }
+  const checkedTarget =
+    target === root || options.includeLeaf ? target : dirname(target);
+  const checkedRel = relative(root, checkedTarget);
+  const pieces = checkedRel ? checkedRel.split(/[\\/]+/).filter(Boolean) : [];
+  let cursor = root;
+  let sawLeaf = false;
+  for (let index = -1; index < pieces.length; index += 1) {
+    if (index >= 0) cursor = join(cursor, pieces[index]);
+    const isLeaf = options.includeLeaf && cursor === target;
+    const stat = await fs.lstat(cursor).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    });
+    if (!stat) {
+      if (isLeaf && options.requireLeaf) {
+        throw new Error("Claude transcript does not exist.");
+      }
+      break;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error("Claude storage path contains a symbolic-link ancestor.");
+    }
+    if (!isLeaf && !stat.isDirectory()) {
+      throw new Error("Claude storage ancestor is not a directory.");
+    }
+    if (isLeaf && options.leafType === "file" && !stat.isFile()) {
+      throw new Error("Claude transcript is not a regular file.");
+    }
+    if (isLeaf && options.leafType === "directory" && !stat.isDirectory()) {
+      throw new Error("Claude storage path is not a directory.");
+    }
+    if (isLeaf) sawLeaf = true;
+  }
+  if (options.requireLeaf && !sawLeaf) {
+    throw new Error("Claude transcript does not exist.");
+  }
+  return target;
+}
+
+export async function resolveSafeClaudeTranscriptPath(
+  cwd: string,
+  sessionId: string,
+  stateDir?: string | null,
+  options: { requireExisting?: boolean } = {},
+): Promise<string> {
+  const root = claudeConfigDir(stateDir);
+  const path = claudeSessionTranscriptPath(cwd, sessionId, stateDir);
+  return assertSafeClaudeStoragePath(root, path, {
+    includeLeaf: true,
+    requireLeaf: options.requireExisting,
+    leafType: "file",
+  });
 }
 
 /**
@@ -55,8 +142,13 @@ export async function discoverClaudeSessionForCwd(
   // the discovery window both bind to the newest transcript — one pane steals
   // the other's session and its own conversation is lost to restore.
   excludeSessionIds?: ReadonlySet<string>,
+  stateDir?: string | null,
 ): Promise<{ sessionId: string; transcriptPath: string } | null> {
-  const dir = claudeProjectsDirForCwd(cwd);
+  const dir = claudeProjectsDirForCwd(cwd, stateDir);
+  await assertSafeClaudeStoragePath(claudeConfigDir(stateDir), dir, {
+    includeLeaf: true,
+    leafType: "directory",
+  });
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
@@ -70,7 +162,12 @@ export async function discoverClaudeSessionForCwd(
     if (excludeSessionIds?.has(basename(name, ".jsonl").toLowerCase())) continue;
     const path = join(dir, name);
     try {
-      const stat = await fs.stat(path);
+      await assertSafeClaudeStoragePath(claudeConfigDir(stateDir), path, {
+        includeLeaf: true,
+        requireLeaf: true,
+        leafType: "file",
+      });
+      const stat = await fs.lstat(path);
       // Prefer CREATION time over modification time: a just-launched session's
       // file is born ~now, whereas a long-running Claude in another pane keeps
       // bumping its mtime. Picking newest-by-mtime therefore mis-binds a fresh

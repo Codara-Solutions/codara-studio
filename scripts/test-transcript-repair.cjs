@@ -36,7 +36,11 @@ async function main() {
     outfile,
     logLevel: "silent",
   });
-  const { inspectClaudeTranscriptTail, repairClaudeTranscriptTail } = require(outfile);
+  const {
+    inspectClaudeTranscriptTail,
+    repairClaudeTranscriptTail,
+    resolveSafeClaudeTranscriptPath,
+  } = require(outfile);
 
   let failures = 0;
   const check = (name, cond) => {
@@ -90,6 +94,101 @@ async function main() {
   // ── only a truncated line (no prior good record): nothing parseable → leave ──
   const allBad = write("allbad.jsonl", `{"type":"user","uuid":"u0","conte`);
   check("all-truncated repair leaves it for self-heal", (await repairClaudeTranscriptTail(allBad)) === false);
+
+  // The IPC repair path resolves the transcript from the frozen Claude home
+  // before invoking the low-level truncator. Prove selected-home isolation and
+  // reject every symlinked ancestor/leaf used to escape that home.
+  const cwd = path.join(dir, "workspace");
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+  const selectedHome = path.join(dir, "selected-home");
+  const selectedProject = path.join(selectedHome, "projects", encoded);
+  fs.mkdirSync(selectedProject, { recursive: true });
+  const selectedTranscript = path.join(selectedProject, `${sessionId}.jsonl`);
+  fs.writeFileSync(selectedTranscript, `${goodPart}{"partial":`, "utf8");
+  const safeSelected = await resolveSafeClaudeTranscriptPath(
+    cwd,
+    sessionId,
+    selectedHome,
+    { requireExisting: true },
+  );
+  check("repair resolves inside the explicitly selected Claude home", safeSelected === selectedTranscript);
+  check("selected-home truncated tail repaired", (await repairClaudeTranscriptTail(safeSelected)) === true);
+
+  const otherHome = path.join(dir, "other-home");
+  const otherProject = path.join(otherHome, "projects", encoded);
+  fs.mkdirSync(otherProject, { recursive: true });
+  const otherTranscript = path.join(otherProject, `${sessionId}.jsonl`);
+  fs.writeFileSync(otherTranscript, `${goodPart}{"other":`, "utf8");
+  let crossHomeRejected = false;
+  try {
+    await resolveSafeClaudeTranscriptPath(cwd, sessionId, selectedHome, {
+      requireExisting: true,
+    });
+    fs.rmSync(selectedTranscript);
+    await resolveSafeClaudeTranscriptPath(cwd, sessionId, selectedHome, {
+      requireExisting: true,
+    });
+  } catch {
+    crossHomeRejected = true;
+  }
+  check(
+    "repair lookup never falls through to another Claude home",
+    crossHomeRejected && fs.readFileSync(otherTranscript, "utf8").endsWith('{"other":'),
+  );
+
+  const outside = path.join(dir, "outside-repair");
+  fs.mkdirSync(path.join(outside, encoded), { recursive: true });
+  fs.writeFileSync(
+    path.join(outside, encoded, `${sessionId}.jsonl`),
+    `${goodPart}{"outside":`,
+  );
+  const projectsLinkHome = path.join(dir, "projects-link-home");
+  fs.mkdirSync(projectsLinkHome, { recursive: true });
+  fs.symlinkSync(outside, path.join(projectsLinkHome, "projects"), "dir");
+  let projectsLinkRejected = false;
+  try {
+    await resolveSafeClaudeTranscriptPath(cwd, sessionId, projectsLinkHome, {
+      requireExisting: true,
+    });
+  } catch {
+    projectsLinkRejected = true;
+  }
+  check("repair rejects a symlinked projects ancestor", projectsLinkRejected);
+
+  const encodedLinkHome = path.join(dir, "encoded-link-home");
+  fs.mkdirSync(path.join(encodedLinkHome, "projects"), { recursive: true });
+  fs.symlinkSync(
+    path.join(outside, encoded),
+    path.join(encodedLinkHome, "projects", encoded),
+    "dir",
+  );
+  let encodedLinkRejected = false;
+  try {
+    await resolveSafeClaudeTranscriptPath(cwd, sessionId, encodedLinkHome, {
+      requireExisting: true,
+    });
+  } catch {
+    encodedLinkRejected = true;
+  }
+  check("repair rejects a symlinked encoded-project ancestor", encodedLinkRejected);
+
+  const leafLinkHome = path.join(dir, "leaf-link-home");
+  const leafLinkProject = path.join(leafLinkHome, "projects", encoded);
+  fs.mkdirSync(leafLinkProject, { recursive: true });
+  fs.symlinkSync(
+    path.join(outside, encoded, `${sessionId}.jsonl`),
+    path.join(leafLinkProject, `${sessionId}.jsonl`),
+  );
+  let leafLinkRejected = false;
+  try {
+    await resolveSafeClaudeTranscriptPath(cwd, sessionId, leafLinkHome, {
+      requireExisting: true,
+    });
+  } catch {
+    leafLinkRejected = true;
+  }
+  check("repair rejects a transcript leaf symlink", leafLinkRejected);
 
   if (failures > 0) {
     console.error(`${failures} failure(s)`);
