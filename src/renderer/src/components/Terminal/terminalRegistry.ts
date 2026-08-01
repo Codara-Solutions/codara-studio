@@ -22,6 +22,8 @@ export interface CreateAgentTerminalInput {
   // of the active one. Absent for user-facing/non-run agents.
   workspaceId?: string;
   workspaceCwd?: string;
+  // Main-resolved identity for a local phone-created Claude terminal. SSH
+  // terminals never receive local account profiles.
   nativeClaudeProfileId?: string;
   // Trusted device origin supplied by main. Phone-created terminals use this
   // for a live tab badge and tooltip instead of the amber agent tint.
@@ -33,6 +35,28 @@ export interface CreateAgentTerminalResult {
   paneId: string;
   // The cwd actually used (input.cwd or the resolved active-workspace default).
   cwd: string;
+}
+
+export interface ShareableStudioTerminal {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  title?: string;
+  cwd?: string;
+  profile: "shell" | "claude" | "codex";
+}
+
+type ListShareableStudioTerminalsFn = () => ShareableStudioTerminal[];
+let listShareableStudioTerminalsFn: ListShareableStudioTerminalsFn | null = null;
+
+export function setListShareableStudioTerminalsFn(
+  fn: ListShareableStudioTerminalsFn | null,
+): void {
+  listShareableStudioTerminalsFn = fn;
+}
+
+export function listShareableStudioTerminals(): ShareableStudioTerminal[] {
+  return listShareableStudioTerminalsFn?.() ?? [];
 }
 
 type CreateAgentTerminalFn = (

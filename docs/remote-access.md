@@ -182,11 +182,32 @@ The exposed surface is intentionally bounded:
 - Git status, commit history, and commit detail;
 - Cora run history and messages;
 - workspace-scoped Claude and Codex session history;
-- terminal create, resume, write, resize, and close.
+- durable device-owned terminal create, list, attach, replay, write, resize,
+  detach, and idempotent close;
+- connection-scoped automation worker terminal mirrors with explicit,
+  authenticated Take control for current Pi steering adapters.
 
 Every file path is resolved inside the selected local workspace. File payload,
 collection, terminal, session, and request sizes have explicit ceilings.
 Renderer IPC never receives identity secrets or raw transport objects.
+
+Interactive terminal leases are owned by the authenticated phone public key,
+not by an individual socket. A normal LAN/relay handoff detaches the old
+subscriber but keeps the PTY alive for 30 minutes. Reattachment uses a stable
+terminal id, an attachment-generation fence, monotonic output cursors, bounded
+replay, and exactly-once input sequence numbers. Ended leases retain their
+bounded final output for five minutes. Revoking the phone or disabling Remote
+Access closes its retained PTYs immediately.
+
+Automation worker mirrors use a separate control boundary. Observation is
+always read-only by default. A foreground phone may explicitly acquire one
+45-second, renewable control lease for a server-derived worker/process
+generation; a second phone is fenced out. Input uses monotonic exactly-once
+sequence numbers and hashed receipts, and ambiguous delivery is never retried.
+Disconnect, mirror close, worker exit, revocation, expiry, or shutdown releases
+control without killing the worker. Structured/headless display shells and
+legacy raw PTYs remain read-only: only an active Pi worker with a real steering
+adapter advertises Take control.
 
 ## Lifecycle and reconnection
 
@@ -216,6 +237,8 @@ The principal coverage is:
   PTY echo;
 - `npm run test:remote-access-hostile` — handshake allocation, deadlines,
   shutdown, session caps, revocation durability, replay, and storage attacks;
+- `npm run test:worker-terminal-controls` — exclusive worker steering leases,
+  exactly-once input, ambiguous outcomes, expiry, disconnect, and revocation;
 - `codara-mobile npm run interop -- --studio <path>` — the real Bare phone
   transport against the real Studio service and the real sibling relay,
   including a PTY echo through the relay and hostile-server scenarios;

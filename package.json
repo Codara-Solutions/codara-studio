@@ -9,6 +9,7 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "test:worker-terminal-controls": "node scripts/test-worker-terminal-controls.cjs",
     "test:cora-run-interop": "node scripts/test-cora-run-interop.cjs",
     "test:cora-history-interop": "node scripts/test-cora-history-interop.cjs",
     "test:remote-cora-contract": "node scripts/test-remote-cora-contract.cjs",
