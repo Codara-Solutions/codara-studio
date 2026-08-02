@@ -1,7 +1,7 @@
 import { promises as fs, createWriteStream, watch, type FSWatcher } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import type {
   AddDirectIterationInput,
   AddRunMessageInput,
@@ -4092,6 +4092,68 @@ export async function describeVerificationFreshness(
     latestChangedImplementationAt,
     latestPassingVerifierAt,
   };
+}
+
+export interface RunHandoffArtifactAudit {
+  /** false when a worker-declared in-workspace artifact no longer exists. */
+  ok: boolean;
+  missing: Array<{ taskTitle: string; path: string; reuse: string }>;
+}
+
+/**
+ * Deliverable-preservation invariant: handoff artifacts are output, not scratch.
+ *
+ * `handoff[]` is how a worker says "I left this on disk on purpose". Codara
+ * injects those paths into later worker prompts and surfaces them to the
+ * manager through wait_for_workers, so they are load-bearing inside the run,
+ * and they are often the only thing the user actually bought: an investigation
+ * whose entire deliverable is a written report has nothing else to show.
+ *
+ * Observed live (run-msatwoee-dqndvr): two read-only investigators spent ~$19
+ * writing research/codex-fast-mode/{claude,codex}.md and both declared them in
+ * handoff[] with reuse "Keep it read-only". In its final turn the manager ran
+ * `rm -rf research/codex-fast-mode` bundled into a tidy-the-tree command, after
+ * the verifier had already passed, and said nothing about it in the completion
+ * summary. Every existing gate was green: the files were untracked, so no diff
+ * showed the loss, and the reports were only recoverable from a dangling
+ * pre-worker checkpoint commit.
+ *
+ * Only paths INSIDE the workspace are audited. A handoff pointing at a temp dir
+ * or a torn-down sandbox worktree is legitimately transient, and failing on
+ * those would wedge runs for no gain.
+ */
+export async function describeMissingHandoffArtifacts(
+  run: RunState,
+): Promise<RunHandoffArtifactAudit> {
+  const cwd = workspaceCwdFromRun(run);
+  if (!cwd) return { ok: true, missing: [] };
+  const workspaceRoot = resolvePath(cwd);
+  const missing: RunHandoffArtifactAudit["missing"] = [];
+  const seen = new Set<string>();
+  for (const attempt of run.workerAttempts ?? []) {
+    if (!attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (!report?.handoff?.length) continue;
+    const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
+    for (const artifact of report.handoff) {
+      if (!artifact?.path) continue;
+      const target = resolvePath(workspaceRoot, artifact.path);
+      if (target !== workspaceRoot && !target.startsWith(workspaceRoot + sep)) continue;
+      if (seen.has(target)) continue;
+      seen.add(target);
+      const exists = await fs.access(target).then(
+        () => true,
+        () => false,
+      );
+      if (exists) continue;
+      missing.push({
+        taskTitle: task?.title ?? attempt.workerTaskId,
+        path: artifact.path,
+        reuse: artifact.reuse,
+      });
+    }
+  }
+  return { ok: missing.length === 0, missing };
 }
 
 /** Asked instead of completing when the work is finished but unverified. The

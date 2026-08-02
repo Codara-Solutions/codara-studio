@@ -2641,6 +2641,25 @@ const IN_FLIGHT_WORKER_TASK_STATUSES = new Set<string>([
   "retry_queued",
 ]);
 
+/**
+ * Did the completion summary actually own up to removing `path`?
+ *
+ * Matched on the path as written and on its basename, because a manager that
+ * discloses a deletion writes "removed research/codex-fast-mode/claude.md", not
+ * the absolute path the final report happened to record. Deliberately generous:
+ * the gate exists to end SILENT deletion, and a summary that names the file has
+ * already achieved that. A false positive here costs a disclosure the user can
+ * read; a false negative would wedge a run over phrasing.
+ */
+function summaryDisclosesPath(summary: string, path: string): boolean {
+  const haystack = summary.toLowerCase();
+  if (!haystack.trim() || !path) return false;
+  const normalized = path.replace(/\\/g, "/").toLowerCase();
+  if (haystack.includes(normalized)) return true;
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  return base.length > 2 && haystack.includes(base);
+}
+
 async function handleOrchestratorComplete(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -2734,6 +2753,29 @@ async function handleOrchestratorComplete(
       "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
         `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
         "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
+    );
+  }
+  // Deliverable-preservation invariant: a worker's handoff[] artifacts are
+  // output the run is accountable for, not scratch to tidy away before the
+  // final diff looks clean. See describeMissingHandoffArtifacts for the
+  // incident. Disclosure clears the gate - naming the path in the summary is
+  // always a legal way forward, so a genuinely intended removal can never wedge
+  // a run; only a SILENT one is refused.
+  const handoffAudit = await runStore.describeMissingHandoffArtifacts(run);
+  const undisclosed = handoffAudit.missing.filter(
+    (artifact) => !summaryDisclosesPath(summary, artifact.path),
+  );
+  if (undisclosed.length > 0) {
+    const detail = undisclosed
+      .map((artifact) => `${artifact.path} (declared by "${artifact.taskTitle}")`)
+      .join(", ");
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Cannot complete: ${undisclosed.length} artifact(s) a worker declared as reusable output no longer exist: ${detail}. ` +
+        "A handoff artifact is a deliverable - the worker wrote it on purpose and it may be the only thing this run produced for the user. " +
+        "Restore it (every pre-worker checkpoint for this run still contains it) and call codara_complete again. " +
+        "If deleting it was genuinely intended, name the exact path in your completion summary and say why, then call codara_complete again.",
     );
   }
   try {
