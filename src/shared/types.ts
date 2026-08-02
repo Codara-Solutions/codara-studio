@@ -3553,6 +3553,31 @@ export interface WorkerReport {
   verifier?: VerifierVerdict;
 }
 
+/**
+ * What an earlier verifier already settled, handed to the verifier that has to
+ * re-run after a corrective edit.
+ *
+ * The freshness invariant means every files-changing implementation needs a
+ * NEWER passing verdict, so a two-line correction mandates a whole fresh
+ * verifier. Observed live in run-msc4glpk-tmgkfr: a 2.4 min / $0.46 corrective
+ * fix was followed by a 12.2 min / $9.81 verifier that re-derived 24 atomic
+ * claims across glass CSS, digest filtering, pruning, attention reporting and
+ * notify policy, when only the digest-opening contract had moved. Verification
+ * was 82% of that run's cost. The gate is right; paying full price for it every
+ * round is not.
+ */
+export interface PriorVerifierRound {
+  /** When the previous verifier finished, ISO. */
+  verifiedAt: string;
+  confidence: string;
+  /** Claims it settled as verified against the tree at that moment. */
+  established: string[];
+  /** Claims it could not settle. This round owns them. */
+  outstanding: Array<{ claim: string; verdict: string; evidence: string }>;
+  /** Files an implementation changed after that verdict, so the delta is explicit. */
+  changedSince: string[];
+}
+
 export interface WorkerHandoffArtifact {
   /** Absolute path to a file or directory left on disk on purpose. */
   path: string;

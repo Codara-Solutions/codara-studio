@@ -76,6 +76,7 @@ import type {
   UserConstitutionCapture,
   WorkerRuntimeState,
   VerifierVerdict,
+  PriorVerifierRound,
   WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
@@ -4048,6 +4049,13 @@ export interface RunVerificationFreshness {
   latestVerifierConfidence: string | null;
   latestChangedImplementationAt: number;
   latestPassingVerifierAt: number;
+  /**
+   * A verifier covering the CURRENT tree that did not pass. Set even when a
+   * sibling verifier in the same round did pass, which is the whole point:
+   * scope-split rounds expect some shards to fail, and the failing one owns
+   * the verdict for the round.
+   */
+  blockingVerifier: { confidence: string; title: string } | null;
 }
 
 /**
@@ -4066,8 +4074,8 @@ export async function describeVerificationFreshness(
   run: RunState,
 ): Promise<RunVerificationFreshness> {
   let latestChangedImplementationAt = 0;
-  let latestPassingVerifierAt = 0;
   let latestVerifierConfidence: string | null = null;
+  const verdicts: Array<{ at: number; confidence: string; title: string }> = [];
   for (const attempt of run.workerAttempts ?? []) {
     if (!attempt.finalReportPath) continue;
     const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
@@ -4077,20 +4085,35 @@ export async function describeVerificationFreshness(
     const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
     if (task.taskClass === "verifier" && report.verifier) {
       latestVerifierConfidence = report.verifier.confidence;
-      if (PASSING_VERIFIER_CONFIDENCES.has(report.verifier.confidence)) {
-        latestPassingVerifierAt = Math.max(latestPassingVerifierAt, finishedAt);
-      }
+      verdicts.push({ at: finishedAt, confidence: report.verifier.confidence, title: task.title });
     } else if (report.filesChanged.length > 0) {
       latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
     }
   }
+
+  // Only verdicts that postdate the newest files-changing implementation say
+  // anything about the current tree; an older FEEDBACK was answered by the
+  // corrective edit that superseded it, which is what keeps the normal
+  // fix -> verify -> fix -> verify loop able to finish.
+  const current = verdicts.filter((v) => v.at >= latestChangedImplementationAt);
+  const latestPassingVerifierAt = current
+    .filter((v) => PASSING_VERIFIER_CONFIDENCES.has(v.confidence))
+    .reduce((newest, v) => Math.max(newest, v.at), 0);
+  // A passing verdict must not mask a failing sibling from the SAME round.
+  // Previously this took the newest passing timestamp alone, so with two
+  // verifiers over one tree a green one could carry a red one over the line.
+  // That was mostly latent while every verifier covered the whole surface;
+  // splitting a round into disjoint scopes makes "one shard fails" the
+  // expected case, so the gate has to see the whole round, not its best member.
+  const blocking = current.find((v) => !PASSING_VERIFIER_CONFIDENCES.has(v.confidence)) ?? null;
   return {
     ok:
       latestChangedImplementationAt === 0 ||
-      latestPassingVerifierAt >= latestChangedImplementationAt,
+      (latestPassingVerifierAt >= latestChangedImplementationAt && blocking === null),
     latestVerifierConfidence,
     latestChangedImplementationAt,
     latestPassingVerifierAt,
+    blockingVerifier: blocking ? { confidence: blocking.confidence, title: blocking.title } : null,
   };
 }
 
@@ -12183,6 +12206,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
   }
   const priorHandoffs = await collectPriorWorkerHandoffs(run, task);
+  const priorVerifierRound = await collectPriorVerifierRound(run, task);
   const prompt = renderWorkerPrompt({
     cwd: effectiveCwd,
     run,
@@ -12191,6 +12215,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     paths,
     settings,
     priorHandoffs,
+    priorVerifierRound,
   });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
@@ -16391,6 +16416,91 @@ async function collectPriorWorkerHandoffs(
     }
   }
   return collected;
+}
+
+/** Caps on what a re-verification inherits, so the prompt stays readable. */
+const MAX_ESTABLISHED_CLAIMS = 24;
+const MAX_OUTSTANDING_CLAIMS = 8;
+const MAX_CHANGED_SINCE_FILES = 12;
+const MAX_CLAIM_CHARS = 300;
+
+const clampClaim = (text: string): string =>
+  text.length > MAX_CLAIM_CHARS ? `${text.slice(0, MAX_CLAIM_CHARS - 1)}…` : text;
+
+/**
+ * Hand a re-running verifier the ground the previous one already covered.
+ *
+ * Only ever consulted for verifier-class tasks. Returns the most recent verifier
+ * verdict in the run plus the files any implementation touched after it, so the
+ * next round can scope itself to the delta and whatever was left open instead of
+ * re-deriving a settled surface from scratch. See PriorVerifierRound for the
+ * incident that motivated it.
+ *
+ * This deliberately does NOT weaken the freshness gate: a passing verdict is
+ * still required after the latest files-changing implementation. It only tells
+ * the verifier where its turn is worth spending.
+ */
+async function collectPriorVerifierRound(
+  run: RunState,
+  task: WorkerTask,
+): Promise<PriorVerifierRound | null> {
+  if (task.taskClass !== "verifier") return null;
+  const attempts = [...(run.workerAttempts ?? [])];
+  let latest: { finishedAt: number; verdict: VerifierVerdict } | null = null;
+  for (const attempt of attempts) {
+    // Its own lineage is the thing under review, not evidence about it.
+    if (attempt.workerTaskId === task.id) continue;
+    if (!attempt.finalReportPath) continue;
+    const owner = (run.workerTasks ?? []).find((entry) => entry.id === attempt.workerTaskId);
+    if (owner?.taskClass !== "verifier") continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (!report?.verifier?.atomicClaims?.length) continue;
+    const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
+    if (!latest || finishedAt >= latest.finishedAt) {
+      latest = { finishedAt, verdict: report.verifier };
+    }
+  }
+  if (!latest) return null;
+
+  // Everything an implementation touched since that verdict. This is the only
+  // reason an established claim could have moved, so naming the files is what
+  // makes "re-check only what the delta could affect" an actionable rule rather
+  // than an invitation to trust stale results.
+  const changedSince = new Set<string>();
+  for (const attempt of attempts) {
+    if (!attempt.finalReportPath) continue;
+    const owner = (run.workerTasks ?? []).find((entry) => entry.id === attempt.workerTaskId);
+    if (owner?.taskClass === "verifier") continue;
+    const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
+    if (finishedAt < latest.finishedAt) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    for (const file of report?.filesChanged ?? []) {
+      if (changedSince.size >= MAX_CHANGED_SINCE_FILES) break;
+      if (file?.path) changedSince.add(file.path);
+    }
+  }
+
+  const established: string[] = [];
+  const outstanding: PriorVerifierRound["outstanding"] = [];
+  for (const claim of latest.verdict.atomicClaims) {
+    if (claim.verdict === "verified") {
+      if (established.length < MAX_ESTABLISHED_CLAIMS) established.push(clampClaim(claim.claim));
+    } else if (outstanding.length < MAX_OUTSTANDING_CLAIMS) {
+      outstanding.push({
+        claim: clampClaim(claim.claim),
+        verdict: claim.verdict,
+        evidence: clampClaim(claim.evidence),
+      });
+    }
+  }
+  if (established.length === 0) return null;
+  return {
+    verifiedAt: new Date(latest.finishedAt).toISOString(),
+    confidence: latest.verdict.confidence,
+    established,
+    outstanding,
+    changedSince: [...changedSince],
+  };
 }
 
 // Write a runtime state onto the WorkerAttempt behind a pane and tell the

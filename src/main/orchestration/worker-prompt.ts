@@ -13,6 +13,7 @@ import type {
   AppSettings,
   RunState,
   StepState,
+  PriorVerifierRound,
   WorkerArtifactPaths,
   WorkerHandoffArtifact,
   WorkerTask,
@@ -68,6 +69,7 @@ export function renderWorkerPrompt({
   paths,
   settings,
   priorHandoffs,
+  priorVerifierRound,
 }: {
   cwd: string;
   run: RunState;
@@ -77,9 +79,11 @@ export function renderWorkerPrompt({
   settings: AppSettings;
   /** Reusable artifacts earlier attempts in this run left behind. */
   priorHandoffs?: WorkerHandoffArtifact[];
+  /** Verifier-class tasks only: what the previous verifier round already settled. */
+  priorVerifierRound?: PriorVerifierRound | null;
 }): string {
   if (task.taskClass === "verifier") {
-    return renderVerifierWorkerPrompt({ cwd, run, step, task, paths, settings, priorHandoffs });
+    return renderVerifierWorkerPrompt({ cwd, run, step, task, paths, settings, priorHandoffs, priorVerifierRound });
   }
   return renderImplementationWorkerPrompt({ cwd, run, step, task, paths, settings, priorHandoffs });
 }
@@ -98,6 +102,46 @@ function renderPriorHandoffSection(priorHandoffs: WorkerHandoffArtifact[] | unde
   ];
   for (const artifact of priorHandoffs) {
     lines.push(`- ${artifact.path}`, `    what: ${artifact.description}`, `    reuse: ${artifact.reuse}`);
+  }
+  return lines;
+}
+
+/**
+ * Scope a re-verification to the delta instead of the whole surface.
+ *
+ * A verifier that re-derives claims a previous verifier already settled is the
+ * most expensive way to learn nothing, and the freshness invariant guarantees
+ * one runs after every corrective edit however small. The named changed-file
+ * list is what keeps this honest: "take the rest as established" is only safe
+ * because the verifier is told exactly what moved and must re-check anything
+ * those files could plausibly reach.
+ */
+function renderPriorVerifierRoundSection(round: PriorVerifierRound | null | undefined): string[] {
+  if (!round?.established.length) return [];
+  const lines = [
+    "",
+    "## ALREADY SETTLED BY THE PREVIOUS VERIFIER",
+    `A verifier ran over this work at ${round.verifiedAt} and returned ${round.confidence}. It settled the claims below against the tree as it stood then.`,
+    round.changedSince.length
+      ? `Everything an implementation has touched since that verdict:\n${round.changedSince.map((file) => `- ${file}`).join("\n")}`
+      : "No implementation reported a file change since that verdict.",
+    "",
+    "Settled claims, do NOT re-derive these from scratch:",
+    ...round.established.map((claim) => `- ${claim}`),
+    "",
+    "Re-check a settled claim ONLY when one of the changed files above could plausibly affect it. When you do, say which claim and which file made you look. Carry every claim you did not re-check into your own atomic_claims with verdict `verified` and evidence naming this prior round, so the ledger stays complete without being re-earned.",
+  ];
+  if (round.outstanding.length) {
+    lines.push(
+      "",
+      "These it could NOT settle. They are the point of your turn, spend it here:",
+      ...round.outstanding.map((item) => `- [${item.verdict}] ${item.claim}\n    prior evidence: ${item.evidence}`),
+    );
+  } else {
+    lines.push(
+      "",
+      "It left nothing unsettled, so your turn is about the changes since: what they broke, what they left half-done, and whether they mean what they claim.",
+    );
   }
   return lines;
 }
@@ -738,6 +782,7 @@ function renderVerifierWorkerPrompt({
   paths,
   settings,
   priorHandoffs,
+  priorVerifierRound,
 }: {
   cwd: string;
   run: RunState;
@@ -746,6 +791,7 @@ function renderVerifierWorkerPrompt({
   paths: WorkerArtifactPaths;
   settings: AppSettings;
   priorHandoffs?: WorkerHandoffArtifact[];
+  priorVerifierRound?: PriorVerifierRound | null;
 }): string {
   const lines: string[] = [];
   const promptProfile = loadManagerPromptProfile();
@@ -772,6 +818,7 @@ function renderVerifierWorkerPrompt({
     "",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
+    ...renderPriorVerifierRoundSection(priorVerifierRound),
   );
 
   if (step) {

@@ -1434,6 +1434,17 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
 const WORKER_ARTIFACT_PRESERVATION_POLICY =
   "Files a worker declared in its final report `handoff[]` or `expectedOutputs` are DELIVERABLES. Never delete, move, overwrite or clean them up, not to tidy the working tree, not to make the final diff read smaller, not because they are untracked. On a research or investigation step the written report IS the product the user asked for, and untracked is exactly what a brand-new deliverable looks like. If you truly believe an artifact must be removed, say so and why in your codara_complete summary naming the exact path, never silently.";
 
+// Verification is routinely the majority of a run's cost and wall-clock, and it
+// is the part that is trivially parallel and almost never parallelised.
+// Measured on run-msc4glpk-tmgkfr: four fix/verify rounds where the fixes cost
+// $4.32 across 19 min and the verifiers cost $32.57 across 40 min, 88% of the
+// spend, every one of them a single agent walking a surface that decomposed
+// into 15-24 independent atomic claims. Rounds cannot be parallelised (each
+// verifies a tree the previous fix has not produced yet) but the inside of a
+// round always can.
+const VERIFIER_SCOPE_SPLIT_POLICY =
+  "Verifier rounds run in sequence, but ONE round can be several verifiers at once. When the surface to verify decomposes into areas that do not need each other's conclusions (a CSS material, a pure data transform, a routing state machine, a policy predicate), spawn 2-4 verifiers in ONE batch with canRunParallel true, each given an explicit disjoint scope and told which areas belong to its peers and are not its job. Wall-clock becomes the slowest scope instead of the sum of all of them. Split by scope, never by duplicating the same brief: two agents re-deriving one surface costs double and finds the same things. Keep it one verifier when the surface is small, when the claims genuinely chain (B is only meaningful if A holds), or when a scope cannot be stated without describing the whole change. Every shard must pass: codara_complete counts a failing verifier against the current tree even when its siblings are green, so a split round is not a way to get a friendlier verdict.";
+
 const MECHANICAL_PROOF_FIRST_POLICY =
   "Before spawning the verifier, re-run the implementation report's commands_run/tests yourself with bash and read the exit codes. That is independent evidence for every MECHANICAL claim (it compiles, tests pass, the boundaries are green) and it costs seconds rather than minutes. Then SCOPE the verifier to what re-running cannot settle - whether the behaviour is correct, whether the change means what it claims, what went unchecked - and name the mechanical results you already confirmed so it does not spend its turn reprinting exit codes you hold. The verifier itself is not optional: codara_complete requires a passing verifier verdict for any files-changing implementation, so a run that skips it cannot finish.";
 
@@ -1445,6 +1456,7 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
         "Execution tier: fast (this classification set it, the user has no depth control).",
         "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof, the verifier re-derives correct behavior and runs adversarial input/output probes.",
         MECHANICAL_PROOF_FIRST_POLICY,
+        VERIFIER_SCOPE_SPLIT_POLICY,
         WORKER_ARTIFACT_PRESERVATION_POLICY,
         "Trivial keeps a tight step cap (max 2 worker_batch steps, no recon, no skeleton); it differs from standard only in scope, not in whether work gets verified.",
       ].join("\n");
@@ -1454,6 +1466,7 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
         "Execution tier: fast (this classification set it, the user has no depth control).",
         "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-5 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier.",
         MECHANICAL_PROOF_FIRST_POLICY,
+        VERIFIER_SCOPE_SPLIT_POLICY,
         WORKER_ARTIFACT_PRESERVATION_POLICY,
       ].join("\n");
     case "complex":
@@ -1462,6 +1475,7 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
         "Execution tier: deep (this classification set it): a wider verifier-round budget and more than one corrective rework per worker.",
         "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker, one Claude (claude-opus-5@high) and one Codex (gpt-5.6-sol@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
         MECHANICAL_PROOF_FIRST_POLICY,
+        VERIFIER_SCOPE_SPLIT_POLICY,
         WORKER_ARTIFACT_PRESERVATION_POLICY,
       ].join("\n");
   }

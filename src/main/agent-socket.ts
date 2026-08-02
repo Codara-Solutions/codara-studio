@@ -2753,12 +2753,20 @@ async function handleOrchestratorComplete(
   // arrives, so a manager that skips codara_complete cannot skip the rule.
   const verification = await runStore.describeVerificationFreshness(run);
   if (!verification.ok) {
+    // A failing verifier over the current tree is named explicitly, because
+    // with a scope-split round the manager may be looking at one or more GREEN
+    // sibling reports and reasonably believe the round passed.
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
-        `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
-        "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
+      verification.blockingVerifier
+        ? `Cannot complete: "${verification.blockingVerifier.title}" returned ` +
+            `${verification.blockingVerifier.confidence} over the current workspace. A passing verdict from ` +
+            "another verifier in the same round does not cover its scope. Address its FEEDBACK/FAILED claims, " +
+            "then re-verify the corrected workspace before calling codara_complete."
+        : "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
+            `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
+            "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
     );
   }
   // Deliverable-preservation invariant: a worker's handoff[] artifacts are
