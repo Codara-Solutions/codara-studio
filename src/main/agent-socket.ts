@@ -1776,6 +1776,8 @@ interface OrchestratorWorkerInput {
   expectedOutputs?: string[];
   verificationCommands?: string[];
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
+  /** No peer-to-peer mailbox for this worker. See WorkerTask.isolated. */
+  isolated?: boolean;
 }
 
 // Map a requested model onto its counterpart on the OTHER provider, for a
@@ -2362,6 +2364,10 @@ async function handleOrchestratorSpawnWorkers(
         : [],
       taskClass: w.taskClass,
       canRunParallel: isParallelBatch,
+      // Opt-in independence. Only meaningful inside a parallel batch, and it
+      // suppresses peer-to-peer traffic ONLY: the manager can still reach an
+      // isolated worker, so asking for independence never costs steering.
+      isolated: isParallelBatch && w.isolated === true ? true : undefined,
       // Every attempt of a multi-worker spawn launches simultaneously below
       // (scheduleAutopilotCycles), bypassing pickAutopilotTasks. Mark the
       // tasks so retry/fallback waves keep that concurrency: without the

@@ -162,6 +162,12 @@ export function shouldUsePeerComms(
   // prompt promises N independent planners, so cross-candidate mailbox chatter
   // would converge the drafts and defeat the council. No peer comms for them.
   if (task.councilGroupId !== undefined) return false;
+  // Same reasoning, reached explicitly: an isolated worker keeps the mailbox
+  // ONLY while the manager can read it, because that channel is what makes
+  // independence free (Cora can still steer). With no manager reader there is
+  // nobody left to talk to, so provisioning a mailbox would just re-offer the
+  // peer traffic the caller asked us to suppress.
+  if (task.isolated === true && !managerInboxIsRead(run)) return false;
   const peerTasks = run.workerTasks.filter((item) => item.stepId === task.stepId && item.id !== task.id);
   const plannedPeerCount = Math.max(0, (step.plannedAgents?.length ?? 0) - 1);
   return peerTasks.length + plannedPeerCount > 0;
@@ -289,8 +295,40 @@ function renderPeerCommsGuidance(
   // on-disk mailbox; CLI transports keep the node script incantation. The two
   // interoperate file-for-file, so mixed batches still coordinate.
   nativePeerTools: boolean,
+  // Deliberate independence (WorkerTask.isolated). The whole coordinate-with-
+  // your-peers block is REPLACED rather than softened: leaving "share findings
+  // early, reply before resuming your own work" in a prompt whose task
+  // description says "do not communicate with any peer" is a contradiction, and
+  // which half a model honours is luck. Observed live in run-msatwoee-dqndvr.
+  isolated: boolean,
 ): string[] {
   if (!paths.peerCommsDir || !paths.peerCommsScript) return [];
+  if (isolated) {
+    // shouldUsePeerComms refuses the mailbox entirely when the manager cannot
+    // read it, so reaching here with managerReachable false would mean the two
+    // predicates have drifted apart. Say nothing rather than advertise a
+    // recipient that does not exist.
+    if (!managerReachable) return [];
+    const header = [
+      "You are running INDEPENDENTLY. Other workers may be running the same or a related brief at the same time, on purpose, so that their conclusions can be compared against yours.",
+      "Do NOT contact them, do not read their notes, and do not try to discover what they are doing. Reach your own conclusion from the evidence you gather yourself. Agreement you arrived at by yourself is a signal; agreement you arrived at by coordinating is not.",
+      "The one open channel is `manager` (Cora, the orchestrator that spawned you). Use it if you are blocked, if the brief is wrong, or at a significant milestone. Cora may also message you to steer or answer; you will see it next time you read your inbox.",
+    ];
+    return nativePeerTools
+      ? [
+          ...header,
+          "Native mailbox tools are registered in this session:",
+          "- `peer_inbox`: read messages Cora has sent you.",
+          "- `peer_send`: send a short note (under ~300 words) to `manager`. Sending to a peer or to `all` is refused for this task.",
+          "- `peer_await`: block briefly for a reply from `manager` (default 120s timeout). Never idle waiting: on timeout, continue with the safest explicit assumption and record it in `risks[]`.",
+        ]
+      : [
+          ...header,
+          `Read your inbox: node "${paths.peerCommsScript}" inbox --dir "${paths.peerCommsDir}" --self "${task.id}"`,
+          `Message Cora: node "${paths.peerCommsScript}" send --dir "${paths.peerCommsDir}" --from "${task.id}" --to manager --subject "<topic>" --body "<note>"`,
+          "Sending to a peer task id or to `all` is refused for this task. Never idle waiting for a reply: continue with the safest explicit assumption and record it in `risks[]`.",
+        ];
+  }
   const opening = [
     managerReachable
       ? "Cora may be running several workers for this same step, plus the `manager` that spawned this batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
@@ -624,7 +662,13 @@ function renderImplementationWorkerPrompt({
   }
 
   const peerCommsGuidance = shouldUsePeerComms(run, step, task)
-    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run), usesPiWorkerHarness(run, task))
+    ? renderPeerCommsGuidance(
+        task,
+        paths,
+        managerInboxIsRead(run),
+        usesPiWorkerHarness(run, task),
+        task.isolated === true,
+      )
     : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
@@ -799,7 +843,13 @@ function renderVerifierWorkerPrompt({
   }
 
   const peerCommsGuidance = shouldUsePeerComms(run, step, task)
-    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run), usesPiWorkerHarness(run, task))
+    ? renderPeerCommsGuidance(
+        task,
+        paths,
+        managerInboxIsRead(run),
+        usesPiWorkerHarness(run, task),
+        task.isolated === true,
+      )
     : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);

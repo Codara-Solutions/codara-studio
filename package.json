@@ -88,6 +88,7 @@
     "test:chat-timeline": "node scripts/test-chat-timeline.cjs",
     "test:composer-fast-mode": "node scripts/test-composer-fast-mode.cjs",
     "test:codex-worker-fast-mode": "node scripts/test-codex-worker-fast-mode.cjs",
+    "test:worker-independence": "node scripts/test-worker-independence.cjs",
     "test:user-message-resume": "node scripts/test-user-message-resume.cjs",
     "test:run-graph-layout": "node scripts/test-run-graph-layout.cjs",
     "test:pane-format": "node scripts/test-pane-format.cjs",

@@ -185,6 +185,23 @@ async function commandSend(dir, args, replyTo) {
   const subject = args.subject && args.subject !== true ? String(args.subject) : "";
   const body = await bodyFromArgs(args);
   if (!body.trim()) throw new Error("message body is empty; pass --body or --stdin");
+  // Independence is enforced here as well as in the Pi peer_send tool, because
+  // a mixed batch can have one worker on each transport and a rule that only
+  // one of them obeys is not a rule. Registry is the single source of truth.
+  const registry = readJson(path.join(dir, "agents.json"), { agents: [] });
+  const cards = Array.isArray(registry.agents) ? registry.agents : [];
+  const selfCard = cards.find((agent) => agent && agent.workerTaskId === from);
+  if (selfCard && selfCard.isolated && to !== "manager") {
+    throw new Error(
+      "this task is running independently on purpose: send may only address the manager",
+    );
+  }
+  const targetCard = cards.find((agent) => agent && agent.workerTaskId === to);
+  if (targetCard && targetCard.isolated) {
+    throw new Error(
+      '"' + to + '" is running independently on purpose and cannot receive peer messages',
+    );
+  }
   const message = {
     id: messageId(),
     createdAt: new Date().toISOString(),

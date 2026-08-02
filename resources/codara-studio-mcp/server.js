@@ -1176,6 +1176,11 @@ const EXECUTE_TOOLS = [
                 description:
                   "Worker role, which also drives model tier and effort. 'skeleton' = rare foundational slice later workers build on (strongest model, highest effort). 'feature' = standard implementation slice. 'leaf' = research, recon, one-shot or mechanical work against an existing contract (standard model, low effort). 'verifier' = READ-ONLY follow-up that re-checks an artifact an implementation worker already produced; it gets read-only tools and a prompt asserting an implementation just finished, so it can never research or produce a deliverable. Never use 'verifier' for first-pass work and never for every worker in a batch: an all-verifier batch with no implementation worker to check is rejected. A read-only research or investigation task is 'leaf' or 'feature', not 'verifier'.",
               },
+              isolated: {
+                type: "boolean",
+                description:
+                  "Set true when this worker's conclusion is only worth anything if it reached it ALONE: independent investigations of the same question whose answers you intend to compare, cross-checks, second opinions, or any time the user asks for workers that do not talk to each other. It removes the peer mailbox for this worker (peers cannot message it and it cannot message them; both transports refuse the send) and removes the coordinate-with-your-peers guidance from its prompt. You can still message it and it can still message you, so independence never costs you steering. Default false: for ordinary parallel slices of one job, peers coordinating is what stops duplicated work and contract drift. Putting 'do not talk to each other' in the description alone does NOT do this.",
+              },
             },
             additionalProperties: false,
           },

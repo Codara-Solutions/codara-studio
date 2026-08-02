@@ -11949,6 +11949,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     expectedOutputs: input.expectedOutputs ?? [],
     verificationCommands: input.verificationCommands ?? [],
     canRunParallel: input.canRunParallel ?? false,
+    ...(input.isolated === true ? { isolated: true as const } : {}),
     conflictsWith: input.conflictsWith ?? [],
     taskClass: input.taskClass,
     writeScopeSource: input.writeScopeSource,
@@ -16996,6 +16997,12 @@ interface PeerCommsAgentCard {
   taskClass?: WorkerTask["taskClass"];
   status: string;
   canRunParallel: boolean;
+  /**
+   * Deliberately independent: not a valid peer_send recipient, and its own
+   * sends to anyone but `manager` are refused. Both mailbox transports read
+   * this card, so the registry is the single source of truth for the rule.
+   */
+  isolated?: boolean;
   allowedPaths: string[];
   forbiddenPaths: string[];
   expectedOutputs: string[];
@@ -17052,6 +17059,7 @@ async function updatePeerCommsRegistry(
       taskClass: peer.taskClass,
       status: peer.id === currentTask.id ? status : latestAttempt?.status ?? peer.status,
       canRunParallel: peer.canRunParallel,
+      ...(peer.isolated === true ? { isolated: true as const } : {}),
       allowedPaths: peer.allowedPaths,
       forbiddenPaths: peer.forbiddenPaths,
       expectedOutputs: peer.expectedOutputs,

@@ -42,7 +42,12 @@ interface PeerAgentCard {
   title?: string;
   label?: string;
   allowedPaths?: string[];
+  /** Deliberately independent: reachable only by `manager`, and reaches only `manager`. */
+  isolated?: boolean;
 }
+
+/** Reserved registry id for the orchestrator. Mirrors run-store's MANAGER_PEER_ID. */
+const MANAGER_PEER_ID = "manager";
 
 export interface PeerCommsContext {
   dir: string;
@@ -269,6 +274,27 @@ export function registerWorkerPeerComms(pi: ExtensionAPI, ctx: PeerCommsContext)
       const body = String(params.body || "").trim();
       if (!to) throw new Error("peer_send requires a recipient");
       if (!body) throw new Error("peer_send requires a non-empty body");
+      // Independence is enforced, not merely requested. A worker marked
+      // isolated in the registry may only reach `manager`, and nobody may reach
+      // it. Checked here rather than left to the prompt because a contradictory
+      // prompt is exactly how this went wrong before: the task said "do not
+      // communicate with any peer" while the generated guidance said "share
+      // findings early", and which one won was luck.
+      const registry = listAgents(ctx);
+      const selfCard = registry.find((agent) => agent.workerTaskId === ctx.selfId);
+      if (selfCard?.isolated && to !== MANAGER_PEER_ID) {
+        throw new Error(
+          "This task is running independently on purpose: peer_send may only address `manager`. " +
+            "Reach your own conclusion from your own evidence, and tell Cora if you are blocked.",
+        );
+      }
+      const targetCard = registry.find((agent) => agent.workerTaskId === to);
+      if (targetCard?.isolated) {
+        throw new Error(
+          `"${to}" is running independently on purpose and cannot receive peer messages. ` +
+            "Send it to `manager` instead if it genuinely needs to reach that worker.",
+        );
+      }
       const message: PeerMessage = {
         id: messageId(),
         createdAt: new Date().toISOString(),

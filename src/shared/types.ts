@@ -3258,6 +3258,19 @@ export interface WorkerTask {
   canRunParallel: boolean;
   conflictsWith: string[];
   taskClass?: PlannedStepAgentTaskClass;
+  /**
+   * Deliberate independence: this worker gets NO peer-to-peer mailbox. It
+   * cannot message same-step peers and they cannot message it; the manager
+   * channel stays open in both directions so a run is never un-steerable.
+   *
+   * Exists because "investigate this independently so I can compare the two
+   * answers" was previously unexpressible: shouldUsePeerComms force-enabled the
+   * mailbox for every parallel batch, so a manager asked for independent
+   * workers could only put the request in prose, directly above a generated
+   * PEER WORKER COMMUNICATION section telling the same worker to "share
+   * findings early". Whichever instruction a model followed was luck.
+   */
+  isolated?: boolean;
   // How allowedPaths was decided. Optional + backward-compatible: undefined on
   // existing tasks reads as manager-provided scopes. Set to "derived" when
   // overwritten from real filesChanged and "fan-out" when forced by a
@@ -3984,6 +3997,8 @@ export interface CreateWorkerTaskInput {
   canRunParallel?: boolean;
   conflictsWith?: string[];
   taskClass?: PlannedStepAgentTaskClass;
+  /** Threads onto the created WorkerTask. See WorkerTask.isolated. */
+  isolated?: boolean;
   // Provenance for allowedPaths; threads onto the created WorkerTask. Optional
   // so existing createWorkerTask call sites keep compiling (undefined =
   // manager-provided scopes).

@@ -54,9 +54,15 @@ export interface WorkerLayout {
   agentIndex: number;
   box: Box;
   side: FanSide;
-  // True when this worker's task was wired for peer comms, so it can message
-  // its same-step siblings. Drives the dashed team thread; false for solo
-  // workers and for every task that predates the flag.
+  // True when this worker's task was wired to message its same-step SIBLINGS.
+  // Drives the dashed team thread; false for solo workers, for every task that
+  // predates the flag, and for deliberately isolated workers.
+  //
+  // An isolated worker still has a mailbox (the manager reaches it through the
+  // same artifacts), so the underlying peerComms flag stays on for it. Drawing
+  // the team thread off that flag alone told the user their two deliberately
+  // independent investigators were talking to each other, which was the exact
+  // opposite of what they had asked for and of what was happening.
   peerComms: boolean;
   // Where this worker's branch lands: the midpoint of the card edge facing the
   // step's centreline. The wire layer draws its port here too, so the wire and
@@ -308,7 +314,7 @@ export function computeRunGraphLayout(
         agentIndex: j,
         box: workerBox,
         side: slot.side,
-        peerComms: row.task?.peerComms === true,
+        peerComms: row.task?.peerComms === true && row.task?.isolated !== true,
         port: {
           x: slot.side === "right" ? workerBox.x : workerBox.x + workerBox.w,
           y: workerBox.y + workerBox.h / 2,
