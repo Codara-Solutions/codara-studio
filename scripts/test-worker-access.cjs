@@ -130,6 +130,15 @@ async function main() {
     );
   }
 
+  // Codex fast mode always overrides the native CLI feature explicitly.
+  {
+    eq("fast mode on enables the Codex feature", wa.codexFastModeArgs(true), ["--enable", "fast_mode"]);
+    eq("fast mode off emits an explicit disable", wa.codexFastModeArgs(false), ["--disable", "fast_mode"]);
+    eq("a missing setting fails closed to disable", wa.codexFastModeArgs(undefined), ["--disable", "fast_mode"]);
+    ok("the fast mode pair is never omitted", wa.codexFastModeArgs(false).length === 2);
+    ok("no Claude fast mode helper exists", typeof wa.claudeFastModeArgs === "undefined");
+  }
+
   // ── 4) wave decoration: default is a no-op ─────────────────────────────────
   {
     const self = { nodeId: "a", label: "A", model: "claude-opus-5", prompt: "do A" };

@@ -42,6 +42,11 @@ export function claudeDisallowedTools(
   return merged;
 }
 
+/** Explicit feature override for one native Codex worker launch. */
+export function codexFastModeArgs(fastMode?: boolean): [string, string] {
+  return [fastMode === true ? "--enable" : "--disable", "fast_mode"];
+}
+
 export interface CodexAccessFlags {
   /** Sandbox mode to pass to `--sandbox`; undefined keeps the `--yolo` default. */
   sandboxMode?: "read-only" | "workspace-write";

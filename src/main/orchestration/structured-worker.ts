@@ -19,7 +19,11 @@ import {
 import { estimateWorkerCostUsd, type ModelUsage } from "../model-prices";
 import { resolveLaunchTarget } from "./cli-session";
 import { ensureCodexProjectTrust } from "./codex-trust";
-import { claudeDisallowedTools, codexAccessFlags } from "./worker-access";
+import {
+  claudeDisallowedTools,
+  codexAccessFlags,
+  codexFastModeArgs,
+} from "./worker-access";
 import {
   acquireNativeCodexProfileLease,
   resolveFrozenNativeCodexProfile,
@@ -46,6 +50,7 @@ export interface StructuredWorkerInput {
   paths: WorkerArtifactPaths;
   sandboxed?: boolean;
   extraWritableDirs?: string[];
+  openAiFastMode: boolean;
   onStarted: (kill: () => void) => void;
 }
 
@@ -313,6 +318,7 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
     if (input.task.loomNodeId) {
       args.push("-c", `mcp_servers.codara-studio.env.SPARK_NODE_ID="${escaped(input.task.loomNodeId)}"`);
     }
+    args.push(...codexFastModeArgs(input.openAiFastMode));
     const launch = resolveLaunchTarget(binary, args);
     child = spawn(launch.exe, launch.args, {
       cwd: input.cwd,

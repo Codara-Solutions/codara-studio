@@ -228,6 +228,7 @@ import {
 import {
   claudeDisallowedTools,
   codexAccessFlags,
+  codexFastModeArgs,
   decorateWavePrompt,
   waveHasChat,
   type WavePeerInfo,
@@ -12264,6 +12265,14 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     );
   }
 
+  const nativeCodexFastMode =
+    !usePiWorkerHarness && task.runtimePreference === "codex"
+      ? await loadSettings().then(
+          (settings) => settings.openAiFastMode === true,
+          () => false,
+        )
+      : false;
+
   const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
   await fs.mkdir(paths.attemptDir, { recursive: true });
   await Promise.all([
@@ -12329,6 +12338,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     isAutomation: isAutomationRun,
     extraWritableDirs,
     workerConstitutionPromptPath: cliWorkerConstitutionPromptPath,
+    openAiFastMode: nativeCodexFastMode,
   });
   const command = usePiWorkerHarness
     ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
@@ -12462,6 +12472,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           nativeClaudeProfileId: attempt.nativeClaudeProfileId,
           sandboxed: Boolean(attempt.sandboxWorktreePath),
           extraWritableDirs,
+          openAiFastMode: nativeCodexFastMode,
           userConstitution: attempt.userConstitution,
         })
       : await runWorkerSession({
@@ -17338,6 +17349,7 @@ async function runStructuredAutomationWorkerSession({
   nativeClaudeProfileId,
   sandboxed,
   extraWritableDirs,
+  openAiFastMode,
   userConstitution,
 }: {
   run: RunState;
@@ -17351,6 +17363,7 @@ async function runStructuredAutomationWorkerSession({
   nativeClaudeProfileId?: string;
   sandboxed: boolean;
   extraWritableDirs: string[];
+  openAiFastMode: boolean;
   userConstitution?: UserConstitutionCapture;
 }): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
   let workerConstitutionBlock: string;
@@ -17423,6 +17436,7 @@ async function runStructuredAutomationWorkerSession({
       paths,
       sandboxed,
       extraWritableDirs,
+      openAiFastMode,
       onStarted(nextKill) {
         transportKill = nextKill;
         if (interruptedBeforeStart) nextKill();
@@ -18715,6 +18729,7 @@ function buildLaunchCommandLine(
     isAutomation?: boolean;
     extraWritableDirs?: string[];
     workerConstitutionPromptPath?: string;
+    openAiFastMode?: boolean;
   },
 ): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
@@ -18816,6 +18831,7 @@ function buildLaunchCommandLine(
     if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
     const codexEffort = mapCodexEffort(task.effortHint);
     if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));
+    args.push(...codexFastModeArgs(opts?.openAiFastMode));
     // Config shield: deny reads of ~/.codex/AGENTS.md (personal global codex
     // instructions). darwin only — and ONLY for --yolo launches: whenever a
     // `--sandbox` mode is set (for ANY reason — a preset OR the isolate
