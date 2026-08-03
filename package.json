@@ -70,6 +70,7 @@
     "test:capability-center": "node scripts/test-capability-center-ui.cjs",
     "test:github-pr-import": "node scripts/test-github-pull-request-git.cjs && node scripts/test-github-pull-request-import-journal.cjs && node scripts/test-github-pull-request-workspace.cjs && node scripts/test-untrusted-pr-policy.cjs && node scripts/test-github-pull-request-surface.cjs",
     "test:prompt-punctuation": "node scripts/test-prompt-punctuation.cjs",
+    "test:cora-evidence-rules": "node scripts/test-cora-evidence-rules.cjs",
     "test:worker-cleanup-safety": "node scripts/test-worker-cleanup-safety.cjs",
     "test:project-constitution": "node scripts/test-project-constitution.cjs",
     "test:project-constitution-settings": "node scripts/test-project-constitution-settings.cjs",

@@ -282,6 +282,7 @@ function renderWebResearchGuidance(
         ]
       : []),
     "- Never open the user's system browser or GUI applications (no `open`, `xdg-open`, `osascript`, `start`). All web access goes through `web_search`, `deep_search`, or direct HTTP fetches.",
+    "- NEVER copy the user's real credentials anywhere, for any reason. Do not copy an auth file, token, cookie jar, or keychain export (`~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.aws`, `~/.ssh`, and anything like them) into a sandbox home, a temp directory, a worktree, or the workspace, and never point a CLI at a copied credential directory. Refresh tokens ROTATE: the moment the sandboxed tool refreshes, the user's real login is dead and they are signed out of an account they were using. If the task needs a logged in CLI, report that in `risks[]` and finish what you can without it.",
   ];
 }
 
