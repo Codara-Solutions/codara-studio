@@ -225,6 +225,74 @@ async function main() {
     console.log(`  PASS ${name}`);
   };
 
+  const digestRun = (id, status, extra = {}) =>
+    run([], { id, title: id, status, steps: [], seen: true, ...extra });
+
+  test("away digest includes only attention states that changed after baseline", () => {
+    const blockedBefore = digestRun("blocked-before", "blocked");
+    const changedToBlocked = digestRun("changed", "running");
+    const newlyFinished = digestRun("finished", "running");
+    const baseline = T.captureAwayDigestBaseline([
+      blockedBefore,
+      changedToBlocked,
+      newlyFinished,
+    ]);
+    changedToBlocked.status = "blocked";
+    newlyFinished.status = "complete";
+    newlyFinished.seen = false;
+
+    const digest = T.buildAwayDigest(
+      [blockedBefore, changedToBlocked, newlyFinished],
+      baseline,
+      null,
+    );
+    assert.deepEqual(digest.needsYou.map((entry) => entry.id), ["changed"]);
+    assert.deepEqual(digest.doneUnseen.map((entry) => entry.id), ["finished"]);
+    assert.equal(digest.total, 2);
+  });
+
+  test("away digest does not open for a working-only transition", () => {
+    const working = digestRun("working", "queued");
+    const baseline = T.captureAwayDigestBaseline([working]);
+    working.status = "running";
+    const digest = T.buildAwayDigest([working], baseline, null);
+    assert.equal(digest.total, 0);
+    assert.deepEqual(digest.needsYou, []);
+    assert.deepEqual(digest.doneUnseen, []);
+    assert.deepEqual(digest.working.map((entry) => entry.id), ["working"]);
+  });
+
+  test("away digest excludes the run surface visible on focus", () => {
+    const visible = digestRun("visible", "running");
+    const background = digestRun("background", "running");
+    const baseline = T.captureAwayDigestBaseline([visible, background]);
+    visible.status = "blocked";
+    background.status = "blocked";
+    const digest = T.buildAwayDigest([visible, background], baseline, "visible");
+    assert.deepEqual(digest.needsYou.map((entry) => entry.id), ["background"]);
+    assert.equal(digest.total, 1);
+  });
+
+  test("away digest pruning preserves unvisited origins and closes when empty", () => {
+    const first = digestRun("first", "blocked");
+    const second = digestRun("second", "complete", { seen: false });
+    const third = digestRun("third", "running");
+    const digest = {
+      total: 2,
+      needsYou: [first],
+      doneUnseen: [second],
+      working: [third],
+    };
+    const withoutWorking = T.pruneAwayDigest(digest, "third");
+    assert.equal(withoutWorking.total, 2);
+    assert.deepEqual(withoutWorking.working, []);
+    const afterFirst = T.pruneAwayDigest(digest, "first");
+    assert.equal(afterFirst.total, 1);
+    assert.deepEqual(afterFirst.doneUnseen.map((entry) => entry.id), ["second"]);
+    assert.deepEqual(afterFirst.working.map((entry) => entry.id), ["third"]);
+    assert.equal(T.pruneAwayDigest(afterFirst, "second"), null);
+  });
+
   test("a superseded failure reads as a retry, not a dead end", () => {
     const parts = wave();
     const timeline = T.buildChatTimeline(run(Object.values(parts)));

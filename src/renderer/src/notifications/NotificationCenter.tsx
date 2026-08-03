@@ -1,15 +1,24 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { NotificationCenterEntry, ResolvedRunQuestion } from "@shared/types";
 import { NotifyGlyphSvg } from "../components/Toast";
-import { accentVar, isCompletionKind, kindMeta } from "./kinds";
+import { accentVar, kindMeta } from "./kinds";
 import type { NavigateTo } from "./routing";
 import { useNotificationCenter } from "./useNotificationCenter";
 
 // Notification center: a bell in the window chrome with an unread badge and
 // a .spark-menu popover over the persisted history (main-side ring buffer).
-// Entries group by day; clicking one routes its NavigationTarget and marks
-// it read. A blocked run says only that an answer is wanted; the options
-// themselves stay in the run, where the reasoning behind them lives.
+// Entries group by day. Clicking one routes its NavigationTarget, marks it
+// read, and removes it for every notification kind. A blocked run says only
+// that an answer is wanted; the options stay in the run with their context.
+
+async function markReadThenRemove(id: string, remove: () => void): Promise<void> {
+  try {
+    await window.spark.notifications.markRead(id);
+  } catch {
+    // Removal is still worth attempting if the read update raced or failed.
+  }
+  remove();
+}
 
 type AppRegionStyle = React.CSSProperties & {
   WebkitAppRegion?: "drag" | "no-drag";
@@ -250,19 +259,16 @@ export default function NotificationCenter({
                     key={entry.id}
                     entry={entry}
                     onOpen={() => {
-                      // Opening an entry is the user ACTING on it: route to the
-                      // target, then — for a completion record (automation/run
-                      // finished/failed) — mark it READ so it stays in the center
-                      // as history; for an actionable prompt, drop it so handled
-                      // items don't pile up. Guard on navigateTo (as the toast
-                      // does) so we never touch an entry without routing anywhere.
+                      // Opening an entry acts on every notification kind. Guard
+                      // on navigation so an entry is never removed without a visit.
                       if (!navigateTo) return;
                       navigateTo(entry.target);
-                      if (isCompletionKind(entry.kind)) center.markRead(entry.id);
-                      else center.remove(entry.id);
+                      void markReadThenRemove(entry.id, () => center.remove(entry.id));
                       setOpen(false);
                     }}
-                    onActed={() => center.remove(entry.id)}
+                    onActed={() => {
+                      void markReadThenRemove(entry.id, () => center.remove(entry.id));
+                    }}
                     resolveQuestion={resolveQuestion}
                   />
                 ))}
@@ -375,8 +381,8 @@ function CenterEntry({
 }: {
   entry: NotificationCenterEntry;
   onOpen: () => void;
-  // Fired when the user resolves the entry in place (answers the inline
-  // question) — the entry is removed from the center, not merely marked read.
+  // Fired when the user resolves an entry in place. It follows the same
+  // mark-read-then-remove lifecycle as opening the entry.
   onActed: () => void;
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
 }) {

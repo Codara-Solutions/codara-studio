@@ -1,0 +1,44 @@
+import type { NavigationTarget } from "@shared/types";
+
+export interface ActiveNotificationView {
+  workspaceId: string | null;
+  visibleRunId: string | null;
+  terminal: {
+    workspaceId: string;
+    tabId: string;
+    paneId: string;
+  } | null;
+  automationsActive: boolean;
+}
+
+function workspaceMatches(
+  targetWorkspaceId: string | undefined,
+  activeWorkspaceId: string | null,
+): boolean {
+  return targetWorkspaceId === undefined || targetWorkspaceId === activeWorkspaceId;
+}
+
+export function isNotificationTargetViewed(
+  target: NavigationTarget,
+  view: ActiveNotificationView,
+): boolean {
+  if (target.type === "run") {
+    return (
+      target.runId === view.visibleRunId &&
+      workspaceMatches(target.workspaceId, view.workspaceId)
+    );
+  }
+
+  if (target.type === "terminal") {
+    return (
+      view.terminal !== null &&
+      target.workspaceId === view.terminal.workspaceId &&
+      target.tabId === view.terminal.tabId &&
+      target.paneId === view.terminal.paneId
+    );
+  }
+
+  if (!workspaceMatches(target.workspaceId, view.workspaceId)) return false;
+  if (target.runId && target.runId === view.visibleRunId) return true;
+  return view.automationsActive;
+}

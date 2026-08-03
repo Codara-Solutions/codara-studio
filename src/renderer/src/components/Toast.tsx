@@ -1,7 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { NotifyEvent, ResolvedRunQuestion } from "@shared/types";
-import { accentVar, isCompletionKind, kindMeta, type NotifyGlyph } from "../notifications/kinds";
+import { accentVar, kindMeta, type NotifyGlyph } from "../notifications/kinds";
 import type { NavigateTo } from "../notifications/routing";
+import {
+  isNotificationTargetViewed,
+  type ActiveNotificationView,
+} from "../notifications/viewed";
 
 // In-app toast manager + renderer for the unified notifications pipeline.
 // Listens for "notification:in-app" NotifyEvents (sent by the main process
@@ -17,11 +21,11 @@ import type { NavigateTo } from "../notifications/routing";
 // early. Click anywhere else on the card routes the event's NavigationTarget
 // through navigateTo — this lets a "needs you" alert deep-link the user
 // straight to the chat, terminal pane, or loom that needs them. Acting on the
-// card then MARKS READ a completion record (automation/run finished/failed) so
-// it stays in the center as history, or REMOVES an actionable prompt
-// (question/blocked/needs-input) so handled items don't pile up.
+// card acknowledges and removes its notification-center entry. Visiting a
+// matching run, pane, or Automations hub does the same. The close button and
+// visual timeout only hide the card, so missed entries remain in the center.
 
-const AUTO_DISMISS_MS = 15_000;
+const AUTO_DISMISS_MS = 3_000;
 // Cap simultaneous toasts so a misbehaving run that fires many alerts
 // in a row can't cover the whole screen. The oldest ones drop off the
 // stack while keeping the most recent visible.
@@ -37,13 +41,41 @@ export interface ToastHostProps {
   // carries the runId — the options live in the run state, so the App
   // resolves them in the renderer (global runs feed + findOpenQuestion).
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
+  // The exact workbench surface currently visible to the user.
+  activeView: ActiveNotificationView;
+}
+
+async function markReadThenRemove(id: string): Promise<void> {
+  try {
+    await window.spark.notifications.markRead(id);
+  } catch {
+    // Removal is still worth attempting if the read update raced or failed.
+  }
+  try {
+    await window.spark.notifications.remove(id);
+  } catch {
+    // Notification cleanup is best-effort.
+  }
 }
 
 export default function ToastHost({
   navigateTo,
   resolveQuestion,
+  activeView,
 }: ToastHostProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastsRef = useRef(toasts);
+  toastsRef.current = toasts;
+  const activeViewRef = useRef(activeView);
+  activeViewRef.current = activeView;
+  const acknowledgingIds = useRef<Set<string>>(new Set());
+  const acknowledge = useCallback((id: string) => {
+    if (acknowledgingIds.current.has(id)) return;
+    acknowledgingIds.current.add(id);
+    void markReadThenRemove(id).finally(() => {
+      acknowledgingIds.current.delete(id);
+    });
+  }, []);
   // One pending dismissal timer per on-screen toast, keyed by id. Held in a
   // ref (not state) so re-renders and new arrivals never disturb the timers
   // already ticking.
@@ -51,6 +83,10 @@ export default function ToastHost({
 
   useEffect(() => {
     const off = window.spark.notifications.onInAppNotification((payload) => {
+      if (isNotificationTargetViewed(payload.target, activeViewRef.current)) {
+        acknowledge(payload.id);
+        return;
+      }
       setToasts((current) => {
         // Drop any toast with the same id (re-entrancy guard if the
         // main process resends a payload while one is still on screen)
@@ -66,7 +102,29 @@ export default function ToastHost({
       });
     });
     return () => off();
-  }, []);
+  }, [acknowledge]);
+
+  useEffect(() => {
+    const matchingVisible = toastsRef.current.filter((toast) =>
+      isNotificationTargetViewed(toast.target, activeView),
+    );
+    if (matchingVisible.length > 0) {
+      const matchingIds = new Set(matchingVisible.map((toast) => toast.id));
+      setToasts((current) => current.filter((toast) => !matchingIds.has(toast.id)));
+      for (const toast of matchingVisible) acknowledge(toast.id);
+    }
+
+    void window.spark.notifications
+      .list()
+      .then((entries) => {
+        for (const entry of entries) {
+          if (isNotificationTargetViewed(entry.target, activeView)) {
+            acknowledge(entry.id);
+          }
+        }
+      })
+      .catch(() => undefined);
+  }, [activeView, acknowledge]);
 
   useEffect(() => {
     const timers = dismissTimers.current;
@@ -139,6 +197,7 @@ export default function ToastHost({
           }
           navigateTo={navigateTo}
           resolveQuestion={resolveQuestion}
+          onAcknowledge={() => acknowledge(toast.id)}
         />
       ))}
     </div>
@@ -151,12 +210,14 @@ function ToastCard({
   onClose,
   navigateTo,
   resolveQuestion,
+  onAcknowledge,
 }: {
   toast: Toast;
   depth: number;
   onClose: () => void;
   navigateTo?: NavigateTo;
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
+  onAcknowledge: () => void;
 }) {
   // In-flight guard so a fast double-click on an answer button (or two
   // different options) only fires one addRunMessage+resumeRun sequence.
@@ -224,17 +285,9 @@ function ToastCard({
       onClick={() => {
         if (!clickable) return;
         navigateTo?.(toast.target);
-        // Routing to the target is the user ACTING on the notification. For a
-        // completion record (automation/run finished/failed) mark it READ so it
-        // remains in the center as history; for an actionable prompt remove it so
-        // a handled item doesn't linger. (The X button and auto-expiry
-        // deliberately do NEITHER: a merely-hidden toast stays as a "missed"
-        // unread entry.)
-        if (isCompletionKind(toast.kind)) {
-          void window.spark.notifications.markRead(toast.id).catch(() => undefined);
-        } else {
-          void window.spark.notifications.remove(toast.id).catch(() => undefined);
-        }
+        // Routing acts on every notification kind. Acknowledge first, then
+        // remove the center entry. The X button and visual timeout do neither.
+        onAcknowledge();
         onClose();
       }}
       onMouseEnter={() => setHover(true)}

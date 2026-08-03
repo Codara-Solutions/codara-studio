@@ -264,6 +264,60 @@ async function main() {
     console.log(`  PASS ${name}`);
   };
 
+  await test("cross-workspace run selection replays only the latest request", async () => {
+    const appSource = fs.readFileSync(path.join(ROOT, "src/renderer/src/App.tsx"), "utf8");
+    const anywhereStart = appSource.indexOf("const handleSelectRunAnywhere = useCallback(");
+    const anywhereEnd = appSource.indexOf("// Unseen terminal-agent alerts", anywhereStart);
+    assert.ok(anywhereStart >= 0 && anywhereEnd > anywhereStart, "selection callback must exist");
+    const anywhereSource = appSource.slice(anywhereStart, anywhereEnd);
+    const rememberAt = anywhereSource.indexOf(
+      "activeRunIdsByWorkspaceRef.current[workspaceId] = runId;",
+    );
+    const queueAt = anywhereSource.indexOf("pendingCrossWorkspaceRunSelectionRef.current = {");
+    const switchAt = anywhereSource.indexOf("setActiveId(workspaceId);", queueAt);
+    const returnAt = anywhereSource.indexOf("return;", switchAt);
+    assert.ok(rememberAt >= 0 && rememberAt < queueAt && queueAt < switchAt && switchAt < returnAt,
+      "cross-workspace selection must remember, queue, switch, and return before touching tabs");
+    assert.match(
+      anywhereSource,
+      /pending\.workspaceId !== tabs\.tabsWorkspaceId[\s\S]*pending\.generation !== runSelectionGenerationRef\.current[\s\S]*handleSelectRun\(pending\.runId, pending\.workspaceId\)/,
+      "the queued request must replay after destination tabs load and reject stale generations",
+    );
+    assert.match(
+      appSource,
+      /const handleSelectRun = useCallback\([\s\S]*?\) => \{\s*pendingCrossWorkspaceRunSelectionRef\.current = null;[\s\S]*?const selectionGeneration = \+\+runSelectionGenerationRef\.current;/,
+      "a newer run selection must invalidate the queued request",
+    );
+    assert.match(
+      appSource,
+      /const handleActivateWorkspace = useCallback\(\(id: string\) => \{\s*pendingCrossWorkspaceRunSelectionRef\.current = null;\s*runSelectionGenerationRef\.current \+= 1;/,
+      "explicit workspace navigation must invalidate a pending run selection",
+    );
+  });
+
+  await test("automation routes prune only their digest origin", async () => {
+    const appSource = fs.readFileSync(path.join(ROOT, "src/renderer/src/App.tsx"), "utf8");
+    const anywhereStart = appSource.indexOf("const handleSelectRunAnywhere = useCallback(");
+    const anywhereEnd = appSource.indexOf("// Unseen terminal-agent alerts", anywhereStart);
+    assert.ok(anywhereStart >= 0 && anywhereEnd > anywhereStart, "selection callback must exist");
+    const anywhereSource = appSource.slice(anywhereStart, anywhereEnd);
+    assert.match(
+      anywhereSource,
+      /if \(route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, runId\) : current,\s*\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
+      "same-workspace automation routing must prune the routed run id",
+    );
+    assert.match(
+      anywhereSource,
+      /if \(pending\.route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, pending\.runId\) : current,\s*\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
+      "cross-workspace automation replay must prune the routed run id",
+    );
+    assert.doesNotMatch(
+      appSource,
+      /onSelectRun=\{\(runId, workspaceId\) => \{\s*handleSelectRunAnywhere\(runId, workspaceId\);\s*setAwayDigest\(null\);/,
+      "the digest card must not close unconditionally after selection",
+    );
+  });
+
   await test("background worker launch never steals the active tab", async () => {
     await run(`(h) => h.tabs.openChatTab({ runId: "run-A" })`);
     // launch_requested materializes the workers tab without focus

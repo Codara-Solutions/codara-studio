@@ -32,11 +32,21 @@ const sharedAliasPlugin = {
 // sourceKey defaults to "run:r1"; watching/dnd default false.
 const CASES = [
   {
-    name: "blocked always delivers, even while watching",
+    name: "blocked is suppressed while watching its exact run surface",
     steps: [
       {
         kind: "run.blocked",
         watching: true,
+        expect: { deliver: false, record: true, read: true, reason: "watching" },
+      },
+    ],
+  },
+  {
+    name: "blocked still delivers while an unrelated surface is visible",
+    steps: [
+      {
+        kind: "run.blocked",
+        watching: false,
         expect: { deliver: true, record: true, read: false, reason: "deliver" },
       },
     ],

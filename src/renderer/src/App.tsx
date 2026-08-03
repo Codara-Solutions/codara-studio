@@ -68,6 +68,7 @@ import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
+import type { ActiveNotificationView } from "./notifications/viewed";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
   PaneNode,
@@ -125,11 +126,14 @@ import { isRunningStatus } from "./lib/run-status";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import {
   buildAwayDigest,
+  captureAwayDigestBaseline,
   compareRunsByAttention,
   describeRunStatus,
   findOpenQuestion,
+  pruneAwayDigest,
   statusToneColor,
   type AwayDigest,
+  type AwayDigestBaseline,
   type ChatStatusTone,
 } from "./components/chat/timeline";
 
@@ -429,6 +433,14 @@ export default function App() {
   // Holds the snapshot computed at focus time; null when nothing landed or the
   // user dismissed it.
   const [awayDigest, setAwayDigest] = useState<AwayDigest | null>(null);
+  const awayBaselineRef = useRef<AwayDigestBaseline>({});
+  useEffect(() => {
+    if (!awayDigest) return;
+    const timer = window.setTimeout(() => {
+      setAwayDigest(null);
+    }, 3_000);
+    return () => window.clearTimeout(timer);
+  }, [awayDigest]);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   // Side-panel layout: outer widths, internal split ratios, per-section
@@ -638,6 +650,22 @@ export default function App() {
   // actually changes.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const activeNotificationView = useMemo<ActiveNotificationView>(() => {
+    const activeTab = tabs.activeTab;
+    return {
+      workspaceId: tabs.tabsWorkspaceId,
+      visibleRunId: visibleRunIdForTab(activeTab),
+      terminal:
+        activeTab?.kind === "terminal" && tabs.tabsWorkspaceId
+          ? {
+              workspaceId: tabs.tabsWorkspaceId,
+              tabId: activeTab.id,
+              paneId: activeTab.activePaneId,
+            }
+          : null,
+      automationsActive: activeTab?.kind === "automations",
+    };
+  }, [tabs.activeTab, tabs.tabsWorkspaceId]);
 
   // The useTabs API's methods are stable for the hook instance's lifetime
   // (only its data fields re-key the memo). Destructure the ones the hoisted
@@ -738,6 +766,12 @@ export default function App() {
   // effect temporarily clearing a just-selected id while React is applying a
   // previously queued list snapshot.
   const runSelectionGenerationRef = useRef(0);
+  const pendingCrossWorkspaceRunSelectionRef = useRef<{
+    runId: string;
+    workspaceId: string;
+    generation: number;
+    route: "run" | "automation";
+  } | null>(null);
 
   // Cross-workspace runs feed for the walk-away cockpit surfaces (run
   // switcher, rail tone dots, focus digest). Independent of the lifted `runs`
@@ -814,6 +848,7 @@ export default function App() {
       workspaceId?: string | null,
       options?: { focus?: "chat" | "runs" | "none" },
     ) => {
+      pendingCrossWorkspaceRunSelectionRef.current = null;
       const targetWorkspaceId = workspaceId ?? activeIdRef.current;
       // The Settings run manager lists runs of deleted workspaces by design.
       // There is no workspace to restore such a selection into, so it must be
@@ -882,11 +917,9 @@ export default function App() {
   );
 
   // Cross-workspace run selection used by the global RunSwitcher and the
-  // focus-after-away digest. handleSelectRun is scoped to the active workspace
-  // (it early-returns when the target lives elsewhere), so switch the active
-  // workspace first when the chosen run belongs to another project. The
-  // per-workspace remembered-selection plumbing then restores this run once the
-  // new workspace's runs load.
+  // focus-after-away digest. Queue the requested surface before switching so
+  // the old workspace's tab store remains untouched. The replay effect below
+  // applies it after useTabs has loaded the destination layout.
   // Board-card runs a user explicitly opened from a card's "Open chat". Runs
   // in this set are exempt from the board-run suppression below — without the
   // exemption the lifted runs list never contains the run and the chat tab
@@ -895,36 +928,79 @@ export default function App() {
 
   const handleSelectRunAnywhere = useCallback(
     (runId: string, workspaceId?: string) => {
+      const target = globalRuns.runsRef.current.find((r) => r.id === runId);
+      const route = target?.automationId ? "automation" : "run";
+      const generation = ++runSelectionGenerationRef.current;
+      pendingCrossWorkspaceRunSelectionRef.current = null;
+
+      // Board-card runs are suppressed from the lifted list until explicitly
+      // opened (openedBoardRunIdsRef). A RunSwitcher / away-digest /
+      // notification click is such an explicit open. Register the exemption
+      // before either the immediate selection or the deferred replay rebuilds
+      // the lifted run list.
+      if (target && isBoardCardRun(target)) {
+        openedBoardRunIdsRef.current.add(runId);
+      }
+
       if (workspaceId && workspaceId !== activeIdRef.current) {
         const currentWorkspaceId = activeIdRef.current;
         if (currentWorkspaceId) {
           activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
         }
+        if (route === "run") {
+          activeRunIdsByWorkspaceRef.current[workspaceId] = runId;
+        }
+        pendingCrossWorkspaceRunSelectionRef.current = {
+          runId,
+          workspaceId,
+          generation,
+          route,
+        };
         setActiveId(workspaceId);
-      }
-      // Loom-owned runs have no chat surface anywhere (the lifted list filters
-      // them, so handleSelectRun would dead-end in an empty chat tab) — their
-      // home is the Automations Hub. Route a blocked-loom toast/digest click
-      // there instead.
-      const target = globalRuns.runsRef.current.find((r) => r.id === runId);
-      if (target?.automationId) {
-        tabsRef.current.openAutomationsTab();
         return;
       }
-      // Board-card runs are suppressed from the lifted list until explicitly
-      // opened (openedBoardRunIdsRef). A RunSwitcher / away-digest /
-      // notification click IS such an explicit open — without the exemption
-      // the selected chat tab renders empty and syncChatTabsToRuns prunes it.
-      // handleSelectRun's own refreshRunsFor pass runs after this, so the
-      // exemption is already registered when the list is rebuilt (mirrors
-      // handleOpenBoardCardRun).
-      if (target && isBoardCardRun(target)) {
-        openedBoardRunIdsRef.current.add(runId);
+
+      // Loom-owned runs have no chat surface anywhere because the lifted list
+      // filters them. Their home is the Automations Hub.
+      if (route === "automation") {
+        setAwayDigest((current) =>
+          current ? pruneAwayDigest(current, runId) : current,
+        );
+        tabsRef.current.openAutomationsTab();
+        return;
       }
       handleSelectRun(runId, workspaceId);
     },
     [handleSelectRun, globalRuns.runsRef],
   );
+
+  useEffect(() => {
+    const pending = pendingCrossWorkspaceRunSelectionRef.current;
+    if (!pending || pending.workspaceId === activeId) return;
+    pendingCrossWorkspaceRunSelectionRef.current = null;
+    runSelectionGenerationRef.current += 1;
+  }, [activeId]);
+
+  useEffect(() => {
+    if (!booted) return;
+    const pending = pendingCrossWorkspaceRunSelectionRef.current;
+    if (!pending || pending.workspaceId !== tabs.tabsWorkspaceId) return;
+    pendingCrossWorkspaceRunSelectionRef.current = null;
+    if (
+      pending.generation !== runSelectionGenerationRef.current ||
+      activeIdRef.current !== pending.workspaceId
+    ) {
+      return;
+    }
+    if (pending.route === "automation") {
+      setAwayDigest((current) =>
+        current ? pruneAwayDigest(current, pending.runId) : current,
+      );
+      tabsRef.current.openAutomationsTab();
+      return;
+    }
+    handleSelectRun(pending.runId, pending.workspaceId);
+  }, [booted, tabs.tabsWorkspaceId, handleSelectRun]);
 
   // Unseen terminal-agent alerts, keyed workspace → pane. Set when main
   // fires a terminal alert (event arrives even with all notification
@@ -1610,8 +1686,13 @@ export default function App() {
     // actually left for a beat, not every momentary blur.
     const AWAY_THRESHOLD_MS = 60_000;
 
+    const managedRuns = () =>
+      globalRuns.runsRef.current.filter(
+        (run) => (!run.automationId && !isBoardCardRun(run)) || run.status === "blocked",
+      );
     const onBlur = () => {
       awayAtRef.current = Date.now();
+      awayBaselineRef.current = captureAwayDigestBaseline(managedRuns());
     };
     const onFocus = () => {
       const awayAt = awayAtRef.current;
@@ -1621,9 +1702,9 @@ export default function App() {
       // blocked (clicks route to the Automations Hub); their per-pass
       // completions never enter done-unseen.
       const digest = buildAwayDigest(
-        globalRuns.runsRef.current.filter(
-          (r) => (!r.automationId && !isBoardCardRun(r)) || r.status === "blocked",
-        ),
+        managedRuns(),
+        awayBaselineRef.current,
+        visibleRunIdForTab(tabsRef.current.activeTab),
       );
       if (digest.total === 0) return;
       setAwayDigest(digest);
@@ -1649,6 +1730,14 @@ export default function App() {
     // globalRuns.runsRef / refresh are stable refs; gate solely on booted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [booted]);
+
+  const visibleAttentionRunId = visibleRunIdForTab(tabs.activeTab);
+  useEffect(() => {
+    if (!visibleAttentionRunId) return;
+    setAwayDigest((current) =>
+      current ? pruneAwayDigest(current, visibleAttentionRunId) : current,
+    );
+  }, [visibleAttentionRunId]);
 
   // Visiting a workspace answers its rail dot. The teal done-unseen cue exists
   // to pull the user TO the workspace; once they have dwelt there a beat, its
@@ -2373,7 +2462,7 @@ export default function App() {
           focused: document.hasFocus(),
           workspaceId: tabs.tabsWorkspaceId,
           tabId: tabs.activeId,
-          runId: activeRunId,
+          runId: visibleRunIdForTab(activeTab),
           paneId: activeTab?.kind === "terminal" ? activeTab.activePaneId : null,
         })
         ?.catch(() => {
@@ -2389,7 +2478,7 @@ export default function App() {
       window.removeEventListener("focus", send);
       window.removeEventListener("blur", send);
     };
-  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, tabs.activeId, activeRunId]);
+  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, tabs.activeId]);
 
   // ── Terminal-agent attention (rail dot) ─────────────────────────────────
   useEffect(() => {
@@ -2583,6 +2672,8 @@ export default function App() {
   // stable for the lifetime of the component — which lets the React.memo on
   // WorkspaceRail actually skip renders.
   const handleActivateWorkspace = useCallback((id: string) => {
+    pendingCrossWorkspaceRunSelectionRef.current = null;
+    runSelectionGenerationRef.current += 1;
     const currentWorkspaceId = activeIdRef.current;
     if (currentWorkspaceId) {
       activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
@@ -5402,6 +5493,7 @@ export default function App() {
         <ToastHost
           navigateTo={navigateToNotifyTarget}
           resolveQuestion={resolveRunQuestion}
+          activeView={activeNotificationView}
         />
         {awayDigest && (
           <AwayDigestCard
@@ -5409,7 +5501,6 @@ export default function App() {
             workspaces={workspaces}
             onSelectRun={(runId, workspaceId) => {
               handleSelectRunAnywhere(runId, workspaceId);
-              setAwayDigest(null);
             }}
             onDismiss={() => setAwayDigest(null)}
           />
@@ -5494,14 +5585,13 @@ function AwayDigestCard({
       `${digest.doneUnseen.length} finished`,
     );
   }
-  if (digest.working > 0) {
-    summaryBits.push(`${digest.working} still working`);
+  if (digest.working.length > 0) {
+    summaryBits.push(`${digest.working.length} still working`);
   }
 
   return (
     <div
       className="spark-fade-in"
-      role="status"
       style={{
         position: "fixed",
         top: 48,
@@ -5510,17 +5600,20 @@ function AwayDigestCard({
         right: 16,
         zIndex: 1001,
         width: "min(360px, calc(100vw - 32px))",
-        display: "flex",
-        flexDirection: "column",
-        gap: 10,
-        padding: "12px 14px",
-        borderRadius: 8,
-        border: "1px solid color-mix(in oklch, var(--info) 48%, var(--rule-strong))",
-        background: "color-mix(in oklch, var(--info) 12%, var(--panel))",
-        boxShadow: "var(--shadow-2)",
-        fontFamily: "var(--font-sans)",
       }}
     >
+      <div
+        className="spark-glass--strong"
+        role="status"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+          padding: "12px 14px",
+          borderRadius: 8,
+          fontFamily: "var(--font-sans)",
+        }}
+      >
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
@@ -5654,11 +5747,18 @@ function AwayDigestCard({
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }
 
 // ── Workspace pane (tab strip + stacks) ──────────────────────────────────────
+
+function visibleRunIdForTab(tab: Tab | null | undefined): string | null {
+  if (!tab) return null;
+  if (tab.kind === "chat") return isDraftChatTabId(tab.id) ? null : tab.id;
+  return runOwnedTabRunId(tab);
+}
 
 function isTabVisibleForRun(tab: Tab, activeRunId: string | null): boolean {
   return !(

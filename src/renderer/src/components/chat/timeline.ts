@@ -1420,27 +1420,45 @@ export function compareRunsByAttention(a: RunState, b: RunState): number {
   return (Number.isFinite(bCreated) ? bCreated : 0) - (Number.isFinite(aCreated) ? aCreated : 0);
 }
 
-// Summary of everything that changed while the user was away, for the single
-// "While you were away" digest shown on focus-after-away. needsYou and
-// doneUnseen carry the actual runs so the digest can deep-link to them;
-// working is just a count of still-in-flight runs. total counts only the two
-// actionable lists so App can skip the digest when nothing landed.
+// Summary of attention states that changed while the user was away. Every
+// bucket retains its originating runs so navigation can prune only the run the
+// user reached while preserving unrelated entries.
 export interface AwayDigest {
   total: number;
   needsYou: RunState[];
   doneUnseen: RunState[];
-  working: number;
+  working: RunState[];
 }
 
-export function buildAwayDigest(runs: RunState[]): AwayDigest {
+export type AwayAttentionState = "blocked" | "done-unseen" | "live" | null;
+export type AwayDigestBaseline = Record<string, AwayAttentionState>;
+
+function awayAttentionState(run: RunState): AwayAttentionState {
+  const tone = describeRunStatus(run).tone;
+  return tone === "blocked" || tone === "done-unseen" || tone === "live"
+    ? tone
+    : null;
+}
+
+export function captureAwayDigestBaseline(runs: RunState[]): AwayDigestBaseline {
+  return Object.fromEntries(runs.map((run) => [run.id, awayAttentionState(run)]));
+}
+
+export function buildAwayDigest(
+  runs: RunState[],
+  baseline: AwayDigestBaseline,
+  visibleRunId: string | null,
+): AwayDigest {
   const needsYou: RunState[] = [];
   const doneUnseen: RunState[] = [];
-  let working = 0;
+  const working: RunState[] = [];
   for (const run of runs) {
-    const tone = describeRunStatus(run).tone;
-    if (tone === "blocked") needsYou.push(run);
-    else if (tone === "done-unseen") doneUnseen.push(run);
-    else if (tone === "live") working += 1;
+    if (run.id === visibleRunId) continue;
+    const state = awayAttentionState(run);
+    if (state === null || baseline[run.id] === state) continue;
+    if (state === "blocked") needsYou.push(run);
+    else if (state === "done-unseen") doneUnseen.push(run);
+    else working.push(run);
   }
   return {
     total: needsYou.length + doneUnseen.length,
@@ -1448,6 +1466,14 @@ export function buildAwayDigest(runs: RunState[]): AwayDigest {
     doneUnseen,
     working,
   };
+}
+
+export function pruneAwayDigest(digest: AwayDigest, runId: string): AwayDigest | null {
+  const needsYou = digest.needsYou.filter((run) => run.id !== runId);
+  const doneUnseen = digest.doneUnseen.filter((run) => run.id !== runId);
+  const working = digest.working.filter((run) => run.id !== runId);
+  const total = needsYou.length + doneUnseen.length;
+  return total > 0 ? { total, needsYou, doneUnseen, working } : null;
 }
 
 export function stepStatusColor(status: StepStatus): string {

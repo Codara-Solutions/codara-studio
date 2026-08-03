@@ -8,9 +8,8 @@ import type { NotifyKind } from "@shared/types";
 //
 // The three rules it enforces, unified across runs / terminal agents /
 // automations:
-//   1. "Needs you" (run.blocked) always delivers, even while watching.
-//   2. Completions deliver only when the user is not watching the source;
-//      suppressed ones are still recorded to the center, pre-read.
+//   1. Alerts deliver only when the user is not watching the exact source.
+//   2. Completions suppressed while watching are still recorded pre-read.
 //   3. Same kind twice for the same source is a no-op until rearm() —
 //      re-emits and settle races never alert twice.
 // Plus the terminal-completion guard: once a source alerted a completion
@@ -99,9 +98,10 @@ export function decide(
     return { deliver: false, record: false, read: true, reason: "watching" };
   }
 
-  // Watching suppresses everything except a run asking for the user —
-  // rule 1 fires even on-screen so a blocked run is never missed.
-  if (ctx.watching && kind !== "run.blocked") {
+  // The exact originating surface is already presenting this state. Suppress
+  // its alert, including run.blocked, while unrelated visible surfaces leave
+  // watching false and continue to alert.
+  if (ctx.watching) {
     return { deliver: false, record: true, read: true, reason: "watching" };
   }
 
