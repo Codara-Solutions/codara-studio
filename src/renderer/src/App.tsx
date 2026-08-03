@@ -82,6 +82,11 @@ import type {
 } from "./tabs/types";
 import { isRunOwnedTab } from "./tabs/types";
 import {
+  createManualAgentLaunchWorker,
+  isPaneAgentInjectable,
+  mergeTerminalRuntimeState,
+} from "./tabs/terminalAgentState";
+import {
   resolveEffectiveActiveId,
   resolveTopStripActiveId,
   runOwnedTabRunId,
@@ -100,6 +105,7 @@ import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   buildAgentResumeCommand,
+  runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
@@ -2228,9 +2234,13 @@ export default function App() {
           }
           return null;
         }
-        return existing.runtimeState === payload.state
+        const runtimeState = mergeTerminalRuntimeState(
+          existing.runtimeState,
+          payload.state,
+        );
+        return existing.runtimeState === runtimeState
           ? existing
-          : { ...existing, runtimeState: payload.state };
+          : { ...existing, runtimeState };
       },
     );
   }, [setTerminalPaneWorking]);
@@ -3614,6 +3624,8 @@ export default function App() {
         autorun,
         options?.session,
       );
+      const launchRuntime =
+        options?.session?.runtime ?? runtimeFromAgentSessionLaunchCommand(launchCommand);
       const active = tabs.tabs.find((t) => t.id === tabs.activeId);
       const target =
         active?.kind === "terminal"
@@ -3625,13 +3637,14 @@ export default function App() {
         const seedCwd = options?.cwd ?? activeWorkspace?.cwd ?? undefined;
         tabs.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
+          manualAgentRuntime: launchRuntime ?? undefined,
         });
         return;
       }
 
       const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
-      const runtime = paneRuntimeRef.current.get(target.activePaneId);
-      const currentCwd = runtime?.cwd ?? activeLeaf?.cwd ?? activeWorkspace?.cwd ?? undefined;
+      const paneRuntime = paneRuntimeRef.current.get(target.activePaneId);
+      const currentCwd = paneRuntime?.cwd ?? activeLeaf?.cwd ?? activeWorkspace?.cwd ?? undefined;
       // Three independent "this pane is in use" signals, any of which is
       // enough to skip the inject and split a fresh pane instead:
       //   - leaf.worker:        banner-based agent detection fired
@@ -3646,8 +3659,8 @@ export default function App() {
         activeLeaf !== null &&
         !activeLeaf.worker &&
         !activeLeaf.autorun &&
-        !runtime?.userInputAt &&
-        !runtime?.altScreenActive &&
+        !paneRuntime?.userInputAt &&
+        !paneRuntime?.altScreenActive &&
         (!options?.cwd || currentCwd === options.cwd);
       if (isUnusedPane) {
         tabs.setActiveTab(target.id);
@@ -3657,6 +3670,13 @@ export default function App() {
         // the pointer after the CLI starts.
         const injectCwd = options?.cwd ?? currentCwd;
         const injectSession = makeSession(injectCwd);
+        if (launchRuntime) {
+          tabs.setLeafWorker(
+            target.id,
+            target.activePaneId,
+            createManualAgentLaunchWorker(launchRuntime, target.activePaneId),
+          );
+        }
         if (injectSession) {
           tabs.setLeafAgentSession(target.id, target.activePaneId, injectSession);
         }
@@ -3675,6 +3695,9 @@ export default function App() {
         cwd,
         autorun: launchCommand,
         agentSession: makeSession(cwd),
+        worker: launchRuntime
+          ? createManualAgentLaunchWorker(launchRuntime, paneId)
+          : undefined,
       });
       if (added) {
         tabs.setActiveTab(target.id);
@@ -3682,7 +3705,10 @@ export default function App() {
         return;
       }
 
-      tabs.newTerminalTab(cwd, launchCommand, { agentSession: makeSession(cwd) });
+      tabs.newTerminalTab(cwd, launchCommand, {
+        agentSession: makeSession(cwd),
+        manualAgentRuntime: launchRuntime ?? undefined,
+      });
     },
     [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
   );
@@ -3788,7 +3814,10 @@ export default function App() {
         : request.runtime === "claude"
           ? CLAUDE_LAUNCH_COMMAND
           : CODEX_LAUNCH_COMMAND;
-      tabsRef.current.newTerminalTab(request.cwd, command, { agentSession: pointer });
+      tabsRef.current.newTerminalTab(request.cwd, command, {
+        agentSession: pointer,
+        manualAgentRuntime: request.runtime,
+      });
     },
     [],
   );
@@ -4782,6 +4811,7 @@ export default function App() {
   const spawnRoutedWorkerPane = useCallback(
     (autorun: string): string | null => {
       const { command: launchCommand, makeSession } = prepareWorkerLaunch(autorun);
+      const launchRuntime = runtimeFromAgentSessionLaunchCommand(launchCommand);
       const t = tabsRef.current;
       const active = t.tabs.find((tab) => tab.id === t.activeId);
       const target =
@@ -4791,7 +4821,10 @@ export default function App() {
             t.tabs.find((tab) => tab.kind === "terminal" && tab.scope?.kind !== "workers");
       if (!target || target.kind !== "terminal") {
         const seedCwd = activeWorkspace?.cwd ?? undefined;
-        t.newTerminalTab(seedCwd, launchCommand, { agentSession: makeSession(seedCwd) });
+        t.newTerminalTab(seedCwd, launchCommand, {
+          agentSession: makeSession(seedCwd),
+          manualAgentRuntime: launchRuntime ?? undefined,
+        });
         return null;
       }
       const paneId = makeId("pane");
@@ -4805,9 +4838,15 @@ export default function App() {
         cwd,
         autorun: launchCommand,
         agentSession: makeSession(cwd),
+        worker: launchRuntime
+          ? createManualAgentLaunchWorker(launchRuntime, paneId)
+          : undefined,
       });
       if (!added) {
-        t.newTerminalTab(cwd, launchCommand, { agentSession: makeSession(cwd) });
+        t.newTerminalTab(cwd, launchCommand, {
+          agentSession: makeSession(cwd),
+          manualAgentRuntime: launchRuntime ?? undefined,
+        });
         return null;
       }
       t.setActiveTab(target.id);
@@ -4817,11 +4856,10 @@ export default function App() {
     [activeWorkspace?.cwd, prepareWorkerLaunch],
   );
 
-  // Wait for a freshly-spawned worker pane's CLI agent to enter its REPL
-  // before typing our prompt at it. We watch the leaf's `worker.agentRunning`
-  // bit which `onTerminalPaneAgentState` flips on alt-screen detection. If
-  // it never flips (very slow boot, agent crashed) we time out and inject
-  // anyway — at worst the text lands at the shell, which is recoverable.
+  // Wait for a freshly spawned worker pane's CLI agent to enter its REPL
+  // before typing our prompt at it. The seeded worker metadata paints the
+  // starting chip before launch, so only detector-confirmed alt-screen state
+  // proves that injection is safe. Keep the timeout for failed or slow boots.
   const waitForAgentReady = useCallback(
     (paneId: string, timeoutMs = 30000): Promise<void> =>
       new Promise((resolve) => {
@@ -4830,7 +4868,12 @@ export default function App() {
           for (const tab of tabsRef.current.tabs) {
             if (tab.kind !== "terminal") continue;
             const leaf = findLeafByPaneId(tab.root, paneId);
-            if (leaf?.worker?.agentRunning) {
+            if (
+              isPaneAgentInjectable(
+                leaf?.worker,
+                paneRuntimeRef.current.get(paneId),
+              )
+            ) {
               resolve();
               return;
             }
@@ -4882,7 +4925,23 @@ export default function App() {
       disabled: !activeWorkspace,
       disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
     });
-    const openWorkers = enumerateOpenWorkers(visibleWorkbenchTabs, runs);
+    const openWorkers = enumerateOpenWorkers(visibleWorkbenchTabs, runs).filter(
+      (worker) => {
+        for (const tab of visibleWorkbenchTabs) {
+          if (tab.kind !== "terminal") continue;
+          const leaf = findLeafByPaneId(tab.root, worker.injectId);
+          if (
+            isPaneAgentInjectable(
+              leaf?.worker,
+              paneRuntimeRef.current.get(worker.injectId),
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
+    );
     for (const worker of openWorkers) {
       list.push({
         id: `worker-existing-${worker.injectId}`,

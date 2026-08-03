@@ -27,14 +27,18 @@ export function buildClaudeLaunch(): { command: string; sessionId: string } {
 // Such panes spawn with SPARK_NO_SHELL_INTEGRATION=1 so pwsh can take the
 // command over args (-NoProfile -NoExit -Command …) — see withStartupCommand
 // in src/main/pty-manager.ts — which removes the 1500ms type-after-mount race.
-export function isAgentSessionLaunchCommand(command: string | undefined | null): boolean {
+export function runtimeFromAgentSessionLaunchCommand(
+  command: string | undefined | null,
+): AgentSessionRuntime | null {
   const cmd = command?.trim();
-  if (!cmd) return false;
-  return (
-    cmd.startsWith(CLAUDE_LAUNCH_COMMAND) ||
-    cmd.startsWith(CODEX_LAUNCH_COMMAND) ||
-    cmd.startsWith("codex resume ")
-  );
+  if (!cmd) return null;
+  if (cmd.startsWith(CLAUDE_LAUNCH_COMMAND)) return "claude";
+  if (cmd.startsWith(CODEX_LAUNCH_COMMAND) || cmd.startsWith("codex resume ")) return "codex";
+  return null;
+}
+
+export function isAgentSessionLaunchCommand(command: string | undefined | null): boolean {
+  return runtimeFromAgentSessionLaunchCommand(command) !== null;
 }
 
 // Resume-command builders — the autorun typed into a restored pane's fresh

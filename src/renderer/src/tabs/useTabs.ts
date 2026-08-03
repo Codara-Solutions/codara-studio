@@ -39,6 +39,8 @@ import type {
   WhiteboardTab,
 } from "./types";
 import { isRunOwnedTab } from "./types";
+import { createManualAgentLaunchWorker } from "./terminalAgentState";
+import { runtimeFromAgentSessionLaunchCommand } from "../workers/launch-commands";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
 // a plain React hook (no zustand dependency) since the rest of Codara uses
@@ -866,6 +868,7 @@ export interface UseTabsApi {
       agentSession?: TerminalAgentSession | null;
       nativeCliLoginToken?: string;
       title?: string;
+      manualAgentRuntime?: TerminalAgentSession["runtime"];
     },
   ) => TabId;
   // Create a terminal tab owned by a bridge caller (agent-socket
@@ -1586,6 +1589,7 @@ export function useTabs(
         agentSession?: TerminalAgentSession | null;
         nativeCliLoginToken?: string;
         title?: string;
+        manualAgentRuntime?: TerminalAgentSession["runtime"];
       },
     ): TabId => {
       const id = makeId("term");
@@ -1594,6 +1598,9 @@ export function useTabs(
       // Durable resume pointer (Claude launches only) — set at creation so it is
       // persisted immediately, independent of post-hoc discovery.
       if (options?.agentSession) root.agentSession = options.agentSession;
+      if (options?.manualAgentRuntime) {
+        root.worker = createManualAgentLaunchWorker(options.manualAgentRuntime, paneId);
+      }
       if (options?.nativeCliLoginToken) {
         root.nativeCliLoginToken = options.nativeCliLoginToken;
       }
@@ -2037,6 +2044,11 @@ export function useTabs(
           newPaneId = fresh;
           const newLeaf = leaf(fresh, target.cwd, autorun);
           if (agentSession) newLeaf.agentSession = agentSession;
+          const launchRuntime =
+            agentSession?.runtime ?? runtimeFromAgentSessionLaunchCommand(autorun);
+          if (launchRuntime) {
+            newLeaf.worker = createManualAgentLaunchWorker(launchRuntime, fresh);
+          }
           const root = splitAtLeaf(
             t.root,
             paneId,
