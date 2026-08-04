@@ -58,6 +58,10 @@ const CORA_RULES = [
     fragments: ["EVERY verifier including the FIRST one", "reading the diff is not the same as holding exit codes"],
   },
   {
+    name: "terminal tabs are for showing the user, not for the agent's own work",
+    fragments: ["SHOWING THEM how to do something", "stays in bash where it costs them no screen"],
+  },
+  {
     name: "no full build in the live app's own workspace",
     fragments: ["full project build in the user's workspace", "output directory the live app is serving"],
   },
