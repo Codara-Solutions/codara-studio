@@ -245,6 +245,25 @@ export function resolveOpenRunQuestion(run: RunState): HumanRunMessage | null {
   return unresolved.at(-1) ?? null;
 }
 
+/**
+ * The open question that owns a blocked run's continuation, if any. While this
+ * is set, answering IS the resume: the answer releases the blocker and the
+ * answer path (schedulePendingManagerResume, or the automation loop's linked-
+ * answer seam for a direct run) schedules the next driver. A plain resume in
+ * this state drops the blocker, flips the run to "running" with nothing
+ * scheduled to drive it, and leaves the question permanently unanswerable —
+ * so resumeRun refuses it and the composer hides its Resume button, both off
+ * this one predicate.
+ *
+ * Deliberately null for a blocked run with NO open question left: a direct
+ * Loom run stays "blocked" after its answer is consumed, and a plain resume is
+ * the legitimate escape hatch there.
+ */
+export function resumeBlockingRunQuestion(run: RunState): HumanRunMessage | null {
+  if (run.status !== "blocked") return null;
+  return resolveOpenRunQuestion(run);
+}
+
 /** Resolve the exact still-open question owned by one direct-Loom node. Durable
  * live-RPC blockers may be unstamped, so their exact blocker id wins first. */
 export function resolveOpenRunQuestionForLoomNode(

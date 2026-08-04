@@ -85,6 +85,7 @@ import {
   normalizeHumanRunQuestionMessages,
   resolveOpenRunQuestion as resolveOpenRunQuestionPure,
   resolveSingleUnresolvedRunQuestion,
+  resumeBlockingRunQuestion,
   unresolvedRunQuestions,
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
@@ -9921,6 +9922,18 @@ export async function resumeManagerTurnRecovery(
 
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  // A run blocked on an open question resumes by ANSWERING it, never by a plain
+  // resume. Plain-resuming it wedged the run: this function drops the blocker
+  // and writes "running", but nothing is scheduled to drive it (an auto Pi
+  // manager fails shouldScheduleDriver, and shouldResumeManagerPlanning only
+  // fires from "paused"), and answerRunQuestion then rejects the orphaned
+  // question off the non-blocked state — an unanswerable question on a run with
+  // no driver. The guard lives here because every transport (renderer IPC,
+  // remote access, CLI bridge) resumes through this one function.
+  const blockingQuestion = resumeBlockingRunQuestion(run);
+  if (blockingQuestion) {
+    throw new Error(`Run is blocked on question ${blockingQuestion.id}. Answer it to resume.`);
+  }
   if (run.managerTurnRecovery) {
     if (run.managerTurnRecovery.state === "resuming") return run;
     return (

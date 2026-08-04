@@ -530,11 +530,19 @@ export default function ChatComposer({
     });
   }, [draft]);
 
-  const openQuestion = run ? findOpenQuestion(run) : null;
+  const openQuestion = useMemo(() => (run ? findOpenQuestion(run) : null), [run]);
   const status = run?.status;
   const isActive =
     status === "running" || status === "planning" || status === "reviewing";
-  const isPaused = status === "paused" || status === "blocked";
+  // A run blocked on an open question resumes by ANSWERING it — the options
+  // rendered right above this bar ARE its resume path. Offering a plain Resume
+  // beside them wedged the run, so resumeRun now refuses that call outright
+  // (resumeBlockingRunQuestion in @shared/run-questions, mirrored here). Every
+  // other paused/blocked shape — a force pause, a parked turn, a direct Loom
+  // run still "blocked" after its answer was consumed — keeps the button.
+  const blockedOnOpenQuestion = status === "blocked" && openQuestion !== null;
+  const isPaused =
+    (status === "paused" || status === "blocked") && !blockedOnOpenQuestion;
   // Parked by the manager-turn failure policy (provider overload/rate limit):
   // Resume retries the failed turn, so the button says what it does. The two
   // lastAction strings mirror manager-turn-policy.ts in the main process.
@@ -1209,9 +1217,13 @@ export default function ChatComposer({
                   ? "Adding pasted image..."
                 : isActive
                   ? "Enter to queue steering · Stop remains separate"
-                  : isPaused
-                    ? "Enter to send and resume · Resume alone skips the note"
-                    : "Enter to send, Shift+Enter for a new line"}
+                  : openQuestion
+                    // No Resume button here — the answer IS the resume — so the
+                    // hint must not point at one.
+                    ? "Enter to answer · Cora picks the work back up"
+                    : isPaused
+                      ? "Enter to send and resume · Resume alone skips the note"
+                      : "Enter to send, Shift+Enter for a new line"}
             </span>
           )}
           {/* Right cluster: context gauge | capabilities | resume | send read
