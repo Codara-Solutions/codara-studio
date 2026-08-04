@@ -168,6 +168,28 @@ const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
 };
 
 /**
+ * Card-scale controls. A column of account cards is the dense part of this
+ * panel, so the buttons inside a card — the ≤2 next steps and the "···"
+ * trigger — run one step below the form-scale buttons the Add-account row and
+ * the rename forms use. `height` has to be set and not just `minHeight`:
+ * .spark-btn pins its own 26px, which a smaller minimum alone cannot undo.
+ */
+const COMPACT_BUTTON_STYLE: React.CSSProperties = {
+  ...BUTTON_STYLE,
+  height: 21,
+  minHeight: 21,
+  padding: "0 7px",
+  fontSize: 10.5,
+};
+
+const COMPACT_PRIMARY_BUTTON_STYLE: React.CSSProperties = {
+  ...COMPACT_BUTTON_STYLE,
+  border: "1px solid var(--accent-edge)",
+  background: "var(--accent-soft)",
+  color: "var(--accent)",
+};
+
+/**
  * Action diet: a card shows at most two buttons — the single most useful next
  * step first (accent), one runner-up beside it — and everything else waits
  * behind the "···" menu. A state that is already true never gets a button, so
@@ -285,13 +307,23 @@ function ActionButton({
   children,
   disabled,
   primary = false,
+  compact = false,
   onClick,
 }: {
   children: React.ReactNode;
   disabled?: boolean;
   primary?: boolean;
+  /** Card-scale rather than form-scale — see COMPACT_BUTTON_STYLE. */
+  compact?: boolean;
   onClick: () => void;
 }) {
+  const base = compact
+    ? primary
+      ? COMPACT_PRIMARY_BUTTON_STYLE
+      : COMPACT_BUTTON_STYLE
+    : primary
+      ? PRIMARY_BUTTON_STYLE
+      : BUTTON_STYLE;
   return (
     <button
       type="button"
@@ -299,7 +331,7 @@ function ActionButton({
       disabled={disabled}
       onClick={onClick}
       style={{
-        ...(primary ? PRIMARY_BUTTON_STYLE : BUTTON_STYLE),
+        ...base,
         ...(disabled ? { cursor: "default", opacity: 0.5 } : {}),
       }}
     >
@@ -359,7 +391,7 @@ function CardOverflowMenu({
         aria-expanded={open}
         aria-label={label}
         onClick={() => (open ? close() : setOpen(true))}
-        style={{ ...BUTTON_STYLE, padding: "4px 9px", letterSpacing: 1 }}
+        style={{ ...COMPACT_BUTTON_STYLE, padding: "0 8px", letterSpacing: 1 }}
       >
         ···
       </button>
@@ -513,46 +545,56 @@ function AddAccountMenu({
   );
 }
 
+/**
+ * One sign-in's state, as an inline mark-plus-sentence pair rather than a row
+ * of its own. The two lines a card carries sit side by side in a wrapping row,
+ * so a healthy card spends one line on both — and a long state ("…is not
+ * installed on this Mac", an error) still wraps to its own line and stays
+ * readable at full length. The wording is what tells the two sides apart, so
+ * it is never shortened here.
+ */
 function ConnectionLine({ state }: { state: ConnectionState }) {
   return (
-    <div
+    <span
       style={{
-        display: "grid",
-        gridTemplateColumns: "12px minmax(0, 1fr)",
+        display: "inline-flex",
         alignItems: "baseline",
-        gap: 7,
+        gap: 4,
+        minWidth: 0,
       }}
     >
       <span
         aria-hidden
         style={{
+          flex: "0 0 auto",
           color: state.ok
             ? "var(--accent)"
             : state.danger
               ? "var(--danger)"
               : "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          textAlign: "center",
+          fontSize: 10,
+          lineHeight: 1.35,
         }}
       >
         {state.ok ? "✓" : "–"}
       </span>
       <span
         style={{
+          minWidth: 0,
           color: state.danger
             ? "var(--danger)"
             : state.ok
               ? "var(--ink)"
               : "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          lineHeight: 1.4,
+          fontSize: 10.5,
+          lineHeight: 1.35,
         }}
       >
         {state.text}
       </span>
-    </div>
+    </span>
   );
 }
 
@@ -866,8 +908,8 @@ function AccountCard({
       aria-current={active ? "true" : undefined}
       style={{
         display: "grid",
-        gap: 8,
-        padding: "10px 11px",
+        gap: 5,
+        padding: "7px 9px",
         borderRadius: "var(--radius-control, 5px)",
         border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
         // Selection, not status: an accent hairline plus a faint ring and a
@@ -881,21 +923,43 @@ function AccountCard({
           : undefined,
       }}
     >
+      {/* Name, address, and plan share one line — three stacked lines was the
+          card's tallest block and its least informative. Both the name and the
+          address can give ground to the other and ellipsize; the plan is two
+          words at most, so it holds its width. */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          gap: 10,
+          gap: 8,
         }}
       >
-        <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+        <div
+          style={{
+            minWidth: 0,
+            display: "grid",
+            gridAutoFlow: "column",
+            // minmax(0, max-content) is load-bearing, not decoration. A flex
+            // row of nowrap text reports the sum of that text as the row's own
+            // minimum width, so one long address would stop the whole panel
+            // from narrowing and hand the Settings scroll pane a horizontal
+            // scrollbar. Grid tracks with a zero floor take their content width
+            // when it fits and let it ellipsize when it does not.
+            gridAutoColumns: "minmax(0, max-content)",
+            justifyContent: "start",
+            alignItems: "baseline",
+            columnGap: 6,
+          }}
+        >
           <span
             style={{
+              minWidth: 0,
               color: "var(--ink)",
               fontFamily: "var(--font-sans)",
-              fontSize: 12.5,
+              fontSize: 12,
               fontWeight: 650,
+              lineHeight: 1.35,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -907,9 +971,11 @@ function AccountCard({
             <span
               title={card.email}
               style={{
+                minWidth: 0,
                 color: "var(--muted)",
                 fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
+                fontSize: 10,
+                lineHeight: 1.35,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -921,9 +987,14 @@ function AccountCard({
           {card.plan ? (
             <span
               style={{
+                minWidth: 0,
                 color: "var(--muted)",
                 fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
+                fontSize: 10,
+                lineHeight: 1.35,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
               }}
             >
               {card.plan} plan
@@ -939,7 +1010,7 @@ function AccountCard({
             flex: "0 0 auto",
             display: "flex",
             alignItems: "center",
-            gap: 6,
+            gap: 5,
           }}
         >
           {active ? (
@@ -949,10 +1020,12 @@ function AccountCard({
                 border: "1px solid var(--accent-edge)",
                 background: "var(--accent-soft)",
                 borderRadius: 99,
-                padding: "2px 8px",
+                padding: "1px 7px",
                 fontFamily: "var(--font-sans)",
-                fontSize: 10,
+                fontSize: 9.5,
                 fontWeight: 650,
+                lineHeight: 1.4,
+                whiteSpace: "nowrap",
               }}
             >
               {activeLabel}
@@ -966,7 +1039,15 @@ function AccountCard({
         </div>
       </div>
 
-      <div style={{ display: "grid", gap: 4 }}>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "baseline",
+          columnGap: 12,
+          rowGap: 2,
+        }}
+      >
         <ConnectionLine state={coraConnectionState(cora)} />
         <ConnectionLine state={cliConnectionState(cli, cliLabel)} />
       </div>
@@ -976,8 +1057,8 @@ function AccountCard({
           style={{
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
-            fontSize: 10.5,
-            lineHeight: 1.4,
+            fontSize: 10,
+            lineHeight: 1.35,
           }}
         >
           {signInHint}
@@ -989,8 +1070,8 @@ function AccountCard({
           style={{
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
-            fontSize: 10.5,
-            lineHeight: 1.4,
+            fontSize: 10,
+            lineHeight: 1.35,
           }}
         >
           {card.pairHint}
@@ -1001,8 +1082,8 @@ function AccountCard({
         <div
           style={{
             display: "grid",
-            gap: 7,
-            paddingTop: 7,
+            gap: 5,
+            paddingTop: 5,
             borderTop: "1px solid var(--rule-soft)",
           }}
         >
@@ -1015,12 +1096,12 @@ function AccountCard({
         // limits. Nothing here is fetched or guessed.
         <div
           style={{
-            paddingTop: 7,
+            paddingTop: 5,
             borderTop: "1px solid var(--rule-soft)",
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
-            fontSize: 10.5,
-            lineHeight: 1.4,
+            fontSize: 10,
+            lineHeight: 1.35,
           }}
         >
           {CLI_ONLY_USAGE_HINT}
@@ -1055,10 +1136,11 @@ function AccountCard({
       ) : visibleActions.length > 0 ? (
         // Primary/secondary buttons only — the "···" menu lives in the header
         // row above, so a card with no next step renders no action row at all.
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
           {visibleActions.map((action, index) => (
             <ActionButton
               key={action.id}
+              compact
               disabled={action.disabled}
               primary={index === 0}
               onClick={() => void action.run()}
@@ -1086,8 +1168,8 @@ function AccountProviderGroup({
       aria-labelledby={`accounts-${view.provider}-title`}
       style={{
         display: "grid",
-        gap: 8,
-        padding: 10,
+        gap: 7,
+        padding: 9,
         borderRadius: "var(--radius-surface, 7px)",
         border: "1px solid var(--rule-soft)",
         background: "color-mix(in oklab, var(--ink) 2%, transparent)",
@@ -1191,7 +1273,7 @@ function AccountProviderGroup({
         </div>
       ) : null}
 
-      <div style={{ display: "grid", gap: 6 }}>
+      <div style={{ display: "grid", gap: 5 }}>
         {view.cards.map((card) => (
           <AccountCard
             key={card.key}
@@ -1208,8 +1290,8 @@ function AccountProviderGroup({
             aria-disabled="true"
             style={{
               display: "grid",
-              gap: 6,
-              padding: "10px 11px",
+              gap: 4,
+              padding: "7px 9px",
               borderRadius: "var(--radius-control, 5px)",
               border: "1px solid var(--rule-soft)",
               background: "color-mix(in oklab, var(--ink) 3%, transparent)",
@@ -1219,8 +1301,9 @@ function AccountProviderGroup({
               style={{
                 color: "var(--ink)",
                 fontFamily: "var(--font-sans)",
-                fontSize: 12.5,
+                fontSize: 12,
                 fontWeight: 650,
+                lineHeight: 1.35,
               }}
             >
               Personal

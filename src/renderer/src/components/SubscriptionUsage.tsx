@@ -28,11 +28,17 @@ function toneForUsage(usedPercent: number): string {
   return `color-mix(in oklch, var(--danger) ${((used - 60) / 40) * 100}%, ${AMBER})`;
 }
 
-function UsageBar({ window: usageWindow }: { window: PiUsageWindow }) {
+function UsageBar({
+  window: usageWindow,
+  compact = false,
+}: {
+  window: PiUsageWindow;
+  compact?: boolean;
+}) {
   const tone = toneForUsage(usageWindow.usedPercent);
   const rounded = Math.round(usageWindow.usedPercent);
   return (
-    <div style={{ display: "grid", gap: 3 }}>
+    <div style={{ display: "grid", gap: compact ? 2 : 3 }}>
       <div
         style={{
           display: "flex",
@@ -41,14 +47,22 @@ function UsageBar({ window: usageWindow }: { window: PiUsageWindow }) {
           gap: 8,
         }}
       >
-        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
+        <span
+          style={{
+            color: "var(--ink)",
+            fontFamily: "var(--font-sans)",
+            fontSize: compact ? 10.5 : 11,
+            ...(compact ? { lineHeight: 1.2 } : {}),
+          }}
+        >
           {usageWindow.label}
         </span>
         <span
           style={{
             color: "var(--muted)",
             fontFamily: "var(--font-mono)",
-            fontSize: 10,
+            fontSize: compact ? 9.5 : 10,
+            ...(compact ? { lineHeight: 1.2 } : {}),
             whiteSpace: "nowrap",
           }}
         >
@@ -62,7 +76,7 @@ function UsageBar({ window: usageWindow }: { window: PiUsageWindow }) {
         aria-valuemax={100}
         aria-label={`${usageWindow.label} quota used`}
         style={{
-          height: 5,
+          height: compact ? 3 : 5,
           borderRadius: 99,
           overflow: "hidden",
           background: "color-mix(in oklab, var(--ink) 10%, transparent)",
@@ -88,16 +102,33 @@ function UsageBar({ window: usageWindow }: { window: PiUsageWindow }) {
  * The limit report for one account, without any card chrome: the Accounts
  * section renders this inside the account's own card, so the usage panel must
  * not draw a competing border or its own accent ring.
+ *
+ * `compact` is that in-card density — smaller labels, hairline bars, and the
+ * three windows drawn tight enough to read as one block. The standalone panel
+ * below has a whole card to itself and keeps the roomier scale.
  */
-export function UsageEntryBody({ usage }: { usage: UsageEntry }) {
+export function UsageEntryBody({
+  usage,
+  compact = false,
+}: {
+  usage: UsageEntry;
+  compact?: boolean;
+}) {
   const connected = usage.status === "ok";
   const temporarilyThrottled = usage.message?.startsWith("Claude temporarily throttled") === true;
   return (
-    <div style={{ display: "grid", gap: 7 }}>
+    <div style={{ display: "grid", gap: compact ? 4 : 7 }}>
       {connected && usage.windows.length > 0 ? (
-        <div style={{ display: "grid", gap: 7 }}>
+        <div
+          style={{
+            display: "grid",
+            // Wider than the gap between a label and its own bar, so each bar
+            // still groups upward instead of floating between two windows.
+            gap: compact ? 4 : 7,
+          }}
+        >
           {usage.windows.map((usageWindow) => (
-            <UsageBar key={usageWindow.id} window={usageWindow} />
+            <UsageBar key={usageWindow.id} window={usageWindow} compact={compact} />
           ))}
         </div>
       ) : (
@@ -110,8 +141,8 @@ export function UsageEntryBody({ usage }: { usage: UsageEntry }) {
                   ? "var(--warn)"
                   : "var(--danger)",
             fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            lineHeight: 1.4,
+            fontSize: compact ? 10 : 11,
+            lineHeight: compact ? 1.35 : 1.4,
           }}
         >
           {usage.status === "not_connected"
@@ -124,7 +155,15 @@ export function UsageEntryBody({ usage }: { usage: UsageEntry }) {
       )}
 
       {usage.limitReached ? (
-        <span style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 11, fontWeight: 650 }}>
+        <span
+          style={{
+            color: "var(--danger)",
+            fontFamily: "var(--font-sans)",
+            fontSize: compact ? 10 : 11,
+            lineHeight: compact ? 1.35 : undefined,
+            fontWeight: 650,
+          }}
+        >
           {usage.generalLimitReached
             ? "General limit reached — normal agent requests will be refused until this resets."
             : "A model or feature limit is reached — check the scoped window above."}

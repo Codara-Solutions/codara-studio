@@ -2739,7 +2739,7 @@ function AccountsSettings() {
             provider: descriptor.provider,
             ...(email ? { email } : {}),
             ...(usage?.plan ? { plan: usage.plan } : {}),
-            ...(usage ? { usage: <UsageEntryBody usage={usage} /> } : {}),
+            ...(usage ? { usage: <UsageEntryBody usage={usage} compact /> } : {}),
             // An email match is a strong hint, not proof, so the card says how
             // to make it one. Reconnecting captures the account id and turns
             // this into a fingerprint pairing.
