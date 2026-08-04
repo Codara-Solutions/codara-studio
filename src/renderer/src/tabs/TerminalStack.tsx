@@ -28,6 +28,7 @@ import type {
 } from "./types";
 import { BackIcon, CloseIcon, DragHandleIcon, LockIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
 import { workerModelLabel } from "../components/runs/run-format";
+import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import {
   TERMINAL_PANE_DRAG_MIME,
   beginTerminalPaneDrag,
@@ -2256,7 +2257,7 @@ const AddPaneMenu = React.forwardRef<
       hint: "worker",
       command: CLAUDE_LAUNCH_COMMAND,
       accent: "claude",
-      glyph: <RuntimeGlyph letter="C" />,
+      glyph: <RuntimeGlyph runtime="claude" />,
     },
     {
       kind: "codex",
@@ -2264,7 +2265,7 @@ const AddPaneMenu = React.forwardRef<
       hint: "worker",
       command: CODEX_LAUNCH_COMMAND,
       accent: "codex",
-      glyph: <RuntimeGlyph letter="X" />,
+      glyph: <RuntimeGlyph runtime="codex" />,
     },
   ];
 
@@ -2454,17 +2455,10 @@ function menuItemTone(accent: "shell" | "claude" | "codex"): {
   };
 }
 
-function RuntimeGlyph({ letter }: { letter: string }) {
+function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {
   return (
-    <span
-      style={{
-        fontSize: 13,
-        fontWeight: 700,
-        fontFamily: "var(--font-mono)",
-        letterSpacing: 0,
-      }}
-    >
-      {letter}
+    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+      <RuntimeMark runtime={runtime} size={13} />
     </span>
   );
 }

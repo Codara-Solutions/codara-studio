@@ -49,6 +49,7 @@ import AccountCards, {
   type NativeCliAccountBusyAction,
 } from "./AccountCards";
 import RemoteAccessSettings from "./RemoteAccessSettings";
+import { RuntimeMark } from "./BrandMarks";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
 import packageJson from "../../../../package.json";
 
@@ -3559,6 +3560,15 @@ function KeybindingsTab() {
   return <KeybindingsSection preferences={preferences} setPreference={setPreference} />;
 }
 
+// One confirm panel serves both deletes, so what is pending is either a single
+// session or a whole selection. Bulk never carries a memory scope: which memory
+// a delete may take with it is a per-session call (a Claude project's memory is
+// shared, Codex's is machine-wide), and that decision doesn't survive being
+// applied to a dozen rows at once.
+type PendingSessionDelete =
+  | { kind: "one"; session: WorkerSessionSummary }
+  | { kind: "many"; sessions: WorkerSessionSummary[] };
+
 function SessionsSettings({
   workspaceCwd,
   onOpenWorkerSession,
@@ -3577,8 +3587,14 @@ function SessionsSettings({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<WorkerSessionSummary | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<PendingSessionDelete | null>(null);
   const [deleteMemory, setDeleteMemory] = useState(false);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
+  // Number of sessions a running bulk delete has already worked through, or
+  // null when no bulk delete is in flight. Doubles as the busy flag.
+  const [bulkDone, setBulkDone] = useState<number | null>(null);
+  const bulkBusy = bulkDone !== null;
+  const locked = bulkBusy || busyId !== null;
 
   const refresh = async () => {
     const bridge = window.spark.agentSession as Partial<typeof window.spark.agentSession>;
@@ -3605,6 +3621,18 @@ function SessionsSettings({
     void refresh();
   }, []);
 
+  // A session that disappeared between refreshes (deleted here, or from
+  // another window) must not linger in the selection and come back as a
+  // delete target the next time the user hits Delete selected.
+  useEffect(() => {
+    if (!sessions) return;
+    const live = new Set(sessions.map(workerSessionKey));
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((key) => live.has(key)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [sessions]);
+
   const filtered = useMemo(() => {
     if (!sessions) return [];
     const query = filter.trim().toLowerCase();
@@ -3619,14 +3647,44 @@ function SessionsSettings({
     });
   }, [filter, runtimeFilter, sessions]);
 
+  // Select-all only ever acts on what the filter is showing, but the selection
+  // itself survives a filter change — what you ticked is what gets deleted.
+  const filteredKeys = useMemo(() => filtered.map(workerSessionKey), [filtered]);
+  const selectedFilteredCount = filteredKeys.filter((key) => selected.has(key)).length;
+  const allFilteredSelected =
+    filteredKeys.length > 0 && selectedFilteredCount === filteredKeys.length;
+  const someFilteredSelected = selectedFilteredCount > 0 && !allFilteredSelected;
+  const selectedSessions = useMemo(
+    () => (sessions ?? []).filter((session) => selected.has(workerSessionKey(session))),
+    [sessions, selected],
+  );
+
+  const toggleSession = (key: string, checked: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
+
+  const toggleAllFiltered = (checked: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const key of filteredKeys) {
+        if (checked) next.add(key);
+        else next.delete(key);
+      }
+      return next;
+    });
+  };
+
   const startNew = async (runtime: WorkerSessionRuntime) => {
     const cwd = await window.spark.dialog.openDirectory(workspaceCwd ?? undefined);
     if (cwd) onOpenWorkerSession(runtime, cwd, null);
   };
 
-  const confirmDelete = async () => {
-    const session = pendingDelete;
-    if (!session) return;
+  const confirmSingleDelete = async (session: WorkerSessionSummary) => {
     const deleteSession = (
       window.spark.agentSession as Partial<typeof window.spark.agentSession>
     ).delete;
@@ -3670,6 +3728,54 @@ function SessionsSettings({
     }
   };
 
+  // Sequential on purpose: the delete IPC rewrites the shared history index
+  // per call, so overlapping deletes would race each other's rewrite. One
+  // failure never stops the run — the rest are still deleted and the failure
+  // is reported at the end.
+  const confirmBulkDelete = async (targets: WorkerSessionSummary[]) => {
+    const deleteSession = (
+      window.spark.agentSession as Partial<typeof window.spark.agentSession>
+    ).delete;
+    if (typeof deleteSession !== "function") {
+      setPendingDelete(null);
+      setError("Restart Codara once to enable session deletion.");
+      return;
+    }
+    setBulkDone(0);
+    setError(null);
+    setNotice(null);
+    const warnings: string[] = [];
+    const failures: string[] = [];
+    let deleted = 0;
+    for (const session of targets) {
+      try {
+        const result = await deleteSession({
+          runtime: session.runtime,
+          nativeCodexProfileId: session.nativeCodexProfileId,
+          sessionId: session.sessionId,
+          cwd: session.cwd,
+          transcriptPath: session.transcriptPath,
+          memoryScope: "none",
+        });
+        deleted += 1;
+        warnings.push(...result.warnings);
+      } catch (err) {
+        failures.push(`“${session.title}”: ${(err as Error).message}`);
+      }
+      setBulkDone((done) => (done === null ? null : done + 1));
+    }
+    setPendingDelete(null);
+    setSelected(new Set());
+    setBulkDone(null);
+    // refresh() clears the error banner on success, so the outcome is written
+    // after the list has been re-read.
+    await refresh();
+    setNotice([`Deleted ${countedSessions(deleted)}.`, ...warnings].join(" "));
+    if (failures.length > 0) {
+      setError(`${countedSessions(failures.length)} could not be deleted. ${failures.join(" ")}`);
+    }
+  };
+
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
@@ -3687,10 +3793,16 @@ function SessionsSettings({
       ) : null}
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <FooterButton primary onClick={() => void startNew("claude")}>New Claude</FooterButton>
-        <FooterButton primary onClick={() => void startNew("codex")}>New Codex</FooterButton>
+        <FooterButton primary disabled={bulkBusy} onClick={() => void startNew("claude")}>
+          <RuntimeMark runtime="claude" size={12} />
+          New Claude
+        </FooterButton>
+        <FooterButton primary disabled={bulkBusy} onClick={() => void startNew("codex")}>
+          <RuntimeMark runtime="codex" size={12} />
+          New Codex
+        </FooterButton>
         <div style={{ flex: 1 }} />
-        <FooterButton onClick={() => void refresh()}>Refresh</FooterButton>
+        <FooterButton disabled={bulkBusy} onClick={() => void refresh()}>Refresh</FooterButton>
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -3698,6 +3810,7 @@ function SessionsSettings({
           className="spark-input"
           type="text"
           value={filter}
+          disabled={bulkBusy}
           onChange={(event) => setFilter(event.currentTarget.value)}
           placeholder="Filter by title, directory, or session id"
           style={{ flex: 1, width: "auto" }}
@@ -3706,6 +3819,7 @@ function SessionsSettings({
           className="spark-input"
           aria-label="Filter sessions by provider"
           value={runtimeFilter}
+          disabled={bulkBusy}
           onChange={(event) =>
             setRuntimeFilter(event.currentTarget.value as "all" | WorkerSessionRuntime)
           }
@@ -3715,6 +3829,44 @@ function SessionsSettings({
           <option value="claude">Claude</option>
           <option value="codex">Codex</option>
         </select>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 26, padding: "0 2px" }}>
+        <input
+          type="checkbox"
+          aria-label="Select all filtered sessions"
+          checked={allFilteredSelected}
+          disabled={filteredKeys.length === 0 || locked}
+          ref={(node) => {
+            // Indeterminate is a DOM property, not an attribute, so React can
+            // only reach it through the node itself.
+            if (node) node.indeterminate = someFilteredSelected;
+          }}
+          onChange={(event) => toggleAllFiltered(event.currentTarget.checked)}
+          style={{ accentColor: "var(--accent)", cursor: "default" }}
+        />
+        {selected.size > 0 ? (
+          <span
+            style={{
+              color: "var(--ink-dim)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 9.5,
+            }}
+          >
+            {selected.size} selected
+          </span>
+        ) : null}
+        <div style={{ flex: 1 }} />
+        <DangerButton
+          disabled={selected.size === 0 || locked}
+          onClick={() => {
+            setPendingDelete({ kind: "many", sessions: selectedSessions });
+            setDeleteMemory(false);
+            setNotice(null);
+          }}
+        >
+          Delete selected
+        </DangerButton>
       </div>
 
       {error ? <SessionManagerMessage tone="danger">{error}</SessionManagerMessage> : null}
@@ -3734,35 +3886,45 @@ function SessionsSettings({
           }}
         >
           <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 700 }}>
-            Permanently delete “{pendingDelete.title}”?
+            {pendingDelete.kind === "one"
+              ? `Permanently delete “${pendingDelete.session.title}”?`
+              : `Permanently delete ${countedSessions(pendingDelete.sessions.length)}?`}
           </div>
           <div style={{ color: "var(--muted)", fontSize: 10, lineHeight: 1.45 }}>
-            This removes the local transcript and cannot be undone. Close a running copy of the
-            session before deleting it.
+            {pendingDelete.kind === "one"
+              ? "This removes the local transcript and cannot be undone. Close a running copy of the session before deleting it."
+              : "This removes each local transcript and cannot be undone. Close any running copies of these sessions before deleting them."}
           </div>
-          <label
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: 8,
-              color: deleteMemory ? "var(--danger)" : "var(--ink-dim)",
-              fontSize: 10,
-              lineHeight: 1.4,
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={deleteMemory}
-              onChange={(event) => setDeleteMemory(event.currentTarget.checked)}
-            />
-            <span>
-              {pendingDelete.runtime === "claude"
-                ? "Also delete this Claude project's auto-memory. This affects every Claude session sharing that project memory."
-                : "Also delete ALL local Codex memories. This affects every Codex project and session on this machine."}
-            </span>
-          </label>
+          {pendingDelete.kind === "one" ? (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 8,
+                color: deleteMemory ? "var(--danger)" : "var(--ink-dim)",
+                fontSize: 10,
+                lineHeight: 1.4,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={deleteMemory}
+                onChange={(event) => setDeleteMemory(event.currentTarget.checked)}
+              />
+              <span>
+                {pendingDelete.session.runtime === "claude"
+                  ? "Also delete this Claude project's auto-memory. This affects every Claude session sharing that project memory."
+                  : "Also delete ALL local Codex memories. This affects every Codex project and session on this machine."}
+              </span>
+            </label>
+          ) : (
+            <div style={{ color: "var(--muted)", fontSize: 10, lineHeight: 1.4 }}>
+              Local agent memory is kept. Delete a session individually to also remove its memory.
+            </div>
+          )}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 7 }}>
             <FooterButton
+              disabled={bulkBusy}
               onClick={() => {
                 setPendingDelete(null);
                 setDeleteMemory(false);
@@ -3771,10 +3933,21 @@ function SessionsSettings({
               Cancel
             </FooterButton>
             <DangerButton
-              disabled={busyId !== null}
-              onClick={() => void confirmDelete()}
+              disabled={locked}
+              onClick={() => {
+                if (pendingDelete.kind === "one") void confirmSingleDelete(pendingDelete.session);
+                else void confirmBulkDelete(pendingDelete.sessions);
+              }}
             >
-              {busyId ? "Deleting…" : deleteMemory ? "Delete session + memory" : "Delete session"}
+              {pendingDelete.kind === "one"
+                ? busyId
+                  ? "Deleting…"
+                  : deleteMemory
+                    ? "Delete session + memory"
+                    : "Delete session"
+                : bulkBusy
+                  ? `Deleting ${Math.min((bulkDone ?? 0) + 1, pendingDelete.sessions.length)} of ${pendingDelete.sessions.length}…`
+                  : `Delete ${countedSessions(pendingDelete.sessions.length)}`}
             </DangerButton>
           </div>
         </div>
@@ -3784,7 +3957,7 @@ function SessionsSettings({
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: 6,
+          gap: 5,
           maxHeight: 430,
           overflow: "auto",
           paddingRight: 2,
@@ -3798,15 +3971,18 @@ function SessionsSettings({
           />
         ) : (
           filtered.map((session) => {
-            const key = `${session.runtime}:${session.sessionId}`;
+            const key = workerSessionKey(session);
             return (
               <SessionManagerRow
                 key={key}
                 session={session}
                 busy={busyId === key}
+                locked={bulkBusy}
+                selected={selected.has(key)}
+                onToggleSelect={(checked) => toggleSession(key, checked)}
                 onOpen={() => onOpenWorkerSession(session.runtime, session.cwd, session)}
                 onDelete={() => {
-                  setPendingDelete(session);
+                  setPendingDelete({ kind: "one", session });
                   setDeleteMemory(false);
                   setNotice(null);
                 }}
@@ -3826,28 +4002,81 @@ function SessionsSettings({
 function SessionManagerRow({
   session,
   busy,
+  locked,
+  selected,
+  onToggleSelect,
   onOpen,
   onDelete,
 }: {
   session: WorkerSessionSummary;
   busy: boolean;
+  locked: boolean;
+  selected: boolean;
+  onToggleSelect: (checked: boolean) => void;
   onOpen: () => void;
   onDelete: () => void;
 }) {
+  const [hover, setHover] = useState(false);
+  // Quiet until pointed at: a management list shouldn't read as a column of
+  // red buttons, but the intent has to be unmistakable once you're on it.
+  const [deleteHover, setDeleteHover] = useState(false);
   const providerColor = session.runtime === "claude" ? "var(--accent)" : "var(--info)";
+  // Anywhere on the row toggles it. The checkbox is a 13px target in a list
+  // you are meant to sweep through, so the row body carries the same action —
+  // except where the click belongs to a real control (Open, the trash, the
+  // checkbox itself), which owns it. Guarding on the event target beats
+  // stopPropagation on each control: a control added later is covered too.
+  const toggleFromRow = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (locked) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest("button, input, a, select, label, textarea")) {
+      return;
+    }
+    onToggleSelect(!selected);
+  };
   return (
     <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => {
+        setHover(false);
+        setDeleteHover(false);
+      }}
+      onClick={toggleFromRow}
       style={{
         display: "grid",
-        gridTemplateColumns: "auto minmax(0, 1fr) auto",
+        gridTemplateColumns: "auto auto minmax(0, 1fr) auto",
         alignItems: "center",
-        gap: 11,
-        padding: "9px 10px",
-        background: "color-mix(in oklab, var(--bg) 82%, transparent)",
-        border: "1px solid var(--rule-soft)",
+        gap: 10,
+        padding: "8px 10px",
+        background: selected
+          ? `color-mix(in oklch, ${providerColor} ${hover ? 15 : 10}%, var(--panel))`
+          : hover
+            ? "color-mix(in oklab, var(--panel) 92%, transparent)"
+            : "color-mix(in oklab, var(--bg) 82%, transparent)",
+        border: `1px solid ${
+          selected
+            ? `color-mix(in oklch, ${providerColor} ${hover ? 46 : 34}%, var(--rule-soft))`
+            : "var(--rule-soft)"
+        }`,
         borderRadius: "var(--radius-surface, 7px)",
+        // Left rail: at a glance, which rows a bulk delete would take.
+        boxShadow: selected ? `inset 2px 0 0 ${providerColor}` : "none",
+        cursor: locked ? "default" : "pointer",
+        // Sweeping the list toggles rows fast; without this the titles pick up
+        // a drag selection on the way past.
+        userSelect: "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
+      <input
+        type="checkbox"
+        checked={selected}
+        disabled={locked}
+        aria-label={`Select session “${session.title}”`}
+        onChange={(event) => onToggleSelect(event.currentTarget.checked)}
+        style={{ accentColor: "var(--accent)", cursor: "default" }}
+      />
       <span
         aria-hidden
         style={{
@@ -3859,14 +4088,11 @@ function SessionManagerRow({
           color: providerColor,
           background: `color-mix(in oklch, ${providerColor} 11%, transparent)`,
           border: `1px solid color-mix(in oklch, ${providerColor} 30%, transparent)`,
-          fontFamily: "var(--font-mono)",
-          fontWeight: 800,
-          fontSize: 11,
         }}
       >
-        {session.runtime === "claude" ? "C" : "X"}
+        <RuntimeMark runtime={session.runtime} size={14} />
       </span>
-      <div style={{ minWidth: 0, display: "grid", gap: 3 }}>
+      <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
         <div
           title={session.title}
           style={{
@@ -3874,7 +4100,7 @@ function SessionManagerRow({
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
             color: "var(--ink)",
-            fontSize: 12,
+            fontSize: 12.5,
             fontWeight: 650,
           }}
         >
@@ -3888,24 +4114,70 @@ function SessionManagerRow({
             whiteSpace: "nowrap",
             color: session.cwdExists ? "var(--muted)" : "var(--danger)",
             fontFamily: "var(--font-mono)",
-            fontSize: 9,
+            fontSize: 10,
           }}
         >
           {session.cwdExists ? session.cwd : `${session.cwd} · directory missing`}
         </div>
-        <div style={{ display: "flex", gap: 7, color: "var(--muted)", fontSize: 9 }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 6,
+            color: "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 9.5,
+          }}
+        >
           <span>{session.runtime === "claude" ? "Claude" : "Codex"}</span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span title={session.sessionId}>{shortWorkerSessionId(session.sessionId)}</span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>{formatSessionUpdated(session.updatedAt)}</span>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 6 }}>
-        <FooterButton onClick={onOpen} disabled={!session.cwdExists || busy}>Open</FooterButton>
-        <DangerButton onClick={onDelete} disabled={busy}>Delete</DangerButton>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <FooterButton onClick={onOpen} disabled={!session.cwdExists || busy || locked}>Open</FooterButton>
+        <button
+          type="button"
+          className="spark-icon-btn"
+          onClick={onDelete}
+          disabled={busy || locked}
+          aria-label="Delete"
+          title={`Delete “${session.title}”`}
+          onMouseEnter={() => setDeleteHover(true)}
+          onMouseLeave={() => setDeleteHover(false)}
+          style={{
+            cursor: "default",
+            color: deleteHover ? "var(--danger)" : "var(--muted)",
+            background: deleteHover
+              ? "color-mix(in oklch, var(--danger) 12%, transparent)"
+              : "transparent",
+          }}
+        >
+          <SessionTrashIcon />
+        </button>
       </div>
     </div>
+  );
+}
+
+function SessionTrashIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M5 7h14" />
+      <path d="M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7" />
+      <path d="M6.8 7 7.6 18.4a1.5 1.5 0 0 0 1.5 1.4h5.8a1.5 1.5 0 0 0 1.5-1.4L17.2 7" />
+    </svg>
   );
 }
 
@@ -3933,6 +4205,14 @@ function SessionManagerMessage({
       {children}
     </div>
   );
+}
+
+function workerSessionKey(session: WorkerSessionSummary): string {
+  return `${session.runtime}:${session.sessionId}`;
+}
+
+function countedSessions(count: number): string {
+  return `${count} ${count === 1 ? "session" : "sessions"}`;
 }
 
 function shortWorkerSessionId(id: string): string {

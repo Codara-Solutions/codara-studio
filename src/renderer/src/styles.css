@@ -2952,8 +2952,21 @@ a { color: inherit; }
     backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     contain: paint;
   }
+  /* The worker session picker is the third surface with this problem: a tall
+     dialog whose rows repaint under the pointer (the highlight follows hover)
+     while the three-channel SVG lens re-rasterizes the whole dialog on top of
+     a blurred full-window scrim. That is what made the session list feel
+     laggy. Same compromise as the two panels above — one composited blur, no
+     lens, an unfiltered scrim, and `contain: paint` so a row repaint or a
+     list scroll can't invalidate the workbench behind the dialog. */
+  html:not([data-glass="off"]) .worker-session-surface {
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    contain: paint;
+  }
   html:not([data-glass="off"]) .settings-dialog-scrim,
-  html:not([data-glass="off"]) .agent-capabilities-scrim {
+  html:not([data-glass="off"]) .agent-capabilities-scrim,
+  html:not([data-glass="off"]) .worker-session-scrim {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
     background: color-mix(in oklab, var(--bg) 44%, transparent);
@@ -3010,6 +3023,19 @@ a { color: inherit; }
 }
 .agent-capability-row:hover {
   background: var(--hover);
+}
+
+/* Same treatment for the worker session picker's history list. A workspace
+   with hundreds of transcripts would otherwise lay out and paint every row
+   inside a backdrop-filtered dialog; off-screen rows skip both until they
+   approach view, so the list costs the same at 8 sessions and at 800. */
+.worker-session-list {
+  contain: layout paint style;
+  overscroll-behavior: contain;
+}
+.worker-session-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
 }
 
 /* ── Capability Center ──────────────────────────────────────────────────────

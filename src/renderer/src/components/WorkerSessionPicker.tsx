@@ -5,6 +5,7 @@ import type {
   WorkerSessionSummary,
 } from "@shared/types";
 
+import { RuntimeMark } from "./BrandMarks";
 import { CloseIcon, PlusIcon } from "./icons";
 import type { TerminalAgentSession } from "../tabs/types";
 import {
@@ -24,8 +25,8 @@ interface WorkerSessionPickerProps {
   onClose: () => void;
 }
 
-const ROW_HEIGHT = 76;
-const VISIBLE_ROWS = 5;
+const ROW_HEIGHT = 52;
+const VISIBLE_ROWS = 6;
 
 export default function WorkerSessionPicker({
   request,
@@ -45,6 +46,11 @@ export default function WorkerSessionPicker({
   const [notice, setNotice] = useState<string | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  // Set by the arrow keys only. Hover moves the highlight too, and scrolling
+  // the list under a stationary cursor slides another row under it, which
+  // fires mouseenter, moves the highlight again and scrolls again — a loop
+  // that costs a forced layout per turn. Pointer moves never scroll.
+  const keyboardMoveRef = useRef(false);
   // The request the current `sessions` belong to. A background re-list that
   // resolves after the picker was reopened for another runtime/cwd is dropped
   // instead of overwriting the newer list.
@@ -84,6 +90,8 @@ export default function WorkerSessionPicker({
   }, [request]);
 
   useEffect(() => {
+    if (!keyboardMoveRef.current) return;
+    keyboardMoveRef.current = false;
     const selected = listRef.current?.querySelector<HTMLElement>(
       `[data-session-index="${selectedIndex}"]`,
     );
@@ -104,6 +112,8 @@ export default function WorkerSessionPicker({
   );
 
   if (!request) return null;
+
+  const tint = runtimeTint(request.runtime);
 
   const prepareCodex = async (nativeCodexProfileId?: string) => {
     if (request.runtime === "codex") {
@@ -266,9 +276,11 @@ export default function WorkerSessionPicker({
     const armed = session ? sessionKey(session) === pendingDeleteKey : false;
     if (event.key === "ArrowDown") {
       event.preventDefault();
+      keyboardMoveRef.current = true;
       setSelectedIndex((index) => (index + 1) % sessions.length);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
+      keyboardMoveRef.current = true;
       setSelectedIndex((index) => (index - 1 + sessions.length) % sessions.length);
     } else if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
@@ -303,20 +315,20 @@ export default function WorkerSessionPicker({
       className="spark-fade-in"
       onMouseDown={onClose}
     >
-      <div className="spark-scrim" style={{ zIndex: 0 }} />
+      <div className="spark-scrim worker-session-scrim" style={{ zIndex: 0 }} />
       <section
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={`${runtimeLabel} sessions`}
         tabIndex={-1}
-        className="spark-glass--strong"
+        className="spark-glass--strong worker-session-surface"
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={handleKeyDown}
         style={{
           position: "relative",
           zIndex: 1,
-          width: "min(640px, calc(100vw - 44px))",
+          width: "min(560px, calc(100vw - 44px))",
           maxHeight: "calc(100vh - 88px)",
           display: "flex",
           flexDirection: "column",
@@ -329,17 +341,17 @@ export default function WorkerSessionPicker({
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 12,
-            padding: "15px 16px",
+            gap: 10,
+            padding: "11px 13px",
             borderBottom: "1px solid var(--rule-soft)",
           }}
         >
-          <RuntimeMark runtime={request.runtime} />
+          <RuntimeChip runtime={request.runtime} />
           <div style={{ minWidth: 0, flex: 1 }}>
             <div
               style={{
                 color: "var(--ink)",
-                fontSize: 15,
+                fontSize: 13.5,
                 fontWeight: 700,
                 letterSpacing: "-0.01em",
               }}
@@ -352,7 +364,7 @@ export default function WorkerSessionPicker({
                 marginTop: 2,
                 color: "var(--muted)",
                 fontFamily: "var(--font-mono)",
-                fontSize: 10.5,
+                fontSize: 10,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -375,129 +387,46 @@ export default function WorkerSessionPicker({
 
         <div
           style={{
-            padding: "14px 15px 15px",
-            minHeight: 176,
+            padding: "11px 12px 12px",
+            minHeight: 150,
             display: "flex",
             flexDirection: "column",
-            gap: 14,
+            gap: 9,
           }}
         >
-          <button
-            type="button"
-            onClick={() => void launchNew()}
+          <NewSessionButton
+            tint={tint}
+            runtimeLabel={runtimeLabel}
             disabled={launching}
-            style={{
-              appearance: "none",
-              width: "100%",
-              minHeight: 72,
-              display: "grid",
-              gridTemplateColumns: "42px minmax(0, 1fr) auto",
-              alignItems: "center",
-              gap: 12,
-              padding: "11px 13px",
-              textAlign: "left",
-              color: "var(--ink)",
-              border: "1px solid var(--accent-edge)",
-              borderRadius: 11,
-              background:
-                "linear-gradient(135deg, color-mix(in oklch, var(--accent) 15%, transparent), color-mix(in oklab, var(--panel) 88%, transparent))",
-              boxShadow: "var(--lift-hi), inset 0 1px 0 color-mix(in oklab, white 5%, transparent)",
-              cursor: "default",
-            }}
-          >
-            <span
-              aria-hidden
-              style={{
-                width: 42,
-                height: 42,
-                display: "grid",
-                placeItems: "center",
-                color: "var(--accent-ink)",
-                borderRadius: 10,
-                background: "var(--accent)",
-                boxShadow: "0 8px 22px var(--accent-glow)",
-              }}
-            >
-              <PlusIcon size={13} />
-            </span>
-            <span style={{ minWidth: 0 }}>
-              <span
-                style={{
-                  display: "block",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  letterSpacing: "-0.01em",
-                }}
-              >
-                Start a new session
-              </span>
-              <span
-                style={{
-                  display: "block",
-                  marginTop: 4,
-                  color: "var(--muted)",
-                  fontSize: 10.5,
-                  lineHeight: 1.4,
-                }}
-              >
-                Open a fresh {runtimeLabel} worker in this workspace.
-              </span>
-            </span>
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                color: "var(--accent)",
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: "0.04em",
-                textTransform: "uppercase",
-              }}
-            >
-              New
-              <span aria-hidden style={{ fontSize: 15, lineHeight: 1 }}>
-                →
-              </span>
-            </span>
-          </button>
+            onClick={() => void launchNew()}
+          />
 
+          {/* Eyebrow, scope and count on one line: the dialog header already
+              names the workspace, so the old subtitle only added height. */}
           <div
             style={{
-              minHeight: 30,
+              minHeight: 18,
               display: "flex",
-              alignItems: "end",
-              justifyContent: "space-between",
-              gap: 12,
-              padding: "0 3px",
+              alignItems: "center",
+              gap: 8,
+              padding: "2px 3px 0",
             }}
           >
-            <span>
-              <span
-                className="spark-eyebrow"
-                style={{ display: "block", color: "var(--ink-dim)" }}
-              >
-                Continue working
-              </span>
-              <span
-                style={{
-                  display: "block",
-                  marginTop: 3,
-                  color: "var(--muted)",
-                  fontSize: 10,
-                }}
-              >
-                Recent sessions in this workspace
-              </span>
+            <span className="spark-eyebrow" style={{ color: "var(--ink-dim)" }}>
+              Continue working
             </span>
+            <span
+              style={{ minWidth: 0, flex: 1, height: 1, background: "var(--rule-soft)" }}
+              aria-hidden
+            />
             {!loading && !error ? (
               <span
                 style={{
-                  minWidth: 24,
-                  height: 20,
+                  minWidth: 20,
+                  height: 16,
                   display: "grid",
                   placeItems: "center",
-                  padding: "0 7px",
+                  padding: "0 6px",
                   color: "var(--muted)",
                   border: "1px solid var(--rule-soft)",
                   borderRadius: 999,
@@ -529,13 +458,14 @@ export default function WorkerSessionPicker({
               // roving-tabindex option list.
               role="list"
               aria-label={`${runtimeLabel} session history`}
+              className="worker-session-list"
               style={{
                 maxHeight: ROW_HEIGHT * VISIBLE_ROWS,
                 overflowY: sessions.length > VISIBLE_ROWS ? "auto" : "hidden",
                 border: "1px solid var(--rule)",
-                borderRadius: 11,
+                borderRadius: 10,
                 background: "color-mix(in oklab, var(--panel) 88%, transparent)",
-                boxShadow: "var(--well), inset 0 1px 0 color-mix(in oklab, white 3%, transparent)",
+                boxShadow: "var(--well)",
               }}
             >
               {sessions.map((session, index) => {
@@ -566,7 +496,7 @@ export default function WorkerSessionPicker({
             <div
               role="status"
               style={{
-                margin: "-6px 3px 0",
+                margin: "-3px 3px 0",
                 color: "var(--muted)",
                 fontSize: 10,
                 lineHeight: 1.45,
@@ -578,20 +508,115 @@ export default function WorkerSessionPicker({
           {!loading && !error && sessions.length > VISIBLE_ROWS ? (
             <div
               style={{
-                margin: "-6px 3px 0",
+                margin: "-3px 3px 0",
                 color: "var(--muted)",
-                fontSize: 10,
-                display: "flex",
-                justifyContent: "space-between",
+                fontSize: 9.5,
+                textAlign: "right",
               }}
             >
-              <span>{sessions.length} sessions</span>
-              <span>Scroll for more</span>
+              Scroll for more
             </div>
           ) : null}
         </div>
       </section>
     </div>
+  );
+}
+
+// The primary call to action, tinted with the runtime it will start rather
+// than a flat accent so the Claude and Codex pickers read apart at a glance.
+// Hover and focus live here because the button sets an inline box-shadow,
+// which silently wins over the global :focus-visible ring — the ring has to
+// be composed back into that same inline shadow for keyboard focus to show.
+function NewSessionButton({
+  tint,
+  runtimeLabel,
+  disabled,
+  onClick,
+}: {
+  tint: string;
+  runtimeLabel: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const lift = "var(--lift-hi), inset 0 1px 0 color-mix(in oklab, white 5%, transparent)";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onFocus={(event) => {
+        if (event.target.matches(":focus-visible")) setFocus(true);
+      }}
+      onBlur={() => setFocus(false)}
+      style={{
+        appearance: "none",
+        width: "100%",
+        minHeight: 54,
+        display: "grid",
+        gridTemplateColumns: "30px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 10,
+        padding: "8px 11px",
+        textAlign: "left",
+        color: "var(--ink)",
+        border: `1px solid color-mix(in oklch, ${tint} ${hover ? 46 : 32}%, var(--rule-soft))`,
+        borderRadius: 10,
+        background: `linear-gradient(135deg, color-mix(in oklch, ${tint} ${
+          hover ? 16 : 11
+        }%, transparent), color-mix(in oklab, var(--panel) 88%, transparent))`,
+        boxShadow: focus ? `var(--focus-ring), ${lift}` : lift,
+        cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 30,
+          height: 30,
+          display: "grid",
+          placeItems: "center",
+          color: tint,
+          borderRadius: 9,
+          background: `color-mix(in oklch, ${tint} 16%, transparent)`,
+          border: `1px solid color-mix(in oklch, ${tint} 36%, transparent)`,
+        }}
+      >
+        <PlusIcon size={12} />
+      </span>
+      <span style={{ minWidth: 0 }}>
+        <span
+          style={{
+            display: "block",
+            fontSize: 12.5,
+            fontWeight: 700,
+            letterSpacing: "-0.01em",
+          }}
+        >
+          Start a new session
+        </span>
+        <span
+          style={{
+            display: "block",
+            marginTop: 3,
+            color: "var(--muted)",
+            fontSize: 10,
+            lineHeight: 1.4,
+          }}
+        >
+          Open a fresh {runtimeLabel} worker in this workspace.
+        </span>
+      </span>
+      <span aria-hidden style={{ color: tint, fontSize: 14, lineHeight: 1, paddingRight: 2 }}>
+        →
+      </span>
+    </button>
   );
 }
 
@@ -630,19 +655,23 @@ function SessionRow({
   onConfirmDelete: () => void;
   disabled: boolean;
 }) {
+  // Quiet until pointed at, so a row of trash cans doesn't read as a row of
+  // warnings. Hover also drives the row highlight, keeping the two in step.
+  const [trashHover, setTrashHover] = useState(false);
+  const tint = runtimeTint(session.runtime);
   const shell: React.CSSProperties = {
     minHeight: ROW_HEIGHT,
     borderBottom: "1px solid var(--rule-soft)",
     background: armed
       ? "color-mix(in oklch, var(--danger) 8%, var(--panel))"
       : selected
-        ? "color-mix(in oklch, var(--accent) 11%, var(--panel))"
+        ? `color-mix(in oklch, ${tint} 11%, var(--panel))`
         : "transparent",
     color: "var(--ink)",
     boxShadow: armed
       ? "inset 2px 0 0 var(--danger)"
       : selected
-        ? "inset 2px 0 0 var(--accent)"
+        ? `inset 2px 0 0 ${tint}`
         : "none",
     transition:
       "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
@@ -655,7 +684,7 @@ function SessionRow({
         role="listitem"
         aria-current={selected ? "true" : undefined}
         onMouseEnter={onHover}
-        style={{ ...shell, display: "grid", gap: 8, padding: "11px 12px" }}
+        style={{ ...shell, display: "grid", gap: 7, padding: "10px 11px" }}
       >
         <div
           title={session.title}
@@ -719,17 +748,22 @@ function SessionRow({
     );
   }
 
+  // The whole row resumes: the resume control spans everything left of the
+  // trash, so there is no small target to aim for and no loud pill on every
+  // line. The arrow fades in on the highlighted row instead — an opacity
+  // change, so moving down the list never reflows the row.
   return (
     <div
       data-session-index={index}
       role="listitem"
       aria-current={selected ? "true" : undefined}
+      className="worker-session-row"
       onMouseEnter={onHover}
       style={{
         ...shell,
         display: "grid",
         gridTemplateColumns: "minmax(0, 1fr) auto",
-        alignItems: "stretch",
+        alignItems: "center",
       }}
     >
       <button
@@ -738,6 +772,7 @@ function SessionRow({
         onFocus={onHover}
         onClick={onOpen}
         title={`Resume ${session.title}`}
+        aria-label={`Resume ${session.title}`}
         style={{
           appearance: "none",
           width: "100%",
@@ -746,45 +781,14 @@ function SessionRow({
           background: "transparent",
           color: "inherit",
           display: "grid",
-          gridTemplateColumns: "18px minmax(0, 1fr) auto",
-          gap: 11,
+          gridTemplateColumns: "minmax(0, 1fr) 12px",
+          gap: 8,
           alignItems: "center",
-          padding: "10px 6px 10px 12px",
+          padding: "8px 4px 8px 12px",
           textAlign: "left",
           cursor: "default",
         }}
       >
-        <span
-          aria-hidden
-          style={{
-            position: "relative",
-            width: 18,
-            alignSelf: "stretch",
-            display: "flex",
-            justifyContent: "center",
-          }}
-        >
-          <span
-            style={{
-              position: "absolute",
-              top: 17,
-              width: 8,
-              height: 8,
-              borderRadius: 999,
-              background: selected ? "var(--accent)" : "var(--muted-2)",
-              boxShadow: selected ? "0 0 0 3px var(--accent-soft)" : "none",
-            }}
-          />
-          <span
-            style={{
-              position: "absolute",
-              top: 29,
-              bottom: -11,
-              width: 1,
-              background: "var(--rule)",
-            }}
-          />
-        </span>
         <span style={{ minWidth: 0 }}>
           <span
             style={{
@@ -793,91 +797,62 @@ function SessionRow({
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
               fontSize: 12.5,
-              fontWeight: 650,
-              lineHeight: 1.35,
+              fontWeight: 600,
+              lineHeight: 1.3,
             }}
           >
             {session.title}
           </span>
           <span
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 7,
-              marginTop: 6,
+              display: "block",
+              marginTop: 2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
               color: error ? "var(--danger)" : "var(--muted)",
-              fontSize: 9.5,
+              fontFamily: error ? "var(--font-sans)" : "var(--font-mono)",
+              fontSize: error ? 9.5 : 10,
+              lineHeight: 1.4,
             }}
           >
-            {error ? (
-              <span
-                style={{
-                  minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {error}
-              </span>
-            ) : (
-              <>
-                <span>{relativeTime(session.updatedAt)}</span>
-                <span aria-hidden style={{ color: "var(--rule-strong)" }}>
-                  •
-                </span>
-                <span
-                  style={{
-                    minWidth: 0,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 9,
-                    letterSpacing: "0.02em",
-                  }}
-                >
-                  {shortSessionId(session.sessionId)}
-                </span>
-              </>
-            )}
+            {error ?? `${relativeTime(session.updatedAt)} · ${shortSessionId(session.sessionId)}`}
           </span>
         </span>
         <span
+          aria-hidden
           style={{
-            minHeight: 26,
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "0 8px",
-            color: selected ? "var(--accent)" : "var(--ink-dim)",
-            border: `1px solid ${selected ? "var(--accent-edge)" : "var(--rule-soft)"}`,
-            borderRadius: 7,
-            background: selected ? "var(--accent-soft)" : "var(--panel-2)",
-            fontSize: 9,
-            fontWeight: 700,
-            letterSpacing: "0.04em",
-            textTransform: "uppercase",
-            whiteSpace: "nowrap",
+            color: tint,
+            fontSize: 13,
+            lineHeight: 1,
+            opacity: selected ? 1 : 0,
+            transition: "opacity var(--motion-fast) var(--ease-out)",
           }}
         >
-          Resume
-          <span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>
-            →
-          </span>
+          →
         </span>
       </button>
-      <span style={{ display: "flex", alignItems: "center", padding: "0 10px 0 2px" }}>
+      <span style={{ display: "flex", alignItems: "center", padding: "0 8px 0 2px" }}>
         <button
           type="button"
           className="spark-icon-btn"
           disabled={disabled || deleting}
-          onMouseEnter={onHover}
+          onMouseEnter={() => {
+            setTrashHover(true);
+            onHover();
+          }}
+          onMouseLeave={() => setTrashHover(false)}
           onFocus={onHover}
           onClick={onArmDelete}
           title="Delete session"
           aria-label={`Delete session ${session.title}`}
-          style={{ cursor: "default", color: "var(--muted)" }}
+          style={{
+            cursor: "default",
+            color: trashHover ? "var(--danger)" : "var(--muted)",
+            background: trashHover
+              ? "color-mix(in oklch, var(--danger) 12%, transparent)"
+              : "transparent",
+          }}
         >
           <TrashIcon />
         </button>
@@ -920,31 +895,31 @@ function TrashIcon() {
   );
 }
 
-function RuntimeMark({ runtime }: { runtime: WorkerSessionRuntime }) {
-  const codex = runtime === "codex";
-  const color = codex ? "var(--info)" : "var(--accent)";
+function RuntimeChip({ runtime }: { runtime: WorkerSessionRuntime }) {
+  const color = runtimeTint(runtime);
   return (
     <span
       aria-hidden
       style={{
-        width: 36,
-        height: 36,
-        borderRadius: 10,
+        width: 30,
+        height: 30,
+        borderRadius: 9,
         display: "grid",
         placeItems: "center",
         color,
         background: `color-mix(in oklch, ${color} 12%, transparent)`,
         border: `1px solid color-mix(in oklch, ${color} 34%, transparent)`,
-        fontFamily: "var(--font-mono)",
-        fontWeight: 800,
-        fontSize: 14,
-        boxShadow: `0 8px 22px color-mix(in oklch, ${color} 16%, transparent), var(--lift-hi)`,
-        flex: "0 0 36px",
+        boxShadow: "var(--lift-hi)",
+        flex: "0 0 30px",
       }}
     >
-      {codex ? "X" : "C"}
+      <RuntimeMark runtime={runtime} size={15} />
     </span>
   );
+}
+
+function runtimeTint(runtime: WorkerSessionRuntime): string {
+  return runtime === "codex" ? "var(--info)" : "var(--accent)";
 }
 
 function EmptyState({
@@ -959,15 +934,15 @@ function EmptyState({
   return (
     <div
       style={{
-        minHeight: 112,
+        minHeight: 92,
         border: "1px dashed var(--rule)",
-        borderRadius: 11,
+        borderRadius: 10,
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 5,
-        padding: 20,
+        gap: 4,
+        padding: 16,
         background: "color-mix(in oklab, var(--panel) 74%, transparent)",
         textAlign: "center",
       }}

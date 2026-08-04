@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
+import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { collectLeaves } from "./paneTree";
 import {
   TAB_REORDER_DRAG_MIME,
@@ -488,7 +489,7 @@ function TabBar({
             <PickerSectionLabel label="Workers" />
             <PickerItem
               label="Claude worker"
-              glyph={<RuntimeGlyph letter="C" />}
+              glyph={<RuntimeGlyph runtime="claude" />}
               accent="claude"
               onClick={() => {
                 setPickerOpen(false);
@@ -497,7 +498,7 @@ function TabBar({
             />
             <PickerItem
               label="Codex worker"
-              glyph={<RuntimeGlyph letter="X" />}
+              glyph={<RuntimeGlyph runtime="codex" />}
               accent="codex"
               onClick={() => {
                 setPickerOpen(false);
@@ -1265,17 +1266,10 @@ function pickerItemTone(accent: PickerAccent): {
   };
 }
 
-function RuntimeGlyph({ letter }: { letter: string }) {
+function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {
   return (
-    <span
-      style={{
-        fontSize: 12,
-        fontWeight: 700,
-        fontFamily: "var(--font-mono)",
-        letterSpacing: 0,
-      }}
-    >
-      {letter}
+    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+      <RuntimeMark runtime={runtime} size={13} />
     </span>
   );
 }
