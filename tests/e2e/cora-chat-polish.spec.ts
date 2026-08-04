@@ -1,6 +1,6 @@
 import { test, expect, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { mkdir, mkdtemp, readFile, readdir, writeFile, utimes } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -45,6 +45,11 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
     await assistant.hover();
     await expect(assistantCopy).toBeVisible();
     const minimap = page.getByRole("navigation", { name: "Conversation map" });
+    // One mark per user turn (buildConversationMinimap, ChatConversation.tsx:345),
+    // so this count is seedConversation's 7 "Earlier question" turns plus the
+    // final one. Keep it above the threshold in ChatConversation.tsx:391, which
+    // renders nothing at all below 7 entries: trimming the seed would turn this
+    // into a confusing "element not found" rather than a count mismatch.
     await expect(minimap).toBeVisible();
     await expect(minimap.getByRole("button")).toHaveCount(8);
     await minimap.getByRole("button").first().hover();
@@ -365,7 +370,7 @@ test("a rejected Codex launch fails once, stays failed, and never adopts a forei
   const fakeHome = join(fixture.root, "home");
   const fakeBin = join(fixture.root, "bin");
   const argsCapture = join(fixture.root, "codex-args.log");
-  await mkdir(join(fakeHome, ".codex"), { recursive: true });
+  const codexHome = await seedConnectedCodexHome(fakeHome);
   await mkdir(fakeBin, { recursive: true });
   await writeFile(
     join(fakeBin, "codex"),
@@ -389,6 +394,10 @@ test("a rejected Codex launch fails once, stays failed, and never adopts a forei
         HOME: fakeHome,
         SHELL: "/bin/false",
         PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+        // Same value HOME would produce, pinned so an inherited CODEX_HOME
+        // (a retired feature exported one from the user's shell profile) can
+        // never point the account gate at the developer's real credentials.
+        CODEX_HOME: codexHome,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
         // point this instance at the user's real ~/.Codara state.
@@ -479,7 +488,25 @@ test("a rejected Codex launch fails once, stays failed, and never adopts a forei
     expect(managerCall).not.toContain("--yolo");
 
     await selectCoraTab(page);
-    await expect(page.getByText("Cora couldn’t complete this turn")).toBeVisible();
+    // A failed turn is not dialogue. run-store records the failed SparkCall and
+    // nothing else — this run's persisted humanMessages hold only the user's
+    // note — so the chat's authoritative failure surface is that call's own
+    // manager row: "Turn failed" (timeline.ts:618) plus the backend's recorded
+    // reason (timeline.ts:626), rendered with the is-failed modifier at
+    // ChatConversation.tsx:1753. The older "Cora couldn’t complete this turn"
+    // card is NOT it: BackendFailureMessage only renders for a spark MESSAGE
+    // whose text matches "<backend> backend error: …" (backendFailureDetails,
+    // ChatConversation.tsx:819), a shape only legacy runs persisted — see the
+    // note at ChatConversation.tsx:533.
+    const failureReason = stillFailed.sparkCalls[0].error ?? "";
+    expect(failureReason).toContain("Codex app server exited");
+    const failedTurn = page.locator(
+      `.cora-manager-disclosure.is-failed[data-manager-call-id="${stillFailed.sparkCalls[0].id}"]`,
+    );
+    await expect(failedTurn).toBeVisible({ timeout: 15_000 });
+    await expect(failedTurn).toContainText("Turn failed");
+    // The reason the run-store persisted is the reason the reader is shown.
+    await expect(failedTurn).toContainText(failureReason);
     if (process.env.SPARK_CHAT_FAILURE_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CHAT_FAILURE_SCREENSHOT, fullPage: true });
     }
@@ -520,7 +547,21 @@ test("Claude manager uses stream-json and preserves streamed text/tool order", a
   await writeFile(join(fakeBin, "claude"), [
     "#!/usr/bin/env node",
     'const fs = require("node:fs");',
-    `fs.appendFileSync(${JSON.stringify(argsCapture)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+    "const argv = process.argv.slice(2);",
+    `fs.appendFileSync(${JSON.stringify(argsCapture)}, JSON.stringify(argv) + "\\n");`,
+    // A native-CLI manager only launches once the selected account resolves as
+    // connected (claude-cli-account-profiles.ts:1179), and connectivity is
+    // probed by running `claude auth status --json` on PATH
+    // (defaultClaudeCliAuthChecker, claude-cli-account-profiles.ts:742).
+    // parseLoggedInOnly (claude-cli-account-profiles.ts:721) JSON.parses the
+    // WHOLE bounded stdout and keeps one boolean, so this branch must print
+    // that object alone — the stream-json events below would parse as nothing
+    // and read as "not connected". Falling off the end (rather than
+    // process.exit) lets the pipe flush.
+    'if (argv[0] === "auth" && argv[1] === "status") {',
+    '  process.stdout.write(JSON.stringify({ loggedIn: true }));',
+    "  return;",
+    "}",
     `const events = ${JSON.stringify(events)};`,
     "(async () => { for (const event of events) { process.stdout.write(JSON.stringify(event) + '\\n'); await new Promise((resolve) => setTimeout(resolve, 12)); } })();",
     "",
@@ -597,7 +638,7 @@ test("Codex manager uses app-server deltas and preserves streamed text/tool orde
   const fakeHome = join(fixture.root, "home");
   const fakeBin = join(fixture.root, "bin");
   const argsCapture = join(fixture.root, "codex-args.json");
-  await mkdir(join(fakeHome, ".codex"), { recursive: true });
+  const codexHome = await seedConnectedCodexHome(fakeHome);
   await mkdir(fakeBin, { recursive: true });
   await writeFile(join(fakeBin, "codex"), [
     "#!/usr/bin/env node",
@@ -632,6 +673,10 @@ test("Codex manager uses app-server deltas and preserves streamed text/tool orde
         ...process.env,
         HOME: fakeHome,
         PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+        // Same value HOME would produce, pinned so an inherited CODEX_HOME
+        // (a retired feature exported one from the user's shell profile) can
+        // never point the account gate at the developer's real credentials.
+        CODEX_HOME: codexHome,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
         // point this instance at the user's real ~/.Codara state.
@@ -708,6 +753,50 @@ async function prepareFixture(prefix: string): Promise<{
     "utf8",
   );
   return { root, userDataDir, workspaceDir };
+}
+
+/**
+ * A native-Codex manager only launches once the selected account resolves as
+ * connected (codex-cli-account-profiles.ts:964). For the personal profile —
+ * the one every fixture here uses, since the fake ~/.Codara holds no managed
+ * accounts — connectivity is pure filesystem state: defaultCodexCliAuthChecker
+ * (codex-cli-account-profiles.ts:539) wants $CODEX_HOME to be a real directory
+ * (not a symlink) holding a regular auth.json that is not readable by group or
+ * other users. A bare ~/.codex directory reads as "missing" and the launch
+ * fails before any argv is captured.
+ *
+ * The credential shape mirrors scripts/test-native-cli-accounts.cjs so the
+ * account-card identity reader finds the fields it expects; nothing in these
+ * tests reads the values back.
+ */
+async function seedConnectedCodexHome(fakeHome: string): Promise<string> {
+  const codexHome = join(fakeHome, ".codex");
+  await mkdir(codexHome, { recursive: true });
+  const unverifiedJwt = (claims: Record<string, unknown>) =>
+    [
+      Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url"),
+      Buffer.from(JSON.stringify(claims)).toString("base64url"),
+      "not-a-real-signature",
+    ].join(".");
+  const authFile = join(codexHome, "auth.json");
+  await writeFile(
+    authFile,
+    JSON.stringify({
+      OPENAI_API_KEY: null,
+      tokens: {
+        id_token: unverifiedJwt({ email: "fixture@example.test" }),
+        access_token: "not-a-real-token",
+        refresh_token: "not-a-real-token",
+        account_id: "acct_00000000-0000-4000-8000-000000000001",
+      },
+      last_refresh: new Date().toISOString(),
+    }),
+    { encoding: "utf8", mode: 0o600 },
+  );
+  // writeFile's mode is masked by the process umask; chmod is what actually
+  // guarantees the 0600 the checker requires.
+  await chmod(authFile, 0o600);
+  return codexHome;
 }
 
 async function seedConversation(page: Page, cwd: string): Promise<string> {
@@ -971,7 +1060,13 @@ async function clickAttached(locator: Locator): Promise<void> {
 async function selectChatFromHistory(page: Page, title: string, runId: string): Promise<void> {
   await clickAttached(page.getByRole("button", { name: "Open chat history" }).last());
   await clickAttached(page.getByRole("option").filter({ hasText: title }));
-  await expect(page.getByTitle(`Copy run ID: ${runId}`)).toBeVisible({ timeout: 15_000 });
+  // RunIdChip.tsx:64 spells the tooltip "Copy run id: <id>", and it only puts
+  // the full id in the tooltip when the chip had to truncate it — i.e. when the
+  // id is longer than the chip's maxChars (12 by default). Every run id these
+  // fixtures use ("run-<base36>-<base36>", or a "run-<name>" literal well past
+  // 12 characters) clears that threshold; a shorter id would render the plain
+  // "Copy run id" title and never match here.
+  await expect(page.getByTitle(`Copy run id: ${runId}`)).toBeVisible({ timeout: 15_000 });
 }
 
 async function readRun(
@@ -980,7 +1075,7 @@ async function readRun(
 ): Promise<{
   status: string;
   autopilot?: { status: string };
-  sparkCalls: Array<{ status: string; error?: string }>;
+  sparkCalls: Array<{ id: string; status: string; error?: string }>;
 }> {
   // Run folders are keyed by run id, but keep a defensive directory scan for
   // older fixtures that may prefix/sanitize their folder names.

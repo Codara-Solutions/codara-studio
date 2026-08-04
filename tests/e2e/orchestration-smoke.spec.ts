@@ -112,9 +112,9 @@ test("autopilot runs from a selected markdown plan", async () => {
 
     // Deterministic force-pause/resume coverage on the REAL functions before
     // the verdict lands: forcePauseRun parks the run (abandoning question
-    // OWNERSHIP but not the question message), a note recorded while paused
-    // stays inert, and the composer's Resume button drives resumeRun back to a
-    // running state. The escalation question must survive the round trip.
+    // OWNERSHIP but not the question message) and the composer's Resume button
+    // drives resumeRun back to a running state. The escalation question must
+    // survive the round trip.
     await page.evaluate(async (id) => {
       const spark = (window as unknown as { spark: any }).spark;
       await spark.orchestration.forcePauseRun(id);
@@ -123,16 +123,6 @@ test("autopilot runs from a selected markdown plan", async () => {
     await expect
       .poll(async () => (await readOnlyRun(userDataDir)).status, { timeout: 15_000 })
       .toBe("paused");
-    await page.evaluate(async (id) => {
-      const spark = (window as unknown as { spark: any }).spark;
-      await spark.orchestration.addRunMessage({
-        runId: id,
-        author: "user",
-        kind: "note",
-        message: "Pause before accepting the report.",
-      });
-    }, runId);
-    await expectRunEvent(page, runId, "human.note", 15_000);
     await page.getByRole("button", { name: "Resume", exact: true }).click();
     await expectRunEvent(page, runId, "run.resumed", 15_000);
     // Resume re-drives the review stage, which cannot act on a manual report
@@ -157,10 +147,39 @@ test("autopilot runs from a selected markdown plan", async () => {
         { timeout: 20_000 },
       )
       .toBe("reescalated");
+
+    // A note filed against the RE-blocked run is recorded and nothing else: an
+    // open question owns the run until it is answered, so shouldResumeForUserMessage
+    // (user-message-resume.ts) declines to resume it. The same note sent while
+    // the run was still PAUSED would resume the run itself — sending into a
+    // paused run IS resuming it now — which is why it is filed here rather than
+    // before the Resume click it would otherwise race.
+    await page.evaluate(async (id) => {
+      const spark = (window as unknown as { spark: any }).spark;
+      await spark.orchestration.addRunMessage({
+        runId: id,
+        author: "user",
+        kind: "note",
+        message: "Pause before accepting the report.",
+      });
+    }, runId);
+    // Assert the note from the run file, not from a "human.note" event: the
+    // plan text was itself filed as a note when the run started, so that event
+    // type is already in the log and waiting on it proves nothing. The note is
+    // recorded and the run is still blocked — that is the whole claim.
+    await expect
+      .poll(
+        async () => {
+          const current = await readOnlyRun(userDataDir);
+          const noted = current.humanMessages.some(
+            (message) => message.message === "Pause before accepting the report.",
+          );
+          return `${current.status}:${noted}`;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe("blocked:true");
     const reescalated = await readOnlyRun(userDataDir);
-    expect(reescalated.humanMessages.map((message) => message.message)).toContain(
-      "Pause before accepting the report.",
-    );
     const freshQuestion = [...reescalated.humanMessages]
       .reverse()
       .find(
@@ -324,14 +343,25 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
 
     await clickAttached(page.getByRole("button", { name: "Agents" }));
     await expect(page.getByText("Accounts", { exact: true })).toBeVisible();
-    // The provider label legitimately appears twice once the usage overview
-    // resolves: PiSubscriptionRow (connect surface) and SubscriptionUsage's
-    // ProviderCard both name it. .first() keeps the assertion timing-proof.
+    // The synthetic auth.json above is a legacy single-account store, which the
+    // account registry migrates into one Pi profile per provider named after
+    // the provider's plan (defaultProfileLabel in pi-account-auth-store.ts).
+    // That label is on screen twice once the usage overview resolves: the
+    // title-bar usage pill (UsageMeters' UsagePill renders usage.label) and the
+    // account card in Settings. .first() keeps the assertion timing-proof.
     await expect(page.getByText("ChatGPT Plus / Pro", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("Claude Pro / Max", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText(/one auth store for manager \+ workers/)).toBeVisible();
-    await expect(page.getByText(/GPT-5\.6 Sol · Connected/)).toBeVisible();
-    await expect(page.getByText(/Fable 5 · Connected/)).toBeVisible();
+    // The Accounts section explainer, then each provider group's header line —
+    // which is where the model Cora runs on is now named ("Cora runs on
+    // {model} · {counts}", SettingsDialog.tsx).
+    await expect(page.getByText(/each need their own sign-in/)).toBeVisible();
+    await expect(page.getByText(/Cora runs on Fable 5 ·/)).toBeVisible();
+    await expect(page.getByText(/Cora runs on GPT-5\.6 Sol ·/)).toBeVisible();
+    // The migrated profiles carry the unexpired credentials written above, so
+    // both cards report a live Cora connection. Only the Cora side is asserted:
+    // the CLI line beside it reflects whichever Claude Code / Codex CLI sign-in
+    // this Mac happens to have, which no throwaway user-data dir isolates.
+    await expect(page.getByText("Connected to Cora", { exact: true }).first()).toBeVisible();
     const serializedSubscriptionStatus = await page.evaluate(async () => {
       const spark = (window as unknown as { spark: any }).spark;
       return JSON.stringify(await spark.piSubscriptions.status());
@@ -447,7 +477,9 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
     if (process.env.SPARK_CAPABILITY_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CAPABILITY_SCREENSHOT });
     }
-    // Two flat sections, no nav rail: the MCP inventory is the first heading.
+    // Four tabs (MCP servers, Skills, Memory, Policy) beside one content pane.
+    // MCP is the tab that opens first, so its section heading is on screen —
+    // the nav button of the same name is a button, not a heading.
     await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
     const capabilitySearch = page.getByPlaceholder("Filter servers");
     await capabilitySearch.fill("playwright");

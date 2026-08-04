@@ -56,7 +56,10 @@ test("workspace switches retain the expanded Explorer and refresh it in the back
     // Starting an @mention must still lazily build the index and show results.
     const composer = page.locator(".composer-shell textarea");
     await composer.fill("@cached");
-    const mentionMenu = page.locator(".composer-shell .spark-glass").filter({ hasText: "Files" });
+    // The popover is portalled to document.body (AnchoredMenu) because the
+    // composer shell is a backdrop root, so it is NOT a descendant of
+    // .composer-shell. Match its own root class instead of the shell's.
+    const mentionMenu = page.locator(".spark-menu").filter({ hasText: "Files" });
     await expect(mentionMenu.getByText("cached.ts", { exact: true })).toBeVisible();
     await composer.fill("");
 

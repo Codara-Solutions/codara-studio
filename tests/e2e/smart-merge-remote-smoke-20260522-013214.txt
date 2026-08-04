@@ -1,3 +1,0 @@
-Smart merge remote smoke test
-Created from a temporary clone at 20260522-013214.
-This commit simulates a teammate pushing to origin/main.

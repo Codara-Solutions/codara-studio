@@ -31,6 +31,22 @@ test("terminal output survives host suspend and resumes into the same xterm", as
     });
     await expect(terminalInput).toBeFocused();
 
+    // Establish a LIVE shell before suspending. A visible xterm textarea only
+    // means the pane mounted; the pty spawn and the shell's own rc files land
+    // later, and keystrokes typed before then are simply lost. After the
+    // suspend nothing on screen can report readiness either — main diverts
+    // every byte into its detached backlog, so the pane stays blank by design.
+    // A disk round-trip through a relative path proves both that the shell is
+    // executing commands and that its cwd is the workspace.
+    await runTerminalCommand(
+      terminalInput,
+      `node -e "require('fs').writeFileSync('.sleep-shell-ready','ready')"`,
+    );
+    await expect.poll(
+      async () => readFile(join(workspaceDir, ".sleep-shell-ready"), "utf8").catch(() => null),
+      { timeout: 30_000 },
+    ).toBe("ready");
+
     await app.evaluate(({ powerMonitor }) => {
       powerMonitor.emit("suspend");
     });
@@ -59,7 +75,13 @@ test("terminal output survives host suspend and resumes into the same xterm", as
         // Repeat the actual SearchAddon selection until the backlog is present
         // instead of polling a clipboard value from one too-early search.
         await terminalInput.press(process.platform === "darwin" ? "Meta+F" : "Control+F");
-        const findInput = page.getByPlaceholder("Find");
+        // The find bar is a plain DOM overlay appended to this pane's
+        // .xterm-host (useTerminalSession's openSearch), so scope it to the
+        // pane rather than trusting there to be exactly one on the page.
+        const findInput = page
+          .locator(".spark-terminal-pane:visible")
+          .first()
+          .getByPlaceholder("Find");
         await findInput.fill(marker);
         await findInput.press("Enter");
         await findInput.press("Escape");

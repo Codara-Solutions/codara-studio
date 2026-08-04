@@ -1,3 +1,0 @@
-Smart merge local smoke test
-Created in the main workspace after the remote smoke commit.
-This commit simulates your own local work before fetching origin/main.

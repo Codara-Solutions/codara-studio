@@ -5,8 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-test("a live worker pane returns after the renderer misses its preparation event", async () => {
-  test.setTimeout(60_000);
+test("a live worker pane returns after the renderer misses its launch event", async () => {
+  // The worker is genuinely launched now, so the budget covers a real session:
+  // main waits for the pane's pty:spawn and a first resize before it drives the
+  // shell, and the tail waits for that shell to die and settle the attempt.
+  test.setTimeout(120_000);
   const { userDataDir, workspaceDir } = await prepareWorkspace();
   let app: ElectronApplication | null = null;
 
@@ -57,6 +60,14 @@ test("a live worker pane returns after the renderer misses its preparation event
         workerTaskId: task.id,
         cwd,
       });
+      // A prepared attempt owns a prompt on disk and nothing else. Only a
+      // LAUNCHED one has a terminal, so launch it: the launch_requested event
+      // is what materializes a CLI worker's pane, and pane creation is what
+      // drives pty:spawn. The promise settles only when the whole worker
+      // session ends, so start it and return — main keeps driving it.
+      void spark.orchestration
+        .launchWorkerAttempt({ runId: run.id, attemptId: envelope.attemptId })
+        .catch(() => undefined);
       return { runId: run.id, attemptId: envelope.attemptId };
     }, workspaceDir);
 
@@ -115,7 +126,7 @@ test("a live worker pane returns after the renderer misses its preparation event
     // under test is routing).
     await page.getByRole("tab", { name: "Runs" }).dispatchEvent("click");
     const workerCard = page
-      .locator('div[style*="cursor: grab"]')
+      .locator('[data-testid="run-canvas-viewport"]')
       .getByRole("button", { name: /Manual worker/ });
     const openTerminal = page.getByRole("button", { name: "Open worker terminal" });
     await workerCard.dispatchEvent("click");
@@ -205,31 +216,53 @@ test("a live worker pane returns after the renderer misses its preparation event
       )
       .toBe(true);
 
-    // A failed Cora worker is represented durably in the run transcript, not
-    // by a dead terminal. Simulate the main-process lifecycle event and prove
-    // the pane (and its PTY) close instead of leaving a red zombie surface.
-    await app.evaluate(({ BrowserWindow }, event) => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        window.webContents.send("orchestration:event", event);
-      }
-    }, {
-      id: "evt-worker-failed-e2e",
-      timestamp: new Date().toISOString(),
-      eventVersion: 1,
-      workspaceId: "ws-worker-reconcile",
-      runId: seeded.runId,
-      workerTaskId: "task-worker-failed-e2e",
-      attemptId: seeded.attemptId,
-      type: "worker_attempt.finished",
-      payload: { exitCode: 1, error: "provider failed" },
-    });
-    await expect(guard).toBeHidden();
+    // The recreated pane wears no pill in any strip: a workers-scoped terminal
+    // is run-owned (isRunOwnedTab, tabs/types.ts:291), and isTopStripTab
+    // (App.tsx:5817) keeps run-owned tabs out of the top bar, while the inner
+    // strip deliberately offers no Workers destination (asserted above). The
+    // graph is the only door, so walking it is the proof: the Inspector's
+    // action resolves a live pane or flashes "No terminal open", and the guard
+    // appearing means reconciliation rebuilt the tab around the PTY that
+    // survived the reload.
+    //
+    // Retry the click rather than firing it once. The pty.exists poll above
+    // cannot gate this: the PTY is main-owned and never died, so it is already
+    // true the instant the renderer comes back, while the pane is rebuilt by a
+    // level-triggered 1s loop that may not have ticked yet. A single click
+    // races it — and retrying is exactly what a user does when the button says
+    // no terminal is open.
+    await page.getByRole("tab", { name: "Runs" }).dispatchEvent("click");
+    await workerCard.dispatchEvent("click");
+    await expect(openTerminal).toBeVisible();
+    await expect(async () => {
+      await openTerminal.dispatchEvent("click");
+      await expect(guard).toBeVisible({ timeout: 1_000 });
+    }).toPass({ timeout: 20_000 });
+    await expect(guard).toHaveAttribute("data-input-protected", "true");
+
+    // A failed Cora worker is represented durably in the run transcript, not by
+    // a dead terminal. Kill this one the way a real one dies — its shell exits
+    // non-zero — so main settles the attempt and broadcasts its own
+    // worker_attempt.finished. A renderer-fabricated event would prove nothing
+    // here: main deliberately downgrades a renderer dispose of a still-LIVE
+    // attempt to a detach (ipc.ts's isLiveWorkerAttemptPty), so only a genuinely
+    // finished attempt can retire the pane and its PTY.
+    // Ctrl+C first: this is a real shell that main pasted the worker prompt
+    // into as comment lines, so it may be sitting on a continuation prompt.
+    await page.evaluate(
+      (attemptId) =>
+        (window as unknown as { spark: any }).spark.pty.write(attemptId, "\u0003exit 1\r"),
+      seeded.attemptId,
+    );
+    await expect(guard).toBeHidden({ timeout: 20_000 });
     await expect
-      .poll(() =>
-        page.evaluate(
-          (attemptId) => (window as unknown as { spark: any }).spark.pty.exists(attemptId),
-          seeded.attemptId,
-        ),
+      .poll(
+        () =>
+          page.evaluate(
+            (attemptId) => (window as unknown as { spark: any }).spark.pty.exists(attemptId),
+            seeded.attemptId,
+          ),
+        { timeout: 20_000 },
       )
       .toBe(false);
   } finally {

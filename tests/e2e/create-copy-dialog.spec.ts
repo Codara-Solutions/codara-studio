@@ -2,9 +2,9 @@ import { test, expect, type ElectronApplication } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -79,13 +79,29 @@ test("create-copy dialog opens remote branches and creates named branches", asyn
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    const worktreesRoot = join(userDataDir, "worktrees", basename(workspaceDir));
+    // Managed worktrees are namespaced per repo as
+    // "<repo dirname>-<sha256 prefix>" (managedWorktreesRoot,
+    // src/main/git-worktrees.ts:53-73). The hash is taken over the CANONICAL
+    // path — on macOS this tmpdir resolves through /private — so the directory
+    // name is not derivable from workspaceDir here. This throwaway home holds
+    // exactly one repo, so read the name rather than recompute the hash; each
+    // branch then lands in a subdirectory slugified from its short name
+    // (pickCheckoutDirName, :196).
+    const managedWorktree = async (branch: string): Promise<string> => {
+      const repos = (await readdir(join(userDataDir, "worktrees"))).filter(
+        (entry) => !entry.startsWith("."),
+      );
+      expect(repos).toHaveLength(1);
+      return join(userDataDir, "worktrees", repos[0], branch);
+    };
     const openDialogForFirstRow = async (): Promise<void> => {
       const menuTrigger = page.getByTitle("Workspace actions").first();
       await expect(menuTrigger).toBeVisible({ timeout: 30_000 });
       await menuTrigger.click();
-      await page.getByText("Create copy", { exact: true }).click();
-      await expect(page.getByText(/Create copy of/)).toBeVisible();
+      // The row menu names this action "Create isolated worktree…" — it is
+      // what the copy IS, and the dialog's heading now says the same thing.
+      await page.getByRole("menuitem", { name: /^Create isolated worktree/ }).click();
+      await expect(page.getByText(/Create isolated worktree for/)).toBeVisible();
     };
 
     // ── Open a REMOTE branch: local tracking branch named after it ──────────
@@ -98,7 +114,7 @@ test("create-copy dialog opens remote branches and creates named branches", asyn
       .click();
     await expect(page.getByText("Opened existing branch")).toBeVisible({ timeout: 15_000 });
 
-    const remoteWorktree = join(worktreesRoot, "origin-only");
+    const remoteWorktree = await managedWorktree("origin-only");
     expect(existsSync(remoteWorktree)).toBe(true);
     const { stdout: remoteHead } = await execFileAsync(
       "git",
@@ -124,7 +140,7 @@ test("create-copy dialog opens remote branches and creates named branches", asyn
     await nameInput.press("Enter");
     await expect(page.getByText(/on new branch/)).toBeVisible({ timeout: 15_000 });
 
-    const namedWorktree = join(worktreesRoot, "my-feature");
+    const namedWorktree = await managedWorktree("my-feature");
     expect(existsSync(namedWorktree)).toBe(true);
     const { stdout: namedHead } = await execFileAsync(
       "git",

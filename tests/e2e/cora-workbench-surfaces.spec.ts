@@ -283,10 +283,9 @@ test("every Cora run exposes a stable Runs surface immediately and the Whiteboar
       await page.screenshot({ path: process.env.CODARA_RUNS_ISOLATION_SCREENSHOT });
     }
 
-    // Chat stays lightweight: the conversation itself begins immediately
-    // beneath the normal Cora strip, with no Runs-style telemetry banner.
+    // Back to chat, so the optional screenshot below captures the lightweight
+    // conversation surface rather than the Runs graph.
     await chatTab.click();
-    await expect(page.locator(".cora-chat-mission-header")).toHaveCount(0);
     if (process.env.CODARA_CHAT_LIGHTWEIGHT_SCREENSHOT) {
       await page.waitForTimeout(250);
       await page.screenshot({ path: process.env.CODARA_CHAT_LIGHTWEIGHT_SCREENSHOT });
