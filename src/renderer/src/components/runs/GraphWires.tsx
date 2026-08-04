@@ -133,17 +133,43 @@ function stepWireState(status: StepState["status"]): WireState {
 // (active worker lanes) widens the stroke and adds a travelling dot so the
 // working branch is unmistakable; `dimmed` recedes a running step's still-
 // pending sibling lanes so contrast, not just hue, carries the signal.
+//
+// `still` is set while the run is paused. settleWhilePaused already turns an
+// active wire quiet, but a BLOCKED wire keeps its danger colour (the failure
+// is still true while the run is held) — so the flag is what stops its retry
+// dashes travelling. A paused run may show no motion anywhere.
 function Wire({
   d,
   state,
   emphasis = false,
   dimmed = false,
+  still = false,
 }: {
   d: string;
   state: WireState;
   emphasis?: boolean;
   dimmed?: boolean;
+  still?: boolean;
 }) {
+  // The retry edge: a lane whose target failed reads as rework, so it is drawn
+  // in short dashes flowing BACKWARD along the path rather than as a solid
+  // run. The dash pattern is inline so the paused (unanimated) form keeps the
+  // same dashed silhouette; only the animation class is withheld.
+  if (state === "blocked") {
+    return (
+      <path
+        d={d}
+        className={still ? undefined : "spark-wire-retry"}
+        fill="none"
+        stroke={WIRE_COLOR.blocked}
+        strokeWidth={emphasis ? 2 : 1.6}
+        strokeDasharray="4 4"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+        style={dimmed ? { opacity: 0.55 } : undefined}
+      />
+    );
+  }
   if (state === "active") {
     return (
       <g>
@@ -194,7 +220,15 @@ function Port({ x, y, state }: { x: number; y: number; state: WireState }) {
       cx={x}
       cy={y}
       r={state === "active" ? 3.5 : 3.1}
-      fill={state === "active" ? "color-mix(in oklch, var(--accent) 34%, var(--bg))" : "var(--bg)"}
+      // A lit centre marks the two ends worth finding: the lane doing the work
+      // and the lane that stopped. Everything else stays a hollow bead.
+      fill={
+        state === "active"
+          ? "color-mix(in oklch, var(--accent) 34%, var(--bg))"
+          : state === "blocked"
+            ? "color-mix(in oklch, var(--danger) 30%, var(--bg))"
+            : "var(--bg)"
+      }
       stroke={color}
       strokeWidth={1.4}
       vectorEffect="non-scaling-stroke"
@@ -274,7 +308,7 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
           spineWireState(wire, stepById, runStatus, promptStepId),
           runPaused,
         );
-        return <Wire key={wire.id} d={flowPath(wire)} state={state} />;
+        return <Wire key={wire.id} d={flowPath(wire)} state={state} still={runPaused} />;
       })}
 
       {/* Fan wires: one branch per parallel worker lane, dropping out of the
@@ -293,6 +327,7 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
             d={flowPath(wire)}
             state={state}
             dimmed={stepLive && state === "pending"}
+            still={runPaused}
           />
         );
       })}

@@ -139,6 +139,27 @@ export function sentenceCase(value: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
 }
 
+// A step that has stopped for good. Only these may be folded shut on the
+// canvas: a queued or running step collapsed to a stub would hide work still
+// in flight, which is the one thing the graph exists to show.
+export function isTerminalStepStatus(status: StepState["status"]): boolean {
+  return (
+    status === "complete" ||
+    status === "skipped" ||
+    status === "failed" ||
+    status === "blocked" ||
+    status === "completed_unverified"
+  );
+}
+
+// A finished step the canvas folds away WITHOUT being asked. Only the clean
+// endings qualify: failed, blocked and completed_unverified steps are terminal
+// too, but they are exactly what the operator opened the graph to look at, so
+// they stay expanded until the user folds them by hand.
+export function isAutoCollapsibleStepStatus(status: StepState["status"]): boolean {
+  return status === "complete" || status === "skipped";
+}
+
 // A step is "attention" when it has stalled in a state only the operator can
 // clear. Drives the loud danger treatment on the node and the inspector list.
 export function stepNeedsAttention(status: StepState["status"]): boolean {
@@ -504,6 +525,33 @@ export function formatDuration(startedAt?: string, finishedAt?: string): string 
   const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
   if (Number.isNaN(start) || Number.isNaN(end)) return "—";
   return formatDurationMs(Math.max(0, end - start));
+}
+
+// ── Cost formatting ──────────────────────────────────────────────────────────
+
+// Compact USD for a node footer. Spend spans four orders of magnitude across
+// models, so precision follows the number: cents once a step crosses 1¢, four
+// decimals below it, so a cheap worker still shows real spend rather than
+// rounding to "$0.00". Returns null for zero / absent / unmeasured, which is
+// the common case (pty attempts report no cost at all) — callers drop the
+// segment entirely rather than printing a zero they cannot stand behind.
+export function formatCostUsd(value: number | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  if (value >= 0.01) return `$${value.toFixed(2)}`;
+  if (value >= 0.0001) return `$${value.toFixed(4)}`;
+  return "<$0.0001";
+}
+
+// First non-empty line of a multi-line blob (a report summary, an attempt's
+// error text), for the one-line console readout on a node. Undefined when
+// there is nothing to say, so callers can fall through to their own wording.
+export function firstLine(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  for (const line of value.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
 }
 
 // ── Live hooks ───────────────────────────────────────────────────────────────

@@ -76,6 +76,11 @@ export interface StepLayout {
   index: number;
   box: Box;
   workers: WorkerLayout[];
+  // True when the step is folded to its compact box. A collapsed step carries
+  // NO workers, so every fan wire, worker port and peer thread derived from
+  // this layout disappears with it and the spine closes up — which is the
+  // whole point: a run with a dozen finished steps stops being a mile wide.
+  collapsed: boolean;
 }
 
 export interface SpineWire {
@@ -136,6 +141,11 @@ export const WORKER_W = 258;
 export const WORKER_H = 82;
 export const END_W = 132;
 export const END_H = 86;
+// The folded form of a step: index chip, one line of title, one line of
+// stats. Small enough that a long run of finished steps costs a fraction of
+// the width their cards plus fans would.
+export const COLLAPSED_STEP_W = 168;
+export const COLLAPSED_STEP_H = 64;
 
 // ── Spacing ─────────────────────────────────────────────────────────────────
 const COL_GAP = 134; // horizontal wire run between spine columns
@@ -267,10 +277,16 @@ function fanOverhang(slots: ReadonlyArray<{ side: FanSide }>): {
  * flat row wider than the viewport. The orchestration is the picture: the
  * spine is Cora's line of control, everything below it is delegated work. A
  * step with no workers connects straight through.
+ *
+ * `collapsedStepIds` folds finished steps down to a compact box with no fan.
+ * Nothing else has to know: fan wires, worker ports and peer threads are all
+ * derived from a step's `workers`, so emptying that list is what makes them
+ * vanish, and the spine simply runs shorter.
  */
 export function computeRunGraphLayout(
   steps: StepState[],
   rowsByStep: ReadonlyMap<string, readonly AgentRow[]>,
+  collapsedStepIds?: ReadonlySet<string>,
 ): RunGraphLayout {
   // Spine centreline. Workers hang below it now, so nothing above the steps
   // competes for room, the fan's depth is paid for in `height` instead.
@@ -288,19 +304,31 @@ export function computeRunGraphLayout(
 
   steps.forEach((step, i) => {
     const rows = rowsByStep.get(step.id) ?? [];
-    const slots = fanSlots(rows.length);
+    const collapsed = collapsedStepIds?.has(step.id) ?? false;
+    // A folded step has no fan, so it has no overhang to pay for either — the
+    // columns either side of it close right up.
+    const slots = collapsed ? [] : fanSlots(rows.length);
     const overhang = fanOverhang(slots);
     // Push the step in by the left overhang so the outermost card still clears
     // the previous column, and pay for the right one when advancing the cursor.
-    const box: Box = {
-      x: cursorX + overhang.left,
-      y: spineY - STEP_H / 2,
-      w: STEP_W,
-      h: STEP_H,
-    };
+    // Both boxes stay centred on the spine, so the wire layer's ports land on
+    // the edges of whichever form the step is currently wearing.
+    const box: Box = collapsed
+      ? {
+          x: cursorX,
+          y: spineY - COLLAPSED_STEP_H / 2,
+          w: COLLAPSED_STEP_W,
+          h: COLLAPSED_STEP_H,
+        }
+      : {
+          x: cursorX + overhang.left,
+          y: spineY - STEP_H / 2,
+          w: STEP_W,
+          h: STEP_H,
+        };
     const centreX = box.x + box.w / 2;
     const stackTop = box.y + box.h + WORKER_DROP;
-    const workers: WorkerLayout[] = rows.map((row, j) => {
+    const workers: WorkerLayout[] = (collapsed ? [] : rows).map((row, j) => {
       const slot = slots[j];
       const workerBox: Box = {
         x: slot.side === "right" ? centreX + FAN_INDENT : centreX - FAN_INDENT - WORKER_W,
@@ -321,7 +349,7 @@ export function computeRunGraphLayout(
         },
       };
     });
-    stepLayouts.push({ stepId: step.id, index: i + 1, box, workers });
+    stepLayouts.push({ stepId: step.id, index: i + 1, box, workers, collapsed });
     cursorX = box.x + box.w + overhang.right + COL_GAP;
   });
 

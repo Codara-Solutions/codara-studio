@@ -7,7 +7,12 @@ import React, {
   useState,
 } from "react";
 import type { RunState } from "@shared/types";
-import { buildRunMaps, useRunReports } from "./run-format";
+import {
+  buildRunMaps,
+  isAutoCollapsibleStepStatus,
+  isTerminalStepStatus,
+  useRunReports,
+} from "./run-format";
 import RunGraph from "./RunGraph";
 import Inspector from "./Inspector";
 import { ResizeHandle } from "../../panels/ResizeHandle";
@@ -32,6 +37,24 @@ const INSPECTOR_STORAGE_KEY = "spark.runs.inspector:v2";
 interface InspectorPrefs {
   width: number;
   collapsed: boolean;
+}
+
+// Shared identity for "no overrides yet", so resetting on a run change does
+// not hand the layout memo a new Set that means the same thing.
+const NO_OVERRIDES: ReadonlySet<string> = new Set<string>();
+
+function withId(set: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  if (set.has(id)) return set;
+  const next = new Set(set);
+  next.add(id);
+  return next;
+}
+
+function withoutId(set: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  if (!set.has(id)) return set;
+  const next = new Set(set);
+  next.delete(id);
+  return next;
 }
 
 function clampZoom(value: number): number {
@@ -59,7 +82,9 @@ export default function RunCanvas({
   onOpenWorkerTerminal,
 }: {
   run: RunState;
-  onOpenWorkerTerminal?: (workerTaskId: string) => void;
+  // Returns whether a terminal pane was actually focused; the Inspector's
+  // Open terminal button uses the miss to show a notice instead of dead-air.
+  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
 }) {
   const maps = useMemo(() => buildRunMaps(run), [run]);
   const reportByAttempt = useRunReports(run);
@@ -70,6 +95,14 @@ export default function RunCanvas({
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedWorkerTaskId, setSelectedWorkerTaskId] = useState<string | null>(null);
   const [inspector, setInspector] = useState<InspectorPrefs>(loadInspectorPrefs);
+
+  // Which finished steps are folded. The auto rule (a cleanly finished step
+  // folds itself) is derived below; these two sets record the user overriding
+  // it in either direction, and a manual choice always beats the rule. Kept in
+  // memory only and per run — a fold is a way of reading THIS graph right now,
+  // not a preference worth outliving the run.
+  const [userExpanded, setUserExpanded] = useState<ReadonlySet<string>>(NO_OVERRIDES);
+  const [userCollapsed, setUserCollapsed] = useState<ReadonlySet<string>>(NO_OVERRIDES);
 
   const [zoomLabel, setZoomLabel] = useState(`${Math.round(DEFAULT_ZOOM * 100)}%`);
   const [isPanning, setIsPanning] = useState(false);
@@ -372,6 +405,57 @@ export default function RunCanvas({
     [onOpenWorkerTerminal, revealInspector],
   );
 
+  // The step the selected worker belongs to. Auto-collapse must never fold a
+  // card the user is currently looking inside of.
+  const selectedWorkerStepId = selectedWorkerTaskId
+    ? maps.taskById.get(selectedWorkerTaskId)?.stepId
+    : undefined;
+
+  // The effective fold set: the auto rule, then the user's overrides on top.
+  const collapsedStepIds = useMemo(() => {
+    const next = new Set<string>();
+    for (const step of run.steps) {
+      if (!isTerminalStepStatus(step.status)) continue;
+      // A hand-folded step stays folded even if it holds the selection — the
+      // toggle handler clears that selection rather than refusing the fold.
+      if (userCollapsed.has(step.id)) {
+        next.add(step.id);
+        continue;
+      }
+      if (!isAutoCollapsibleStepStatus(step.status)) continue;
+      if (userExpanded.has(step.id)) continue;
+      if (step.id === selectedWorkerStepId) continue;
+      next.add(step.id);
+    }
+    return next;
+  }, [run.steps, userCollapsed, userExpanded, selectedWorkerStepId]);
+
+  const handleToggleStepCollapse = useCallback(
+    (stepId: string) => {
+      const step = run.steps.find((candidate) => candidate.id === stepId);
+      if (!step || !isTerminalStepStatus(step.status)) return;
+      if (collapsedStepIds.has(stepId)) {
+        setUserCollapsed((prev) => withoutId(prev, stepId));
+        setUserExpanded((prev) => withId(prev, stepId));
+        return;
+      }
+      setUserExpanded((prev) => withoutId(prev, stepId));
+      setUserCollapsed((prev) => withId(prev, stepId));
+      // Folding the card the selected worker lives in would leave the
+      // inspector open on something no longer in the picture.
+      setSelectedWorkerTaskId((current) =>
+        current && maps.taskById.get(current)?.stepId === stepId ? null : current,
+      );
+    },
+    [run.steps, collapsedStepIds, maps.taskById],
+  );
+
+  // Overrides belong to the run they were made in.
+  useEffect(() => {
+    setUserExpanded(NO_OVERRIDES);
+    setUserCollapsed(NO_OVERRIDES);
+  }, [run.id]);
+
   const clearSelection = useCallback(() => {
     setSelectedStepId(null);
     setSelectedWorkerTaskId(null);
@@ -436,6 +520,8 @@ export default function RunCanvas({
                 reportByAttempt={reportByAttempt}
                 selectedStepId={selectedStepId}
                 selectedWorkerTaskId={selectedWorkerTaskId}
+                collapsedStepIds={collapsedStepIds}
+                onToggleStepCollapse={handleToggleStepCollapse}
                 onSelectStep={handleSelectStep}
                 onSelectWorker={handleSelectWorker}
                 onOpenWorker={handleOpenWorker}

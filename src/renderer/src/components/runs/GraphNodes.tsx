@@ -3,6 +3,8 @@ import type { RunState, StepState, WorkerAttempt, WorkerReport, WorkerTask } fro
 import {
   type AgentRow,
   deriveAgentStatus,
+  firstLine,
+  formatCostUsd,
   isLiveStatus,
   runtimeTone,
   sentenceCase,
@@ -61,6 +63,21 @@ function AlertGlyph({ size = 14 }: { size?: number }) {
   );
 }
 
+// The failure counterpart to CheckGlyph — a plain cross, drawn on the same
+// 14-unit grid so the two badges swap without the header shifting.
+function CrossGlyph({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" aria-hidden>
+      <path
+        d="M3.8 3.8 10.2 10.2M10.2 3.8 3.8 10.2"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function CheckpointGlyph({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -101,26 +118,28 @@ function ArrowUpRightGlyph({ size = 12 }: { size?: number }) {
   );
 }
 
-function WorkersGlyph({ size = 11 }: { size?: number }) {
+// 10px chevron for the collapse / expand toggle. Points down on an expanded
+// step (fold this away) and right on a collapsed one (unfold it).
+function ChevronGlyph({ size = 10, dir }: { size?: number; dir: "down" | "right" }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" aria-hidden>
-      <circle cx="4" cy="4" r="2" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M1 10.4c0-1.7 1.4-2.8 3-2.8s3 1.1 3 2.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-      <path d="M8.2 2.6a2 2 0 0 1 0 3.5M9 10.4c0-1.5-.9-2.5-2-2.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function FilesGlyph({ size = 11 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" aria-hidden>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 10 10"
+      fill="none"
+      aria-hidden
+      style={{
+        transform: dir === "right" ? "rotate(-90deg)" : undefined,
+        transition: "transform var(--motion-fast) var(--ease-out)",
+      }}
+    >
       <path
-        d="M3 1.6h3.6L9 4v6.4H3z"
+        d="M2.2 3.6 5 6.4l2.8-2.8"
         stroke="currentColor"
-        strokeWidth="1.15"
+        strokeWidth="1.5"
+        strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path d="M6.4 1.8V4.2H8.8" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -175,6 +194,118 @@ function StatusTag({ label, tone }: { label: string; tone: string }) {
       {sentenceCase(label)}
     </span>
   );
+}
+
+// ── Card primitives ──────────────────────────────────────────────────────────
+// The three parts every work card wears, in the order the eye reads them: the
+// header's live indicator, the one-line console readout of what the card is
+// doing right now, and the hairline rail underneath. Step cards and worker
+// cards share them so a batch and its workers read as one family.
+
+// The live indicator: a two-lit-sides ring turning on itself. It replaces a
+// wordy "Running" chip for the one state that needs no word — only the states
+// a word can explain (paused, no response, crashed, queued) keep the chip.
+// Never rendered while the run is paused; the class collapses under
+// prefers-reduced-motion.
+function ArcSpinner({ size = 14, tone = "var(--accent)" }: { size?: number; tone?: string }) {
+  return (
+    <span
+      aria-hidden
+      className="runs-arc-spin"
+      style={{
+        width: size,
+        height: size,
+        boxSizing: "border-box",
+        borderRadius: 999,
+        border: "1.5px solid transparent",
+        borderTopColor: tone,
+        borderRightColor: tone,
+        flex: "0 0 auto",
+      }}
+    />
+  );
+}
+
+// What the card is doing right now, in one ellipsized monospace line — the
+// terminal readout the node would print if it had a terminal. Tinted by
+// outcome: danger when the line is a failure, ok when it is a result.
+function ConsoleLine({
+  text,
+  tone,
+  title,
+}: {
+  text: string;
+  tone: string;
+  title?: string;
+}) {
+  return (
+    <span
+      title={title}
+      style={{
+        display: "block",
+        minWidth: 0,
+        width: "100%",
+        color: tone,
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+        lineHeight: 1.35,
+        letterSpacing: "-0.01em",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+// The 2px rail above the footer. `indeterminate` is for work with no
+// done/total to measure against (a single worker): the fill sweeps instead of
+// growing, and settles to a plain accent rail under reduced motion. Paused
+// cards always pass a static fill — nothing on a held run may travel.
+function ProgressTrack({
+  progress,
+  tone,
+  indeterminate = false,
+}: {
+  progress: number;
+  tone: string;
+  indeterminate?: boolean;
+}) {
+  const width = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "block",
+        width: "100%",
+        height: 2,
+        flex: "0 0 auto",
+        borderRadius: 999,
+        background: "color-mix(in oklab, var(--ink) 9%, transparent)",
+        overflow: "hidden",
+      }}
+    >
+      <span
+        className={indeterminate ? "runs-track-live" : undefined}
+        style={{
+          display: "block",
+          height: "100%",
+          width: indeterminate ? "100%" : `${width}%`,
+          background: indeterminate ? undefined : tone,
+          transition: "width var(--motion) var(--ease-out)",
+        }}
+      />
+    </span>
+  );
+}
+
+// The soft outer glow a card wears while it is the live one (accent) or has
+// stopped on a failure (danger). Built with color-mix so it stays a whisper on
+// light themes instead of the reference's flat rgba haze.
+function glowShadow(color: string): string {
+  return `0 0 14px color-mix(in oklch, ${color} 18%, transparent)`;
 }
 
 // ── Verifier verdict (shared) ────────────────────────────────────────────────
@@ -379,7 +510,16 @@ export const SparkNode = React.memo(function SparkNode({
           : live
             ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
             : "var(--panel)",
-        boxShadow: "var(--lift-hi), var(--shadow-2)",
+        // The same soft outer glow the live step cards wear, so the origin
+        // belongs to the lit path rather than sitting outside it. A paused run
+        // is not live, so isLiveStatus already withholds it.
+        boxShadow: [
+          failed ? glowShadow("var(--danger)") : live ? glowShadow("var(--accent)") : null,
+          "var(--lift-hi)",
+          "var(--shadow-2)",
+        ]
+          .filter(Boolean)
+          .join(", "),
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
@@ -457,14 +597,211 @@ interface StepNodeProps {
   reportByAttempt?: ReadonlyMap<string, WorkerReport>;
   attemptByTask?: Map<string, WorkerAttempt>;
   tasksById?: Map<string, WorkerTask>;
+  // Folded to the compact node — its worker fan is gone from the layout, so
+  // the card must stand on its own summary.
+  collapsed?: boolean;
+  // Present only when this step may be folded (a terminal step). Absent means
+  // no toggle is drawn at all, which is how a live step is kept open.
+  onToggleCollapse?: () => void;
 }
 
 export const StepNode = React.memo(function StepNode(props: StepNodeProps) {
+  if (props.collapsed) {
+    return <CollapsedStepNode {...props} />;
+  }
   if ((props.step.kind ?? "worker_batch") === "brake") {
     return <CheckpointNode {...props} />;
   }
   return <WorkerBatchNode {...props} />;
 });
+
+// The fold affordance on a terminal step. Quiet until hovered: it is a view
+// control, not part of the run's story. A real <button> is fine here because
+// the step cards are <article>s — the aria-hidden span dance in WorkerNode
+// exists only because that card is itself a <button>.
+function CollapseToggle({
+  collapsed,
+  onToggle,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const label = collapsed ? "Expand step" : "Collapse step";
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-expanded={!collapsed}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggle();
+      }}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        flex: "0 0 auto",
+        width: 17,
+        height: 17,
+        padding: 0,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 5,
+        border: "1px solid transparent",
+        background: hover ? "color-mix(in oklab, var(--ink) 9%, transparent)" : "transparent",
+        color: hover ? "var(--ink-dim)" : "var(--muted)",
+        cursor: "pointer",
+        transition:
+          "color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <ChevronGlyph dir={collapsed ? "right" : "down"} />
+    </button>
+  );
+}
+
+// A finished step, folded. Everything the expanded card said is gone except
+// what survives as a result: which step it was, what it was called, whether it
+// landed, and what it cost in workers and wall time. Clicking it still opens
+// the inspector — the chevron is the only part that unfolds it.
+function CollapsedStepNode({
+  step,
+  index,
+  rows,
+  selected,
+  onSelect,
+  onToggleCollapse,
+}: StepNodeProps) {
+  const [hover, setHover] = useState(false);
+  const status = step.status;
+  const failed = status === "blocked" || status === "failed";
+  const skipped = status === "skipped";
+  const complete = status === "complete";
+
+  const total = rows.length;
+  const attempts = rows
+    .map((row) => row.attempt)
+    .filter((attempt): attempt is WorkerAttempt => Boolean(attempt));
+  const startedAt = attempts
+    .map((attempt) => attempt.startedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()[0];
+  const finishedAt =
+    attempts.length > 0 && attempts.every((attempt) => attempt.finishedAt)
+      ? attempts
+          .map((attempt) => attempt.finishedAt as string)
+          .sort()
+          .slice(-1)[0]
+      : undefined;
+
+  const border = selected
+    ? "var(--accent)"
+    : failed
+      ? "var(--danger)"
+      : complete
+        ? "color-mix(in oklch, var(--ok) 45%, var(--rule))"
+        : hover
+          ? "var(--rule-strong)"
+          : "var(--rule)";
+
+  return (
+    <article
+      onClick={(event) => {
+        event.stopPropagation();
+        onSelect();
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={`${step.title}\n${step.goal || ""}\n\n${stepStatusLabel(status)} — collapsed. Click to inspect, or use the chevron to expand.`}
+      style={{
+        width: "100%",
+        height: "100%",
+        boxSizing: "border-box",
+        borderRadius: 12,
+        border: `1px solid ${border}`,
+        background: failed
+          ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
+          : "var(--panel)",
+        boxShadow: [
+          selected ? "0 0 0 1.5px var(--accent)" : null,
+          failed ? glowShadow("var(--danger)") : null,
+          "var(--lift-hi)",
+          "var(--shadow-1)",
+        ]
+          .filter(Boolean)
+          .join(", "),
+        opacity: skipped ? 0.45 : 1,
+        padding: "9px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        cursor: "pointer",
+        overflow: "hidden",
+        fontFamily: "var(--font-sans)",
+        transition:
+          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+        <StepBadge index={index} status={status} size={22} showIndex />
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            color: "var(--ink)",
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: "-0.01em",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {step.title}
+        </span>
+        {complete ? (
+          <span title="Complete" style={{ color: "var(--ok)", display: "inline-flex" }}>
+            <CheckGlyph size={12} />
+          </span>
+        ) : failed ? (
+          <span title={stepStatusLabel(status)} style={{ color: "var(--danger)", display: "inline-flex" }}>
+            <CrossGlyph size={12} />
+          </span>
+        ) : null}
+        {onToggleCollapse && <CollapseToggle collapsed onToggle={onToggleCollapse} />}
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          minWidth: 0,
+          fontFamily: "var(--font-mono)",
+          fontSize: 9.5,
+          fontVariantNumeric: "tabular-nums",
+          color: "var(--muted)",
+        }}
+      >
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {skipped
+            ? "skipped"
+            : total > 0
+              ? `${total} ${total === 1 ? "worker" : "workers"}`
+              : stepStatusLabel(status)}
+        </span>
+        {startedAt && (
+          <span style={{ flex: "0 0 auto" }}>
+            <ElapsedTime startedAt={startedAt} finishedAt={finishedAt} />
+          </span>
+        )}
+      </div>
+    </article>
+  );
+}
 
 function WorkerBatchNode({
   step,
@@ -478,6 +815,7 @@ function WorkerBatchNode({
   reportByAttempt,
   attemptByTask,
   tasksById,
+  onToggleCollapse,
 }: StepNodeProps) {
   const [hover, setHover] = useState(false);
   const status = step.status;
@@ -492,16 +830,27 @@ function WorkerBatchNode({
   const attention = status === "blocked" || status === "failed";
   const live = !runPaused && (active || inMotion);
 
+  // Only genuine motion earns the spinner. A step that is merely the run's
+  // current one (queued, waiting for Cora to spawn it) keeps the accent edge
+  // but says its word, so the header can never spin over work not started.
+  const spinning = !runPaused && inMotion;
+
   const total = rows.length;
-  const done = rows.filter(
-    (row) => deriveAgentStatus(row.task, row.attempt, status) === "done",
-  ).length;
+  const rowStatuses = rows.map((row) => deriveAgentStatus(row.task, row.attempt, status));
+  const done = rowStatuses.filter((rowStatus) => rowStatus === "done").length;
+  const runningCount = rowStatuses.filter((rowStatus) => rowStatus === "running").length;
   const progress = total > 0 ? done / total : complete ? 1 : 0;
   // Retries hide behind logical worker rows; surface the raw try count when
   // it outgrows the worker count so the step admits its rework.
   const spawned = rows.filter((row) => row.task).length;
   const attemptTotal = rows.reduce(
     (sum, row) => sum + (row.attemptCount ?? (row.attempt ? 1 : 0)),
+    0,
+  );
+  // The deepest round any one worker has reached — what "attempt 3" on the
+  // console line means, as opposed to the batch-wide attemptTotal.
+  const attemptRound = rows.reduce(
+    (max, row) => Math.max(max, row.attemptCount ?? row.attempt?.attemptNumber ?? 0),
     0,
   );
 
@@ -520,6 +869,31 @@ function WorkerBatchNode({
           .slice(-1)[0]
       : undefined;
 
+  // Every try across every row's lineage, not just the surviving attempts —
+  // a step that retried twice was billed for all three runs.
+  const cost = formatCostUsd(
+    rows.reduce((sum, row) => {
+      const tries = row.attempts ?? (row.attempt ? [row.attempt] : []);
+      return sum + tries.reduce((spend, attempt) => spend + (attempt.costUsd ?? 0), 0);
+    }, 0),
+  );
+
+  // A stopped step's own words: the first blocked worker's error, which says
+  // far more than repeating "failed" the badge already showed.
+  const failureText = attention
+    ? firstLine(rows.find((_, i) => rowStatuses[i] === "blocked")?.attempt?.error)
+    : undefined;
+  const readout = stepConsoleLine({
+    status,
+    held,
+    done,
+    total,
+    fileCount,
+    runningCount,
+    attemptRound,
+    failureText,
+  });
+
   const border = selected
     ? "var(--accent)"
     : attention
@@ -528,9 +902,11 @@ function WorkerBatchNode({
         ? "var(--accent-edge)"
         : held
           ? "color-mix(in oklch, var(--info) 46%, var(--rule))"
-          : hover
-            ? "var(--rule-strong)"
-            : "var(--rule)";
+          : status === "complete"
+            ? "color-mix(in oklch, var(--ok) 45%, var(--rule))"
+            : hover
+              ? "var(--rule-strong)"
+              : "var(--rule)";
   const background = attention
     ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
     : live
@@ -538,13 +914,23 @@ function WorkerBatchNode({
       : held
         ? "color-mix(in oklab, var(--info) 4%, var(--panel))"
         : "var(--panel)";
+  // Glow only for the two states that earn it. `live` is already false while
+  // the run is paused, so a held step keeps its quiet info edge and nothing
+  // around it suggests the work is still burning.
   const shadow = [
     selected ? "0 0 0 1.5px var(--accent)" : null,
+    attention ? glowShadow("var(--danger)") : live ? glowShadow("var(--accent)") : null,
     "var(--lift-hi)",
     "var(--shadow-2)",
   ]
     .filter(Boolean)
     .join(", ");
+
+  const footerStats = [
+    total > 0 ? `${done}/${total} workers` : null,
+    fileCount > 0 ? `${fileCount} ${fileCount === 1 ? "file" : "files"}` : null,
+    attemptTotal > spawned && spawned > 0 ? `${attemptTotal} attempts` : null,
+  ].filter(Boolean) as string[];
 
   return (
     <article
@@ -560,29 +946,39 @@ function WorkerBatchNode({
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        borderRadius: 18,
+        borderRadius: 14,
         border: `1px solid ${border}`,
         background,
         boxShadow: shadow,
-        padding: "13px 15px 17px",
+        // A skipped step stays legible but steps back out of the reading
+        // order — it is part of the plan that did not happen.
+        opacity: status === "skipped" ? 0.45 : 1,
+        padding: "12px 14px",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 7,
         cursor: "pointer",
         overflow: "hidden",
         fontFamily: "var(--font-sans)",
         transition:
-          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
-      <header style={{ display: "grid", gridTemplateColumns: "32px minmax(0,1fr) auto", gap: 11, alignItems: "start" }}>
+      <header
+        style={{
+          display: "grid",
+          gridTemplateColumns: "28px minmax(0,1fr) auto",
+          gap: 9,
+          alignItems: "start",
+        }}
+      >
         <StepBadge index={index} status={status} tone={held ? tone : undefined} />
-        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
           <span
             style={{
               color: "var(--muted)",
               fontFamily: "var(--font-sans)",
-              fontSize: 10,
+              fontSize: 9.5,
               fontWeight: 600,
               letterSpacing: "0.04em",
             }}
@@ -594,7 +990,8 @@ function WorkerBatchNode({
               color: "var(--ink)",
               fontSize: 13.5,
               fontWeight: 600,
-              lineHeight: 1.28,
+              letterSpacing: "-0.01em",
+              lineHeight: 1.25,
               overflow: "hidden",
               display: "-webkit-box",
               WebkitLineClamp: 2,
@@ -605,9 +1002,34 @@ function WorkerBatchNode({
             {step.title}
           </span>
         </div>
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 6, flex: "0 0 auto" }}>
-          <StatusTag label={held ? "paused" : stepStatusLabel(status)} tone={tone} />
+        <div
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            flex: "0 0 auto",
+            // Sits on the title's first line rather than the block's top edge.
+            marginTop: 2,
+          }}
+        >
           <VerdictPill kind={verdict} compact />
+          {attention ? (
+            <span
+              title={stepStatusLabel(status)}
+              style={{ color: "var(--danger)", display: "inline-flex" }}
+            >
+              {status === "blocked" ? <AlertGlyph /> : <CrossGlyph />}
+            </span>
+          ) : spinning ? (
+            <ArcSpinner />
+          ) : status === "complete" ? (
+            <span title="Complete" style={{ color: "var(--ok)", display: "inline-flex" }}>
+              <CheckGlyph />
+            </span>
+          ) : (
+            <StatusTag label={held ? "paused" : stepStatusLabel(status)} tone={tone} />
+          )}
+          {onToggleCollapse && <CollapseToggle collapsed={false} onToggle={onToggleCollapse} />}
         </div>
       </header>
 
@@ -616,92 +1038,143 @@ function WorkerBatchNode({
           margin: 0,
           color: "var(--ink-dim)",
           fontSize: 11,
-          lineHeight: 1.45,
-          minHeight: 32,
+          lineHeight: 1.4,
           overflow: "hidden",
           display: "-webkit-box",
-          WebkitLineClamp: 2,
+          WebkitLineClamp: 1,
           WebkitBoxOrient: "vertical",
         }}
       >
         {step.goal || "Worker activity for this step."}
       </p>
 
+      <ConsoleLine text={readout.text} tone={readout.tone} />
+
       <div
         style={{
           marginTop: "auto",
-          paddingTop: 9,
-          borderTop: "1px solid var(--rule-soft)",
           display: "flex",
-          alignItems: "center",
-          gap: 14,
+          flexDirection: "column",
+          gap: 7,
+          minWidth: 0,
         }}
       >
-        <Stat
-          icon={<WorkersGlyph />}
-          label="Workers"
-          value={total > 0 ? `${done}/${total}` : "—"}
-          tone={total > 0 && done === total ? "var(--ok)" : "var(--ink-dim)"}
+        <ProgressTrack
+          progress={progress}
+          tone={
+            attention
+              ? "var(--danger)"
+              : held
+                ? "var(--info)"
+                : complete
+                  ? "var(--ok)"
+                  : "var(--accent)"
+          }
         />
-        {attemptTotal > spawned && spawned > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontFamily: "var(--font-mono)",
+            fontSize: 10.5,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
           <span
-            title={`${spawned} workers ran ${attemptTotal} attempts, retries included`}
+            title={
+              attemptTotal > spawned && spawned > 0
+                ? `${done} of ${total} workers finished · ${fileCount} files touched · ${spawned} workers ran ${attemptTotal} attempts, retries included`
+                : `${done} of ${total} workers finished · ${fileCount} files touched`
+            }
             style={{
+              flex: 1,
+              minWidth: 0,
               color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
-              fontWeight: 500,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
               whiteSpace: "nowrap",
             }}
           >
-            · {attemptTotal} attempts
+            {footerStats.length > 0 ? footerStats.join(" · ") : "no workers yet"}
           </span>
-        )}
-        <Stat
-          icon={<FilesGlyph />}
-          label="Files"
-          value={fileCount > 0 ? String(fileCount) : "—"}
-          tone={fileCount > 0 ? "var(--ink-dim)" : "var(--muted)"}
-        />
-        <span style={{ flex: 1 }} />
-        {startedAt && (
-          <span
-            style={{
-              color: live ? "var(--accent)" : "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 10.5,
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            <ElapsedTime startedAt={startedAt} finishedAt={finishedAt} />
-          </span>
-        )}
+          {cost && (
+            <span title="Measured spend across this step's attempts" style={{ flex: "0 0 auto", color: "var(--muted)" }}>
+              {cost}
+            </span>
+          )}
+          {startedAt && (
+            <span
+              style={{
+                flex: "0 0 auto",
+                color: live ? "var(--accent)" : "var(--muted)",
+                fontWeight: live ? 600 : undefined,
+              }}
+            >
+              <ElapsedTime startedAt={startedAt} finishedAt={finishedAt} />
+            </span>
+          )}
+        </div>
       </div>
-
-      {/* Worker-completion bar, flush along the node's bottom edge. */}
-      <span
-        aria-hidden
-        style={{
-          position: "absolute",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          height: 3,
-          background: "color-mix(in oklab, var(--ink) 8%, transparent)",
-        }}
-      >
-        <span
-          style={{
-            display: "block",
-            height: "100%",
-            width: `${Math.round(progress * 100)}%`,
-            background: attention ? "var(--danger)" : complete ? "var(--ok)" : "var(--accent)",
-            transition: "width var(--motion) var(--ease-out)",
-          }}
-        />
-      </span>
     </article>
   );
+}
+
+// The step card's console readout. Every branch is synthesized from the same
+// rows the footer counts, so the line can never claim something the numbers
+// beside it contradict. Ordered by precedence, not by status enum: a held run
+// and a stopped step both outrank "still running", because a paused or failed
+// step whose last persisted status is `running` must never narrate motion.
+function stepConsoleLine(input: {
+  status: StepState["status"];
+  held: boolean;
+  done: number;
+  total: number;
+  fileCount: number;
+  runningCount: number;
+  attemptRound: number;
+  failureText?: string;
+}): { text: string; tone: string } {
+  const { status, held, done, total, fileCount, runningCount, attemptRound, failureText } = input;
+  const files = `${fileCount} ${fileCount === 1 ? "file" : "files"}`;
+
+  if (held) {
+    return {
+      text: total > 0 ? `paused · ${done}/${total} workers` : "paused",
+      tone: "var(--info)",
+    };
+  }
+  if (status === "blocked" || status === "failed") {
+    const detail = failureText ?? (total > 0 ? `${done}/${total} workers finished` : "no workers ran");
+    return { text: `${status} · ${detail}`, tone: "var(--danger)" };
+  }
+  if (status === "skipped") {
+    return { text: "skipped", tone: "var(--muted)" };
+  }
+  if (status === "complete") {
+    const parts = ["done"];
+    if (total > 0) parts.push(`${total} ${total === 1 ? "worker" : "workers"}`);
+    if (fileCount > 0) parts.push(files);
+    return { text: parts.join(" · "), tone: "var(--ok)" };
+  }
+  if (status === "completed_unverified") {
+    return {
+      text: fileCount > 0 ? `landed unverified · ${files}` : "landed unverified",
+      tone: "var(--warn)",
+    };
+  }
+  if (status === "running" || status === "reviewing") {
+    const parts: string[] = [];
+    if (status === "reviewing") parts.push("reviewing");
+    parts.push(total > 0 ? `${done}/${total} workers` : "spawning workers");
+    if (runningCount > 0) parts.push(`${runningCount} running`);
+    if (attemptRound > 1) parts.push(`attempt ${attemptRound}`);
+    return { text: parts.join(" · "), tone: "var(--ink-dim)" };
+  }
+  if (status === "planning") {
+    return { text: "planning…", tone: "var(--muted)" };
+  }
+  return { text: "waiting…", tone: "var(--muted)" };
 }
 
 // Brake / checkpoint step: a manager replanning pause, no workers. Lighter and
@@ -713,6 +1186,7 @@ function CheckpointNode({
   runPaused = false,
   selected,
   onSelect,
+  onToggleCollapse,
 }: StepNodeProps) {
   const [hover, setHover] = useState(false);
   const status = step.status;
@@ -752,7 +1226,13 @@ function CheckpointNode({
         borderRadius: 14,
         border: `1px dashed ${border}`,
         background: live ? "color-mix(in oklab, var(--accent) 5%, var(--panel))" : "var(--panel)",
-        boxShadow: selected ? "0 0 0 1.5px var(--accent), var(--shadow-1)" : "var(--shadow-1)",
+        boxShadow: [
+          selected ? "0 0 0 1.5px var(--accent)" : null,
+          live ? glowShadow("var(--accent)") : null,
+          "var(--shadow-1)",
+        ]
+          .filter(Boolean)
+          .join(", "),
         padding: "13px 16px",
         display: "flex",
         flexDirection: "column",
@@ -766,10 +1246,10 @@ function CheckpointNode({
           style={{
             width: 28,
             height: 28,
-            borderRadius: 8,
+            borderRadius: 7,
             flex: "0 0 auto",
-            border: `1px solid ${tone}`,
-            background: complete ? "var(--ok-soft)" : "color-mix(in oklab, var(--ink) 4%, transparent)",
+            border: `1px solid color-mix(in oklch, ${tone} 28%, var(--rule))`,
+            background: `color-mix(in oklch, ${tone} 12%, transparent)`,
             color: tone,
             display: "inline-flex",
             alignItems: "center",
@@ -778,7 +1258,7 @@ function CheckpointNode({
         >
           <CheckpointGlyph />
         </span>
-        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
           <span
             style={{
               color: "var(--muted)",
@@ -790,6 +1270,7 @@ function CheckpointNode({
           >
             Step {index} · Checkpoint
           </span>
+
           <span
             style={{
               color: "var(--ink)",
@@ -805,6 +1286,7 @@ function CheckpointNode({
             {step.title}
           </span>
         </div>
+        {onToggleCollapse && <CollapseToggle collapsed={false} onToggle={onToggleCollapse} />}
       </header>
       <p
         style={{
@@ -828,85 +1310,51 @@ function CheckpointNode({
   );
 }
 
+// The header's icon chip: a tinted rounded square carrying the step's ordinal,
+// or its outcome mark once the step is terminal. Tint and edge are mixed from
+// the step's own tone rather than painted solid, so the chip stays a quiet
+// anchor on light themes instead of a filled block.
 function StepBadge({
   index,
   status,
   tone: toneOverride,
+  size = 28,
+  showIndex = false,
 }: {
   index: number;
   status: StepState["status"];
   // Set when the node paints the step in a tone its own status cannot express
   // (a running step held by a paused run), so the badge agrees with the chip.
   tone?: string;
+  size?: number;
+  // Keep the ordinal even on a terminal step. The collapsed card needs it:
+  // it has no "Step N" eyebrow to fall back on, and it shows the outcome as a
+  // separate mark, so the chip is free to stay the number.
+  showIndex?: boolean;
 }) {
   const tone = toneOverride ?? stepStatusColor(status);
-  const complete = status === "complete" || status === "skipped";
-  const failed = status === "failed" || status === "blocked";
+  const complete = !showIndex && (status === "complete" || status === "skipped");
+  const failed = !showIndex && (status === "failed" || status === "blocked");
   return (
     <span
       style={{
-        width: 32,
-        height: 32,
-        borderRadius: 8,
-        border: `1px solid ${tone}`,
-        background: complete
-          ? "var(--ok-soft)"
-          : failed
-            ? "var(--danger-soft)"
-            : toneOverride
-              ? `color-mix(in oklch, ${toneOverride} 8%, transparent)`
-              : "color-mix(in oklch, var(--accent) 8%, transparent)",
+        width: size,
+        height: size,
+        flex: "0 0 auto",
+        borderRadius: 7,
+        border: `1px solid color-mix(in oklch, ${tone} 28%, var(--rule))`,
+        background: `color-mix(in oklch, ${tone} 12%, transparent)`,
         color: tone,
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
         fontFamily: "var(--font-mono)",
-        fontSize: 12.5,
+        fontSize: 12,
         fontWeight: 700,
         fontVariantNumeric: "tabular-nums",
       }}
     >
       {complete ? <CheckGlyph /> : failed ? <AlertGlyph /> : String(index)}
-    </span>
-  );
-}
-
-function Stat({
-  icon,
-  label,
-  value,
-  tone,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  tone: string;
-}) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }} title={`${label}: ${value}`}>
-      <span style={{ color: "var(--muted)", display: "inline-flex" }}>{icon}</span>
-      <span
-        style={{
-          color: "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          fontWeight: 500,
-          letterSpacing: "0.02em",
-        }}
-      >
-        {label}
-      </span>
-      <span
-        style={{
-          color: tone,
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          fontWeight: 600,
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
-        {value}
-      </span>
     </span>
   );
 }
@@ -920,6 +1368,10 @@ interface WorkerNodeProps {
   // an attempt caught mid-launch can still read as running, so the card is told
   // the run is held rather than inferring aliveness from a stale attempt.
   runPaused?: boolean;
+  // Attempt-id keyed worker reports, threaded down from RunGraph. Optional so
+  // the card still renders before the lazy report loader has read anything off
+  // disk; the console line falls back to a bare "complete" until it lands.
+  reportByAttempt?: ReadonlyMap<string, WorkerReport>;
   selected: boolean;
   onSelect: () => void;
   onOpen: () => void;
@@ -929,6 +1381,7 @@ export const WorkerNode = React.memo(function WorkerNode({
   row,
   stepStatus,
   runPaused = false,
+  reportByAttempt,
   selected,
   onSelect,
   onOpen,
@@ -1004,6 +1457,62 @@ export const WorkerNode = React.memo(function WorkerNode({
     : "model pending";
   const stateColor = held ? statusColor("paused") : statusColor(status);
 
+  // Two runtime states outlive their word: "no response" and "crashed" say
+  // something a glyph cannot, so they keep the dot-and-word chip while every
+  // other terminal state collapses to a spinner / check / cross.
+  const wordyRuntime = runtimeState === "stalled" || runtimeState === "error";
+  const indicator: "word" | "spinner" | "check" | "cross" =
+    held || wordyRuntime
+      ? "word"
+      : running
+        ? "spinner"
+        : status === "done"
+          ? "check"
+          : blocked
+            ? "cross"
+            : "word";
+
+  // What this worker is doing, in the card's one console line. A finished
+  // worker speaks its report's own summary — the thing it was spawned to
+  // produce — rather than repeating the check mark beside it. While it RUNS,
+  // the live activity readout (the tool line the worker is on right now,
+  // stall/retry detail included) beats the bare state word; the word stays
+  // the fallback until a writer has reported anything.
+  const report = attempt ? reportByAttempt?.get(attempt.id) : undefined;
+  const liveActivity = running ? attempt?.runtimeActivity?.trim() : undefined;
+  const readout: { text: string; tone: string } = held
+    ? { text: "paused", tone: "var(--info)" }
+    : queued
+      ? { text: "queued", tone: "var(--muted)" }
+      : blocked
+        ? { text: firstLine(attempt?.error) ?? stateLabel, tone: "var(--danger)" }
+        : status === "done"
+          ? { text: firstLine(report?.summary) ?? "complete", tone: "var(--ok)" }
+          : {
+              text: liveActivity || stateLabel,
+              tone:
+                runtimeState === "error"
+                  ? "var(--danger)"
+                  : runtimeState === "stalled"
+                    ? "var(--warn)"
+                    : "var(--ink-dim)",
+            };
+
+  // A single worker has no done/total to fill against, so its rail sweeps
+  // while the work is open and settles to a full outcome-toned bar when it
+  // lands. A held worker gets a static info bar: present, but not travelling.
+  const track: { progress: number; tone: string; indeterminate?: boolean } = held
+    ? { progress: 1, tone: "var(--info)" }
+    : running
+      ? { progress: 1, tone: "var(--accent)", indeterminate: true }
+      : status === "done"
+        ? { progress: 1, tone: "var(--ok)" }
+        : blocked
+          ? { progress: 1, tone: "var(--danger)" }
+          : { progress: 0, tone: "var(--muted)" };
+
+  const cost = formatCostUsd(attempt?.costUsd);
+
   // Attempt lineage: ordinal counts every try across the task's supersedes
   // chain; the tooltip recounts the earlier tries so rework is inspectable
   // without opening the inspector.
@@ -1058,20 +1567,23 @@ export const WorkerNode = React.memo(function WorkerNode({
         // that separates one card from the one stacked above it. While the
         // worker runs the edge turns accent and the card lifts a level: the
         // working lane must be structural, not just a tint. Model identity
-        // stays on the chip.
-        boxShadow: `${
+        // stays on the chip. The outer glow joins it for the two states that
+        // earn one — never while held, which has neither.
+        boxShadow: [
           running
             ? "inset 0 2px 0 var(--accent)"
-            : `inset 0 3px 0 color-mix(in oklch, ${tone.label} 78%, transparent)`
-        }, ${
-          selected
-            ? "0 0 0 1.5px var(--accent), var(--shadow-1)"
-            : running
-              ? "var(--lift-hi), var(--shadow-2)"
-              : "var(--lift-hi), var(--shadow-1)"
-        }`,
+            : `inset 0 3px 0 color-mix(in oklch, ${tone.label} 78%, transparent)`,
+          selected ? "0 0 0 1.5px var(--accent)" : null,
+          blocked ? glowShadow("var(--danger)") : running ? glowShadow("var(--accent)") : null,
+          "var(--lift-hi)",
+          running ? "var(--shadow-2)" : "var(--shadow-1)",
+        ]
+          .filter(Boolean)
+          .join(", "),
         opacity: queued ? 0.62 : 1,
-        padding: "11px 10px 8px 10px",
+        // Four rows in 82px: the padding and the line-heights below are the
+        // budget. Anything added here has to come out of something else.
+        padding: "8px 10px",
         display: "flex",
         flexDirection: "column",
         gap: 5,
@@ -1102,6 +1614,7 @@ export const WorkerNode = React.memo(function WorkerNode({
             padding: "2px 5px",
             fontFamily: "var(--font-mono)",
             fontSize: 9,
+            lineHeight: 1.2,
             fontWeight: 650,
             letterSpacing: "0.04em",
             // Deliberately NOT uppercased, see ModelTag in Inspector.tsx. The
@@ -1113,45 +1626,59 @@ export const WorkerNode = React.memo(function WorkerNode({
         >
           {modelBadge}
         </span>
+        {/* The card's title, in the reference's header slot: what this worker
+            was actually asked to do, not the slot it occupies. */}
         <span
           style={{
             minWidth: 0,
-            color: "var(--muted-2)",
+            color: "var(--ink)",
             fontFamily: "var(--font-sans)",
-            fontSize: 9.5,
-            fontWeight: 600,
-            letterSpacing: "0.03em",
+            fontSize: 11,
+            fontWeight: 650,
+            letterSpacing: "-0.01em",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
         >
-          {role}
+          {label}
         </span>
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 4,
-            color: held
-              ? stateColor
-              : runtimeState === "error" || blocked
-                ? "var(--danger)"
-                : runtimeState === "stalled"
-                  ? "var(--warn)"
-                  : runtimeState === "idle" || runtimeState === "done"
-                    ? "var(--ok)"
-                    : stateColor,
-            fontFamily: "var(--font-sans)",
-            fontSize: 9.5,
-            fontWeight: 600,
-            letterSpacing: "0.02em",
-            whiteSpace: "nowrap",
-          }}
-        >
-          <StatusDot status={held ? "paused" : mapAgentToStepStatus(status)} size={5} />
-          {sentenceCase(stateLabel)}
-        </span>
+        {indicator === "spinner" ? (
+          <ArcSpinner size={12} />
+        ) : indicator === "check" ? (
+          <span title="Complete" style={{ color: "var(--ok)", display: "inline-flex" }}>
+            <CheckGlyph size={12} />
+          </span>
+        ) : indicator === "cross" ? (
+          <span title="Blocked" style={{ color: "var(--danger)", display: "inline-flex" }}>
+            <CrossGlyph size={12} />
+          </span>
+        ) : (
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              color: held
+                ? stateColor
+                : runtimeState === "error" || blocked
+                  ? "var(--danger)"
+                  : runtimeState === "stalled"
+                    ? "var(--warn)"
+                    : runtimeState === "idle" || runtimeState === "done"
+                      ? "var(--ok)"
+                      : stateColor,
+              fontFamily: "var(--font-sans)",
+              fontSize: 9.5,
+              fontWeight: 600,
+              letterSpacing: "0.02em",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <StatusDot status={held ? "paused" : mapAgentToStepStatus(status)} size={5} />
+            {sentenceCase(stateLabel)}
+          </span>
+        )}
         <span
           // Kept out of the a11y tree: a nested button is invalid inside the
           // card <button>. The inspector's "Open worker terminal" action is
@@ -1175,70 +1702,84 @@ export const WorkerNode = React.memo(function WorkerNode({
           <ArrowUpRightGlyph />
         </span>
       </div>
-      <span
+      <ConsoleLine text={readout.text} tone={readout.tone} title={readout.text} />
+
+      <div
         style={{
+          marginTop: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 5,
           minWidth: 0,
           width: "100%",
-          color: "var(--ink)",
-          fontSize: 11,
-          fontWeight: 650,
-          lineHeight: 1.2,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
         }}
       >
-        {label}
-      </span>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 7, minWidth: 0, width: "100%" }}>
-        <span
+        <ProgressTrack
+          progress={track.progress}
+          tone={track.tone}
+          indeterminate={track.indeterminate}
+        />
+        <div
           style={{
-            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
             minWidth: 0,
-            color: "var(--muted)",
+            width: "100%",
             fontFamily: "var(--font-mono)",
             fontSize: 10,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {modelLine}
-        </span>
-        {attemptOrdinal > 1 && (
-          <span
-            title={
-              attemptHistory ??
-              `${attemptOrdinal - 1} earlier ${attemptOrdinal === 2 ? "attempt" : "attempts"}`
-            }
-            style={{
-              flex: "0 0 auto",
-              color: "var(--muted-2)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
-            }}
-          >
-            attempt {attemptOrdinal} of {Math.max(WORKER_ATTEMPT_CAP, attemptOrdinal)}
-          </span>
-        )}
-        <span
-          style={{
-            flex: "0 0 auto",
-            minWidth: 34,
-            textAlign: "right",
-            color: running ? "var(--accent)" : stateColor,
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            fontWeight: running ? 600 : undefined,
+            lineHeight: 1.2,
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          {attempt ? (
-            <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="—" />
-          ) : (
-            "—"
+          {/* Role joins the model line here now that the header carries the
+              worker's title. Ellipsis eats the model id first — the chip above
+              already names the model in its short human form. */}
+          <span
+            title={`${role} · ${modelLine}`}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              color: "var(--muted)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {role} · {modelLine}
+          </span>
+          {attemptOrdinal > 1 && (
+            <span
+              title={
+                attemptHistory ??
+                `${attemptOrdinal - 1} earlier ${attemptOrdinal === 2 ? "attempt" : "attempts"}`
+              }
+              style={{ flex: "0 0 auto", color: "var(--muted-2)" }}
+            >
+              attempt {attemptOrdinal}/{Math.max(WORKER_ATTEMPT_CAP, attemptOrdinal)}
+            </span>
           )}
-        </span>
+          {cost && (
+            <span title="Measured spend for this attempt" style={{ flex: "0 0 auto", color: "var(--muted-2)" }}>
+              {cost}
+            </span>
+          )}
+          <span
+            style={{
+              flex: "0 0 auto",
+              minWidth: 30,
+              textAlign: "right",
+              color: running ? "var(--accent)" : stateColor,
+              fontWeight: running ? 600 : undefined,
+            }}
+          >
+            {attempt ? (
+              <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="—" />
+            ) : (
+              "—"
+            )}
+          </span>
+        </div>
       </div>
     </button>
   );
@@ -1281,7 +1822,15 @@ export const EndNode = React.memo(function EndNode({
           : failed
             ? "color-mix(in oklab, var(--danger) 5%, var(--panel))"
             : "var(--panel)",
-        boxShadow: "var(--lift-hi), var(--shadow-1)",
+        // The terminal earns its glow only once the run has actually landed —
+        // the one moment the whole spine is finished.
+        boxShadow: [
+          complete ? glowShadow("var(--ok)") : failed ? glowShadow("var(--danger)") : null,
+          "var(--lift-hi)",
+          "var(--shadow-1)",
+        ]
+          .filter(Boolean)
+          .join(", "),
         display: "flex",
         flexDirection: "column",
         alignItems: "center",

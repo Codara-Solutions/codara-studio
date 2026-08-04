@@ -3,6 +3,7 @@ import type { RunState } from "@shared/types";
 import {
   agentRowsForStep,
   type AgentRow,
+  isTerminalStepStatus,
   promptGenerationTargetStepId,
   type RunMaps,
   sortSteps,
@@ -32,10 +33,19 @@ interface Props {
   reportByAttempt: ReadonlyMap<string, WorkerReport>;
   selectedStepId: string | null;
   selectedWorkerTaskId: string | null;
+  // Steps folded to their compact node — derived in RunCanvas, where the
+  // user's manual overrides live alongside the selection they interact with.
+  collapsedStepIds?: ReadonlySet<string>;
+  // Absent for a step the canvas will not let the user fold (a live one).
+  onToggleStepCollapse?: (id: string) => void;
   onSelectStep: (id: string) => void;
   onSelectWorker: (id: string) => void;
   onOpenWorker: (id: string) => void;
 }
+
+// Stable identity for "nothing is collapsed", so the layout memo does not
+// churn on a fresh empty Set every render.
+const NO_COLLAPSED: ReadonlySet<string> = new Set<string>();
 
 // Absolute wrapper for one node — RunGraph positions, the node paints itself.
 function NodeBox({
@@ -69,6 +79,8 @@ export default function RunGraph({
   reportByAttempt,
   selectedStepId,
   selectedWorkerTaskId,
+  collapsedStepIds = NO_COLLAPSED,
+  onToggleStepCollapse,
   onSelectStep,
   onSelectWorker,
   onOpenWorker,
@@ -86,8 +98,8 @@ export default function RunGraph({
   }, [orderedSteps, maps]);
 
   const layout = useMemo(
-    () => computeRunGraphLayout(orderedSteps, rowsByStep),
-    [orderedSteps, rowsByStep],
+    () => computeRunGraphLayout(orderedSteps, rowsByStep, collapsedStepIds),
+    [orderedSteps, rowsByStep, collapsedStepIds],
   );
   const promptStepId = useMemo(() => promptGenerationTargetStepId(run), [run]);
   // The user has stopped this run from the composer. Nothing below the spine
@@ -127,6 +139,10 @@ export default function RunGraph({
         if (!step) return null;
         const rows = rowsByStep.get(step.id) ?? [];
         const stepSelected = selectedStepId === step.id;
+        // Only a step that has stopped for good offers the fold control; a
+        // live one has no toggle at all, so it can never be shut over moving
+        // work.
+        const foldable = Boolean(onToggleStepCollapse) && isTerminalStepStatus(step.status);
         return (
           <React.Fragment key={step.id}>
             <NodeBox box={stepLayout.box} z={stepSelected ? 3 : 2}>
@@ -141,6 +157,10 @@ export default function RunGraph({
                 active={step.id === run.currentStepId}
                 runPaused={runPaused}
                 selected={stepSelected}
+                collapsed={stepLayout.collapsed}
+                onToggleCollapse={
+                  foldable ? () => onToggleStepCollapse?.(step.id) : undefined
+                }
                 onSelect={() => onSelectStep(step.id)}
               />
             </NodeBox>
@@ -159,6 +179,7 @@ export default function RunGraph({
                     row={row}
                     stepStatus={step.status}
                     runPaused={runPaused}
+                    reportByAttempt={reportByAttempt}
                     selected={workerSelected}
                     onSelect={() => {
                       if (workerLayout.taskId) onSelectWorker(workerLayout.taskId);

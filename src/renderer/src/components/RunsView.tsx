@@ -18,7 +18,8 @@ interface Props {
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
-  onOpenWorkerTerminal?: (workerTaskId: string) => void;
+  // Returns whether a terminal pane was actually focused (see App.tsx).
+  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
 }
 
 export default function RunsView({

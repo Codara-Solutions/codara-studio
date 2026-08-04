@@ -64,6 +64,22 @@ import {
 // preview-tab spawns per pane (a chatty dev server shouldn't open ten
 // previews if the user happens to scroll its log).
 
+// Placeholder ShellInfo for Pi-harness worker panes. Their pty is a display
+// session that MAIN already owns (run-store's ensurePiWorkerDisplayPty); the
+// pane only ever ATTACHES, and pty-manager's existing-session branch ignores
+// the shell. Same fail-closed contract as BACKEND_TERMINAL_SHELL: if the
+// session is gone (attempt finished between the reconcile loop's exists check
+// and this mount), the accidental spawn fails on a no-op executable with a
+// visible one-liner instead of leaving a bare interactive shell wearing the
+// worker's name.
+const PI_WORKER_DISPLAY_SHELL: ShellInfo = {
+  id: "spark-pi-worker-display",
+  label: "Pi worker display",
+  exe: "noop",
+  args: [],
+  family: "other",
+};
+
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
@@ -1008,7 +1024,10 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             <TerminalPane
               ref={(h) => setHandle(leaf.paneId, h)}
               sessionId={leaf.paneId}
-              shell={shell}
+              // Pi worker panes attach to the main-owned display session and
+              // must never be able to spawn a real shell of their own; every
+              // other leaf keeps the workspace shell.
+              shell={leaf.worker?.harness === "pi" ? PI_WORKER_DISPLAY_SHELL : shell}
               initialCwd={leaf.cwd}
               initialCommand={leaf.autorun}
               nativeCliLoginToken={leaf.nativeCliLoginToken}

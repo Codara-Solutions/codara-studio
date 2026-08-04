@@ -1021,6 +1021,52 @@ a { color: inherit; }
   animation: spark-wire-flow 2.6s linear infinite;
 }
 
+/* The retry edge: a run-graph wire whose target is blocked or failed. Short
+   dashes flowing BACKWARD along the path, so a rework loop reads as work
+   travelling back upstream rather than onward. The dash pattern is inline on
+   the path (GraphWires.tsx) so a paused run keeps the dashed silhouette with
+   the animation withheld — a held run may never show anything moving. */
+@keyframes spark-wire-retry {
+  to { stroke-dashoffset: -16; }
+}
+.spark-wire-retry {
+  animation: spark-wire-retry 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .spark-wire-retry { animation: none; }
+}
+
+/* Run-graph card spinner: the 14px arc that replaces a wordy "Running" chip on
+   a live step / worker card. Two lit border sides on a transparent ring, so
+   only the rotation says it is turning. */
+.runs-arc-spin {
+  animation: spark-spin 0.7s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .runs-arc-spin { animation: none; }
+}
+
+/* Indeterminate fill for a run-graph progress rail — a worker card has no
+   done/total to measure itself against, so its rail sweeps instead of filling.
+   Under reduced motion it settles to a plain accent rail: still clearly the
+   live lane, just not travelling. */
+.runs-track-live {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklch, var(--accent) 16%, transparent) 0%,
+    var(--accent) 45%,
+    color-mix(in oklch, var(--accent) 16%, transparent) 100%
+  );
+  background-size: 220% 100%;
+  animation: spark-shimmer 1.7s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .runs-track-live {
+    animation: none;
+    background: color-mix(in oklch, var(--accent) 62%, transparent);
+  }
+}
+
 @media (max-width: 940px) {
   .runs-header {
     grid-template-columns: minmax(0, 1fr) !important;

@@ -20,7 +20,9 @@ interface Props {
   runsWorkspaceId: string | null;
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
-  onOpenWorkerTerminal?: (workerTaskId: string) => void;
+  // Returns whether a terminal pane was actually focused, so surfaces with
+  // their own notice (the Inspector's Open terminal button) can explain a miss.
+  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
 }
 
 // React.memo so RunsStack only re-renders when one of its real inputs

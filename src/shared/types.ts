@@ -3489,6 +3489,16 @@ export interface WorkerAttempt {
   /** ISO timestamp captured the last time runtimeState changed. */
   runtimeStateUpdatedAt?: string;
   /**
+   * Ephemeral best-effort readout of what the worker is doing right now
+   * ("Run command · npm test", "writing…"). Fed by the Pi event stream and by
+   * hook /state notes; updated in memory only (no save, no event per write) so
+   * the renderer's 1s snapshot poll can carry it. Display-only: it is not
+   * required to survive a restart and must never drive lifecycle decisions.
+   */
+  runtimeActivity?: string;
+  /** ISO timestamp of the last runtimeActivity write. */
+  runtimeActivityAt?: string;
+  /**
    * Which writer last updated `runtimeState`. The doc rule is "hook wins
    * over regex" — `reportTerminalState` honours this by refusing to
    * overwrite a fresh hook report (see HOOK_TRUST_MS in run-store.ts).

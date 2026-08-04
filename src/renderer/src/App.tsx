@@ -1623,6 +1623,30 @@ export default function App() {
     });
   }, [booted, refreshRunsFor]);
 
+  // The event channel above only refreshes when orchestration APPENDS an
+  // event. A live worker's activity readout (WorkerAttempt.runtimeActivity)
+  // is deliberately event-less and in-memory — one journal append per tool
+  // call would be spam — so a long worker turn can mutate the run cache for
+  // minutes without a single event. While any attempt is live, poll the
+  // snapshot at 1Hz to carry those silent mutations to the Runs card.
+  // Cheap in every idle dimension: the tick is one array scan when nothing
+  // is running, skips entirely while the window is hidden, and a no-change
+  // poll is absorbed by refreshRunsFor's sameRunsList reference-keep.
+  useEffect(() => {
+    if (!booted) return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      const hasLiveAttempt = runsRef.current.some((run) =>
+        run.workerAttempts.some((attempt) =>
+          ["launching", "running", "finishing"].includes(attempt.status),
+        ),
+      );
+      if (!hasLiveAttempt) return;
+      void refreshRunsForRef.current(activeIdRef.current);
+    }, 1_000);
+    return () => window.clearInterval(interval);
+  }, [booted]);
+
   // Replay any spawn-terminal specs queued for a workspace while it was in the
   // background. Runs whenever the active workspace changes (and once after
   // boot): if the now-active workspace has pending specs, drop them into its
@@ -1949,8 +1973,9 @@ export default function App() {
   // worker terminal for an agent that did not exist, and the user went looking
   // for the agent and found an empty shell (run-ms9ikoef-mnucvq).
   // `launch_requested` is emitted inside launchWorkerAttempt in the same commit
-  // that flips the attempt to "launching", so the pane still materializes well
-  // inside the Pi harness's renderer grace window.
+  // that flips the attempt to "launching", so a CLI worker's pane (whose
+  // creation drives the actual pty:spawn) materializes right at launch. Pi
+  // attempts skip this path entirely — see the harness gate below.
   useEffect(() => {
     if (!booted) return;
 
@@ -2039,10 +2064,10 @@ export default function App() {
 
       const t = tabsRef.current;
       if (!t) return;
-      // Pi-harness workers run in-process over RPC and own no pty, so a pane
-      // for one spawns a bare shell the user never asked for: the same "empty
-      // shell wearing a worker's name" the status filter below guards against,
-      // reached through harness rather than through status.
+      // Pi-harness workers run in-process over RPC; main creates their display
+      // pty a beat AFTER this launch event, so a pane materialized here would
+      // have nothing to attach to yet. The 1s reconcile loop below owns Pi
+      // panes instead: it waits for pty.exists(attemptId) and attaches then.
       if (harness === "pi") return;
       // ensureWorkerTerminalTab activates a newly materialized pane itself; a
       // repeat event for an existing pane must not steal the user's selection.
@@ -2190,9 +2215,19 @@ export default function App() {
             // surface and must never materialize as chat-owned terminal tabs.
             if (run.automationId || run.workspaceId !== workspaceId) return;
             if (finishedWorkerAttemptsRef.current.has(attempt.id)) return;
-            // Same reason as the event path above: a Pi-harness worker owns no
-            // pty, so materializing its pane only spawns an empty shell.
-            if (workerHarnessFromCommand(attempt.command) === "pi") return;
+            // A Pi-harness worker runs in-process over RPC; MAIN owns its
+            // display pty (ensurePiWorkerDisplayPty in run-store) and the pane
+            // only ever ATTACHES to that session (TerminalStack hands pi
+            // leaves a fail-closed shell, so pane creation cannot spawn one).
+            // Gate on the session actually existing: a stale "running" attempt
+            // whose session is gone (boot recovery, killed display) must not
+            // materialize a pane that has nothing to attach to.
+            if (workerHarnessFromCommand(attempt.command) === "pi") {
+              const hasDisplaySession = await window.spark.pty
+                .exists(attempt.id)
+                .catch(() => false);
+              if (!hasDisplaySession) return;
+            }
 
             if (disposed) return;
             if (tabsRef.current.tabsWorkspaceId !== workspaceId) return;

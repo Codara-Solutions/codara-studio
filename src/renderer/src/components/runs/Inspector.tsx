@@ -44,7 +44,10 @@ interface Props {
   selectedWorkerTaskId: string | null;
   onSelectStep: (id: string) => void;
   onSelectWorker: (id: string) => void;
-  onOpenWorkerTerminal?: (workerTaskId: string) => void;
+  // Returns whether a terminal pane was actually focused. A finished worker's
+  // pane may be gone (closed, app restart), so the button explains the miss
+  // instead of silently doing nothing.
+  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
   onClear: () => void;
 }
 
@@ -1162,8 +1165,21 @@ function WorkerDetail({
   attempts: WorkerAttempt[];
   step: StepState | null;
   reportByAttempt: ReadonlyMap<string, WorkerReport>;
-  onOpenTerminal?: () => void;
+  // Returns whether a terminal pane was actually focused (App owns the panes).
+  onOpenTerminal?: () => boolean;
 }) {
+  // Transient "no terminal to open" notice. A finished worker's pane does not
+  // survive an app restart (and a Pi display session dies with its attempt),
+  // so the button must say why nothing happened rather than being a dead
+  // click. Cleared on a timer AND keyed to the task so a miss on one worker
+  // never lingers onto another's detail view.
+  const [terminalMissTaskId, setTerminalMissTaskId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!terminalMissTaskId) return;
+    const timer = window.setTimeout(() => setTerminalMissTaskId(null), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [terminalMissTaskId]);
+  const terminalMiss = terminalMissTaskId === task.id;
   const status = deriveAgentStatus(task, attempt ?? undefined, step?.status ?? "running");
   const report = attempt ? reportByAttempt.get(attempt.id) : undefined;
   // Ordinal of the current attempt within the chain-wide lineage. Attempt
@@ -1206,24 +1222,30 @@ function WorkerDetail({
               <button
                 type="button"
                 aria-label="Open worker terminal"
-                title="Open this worker's terminal"
-                onClick={onOpenTerminal}
+                title={
+                  terminalMiss
+                    ? "This worker's terminal is no longer open — its pane closed or did not survive a restart."
+                    : "Open this worker's terminal"
+                }
+                onClick={() => {
+                  setTerminalMissTaskId(onOpenTerminal() ? null : task.id);
+                }}
                 style={{
                   marginLeft: "auto",
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 5,
                   padding: "4px 9px",
-                  border: "1px solid var(--rule)",
+                  border: `1px solid ${terminalMiss ? "color-mix(in oklch, var(--warn) 55%, var(--rule))" : "var(--rule)"}`,
                   borderRadius: 7,
                   background: "var(--bg)",
-                  color: "var(--ink-dim)",
+                  color: terminalMiss ? "var(--warn)" : "var(--ink-dim)",
                   fontSize: 10.5,
                   fontWeight: 600,
                   whiteSpace: "nowrap",
                 }}
               >
-                Open terminal
+                {terminalMiss ? "No terminal open" : "Open terminal"}
                 <svg width={10} height={10} viewBox="0 0 12 12" fill="none" aria-hidden>
                   <path
                     d="M4 3h5v5M9 3 3 9"
@@ -1934,7 +1956,14 @@ function friendlyWorkerLine(
   status: FriendlyWorkerStatus,
   report?: WorkerReport,
 ): string {
-  if (status === "running") return "Currently running. The final report will appear when it finishes.";
+  if (status === "running") {
+    // The live activity readout (what tool the worker is on right now) beats
+    // the generic sentence whenever a writer has reported one.
+    return (
+      attempt?.runtimeActivity?.trim() ||
+      "Currently running. The final report will appear when it finishes."
+    );
+  }
   if (status === "blocked") return attempt?.error || "This worker hit a problem and may need a retry or review.";
   if (status === "done") {
     if (report?.summary) return report.summary;

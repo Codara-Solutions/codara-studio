@@ -16522,14 +16522,29 @@ function bridgeRuntimeStateToAttempt(
   const match = findAttemptByPaneId(paneId);
   if (!match) return;
   const { run: targetRun, attempt: targetAttempt } = match;
+  // A report that carries a note has something to say about what the worker
+  // is doing right now; land it in the ephemeral activity readout whether or
+  // not the state WORD moved (the state is often "working" for a whole
+  // session while the note names each tool). In-memory + updatedAt bump only:
+  // the 1s snapshot poll reads the run cache, so a note-only change needs no
+  // run.json write and must not emit runtime_state_changed. A note-less
+  // report leaves the last activity standing — only a writer with something
+  // to say may overwrite it.
+  const activity = note ? piWorkerSafeText(note, PI_WORKER_ACTIVITY_MAX_CHARS) : "";
+  const activityChanged = Boolean(activity) && targetAttempt.runtimeActivity !== activity;
+  if (activityChanged) {
+    targetAttempt.runtimeActivity = activity;
+    targetAttempt.runtimeActivityAt = timestamp;
+  }
   const attemptStateChanged =
     targetAttempt.runtimeState !== state || targetAttempt.runtimeStateSource !== source;
   if (!attemptStateChanged) {
-    // No attempt-side change but still refresh the timestamp so the
+    // No state-word change but still refresh the timestamp so the
     // HOOK_TRUST_MS window in reportTerminalState slides forward, which is
     // the whole point of receiving repeat hook reports. No save / no
-    // event: nothing observable changed for the renderer.
+    // event: only the activity line (if any) changed for the renderer.
     targetAttempt.runtimeStateUpdatedAt = timestamp;
+    if (activityChanged) targetRun.updatedAt = timestamp;
     return;
   }
   const attemptPrevious = targetAttempt.runtimeState ?? null;
@@ -17966,30 +17981,24 @@ async function waitForPiWorkerTurn(
   }
 }
 
-const PI_WORKER_RENDERER_PTY_GRACE_MS = 1_500;
 const PI_WORKER_FALLBACK_COLS = 110;
 const PI_WORKER_FALLBACK_ROWS = 32;
+// WorkerAttempt.runtimeActivity is one ellipsized console line on the Runs
+// card; anything longer than this is noise the title= tooltip can carry.
+const PI_WORKER_ACTIVITY_MAX_CHARS = 120;
 
 /**
  * Pi runs in a main-process RPC client; its PTY is only a durable activity
- * display. Give the renderer a short chance to create the normal visible
- * pane, then create a headless display PTY ourselves. A later TerminalPane
- * attaches to this same session and receives its tail, so background
- * workspaces and missed envelope events keep running instead of failing a
- * provider that was never launched.
- *
- * Automation (loom) attempts pass rendererGraceMs 0: the renderer never
- * proactively creates panes for direct runs (LiveBoard/WorkersView attach to
- * the existing session on demand), so waiting the grace would only add dead
- * time to every iteration.
+ * display, and MAIN owns that session outright. The renderer's workers pane
+ * is a pure attacher: it materializes only once this session exists (App.tsx
+ * gates the pane on pty.exists) and hands TerminalPane a fail-closed display
+ * shell, so pane creation can never spawn a process of its own. Create the
+ * headless display PTY immediately — a later TerminalPane attach receives the
+ * full tail, so background workspaces and late-opened panes see the whole
+ * transcript instead of a black hole.
  */
-async function ensurePiWorkerDisplayPty(
-  attemptId: string,
-  cwd: string,
-  rendererGraceMs: number = PI_WORKER_RENDERER_PTY_GRACE_MS,
-): Promise<boolean> {
-  if (rendererGraceMs > 0 && (await pty.waitForSpawn(attemptId, rendererGraceMs))) return false;
-  if (pty.exists(attemptId)) return false;
+async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise<void> {
+  if (pty.exists(attemptId)) return;
   const shell = await defaultShell();
   if (!shell) throw new Error("No default shell is available for the Cora worker display.");
   await pty.spawn({
@@ -18002,7 +18011,6 @@ async function ensurePiWorkerDisplayPty(
     env: { SPARK_NO_SHELL_INTEGRATION: "1" },
   });
   pty.resize(attemptId, PI_WORKER_FALLBACK_COLS, PI_WORKER_FALLBACK_ROWS);
-  return true;
 }
 
 /**
@@ -18032,23 +18040,7 @@ async function runPiWorkerSession({
   userConstitution?: UserConstitutionCapture;
 }): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
-  const displayPtyRecovered = await ensurePiWorkerDisplayPty(
-    attemptId,
-    cwd,
-    isAutomationRun ? 0 : undefined,
-  );
-  if (displayPtyRecovered) {
-    await appendEvent({
-      workspaceId: run.workspaceId,
-      runId: run.id,
-      stepId: task.stepId,
-      workerTaskId: task.id,
-      attemptId,
-      type: "worker_attempt.display_pty_recovered",
-      message: "Cora created a main-owned worker display after the renderer missed the launch event",
-      payload: { cwd, graceMs: PI_WORKER_RENDERER_PTY_GRACE_MS },
-    });
-  }
+  await ensurePiWorkerDisplayPty(attemptId, cwd);
   await pty.waitForResize(attemptId, 5_000);
 
   const provider = piProviderForWorker(task);
@@ -18112,6 +18104,25 @@ async function runPiWorkerSession({
   const paintFolded = (paneText: string, logText: string) => {
     pty.publishOutput(attemptId, paneText);
     appendWorkerLog(stripPaneSgr(logText));
+  };
+  // Live "what is it doing right now" readout for the Runs graph card.
+  // In-memory only and value-gated: mutate the cached attempt and bump its
+  // run's updatedAt so the renderer's live-worker snapshot poll carries it —
+  // deliberately NO run.json write and NO event per tool call, this fires on
+  // every tool start. Resolve the target attempt at WRITE time through the
+  // run cache, exactly like the hook bridge does: only mutations on the
+  // instance listRuns serves are ever visible to the renderer, and the `run`
+  // parameter this session captured stops being that instance if the cache
+  // entry is ever replaced mid-session.
+  const reportActivity = (text: unknown) => {
+    const activity = piWorkerSafeText(text, PI_WORKER_ACTIVITY_MAX_CHARS);
+    if (!activity) return;
+    const target = findAttemptByPaneId(attemptId);
+    if (!target || target.attempt.runtimeActivity === activity) return;
+    const at = new Date().toISOString();
+    target.attempt.runtimeActivity = activity;
+    target.attempt.runtimeActivityAt = at;
+    target.run.updatedAt = at;
   };
 
   try {
@@ -18259,7 +18270,10 @@ async function runPiWorkerSession({
         void client?.stop().catch(() => undefined);
       },
     });
-    applyHookStateReport({ paneId: attemptId, state: "working", note: "Pi harness" });
+    // The note doubles as the card's first activity line, so it should read
+    // as what the worker is DOING ("starting…"), not which harness runs it —
+    // the first tool call replaces it moments later.
+    applyHookStateReport({ paneId: attemptId, state: "working", note: "starting…" });
 
     let assistantLineOpen = false;
     // Pane budget for ONE streamed assistant message. Prose arrives delta by
@@ -18274,9 +18288,11 @@ async function runPiWorkerSession({
         assistantLineOpen = false;
         assistantBudget = paneStreamBudget();
         assistantPaneCut = false;
+        const label = piWorkerToolLabel(event.toolName);
         const detail = piWorkerToolDetail(event);
+        reportActivity(detail ? `${label} · ${detail}` : label);
         paint(
-          `\r\n  ${paneToolStartMarker(piWorkerToolLabel(event.toolName))}` +
+          `\r\n  ${paneToolStartMarker(label)}` +
           `${detail ? `\r\n    ${paneDim(detail)}` : ""}\r\n`,
         );
       } else if (event.type === "tool_execution_end") {
@@ -18303,6 +18319,9 @@ async function runPiWorkerSession({
             if (!assistantLineOpen) {
               paint("\r\n  ");
               assistantLineOpen = true;
+              // Once per streamed message (this branch runs on its first
+              // delta only), never per delta.
+              reportActivity("writing…");
             }
             paint(delta.delta.replace(/\n/g, "\r\n  "));
             assistantBudget = paneStreamAdd(assistantBudget, delta.delta);
@@ -18329,10 +18348,15 @@ async function runPiWorkerSession({
           usageTotals.cacheWrite += usage.cacheWrite;
         }
         const failure = piWorkerEventFailure(event);
-        if (failure) paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
+        if (failure) {
+          reportActivity(`Provider error: ${piWorkerSafeText(failure, 300)}`);
+          paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
+        }
       } else if (event.type === "auto_retry_start") {
+        reportActivity("Provider retry…");
         paint(`\r\n  ${paneRetryMarker("Provider retry…")}\r\n`);
       } else if (event.type === "auto_retry_end" && event.success === false) {
+        reportActivity(`Provider retry failed: ${piWorkerSafeText(event.finalError, 300)}`);
         paint(`\r\n  \x1b[31mProvider retry failed: ${piWorkerSafeText(event.finalError, 700)}\x1b[0m\r\n`);
       } else if (event.type === "extension_error") {
         paint(`\r\n  \x1b[31mExtension error: ${String(event.error ?? "unknown")}\x1b[0m\r\n`);

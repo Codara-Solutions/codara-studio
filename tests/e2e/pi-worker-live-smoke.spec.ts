@@ -120,14 +120,34 @@ test("a real Cora Codex worker executes through Pi and completes the normal atte
     expect(running?.payload?.model).toBe("gpt-5.6-sol");
 
     await page.getByRole("tab", { name: "Cora" }).click();
-    await page.getByRole("tab", { name: "Runs" }).click();
+    // Worker terminals are run-owned but never surface as a strip pill — they
+    // are entered from the worker cards on the Runs canvas (see the dblclick
+    // below), so no tab named "workers" may appear in any tablist.
     await expect(page.getByRole("tab", { name: "Workers" })).toHaveCount(0);
+    await page.getByRole("tab", { name: "Runs" }).click();
+    // The finished step auto-collapses to its compact node, unmounting the
+    // worker cards. Unfold it first; the chevron carries the accessible name.
+    const expandStep = page.getByRole("button", { name: "Expand step" });
+    await expect(expandStep).toBeVisible({ timeout: 15_000 });
+    await expandStep.click();
     const workerCard = page.locator(`[data-worker-task-id="${launched.finished.workerTasks[0].id}"]`);
     await expect(workerCard).toContainText("Create deterministic Pi artifact");
-    await expect(workerCard).toContainText("Codex · Pi");
+    // The card's chip names the MODEL, not the harness: workerModelLabel
+    // renders "gpt-5.6-sol" as its variant name.
+    await expect(workerCard).toContainText("Sol");
     // This direct fixture is reviewed synchronously after the report; require
     // the renderer to reconcile all the way from working to accepted.
     await expect(workerCard).toHaveAttribute("data-worker-state", "accepted", { timeout: 15_000 });
+    // "Open terminal" must reach the Pi worker's pane: the attempt streamed
+    // its transcript into a main-owned display pty, the workers pane attached
+    // to it, and a successful attempt keeps that pane as inspectable evidence.
+    // Double-clicking the card routes through handleOpenWorkerTerminal; the
+    // pane header names the worker once its terminal is actually on screen.
+    await workerCard.dblclick();
+    await expect(page.locator(".cora-worker-pane-header")).toBeVisible();
+    await expect(page.locator(".cora-worker-pane-header")).toContainText(
+      "Create deterministic Pi artifact",
+    );
     if (process.env.CODARA_PI_WORKER_SCREENSHOT) {
       await page.screenshot({ path: process.env.CODARA_PI_WORKER_SCREENSHOT });
     }
