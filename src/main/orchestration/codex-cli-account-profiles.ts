@@ -7,6 +7,7 @@ import {
   codaraHomeDir,
   isCodaraManagedCliPath,
 } from "./codara-managed-cli-roots";
+import { ensureSharedCliState } from "./native-cli-shared-state";
 
 export const CODEX_CLI_PERSONAL_PROFILE_ID = "personal" as const;
 export const CODEX_CLI_ACCOUNT_PROFILES_VERSION = 1 as const;
@@ -604,6 +605,40 @@ export class CodexCliAccountProfileStore {
     await assertSafeDirectory(this.accountsDir, { create: true });
   }
 
+  /**
+   * Managed accounts share the user-state surfaces (sessions, history,
+   * config, prompts) with the personal Codex home so switching accounts
+   * behaves like logout+login in one home; auth.json stays per-account.
+   *
+   * Best-effort by design: resolution must never start failing because a
+   * symlink could not be made. A leased profile is skipped entirely — every
+   * launch resolves BEFORE acquiring its lease, so the first spawn of a
+   * profile always healed its directory, and migrating a real directory out
+   * from under a live CLI would lose its writes. The per-profile mutation key
+   * serializes concurrent resolutions of the same profile without blocking
+   * other profiles or the metadata lock.
+   */
+  private async ensureManagedSharedState(
+    profileId: string,
+    homeDir: string,
+  ): Promise<void> {
+    if (process.platform === "win32") return;
+    if (this.leases?.isLeased(profileId)) return;
+    try {
+      await withMutationLock(`${this.filePath}::share::${profileId}`, async () => {
+        if (this.leases?.isLeased(profileId)) return;
+        await ensureSharedCliState({
+          managedDir: homeDir,
+          personalDir: this.personalHomeDir,
+          runtime: "codex",
+        });
+      });
+    } catch {
+      // ensureSharedCliState reports per-name outcomes and never throws; this
+      // guard keeps even an unexpected failure out of the launch path.
+    }
+  }
+
   private async reconcileLocked(
     snapshot?: CodexCliAccountProfilesSnapshot,
   ): Promise<CodexCliAccountReconciliation> {
@@ -802,6 +837,9 @@ export class CodexCliAccountProfileStore {
 
       await fs.mkdir(homeDir, { mode: 0o700 });
       if (process.platform !== "win32") await fs.chmod(homeDir, 0o700);
+      // A fresh directory takes the pure "managed entry missing" branch of
+      // the heal: every shared name becomes a link before first use.
+      await this.ensureManagedSharedState(id, homeDir);
       const timestamp = this.now().toISOString();
       const profile: CodexCliManagedProfile = {
         id,
@@ -912,6 +950,7 @@ export class CodexCliAccountProfileStore {
       managed = true;
       ({ homeDir, authFile } = codexCliManagedProfilePaths(this.rootDir, profileId));
       await assertSafeDirectory(homeDir, { create: false });
+      await this.ensureManagedSharedState(profileId, homeDir);
     }
     const status = await Promise.resolve(
       this.authChecker({
@@ -956,35 +995,44 @@ export class CodexCliAccountProfileStore {
         throw new CodexCliAccountProfileLeasedError(rawProfileId);
       }
 
-      const { homeDir } = codexCliManagedProfilePaths(this.rootDir, rawProfileId);
-      const staged = join(
-        this.accountsDir,
-        `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
-      );
-      const homeStats = await fs.lstat(homeDir).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
+      // Serialize against the shared-state heal for this profile: a heal
+      // mid-migration keeps rollouts in a temporary stage inside the home,
+      // and deleting the home in that window would destroy state the heal
+      // was moving into the personal ~/.codex.
+      return withMutationLock(
+        `${this.filePath}::share::${rawProfileId}`,
+        async () => {
+          const { homeDir } = codexCliManagedProfilePaths(this.rootDir, rawProfileId);
+          const staged = join(
+            this.accountsDir,
+            `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
+          );
+          const homeStats = await fs.lstat(homeDir).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return null;
+              throw error;
+            },
+          );
+          if (homeStats && (homeStats.isSymbolicLink() || !homeStats.isDirectory())) {
+            throw new CodexCliAccountProfileSafetyError(
+              "the account home selected for deletion is unsafe",
+            );
+          }
+          if (homeStats) await fs.rename(homeDir, staged);
+          const next: CodexCliAccountProfilesSnapshot = {
+            ...snapshot,
+            profiles: snapshot.profiles.filter((profile) => profile.id !== rawProfileId),
+          };
+          try {
+            await persistSnapshotAtomically(this.rootDir, this.filePath, next);
+          } catch (error) {
+            if (homeStats) await fs.rename(staged, homeDir).catch(() => undefined);
+            throw error;
+          }
+          if (homeStats) await fs.rm(staged, { recursive: true, force: true });
+          return { deleted: true, snapshot: cloneSnapshot(next) };
         },
       );
-      if (homeStats && (homeStats.isSymbolicLink() || !homeStats.isDirectory())) {
-        throw new CodexCliAccountProfileSafetyError(
-          "the account home selected for deletion is unsafe",
-        );
-      }
-      if (homeStats) await fs.rename(homeDir, staged);
-      const next: CodexCliAccountProfilesSnapshot = {
-        ...snapshot,
-        profiles: snapshot.profiles.filter((profile) => profile.id !== rawProfileId),
-      };
-      try {
-        await persistSnapshotAtomically(this.rootDir, this.filePath, next);
-      } catch (error) {
-        if (homeStats) await fs.rename(staged, homeDir).catch(() => undefined);
-        throw error;
-      }
-      if (homeStats) await fs.rm(staged, { recursive: true, force: true });
-      return { deleted: true, snapshot: cloneSnapshot(next) };
     });
     if (this.leases?.runWhileUnleased) {
       return this.leases.runWhileUnleased(rawProfileId, mutate);

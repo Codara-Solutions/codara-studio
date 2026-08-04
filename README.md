@@ -80,12 +80,22 @@ cora agent message <run> all "Re-check the acceptance criteria"
 ### CLI accounts
 
 Every account you add in **Settings → Accounts** has its own private login
-directory, and one account per CLI is marked **Active**. Terminals that Codara
-Studio launches use the Active account (each one gets its config directory at
-spawn). Your own terminals are untouched: a plain `claude` or `codex` outside
-Codara keeps whatever login — and, for Claude Code, whatever chats, settings,
-agents, and commands — it always had. Codara never edits your shell startup
-files or exports `CLAUDE_CONFIG_DIR` / `CODEX_HOME` into your shell.
+directory, and one account per CLI is marked **Active**. Every terminal Codara
+Studio opens uses the Active account — agent panes resolve it at spawn, and a
+plain Studio shell gets it in its environment, so even a `claude` or `codex`
+you type yourself signs in as the Active account (terminals already open keep
+the account they started with). Your own terminals outside Codara are
+untouched: a plain `claude` or `codex` there keeps whatever login it always
+had. Codara never edits your shell startup files.
+
+Switching the Active account behaves like logging out and back in on one home:
+your chats, `/resume` list, history, and settings all stay — each account keeps
+only its own sign-in. Under the hood, every managed account shares the
+user-state surfaces (Claude's `projects/`, `settings.json`, history; Codex's
+`sessions/`, `config.toml`, history) with your personal `~/.claude` /
+`~/.codex` through links, while credentials and identity files stay private to
+each account. On Windows, managed accounts keep the older fully-isolated
+behavior.
 
 ```sh
 cora accounts cli    # which accounts exist, and which is Active (works app-closed)

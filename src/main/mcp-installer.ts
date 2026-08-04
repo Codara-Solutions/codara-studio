@@ -502,7 +502,11 @@ async function installForCodex(
 
   try {
     resolveCodexMcpConfigTarget(codexHome);
-    await writeFileAtomic(target.configPath, next, { mode: 0o600 });
+    // A managed account's config.toml is a share link to the personal
+    // ~/.codex config (native-cli-shared-state.ts); the atomic rename must
+    // land on the real file, not replace the link with a private fork.
+    const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
+    await writeFileAtomic(writePath, next, { mode: 0o600 });
     return true;
   } catch (err) {
     console.warn("[mcp-installer] failed to write the selected Codex config:", err);
@@ -1095,7 +1099,9 @@ async function uninstallCodexBuiltinBlock(
   if (next === existing) return { ok: true };
   try {
     resolveCodexMcpConfigTarget(codexHome);
-    await writeFileAtomic(target.configPath, next, { mode: 0o600 });
+    // Same share-link rule as installForCodex: write through the link.
+    const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
+    await writeFileAtomic(writePath, next, { mode: 0o600 });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: `Could not write ~/.codex/config.toml: ${(err as Error).message}` };

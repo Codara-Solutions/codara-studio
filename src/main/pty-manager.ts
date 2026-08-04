@@ -40,6 +40,7 @@ import {
   resolveFrozenNativeClaudeProfile,
   resolveNewNativeClaudeProfile,
 } from "./orchestration/native-claude-profile-runtime";
+import { resolvePlainShellAccountSelectors } from "./orchestration/native-cli-shell-defaults";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { installClaudeHooks } from "./hook-installer";
 import {
@@ -363,6 +364,16 @@ export interface SpawnOptions {
   nativeClaudeConfigDirEnv?: string | null;
   /** Main-process-only lease ownership transferred to the spawned session. */
   releaseNativeClaudeProfileLease?: () => void;
+  /**
+   * Main-process-only Active-account homes for a PLAIN shell (no Studio
+   * startup command), so a hand-typed `claude`/`codex` follows the account
+   * switch. Environment-only: unlike the native*ProfileId fields these take
+   * no lease and are never persisted — a restored shell re-resolves whatever
+   * account is Active at restore time. Set by spawn() itself, never accepted
+   * over IPC.
+   */
+  plainShellCodexHome?: string;
+  plainShellClaudeConfigDir?: string;
   /**
    * Main-process-only exact child environment. When present, pty-manager does
    * not inherit, enrich, or append Studio/provider variables. Renderer IPC
@@ -753,6 +764,45 @@ async function spawnWithSessionLock(
       nativeClaudeConfigDirEnv: execution.env.CLAUDE_CONFIG_DIR ?? null,
       releaseNativeClaudeProfileLease,
     };
+  }
+  // A plain user shell — no Studio startup command, no worker run, no frozen
+  // account, no caller-selected home — follows the Active accounts too, so a
+  // hand-typed `claude` or `codex` signs in as the account Settings marks
+  // Active. Managed accounts share every user-state surface with the personal
+  // home (native-cli-shared-state.ts), so this changes the sign-in and
+  // nothing else; a PERSONAL default leaves the shell environment exactly as
+  // inherited. Best-effort because a shell must always open. Deliberately no
+  // lease and no persistence: an idle shell tab must not block account
+  // operations, and a restored shell should follow whatever account is
+  // Active at restore time rather than a login pinned before the restart.
+  if (
+    parsedStartup === undefined &&
+    !opts.startupCommand &&
+    opts.nativeCodexProfileId === undefined &&
+    opts.nativeClaudeProfileId === undefined &&
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID") &&
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CLAUDE_CONFIG_DIR") &&
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME")
+  ) {
+    const selectors = await resolvePlainShellAccountSelectors().catch(() => null);
+    if (selectors) {
+      if (selectors.codexHome) {
+        // Same courtesy agent panes get: seed workspace trust so the first
+        // hand-typed `codex` here doesn't stall on the trust prompt.
+        await ensureCodexProjectTrust(opts.cwd, selectors.codexHome).catch(
+          () => undefined,
+        );
+      }
+      preparedOpts = {
+        ...preparedOpts,
+        ...(selectors.codexHome
+          ? { plainShellCodexHome: selectors.codexHome }
+          : {}),
+        ...(selectors.claudeConfigDir
+          ? { plainShellClaudeConfigDir: selectors.claudeConfigDir }
+          : {}),
+      };
+    }
   }
   if (!Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID")) {
     const startup = parsedStartup;
@@ -1223,6 +1273,30 @@ function doSpawn(
     const selectedEnv = buildClaudeCliProfileEnvironment(
       env,
       opts.nativeClaudeConfigDirEnv ?? null,
+    );
+    for (const key of Object.keys(env)) delete env[key];
+    for (const [key, value] of Object.entries(selectedEnv)) {
+      if (typeof value === "string") env[key] = value;
+    }
+  }
+  // Plain-shell Active accounts (set by spawn(); mutually exclusive with the
+  // frozen-profile fields above). Same builders, applied late on the enriched
+  // env, so the child sees exactly one selected home per CLI with that CLI's
+  // credential-override routes stripped while Studio's own variables survive.
+  if (opts.plainShellCodexHome) {
+    const selectedEnv = buildCodexCliProfileEnvironment(
+      env,
+      opts.plainShellCodexHome,
+    );
+    for (const key of Object.keys(env)) delete env[key];
+    for (const [key, value] of Object.entries(selectedEnv)) {
+      if (typeof value === "string") env[key] = value;
+    }
+  }
+  if (opts.plainShellClaudeConfigDir) {
+    const selectedEnv = buildClaudeCliProfileEnvironment(
+      env,
+      opts.plainShellClaudeConfigDir,
     );
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {

@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { isCodaraManagedCliPath } from "./codara-managed-cli-roots";
@@ -57,6 +57,48 @@ function assertExistingNodeNotSymlink(
 }
 
 /**
+ * Like assertExistingNodeNotSymlink, but tolerant of the share links Codara
+ * itself plants inside its managed account homes: a managed profile shares
+ * sessions/, history.jsonl, and config.toml with the personal ~/.codex via
+ * symlinks (see native-cli-shared-state.ts), so inside a Codara-managed home
+ * a symlink at one of those names is the designed state, not an attack. The
+ * link must still resolve to a real node of the expected type; a dangling
+ * link behaves as missing. Personal (non-managed) homes keep the strict
+ * no-symlink rule unchanged.
+ */
+function assertSharedNodeAllowingManagedLink(
+  homeDir: string,
+  path: string,
+  label: string,
+  expected: "directory" | "file",
+): boolean {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (!stat.isSymbolicLink()) {
+    return assertExistingNodeNotSymlink(path, label, expected);
+  }
+  if (!isCodaraManagedCliPath(homeDir)) {
+    throw new Error(`${label} cannot be a symbolic link.`);
+  }
+  let real: ReturnType<typeof statSync>;
+  try {
+    real = statSync(path);
+  } catch {
+    // The personal target disappeared; the next profile resolution re-heals.
+    return false;
+  }
+  if (expected === "directory" ? !real.isDirectory() : !real.isFile()) {
+    throw new Error(`${label} must be a ${expected}.`);
+  }
+  return true;
+}
+
+/**
  * The inherited CODEX_HOME, unless it names a directory Codara manages: Studio
  * itself may have been launched from a shell that sources the Active-account
  * env file, and following that selector would route "personal" work into a
@@ -108,14 +150,29 @@ export function resolveCodexHomePaths(
   const historyPath = join(homeDir, "history.jsonl");
   const memoriesRoot = join(homeDir, "memories");
   const shellSnapshotsRoot = join(homeDir, "shell_snapshots");
-  assertExistingNodeNotSymlink(configPath, "Native Codex config", "file");
-  assertExistingNodeNotSymlink(
+  // config/sessions/history/memories are shared-state names inside managed
+  // homes and may legitimately be Codara's own links; shell_snapshots is
+  // per-account and keeps the strict rule.
+  assertSharedNodeAllowingManagedLink(
+    homeDir,
+    configPath,
+    "Native Codex config",
+    "file",
+  );
+  assertSharedNodeAllowingManagedLink(
+    homeDir,
     sessionsRoot,
     "Native Codex session root",
     "directory",
   );
-  assertExistingNodeNotSymlink(historyPath, "Native Codex history", "file");
-  assertExistingNodeNotSymlink(
+  assertSharedNodeAllowingManagedLink(
+    homeDir,
+    historyPath,
+    "Native Codex history",
+    "file",
+  );
+  assertSharedNodeAllowingManagedLink(
+    homeDir,
     memoriesRoot,
     "Native Codex memories root",
     "directory",

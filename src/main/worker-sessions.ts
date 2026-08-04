@@ -640,14 +640,18 @@ async function removeSessionHistoryEntries(path: string, sessionId: string): Pro
     return true;
   });
   if (!changed) return;
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  const mode = await fs.stat(path).then((stat) => stat.mode & 0o777).catch(() => 0o600);
+  // history.jsonl in a managed account is a share link to the personal file
+  // (native-cli-shared-state.ts); the rewrite must rename over the REAL file,
+  // or the link would be replaced by a private fork of the history.
+  const target = await fs.realpath(path).catch(() => path);
+  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  const mode = await fs.stat(target).then((stat) => stat.mode & 0o777).catch(() => 0o600);
   try {
     await fs.writeFile(temp, kept.length > 0 ? `${kept.join("\n")}\n` : "", {
       encoding: "utf8",
       mode,
     });
-    await fs.rename(temp, path);
+    await fs.rename(temp, target);
   } finally {
     await fs.rm(temp, { force: true }).catch(() => undefined);
   }
@@ -759,7 +763,16 @@ export async function deleteWorkerSession(
     memoryDeleted = true;
   } else if (input.memoryScope === "codex-all") {
     const { memoriesRoot } = resolveCodexHomePaths(options.codexHome);
-    await removeIfPresent(memoriesRoot);
+    // memories/ in a managed account is a share link to the personal store
+    // (native-cli-shared-state.ts); "delete all memories" means the ONE
+    // shared store, so remove the real directory, not just the link — which
+    // removeIfPresent would otherwise unlink and the next heal recreate.
+    // Personal homes reject a symlinked memories/ upstream, so realpath only
+    // ever follows Codara's own share link here.
+    const realMemoriesRoot = await fs
+      .realpath(memoriesRoot)
+      .catch(() => memoriesRoot);
+    await removeIfPresent(realMemoriesRoot);
     memoryDeleted = true;
   }
 

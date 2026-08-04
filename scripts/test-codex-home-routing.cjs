@@ -194,6 +194,55 @@ async function main() {
       /memories root.*symbolic link/i,
     );
     assert.equal(read(path.join(externalMemories, "keep.md")), "keep");
+
+    // Inside a CODARA-MANAGED home the same links are the designed state:
+    // managed profiles share memories/sessions/config/history with the
+    // personal ~/.codex (native-cli-shared-state.ts), so resolution must
+    // follow them instead of throwing. The strict rejections above prove
+    // non-managed homes keep the old rule.
+    const codaraHome = path.join(personalOsHome, ".Codara");
+    const managedHome = path.join(
+      codaraHome,
+      "codex-cli",
+      "accounts",
+      "33333333-3333-4333-8333-333333333333",
+    );
+    fs.mkdirSync(managedHome, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(personalCodexHome, "memories"), { recursive: true });
+    fs.mkdirSync(path.join(personalCodexHome, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(personalCodexHome, "history.jsonl"), '{"id":"H"}\n', {
+      mode: 0o600,
+    });
+    for (const name of ["memories", "sessions"]) {
+      fs.symlinkSync(
+        path.join(personalCodexHome, name),
+        path.join(managedHome, name),
+        "dir",
+      );
+    }
+    for (const name of ["config.toml", "history.jsonl"]) {
+      fs.symlinkSync(
+        path.join(personalCodexHome, name),
+        path.join(managedHome, name),
+      );
+    }
+    const previousCodaraHome = process.env.CODARA_HOME_DIR;
+    process.env.CODARA_HOME_DIR = codaraHome;
+    try {
+      const managedPaths = paths.resolveCodexHomePaths(managedHome);
+      assert.equal(managedPaths.memoriesRoot, path.join(managedHome, "memories"));
+      assert.equal(managedPaths.sessionsRoot, path.join(managedHome, "sessions"));
+      assert.equal(managedPaths.historyPath, path.join(managedHome, "history.jsonl"));
+      assert.match(
+        read(managedPaths.configPath),
+        /PERSONAL_CONFIG_MUST_NOT_BE_COPIED/,
+        "the shared config must be readable through the managed link",
+      );
+      assert.equal(read(managedPaths.historyPath), '{"id":"H"}\n');
+    } finally {
+      if (previousCodaraHome === undefined) delete process.env.CODARA_HOME_DIR;
+      else process.env.CODARA_HOME_DIR = previousCodaraHome;
+    }
   }
 
   console.log(

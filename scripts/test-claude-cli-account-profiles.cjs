@@ -188,25 +188,38 @@ async function main() {
     "managed profiles must not copy personal/global Claude state",
   );
 
-  // A fresh managed directory is seeded past Claude Code's first-run wizard.
-  // 2.1.220 gates onboarding on hasCompletedOnboarding in the config directory's
-  // .claude.json and stores the theme it would ask for in settings.json.
+  // A fresh managed directory is seeded past Claude Code's first-run wizard
+  // (hasCompletedOnboarding in .claude.json) and shares the user-state
+  // surfaces with the personal config directory through symlinks
+  // (native-cli-shared-state.ts). The theme is no longer copied: the managed
+  // settings.json IS the personal settings.json, reached through a link.
   assert.deepEqual(
     JSON.parse(fs.readFileSync(path.join(alphaDir, ".claude.json"), "utf8")),
     { hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.220" },
   );
-  assert.deepEqual(
-    JSON.parse(fs.readFileSync(path.join(alphaDir, "settings.json"), "utf8")),
-    { theme: "dark" },
+  assert.equal(
+    fs.lstatSync(path.join(alphaDir, "settings.json")).isSymbolicLink(),
+    true,
+    "settings.json must be shared with the personal home via a link",
+  );
+  assert.equal(
+    fs.readlinkSync(path.join(alphaDir, "settings.json")),
+    path.join(personalConfigDir, "settings.json"),
+  );
+  assert.equal(
+    fs.lstatSync(path.join(alphaDir, "projects")).isSymbolicLink(),
+    true,
+    "chats must be shared with the personal home via a link",
   );
   if (process.platform !== "win32") {
     assert.equal(mode(path.join(alphaDir, ".claude.json")), 0o600);
-    assert.equal(mode(path.join(alphaDir, "settings.json")), 0o600);
   }
   {
-    const seededText =
-      fs.readFileSync(path.join(alphaDir, ".claude.json"), "utf8") +
-      fs.readFileSync(path.join(alphaDir, "settings.json"), "utf8");
+    // Only .claude.json is a COPY, and a copy must never carry identity or
+    // credentials. settings.json is deliberately not held to this: it is a
+    // link to the user's own personal settings file, not a copied file, so
+    // its content stays wherever the user put it.
+    const seededText = fs.readFileSync(path.join(alphaDir, ".claude.json"), "utf8");
     for (const forbidden of FORBIDDEN_SEED_MARKERS) {
       assert.equal(
         seededText.includes(forbidden),
@@ -584,10 +597,19 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
         authChecker: () => ({ connected: false }),
         ...options,
       });
-    const seededFiles = (dir) =>
-      fs.readdirSync(dir).sort();
+    // The shared-state links (projects, settings.json, …) are created on
+    // every profile, so seeding is judged by the two files the seeder could
+    // COPY, never by an exact directory listing.
+    const isShareLink = (dir, name, personalDir) => {
+      const stat = fs.lstatSync(path.join(dir, name));
+      return (
+        stat.isSymbolicLink() &&
+        fs.readlinkSync(path.join(dir, name)) === path.join(personalDir, name)
+      );
+    };
 
-    // No personal config at all: create the account and nothing else.
+    // No personal config at all: create the account, link the share set, and
+    // copy nothing.
     const barePersonal = path.join(TMP, "seed-bare-personal");
     privateDir(barePersonal);
     const bare = seedStore("bare", {
@@ -595,16 +617,21 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
       personalConfigDirEnv: barePersonal,
     });
     const bareProfile = await bare.createProfile({ label: "Bare" });
-    assert.deepEqual(
-      seededFiles(
-        mod.claudeCliManagedProfileConfigDir(
-          path.join(TMP, "seed", "bare"),
-          bareProfile.profile.id,
-        ),
-      ),
-      [],
+    const bareDir = mod.claudeCliManagedProfileConfigDir(
+      path.join(TMP, "seed", "bare"),
+      bareProfile.profile.id,
+    );
+    assert.equal(
+      fs.existsSync(path.join(bareDir, ".claude.json")),
+      false,
       "a missing personal config must seed nothing",
     );
+    assert.equal(
+      fs.existsSync(path.join(bareDir, "settings.json")),
+      false,
+      "a missing personal settings.json must not produce a dangling link",
+    );
+    assert.ok(isShareLink(bareDir, "projects", barePersonal));
 
     // The $CLAUDE_CONFIG_DIR-relative .claude.json is the other supported
     // source, and only the allowlist crosses from it.
@@ -629,11 +656,17 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
       path.join(TMP, "seed", "selector"),
       selectorProfile.profile.id,
     );
-    assert.deepEqual(seededFiles(selectorDir), [".claude.json", "settings.json"]);
     assert.deepEqual(
       JSON.parse(fs.readFileSync(path.join(selectorDir, ".claude.json"), "utf8")),
       { hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.220" },
     );
+    assert.equal(
+      fs.lstatSync(path.join(selectorDir, ".claude.json")).isSymbolicLink(),
+      false,
+      ".claude.json is per-account and must stay a private copy",
+    );
+    // The theme is not copied anymore: the settings arrive through the link.
+    assert.ok(isShareLink(selectorDir, "settings.json", selectorPersonal));
     assert.deepEqual(
       JSON.parse(fs.readFileSync(path.join(selectorDir, "settings.json"), "utf8")),
       { theme: "light-daltonized" },
@@ -652,19 +685,23 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
       personalConfigDirEnv: symlinkPersonal,
     });
     const symlinkedProfile = await symlinked.createProfile({ label: "Symlinked" });
-    assert.deepEqual(
-      seededFiles(
-        mod.claudeCliManagedProfileConfigDir(
-          path.join(TMP, "seed", "symlinked"),
-          symlinkedProfile.profile.id,
+    assert.equal(
+      fs.existsSync(
+        path.join(
+          mod.claudeCliManagedProfileConfigDir(
+            path.join(TMP, "seed", "symlinked"),
+            symlinkedProfile.profile.id,
+          ),
+          ".claude.json",
         ),
       ),
-      [],
+      false,
       "a symlinked personal config must never be read",
     );
 
-    // Unfinished onboarding, an unknown theme, and a junk onboarding version
-    // each drop out of the copy on their own.
+    // Unfinished personal onboarding is never claimed as finished, and the
+    // personal settings.json is linked as-is — it is the user's own file, so
+    // even odd content in it is shared rather than filtered into a copy.
     const partialPersonal = path.join(TMP, "seed-partial-personal");
     privateDir(partialPersonal);
     fs.writeFileSync(
@@ -685,28 +722,20 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
       personalConfigDirEnv: partialPersonal,
     });
     const partialProfile = await partial.createProfile({ label: "Partial" });
-    assert.deepEqual(
-      seededFiles(
-        mod.claudeCliManagedProfileConfigDir(
-          path.join(TMP, "seed", "partial"),
-          partialProfile.profile.id,
-        ),
-      ),
-      [],
+    const partialDir = mod.claudeCliManagedProfileConfigDir(
+      path.join(TMP, "seed", "partial"),
+      partialProfile.profile.id,
     );
+    assert.equal(fs.existsSync(path.join(partialDir, ".claude.json")), false);
+    assert.ok(isShareLink(partialDir, "settings.json", partialPersonal));
 
-    // Pure projections, checked directly so the allowlist cannot be widened by
+    // Pure projection, checked directly so the allowlist cannot be widened by
     // accident: the output keys are exactly the declared ones.
     assert.deepEqual(
       Object.keys(mod.pickClaudeCliFirstRunConfig(adversarialPersonalConfig())).sort(),
       [...mod.CLAUDE_CLI_SEEDED_CONFIG_KEYS].sort(),
     );
     assert.deepEqual(mod.pickClaudeCliFirstRunConfig(null), {});
-    assert.deepEqual(mod.pickClaudeCliFirstRunSettings(null), {});
-    assert.deepEqual(
-      mod.pickClaudeCliFirstRunSettings({ theme: "dark-ansi", model: "opus" }),
-      { theme: "dark-ansi" },
-    );
     assert.deepEqual(
       mod.pickClaudeCliFirstRunConfig({
         hasCompletedOnboarding: true,
@@ -714,7 +743,6 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
       }),
       { hasCompletedOnboarding: true },
     );
-    assert.deepEqual([...mod.CLAUDE_CLI_SEEDED_SETTINGS_KEYS], ["theme"]);
   }
 
   const source = fs.readFileSync(

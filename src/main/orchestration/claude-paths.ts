@@ -10,6 +10,11 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { isCodaraManagedCliPath } from "./codara-managed-cli-roots";
+import {
+  CLAUDE_CLI_SHARED_STATE_DIR_SET,
+  CLAUDE_CLI_SHARED_STATE_FILE_SET,
+} from "./native-cli-shared-state";
 
 /**
  * Mirror Claude Code's project-dir naming: EVERY non-alphanumeric character in
@@ -53,6 +58,27 @@ export function claudeSessionTranscriptPath(
   );
 }
 
+/**
+ * True when a symlink inside a Claude state root is one of Codara's own
+ * share links: a Codara-managed account shares an allowlisted set of
+ * top-level state names (projects, history.jsonl, …) with the personal
+ * ~/.claude via symlinks (see native-cli-shared-state.ts). Only a link
+ * sitting DIRECTLY under a managed root at one of those names qualifies —
+ * the personal home and every deeper component keep the strict no-symlink
+ * rule, so a planted link can still never reroute storage paths.
+ */
+function isCodaraSharedClaudeStateLink(root: string, path: string): boolean {
+  if (dirname(path) !== root) return false;
+  const name = basename(path);
+  if (
+    !CLAUDE_CLI_SHARED_STATE_DIR_SET.has(name) &&
+    !CLAUDE_CLI_SHARED_STATE_FILE_SET.has(name)
+  ) {
+    return false;
+  }
+  return isCodaraManagedCliPath(root);
+}
+
 export async function assertSafeClaudeStoragePath(
   stateDir: string,
   targetPath: string,
@@ -92,16 +118,34 @@ export async function assertSafeClaudeStoragePath(
       }
       break;
     }
+    let effective = stat;
     if (stat.isSymbolicLink()) {
-      throw new Error("Claude storage path contains a symbolic-link ancestor.");
+      if (!isCodaraSharedClaudeStateLink(root, cursor)) {
+        throw new Error("Claude storage path contains a symbolic-link ancestor.");
+      }
+      // The share link must resolve to a real node; a dangling link behaves
+      // exactly like a missing entry (the next resolution re-heals it).
+      const real = await fs
+        .stat(cursor)
+        .catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+          throw error;
+        });
+      if (!real) {
+        if (isLeaf && options.requireLeaf) {
+          throw new Error("Claude transcript does not exist.");
+        }
+        break;
+      }
+      effective = real;
     }
-    if (!isLeaf && !stat.isDirectory()) {
+    if (!isLeaf && !effective.isDirectory()) {
       throw new Error("Claude storage ancestor is not a directory.");
     }
-    if (isLeaf && options.leafType === "file" && !stat.isFile()) {
+    if (isLeaf && options.leafType === "file" && !effective.isFile()) {
       throw new Error("Claude transcript is not a regular file.");
     }
-    if (isLeaf && options.leafType === "directory" && !stat.isDirectory()) {
+    if (isLeaf && options.leafType === "directory" && !effective.isDirectory()) {
       throw new Error("Claude storage path is not a directory.");
     }
     if (isLeaf) sawLeaf = true;

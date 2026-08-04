@@ -30,21 +30,31 @@ export async function ensureCodexProjectTrust(
 ): Promise<void> {
   if (!cwd) return;
   const { configPath, homeDir } = resolveCodexHomePaths(codexHome);
-  const cached = codexTrustedCwds.get(configPath);
+  // Personal and managed homes can alias ONE config.toml: a Codara-managed
+  // account shares its config with the personal ~/.codex through a symlink
+  // (native-cli-shared-state.ts). Key the lock and the trusted-cwd cache by
+  // the file's real identity — keyed by the given path, a personal spawn and
+  // a managed spawn would run unserialized read-modify-writes on the same
+  // file — and hand the real path to the writer so its atomic rename lands on
+  // the shared file instead of replacing the link with a private fork.
+  // realpath fails when the config does not exist yet; the literal path is
+  // the correct identity (and write target) in that case.
+  const realConfigPath = await fs.realpath(configPath).catch(() => configPath);
+  const cached = codexTrustedCwds.get(realConfigPath);
   if (cached?.has(cwd)) return;
-  const prior = codexConfigLocks.get(configPath) ?? Promise.resolve();
+  const prior = codexConfigLocks.get(realConfigPath) ?? Promise.resolve();
   const next = prior
     .catch(() => undefined)
-    .then(() => writeCodexProjectTrustEntry(homeDir, configPath, cwd));
-  codexConfigLocks.set(configPath, next);
+    .then(() => writeCodexProjectTrustEntry(homeDir, realConfigPath, cwd));
+  codexConfigLocks.set(realConfigPath, next);
   try {
     await next;
-    const set = codexTrustedCwds.get(configPath) ?? new Set<string>();
+    const set = codexTrustedCwds.get(realConfigPath) ?? new Set<string>();
     set.add(cwd);
-    codexTrustedCwds.set(configPath, set);
+    codexTrustedCwds.set(realConfigPath, set);
   } finally {
-    if (codexConfigLocks.get(configPath) === next) {
-      codexConfigLocks.delete(configPath);
+    if (codexConfigLocks.get(realConfigPath) === next) {
+      codexConfigLocks.delete(realConfigPath);
     }
   }
 }

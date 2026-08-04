@@ -683,6 +683,12 @@ function alreadyInstalled(
 // Write the settings file, skipping a bit-identical write. Two-space indent
 // matches Claude's own default settings file style so diffs in version
 // control / dotfile repos stay clean.
+//
+// The write lands on the file's REAL path: a Codara-managed account shares
+// settings.json with the personal ~/.claude through a symlink (see
+// native-cli-shared-state.ts), and writeFileAtomic's rename-over would
+// replace that link with a private copy, silently forking the two accounts'
+// settings. readExistingSettings already follows the link on the read side.
 async function persistSettings(
   settingsPath: string,
   next: ClaudeSettings,
@@ -691,8 +697,9 @@ async function persistSettings(
   try {
     const payload = JSON.stringify(next, null, 2);
     if (raw !== null && raw === payload) return;
-    await fs.mkdir(dirname(settingsPath), { recursive: true });
-    await writeFileAtomic(settingsPath, payload);
+    const targetPath = await fs.realpath(settingsPath).catch(() => settingsPath);
+    await fs.mkdir(dirname(targetPath), { recursive: true });
+    await writeFileAtomic(targetPath, payload);
   } catch (err) {
     console.warn("[hook-installer] failed to write", settingsPath, ":", err);
   }

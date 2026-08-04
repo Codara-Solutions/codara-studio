@@ -355,6 +355,9 @@ async function main() {
     [
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
+      // Type-only import of the execution-profile shape; resolution still
+      // funnels through native-claude-profile-runtime.
+      "src/main/orchestration/native-cli-shell-defaults.ts",
       "src/main/pty-manager.ts",
     ],
   );

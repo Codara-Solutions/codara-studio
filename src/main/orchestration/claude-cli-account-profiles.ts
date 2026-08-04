@@ -10,6 +10,7 @@ import {
   codaraHomeDir,
   isCodaraManagedCliPath,
 } from "./codara-managed-cli-roots";
+import { ensureSharedCliState } from "./native-cli-shared-state";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,11 +27,13 @@ export const CLAUDE_CLI_PROFILE_LABEL_MAX_LENGTH = 80;
  * Claude Code 2.1.220 gates the whole onboarding flow (theme picker, security
  * notes, terminal setup) on `hasCompletedOnboarding` in its global config file,
  * and writes `hasCompletedOnboarding` + `lastOnboardingVersion` when the flow
- * finishes; the theme the wizard would ask for is stored separately, as `theme`
- * in the config directory's settings.json. Anthropic's own eval harness seeds a
- * config directory the same way.
+ * finishes. Anthropic's own eval harness seeds a config directory the same
+ * way. The theme the wizard would ask for is NOT seeded here: settings.json is
+ * shared with the personal config directory through a symlink (see
+ * native-cli-shared-state.ts), so the personal theme — and every other
+ * setting — arrives through the link instead of a diverging copy.
  *
- * The lists below are exhaustive and closed. Nothing identity- or
+ * The list below is exhaustive and closed. Nothing identity- or
  * credential-bearing (oauthAccount, userID, anonymousId, machineID, projects,
  * mcpServers, customApiKeyResponses, hooks, env, …) is ever considered: a
  * managed account is a separate login, and copying any of that would either
@@ -40,20 +43,11 @@ export const CLAUDE_CLI_SEEDED_CONFIG_KEYS = [
   "hasCompletedOnboarding",
   "lastOnboardingVersion",
 ] as const;
-export const CLAUDE_CLI_SEEDED_SETTINGS_KEYS = ["theme"] as const;
 export const CLAUDE_CLI_CONFIG_FILE = ".claude.json";
 export const CLAUDE_CLI_SETTINGS_FILE = "settings.json";
 
 /** Refuse to parse an implausibly large personal config rather than stall. */
 const PERSONAL_CONFIG_MAX_BYTES = 32 * 1024 * 1024;
-const CLAUDE_THEME_VALUES: ReadonlySet<string> = new Set([
-  "dark",
-  "light",
-  "dark-ansi",
-  "light-ansi",
-  "dark-daltonized",
-  "light-daltonized",
-]);
 const ONBOARDING_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
 
 const UUID_V4_PATTERN =
@@ -643,18 +637,6 @@ export function pickClaudeCliFirstRunConfig(
   return seeded;
 }
 
-export function pickClaudeCliFirstRunSettings(
-  personal: Record<string, unknown> | null,
-): Record<string, unknown> {
-  const seeded: Record<string, unknown> = {};
-  if (!personal) return seeded;
-  const theme = personal.theme;
-  if (typeof theme === "string" && CLAUDE_THEME_VALUES.has(theme)) {
-    seeded.theme = theme;
-  }
-  return seeded;
-}
-
 async function writePrivateJsonFile(
   path: string,
   value: Record<string, unknown>,
@@ -677,11 +659,14 @@ export interface SeedClaudeCliFirstRunInput {
 
 export interface SeedClaudeCliFirstRunResult {
   configKeys: string[];
-  settingsKeys: string[];
 }
 
 /**
- * Copies the allowlisted first-run preferences into a new managed account.
+ * Copies the allowlisted first-run onboarding flags into a new managed
+ * account's .claude.json. The theme (and every other setting) is deliberately
+ * NOT seeded: settings.json is shared with the personal config directory via
+ * a symlink (native-cli-shared-state.ts), so seeding a copy here would fork
+ * the two files at the moment of creation.
  *
  * Best-effort by design: a missing, unreadable, or unusual personal config
  * leaves the new account exactly as it was created, because a working account
@@ -692,43 +677,25 @@ export interface SeedClaudeCliFirstRunResult {
 export async function seedManagedClaudeCliFirstRunPreferences(
   input: SeedClaudeCliFirstRunInput,
 ): Promise<SeedClaudeCliFirstRunResult> {
-  const empty: SeedClaudeCliFirstRunResult = { configKeys: [], settingsKeys: [] };
+  const empty: SeedClaudeCliFirstRunResult = { configKeys: [] };
   let personalConfig: Record<string, unknown> | null;
-  let personalSettings: Record<string, unknown> | null;
   try {
     personalConfig = await readFirstJsonRecord(
       personalClaudeConfigFiles(input.personalConfigDir, input.personalConfigDirEnv),
-    );
-    personalSettings = await readJsonRecordIfSafe(
-      join(input.personalConfigDir, CLAUDE_CLI_SETTINGS_FILE),
     );
   } catch {
     return empty;
   }
 
   const config = pickClaudeCliFirstRunConfig(personalConfig);
-  const settings = pickClaudeCliFirstRunSettings(personalSettings);
+  if (Object.keys(config).length === 0) return empty;
   const configPath = join(input.configDir, CLAUDE_CLI_CONFIG_FILE);
-  const settingsPath = join(input.configDir, CLAUDE_CLI_SETTINGS_FILE);
-  const written: string[] = [];
   try {
-    if (Object.keys(config).length > 0) {
-      await writePrivateJsonFile(configPath, config);
-      written.push(configPath);
-    }
-    if (Object.keys(settings).length > 0) {
-      await writePrivateJsonFile(settingsPath, settings);
-      written.push(settingsPath);
-    }
+    await writePrivateJsonFile(configPath, config);
   } catch {
-    // Half-seeded state is worse than none: a settings.json without the
-    // onboarding flag would strand a theme the wizard is about to overwrite.
-    for (const path of written) {
-      await fs.rm(path, { force: true }).catch(() => undefined);
-    }
     return empty;
   }
-  return { configKeys: Object.keys(config), settingsKeys: Object.keys(settings) };
+  return { configKeys: Object.keys(config) };
 }
 
 async function withMutationLock<T>(
@@ -892,6 +859,40 @@ export class ClaudeCliAccountProfileStore {
   private async ensureStoreDirectories(): Promise<void> {
     await assertSafeDirectory(this.rootDir, { create: true, repairMode: true });
     await assertSafeDirectory(this.accountsDir, { create: true, repairMode: true });
+  }
+
+  /**
+   * Managed accounts share the user-state surfaces (chats, settings, history)
+   * with the personal Claude home so switching accounts behaves like
+   * logout+login in one home; only credentials and identity stay per-account.
+   *
+   * Best-effort by design: resolution must never start failing because a
+   * symlink could not be made. A leased profile is skipped entirely — every
+   * launch resolves BEFORE acquiring its lease, so the first spawn of a
+   * profile always healed its directory, and migrating a real directory out
+   * from under a live CLI would lose its writes. The per-profile mutation key
+   * serializes concurrent resolutions of the same profile without blocking
+   * other profiles or the metadata lock.
+   */
+  private async ensureManagedSharedState(
+    profileId: string,
+    configDir: string,
+  ): Promise<void> {
+    if (process.platform === "win32") return;
+    if (this.leases?.isLeased(profileId)) return;
+    try {
+      await withMutationLock(`${this.filePath}::share::${profileId}`, async () => {
+        if (this.leases?.isLeased(profileId)) return;
+        await ensureSharedCliState({
+          managedDir: configDir,
+          personalDir: this.personalConfigDir,
+          runtime: "claude",
+        });
+      });
+    } catch {
+      // ensureSharedCliState reports per-name outcomes and never throws; this
+      // guard keeps even an unexpected failure out of the launch path.
+    }
   }
 
   private async reconcileLocked(
@@ -1058,6 +1059,9 @@ export class ClaudeCliAccountProfileStore {
         personalConfigDir: this.personalConfigDir,
         personalConfigDirEnv: this.personalConfigDirEnv,
       });
+      // A fresh directory takes the pure "managed entry missing" branch of
+      // the heal: every shared name becomes a link before first use.
+      await this.ensureManagedSharedState(id, configDir);
       const timestamp = this.now().toISOString();
       const profile: ClaudeCliManagedProfile = {
         id,
@@ -1166,6 +1170,7 @@ export class ClaudeCliAccountProfileStore {
       configDir = claudeCliManagedProfileConfigDir(this.rootDir, profileId);
       configDirEnv = configDir;
       await assertSafeDirectory(configDir, { create: false, repairMode: false });
+      await this.ensureManagedSharedState(profileId, configDir);
     }
     const status = await Promise.resolve(
       this.authChecker({ profileId, managed, configDir, configDirEnv }),
@@ -1208,49 +1213,58 @@ export class ClaudeCliAccountProfileStore {
           throw new ClaudeCliAccountProfileLeasedError(rawProfileId);
         }
 
-        const configDir = claudeCliManagedProfileConfigDir(
-          this.rootDir,
-          rawProfileId,
+        // Serialize against the shared-state heal for this profile: a heal
+        // mid-migration keeps transcripts in a temporary stage inside the
+        // config directory, and deleting the directory in that window would
+        // destroy state the heal was moving into the personal home.
+        return withMutationLock(
+          `${this.filePath}::share::${rawProfileId}`,
+          async () => {
+            const configDir = claudeCliManagedProfileConfigDir(
+              this.rootDir,
+              rawProfileId,
+            );
+            const staged = join(
+              this.accountsDir,
+              `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
+            );
+            const configStats = await lstatOrNull(configDir);
+            if (
+              configStats &&
+              (configStats.isSymbolicLink() || !configStats.isDirectory())
+            ) {
+              throw new ClaudeCliAccountProfileSafetyError(
+                "the account config directory selected for deletion is unsafe",
+              );
+            }
+            if (
+              configStats &&
+              process.platform !== "win32" &&
+              (configStats.mode & 0o077) !== 0
+            ) {
+              throw new ClaudeCliAccountProfileSafetyError(
+                "the account config directory selected for deletion is not private",
+              );
+            }
+            if (configStats) await fs.rename(configDir, staged);
+            const next: ClaudeCliAccountProfilesSnapshot = {
+              ...snapshot,
+              profiles: snapshot.profiles.filter(
+                (profile) => profile.id !== rawProfileId,
+              ),
+            };
+            try {
+              await persistSnapshotAtomically(this.rootDir, this.filePath, next);
+            } catch (error) {
+              if (configStats) {
+                await fs.rename(staged, configDir).catch(() => undefined);
+              }
+              throw error;
+            }
+            if (configStats) await fs.rm(staged, { recursive: true, force: true });
+            return { deleted: true, snapshot: cloneSnapshot(next) };
+          },
         );
-        const staged = join(
-          this.accountsDir,
-          `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
-        );
-        const configStats = await lstatOrNull(configDir);
-        if (
-          configStats &&
-          (configStats.isSymbolicLink() || !configStats.isDirectory())
-        ) {
-          throw new ClaudeCliAccountProfileSafetyError(
-            "the account config directory selected for deletion is unsafe",
-          );
-        }
-        if (
-          configStats &&
-          process.platform !== "win32" &&
-          (configStats.mode & 0o077) !== 0
-        ) {
-          throw new ClaudeCliAccountProfileSafetyError(
-            "the account config directory selected for deletion is not private",
-          );
-        }
-        if (configStats) await fs.rename(configDir, staged);
-        const next: ClaudeCliAccountProfilesSnapshot = {
-          ...snapshot,
-          profiles: snapshot.profiles.filter(
-            (profile) => profile.id !== rawProfileId,
-          ),
-        };
-        try {
-          await persistSnapshotAtomically(this.rootDir, this.filePath, next);
-        } catch (error) {
-          if (configStats) {
-            await fs.rename(staged, configDir).catch(() => undefined);
-          }
-          throw error;
-        }
-        if (configStats) await fs.rm(staged, { recursive: true, force: true });
-        return { deleted: true, snapshot: cloneSnapshot(next) };
       });
 
     if (this.leases?.runWhileUnleased) {
