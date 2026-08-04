@@ -2039,6 +2039,11 @@ export default function App() {
 
       const t = tabsRef.current;
       if (!t) return;
+      // Pi-harness workers run in-process over RPC and own no pty, so a pane
+      // for one spawns a bare shell the user never asked for: the same "empty
+      // shell wearing a worker's name" the status filter below guards against,
+      // reached through harness rather than through status.
+      if (harness === "pi") return;
       // ensureWorkerTerminalTab activates a newly materialized pane itself; a
       // repeat event for an existing pane must not steal the user's selection.
       const tabId = t.ensureWorkerTerminalTab(event.runId, workspaceCwd, event.attemptId, workerMeta, {
@@ -2185,6 +2190,9 @@ export default function App() {
             // surface and must never materialize as chat-owned terminal tabs.
             if (run.automationId || run.workspaceId !== workspaceId) return;
             if (finishedWorkerAttemptsRef.current.has(attempt.id)) return;
+            // Same reason as the event path above: a Pi-harness worker owns no
+            // pty, so materializing its pane only spawns an empty shell.
+            if (workerHarnessFromCommand(attempt.command) === "pi") return;
 
             if (disposed) return;
             if (tabsRef.current.tabsWorkspaceId !== workspaceId) return;
