@@ -30,7 +30,10 @@ export function CopyBranchDeleteDialog({
   }, [busy, onCancel]);
 
   // git worktree remove refuses a dirty tree; surface a force retry then.
-  const dirty = Boolean(error && /contains modified or untracked|use --force/i.test(error));
+  const dirty = Boolean(
+    error &&
+      /has uncommitted changes|contains modified or untracked|use --force/i.test(error),
+  );
 
   return (
     <div
@@ -100,7 +103,12 @@ export function CopyBranchDeleteDialog({
               overflowWrap: "anywhere",
             }}
           >
-            {error}
+            <div>{error}</div>
+            {dirty && (
+              <div style={{ marginTop: 6, fontWeight: 600 }}>
+                Force removal discards uncommitted changes.
+              </div>
+            )}
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
