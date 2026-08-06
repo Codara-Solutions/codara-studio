@@ -515,11 +515,49 @@ function sortedEqual(actual, expected, label) {
       false,
       "a null-scoped terminal write must not be able to supply another run id",
     );
+    // Implicit preview tab picking in the renderer is scoped to the calling
+    // run, so EVERY preview op must carry the run stamp — not just navigate.
+    process.env.SPARK_RUN_ID = "run-trusted";
+    for (const [tool, rpc] of [
+      ["codara_preview_navigate", "preview.navigate"],
+      ["codara_preview_snapshot", "preview.snapshot"],
+      ["codara_preview_resize", "preview.resize"],
+      ["codara_preview_scroll", "preview.scroll"],
+    ]) {
+      await directBridge.callToolByName(tool, {
+        url: "http://127.0.0.1:4173/",
+        width: 800,
+        height: 600,
+      });
+      assert.strictEqual(received.at(-1).method, rpc);
+      assert.strictEqual(
+        received.at(-1).params.runId,
+        "run-trusted",
+        `${tool} must stamp the calling run id so tab picking stays run-scoped`,
+      );
+    }
+    delete process.env.SPARK_RUN_ID;
+
     const batch = await directBridge.callToolByName("codara_preview_run", {
       steps: [{ action: "navigate", url: "http://127.0.0.1:4173/" }],
     });
     assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
     assert.strictEqual(received.at(-1).method, "preview.navigate");
+
+    // The batched step schema is additionalProperties:false, so every field the
+    // single-shot tool accepts must also be spelled out on the step items or a
+    // legitimate batched step is rejected outright.
+    const runTool = studio.definitions.find((tool) => tool.name === "codara_preview_run");
+    const stepProps = runTool.inputSchema.properties.steps.items.properties;
+    const snapshotProps = studio.definitions.find((tool) => tool.name === "codara_preview_snapshot")
+      .inputSchema.properties;
+    for (const field of Object.keys(snapshotProps)) {
+      assert.deepStrictEqual(
+        stepProps[field],
+        snapshotProps[field],
+        `codara_preview_run step schema must mirror codara_preview_snapshot's ${field}`,
+      );
+    }
 
     console.log("PASS: codara-studio MCP roster matrix");
     console.log(`  studio:     ${studio.tools.length} tools`);

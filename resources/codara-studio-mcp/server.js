@@ -422,6 +422,8 @@ const PREVIEW_TOOLS = [
               awaitPromise: { type: "boolean" },
               state: { type: "string" },
               timeoutMs: { type: "number" },
+              mode: { type: "string", enum: ["outline"], description: "Reserved; currently only 'outline' is supported." },
+              maxBytes: { type: "number", description: "Maximum bytes to return (default 12000)." },
               x: { type: "number" },
               y: { type: "number" },
               deltaX: { type: "number" },
@@ -1654,15 +1656,18 @@ function isTransportTimeout(err) {
 // terminal.close must prove they belong to the same run that minted their
 // terminal. For terminal ownership, the launch-time SPARK_RUN_ID is the
 // authority: a model-supplied runId must never let one run impersonate another.
-// User-facing agents with no SPARK_RUN_ID keep null-scoped ownership. Preview
-// navigation retains its existing best-effort caller-supplied routing behavior.
+// User-facing agents with no SPARK_RUN_ID keep null-scoped ownership. EVERY
+// preview op carries the same best-effort caller-supplied routing stamp, not
+// just navigate: the renderer scopes implicit tab picking to the calling run,
+// so an unstamped snapshot/click/resize would fall back to picking whatever
+// preview tab happened to be open, including the user's.
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
     rpc !== "terminal.read" &&
     rpc !== "terminal.create" &&
     rpc !== "terminal.write" &&
     rpc !== "terminal.close" &&
-    rpc !== "preview.navigate"
+    !rpc.startsWith("preview.")
   ) return;
   if (
     rpc === "terminal.read" ||

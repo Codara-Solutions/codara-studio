@@ -95,9 +95,18 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
   }
 }
 
-function requireTab(params: { tabId?: string | null }) {
-  const tab = pickPreviewTab(params.tabId ?? null);
+// Implicit tab picking is scoped to the calling run: params.runId is stamped by
+// the MCP server from SPARK_RUN_ID, so an agent op with no explicit tabId only
+// ever lands on a tab that run opened. An explicit tabId is still honored.
+function requireTab(params: { tabId?: string | null; runId?: unknown }) {
+  const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
+  const tab = pickPreviewTab(params.tabId ?? null, runId);
   if (!tab) {
+    if (runId && !params.tabId) {
+      throw new Error(
+        "No preview tab belongs to this run — call codara_preview_navigate first to open one (or pass an explicit tabId).",
+      );
+    }
     throw new Error(
       "No browser tab is open. Open a Browser tab in Codara (right-click a file → Open in Browser, or open a localhost URL) before calling preview tools.",
     );
@@ -139,10 +148,12 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null);
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
   } else {
-    const before = pickPreviewTab(null);
     // runId is the calling run's identity, stamped by the MCP server; the
-    // auto-opened tab must belong to that run, not the selected one.
-    tab = await ensurePreviewTab(url, readString(params, "runId"));
+    // reused-or-opened tab must belong to that run, not the selected one and
+    // never one the user opened.
+    const runId = readString(params, "runId");
+    const before = pickPreviewTab(null, runId);
+    tab = await ensurePreviewTab(url, runId);
     opened = !before;
   }
   // ensurePreviewTab created the tab with the target URL, so loadURL is a

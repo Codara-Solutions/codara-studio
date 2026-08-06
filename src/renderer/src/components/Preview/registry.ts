@@ -12,6 +12,11 @@ interface RegistryEntry {
   id: string;
   handle: BrowserPaneHandle;
   url: string;
+  // Owning run id for agent-spawned previews; null for tabs the user opened
+  // (TabBar picker, Codara browser, restored-from-disk previews — useTabs
+  // strips runId on persist). Ownership is what keeps a run's probes off the
+  // user's own preview tabs.
+  runId: string | null;
 }
 
 const entries = new Map<string, RegistryEntry>();
@@ -21,13 +26,16 @@ export function registerPreviewTab(input: {
   id: string;
   handle: BrowserPaneHandle;
   url: string;
+  runId?: string | null;
 }): void {
-  entries.set(input.id, input);
+  entries.set(input.id, { ...input, runId: input.runId ?? null });
 }
 
-export function updatePreviewTabUrl(id: string, url: string): void {
+export function updatePreviewTabUrl(id: string, url: string, runId?: string | null): void {
   const entry = entries.get(id);
-  if (entry) entry.url = url;
+  if (!entry) return;
+  entry.url = url;
+  if (runId !== undefined) entry.runId = runId;
 }
 
 export function unregisterPreviewTab(id: string): void {
@@ -39,8 +47,21 @@ export function setActivePreviewTab(id: string | null): void {
   activeId = id && entries.has(id) ? id : null;
 }
 
-export function pickPreviewTab(tabId?: string | null): RegistryEntry | null {
+// `tabId` is trusted: an explicit target is honored whoever asks for it.
+// Without one, a caller that carries a run identity may only be given a tab
+// that RUN owns — implicit picking must never hand a run the user's preview
+// tab (or another run's). Callers with no run identity (user-facing agents)
+// keep the historical "active, else first" behavior.
+export function pickPreviewTab(tabId?: string | null, runId?: string | null): RegistryEntry | null {
   if (tabId) return entries.get(tabId) ?? null;
+  if (runId) {
+    const active = activeId ? entries.get(activeId) : undefined;
+    if (active && active.runId === runId) return active;
+    for (const entry of entries.values()) {
+      if (entry.runId === runId) return entry;
+    }
+    return null;
+  }
   if (activeId) return entries.get(activeId) ?? null;
   // Fall back to the first registered tab — better to drive *something*
   // than to fail because the user clicked away from the preview.
@@ -67,12 +88,16 @@ export function setOpenPreviewTabFn(fn: OpenPreviewTabFn | null): void {
   openPreviewTabFn = fn;
 }
 
-// Pick an existing preview tab if one is open, otherwise create a fresh one
-// pointing at `url` and wait briefly for PreviewStack to register its
-// BrowserPaneHandle. Used by previewRpc.navigate so a sub-agent doesn't have
-// to ask the user to "please open a preview tab".
+// Resolve the preview tab a navigate should drive, minting one when needed,
+// and wait briefly for PreviewStack to register its BrowserPaneHandle. Used by
+// previewRpc.navigate so a sub-agent doesn't have to ask the user to "please
+// open a preview tab".
+//
+// With a runId, only that run's own tab is reusable: a run gets a fresh tab
+// rather than commandeering the user's (or a sibling run's) preview. Without
+// one, any open preview is fair game, as before.
 export async function ensurePreviewTab(url: string, runId?: string | null): Promise<RegistryEntry> {
-  const existing = pickPreviewTab(null);
+  const existing = pickPreviewTab(null, runId ?? null);
   if (existing) return existing;
   if (!openPreviewTabFn) {
     throw new Error(

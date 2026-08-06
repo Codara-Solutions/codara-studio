@@ -145,7 +145,11 @@ async function resolveGuest(
   params: Record<string, unknown>,
 ): Promise<{ wc: WebContents; info: GuestInfo }> {
   const tabId = typeof params.tabId === "string" ? params.tabId : null;
-  const info = (await requestPreviewOp("get_web_contents_id", { tabId })) as GuestInfo;
+  // Forward the caller's run identity: without an explicit tabId the renderer
+  // scopes its pick to the tabs that run owns, so trusted-input ops resolve the
+  // same guest the DOM ops would — never the user's own preview tab.
+  const runId = typeof params.runId === "string" ? params.runId : null;
+  const info = (await requestPreviewOp("get_web_contents_id", { tabId, runId })) as GuestInfo;
   const wcId = info?.webContentsId;
   if (typeof wcId !== "number") {
     throw new Error("preview tab is not ready (no web contents id yet)");
@@ -547,6 +551,7 @@ async function opPressKey(params: Record<string, unknown>): Promise<unknown> {
   } catch {
     return requestPreviewOp("press_key", {
       tabId: (params.tabId as string) ?? null,
+      runId: typeof params.runId === "string" ? params.runId : null,
       key,
       selector: (params.selector as string) ?? null,
     });

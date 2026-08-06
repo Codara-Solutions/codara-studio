@@ -63,10 +63,15 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
   // Track the most recent URL fed into the registry so the per-tab url
   // callback below only re-syncs on actual change.
   const lastRegisteredUrl = useRef(new Map<TabId, string>());
-  const setHandle = (id: TabId, h: BrowserPaneHandle | null, url: string) => {
+  const setHandle = (
+    id: TabId,
+    h: BrowserPaneHandle | null,
+    url: string,
+    runId: string | null,
+  ) => {
     if (h) {
       handles.current.set(id, h);
-      registerPreviewTab({ id, handle: h, url });
+      registerPreviewTab({ id, handle: h, url, runId });
       lastRegisteredUrl.current.set(id, url);
     } else {
       handles.current.delete(id);
@@ -106,7 +111,7 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
     for (const t of previews) {
       const prev = lastRegisteredUrl.current.get(t.id);
       if (prev !== t.url) {
-        updatePreviewTabUrl(t.id, t.url);
+        updatePreviewTabUrl(t.id, t.url, t.runId ?? null);
         lastRegisteredUrl.current.set(t.id, t.url);
       }
     }
@@ -133,7 +138,7 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
             }}
           >
             <BrowserPane
-              ref={(h) => setHandle(t.id, h, t.url)}
+              ref={(h) => setHandle(t.id, h, t.url, t.runId ?? null)}
               url={t.url}
               visible={visible}
               onUrlChange={getUrlCallback(t.id)}
