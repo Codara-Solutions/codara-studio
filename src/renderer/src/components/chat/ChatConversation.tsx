@@ -110,6 +110,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
         buildChatTimeline(run).filter(
           (item) =>
             !isRedundantParkedBackendFailure(item, run) &&
+            !isSupersededFailedManagerTurn(item, run) &&
             shouldRenderTimelineItem(item, inspectableCalls, execution.hydrated),
         ),
       ),
@@ -580,6 +581,36 @@ function isRedundantParkedBackendFailure(
   if (item.backendTurnId) return item.backendTurnId === recovery.failedSparkCallId;
   if (item.targetTurnId) return item.targetTurnId === recovery.failedSparkCallId;
   return true;
+}
+
+// Once the user retries a failed turn, the replacement SparkCall carries the
+// same frozen inputMessageIds. The old "Turn failed" row is then superseded:
+// while the retry runs the live row speaks for the turn, and after it succeeds
+// the failure is history the user already acted on. A retry that itself fails
+// keeps its own failed row visible.
+function isSupersededFailedManagerTurn(
+  item: ChatTimelineItem,
+  run: RunState,
+): boolean {
+  if (item.kind !== "tool" || item.activity !== "manager" || item.status !== "failed") {
+    return false;
+  }
+  const itemCall = run.sparkCalls.find(
+    (call) => call.id === timelineSparkCallId(item),
+  );
+  const inputs = itemCall?.inputMessageIds;
+  if (!itemCall || !inputs || inputs.length === 0) return false;
+  return run.sparkCalls.some(
+    (call) =>
+      call !== itemCall &&
+      call.status !== "failed" &&
+      call.mode === itemCall.mode &&
+      call.purpose !== "compaction" &&
+      (call.conversationEpoch ?? 0) === (itemCall.conversationEpoch ?? 0) &&
+      call.createdAt >= itemCall.createdAt &&
+      call.inputMessageIds?.length === inputs.length &&
+      call.inputMessageIds.every((id, index) => id === inputs[index]),
+  );
 }
 
 function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {

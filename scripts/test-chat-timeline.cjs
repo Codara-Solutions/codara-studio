@@ -990,6 +990,25 @@ async function main() {
     assert.match(elseBranch, /Working<ElapsedSince/, "the live branch keeps its ticker");
   });
 
+  // A failed manager turn the user already retried must vanish once the
+  // replacement call (same frozen inputMessageIds, same epoch) is running or
+  // done; a retry that itself failed keeps its own failed row.
+  test("a retried turn's failure row is superseded by the replacement call", () => {
+    const source = fs.readFileSync(CHAT_CONVERSATION, "utf8");
+    assert.match(source, /!isSupersededFailedManagerTurn\(item, run\) &&/,
+      "the timeline filter must drop superseded failures");
+    const start = source.indexOf("function isSupersededFailedManagerTurn");
+    const end = source.indexOf("function groupCompletedActivity", start);
+    assert.notEqual(start, -1, "isSupersededFailedManagerTurn must exist");
+    const body = source.slice(start, end);
+    assert.match(body, /call\.status !== "failed"/,
+      "a failed retry must not supersede the original failure");
+    assert.match(body, /call\.purpose !== "compaction"/,
+      "compaction calls never supersede a conversational failure");
+    assert.match(body, /inputMessageIds\.every\(\(id, index\) => id === inputs\[index\]\)/,
+      "supersession must match the exact frozen input messages");
+  });
+
   console.log(`\n${passed} chat timeline contract tests passed`);
 }
 

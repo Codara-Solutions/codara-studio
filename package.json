@@ -163,6 +163,7 @@
     "rehype-highlight": "^7.0.2",
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
+    "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.0",
     "sodium-native": "^5.1.0",
     "ssh-config": "^5.2.0",

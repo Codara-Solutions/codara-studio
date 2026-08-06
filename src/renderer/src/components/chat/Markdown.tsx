@@ -1,11 +1,15 @@
 import React, { useEffect, useId, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
 import rehypeHighlight from "rehype-highlight";
 
 // Hoisted so streaming re-renders reuse the same plugin arrays and component
 // map — a fresh object here re-runs the whole remark/rehype pipeline per render.
-const REMARK_PLUGINS = [remarkGfm];
+// remark-breaks keeps single newlines as line breaks: chat prose is written
+// line-by-line, and collapsing soft breaks is what produced wall-of-text
+// question cards.
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 const REHYPE_PLUGINS = [rehypeHighlight];
 
 const COMPONENTS: Components = {
