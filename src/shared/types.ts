@@ -84,6 +84,11 @@ export interface Workspace {
   remote?: {
     hostId: string;
   };
+  // Local folders outside `cwd` attached to this workspace's Explorer as
+  // additional root nodes, in display order. Always local absolute paths
+  // (never ssh://), even when the workspace itself is remote — the folder
+  // picker is always the local OS dialog.
+  extraFolders?: string[];
 }
 
 export interface WorkspaceGroup {

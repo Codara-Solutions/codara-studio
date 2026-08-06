@@ -9,6 +9,7 @@ import {
   type Workspace,
   type WorkspaceGroup,
 } from "@shared/types";
+import { isRemotePath } from "@shared/remote";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 
@@ -139,7 +140,25 @@ function normalize(w: Workspace): Workspace {
   if (remote && typeof remote === "object" && typeof remote.hostId === "string" && remote.hostId) {
     normalized.remote = { hostId: remote.hostId };
   }
+  const extraFolders = normalizeExtraFolders(w.extraFolders);
+  if (extraFolders.length > 0) normalized.extraFolders = extraFolders;
   return normalized;
+}
+
+// External Explorer folders are always local paths; drop anything remote or
+// duplicated so a hand-edited state file cannot produce a broken tree.
+function normalizeExtraFolders(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed || isRemotePath(trimmed) || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 function normalizeWorkspaceGroups(value: unknown): WorkspaceGroup[] {

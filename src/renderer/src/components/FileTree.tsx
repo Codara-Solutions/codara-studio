@@ -208,6 +208,19 @@ interface Props {
   collapsed: boolean;
   onToggleCollapse: () => void;
   headerDrag?: SectionHeaderDragProps;
+  // "primary" (default) renders the workspace tree with the Explorer section
+  // header. "external" renders an extra attached folder: no header, and the
+  // folder itself appears as an expandable root row so it stays identifiable.
+  variant?: "primary" | "external";
+  // Primary variant only: header button that attaches an external folder to
+  // the active workspace.
+  onAddExternalFolder?: () => void;
+  // External variant only: detach this folder from the workspace (reference
+  // removal — never deletes anything on disk).
+  onRemoveExternalFolder?: () => void;
+  // External variant only: user-chosen height in px (dragged via the rail's
+  // ResizeHandle). Overrides the content-based auto height when set.
+  heightPx?: number | null;
 }
 
 interface FileContextMenu {
@@ -250,6 +263,10 @@ export default function FileTree({
   collapsed,
   onToggleCollapse,
   headerDrag,
+  variant = "primary",
+  onAddExternalFolder,
+  onRemoveExternalFolder,
+  heightPx,
 }: Props) {
   const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => {
     const cached = cachedFileTree(cwd);
@@ -483,7 +500,7 @@ export default function FileTree({
     let cancelled = false;
     // Arm the watcher with the same bounded backoff as the initial list: a
     // freshly-created workspace can reach this effect before its root is in
-    // the main-process sandbox allowlist, so `setWatchRoot` may reject with
+    // the main-process sandbox allowlist, so `addWatchRoot` may reject with
     // "Path not allowed" — without a retry NO watcher would ever be installed
     // for that workspace. Once it resolves, do ONE reconciling reload of the
     // root: the first paint came from loadDir and the macOS FSEvents recursive
@@ -491,11 +508,11 @@ export default function FileTree({
     // makes the visible tree match on-disk state once watching is actually
     // live. Both steps bail if the cwd changed / the component unmounted.
     void (async () => {
-      // `setWatchRoot` resolves to `undefined` on success; `callWithRetry`
+      // `addWatchRoot` resolves to `undefined` on success; `callWithRetry`
       // returns `null` only when cancelled or every attempt failed, so test
       // against `null` (not falsiness) to detect a genuine failure.
       const armed = await callWithRetry(
-        () => window.spark.fs.setWatchRoot(cwd),
+        () => window.spark.fs.addWatchRoot(cwd),
         () => cancelled,
       );
       if (cancelled || armed === null) return;
@@ -532,7 +549,10 @@ export default function FileTree({
     return () => {
       cancelled = true;
       unsub();
-      void window.spark.fs.setWatchRoot(null);
+      // Remove only THIS tree's root: with external folders, several FileTree
+      // instances watch different roots in the same window, so a blanket
+      // "clear all watchers" here would kill the siblings' live refresh.
+      void window.spark.fs.removeWatchRoot(cwd);
     };
   }, [cwd]);
 
@@ -1203,12 +1223,16 @@ export default function FileTree({
   // the `root` reference doesn't change across mutations. The traversal is
   // a single linear walk over the open subtree, so the cost is negligible.
   const flat: FlatRow[] = (() => {
-    // Skip the root node row itself — its name is already shown in the
-    // SectionHeader's `meta` slot, so rendering it again would duplicate
-    // the workspace folder name. We still flatten its children at depth 0.
+    // Primary variant: skip the root node row itself — its name is already
+    // shown in the SectionHeader's `meta` slot, so rendering it again would
+    // duplicate the workspace folder name. We still flatten its children at
+    // depth 0. External variant: there is no header, so the attached folder
+    // itself is the row users see, expand, and right-click.
     const root = rootRef.current;
     const rows: FlatRow[] = [];
-    if (root.open) {
+    if (variant === "external") {
+      rows.push(...flatten(root, 0));
+    } else if (root.open) {
       for (const child of root.children) {
         rows.push(...flatten(child, 0));
       }
@@ -1346,14 +1370,33 @@ export default function FileTree({
 
   return (
     <div
+      // Lets the rail measure this tree's current height when a resize drag
+      // starts before any explicit height exists.
+      data-external-tree={variant === "external" ? cwd : undefined}
       style={{
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
-        height: "100%",
+        // Primary fills the Explorer section. External trees stack below it:
+        // a user-dragged height wins outright; otherwise they size to their
+        // visible rows (floor keeps error/empty states legible), capped so a
+        // large attached folder cannot crush the workspace tree — past either
+        // limit the tree scrolls internally.
+        ...(variant === "external"
+          ? collapsed
+            ? { flex: "0 0 auto" }
+            : heightPx != null
+              ? { flex: `0 0 ${heightPx}px`, height: heightPx }
+              : {
+                  flex: "0 1 auto",
+                  height: Math.max(flat.length * ROW_HEIGHT + 12, error ? 80 : ROW_HEIGHT + 12),
+                  maxHeight: "40%",
+                }
+          : { height: "100%" }),
         overflow: "hidden",
       }}
     >
+      {variant !== "external" && (
       <SectionHeader
         label="Explorer"
         collapsed={collapsed}
@@ -1415,9 +1458,18 @@ export default function FileTree({
             >
               <RevealIcon />
             </HeaderIconButton>
+            {onAddExternalFolder && (
+              <HeaderIconButton
+                title="Add folder to workspace"
+                onClick={() => onAddExternalFolder()}
+              >
+                <AddFolderIcon />
+              </HeaderIconButton>
+            )}
           </>
         }
       />
+      )}
       {!collapsed && (
         <>
       {error && (
@@ -1623,7 +1675,13 @@ export default function FileTree({
       </div>
         </>
       )}
-      {contextMenu && (
+      {contextMenu && (() => {
+        // The attached folder's own row: "Delete" becomes "Remove from
+        // workspace" (drops the reference, never touches disk) and renaming
+        // the root is disallowed — same restriction the primary workspace
+        // root has, since an on-disk rename would orphan the stored path.
+        const isExternalRoot = variant === "external" && contextMenu.entry.path === cwd;
+        return (
         <FileMenu
           menu={contextMenu}
           entries={contextMenuEntries}
@@ -1666,7 +1724,9 @@ export default function FileTree({
             void beginCreate(entry, "dir");
           }}
           onRename={
-            contextMenuEntries.length === 1 ? () => beginRename(contextMenu.entry) : null
+            contextMenuEntries.length === 1 && !isExternalRoot
+              ? () => beginRename(contextMenu.entry)
+              : null
           }
           onReveal={
             contextMenuEntries.length === 1
@@ -1726,14 +1786,24 @@ export default function FileTree({
             setContextMenu(null);
             void navigator.clipboard.writeText(text).catch((err) => setError((err as Error).message));
           }}
-          onDelete={() => void deleteEntries(contextMenuEntries)}
+          onDelete={
+            isExternalRoot
+              ? () => {
+                  setContextMenu(null);
+                  onRemoveExternalFolder?.();
+                }
+              : () => void deleteEntries(contextMenuEntries)
+          }
           deleteLabel={
-            contextMenuEntries.length > 1
-              ? `Delete ${contextMenuEntries.length} files`
-              : "Delete"
+            isExternalRoot
+              ? "Remove from workspace"
+              : contextMenuEntries.length > 1
+                ? `Delete ${contextMenuEntries.length} files`
+                : "Delete"
           }
         />
-      )}
+        );
+      })()}
       {blankMenu && (
         <div
           onClick={(e) => e.stopPropagation()}
@@ -2639,6 +2709,24 @@ function NewFolderIcon() {
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
       <path d="M1 4 H5.5 L7 5.5 H13 V12 H1 Z" stroke="currentColor" strokeWidth="1" />
       <path d="M7 7.5 V10.5 M5.5 9 H8.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// Folder with an inward arrow: attach an existing outside folder to the
+// workspace (NewFolderIcon's plus already means "create", RevealIcon's
+// outward arrow means "open elsewhere").
+function AddFolderIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M1 4 H5.5 L7 5.5 H13 V12 H1 Z" stroke="currentColor" strokeWidth="1" />
+      <path
+        d="M10.5 7 L7.5 10 M7.5 10 H10 M7.5 10 V7.5"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

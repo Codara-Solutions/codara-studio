@@ -396,7 +396,7 @@ export function registerIpc(): void {
     // newly-added workspace is reachable the instant it's persisted, even
     // before the renderer effect that calls setAllowedRoots fires.
     const roots = state.workspaces
-      .map((w) => w.cwd)
+      .flatMap((w) => [w.cwd, ...(w.extraFolders ?? [])])
       .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
     setAllowedRoots(roots);
   });
@@ -986,18 +986,19 @@ export function registerIpc(): void {
     }
   });
 
-  ipcMain.handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {
+  ipcMain.handle("fs:addWatchRoot", async (e, root: string): Promise<void> => {
     // Remote (ssh://) roots have no local fs.watch — the git panel's 10s poll
     // + manual refresh cover change detection, exactly as on Linux where
     // recursive fs.watch is unavailable. No-op here so nothing throws.
-    if (root !== null && isRemotePath(root)) {
-      await fsWatcher.setWatchRoot(e.sender, null);
-      return;
-    }
+    if (isRemotePath(root)) return;
     // Gate only the root path here; downstream watcher events do not need a
     // per-event check (they all fire inside the gated root).
-    if (root !== null) assertAllowedReadPath(root);
-    await fsWatcher.setWatchRoot(e.sender, root);
+    assertAllowedReadPath(root);
+    await fsWatcher.addWatchRoot(e.sender, root);
+  });
+
+  ipcMain.handle("fs:removeWatchRoot", async (e, root: string): Promise<void> => {
+    fsWatcher.removeWatchRoot(e.sender, root);
   });
 
   // The renderer is authoritative about which workspaces are open, but the
