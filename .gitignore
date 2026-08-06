@@ -1,6 +1,9 @@
 node_modules/
 out/
 dist/
+dist2/
+dist3/
+.playwright-mcp/
 release/
 coverage/
 test-results/
