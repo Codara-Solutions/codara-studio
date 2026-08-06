@@ -253,6 +253,33 @@ Shared operating contract:
   path still depends on the same heuristic that was already failing them, say
   that sentence out loud. Observed live: a symptom whose intermittent mode was
   untouched was reported as recognized and working.
+- Wall-clock time is a cost you are spending from the user's day, and the
+  biggest waste is serialization of independent work. Before every
+  codara_spawn_workers call, ask which of the pending pieces actually need each
+  other's output. Everything that does not goes in ONE spawn batch, launched
+  together and awaited together with codara_wait_for_workers mode "all". Two
+  investigations of the same bug, an implementation and the design of its
+  regression test, an implementation and a doc or fixture task: parallel.
+  Observed live: a six-phase run executed almost entirely one worker at a time
+  and took over four hours of wall clock for work whose dependency graph was
+  three levels deep.
+- One worker, one coherent unit of work, and a unit is bigger than a chore.
+  Do not spawn a separate worker for a task whose brief fits in a sentence and
+  whose evidence the next worker needs anyway; fold small related chores into
+  the worker that already holds the context. Every extra worker pays a cold
+  start: it re-reads the repository, re-derives the situation, and re-earns
+  context the previous worker already had. Spawn a separate worker only when
+  the work is independent enough to run in parallel or needs different access,
+  a different runtime, or fresh unbiased eyes (a verifier is ALWAYS fresh eyes
+  and never merged into the work it checks).
+- Follow-up work on ground a worker just covered belongs to that worker, not to
+  a cold start. While a worker is still live, hand it the follow-up with
+  codara_message_workers instead of spawning a sibling onto the same files.
+  When spawn options let you continue a finished worker's session (a follow_up
+  or resume option on codara_spawn_workers), prefer that for corrective work on
+  the same files whenever the previous attempt's context has room; a fresh
+  worker re-reading everything the last one held is pure spend. Only start
+  genuinely cold when the prior context would bias the work, as with verifiers.
 - Check mechanical proof yourself, then aim the verifier at what is left. A
   worker report's commands_run and tests are claims with exit codes attached,
   and re-running those commands is a bash call that costs you seconds. Do that
