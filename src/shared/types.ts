@@ -3362,6 +3362,21 @@ export interface WorkerTask {
    * this so the sandbox can reach the out-of-workspace board. Absent otherwise.
    */
   collabMailDirHint?: string;
+  /**
+   * Warm follow-up provenance: the ACCEPTED worker task whose runtime session
+   * this task continues (codara_spawn_workers `follow_up_of`). Set only when
+   * the reuse gate passed at spawn time; purely informational thereafter.
+   */
+  followUpOfTaskId?: string;
+  /**
+   * The exact Pi session id to resume instead of minting a fresh one. Set
+   * together with followUpOfTaskId when the reuse gate passed. Consumed by
+   * runPiWorkerSession, which launches Pi with this `--session-id` so the new
+   * prompt lands as the next turn of the finished worker's transcript. Never
+   * set on verifier tasks: a verifier must not inherit the context of the
+   * work it judges.
+   */
+  resumeSessionId?: string;
 }
 
 /**
@@ -3514,6 +3529,25 @@ export interface WorkerAttempt {
    * regression auto-restore reverts to the most recent non-null value.
    */
   preWorkerCheckpointSha?: string | null;
+  /**
+   * Pi session id this attempt ran under, recorded at session finish. This is
+   * what makes warm follow-up spawns possible: launching a new Pi process with
+   * the same `--session-id` against the canonical session dir continues the
+   * finished worker's transcript. Absent for non-Pi transports (legacy CLI,
+   * structured e2e workers) and for attempts recorded before this field.
+   */
+  piSessionId?: string;
+  /**
+   * Context occupancy at session finish: the newest message's input +
+   * cacheRead + cacheWrite, a gauge over the last provider request (same
+   * semantics as PiTurnResult.contextTokens). Drives the follow-up reuse gate.
+   */
+  contextTokens?: number;
+  /**
+   * The provider's context window when it reported one. Pi 0.82 never does,
+   * so the reuse gate falls back to contextWindowForModel(attempt.model).
+   */
+  contextWindowTokens?: number;
 }
 
 export interface WorkerTaskEnvelope {
@@ -4056,6 +4090,10 @@ export interface CreateWorkerTaskInput {
   // Looms v2.5: the shared chat board dir when this task's node is a chat
   // participant; a codex launch --add-dir's it. Undefined otherwise.
   collabMailDirHint?: string;
+  // Warm follow-up: thread onto the created WorkerTask. Set only by the
+  // execute-mode spawn handler after its session-reuse gate passed.
+  followUpOfTaskId?: string;
+  resumeSessionId?: string;
 }
 
 export interface UpdateWorkerTaskInput {

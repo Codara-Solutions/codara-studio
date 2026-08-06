@@ -550,6 +550,12 @@ export interface CreateCodaraPiWorkerLaunchOptions {
   /** Exact app-owned files outside cwd that an untrusted PR worker may write
    * (normally only its mandatory final-report.json). */
   untrustedWriteAllowFiles?: string[];
+  /** Continue a FINISHED worker's transcript instead of minting a fresh
+   * session: the previous attempt's persisted Pi session id, already vetted by
+   * the spawn-time reuse gate. Launching with the same `--session-id` against
+   * the canonical session dir resumes it, so the new prompt lands as the next
+   * turn of that conversation. Undefined launches cold as before. */
+  resumeSessionId?: string;
   /** Absolute path of the run's peer-comms mailbox dir. Set only for workers
    * in a parallel batch; stamped into the worker env as CODARA_PI_PEER_DIR. */
   peerCommsDir?: string;
@@ -610,7 +616,10 @@ export async function createCodaraPiWorkerLaunchPlan(
     mkdir(paths.configDir, { recursive: true, mode: 0o700 }),
     mkdir(paths.sessionDir, { recursive: true, mode: 0o700 }),
   ]);
-  const rawSessionId = `${options.runId}-${options.attemptId}`;
+  // A follow-up resume reuses the source attempt's exact id (it went through
+  // this same sanitizer when first minted; buildPiManagerLaunchPlan re-asserts
+  // the safe charset). Everything else derives a fresh per-attempt id.
+  const rawSessionId = options.resumeSessionId?.trim() || `${options.runId}-${options.attemptId}`;
   const sessionId = rawSessionId
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "")

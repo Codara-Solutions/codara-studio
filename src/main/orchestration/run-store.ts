@@ -11998,6 +11998,8 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     accessHint: input.accessHint,
     blockedToolsHint: input.blockedToolsHint,
     collabMailDirHint: input.collabMailDirHint,
+    followUpOfTaskId: input.followUpOfTaskId,
+    resumeSessionId: input.resumeSessionId,
     createdAt: now,
     updatedAt: now,
   };
@@ -12547,7 +12549,14 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   const peerCommsAcquired = watchPeerComms
     ? await acquirePeerCommsWatcher(run).catch(() => false)
     : false;
-  let result: { exitCode: number; error?: string; costUsd?: number };
+  let result: {
+    exitCode: number;
+    error?: string;
+    costUsd?: number;
+    piSessionId?: string;
+    contextTokens?: number;
+    contextWindowTokens?: number;
+  };
   try {
     result = usePiWorkerHarness
       ? await runPiWorkerSession({
@@ -12609,6 +12618,16 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // in the placeholder estimate.
   if (typeof result.costUsd === "number" && Number.isFinite(result.costUsd) && result.costUsd > 0) {
     finishedAttempt.costUsd = roundCost(result.costUsd);
+  }
+  // Runtime session identity + final context occupancy (Pi sessions only).
+  // Recorded even on failures so a later follow_up_of gate can explain itself
+  // from real numbers; the gate independently requires a SUCCEEDED attempt.
+  if (result.piSessionId) finishedAttempt.piSessionId = result.piSessionId;
+  if (typeof result.contextTokens === "number" && result.contextTokens > 0) {
+    finishedAttempt.contextTokens = result.contextTokens;
+  }
+  if (typeof result.contextWindowTokens === "number" && result.contextWindowTokens > 0) {
+    finishedAttempt.contextWindowTokens = result.contextWindowTokens;
   }
   // Classify the failure at the one point every worker session funnels through,
   // so the retry path can branch on a kind instead of re-reading error prose.
@@ -17909,6 +17928,44 @@ function piWorkerMessageUsage(
   };
 }
 
+// Warm follow-up resume, restricted to the task's FIRST attempt. A retry or a
+// verifier-FEEDBACK rework of the same task launches cold on a fresh
+// per-attempt id instead: the prior attempt's Pi process may be hung rather
+// than dead and still hold the session file, and an unbounded rework loop must
+// not keep growing one transcript past the gate that admitted it. Verifiers
+// are re-fenced on principle; independence of verification is an invariant,
+// not a spawn-handler courtesy.
+function piWorkerResumeSessionId(
+  run: RunState,
+  task: WorkerTask,
+  attemptId: string,
+): string | undefined {
+  if (!task.resumeSessionId || task.taskClass === "verifier") return undefined;
+  const hasPriorAttempt = run.workerAttempts.some(
+    (attempt) => attempt.workerTaskId === task.id && attempt.id !== attemptId,
+  );
+  return hasPriorAttempt ? undefined : task.resumeSessionId;
+}
+
+// Forward-compatibility only, mirroring pi-turn.ts contextWindowFrom: the
+// pinned Pi 0.82 never reports a context window on message_end, so the reuse
+// gate falls back to contextWindowForModel(attempt.model) while this is null.
+function piWorkerMessageContextWindow(event: PiRpcEvent): number | null {
+  if (event.type !== "message_end") return null;
+  const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
+    ? event.message as Record<string, unknown>
+    : null;
+  const usage = message?.usage && typeof message.usage === "object" && !Array.isArray(message.usage)
+    ? message.usage as Record<string, unknown>
+    : null;
+  const positive = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  return (
+    positive(usage?.contextWindow ?? usage?.context_window) ??
+    positive(message?.contextWindow ?? message?.context_window)
+  );
+}
+
 /**
  * Drive one Pi worker turn to completion.
  *
@@ -18051,7 +18108,14 @@ async function runPiWorkerSession({
   promptText: string;
   command: string;
   userConstitution?: UserConstitutionCapture;
-}): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
+}): Promise<{
+  exitCode: number;
+  error?: string;
+  costUsd?: number;
+  piSessionId?: string;
+  contextTokens?: number;
+  contextWindowTokens?: number;
+}> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   await ensurePiWorkerDisplayPty(attemptId, cwd);
   await pty.waitForResize(attemptId, 5_000);
@@ -18075,6 +18139,20 @@ async function runPiWorkerSession({
   // rollup can skip its placeholder estimate.
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawUsage = false;
+  // Session identity + final context occupancy, persisted on the attempt so a
+  // later follow_up_of spawn can gate warm session reuse. The gauge follows
+  // pi-turn.ts semantics: the newest message carries the whole conversation,
+  // so each message_end supersedes the previous value instead of adding to it.
+  let piSessionId: string | undefined;
+  let lastContextTokens = 0;
+  let reportedContextWindowTokens: number | undefined;
+  const sessionCapture = () => ({
+    ...(piSessionId ? { piSessionId } : {}),
+    ...(lastContextTokens > 0 ? { contextTokens: lastContextTokens } : {}),
+    ...(reportedContextWindowTokens !== undefined
+      ? { contextWindowTokens: reportedContextWindowTokens }
+      : {}),
+  });
   const measuredPiCostUsd = (): number =>
     sawUsage
       ? estimateWorkerCostUsd({
@@ -18196,6 +18274,11 @@ async function runPiWorkerSession({
         runProjectPolicyMode(run) === "untrusted-pull-request"
           ? [paths.finalReportJson]
           : undefined,
+      // Warm follow-up: continue the accepted source worker's transcript. The
+      // spawn-time gate stamped this only after checking runtime, success, and
+      // context headroom; piWorkerResumeSessionId re-fences verifiers and
+      // restricts the resume to the task's FIRST attempt.
+      resumeSessionId: piWorkerResumeSessionId(run, task, attemptId),
       // Frozen contract with resources/pi-cora/worker.ts: parallel-batch
       // workers get CODARA_PI_PEER_DIR + CODARA_PI_SELF_ID to reach the
       // run's mailbox natively. Same gate as the prompt-side guidance.
@@ -18226,6 +18309,7 @@ async function runPiWorkerSession({
     mcpConfigPath = plan.mcpConfigPath;
     workerConstitutionPromptPath = plan.workerConstitutionPromptPath;
     agentSocketCapabilityId = plan.agentSocketCapabilityId;
+    piSessionId = plan.sessionId;
     if (plan.accountProfileId !== resolvedWorkerAccount.accountProfileId) {
       throw new Error("Pi worker plan changed its frozen account identity");
     }
@@ -18359,6 +18443,11 @@ async function runPiWorkerSession({
           usageTotals.output += usage.output;
           usageTotals.cacheRead += usage.cacheRead;
           usageTotals.cacheWrite += usage.cacheWrite;
+          // Context gauge for the reuse gate: what the newest request occupied.
+          const gauge = usage.input + usage.cacheRead + usage.cacheWrite;
+          if (gauge > 0) lastContextTokens = gauge;
+          reportedContextWindowTokens =
+            piWorkerMessageContextWindow(event) ?? reportedContextWindowTokens;
         }
         const failure = piWorkerEventFailure(event);
         if (failure) {
@@ -18410,7 +18499,7 @@ async function runPiWorkerSession({
     paintPiWorkerReportOutcome(paint, report);
     await logQueue.catch(() => undefined);
     const successCost = measuredPiCostUsd();
-    return { exitCode: 0, ...(successCost > 0 ? { costUsd: successCost } : {}) };
+    return { exitCode: 0, ...(successCost > 0 ? { costUsd: successCost } : {}), ...sessionCapture() };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // A late error must not fail work that already finished: when the worker's
@@ -18427,14 +18516,14 @@ async function runPiWorkerSession({
         paintPiWorkerReportOutcome(paint, report);
         await logQueue.catch(() => undefined);
         const preservedCost = measuredPiCostUsd();
-        return { exitCode: 0, ...(preservedCost > 0 ? { costUsd: preservedCost } : {}) };
+        return { exitCode: 0, ...(preservedCost > 0 ? { costUsd: preservedCost } : {}), ...sessionCapture() };
       }
     }
     applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
     paint(`\r\n\x1b[31m  ×  PI WORKER STOPPED\x1b[0m\r\n  ${message}\r\n`);
     await logQueue.catch(() => undefined);
     const failureCost = measuredPiCostUsd();
-    return { exitCode: 1, error: message, ...(failureCost > 0 ? { costUsd: failureCost } : {}) };
+    return { exitCode: 1, error: message, ...(failureCost > 0 ? { costUsd: failureCost } : {}), ...sessionCapture() };
   } finally {
     unsubscribe?.();
     activeWorkerProcesses.delete(attemptId);

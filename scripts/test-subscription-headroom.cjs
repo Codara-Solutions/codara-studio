@@ -517,7 +517,7 @@ async function main() {
   check(
     "spawn reroute keys off the decisive preference and exempts fable pins",
     socketSource.includes("preferredRuntimeForHeadroom(headroomSummary)") &&
-      /headroomReroute &&\s*\n\s*!verifierPeerOverride &&\s*\n\s*effectiveRuntime === headroomReroute\.from &&\s*\n\s*!\/fable\/i\.test\(effectiveModelHint \?\? ""\)/.test(
+      /headroomReroute &&\s*\n\s*!verifierPeerOverride &&\s*\n\s*!resumePlan &&\s*\n\s*effectiveRuntime === headroomReroute\.from &&\s*\n\s*!\/fable\/i\.test\(effectiveModelHint \?\? ""\)/.test(
         socketSource,
       ),
   );

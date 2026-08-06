@@ -50,6 +50,10 @@ import {
   planValidationAskProblem,
 } from "./orchestration/run-question-policy";
 import { runProjectPolicyMode } from "./orchestration/project-policy";
+import {
+  evaluateWorkerSessionReuse,
+  type WorkerSessionReuseDecision,
+} from "./orchestration/worker-session-reuse";
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
@@ -1778,6 +1782,10 @@ interface OrchestratorWorkerInput {
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
   /** No peer-to-peer mailbox for this worker. See WorkerTask.isolated. */
   isolated?: boolean;
+  /** Accepted worker task whose runtime session this worker should continue.
+   *  Gated by evaluateWorkerSessionReuse; falls back to a cold spawn with an
+   *  explanatory note when the gate fails. Never valid on a verifier. */
+  follow_up_of?: string;
 }
 
 // Map a requested model onto its counterpart on the OTHER provider, for a
@@ -2113,6 +2121,30 @@ async function handleOrchestratorSpawnWorkers(
     return errorResponse(id, ERR_INVALID_PARAMS, batchRejection.message);
   }
 
+  // Hard follow_up_of rejections, checked over EVERY requested entry before
+  // any filtering: a verifier asking to inherit context must hit this explicit
+  // error even when the verifier-round cap below would have dropped it, and an
+  // untrusted PR run gets no session reuse at all.
+  for (const worker of workerEntries) {
+    if (typeof worker.follow_up_of !== "string" || !worker.follow_up_of.trim()) continue;
+    if (worker.taskClass === "verifier") {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "follow_up_of is not allowed on a verifier: a verifier must re-check the work in a fresh " +
+          "session and can never inherit the context of the work it is judging. Spawn the verifier " +
+          "without follow_up_of.",
+      );
+    }
+    if (untrustedPullRequest) {
+      return errorResponse(
+        id,
+        ERR_FORBIDDEN,
+        "session reuse is unavailable for imported pull-request runs",
+      );
+    }
+  }
+
   // Hard verification-round cap: past the policy's budget, refuse to mint
   // another verification step. The manager must either accept the work (it
   // lands via the completed_unverified path with the existing caveats) or ask
@@ -2142,6 +2174,46 @@ async function handleOrchestratorSpawnWorkers(
       }
       workersToCreate = workerEntries.filter((worker) => worker.taskClass !== "verifier");
       guardrailNotes.push(capNote);
+    }
+  }
+
+  // Warm follow-up session reuse (follow_up_of). Decided per entry BEFORE any
+  // task is created: an invalid pointer fails the whole batch (the hard
+  // verifier/untrusted rejections already ran above, pre-filtering), and a
+  // merely-failed gate degrades to a cold spawn whose reason reaches the
+  // manager through the result note. Entries with empty titles are skipped
+  // here exactly as the create loop drops them: a note about a worker that
+  // will never exist only confuses the manager.
+  const sessionResumePlans = new Map<
+    Record<string, unknown>,
+    Extract<WorkerSessionReuseDecision, { kind: "resume" }>
+  >();
+  for (const worker of workersToCreate) {
+    const followUpOf = typeof worker.follow_up_of === "string" ? worker.follow_up_of.trim() : "";
+    if (!followUpOf) continue;
+    if (typeof worker.title !== "string" || !worker.title.trim()) continue;
+    const decision = evaluateWorkerSessionReuse({
+      run,
+      followUpOfTaskId: followUpOf,
+      requestedRuntime: worker.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK,
+    });
+    if (decision.kind === "invalid") {
+      return errorResponse(id, ERR_INVALID_PARAMS, decision.reason);
+    }
+    if (decision.kind === "cold") {
+      guardrailNotes.push(`follow_up_of ${followUpOf}: ${decision.reason}`);
+    } else if (
+      [...sessionResumePlans.values()].some((plan) => plan.sessionId === decision.sessionId)
+    ) {
+      // Two workers of one batch launch simultaneously; letting both continue
+      // the same transcript would have two Pi processes writing one session
+      // file. First claim wins, the duplicate spawns cold.
+      guardrailNotes.push(
+        `follow_up_of ${followUpOf}: another worker in this batch already resumed that session; ` +
+          "a session can only be continued by one worker at a time. Spawned cold instead.",
+      );
+    } else {
+      sessionResumePlans.set(worker, decision);
     }
   }
 
@@ -2311,6 +2383,8 @@ async function handleOrchestratorSpawnWorkers(
   const createdTaskClasses: (string | undefined)[] = [];
   // Titles of workers the headroom reroute actually moved, for the note below.
   const headroomReroutedTitles: string[] = [];
+  // Workers actually created with a warm session resume, for the result flag.
+  let resumedSessionCount = 0;
   const attemptIdsToLaunch: string[] = [];
   // Create every task BEFORE preparing any: prepareWorkerTask renders the
   // worker prompt and evaluates shouldUsePeerComms against the run snapshot at
@@ -2322,15 +2396,25 @@ async function handleOrchestratorSpawnWorkers(
     const title = typeof w.title === "string" ? w.title.trim() : "";
     if (!title) continue;
     const description = typeof w.description === "string" ? w.description : "";
+    const resumePlan = sessionResumePlans.get(w);
     let effectiveRuntime = verifierPeerOverride?.runtime ?? w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
     let effectiveModelHint = verifierPeerOverride?.modelHint ??
       (typeof w.modelHint === "string" ? w.modelHint : undefined);
+    // A resumed session must continue on the exact runtime and model that
+    // produced its transcript, so the source attempt's resolution wins over
+    // any hint and the headroom reroute below is skipped.
+    if (resumePlan) {
+      effectiveRuntime = resumePlan.sourceAttempt.runtime;
+      effectiveModelHint = resumePlan.sourceAttempt.model ?? resumePlan.sourceTask.modelHint;
+    }
     // Headroom reroute, per worker: skipped for the verifier peer override
-    // (independence invariant) and for an explicit fable pin (deliberate
-    // premium ask, honored even while the Claude quota is tight).
+    // (independence invariant), for a warm session resume (pinned to its
+    // source runtime), and for an explicit fable pin (deliberate premium ask,
+    // honored even while the Claude quota is tight).
     if (
       headroomReroute &&
       !verifierPeerOverride &&
+      !resumePlan &&
       effectiveRuntime === headroomReroute.from &&
       !/fable/i.test(effectiveModelHint ?? "")
     ) {
@@ -2374,6 +2458,10 @@ async function handleOrchestratorSpawnWorkers(
       // marker the picker's fan-out guard reads their empty allowedPaths as
       // "no concrete scope" and relaunches the batch one task at a time.
       parallelTrust: isParallelBatch ? "manager_batch" : undefined,
+      // Warm follow-up: the launch path resumes this exact session instead of
+      // minting a fresh one. Stamped only when the reuse gate passed above.
+      followUpOfTaskId: resumePlan?.sourceTask.id,
+      resumeSessionId: resumePlan?.sessionId,
       createdBy: "spark",
     });
     // The just-created task is the LAST entry on updated.workerTasks.
@@ -2381,6 +2469,16 @@ async function handleOrchestratorSpawnWorkers(
     if (!created) continue;
     workerTaskIds.push(created.id);
     createdTaskClasses.push(typeof w.taskClass === "string" ? w.taskClass : undefined);
+    if (resumePlan) {
+      resumedSessionCount += 1;
+      guardrailNotes.push(
+        `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id} ` +
+          `(attempt ${resumePlan.sourceAttempt.attemptNumber}, ` +
+          `${Math.round((resumePlan.contextTokens / resumePlan.contextWindowTokens) * 100)}% of its ` +
+          `${resumePlan.contextWindowTokens}-token context window used). The new prompt lands as the ` +
+          "next turn of that worker's session, with its prior context intact.",
+      );
+    }
   }
   for (const workerTaskId of workerTaskIds) {
     try {
@@ -2458,12 +2556,11 @@ async function handleOrchestratorSpawnWorkers(
         "caution either: independent slices run together should run together.",
     );
   }
-  return successResponse(
-    id,
-    notes.length > 0
-      ? { worker_task_ids: workerTaskIds, note: notes.join("\n") }
-      : { worker_task_ids: workerTaskIds },
-  );
+  return successResponse(id, {
+    worker_task_ids: workerTaskIds,
+    ...(resumedSessionCount > 0 ? { resumed_session: true } : {}),
+    ...(notes.length > 0 ? { note: notes.join("\n") } : {}),
+  });
 }
 
 // A long-poll loop should give up the moment the MCP client hangs up -

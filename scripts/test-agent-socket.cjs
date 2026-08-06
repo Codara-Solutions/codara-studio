@@ -1135,6 +1135,139 @@ async function main() {
         reusedFeedbackRetry.result?.worker_task_ids?.[0] === "wt-live-feedback-retry",
       JSON.stringify(reusedFeedbackRetry).slice(0, 260),
     );
+
+    // ── Warm session reuse (follow_up_of) ─────────────────────────────────
+    fabricateRun("run-warm-reuse", {
+      chatMode: "execute",
+      steps: [],
+      workerTasks: [{
+        id: "wt-warm-src",
+        title: "Build the parser",
+        description: "implementation slice",
+        status: "accepted",
+        taskClass: "feature",
+        runtimePreference: "claude",
+        allowedPaths: [],
+        forbiddenPaths: [],
+        expectedOutputs: [],
+        verificationCommands: [],
+        canRunParallel: false,
+        conflictsWith: [],
+        createdBy: "spark",
+        createdAt: "2026-08-06T10:00:00.000Z",
+        updatedAt: "2026-08-06T10:05:00.000Z",
+      }],
+      workerAttempts: [{
+        id: "attempt-warm-src",
+        workerTaskId: "wt-warm-src",
+        attemptNumber: 1,
+        runtime: "claude",
+        model: "claude-sonnet-5",
+        cwd: os.homedir(),
+        status: "succeeded",
+        startedAt: "2026-08-06T10:00:10.000Z",
+        finishedAt: "2026-08-06T10:05:00.000Z",
+        piSessionId: "run-warm-reuse-attempt-warm-src",
+        contextTokens: 20000,
+      }],
+    });
+    const verifierFollowUp = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-warm-reuse",
+      workers: [{
+        title: "verify the parser",
+        description: "read-only verification",
+        taskClass: "verifier",
+        runtimePreference: "codex",
+        follow_up_of: "wt-warm-src",
+      }],
+    });
+    check(
+      "spawn_workers rejects follow_up_of on a verifier outright",
+      typeof verifierFollowUp.error?.message === "string" &&
+        verifierFollowUp.error.message.includes("not allowed on a verifier"),
+      JSON.stringify(verifierFollowUp).slice(0, 260),
+    );
+    const unknownFollowUp = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-warm-reuse",
+      workers: [{
+        title: "extend the parser",
+        description: "follow-up work",
+        taskClass: "feature",
+        runtimePreference: "claude",
+        follow_up_of: "wt-does-not-exist",
+      }],
+    });
+    check(
+      "spawn_workers errors on an unknown follow_up_of task id",
+      typeof unknownFollowUp.error?.message === "string" &&
+        unknownFollowUp.error.message.includes("does not name a worker task"),
+      JSON.stringify(unknownFollowUp).slice(0, 260),
+    );
+    const warmBatch = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-warm-reuse",
+      workers: [
+        {
+          title: "Extend the parser",
+          description: "follow-up work on the same files",
+          taskClass: "feature",
+          runtimePreference: "claude",
+          follow_up_of: "wt-warm-src",
+        },
+        {
+          title: "Also extend the parser",
+          description: "duplicate follow-up in the same batch",
+          taskClass: "feature",
+          runtimePreference: "claude",
+          follow_up_of: "wt-warm-src",
+        },
+      ],
+    });
+    check(
+      "spawn_workers resumes the accepted worker's session and dedupes the in-batch duplicate",
+      warmBatch.result?.resumed_session === true &&
+        warmBatch.result?.worker_task_ids?.length === 2 &&
+        /Resumed session/.test(warmBatch.result?.note ?? "") &&
+        /already resumed that session/.test(warmBatch.result?.note ?? ""),
+      JSON.stringify(warmBatch).slice(0, 400),
+    );
+    const crossBatchFollowUp = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-warm-reuse",
+      workers: [{
+        title: "Extend the parser again",
+        description: "second spawn RPC repeating the same follow_up_of",
+        taskClass: "feature",
+        runtimePreference: "claude",
+        follow_up_of: "wt-warm-src",
+      }],
+    });
+    check(
+      "a repeated follow_up_of across spawn RPCs goes cold while the first claim is live",
+      crossBatchFollowUp.result?.resumed_session === undefined &&
+        /one live writer/.test(crossBatchFollowUp.result?.note ?? ""),
+      JSON.stringify(crossBatchFollowUp).slice(0, 400),
+    );
+    fabricateRun("run-warm-untrusted", {
+      chatMode: "execute",
+      projectPolicyMode: "untrusted-pull-request",
+      workerTasks: [],
+      workerAttempts: [],
+    });
+    const untrustedFollowUp = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-warm-untrusted",
+      workers: [{
+        title: "review follow-up",
+        description: "follow-up work",
+        taskClass: "feature",
+        runtimePreference: "claude",
+        follow_up_of: "wt-anything",
+      }],
+    });
+    check(
+      "session reuse is refused on imported pull-request runs",
+      typeof untrustedFollowUp.error?.message === "string" &&
+        untrustedFollowUp.error.message.includes("session reuse is unavailable"),
+      JSON.stringify(untrustedFollowUp).slice(0, 260),
+    );
     const failedVerifierComplete = await rpc(handshake, "orchestrator.complete", {
       runId: "run-verifier-feedback",
       summary: "incorrectly claiming the verifier passed",

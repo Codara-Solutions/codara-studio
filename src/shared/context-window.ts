@@ -8,6 +8,9 @@ export interface ContextWindowInfo {
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
 
 const KNOWN_CONTEXT_WINDOWS: Array<[RegExp, number]> = [
+  // Sourced from the pinned Pi runtime's model catalog (@earendil-works/pi-ai
+  // providers/data/anthropic.json: claude-fable-5 contextWindow 1000000).
+  [/claude-fable/i, 1_000_000],
   [/claude-(opus|sonnet|haiku)/i, 200_000],
   [/anthropic\/claude/i, 200_000],
   [/gpt-5/i, 400_000],

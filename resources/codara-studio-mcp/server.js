@@ -1178,6 +1178,11 @@ const EXECUTE_TOOLS = [
                 description:
                   "Worker role, which also drives model tier and effort. 'skeleton' = rare foundational slice later workers build on (strongest model, highest effort). 'feature' = standard implementation slice. 'leaf' = research, recon, one-shot or mechanical work against an existing contract (standard model, low effort). 'verifier' = READ-ONLY follow-up that re-checks an artifact an implementation worker already produced; it gets read-only tools and a prompt asserting an implementation just finished, so it can never research or produce a deliverable. Never use 'verifier' for first-pass work and never for every worker in a batch: an all-verifier batch with no implementation worker to check is rejected. A read-only research or investigation task is 'leaf' or 'feature', not 'verifier'.",
               },
+              follow_up_of: {
+                type: "string",
+                description:
+                  "Optional worker_task_id of an ACCEPTED worker from this run. Use it for follow-up or corrective work on files that finished worker just covered: Codara resumes that worker's runtime session (same runtime and model, prior context intact) so the new prompt lands as its next turn instead of paying a cold start. Only honored while the finished attempt's context usage is low; otherwise Codara spawns cold and the result note says why. Never allowed on taskClass verifier; verification must start fresh.",
+              },
               isolated: {
                 type: "boolean",
                 description:
