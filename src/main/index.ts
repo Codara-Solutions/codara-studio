@@ -785,11 +785,21 @@ function createWindow(): void {
       unresponsiveTimer = null;
     }
   });
-  // Boot watchdog: arm when loading begins, not after it finishes. This covers
-  // a dev-server/module request that hangs forever and guarantees the renderer
-  // cannot signal ready and then have did-finish-load arm a stale watchdog.
-  // Initial loads and recovery/HMR reloads all cross did-start-loading.
-  windowForEvents.webContents.on("did-start-loading", () => {
+  // Boot watchdog: arm on this window's own main-frame document navigations,
+  // and only those. did-start-loading is frame-tree-wide, so a preview
+  // <webview>'s embedder-side iframe attach fires it a moment AFTER the app has
+  // already booted and sent its one `app:renderer-ready` (that signal is
+  // document-scoped and sent at most once per load) — the late arm is therefore
+  // undisarmable and reloads the renderer every BOOT_WATCHDOG_MS forever.
+  // Same-document navigations (hash, pushState) never re-run the module graph,
+  // so they get no watchdog either. Arming at navigation start rather than
+  // finish is still deliberate: it covers a dev-server/module request that hangs
+  // forever, and stops did-finish-load from arming a stale watchdog after the
+  // renderer already signalled ready. The initial loadURL, recoverRenderer's
+  // reload, and dev-server full reloads are all cross-document main-frame
+  // navigations, so all of them still arm.
+  windowForEvents.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return;
     rendererReadyForCurrentLoad = false;
     armBootWatchdog();
   });

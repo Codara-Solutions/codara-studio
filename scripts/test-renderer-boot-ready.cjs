@@ -21,13 +21,26 @@ assert.match(
 );
 
 const bootListeners = source.slice(
-  source.indexOf("// Boot watchdog: arm when loading begins"),
-  source.indexOf("// The page itself failed to load", source.indexOf("// Boot watchdog: arm when loading begins")),
+  source.indexOf("// Boot watchdog: arm on this window's own main-frame"),
+  source.indexOf(
+    "// The page itself failed to load",
+    source.indexOf("// Boot watchdog: arm on this window's own main-frame"),
+  ),
 );
 assert.match(
   bootListeners,
-  /did-start-loading[\s\S]*rendererReadyForCurrentLoad = false;[\s\S]*armBootWatchdog\(\)/,
-  "every new renderer load must reset readiness and arm its watchdog",
+  /did-start-navigation[\s\S]*rendererReadyForCurrentLoad = false;[\s\S]*armBootWatchdog\(\)/,
+  "every new renderer document must reset readiness and arm its watchdog",
+);
+assert.match(
+  bootListeners,
+  /if \(!details\.isMainFrame \|\| details\.isSameDocument\) return;/,
+  "only this window's own cross-document main-frame navigation may arm the watchdog",
+);
+assert.doesNotMatch(
+  bootListeners,
+  /\.on\("did-start-loading"/,
+  "did-start-loading is frame-tree-wide: a preview <webview>'s iframe attach would arm a watchdog that the once-per-document ready signal can never disarm",
 );
 assert.doesNotMatch(
   bootListeners,
@@ -36,5 +49,5 @@ assert.doesNotMatch(
 );
 
 console.log(
-  "PASS renderer readiness is load-scoped, duplicate-safe, and watchdog-armed before a hung load",
+  "PASS renderer readiness is document-scoped, duplicate-safe, and watchdog-armed before a hung load",
 );
