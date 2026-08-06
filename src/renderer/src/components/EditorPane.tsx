@@ -95,16 +95,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const isMarkdown = useMemo(() => isMarkdownPath(path), [path]);
   const previewKind = useMemo(() => previewKindForPath(path), [path]);
   // Image/pdf/media panes never mount CodeMirror or read text over IPC —
-  // FilePreview loads them via file:// URLs. SVG is real markup, so it keeps
-  // the document flow and gets the same Preview/Edit toggle as markdown.
-  const previewOnly = previewKind !== null && previewKind !== "svg";
-  const hasViewToggle = isMarkdown || previewKind === "svg";
+  // FilePreview loads them via file:// URLs. SVG and HTML are real markup,
+  // so they keep the document flow and get the same Preview/Edit toggle as
+  // markdown.
+  const toggleKind = previewKind === "svg" || previewKind === "html";
+  const previewOnly = previewKind !== null && !toggleKind;
+  const hasViewToggle = isMarkdown || toggleKind;
 
-  // View mode applies to markdown + SVG panes. Markdown defaults to "edit"
-  // to match VS Code; SVG defaults to "preview" (you open an SVG to look at
-  // it). Mode is intentionally NOT persisted; reopening a tab returns the
-  // user to the view they expect.
-  const [viewMode, setViewMode] = useState<ViewMode>(previewKind === "svg" ? "preview" : "edit");
+  // View mode applies to markdown + SVG/HTML panes. Markdown defaults to
+  // "edit" to match VS Code; SVG and HTML default to "preview" (you open a
+  // mockup to look at it). Mode is intentionally NOT persisted; reopening a
+  // tab returns the user to the view they expect.
+  const [viewMode, setViewMode] = useState<ViewMode>(toggleKind ? "preview" : "edit");
   const [copiedAt, setCopiedAt] = useState<number | null>(null);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
@@ -291,11 +293,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (!active) flushRef.current();
   }, [active]);
 
-  // Markdown preview toggle — dispatched globally by the keyboard handler
-  // in App.tsx. Every mounted MD pane listens, but only the active tab acts;
-  // non-MD panes ignore it entirely.
+  // Preview toggle — dispatched globally by the keyboard handler in App.tsx.
+  // Every mounted toggle-capable pane (markdown/SVG/HTML) listens, but only
+  // the active tab acts; other panes ignore it entirely.
   useEffect(() => {
-    if (!isMarkdown) return;
+    if (!hasViewToggle) return;
     const onToggle = () => {
       if (!active) return;
       setViewMode((m) => (m === "edit" ? "preview" : "edit"));
@@ -303,7 +305,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     window.addEventListener("spark:markdown.togglePreview", onToggle);
     return () =>
       window.removeEventListener("spark:markdown.togglePreview", onToggle);
-  }, [isMarkdown, active]);
+  }, [hasViewToggle, active]);
 
   // Copy raw markdown source to the system clipboard. The 1200ms badge is
   // long enough to confirm but short enough not to linger if the user
@@ -404,8 +406,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onWhiteboardSaved={handleWhiteboardSaved}
           />
         )}
-        {previewKind === "svg" && viewMode === "preview" && (
-          <FilePreview path={path} kind="svg" />
+        {toggleKind && viewMode === "preview" && (
+          <FilePreview path={path} kind={previewKind!} />
         )}
         {doc.status === "ready" && conflict && (
           <div
