@@ -7,9 +7,9 @@ function ipcErrorText(err: unknown): string {
   return String(err).replace(/^Error invoking remote method '[^']+': /, "");
 }
 
-// Keys tab of the SSH manager: lists ~/.ssh keys, generates/imports keys, and
-// walks the user through installing a public key on a server or provider.
-// Delete arrives in the next task.
+// Keys tab of the SSH manager: lists ~/.ssh keys, generates/imports/deletes
+// keys, and walks the user through installing a public key on a server or
+// provider.
 export default function SshKeysTab() {
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
   const [busy, setBusy] = useState(false);
@@ -19,6 +19,7 @@ export default function SshKeysTab() {
   const [noticeIsWarning, setNoticeIsWarning] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [helperFor, setHelperFor] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [copiedFor, setCopiedFor] = useState<string | null>(null);
   const copyTimer = useRef<number | undefined>(undefined);
 
@@ -58,6 +59,22 @@ export default function SshKeysTab() {
     }
   };
 
+  const doDelete = async (name: string) => {
+    setError(null);
+    setBusy(true);
+    try {
+      await window.spark.sshKeys.delete(name);
+      setHelperFor((cur) => (cur === name ? null : cur));
+      refresh();
+    } catch (e) {
+      setError(ipcErrorText(e));
+    } finally {
+      // Clear the strip on failure too so the user isn't stuck in confirm mode.
+      setConfirmDelete(null);
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0, flex: 1 }}>
       <div style={{ overflow: "auto", display: "grid", gap: 6, minHeight: 0 }}>
@@ -68,55 +85,95 @@ export default function SshKeysTab() {
         )}
         {keys.map((key) => (
           <div key={key.name} style={{ display: "grid", gap: 6 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "8px 12px",
-                borderRadius: 8,
-                border: "1px solid var(--rule)",
-                background: "var(--panel)",
-              }}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{key.name}</span>
-                  {!key.hasPrivateKey && <WarningChip label="no private key" />}
-                  {key.publicKey == null && <WarningChip label="no public key" />}
+            {confirmDelete === key.name ? (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  border: "1px solid var(--danger)",
+                  background: "var(--danger-soft)",
+                }}
+              >
+                <div style={{ flex: 1, fontSize: 12, color: "var(--ink)" }}>
+                  Delete <b>{key.name}</b> and its public key? Servers that trust this key will stop
+                  accepting logins with it — make sure you have another way in. This cannot be undone.
                 </div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "var(--muted)",
-                    fontFamily: "var(--font-mono)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
+                <button type="button" className="spark-btn" disabled={busy} onClick={() => setConfirmDelete(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="spark-btn"
+                  style={{ color: "var(--danger)" }}
+                  disabled={busy}
+                  onClick={() => void doDelete(key.name)}
                 >
-                  {[key.type, key.fingerprint].filter(Boolean).join("  ") || "—"}
-                </div>
+                  Delete key
+                </button>
               </div>
-              <button
-                type="button"
-                className="spark-btn"
-                style={{ fontSize: 11, padding: "3px 8px" }}
-                disabled={key.publicKey == null}
-                onClick={() => copyPublicKey(key)}
+            ) : (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  border: "1px solid var(--rule)",
+                  background: "var(--panel)",
+                }}
               >
-                {copiedFor === key.name ? "Copied ✓" : "Copy public key"}
-              </button>
-              <button
-                type="button"
-                className="spark-btn"
-                style={{ fontSize: 11, padding: "3px 8px" }}
-                disabled={key.publicKey == null}
-                onClick={() => setHelperFor((cur) => (cur === key.name ? null : key.name))}
-              >
-                Setup…
-              </button>
-            </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{key.name}</span>
+                    {!key.hasPrivateKey && <WarningChip label="no private key" />}
+                    {key.publicKey == null && <WarningChip label="no public key" />}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--muted)",
+                      fontFamily: "var(--font-mono)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {[key.type, key.fingerprint].filter(Boolean).join("  ") || "—"}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="spark-btn"
+                  style={{ fontSize: 11, padding: "3px 8px" }}
+                  disabled={key.publicKey == null}
+                  onClick={() => copyPublicKey(key)}
+                >
+                  {copiedFor === key.name ? "Copied ✓" : "Copy public key"}
+                </button>
+                <button
+                  type="button"
+                  className="spark-btn"
+                  style={{ fontSize: 11, padding: "3px 8px" }}
+                  disabled={key.publicKey == null}
+                  onClick={() => setHelperFor((cur) => (cur === key.name ? null : key.name))}
+                >
+                  Setup…
+                </button>
+                <button
+                  type="button"
+                  className="spark-btn"
+                  style={{ fontSize: 11, padding: "3px 8px", color: "var(--danger)" }}
+                  disabled={busy}
+                  onClick={() => setConfirmDelete(key.name)}
+                >
+                  Delete
+                </button>
+              </div>
+            )}
             {helperFor === key.name && key.publicKey != null && <SetupHelper keyInfo={key} />}
           </div>
         ))}
