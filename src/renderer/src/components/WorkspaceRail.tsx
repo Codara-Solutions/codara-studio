@@ -207,7 +207,13 @@ function WorkspaceRail(props: RailProps) {
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createBtnRef = useRef<HTMLButtonElement>(null);
-  const [railCtxMenu, setRailCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const [railCtxMenu, setRailCtxMenu] = useState<{
+    x: number;
+    y: number;
+    // The scroll container the right-click landed in — the menu's anchor
+    // region, so scroll-close can test "did the scrolled thing move ME".
+    anchor: HTMLElement;
+  } | null>(null);
 
   // Section-divider drag: snapshot the split ratio and the body height at
   // drag start, then translate a pointer delta into a ratio delta. The hook's
@@ -545,7 +551,11 @@ function WorkspaceRail(props: RailProps) {
                   // Blank space only — rows and folders keep their "…" menus.
                   if (event.target !== event.currentTarget) return;
                   event.preventDefault();
-                  setRailCtxMenu({ x: event.clientX, y: event.clientY });
+                  setRailCtxMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    anchor: event.currentTarget,
+                  });
                 }}
                 onDragOver={(event) => {
                   if (!isWorkspaceDrag(event)) return;
@@ -660,7 +670,12 @@ function WorkspaceRail(props: RailProps) {
               </div>
             )}
             {railCtxMenu && (
-              <RailContextMenu x={railCtxMenu.x} y={railCtxMenu.y} onClose={() => setRailCtxMenu(null)}>
+              <RailContextMenu
+                x={railCtxMenu.x}
+                y={railCtxMenu.y}
+                anchor={railCtxMenu.anchor}
+                onClose={() => setRailCtxMenu(null)}
+              >
                 <RowMenuItem
                   label="New workspace…"
                   onClick={() => {
@@ -1912,11 +1927,14 @@ function normalizeHex(c: string): string {
 function RailContextMenu({
   x,
   y,
+  anchor,
   onClose,
   children,
 }: {
   x: number;
   y: number;
+  // The container the right-click landed in; scrolls that move it close the menu.
+  anchor: HTMLElement;
   onClose: () => void;
   children: React.ReactNode;
 }) {
@@ -1943,18 +1961,29 @@ function RailContextMenu({
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
+    // Same rule as AnchoredMenu: only a scroll that MOVES THE ANCHOR closes
+    // the menu. Closing on any scroll breaks it during a run — the
+    // conversation timeline follows streamed output and scrolls itself several
+    // times a second, which would flick this menu shut on every token even
+    // though the rail hasn't moved. Capture-phase because scroll doesn't
+    // bubble; a Document-level scroll contains everything and still closes.
+    const onScroll = (event: Event) => {
+      const target = event.target as Node | null;
+      if (!target || !target.contains(anchor)) return;
+      onClose();
+    };
     // Capture-phase: some dialog surfaces stopPropagation on mousedown.
     document.addEventListener("mousedown", onPointerDown, true);
     document.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onClose, true);
+    window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onClose);
     return () => {
       document.removeEventListener("mousedown", onPointerDown, true);
       document.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onClose);
     };
-  }, [onClose]);
+  }, [anchor, onClose]);
 
   return createPortal(
     <div
