@@ -108,6 +108,7 @@
     "test:declared-deps": "node scripts/test-declared-deps.cjs",
     "test:trusted-sender": "node scripts/test-trusted-sender.cjs",
     "test:remote-access": "node scripts/test-remote-access.cjs",
+    "test:ssh-keys": "node scripts/test-ssh-keys.cjs",
     "test:remote-cora-contract": "node scripts/test-remote-cora-contract.cjs",
     "test:cora-history-interop": "node scripts/test-cora-history-interop.cjs",
     "test:cora-run-interop": "node scripts/test-cora-run-interop.cjs",
