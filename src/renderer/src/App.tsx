@@ -63,7 +63,7 @@ import { mergeSessionStart } from "./components/Terminal/resume-policy";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
-import RemoteConnectDialog from "./components/remote/RemoteConnectDialog";
+import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
@@ -5463,7 +5463,7 @@ export default function App() {
         )}
 
         {remoteConnectOpen && (
-          <RemoteConnectDialog
+          <SshManagerDialog
             onClose={() => setRemoteConnectOpen(false)}
             onPick={(host, remotePath) => void createRemoteWs(host, remotePath)}
           />
