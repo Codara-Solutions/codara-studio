@@ -35,10 +35,14 @@ const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
 const WORKSPACE_GROUP_MIME = "application/x-codara-workspace-group";
 // Below this width the full tracked uppercase label no longer fits beside the
-// workspace count and the fixed 20px "+" action. The header now carries a
-// single action, so 250px is conservative — kept unchanged on purpose so the
-// compact flip happens well before a one-pixel resize could toggle ellipsis.
-const COMPACT_WORKSPACE_HEADER_WIDTH = 250;
+// workspace count and the fixed 20px "+" action, so the header swaps in "WS".
+// Derived from the SectionHeader band rather than guessed: 12px row padding
+// (5 + 7) + 14px drag slot + 16px chevron slot + 88px for "WORKSPACES"
+// (10px/700 Inter at 0.15em tracking, measured in Chromium) + 12px for the
+// two-digit count + 4 × 7px inner gaps + 6px gap to the action cluster + one
+// 20px action ≈ 196px. Rounded to 200 for a few px of guard against wider
+// fallback fonts. Was 250 back when the band carried four 20px actions.
+const COMPACT_WORKSPACE_HEADER_WIDTH = 200;
 
 const SECTION_LABELS: Record<PanelSectionKey, string> = {
   workspaces: "Workspaces",
