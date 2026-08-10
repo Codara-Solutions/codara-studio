@@ -31,6 +31,7 @@ import type {
   CoraCliMutationResult,
 } from "@shared/cora-cli";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   AddRunMessageInput,
@@ -555,6 +556,7 @@ const api = {
       ipcRenderer.invoke("dialog:openDirectory", defaultPath),
     openImages: (defaultPath?: string): Promise<string[]> =>
       ipcRenderer.invoke("dialog:openImages", defaultPath),
+    openSshKey: (): Promise<string | null> => ipcRenderer.invoke("dialog:openSshKey"),
     exportWhiteboard: (input: ExportCoraWhiteboardFileInput): Promise<string | null> =>
       ipcRenderer.invoke("dialog:exportWhiteboard", input),
     importWhiteboard: (defaultPath?: string): Promise<ImportedCoraWhiteboardFile | null> =>
@@ -1287,6 +1289,16 @@ const api = {
     // hint before launching a remote agent terminal.
     detectAgents: (hostIdOrPath: string): Promise<{ hostId: string; claude: boolean; codex: boolean }> =>
       ipcRenderer.invoke("remote:detectAgents", hostIdOrPath),
+  },
+  // SSH key management (SSH manager → Keys tab). Paths never leave ~/.ssh
+  // except the import source, which comes from the native file picker.
+  sshKeys: {
+    list: (): Promise<SshKeyInfo[]> => ipcRenderer.invoke("sshKeys:list"),
+    generate: (opts: { name: string; passphrase?: string; comment?: string }): Promise<SshKeyInfo> =>
+      ipcRenderer.invoke("sshKeys:generate", opts),
+    import: (sourcePath: string): Promise<SshKeyImportResult> =>
+      ipcRenderer.invoke("sshKeys:import", sourcePath),
+    delete: (name: string): Promise<void> => ipcRenderer.invoke("sshKeys:delete", name),
   },
   // Phone Remote Access (Settings, "Remote access"): listener lifecycle,
   // QR pairing, and the paired-device list. Distinct from `remote` above

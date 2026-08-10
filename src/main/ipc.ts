@@ -12,6 +12,13 @@ import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-fil
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
 import { browseRemoteDir } from "./remote/browse";
 import {
+  listKeys as listSshKeys,
+  generateKey as generateSshKey,
+  importKey as importSshKey,
+  deleteKey as deleteSshKey,
+} from "./remote/ssh-keys";
+import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
+import {
   answerAuthPrompt,
   disconnectHost,
   getConnection,
@@ -1391,6 +1398,17 @@ export function registerIpc(): void {
     });
     if (result.canceled) return [];
     return result.filePaths;
+  });
+
+  handle("dialog:openSshKey", async (e): Promise<string | null> => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const result = await dialog.showOpenDialog(win!, {
+      title: "Import SSH key",
+      properties: ["openFile", "showHiddenFiles"],
+      defaultPath: join(app.getPath("home"), ".ssh"),
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
   });
 
   handle(
@@ -3279,6 +3297,22 @@ export function registerIpc(): void {
     async (_e, hostIdOrPath: string): Promise<RemoteAgentAvailability> =>
       detectRemoteAgents(hostIdOrPath),
   );
+
+  // SSH key management for the SSH manager's Keys tab. Confined to ~/.ssh by
+  // the module itself; the renderer never passes paths for list/generate/delete.
+  handle("sshKeys:list", async (): Promise<SshKeyInfo[]> => listSshKeys());
+  handle(
+    "sshKeys:generate",
+    async (
+      _e,
+      opts: { name: string; passphrase?: string; comment?: string },
+    ): Promise<SshKeyInfo> => generateSshKey(opts),
+  );
+  handle(
+    "sshKeys:import",
+    async (_e, sourcePath: string): Promise<SshKeyImportResult> => importSshKey(sourcePath),
+  );
+  handle("sshKeys:delete", async (_e, name: string): Promise<void> => deleteSshKey(name));
 
   // ── Remote Access (phone pairing + listener) ───────────────────────────
   // Settings' "Remote access" section. Distinct from the remote:* channels
