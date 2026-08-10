@@ -49,7 +49,7 @@ export default function RemoteAuthPrompt() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        // No backdrop-filter here, see RemoteConnectDialog: this is the
+        // No backdrop-filter here, see SshManagerDialog: this is the
         // glass form's PARENT, so filtering it makes it a backdrop root and
         // the form frosts an empty interior. Sibling scrim instead.
         background: "transparent",

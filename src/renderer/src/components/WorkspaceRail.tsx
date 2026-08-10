@@ -35,8 +35,9 @@ const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
 const WORKSPACE_GROUP_MIME = "application/x-codara-workspace-group";
 // Below this width the full tracked uppercase label no longer fits beside the
-// workspace count and four fixed 20px actions. Keep a little buffer above the
-// exact measured edge so a one-pixel resize cannot toggle into ellipsis.
+// workspace count and the fixed 20px "+" action. The header now carries a
+// single action, so 250px is conservative — kept unchanged on purpose so the
+// compact flip happens well before a one-pixel resize could toggle ellipsis.
 const COMPACT_WORKSPACE_HEADER_WIDTH = 250;
 
 const SECTION_LABELS: Record<PanelSectionKey, string> = {
@@ -1543,6 +1544,9 @@ function WorkspaceRow({
   }, [editing]);
   useEffect(() => {
     if (editing && inputRef.current) {
+      // Editing hides the "…" button; drop its menu state too so a stale open
+      // menu cannot reappear when editing ends.
+      setMenuOpen(false);
       inputRef.current.focus();
       inputRef.current.select();
     }

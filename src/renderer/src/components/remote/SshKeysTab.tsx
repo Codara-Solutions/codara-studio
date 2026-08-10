@@ -4,7 +4,9 @@ import type { SshKeyInfo } from "@shared/ssh-keys";
 // Electron wraps errors thrown in ipcMain handlers with a noisy prefix; strip
 // it so the user sees the handler's actual message.
 function ipcErrorText(err: unknown): string {
-  return String(err).replace(/^Error invoking remote method '[^']+': /, "");
+  return String(err)
+    .replace(/^Error invoking remote method '[^']+': /, "")
+    .replace(/^Error:\s*/, "");
 }
 
 // Keys tab of the SSH manager: lists ~/.ssh keys, generates/imports/deletes
@@ -61,6 +63,7 @@ export default function SshKeysTab() {
 
   const doDelete = async (name: string) => {
     setError(null);
+    setNotice(null);
     setBusy(true);
     try {
       await window.spark.sshKeys.delete(name);

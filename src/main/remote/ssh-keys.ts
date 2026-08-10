@@ -78,7 +78,10 @@ export async function listKeys(dir?: string): Promise<SshKeyInfo[]> {
     return [];
   }
 
-  const files = new Set(entries.filter((entry) => entry.isFile()).map((entry) => entry.name));
+  // Symlinks count too: keys managed by a dotfiles repo are typically links.
+  const files = new Set(
+    entries.filter((entry) => entry.isFile() || entry.isSymbolicLink()).map((entry) => entry.name),
+  );
   const names = new Set<string>();
   for (const file of files) {
     if (file.startsWith("known_hosts") || IGNORED.has(file)) continue;
@@ -173,6 +176,9 @@ export async function importKey(sourcePath: string, dir?: string): Promise<SshKe
 
 export async function deleteKey(name: string, dir?: string): Promise<void> {
   assertValidName(name);
+  // Mirror listKeys's skip logic: config, authorized_keys, known_hosts* are
+  // valid filenames but never keys, and deleting them would break ssh setup.
+  if (IGNORED.has(name) || name.startsWith("known_hosts")) throw new Error("Not a key file.");
   const base = sshDir(dir);
   const privPath = join(base, name);
   if (!(await exists(privPath))) throw new Error(`${name} does not exist.`);

@@ -103,6 +103,27 @@ function tmpSshDir() {
     await assert.rejects(() => mod.deleteKey("nope", dir));
   });
 
+  await check("deleteKey refuses non-key ssh files even when they exist", async () => {
+    const dir = tmpSshDir();
+    fs.writeFileSync(path.join(dir, "config"), "Host example\n");
+    fs.writeFileSync(path.join(dir, "known_hosts"), "example ssh-ed25519 AAAA\n");
+    await assert.rejects(() => mod.deleteKey("config", dir), /Not a key file/);
+    await assert.rejects(() => mod.deleteKey("known_hosts", dir), /Not a key file/);
+    assert.ok(fs.existsSync(path.join(dir, "config")));
+    assert.ok(fs.existsSync(path.join(dir, "known_hosts")));
+  });
+
+  await check("listKeys includes symlinked keys", async () => {
+    const dir = tmpSshDir();
+    fs.writeFileSync(
+      path.join(dir, "real.pub"),
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlaceholderPlaceholderPlaceholderPlacehold me@example\n",
+    );
+    fs.symlinkSync(path.join(dir, "real.pub"), path.join(dir, "linked.pub"));
+    const keys = await mod.listKeys(dir);
+    assert.deepStrictEqual(keys.map((k) => k.name), ["linked", "real"]);
+  });
+
   if (hasKeygen) {
     await check("generateKey creates an ed25519 pair with 0600 perms", async () => {
       const dir = tmpSshDir();
