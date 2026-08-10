@@ -23,5 +23,7 @@ export interface SshKeyImportResult {
 }
 
 export function isValidKeyName(name: string): boolean {
-  return /^[A-Za-z0-9._-]+$/.test(name) && !name.includes("..") && !name.endsWith(".pub");
+  // "." must be rejected explicitly: it passes the charset check, contains no
+  // "..", and doesn't end in ".pub", yet join(dir, ".") is the dir itself.
+  return /^[A-Za-z0-9._-]+$/.test(name) && name !== "." && !name.includes("..") && !name.endsWith(".pub");
 }

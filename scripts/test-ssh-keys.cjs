@@ -68,9 +68,31 @@ function tmpSshDir() {
     assert.ok(keys[0].publicKey.startsWith("ssh-ed25519 "));
   });
 
+  await check("listKeys skips phantom names and non-regular files", async () => {
+    const dir = tmpSshDir();
+    // ".pub" derives name "" and "..pub" derives "." — both must be filtered,
+    // or a phantom key whose privateKeyPath is the ssh dir itself gets listed.
+    fs.writeFileSync(path.join(dir, ".pub"), "junk");
+    fs.writeFileSync(path.join(dir, "..pub"), "junk");
+    fs.mkdirSync(path.join(dir, "subdir.pub"));
+    const keys = await mod.listKeys(dir);
+    assert.deepStrictEqual(keys, []);
+  });
+
+  await check("listKeys lists a well-known private key without a .pub", async () => {
+    const dir = tmpSshDir();
+    fs.writeFileSync(path.join(dir, "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    const keys = await mod.listKeys(dir);
+    assert.strictEqual(keys.length, 1);
+    assert.strictEqual(keys[0].name, "id_ed25519");
+    assert.strictEqual(keys[0].publicKey, null);
+    assert.strictEqual(keys[0].publicKeyPath, null);
+    assert.strictEqual(keys[0].hasPrivateKey, true);
+  });
+
   await check("generateKey rejects invalid names", async () => {
     const dir = tmpSshDir();
-    for (const bad of ["../evil", "a/b", "", "x..y", "name.pub"]) {
+    for (const bad of ["../evil", "a/b", "", "x..y", "name.pub", "."]) {
       await assert.rejects(() => mod.generateKey({ name: bad }, dir));
     }
   });
@@ -113,6 +135,44 @@ function tmpSshDir() {
       if (process.platform !== "win32") {
         const mode = fs.statSync(path.join(dir, "movable")).mode & 0o777;
         assert.strictEqual(mode, 0o600);
+      }
+    });
+
+    await check("importKey copies a sibling .pub instead of deriving", async () => {
+      const srcDir = tmpSshDir();
+      const dir = tmpSshDir();
+      await mod.generateKey({ name: "withpub" }, srcDir);
+      const result = await mod.importKey(path.join(srcDir, "withpub"), dir);
+      assert.strictEqual(result.warning, undefined);
+      const srcPub = fs.readFileSync(path.join(srcDir, "withpub.pub"), "utf8").trim();
+      assert.strictEqual(result.key.publicKey, srcPub);
+      if (process.platform !== "win32") {
+        const mode = fs.statSync(path.join(dir, "withpub.pub")).mode & 0o777;
+        assert.strictEqual(mode, 0o644);
+      }
+    });
+
+    await check("importKey refuses to overwrite", async () => {
+      const srcDir = tmpSshDir();
+      const dir = tmpSshDir();
+      await mod.generateKey({ name: "twice" }, srcDir);
+      await mod.importKey(path.join(srcDir, "twice"), dir);
+      await assert.rejects(() => mod.importKey(path.join(srcDir, "twice"), dir), /already exists/);
+    });
+
+    await check("generateKey failure never leaks the passphrase", async () => {
+      const dir = tmpSshDir();
+      fs.chmodSync(dir, 0o500); // read-only → ssh-keygen cannot write the key
+      try {
+        await assert.rejects(
+          () => mod.generateKey({ name: "leaky", passphrase: "sekret123" }, dir),
+          (err) => {
+            assert.ok(!String(err && err.message).includes("sekret123"), "passphrase leaked into error");
+            return true;
+          },
+        );
+      } finally {
+        fs.chmodSync(dir, 0o700);
       }
     });
 
