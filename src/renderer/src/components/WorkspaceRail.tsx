@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import type { ChatBackendKind, FsEntry, GitFileChange, RunState, Workspace, WorkspaceGroup } from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
@@ -206,6 +207,7 @@ function WorkspaceRail(props: RailProps) {
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createBtnRef = useRef<HTMLButtonElement>(null);
+  const [railCtxMenu, setRailCtxMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Section-divider drag: snapshot the split ratio and the body height at
   // drag start, then translate a pointer delta into a ratio delta. The hook's
@@ -539,6 +541,12 @@ function WorkspaceRail(props: RailProps) {
             {!collapsed.workspaces && (
               <div
                 style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}
+                onContextMenu={(event) => {
+                  // Blank space only — rows and folders keep their "…" menus.
+                  if (event.target !== event.currentTarget) return;
+                  event.preventDefault();
+                  setRailCtxMenu({ x: event.clientX, y: event.clientY });
+                }}
                 onDragOver={(event) => {
                   if (!isWorkspaceDrag(event)) return;
                   if (event.target === event.currentTarget) {
@@ -650,6 +658,24 @@ function WorkspaceRail(props: RailProps) {
                   />
                 )}
               </div>
+            )}
+            {railCtxMenu && (
+              <RailContextMenu x={railCtxMenu.x} y={railCtxMenu.y} onClose={() => setRailCtxMenu(null)}>
+                <RowMenuItem
+                  label="New workspace…"
+                  onClick={() => {
+                    setRailCtxMenu(null);
+                    onCreate();
+                  }}
+                />
+                <RowMenuItem
+                  label="New folder"
+                  onClick={() => {
+                    setRailCtxMenu(null);
+                    setEditingGroupId(props.onCreateWorkspaceGroup());
+                  }}
+                />
+              </RailContextMenu>
             )}
           </>
         );
@@ -1878,6 +1904,79 @@ function normalizeHex(c: string): string {
   // back to a default so React doesn't warn about a non-conforming value.
   if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
   return "#f0c419";
+}
+
+// Right-click menu for blank rail space. Anchored to a POINT, not an element,
+// so AnchoredMenu doesn't fit — but the same rules apply: portal to body
+// (correct glass backdrop, no overflow clipping) and clamp to the viewport.
+function RailContextMenu({
+  x,
+  y,
+  onClose,
+  children,
+}: {
+  x: number;
+  y: number;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const pad = 8;
+    const rect = el.getBoundingClientRect();
+    setPos({
+      left: Math.min(Math.max(pad, x), window.innerWidth - rect.width - pad),
+      top: Math.min(Math.max(pad, y), window.innerHeight - rect.height - pad),
+    });
+  }, [x, y]);
+
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && ref.current?.contains(target)) return;
+      onClose();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    // Capture-phase: some dialog surfaces stopPropagation on mousedown.
+    document.addEventListener("mousedown", onPointerDown, true);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onClose, true);
+    window.addEventListener("resize", onClose);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown, true);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("resize", onClose);
+    };
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      ref={ref}
+      role="menu"
+      className="spark-menu"
+      style={{
+        position: "fixed",
+        left: pos?.left ?? x,
+        top: pos?.top ?? y,
+        minWidth: 180,
+        padding: 4,
+        display: "grid",
+        gap: 2,
+        zIndex: 60,
+        visibility: pos ? "visible" : "hidden",
+      }}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
 }
 
 function RowMenuItem({
