@@ -246,10 +246,19 @@ export default function AnchoredMenu({
     // the whole composer shell, which grows as the textarea autosizes or an
     // attachment chip row appears; without this the panel keeps its stale
     // offset and lands on top of the first line of text.
+    //
+    // The boundary element is watched too: dragging a section divider in the
+    // workspace rail resizes the workspaces scroll container, which moves the
+    // anchor row WITHOUT firing window resize, anchor resize, or a scroll — the
+    // open row menu kept its stale fixed coordinates and stranded on top of the
+    // Source Control panel. Re-measuring here follows the row and re-runs the
+    // boundary flip test.
     const anchor = anchorRef.current;
     const observer =
       typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measure());
     if (anchor && observer) observer.observe(anchor);
+    const boundary = boundaryRef?.current;
+    if (boundary && observer) observer.observe(boundary);
 
     // Capture-phase for the same reason as scroll: bubbling cannot be trusted.
     // The Settings dialog surface calls stopPropagation on mousedown, so a
@@ -268,7 +277,7 @@ export default function AnchoredMenu({
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", onScroll, true);
     };
-  }, [open, onClose, measure, anchorRef]);
+  }, [open, onClose, measure, anchorRef, boundaryRef]);
 
   if (!open) return null;
 
