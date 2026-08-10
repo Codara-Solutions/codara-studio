@@ -1,7 +1,0 @@
-{
-  "taskId": "fix-with-regression-test",
-  "seedCommit": "0621d6cca43640f774bf85c4e26aa15510a471c0",
-  "seedBranch": "eval-fixtures/fix-with-regression-test-seed",
-  "repinnedAt": "2026-05-04T00:00:00.000Z",
-  "notes": "Seed branched from main @ 6fa0fce. Two preparatory commits: (a) introduce the bug — drop the third OR-branch (json_schema/not-support) from isStructuredOutputUnsupportedError; (b) extract the classifier to src/main/orchestration/openrouter-error-classifier.ts so the regression test can import it without dragging in the rest of openrouter-manager.ts's transitive imports. Agent's job: find the missing case, fix it, write the regression test. Do NOT merge eval-fixtures/* to main."
-}

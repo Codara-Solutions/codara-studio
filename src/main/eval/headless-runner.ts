@@ -48,7 +48,7 @@ import type {
 } from "@shared/types";
 import type { HeadlessEvalArgs } from "./headless-args";
 
-// Variant config schema mirrored loosely from evals/lib/variant-config.js.
+// Variant config schema mirrored loosely from evals-v2/lib/variant-config.js.
 // We only consume the fields headless mode actually applies — everything
 // else is ignored so a future field addition does not break interactive
 // Codara.
@@ -474,7 +474,7 @@ async function applyVariantConfig(config: VariantConfig, configPath: string): Pr
   // so writing it here would change nothing about the run.)
 
   // Manager profile path. The variant config records a path relative to
-  // the repo root (the JSON lives under evals/configs/, the profile lives
+  // the repo root (the JSON lives under evals-v2/configs/, the profile lives
   // under resources/orchestration/). We try multiple resolution roots so
   // both relative and absolute forms work: an absolute path wins; otherwise
   // we try the nearest .git ancestor of the config file (the repo root),

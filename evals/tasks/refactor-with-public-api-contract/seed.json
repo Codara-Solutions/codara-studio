@@ -1,7 +1,0 @@
-{
-  "taskId": "refactor-with-public-api-contract",
-  "seedCommit": "6fa0fcefcbe6645a47f27505bc727fc7ef4b7805",
-  "seedBranch": "main",
-  "repinnedAt": "2026-05-04T00:00:00.000Z",
-  "notes": "Pinned to main HEAD when task 3 was authored. Held-out generalization task: rename storage.ts's loadSettings() to getAppSettings(), update all call sites in src/main/, document the change. Re-pin via `node evals/scripts/repin-seed.cjs refactor-with-public-api-contract` only when the task fixtures themselves change."
-}

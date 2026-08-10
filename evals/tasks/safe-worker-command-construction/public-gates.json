@@ -1,3 +1,0 @@
-[
-  { "id": "typecheck", "command": "npm", "args": ["run", "typecheck"] }
-]

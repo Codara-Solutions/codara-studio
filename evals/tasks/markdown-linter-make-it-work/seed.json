@@ -1,7 +1,0 @@
-{
-  "taskId": "markdown-linter-make-it-work",
-  "seedCommit": "4537306687e062f74c2cf71ac6668661c51e0287",
-  "seedBranch": "eval-fixtures/markdown-linter-make-it-work-seed",
-  "repinnedAt": "2026-05-07T00:00:00.000Z",
-  "notes": "Seed branched from main @ 6fa0fce with one fixture commit (4537306) adding vendor/markdown-linter/ — a tiny zero-dependency markdown linter. The linter has three latent issues meant to be discovered, not stated: parser splits on \\n only (CRLF leaves \\r in line.text and breaks regex-anchored rules); parser only recognizes YAML frontmatter (TOML treated as content); list-indent rule's regex requires space indent (tab-indented items silently skipped). The docs/ fixture demonstrates all three (TOML frontmatter, tab-indented lists, CRLF on disk via .gitattributes eol=crlf for docs/**/*.md). The linter's own tests in vendor/markdown-linter/test/ cover the LF/YAML/space-indent happy path and pass cleanly — they pin the don't-break-working-behavior floor."
-}
