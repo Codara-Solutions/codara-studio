@@ -190,6 +190,9 @@ interface Props {
   onToggleLeft: () => void;
   onToggleRight: () => void;
   onOpenSettings?: () => void;
+  // Opens the Usage tab from the meter cluster. Optional so the chrome renders
+  // unchanged anywhere the tab surface is not wired up.
+  onOpenUsage?: () => void;
   // Notification-center wiring (bell + popover in the right-side controls).
   notifyNavigateTo?: NavigateTo;
   notifyResolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
@@ -205,6 +208,7 @@ function WindowChrome({
   onToggleLeft,
   onToggleRight,
   onOpenSettings,
+  onOpenUsage,
   notifyNavigateTo,
   notifyResolveQuestion,
 }: Props) {
@@ -314,7 +318,7 @@ function WindowChrome({
           alignItems: "stretch",
         }}
       >
-        <UsageMeters />
+        <UsageMeters onOpenUsage={onOpenUsage} />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
         <NotificationCenter
           navigateTo={notifyNavigateTo}

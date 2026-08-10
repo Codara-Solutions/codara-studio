@@ -71,6 +71,62 @@ function ProviderGlyph({ provider, size }: { provider: UsageEntry["provider"]; s
   return provider === "anthropic" ? <AnthropicGlyph size={size} /> : <OpenAIGlyph size={size} />;
 }
 
+/** Three ascending bars — the Usage page's daily chart at glyph size. */
+function UsageGlyph({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" aria-hidden focusable="false">
+      <path
+        d="M3 11.4V8.2M7 11.4V5.4M11 11.4V2.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Opens the Usage tab. It sits with the quota pills because it answers the
+ * question they raise: the pills say how much of the plan is left, this says
+ * where it went.
+ */
+function UsageTabButton({ onOpen }: { onOpen: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      data-window-control
+      title="Usage analytics"
+      aria-label="Usage analytics"
+      onClick={onOpen}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={
+        {
+          appearance: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 20,
+          height: 18,
+          padding: 0,
+          borderRadius: 99,
+          border: "1px solid transparent",
+          background: hover ? "var(--hover)" : "transparent",
+          color: hover ? "var(--ink)" : "var(--muted)",
+          cursor: "default",
+          WebkitAppRegion: "no-drag",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        } as AppRegionStyle
+      }
+    >
+      <UsageGlyph />
+    </button>
+  );
+}
+
 /** The binding constraint: the window closest to exhausted. */
 function tightestWindow(usage: UsageEntry): PiUsageWindow | null {
   return usage.windows
@@ -426,7 +482,7 @@ function UsagePill({
   );
 }
 
-export default function UsageMeters() {
+export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void } = {}) {
   const [overview, setOverview] = useState<PiUsageOverview | null>(null);
   const [openEntry, setOpenEntry] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
@@ -509,7 +565,10 @@ export default function UsageMeters() {
         (left.provider === "anthropic" ? 0 : 1) -
         (right.provider === "anthropic" ? 0 : 1),
     );
-  if (connected.length === 0) return null;
+  // With no connected subscription there are no pills — but the Usage opener is
+  // about spend already recorded on disk, which exists regardless, so it keeps
+  // its place rather than disappearing with them.
+  if (connected.length === 0 && !onOpenUsage) return null;
   const active = connected.find((entry) => usageEntryKey(entry) === openEntry) ?? null;
 
   return (
@@ -536,6 +595,7 @@ export default function UsageMeters() {
           }}
         />
       ))}
+      {onOpenUsage ? <UsageTabButton onOpen={onOpenUsage} /> : null}
       {active && anchor ? (
         <UsagePopover
           usage={active}

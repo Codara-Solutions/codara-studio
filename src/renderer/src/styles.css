@@ -4277,3 +4277,33 @@ a { color: inherit; }
     display: none;
   }
 }
+
+/* ── Usage page ──────────────────────────────────────────────────────────────
+   Two things the page cannot express as inline styles: a keyframed bar reveal
+   and a row-hover tint. Everything else there is inline, in tokens. */
+
+/* The one animation on the page: the daily bars grow up from the axis once, on
+   mount. transform-box: fill-box is what makes transform-origin resolve against
+   the bar's own box rather than the SVG viewport. */
+.usage-bar {
+  transform-box: fill-box;
+  transform-origin: bottom;
+  animation: usage-bar-grow 240ms var(--ease-out) both;
+}
+
+@keyframes usage-bar-grow {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+.usage-row {
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.usage-row:hover {
+  background: color-mix(in oklab, var(--ink) 3%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-bar { animation: none; }
+}

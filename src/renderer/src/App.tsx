@@ -2790,6 +2790,12 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
+  // Read through tabsRef so the title bar's opener stays referentially stable
+  // across App renders, like the tray's Automations handler above.
+  const handleOpenUsage = useCallback(() => {
+    tabsRef.current.openUsageTab();
+  }, []);
+
   const handleOpenCapabilities = useCallback(() => {
     void loadAgentCapabilitiesDialog();
     setCapabilitiesOpen(true);
@@ -5243,6 +5249,7 @@ export default function App() {
         onToggleLeft={handleToggleLeft}
         onToggleRight={handleToggleRight}
         onOpenSettings={handleOpenSettings}
+        onOpenUsage={handleOpenUsage}
         notifyNavigateTo={navigateToNotifyTarget}
         notifyResolveQuestion={resolveRunQuestion}
       />

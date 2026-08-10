@@ -9,12 +9,17 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
 } from "@shared/usage-analytics";
+import { ClaudeMark, CodexMark } from "../BrandMarks";
+import { SparkIcon } from "../icons";
 import { formatCount, formatDayShort, formatPercent, formatTokens, formatUsd } from "./usage-format";
 
-// The Usage page: daily token spend across the three harnesses whose
-// transcripts live on this machine (Claude Code, Codex, and Cora's own Pi
-// sessions). The scan itself lives in the main process; this file is display
-// only — every number here is derived from the summary it hands back.
+// The Usage page: what the three harnesses on this machine actually spent.
+// The scan lives in the main process; this file is display only.
+//
+// The cost figure leads because it is the question people open this for. The
+// chart is the one loud element — everything around it stays in the app's quiet
+// register (hairline rules, mono numerals, uppercase micro-labels), so the bars
+// are what the eye lands on.
 
 const WINDOW_OPTIONS = [7, 30, 90] as const;
 
@@ -24,28 +29,55 @@ const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   cora: "Cora",
 };
 
-// Stacking order, bottom band first. Cora carries the app accent because it is
-// Codara's own spend; the other two take their vendors' marks.
+// Stacking order, bottom band first.
 const PROVIDER_ORDER: readonly UsageProviderKind[] = ["cora", "codex", "claude"];
 
+/**
+ * Provider identity colours.
+ *
+ * All three derive from theme tokens rather than fixed hexes, so the seven
+ * bundled themes (four of them light) re-tint them for free. Cora takes the
+ * house accent because it is Codara's own spend; Codex keeps the `--info` blue
+ * the app already assigns it (see BrandMarks); Claude is `--warn` pulled toward
+ * `--danger`, which lands on Anthropic's terracotta and, being off the pure
+ * amber, does not read as a warning next to the other two.
+ */
 const PROVIDER_COLOR: Record<UsageProviderKind, string> = {
-  claude: "#d97757",
-  codex: "var(--ink-dim)",
+  claude: "color-mix(in oklch, var(--warn) 75%, var(--danger))",
+  codex: "var(--info)",
   cora: "var(--accent)",
 };
+
+function ProviderMark({ provider, size = 12 }: { provider: UsageProviderKind; size?: number }) {
+  if (provider === "claude") return <ClaudeMark size={size} />;
+  if (provider === "codex") return <CodexMark size={size} />;
+  return <SparkIcon size={size} />;
+}
 
 type UsageMetric = "cost" | "tokens";
 type UsageBreakdown = "model" | "day";
 
-// Reopening the tab (or flipping back to a window already fetched) inside this
-// window reuses the last answer instead of re-running a scan that takes seconds
-// on a large history. Manual refresh always bypasses it.
+// Reopening the tab, or flipping back to a window already fetched, reuses the
+// last answer inside this window instead of re-running a scan that takes
+// seconds on a large history. Refresh always bypasses it.
 const SUMMARY_TTL_MS = 2 * 60 * 1000;
 const summaryCache = new Map<string, { fetchedAtMs: number; summary: UsageSummary }>();
 
 function windowKey(input: UsageSummaryInput): string {
   return `${input.sinceDay}|${input.untilDay}|${input.timeZone}`;
 }
+
+const LABEL: React.CSSProperties = {
+  fontSize: 10,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--muted)",
+};
+
+const MONO: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontVariantNumeric: "tabular-nums",
+};
 
 interface DayTotals {
   day: string;
@@ -62,10 +94,10 @@ export default function UsagePage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Bumped by Refresh to re-read the clock. Without it the range would hold
-  // the `new Date()` captured when the window length last changed, and a tab
-  // left open overnight would keep asking for yesterday's untilDay — today's
-  // usage would be invisible no matter how often the user refreshed.
+  // Bumped by Refresh to re-read the clock. Without it the range would hold the
+  // `new Date()` captured when the window length last changed, and a tab left
+  // open overnight would keep asking for yesterday — today's usage would be
+  // invisible no matter how often the user refreshed.
   const [rangeEpoch, setRangeEpoch] = useState(0);
 
   // Otherwise recomputed only when the window length changes, so an unrelated
@@ -83,37 +115,34 @@ export default function UsagePage() {
   // re-reads the clock and bypasses the summary cache.
   const pendingForceRef = useRef(false);
 
-  const load = useCallback(
-    async (input: UsageSummaryInput, options?: { force?: boolean }) => {
-      const key = windowKey(input);
-      const cached = summaryCache.get(key);
-      // The counter is bumped on EVERY load, cache hits included. Serving a hit
-      // without claiming the newest request number would let an older, slower
-      // scan for a different window resolve afterwards, pass the staleness
-      // check, and paint 90-day totals under a 30-day header.
-      const request = (requestRef.current += 1);
-      if (!options?.force && cached && Date.now() - cached.fetchedAtMs < SUMMARY_TTL_MS) {
-        setSummary(cached.summary);
-        setError(null);
-        setLoading(false);
-        return;
-      }
-      setLoading(true);
+  const load = useCallback(async (input: UsageSummaryInput, options?: { force?: boolean }) => {
+    const key = windowKey(input);
+    const cached = summaryCache.get(key);
+    // The counter is bumped on EVERY load, cache hits included. Serving a hit
+    // without claiming the newest request number would let an older, slower
+    // scan for a different window resolve afterwards, pass the staleness check,
+    // and paint 90-day totals under a 30-day header.
+    const request = (requestRef.current += 1);
+    if (!options?.force && cached && Date.now() - cached.fetchedAtMs < SUMMARY_TTL_MS) {
+      setSummary(cached.summary);
       setError(null);
-      try {
-        const next = await window.spark.usageAnalytics.summary(input);
-        if (requestRef.current !== request) return;
-        summaryCache.set(key, { fetchedAtMs: Date.now(), summary: next });
-        setSummary(next);
-      } catch (err) {
-        if (requestRef.current !== request) return;
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (requestRef.current === request) setLoading(false);
-      }
-    },
-    [],
-  );
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await window.spark.usageAnalytics.summary(input);
+      if (requestRef.current !== request) return;
+      summaryCache.set(key, { fetchedAtMs: Date.now(), summary: next });
+      setSummary(next);
+    } catch (err) {
+      if (requestRef.current !== request) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (requestRef.current === request) setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     const force = pendingForceRef.current;
@@ -165,58 +194,35 @@ export default function UsagePage() {
     >
       <div
         style={{
-          maxWidth: 1080,
+          maxWidth: 1040,
           margin: "0 auto",
-          padding: "20px 24px 40px",
+          padding: "22px 26px 44px",
           display: "flex",
           flexDirection: "column",
-          gap: 22,
+          gap: 26,
         }}
       >
         <header
           style={{
             display: "flex",
             flexWrap: "wrap",
-            alignItems: "flex-start",
+            alignItems: "center",
             justifyContent: "space-between",
             gap: 12,
           }}
         >
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Usage</h1>
-            <span style={{ fontSize: 12, color: "var(--ink-dim)" }}>
-              {formatDayShort(range.sinceDay)} – {formatDayShort(range.untilDay)} ·{" "}
-              {range.timeZone}
-            </span>
-          </div>
+          <span style={LABEL}>Usage</span>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <SegmentedControl
+            <Segmented
               label="Usage window"
               options={WINDOW_OPTIONS.map((option) => ({
                 value: String(option),
-                label: `${option} days`,
+                label: `${option}d`,
               }))}
               value={String(windowDays)}
               onChange={(value) => setWindowDays(Number(value))}
             />
-            <button
-              type="button"
-              onClick={refresh}
-              disabled={loading}
-              title="Rescan transcripts"
-              style={{
-                border: "1px solid var(--rule)",
-                borderRadius: "var(--radius-control)",
-                background: "transparent",
-                color: "var(--ink-dim)",
-                fontSize: 11,
-                padding: "5px 10px",
-                cursor: loading ? "default" : "pointer",
-                opacity: loading ? 0.5 : 1,
-              }}
-            >
-              {loading ? "Scanning…" : "Refresh"}
-            </button>
+            <RefreshButton onClick={refresh} busy={loading} />
           </div>
         </header>
 
@@ -224,96 +230,88 @@ export default function UsagePage() {
           <div
             role="alert"
             style={{
-              border: "1px solid var(--danger)",
-              background: "var(--danger-soft)",
+              border: "1px solid color-mix(in oklch, var(--danger) 45%, transparent)",
               borderRadius: "var(--radius-surface)",
               padding: "8px 12px",
               fontSize: 12,
+              color: "var(--ink-dim)",
             }}
           >
-            Usage could not be scanned: {error}
+            Usage could not be scanned. {error}
           </div>
         )}
 
         {summary === null ? (
-          <p style={{ padding: "64px 0", textAlign: "center", fontSize: 12, color: "var(--ink-dim)" }}>
-            {error === null ? "Scanning transcripts…" : "No usage to show."}
+          <p
+            style={{
+              padding: "72px 0",
+              textAlign: "center",
+              fontSize: 12,
+              color: "var(--muted)",
+            }}
+          >
+            {error === null ? "Scanning transcripts…" : "Nothing to show."}
           </p>
         ) : (
           <>
+            {/* The financial answer, first and biggest. */}
             <section
               style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-                gap: 1,
-                background: "var(--rule-soft)",
-                border: "1px solid var(--rule-soft)",
-                borderRadius: "var(--radius-surface)",
-                overflow: "hidden",
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "flex-end",
+                justifyContent: "space-between",
+                gap: 24,
               }}
             >
-              <Stat
-                label="Total cost"
-                value={`${formatUsd(totals.costUsd)}${totals.pricedRecords > 0 ? "*" : ""}`}
-                detail={
-                  totals.unpricedRecords > 0
-                    ? `${formatCount(totals.unpricedRecords)} calls on unpriced models`
-                    : "across all three harnesses"
-                }
-              />
-              <Stat
-                label="Total tokens"
-                value={formatTokens(totals.tokens)}
-                detail={`${formatCount(sessionCount)} sessions`}
-              />
-              <Stat
-                label="Daily average"
-                value={formatTokens(dailyAverage)}
-                detail={`over ${formatCount(activeDays)} active days`}
-              />
-              <Stat
-                label="Cache hits"
-                value={formatPercent(cachedShare)}
-                detail={`${formatTokens(totals.cachedInputTokens)} of observed input`}
-              />
-              <Stat
-                label="Cache savings"
-                value={formatUsd(totals.cacheSavingsUsd)}
-                detail="vs. full input rates"
-              />
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <span
+                  style={{
+                    ...MONO,
+                    fontSize: 30,
+                    lineHeight: 1.1,
+                    letterSpacing: "-0.01em",
+                  }}
+                >
+                  {formatUsd(totals.costUsd)}
+                  {totals.pricedRecords > 0 && (
+                    <span style={{ color: "var(--muted)", fontSize: 18 }}>*</span>
+                  )}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  {formatDayShort(range.sinceDay)} – {formatDayShort(range.untilDay)} ·{" "}
+                  {formatCount(sessionCount)} sessions
+                </span>
+              </div>
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 26 }}>
+                <Figure label="Tokens" value={formatTokens(totals.tokens)} />
+                <Figure label="Daily avg" value={formatTokens(dailyAverage)} />
+                <Figure label="Cache hits" value={formatPercent(cachedShare)} />
+                <Figure label="Cache saved" value={formatUsd(totals.cacheSavingsUsd)} />
+              </div>
             </section>
 
-            <p style={{ margin: 0, fontSize: 11, color: "var(--muted)" }}>
-              * Estimated where the transcript did not report a cost: those calls are priced from
-              Codara's local rate table, which drifts from vendor list prices. Cora's own sessions
-              report exact costs and are used as-is.
-            </p>
-
-            <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div
                 style={{
                   display: "flex",
                   flexWrap: "wrap",
                   alignItems: "center",
                   justifyContent: "space-between",
-                  gap: 10,
+                  gap: 12,
                 }}
               >
-                <h2 style={{ margin: 0, fontSize: 13, fontWeight: 500 }}>
-                  Daily {metric === "cost" ? "cost" : "tokens"}
-                </h2>
-                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                  <Legend />
-                  <SegmentedControl
-                    label="Chart metric"
-                    options={[
-                      { value: "cost", label: "Cost" },
-                      { value: "tokens", label: "Tokens" },
-                    ]}
-                    value={metric}
-                    onChange={(value) => setMetric(value as UsageMetric)}
-                  />
-                </div>
+                <Legend />
+                <Segmented
+                  label="Chart metric"
+                  options={[
+                    { value: "cost", label: "Cost" },
+                    { value: "tokens", label: "Tokens" },
+                  ]}
+                  value={metric}
+                  onChange={(value) => setMetric(value as UsageMetric)}
+                />
               </div>
               <UsageChart days={days} byDay={byDay} metric={metric} />
             </section>
@@ -324,11 +322,11 @@ export default function UsagePage() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
-                  gap: 10,
+                  gap: 12,
                 }}
               >
-                <h2 style={{ margin: 0, fontSize: 13, fontWeight: 500 }}>Breakdown</h2>
-                <SegmentedControl
+                <span style={LABEL}>Breakdown</span>
+                <Segmented
                   label="Breakdown grouping"
                   options={[
                     { value: "model", label: "Model" },
@@ -342,6 +340,13 @@ export default function UsagePage() {
                 <ModelTable rows={modelRows} />
               ) : (
                 <DayTable rows={dayRows} />
+              )}
+              {totals.pricedRecords > 0 && (
+                <p style={{ margin: 0, fontSize: 11, color: "var(--muted)" }}>
+                  * Estimated where the transcript reported no cost: those calls are priced from
+                  Codara's local rate table, which drifts from vendor list prices. Cora reports
+                  exact costs and is used as-is.
+                </p>
               )}
             </section>
 
@@ -385,7 +390,6 @@ interface SummaryTotals {
   cacheCreationTokens: number;
   outputTokens: number;
   pricedRecords: number;
-  unpricedRecords: number;
 }
 
 function summarizeBuckets(buckets: UsageDayBucket[]): SummaryTotals {
@@ -398,7 +402,6 @@ function summarizeBuckets(buckets: UsageDayBucket[]): SummaryTotals {
     cacheCreationTokens: 0,
     outputTokens: 0,
     pricedRecords: 0,
-    unpricedRecords: 0,
   };
   for (const bucket of buckets) {
     totals.costUsd += bucket.costUsd;
@@ -409,7 +412,6 @@ function summarizeBuckets(buckets: UsageDayBucket[]): SummaryTotals {
     totals.cacheCreationTokens += bucket.totals.cacheCreationTokens;
     totals.outputTokens += bucket.totals.outputTokens;
     if (bucket.costSource === "priced") totals.pricedRecords += bucket.recordCount;
-    if (bucket.costSource === "unpriced") totals.unpricedRecords += bucket.recordCount;
   }
   return totals;
 }
@@ -454,7 +456,12 @@ function buildModelRows(buckets: UsageDayBucket[]): ModelRow[] {
 
 const VIEW_WIDTH = 960;
 const VIEW_HEIGHT = 220;
+const PLOT_HEIGHT = 208;
 const TICK_COUNT = 4;
+const BAR_CAP_RADIUS = 1.5;
+// Above this many columns the axis shows three anchors instead of every day;
+// below it, every column is labelled and weekends can be dimmed.
+const DENSE_AXIS_THRESHOLD = 10;
 
 /**
  * A scale whose maximum is a readable 1/2/5 x 10^n step at or above the peak.
@@ -471,6 +478,28 @@ export function niceScale(peak: number, count: number): { max: number; ticks: nu
   const ticks: number[] = [];
   for (let value = 0; value <= max + step * 1e-6; value += step) ticks.push(value);
   return { max, ticks };
+}
+
+/** A bar with rounded top corners and a square base, so the stack sits flush. */
+function topRoundedBar(x: number, y: number, width: number, height: number): string {
+  const radius = Math.min(BAR_CAP_RADIUS, height, width / 2);
+  if (radius <= 0) return `M${x},${y}h${width}v${height}h${-width}Z`;
+  return [
+    `M${x},${y + radius}`,
+    `Q${x},${y} ${x + radius},${y}`,
+    `H${x + width - radius}`,
+    `Q${x + width},${y} ${x + width},${y + radius}`,
+    `V${y + height}`,
+    `H${x}`,
+    "Z",
+  ].join(" ");
+}
+
+function isWeekend(day: string): boolean {
+  const parsed = Date.parse(`${day}T00:00:00Z`);
+  if (Number.isNaN(parsed)) return false;
+  const weekday = new Date(parsed).getUTCDay();
+  return weekday === 0 || weekday === 6;
 }
 
 function UsageChart({
@@ -504,13 +533,16 @@ function UsageChart({
 
   const peak = columns.reduce((max, column) => Math.max(max, column.total), 0);
   const { max, ticks } = niceScale(peak, TICK_COUNT);
-  const toY = (value: number) => (max === 0 ? VIEW_HEIGHT : VIEW_HEIGHT * (1 - value / max));
+  // The plot stops short of the viewBox top so the tallest bar's cap is not
+  // shaved by the edge.
+  const toY = (value: number) =>
+    max === 0 ? VIEW_HEIGHT : VIEW_HEIGHT - (value / max) * PLOT_HEIGHT;
   const format = metric === "cost" ? formatUsd : formatTokens;
 
   const slot = days.length === 0 ? 0 : VIEW_WIDTH / days.length;
-  // Bars keep a hairline gap at any window length, but never collapse to
-  // nothing on a 90-day range.
-  const barWidth = Math.max(1, slot * 0.72);
+  // A 2px gutter at 90 days is sub-pixel once scaled down, so the gap is a
+  // proportion of the slot with a floor that keeps 7-day bars from touching.
+  const barWidth = Math.max(1, slot - Math.max(2, slot * 0.22));
 
   const handleMove = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -525,24 +557,25 @@ function UsageChart({
 
   const hovered = hoverIndex === null ? undefined : columns[hoverIndex];
   const hoverLeft = days.length === 0 ? 0 : (((hoverIndex ?? 0) + 0.5) / days.length) * 100;
+  const dense = days.length > DENSE_AXIS_THRESHOLD;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ display: "flex", gap: 8 }}>
-        {/* Axis labels live outside the SVG so the non-uniform scaling of the
-            plot never stretches their glyphs. */}
-        <div style={{ position: "relative", width: 52, height: 200, flex: "0 0 52px" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", gap: 10 }}>
+        {/* Axis labels sit outside the SVG: the plot scales non-uniformly to
+            the pane width, which would stretch any text inside it. */}
+        <div style={{ position: "relative", width: 46, height: 208, flex: "0 0 46px" }}>
           {ticks.map((tick) => (
             <span
               key={tick}
               style={{
+                ...MONO,
                 position: "absolute",
                 right: 0,
                 top: `${(toY(tick) / VIEW_HEIGHT) * 100}%`,
                 transform: "translateY(-50%)",
-                fontSize: 10,
+                fontSize: 9,
                 color: "var(--muted)",
-                fontFamily: "var(--font-mono)",
               }}
             >
               {tick === 0 ? "0" : format(tick)}
@@ -554,7 +587,7 @@ function UsageChart({
           ref={plotRef}
           onMouseMove={handleMove}
           onMouseLeave={() => setHoverIndex(null)}
-          style={{ position: "relative", height: 200, flex: 1 }}
+          style={{ position: "relative", height: 208, flex: 1 }}
         >
           <svg
             width="100%"
@@ -576,24 +609,46 @@ function UsageChart({
                 vectorEffect="non-scaling-stroke"
               />
             ))}
+
+            {/* Full-height band behind the hovered day, so the readout is tied
+                to a column rather than floating over the plot. */}
+            {hoverIndex !== null && (
+              <rect
+                x={hoverIndex * slot}
+                y={0}
+                width={slot}
+                height={VIEW_HEIGHT}
+                fill="color-mix(in oklab, var(--ink) 4%, transparent)"
+              />
+            )}
+
             {columns.map((column, index) => {
               const x = index * slot + (slot - barWidth) / 2;
+              // Only the topmost non-empty band gets rounded caps; the ones
+              // below it must stay square to sit flush under their neighbour.
+              const topBand = [...column.bands].reverse().find((band) => band.value > 0);
               return (
-                <g key={column.day} opacity={hoverIndex === null || hoverIndex === index ? 1 : 0.55}>
-                  {column.bands.map((band) =>
-                    // A day with no usage renders nothing rather than a
-                    // zero-height sliver, so gaps read as gaps.
-                    band.value <= 0 ? null : (
-                      <rect
+                <g key={column.day}>
+                  {column.bands.map((band) => {
+                    // An empty day draws nothing rather than a zero-height
+                    // sliver, so gaps read as gaps.
+                    if (band.value <= 0) return null;
+                    const y = toY(band.top);
+                    const height = Math.max(0, toY(band.base) - y);
+                    return (
+                      <path
                         key={band.provider}
-                        x={x}
-                        width={barWidth}
-                        y={toY(band.top)}
-                        height={Math.max(0, toY(band.base) - toY(band.top))}
+                        className="usage-bar"
+                        d={
+                          band === topBand
+                            ? topRoundedBar(x, y, barWidth, height)
+                            : `M${x},${y}h${barWidth}v${height}h${-barWidth}Z`
+                        }
                         fill={PROVIDER_COLOR[band.provider]}
+                        opacity={hoverIndex === null || hoverIndex === index ? 1 : 0.5}
                       />
-                    ),
-                  )}
+                    );
+                  })}
                 </g>
               );
             })}
@@ -601,6 +656,7 @@ function UsageChart({
 
           {hovered !== undefined && hovered.total > 0 && (
             <div
+              className="spark-menu spark-fade-in"
               style={{
                 position: "absolute",
                 top: 0,
@@ -608,22 +664,18 @@ function UsageChart({
                 transform: hoverLeft > 60 ? "translateX(-100%)" : "translateX(0)",
                 pointerEvents: "none",
                 zIndex: 2,
-                minWidth: 150,
-                border: "1px solid var(--rule)",
-                borderRadius: "var(--radius-surface)",
-                background: "var(--panel-2)",
-                boxShadow: "var(--shadow-1)",
-                padding: "6px 8px",
+                minWidth: 158,
+                padding: "7px 9px",
+                display: "grid",
+                gap: 3,
                 fontSize: 11,
               }}
             >
-              <div style={{ color: "var(--ink-dim)", marginBottom: 3 }}>
-                {formatDayShort(hovered.day)}
-              </div>
+              <div style={{ ...LABEL, marginBottom: 1 }}>{formatDayShort(hovered.day)}</div>
               {[...hovered.bands].reverse().map((band) => (
                 <div
                   key={band.provider}
-                  style={{ display: "flex", justifyContent: "space-between", gap: 12 }}
+                  style={{ display: "flex", justifyContent: "space-between", gap: 14 }}
                 >
                   <span
                     style={{
@@ -636,45 +688,58 @@ function UsageChart({
                     <Swatch provider={band.provider} />
                     {PROVIDER_LABEL[band.provider]}
                   </span>
-                  <span style={{ fontFamily: "var(--font-mono)" }}>{format(band.value)}</span>
+                  <span style={MONO}>{format(band.value)}</span>
                 </div>
               ))}
               <div
                 style={{
                   display: "flex",
                   justifyContent: "space-between",
-                  gap: 12,
-                  marginTop: 4,
+                  gap: 14,
+                  marginTop: 3,
                   paddingTop: 4,
                   borderTop: "1px solid var(--rule-soft)",
                 }}
               >
-                <span style={{ color: "var(--ink-dim)" }}>Total</span>
-                <span style={{ fontFamily: "var(--font-mono)" }}>{format(hovered.total)}</span>
+                <span style={{ color: "var(--muted)" }}>Total</span>
+                <span style={MONO}>{format(hovered.total)}</span>
               </div>
             </div>
           )}
         </div>
       </div>
 
+      {/* Under ten days every column is named; past that the axis keeps three
+          anchors so the labels never collide. */}
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
-          paddingLeft: 60,
-          fontSize: 10,
-          color: "var(--muted)",
+          paddingLeft: 56,
+          ...MONO,
+          fontSize: 9,
         }}
       >
-        <span>{days[0] === undefined ? "" : formatDayShort(days[0])}</span>
-        <span>
-          {days[Math.floor(days.length / 2)] === undefined
-            ? ""
-            : formatDayShort(days[Math.floor(days.length / 2)]!)}
-        </span>
-        <span>
-          {days[days.length - 1] === undefined ? "" : formatDayShort(days[days.length - 1]!)}
-        </span>
+        {dense
+          ? [days[0], days[Math.floor(days.length / 2)], days[days.length - 1]].map((day, index) => (
+              <span key={day ?? index} style={{ color: "var(--muted)" }}>
+                {day === undefined ? "" : formatDayShort(day)}
+              </span>
+            ))
+          : days.map((day) => (
+              <span
+                key={day}
+                style={{
+                  flex: 1,
+                  textAlign: "center",
+                  // Weekends read a shade quieter, which is usually the shape
+                  // of the week in this data.
+                  color: isWeekend(day) ? "var(--muted-2)" : "var(--muted)",
+                }}
+              >
+                {formatDayShort(day)}
+              </span>
+            ))}
       </div>
     </div>
   );
@@ -683,22 +748,21 @@ function UsageChart({
 /* ── Tables ──────────────────────────────────────────────────────────────── */
 
 const CELL: React.CSSProperties = {
-  padding: "5px 8px",
+  padding: "6px 8px",
   borderBottom: "1px solid var(--rule-soft)",
   fontSize: 12,
 };
 const NUM_CELL: React.CSSProperties = {
   ...CELL,
+  ...MONO,
   textAlign: "right",
-  fontFamily: "var(--font-mono)",
   color: "var(--ink-dim)",
 };
 const HEAD_CELL: React.CSSProperties = {
-  padding: "5px 8px",
+  ...LABEL,
+  padding: "0 8px 6px",
   borderBottom: "1px solid var(--rule)",
-  fontSize: 11,
   fontWeight: 400,
-  color: "var(--muted)",
   textAlign: "left",
 };
 
@@ -718,11 +782,16 @@ function ModelTable({ rows }: { rows: ModelRow[] }) {
       </thead>
       <tbody>
         {rows.map((row) => (
-          <tr key={`${row.provider}:${row.model}`}>
+          <tr key={`${row.provider}:${row.model}`} className="usage-row">
             <td style={CELL}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-                <Swatch provider={row.provider} />
-                <span style={{ fontFamily: "var(--font-mono)" }}>{row.model}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <span
+                  aria-hidden
+                  style={{ display: "flex", color: PROVIDER_COLOR[row.provider] }}
+                >
+                  <ProviderMark provider={row.provider} size={12} />
+                </span>
+                <span style={MONO}>{row.model}</span>
                 {row.unpriced && <UnpricedBadge />}
               </span>
             </td>
@@ -756,8 +825,8 @@ function DayTable({ rows }: { rows: DayTotals[] }) {
       </thead>
       <tbody>
         {rows.map((row) => (
-          <tr key={row.day}>
-            <td style={CELL}>{formatDayShort(row.day)}</td>
+          <tr key={row.day} className="usage-row">
+            <td style={{ ...CELL, ...MONO }}>{formatDayShort(row.day)}</td>
             {PROVIDER_ORDER.map((provider) => (
               <td key={provider} style={NUM_CELL}>
                 {formatUsd(row.byProvider.get(provider)?.costUsd ?? 0)}
@@ -774,7 +843,7 @@ function DayTable({ rows }: { rows: DayTotals[] }) {
 
 function EmptyRow() {
   return (
-    <p style={{ padding: "24px 0", textAlign: "center", fontSize: 12, color: "var(--muted)" }}>
+    <p style={{ padding: "28px 0", textAlign: "center", fontSize: 12, color: "var(--muted)" }}>
       No usage in this window.
     </p>
   );
@@ -782,31 +851,46 @@ function EmptyRow() {
 
 /* ── Sources ─────────────────────────────────────────────────────────────── */
 
+const SOURCE_DOT: Record<string, string> = {
+  ok: "var(--ok)",
+  missing: "var(--muted-2)",
+  error: "var(--danger)",
+};
+
 function SourcesFooter({ summary }: { summary: UsageSummary }) {
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <h2 style={{ margin: 0, fontSize: 13, fontWeight: 500 }}>Sources</h2>
+    <section style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      <span style={LABEL}>Sources</span>
       {summary.sources.map((source) => (
         <div
           key={source.provider}
           style={{
             display: "flex",
             flexWrap: "wrap",
-            alignItems: "baseline",
+            alignItems: "center",
             gap: 8,
-            fontSize: 11,
-            color: "var(--ink-dim)",
+            ...MONO,
+            fontSize: 10,
+            color: "var(--muted)",
           }}
         >
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, minWidth: 110 }}>
-            <Swatch provider={source.provider} />
+          <span
+            aria-hidden
+            title={source.status}
+            style={{
+              width: 5,
+              height: 5,
+              borderRadius: "50%",
+              flex: "0 0 5px",
+              background: SOURCE_DOT[source.status] ?? "var(--muted-2)",
+            }}
+          />
+          <span style={{ color: "var(--ink-dim)", minWidth: 78 }}>
             {PROVIDER_LABEL[source.provider]}
           </span>
-          <span style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
-            {source.dir || "—"}
-          </span>
+          <span>{source.dir || "—"}</span>
           {source.status === "ok" ? (
-            <span style={{ color: "var(--muted)" }}>
+            <span>
               {formatCount(source.scannedFiles)} files · {formatCount(source.distinctSessions)}{" "}
               sessions
             </span>
@@ -817,9 +901,9 @@ function SourcesFooter({ summary }: { summary: UsageSummary }) {
           )}
         </div>
       ))}
-      <span style={{ fontSize: 11, color: "var(--muted)" }}>
-        Scanned in {(summary.scanDurationMs / 1000).toFixed(1)}s. Managed account directories link
-        their transcripts into the personal home, so each session is counted once.
+      <span style={{ ...MONO, fontSize: 10, color: "var(--muted-2)" }}>
+        Scanned in {(summary.scanDurationMs / 1000).toFixed(1)}s · managed accounts link their
+        transcripts into the personal home, so each session is counted once
       </span>
     </section>
   );
@@ -827,25 +911,16 @@ function SourcesFooter({ summary }: { summary: UsageSummary }) {
 
 /* ── Small pieces ────────────────────────────────────────────────────────── */
 
-function Stat({ label, value, detail }: { label: string; value: string; detail: string }) {
+function Figure({ label, value }: { label: string; value: string }) {
   return (
-    <div
-      style={{
-        background: "var(--panel)",
-        padding: "10px 12px",
-        display: "flex",
-        flexDirection: "column",
-        gap: 2,
-      }}
-    >
-      <span style={{ fontSize: 11, color: "var(--muted)" }}>{label}</span>
-      <span style={{ fontSize: 18, fontFamily: "var(--font-mono)" }}>{value}</span>
-      <span style={{ fontSize: 11, color: "var(--muted)" }}>{detail}</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <span style={LABEL}>{label}</span>
+      <span style={{ ...MONO, fontSize: 14, color: "var(--ink-dim)" }}>{value}</span>
     </div>
   );
 }
 
-function SegmentedControl({
+function Segmented({
   label,
   options,
   value,
@@ -862,9 +937,11 @@ function SegmentedControl({
       aria-label={label}
       style={{
         display: "inline-flex",
+        alignItems: "center",
+        gap: 2,
+        padding: 2,
+        borderRadius: 99,
         border: "1px solid var(--rule)",
-        borderRadius: "var(--radius-control)",
-        overflow: "hidden",
       }}
     >
       {options.map((option) => {
@@ -876,12 +953,21 @@ function SegmentedControl({
             aria-pressed={selected}
             onClick={() => onChange(option.value)}
             style={{
+              appearance: "none",
               border: "none",
-              background: selected ? "var(--panel-3)" : "transparent",
-              color: selected ? "var(--ink)" : "var(--ink-dim)",
-              fontSize: 11,
-              padding: "5px 10px",
-              cursor: "pointer",
+              borderRadius: 99,
+              padding: "3px 10px",
+              // Selected reads as a filled ink plate rather than a colour: the
+              // accent means "interactive" elsewhere, and a toggle that is
+              // merely current should not shout louder than the chart.
+              background: selected ? "color-mix(in oklab, var(--ink) 9%, transparent)" : "transparent",
+              color: selected ? "var(--ink)" : "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+              cursor: "default",
+              transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
             }}
           >
             {option.label}
@@ -892,16 +978,61 @@ function SegmentedControl({
   );
 }
 
+function RefreshButton({ onClick, busy }: { onClick: () => void; busy: boolean }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      title={busy ? "Scanning transcripts…" : "Rescan transcripts"}
+      aria-label="Rescan transcripts"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 24,
+        height: 24,
+        padding: 0,
+        border: "none",
+        borderRadius: 99,
+        background: hover && !busy ? "var(--hover)" : "transparent",
+        color: busy ? "var(--muted-2)" : hover ? "var(--ink)" : "var(--muted)",
+        cursor: "default",
+        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <svg
+        width="13"
+        height="13"
+        viewBox="0 0 14 14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <path d="M12 7a5 5 0 1 1-1.6-3.66" />
+        <path d="M12.2 1.9v2.6H9.6" />
+      </svg>
+    </button>
+  );
+}
+
 function Swatch({ provider }: { provider: UsageProviderKind }) {
   return (
     <span
       aria-hidden
       style={{
         display: "inline-block",
-        width: 8,
-        height: 8,
+        width: 7,
+        height: 7,
         borderRadius: 2,
-        flex: "0 0 8px",
+        flex: "0 0 7px",
         background: PROVIDER_COLOR[provider],
       }}
     />
@@ -910,7 +1041,7 @@ function Swatch({ provider }: { provider: UsageProviderKind }) {
 
 function Legend() {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
       {[...PROVIDER_ORDER].reverse().map((provider) => (
         <span
           key={provider}
@@ -922,7 +1053,9 @@ function Legend() {
             color: "var(--ink-dim)",
           }}
         >
-          <Swatch provider={provider} />
+          <span aria-hidden style={{ display: "flex", color: PROVIDER_COLOR[provider] }}>
+            <ProviderMark provider={provider} size={11} />
+          </span>
           {PROVIDER_LABEL[provider]}
         </span>
       ))}
@@ -935,11 +1068,12 @@ function UnpricedBadge() {
     <span
       title="This model is not in Codara's rate table, so its calls contribute no cost."
       style={{
-        fontSize: 10,
+        ...LABEL,
+        fontSize: 9,
         padding: "1px 5px",
-        borderRadius: "var(--radius-control)",
-        border: "1px solid var(--rule)",
-        color: "var(--muted)",
+        borderRadius: 99,
+        border: "1px solid color-mix(in oklch, var(--warn) 40%, transparent)",
+        color: "var(--warn)",
       }}
     >
       unpriced
