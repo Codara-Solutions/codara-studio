@@ -262,6 +262,15 @@ export interface AutomationsTab extends BaseTab {
   kind: "automations";
 }
 
+// Usage tabs host the token/cost analytics scanned from the provider CLIs'
+// on-disk transcripts. Like AutomationsTab there is no per-tab payload: the
+// page owns its own window/metric state and fetches through
+// window.spark.usageAnalytics. Machine-wide rather than workspace-scoped —
+// the transcripts it reads cover every project on this machine.
+export interface UsageTab extends BaseTab {
+  kind: "usage";
+}
+
 // An untitled whiteboard draft opened from the "+" picker. The board content
 // itself is runtime-only (a module-level draft map in WhiteboardFilePreview
 // keyed by this tab's id), so these tabs are never restored from a persisted
@@ -278,6 +287,7 @@ export type Tab =
   | PreviewTab
   | RunsTab
   | AutomationsTab
+  | UsageTab
   | WhiteboardTab
   | DiffTab;
 

@@ -21,6 +21,7 @@
 // provider produced the usage block.
 
 import type { WorkerRuntime } from "@shared/types";
+import type { UsagePriceRate, UsageProviderKind } from "@shared/usage-analytics";
 
 export interface ModelPrice {
   /** USD per 1M input tokens (the prompt). */
@@ -34,6 +35,12 @@ export interface ModelPrice {
    * fall back to billing cached reads at the normal `input` rate.
    */
   cacheRead?: number;
+  /**
+   * USD per 1M cache-WRITE input tokens (Anthropic's 5-minute prompt cache is
+   * billed at 1.25x the input rate). Only Anthropic bills writes separately;
+   * when omitted, cache-creation tokens are billed at the plain `input` rate.
+   */
+  cacheWrite?: number;
 }
 
 // Keyed on `provider/model` slugs (the vendor-prefixed form every runtime in
@@ -43,17 +50,20 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   // Anthropic — Claude 4.x family.
   // Opus 5 is the current standard-tier Claude worker. Priced at the Opus list
   // rate; refresh from the vendor if that changes.
-  "anthropic/claude-opus-5": { input: 15, output: 75, cacheRead: 1.5 },
+  // cacheWrite is the 5-minute prompt-cache write rate: 1.25x input across the
+  // Anthropic family (cross-checked against the openrouter listings).
+  "anthropic/claude-opus-5": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
   // Retained so historical runs on the older id still price instead of
   // silently costing zero.
-  "anthropic/claude-opus-4-8": { input: 15, output: 75, cacheRead: 1.5 },
-  "anthropic/claude-opus-4-7": { input: 15, output: 75, cacheRead: 1.5 },
-  "anthropic/claude-opus-4": { input: 15, output: 75, cacheRead: 1.5 },
-  "anthropic/claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3 },
-  "anthropic/claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3 },
-  "anthropic/claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3 },
-  "anthropic/claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3 },
-  "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1 },
+  "anthropic/claude-opus-4-8": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "anthropic/claude-opus-4-7": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "anthropic/claude-opus-4": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "anthropic/claude-fable-5": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "anthropic/claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  "anthropic/claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  "anthropic/claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  "anthropic/claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
 
   // OpenAI — GPT-5.6 / legacy GPT-5 / GPT-4o roster. GPT-5.6 cached input is
   // billed at 10% of the uncached input price.
@@ -229,6 +239,90 @@ export function priceKeyForWorker(
   const defaultKey = `${provider}/${defaultBase}`;
   if (MODEL_PRICES[defaultKey]) return defaultKey;
   return undefined;
+}
+
+// Models the Usage scan must never price, however the table is keyed. Bare
+// family names are genuinely ambiguous across generations (which "opus"?), and
+// `<synthetic>` marks locally generated CLI messages that were never billed —
+// reporting those as unpriced beats guessing a generation and inventing spend.
+const UNPRICEABLE_USAGE_MODELS = new Set(["<synthetic>", "synthetic", "opus", "sonnet", "haiku", "fable"]);
+
+// Vendor prefixes inferred from the model id itself. The Usage scan reads raw
+// transcript model names, which are bare (`claude-opus-5`, `gpt-5.6-sol`) while
+// MODEL_PRICES is keyed on `vendor/model` — and Cora sessions mix vendors in one
+// provider, so the provider kind alone cannot decide this.
+const USAGE_MODEL_VENDORS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^claude/, "anthropic"],
+  [/^(gpt|o[0-9]|codex)/, "openai"],
+  [/^gemini/, "google"],
+  [/^grok/, "x-ai"],
+  [/^glm/, "z-ai"],
+];
+
+// Vendor used when the model id gives nothing away — the harness the transcript
+// came from is the next best signal (Cora runs mostly on the Codex backend).
+const USAGE_PROVIDER_VENDORS: Record<UsageProviderKind, string> = {
+  claude: "anthropic",
+  codex: "openai",
+  cora: "openai",
+};
+
+/**
+ * Resolve a transcript model name to a per-1M rate for the Usage scan.
+ *
+ * Transcript ids carry decorations the price table does not: a release date
+ * (`claude-haiku-4-5-20251001`), a Codara effort marker (`@high`), a route
+ * variant (`:nitro`), or a context-window tag (`claude-opus-5[1m]`). Each is
+ * stripped in turn and the exact key tried first at every step, so a listed
+ * variant still wins over its base. Returns null for an unknown or deliberately
+ * unpriceable model; the caller reports that cell as "unpriced" rather than $0.
+ */
+export function lookupUsagePrice(
+  model: string,
+  provider: UsageProviderKind,
+): UsagePriceRate | null {
+  const trimmed = model.trim().toLowerCase();
+  if (trimmed.length === 0) return null;
+
+  // Strip the context-window tag before the unpriceable check so `opus[1m]` is
+  // recognized as the same ambiguous family name that `opus` is.
+  const untagged = trimmed.replace(/\[[^\]]*\]$/, "");
+  const slash = untagged.lastIndexOf("/");
+  const bare = slash === -1 ? untagged : untagged.slice(slash + 1);
+  if (UNPRICEABLE_USAGE_MODELS.has(bare)) return null;
+
+  const vendor =
+    slash === -1
+      ? (USAGE_MODEL_VENDORS.find(([pattern]) => pattern.test(bare))?.[1] ??
+        USAGE_PROVIDER_VENDORS[provider])
+      : untagged.slice(0, slash);
+
+  for (const candidate of usageModelKeyCandidates(bare)) {
+    const price = MODEL_PRICES[`${vendor}/${candidate}`];
+    if (price) {
+      return {
+        input: price.input,
+        output: price.output,
+        // Missing rates fall back to plain input rather than to free: a model
+        // that does not publish a cache rate still bills those tokens.
+        cacheRead: price.cacheRead ?? price.input,
+        cacheWrite: price.cacheWrite ?? price.input,
+      };
+    }
+  }
+  return null;
+}
+
+// Progressively less decorated spellings of one bare model id, most specific
+// first. Duplicates are harmless (the lookup just misses twice).
+function usageModelKeyCandidates(bare: string): string[] {
+  const candidates = [bare];
+  const withoutEffort = bare.replace(/@.+$/, "");
+  candidates.push(withoutEffort);
+  candidates.push(withoutEffort.replace(/:.+$/, ""));
+  // Release-dated ids (`-20251001`) price at their base model's rate.
+  candidates.push(withoutEffort.replace(/:.+$/, "").replace(/-\d{6,8}$/, ""));
+  return candidates;
 }
 
 // Estimate a single worker attempt's USD cost from the price table.

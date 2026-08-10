@@ -36,6 +36,7 @@ import type {
   TerminalLeafWorker,
   TerminalSplit,
   TerminalTab,
+  UsageTab,
   WhiteboardTab,
 } from "./types";
 import { isRunOwnedTab } from "./types";
@@ -312,6 +313,10 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
             // Runs), not durable layout — they re-open on demand via the "+"
             // picker rather than restoring from a persisted blob.
             tab.kind !== "automations" &&
+            // Usage is likewise derived, and restoring it would kick off a
+            // multi-second cold transcript scan during boot for a tab the
+            // user may not be coming back to. It reopens on demand.
+            tab.kind !== "usage" &&
             // Stale shells from the short-lived Cora Hub tab: the kind no
             // longer exists (the ✦ Cora button opens a draft chat now), but
             // blobs persisted by builds that had it may still carry one — drop
@@ -1059,6 +1064,10 @@ export interface UseTabsApi {
   // append a fresh one and focus it. Singleton-ish like the Runs tab — there
   // is only ever one Automations surface per workspace.
   openAutomationsTab: () => TabId;
+  // Focus the single Usage tab if one is open, else append a fresh one and
+  // focus it. Singleton like Automations — the analytics it shows are
+  // machine-wide, so a second copy would show the same thing twice.
+  openUsageTab: () => TabId;
   // Append a fresh untitled whiteboard tab and focus it (one draft per call,
   // not a singleton). See WhiteboardTab in types.ts for the draft contract.
   newWhiteboardTab: () => TabId;
@@ -2810,6 +2819,25 @@ export function useTabs(
     return resultId;
   }, []);
 
+  // Open the single Usage tab. Same singleton shape as openAutomationsTab,
+  // including the existence check inside the updater so a double click never
+  // stacks two.
+  const openUsageTab = useCallback((): TabId => {
+    const existingId = tabsRef.current.find((t): t is UsageTab => t.kind === "usage")?.id;
+    const resultId = existingId ?? makeId("usage");
+    setTabs((curr) => {
+      const existing = curr.find((t): t is UsageTab => t.kind === "usage");
+      if (existing) {
+        setActiveId(existing.id);
+        return curr;
+      }
+      const tab: UsageTab = { id: resultId, kind: "usage", title: "Usage" };
+      setActiveId(resultId);
+      return [...curr, tab];
+    });
+    return resultId;
+  }, []);
+
   // Append a fresh untitled whiteboard tab and focus it. NOT a singleton:
   // each "+ New whiteboard" starts its own draft board. The board content is
   // owned by the WhiteboardFilePreview draft map (keyed by this tab id); the
@@ -3400,6 +3428,7 @@ export function useTabs(
       openRunsTab,
       hideRunsTabs,
       openAutomationsTab,
+      openUsageTab,
       newWhiteboardTab,
       openDiffTab,
       closeRunsTabFor,

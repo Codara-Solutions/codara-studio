@@ -15,6 +15,7 @@ export type CommandId =
   | "runSwitcher.open"
   | "settings.open"
   | "automations.open"
+  | "usage.open"
   | "board.open"
   | "session.openInspector"
   | "composer.focus"
@@ -102,6 +103,14 @@ export const COMMANDS: Command[] = [
     // browser binding collides with it). The same view is reachable from the
     // tray menu and a matching global accelerator in main.
     defaultChords: [mod("a", { shift: true })],
+  },
+  {
+    id: "usage.open",
+    label: "Open Usage",
+    group: "Navigation",
+    // Mod+Shift+U — free chord, and the only U binding in the table. Opens the
+    // token/cost analytics scanned from the provider CLIs' transcripts.
+    defaultChords: [mod("u", { shift: true })],
   },
   {
     id: "board.open",

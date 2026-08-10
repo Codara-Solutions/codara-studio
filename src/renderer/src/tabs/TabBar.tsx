@@ -1060,6 +1060,34 @@ function KindIcon({ tab }: { tab: Tab }) {
       </span>
     );
   }
+  if (tab.kind === "usage") {
+    return (
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 14,
+          flex: "0 0 14px",
+          color: "var(--accent)",
+        }}
+      >
+        {/* Three ascending bars — the daily-usage chart in miniature. */}
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 14 14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+        >
+          <path d="M3 11V8M7 11V5.5M11 11V3" />
+        </svg>
+      </span>
+    );
+  }
   if (tab.kind === "whiteboard") {
     return (
       <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
@@ -1108,6 +1136,7 @@ function GlyphIcon({ glyph, color }: { glyph: string; color: string }) {
 function labelFor(t: Tab): string {
   if (t.kind === "terminal") return t.title || "terminals";
   if (t.kind === "automations") return t.title || "Automations";
+  if (t.kind === "usage") return t.title || "Usage";
   if (t.kind === "diff") return `${t.title} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   return t.title;
 }
@@ -1123,6 +1152,7 @@ function titleFor(t: Tab): string {
     return t.title;
   }
   if (t.kind === "automations") return t.title;
+  if (t.kind === "usage") return t.title;
   if (t.kind === "diff") return `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   return t.title;
 }

@@ -149,6 +149,7 @@ const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const EditorStack = lazy(() => import("./tabs/EditorStack"));
 const RunsStack = lazy(() => import("./tabs/RunsStack"));
 const AutomationsStack = lazy(() => import("./tabs/AutomationsStack"));
+const UsageStack = lazy(() => import("./tabs/UsageStack"));
 const WhiteboardStack = lazy(() => import("./tabs/WhiteboardStack"));
 
 // React StrictMode intentionally remounts effects in development. The ready
@@ -4364,6 +4365,7 @@ export default function App() {
       },
       "session.openInspector": () => setInspectorOpen((open) => !open),
       "automations.open": () => tabs.openAutomationsTab(),
+      "usage.open": () => tabs.openUsageTab(),
       // The Cora Board is a chat sub-view now (no top-level tab). The chord
       // focuses the active chat's Board view; the chatView state lives inside
       // the Workspace component, so this is broadcast like the other
@@ -6736,6 +6738,11 @@ const Workspace = React.memo(function Workspace({
               terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               onOpenRunChat={handleOpenBoardCardRunInChat}
             />
+          </Suspense>
+        )}
+        {visibleTabs.some((tab) => tab.kind === "usage") && (
+          <Suspense fallback={null}>
+            <UsageStack tabs={visibleTabs} activeId={effectiveActiveId} />
           </Suspense>
         )}
         {visibleTabs.some((tab) => tab.kind === "whiteboard") && (

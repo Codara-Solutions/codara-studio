@@ -31,6 +31,7 @@ import type {
   CoraCliMutationResult,
 } from "@shared/cora-cli";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
@@ -365,6 +366,13 @@ const api = {
       ipcRenderer.on("pi-runtime:install-event", listener);
       return () => ipcRenderer.off("pi-runtime:install-event", listener);
     },
+  },
+  usageAnalytics: {
+    // Scans the provider CLIs' on-disk transcripts. Cold scans take seconds on
+    // a large history, so callers show a scanning state rather than assuming
+    // this resolves promptly.
+    summary: (input: UsageSummaryInput): Promise<UsageSummary> =>
+      ipcRenderer.invoke("usage-analytics:summary", input),
   },
   agents: {
     runtimes: (force = false): Promise<AgentRuntimeDiagnostic[]> =>

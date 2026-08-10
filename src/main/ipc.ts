@@ -20,6 +20,7 @@ import {
   setStatusSender,
 } from "./remote/connections";
 import { isRemotePath } from "@shared/remote";
+import type { UsageSummaryInput } from "@shared/usage-analytics";
 import { detectRemoteAgents, type RemoteAgentAvailability } from "./remote/remote-agents";
 import type {
   RemoteAuthPromptAnswer,
@@ -1138,6 +1139,13 @@ export function registerIpc(): void {
   handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
     const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
     return inspectPiSubscriptionUsage(input?.force === true);
+  });
+  // Lazily imported like the pi-subscription handlers: the scanner pulls in the
+  // transcript readers and the persisted memo, none of which is worth loading
+  // for a session that never opens the Usage tab.
+  handle("usage-analytics:summary", async (_event, input: UsageSummaryInput) => {
+    const { readUsageSummary } = await import("./usage-analytics");
+    return readUsageSummary(input);
   });
   handle("pi-models:catalog", async (_event, input?: { force?: unknown }) => {
     const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
