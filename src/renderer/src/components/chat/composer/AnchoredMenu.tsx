@@ -59,6 +59,13 @@ interface Props {
    * flips up instead of overhanging the Source Control section below it.
    * Only the flip DECISION consults the boundary; the flipped-up position and
    * `left` are still viewport-clamped as before.
+   *
+   * The boundary is also a VISIBILITY contract for the anchor: if the anchor's
+   * rect has left through the boundary's bottom edge — the row was dragged
+   * behind the next section by the divider, so it occupies layout space but
+   * paints nowhere — the menu closes instead of positioning. Flipping cannot
+   * save that case: the flipped menu hangs above `rect.top`, and `rect.top`
+   * itself is already past the boundary's bottom edge.
    */
   boundaryRef?: React.RefObject<HTMLElement | null>;
   /** Which trigger edge the menu lines up with. "end" right-aligns. */
@@ -122,6 +129,25 @@ export default function AnchoredMenu({
     const anchor = anchorRef.current;
     if (!anchor) return;
     const rect = anchor.getBoundingClientRect();
+    // A boundary anchor can leave the boundary's box entirely without a scroll
+    // or a window resize: dragging the rail's section divider shrinks the
+    // workspaces container while its rows stay put, and `overflow` clips a
+    // pushed-out row's PAINT, not its layout rect — the rect still measures
+    // below the boundary's bottom edge. No placement keeps a menu inside the
+    // boundary while its anchor is not (a flipped menu hangs above `rect.top`,
+    // which is itself already past the edge), so close instead — the same
+    // rationale as the scroll rule in the listener effect: a fixed panel
+    // anchored to an invisible trigger is worse than no panel. A partially
+    // clipped row still counts as visible; the flip below keeps its menu
+    // inside. Only the BOTTOM edge is tested: it is the only edge a divider
+    // drag moves, rows leaving past the top are a scroll and the scroll rule
+    // closes those, and the rail's header "+" menu legitimately anchors ABOVE
+    // the boundary it passes.
+    const boundaryRect = boundaryRef?.current?.getBoundingClientRect() ?? null;
+    if (boundaryRect && rect.top >= boundaryRect.bottom) {
+      onCloseRef.current();
+      return;
+    }
     if (matchAnchorWidth) {
       setPosition({
         left: rect.left + inset,
@@ -151,13 +177,12 @@ export default function AnchoredMenu({
       // Flip above the trigger when the panel would spill past the viewport
       // bottom — the last account card's menu, with Settings scrolled to the
       // end, is the case this exists for. A boundaryRef tightens the limit to
-      // its element's bottom edge too (see the prop comment).
-      const boundary = boundaryRef?.current;
-      const bottomLimit = boundary
-        ? Math.min(
-            window.innerHeight - EDGE_PAD,
-            boundary.getBoundingClientRect().bottom,
-          )
+      // its element's bottom edge too (see the prop comment). The flipped menu
+      // stays inside the boundary because it hangs above `rect.top`, and the
+      // occlusion check above guarantees `rect.top` is above the boundary's
+      // bottom whenever this code runs.
+      const bottomLimit = boundaryRect
+        ? Math.min(window.innerHeight - EDGE_PAD, boundaryRect.bottom)
         : window.innerHeight - EDGE_PAD;
       if (height > 0 && top + height > bottomLimit) {
         setPosition({ left, bottom: bottomAnchored });
