@@ -5,7 +5,7 @@ import type { GitHubWorkQueueItem } from "@shared/github";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor } from "./chat/timeline";
-import { MinusIcon, PlusIcon } from "./icons";
+import { PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
@@ -204,11 +204,8 @@ function WorkspaceRail(props: RailProps) {
   const groupDragIdRef = useRef<string | null>(null);
   const [railDropIndex, setRailDropIndex] = useState<number | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
-  const deleteActiveWorkspace = () => {
-    if (!props.activeId) return;
-    props.onCloseEditor();
-    props.onDelete(props.activeId);
-  };
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const createBtnRef = useRef<HTMLButtonElement>(null);
 
   // Section-divider drag: snapshot the split ratio and the body height at
   // drag start, then translate a pointer delta into a ratio delta. The hook's
@@ -496,29 +493,46 @@ function WorkspaceRail(props: RailProps) {
               actions={
                 <>
                   <RailIconButton
-                    title="New workspace folder"
-                    onClick={() => setEditingGroupId(props.onCreateWorkspaceGroup())}
+                    ref={createBtnRef}
+                    title="New…"
+                    onClick={() => setCreateMenuOpen((o) => !o)}
                   >
-                    <FolderPlusGlyph />
-                  </RailIconButton>
-                  <RailIconButton title="New workspace" onClick={onCreate}>
                     <PlusIcon size={11} />
                   </RailIconButton>
-                  <RailIconButton title="New remote workspace (SSH)" onClick={props.onCreateRemote}>
-                    <RemoteGlyph />
-                  </RailIconButton>
-                  <RailIconButton
-                    title={
-                      props.activeId
-                        ? "Delete selected workspace"
-                        : "Select a workspace to delete"
-                    }
-                    onClick={deleteActiveWorkspace}
-                    disabled={!props.activeId}
-                    danger
+                  <AnchoredMenu
+                    anchorRef={createBtnRef}
+                    open={createMenuOpen}
+                    onClose={() => setCreateMenuOpen(false)}
+                    className="spark-menu"
+                    role="menu"
+                    ariaLabel="Create"
+                    placement="below"
+                    align="end"
                   >
-                    <MinusIcon size={11} />
-                  </RailIconButton>
+                    <div style={{ minWidth: 200, padding: 4, display: "grid", gap: 2 }}>
+                      <RowMenuItem
+                        label="New workspace…"
+                        onClick={() => {
+                          setCreateMenuOpen(false);
+                          onCreate();
+                        }}
+                      />
+                      <RowMenuItem
+                        label="New folder"
+                        onClick={() => {
+                          setCreateMenuOpen(false);
+                          setEditingGroupId(props.onCreateWorkspaceGroup());
+                        }}
+                      />
+                      <RowMenuItem
+                        label="New remote workspace (SSH)…"
+                        onClick={() => {
+                          setCreateMenuOpen(false);
+                          props.onCreateRemote();
+                        }}
+                      />
+                    </div>
+                  </AnchoredMenu>
                 </>
               }
             />
@@ -1248,62 +1262,64 @@ function EmptyPanelDropTarget({ active, accent }: { active: boolean; accent: str
   );
 }
 
-function RailIconButton({
-  title,
-  onClick,
-  disabled = false,
-  danger = false,
-  children,
-}: {
+interface RailIconButtonProps {
   title: string;
   onClick: () => void;
   disabled?: boolean;
   danger?: boolean;
   children: React.ReactNode;
-}) {
-  const [hover, setHover] = useState(false);
-  const [focus, setFocus] = useState(false);
-  const active = hover && !disabled;
-  return (
-    <button
-      type="button"
-      className="spark-icon-btn"
-      onClick={() => {
-        if (!disabled) onClick();
-      }}
-      disabled={disabled}
-      title={title}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      onFocus={() => setFocus(true)}
-      onBlur={() => setFocus(false)}
-      style={{
-        // Routed through .spark-icon-btn for shared hover/press/disabled;
-        // sized to 20px and overridden inline for the danger tint + focus
-        // ring. No unconditional border — the band reads cleaner.
-        ["--spark-icon-btn-size" as string]: "20px",
-        borderRadius: "var(--radius-control, 7px)",
-        background: active
-          ? danger
-            ? "var(--danger-soft)"
-            : "var(--hover-strong, var(--hover))"
-          : "transparent",
-        color: disabled
-          ? "var(--muted-2)"
-          : active && danger
-            ? "var(--danger)"
-            : active
-              ? "var(--ink)"
-              : "var(--ink-dim)",
-        boxShadow: focus
-          ? "var(--focus-ring, 0 0 0 2px var(--accent-edge))"
-          : "none",
-      }}
-    >
-      {children}
-    </button>
-  );
 }
+
+const RailIconButton = React.forwardRef<HTMLButtonElement, RailIconButtonProps>(
+  function RailIconButton(
+    { title, onClick, disabled = false, danger = false, children },
+    ref,
+  ) {
+    const [hover, setHover] = useState(false);
+    const [focus, setFocus] = useState(false);
+    const active = hover && !disabled;
+    return (
+      <button
+        ref={ref}
+        type="button"
+        className="spark-icon-btn"
+        onClick={() => {
+          if (!disabled) onClick();
+        }}
+        disabled={disabled}
+        title={title}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        onFocus={() => setFocus(true)}
+        onBlur={() => setFocus(false)}
+        style={{
+          // Routed through .spark-icon-btn for shared hover/press/disabled;
+          // sized to 20px and overridden inline for the danger tint + focus
+          // ring. No unconditional border — the band reads cleaner.
+          ["--spark-icon-btn-size" as string]: "20px",
+          borderRadius: "var(--radius-control, 7px)",
+          background: active
+            ? danger
+              ? "var(--danger-soft)"
+              : "var(--hover-strong, var(--hover))"
+            : "transparent",
+          color: disabled
+            ? "var(--muted-2)"
+            : active && danger
+              ? "var(--danger)"
+              : active
+                ? "var(--ink)"
+                : "var(--ink-dim)",
+          boxShadow: focus
+            ? "var(--focus-ring, 0 0 0 2px var(--accent-edge))"
+            : "none",
+        }}
+      >
+        {children}
+      </button>
+    );
+  },
+);
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
@@ -2047,28 +2063,6 @@ function FolderGlyph({ color, open }: { color: string; open: boolean }) {
     >
       <path d="M2.25 5.25h5l1.4 1.6h7.1v6.4a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5v-8Z" />
       <path d="M2.25 5.25V4.6a1.35 1.35 0 0 1 1.35-1.35h3.05l1.3 1.5h6.3a1.5 1.5 0 0 1 1.5 1.5v.6" opacity=".72" />
-    </svg>
-  );
-}
-
-function FolderPlusGlyph() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M2.25 5.4h5l1.4 1.55h7.1v6.15a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5V5.4Z" />
-      <path d="M2.25 5.4v-.65A1.35 1.35 0 0 1 3.6 3.4h3.05l1.3 1.5h3.1" />
-      <path d="M12.8 2.8v4.3M10.65 4.95h4.3" />
-    </svg>
-  );
-}
-
-// Small server/remote glyph for the "new remote workspace" rail action.
-function RemoteGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="4" width="18" height="7" rx="1.5" />
-      <rect x="3" y="14" width="18" height="6" rx="1.5" />
-      <line x1="7" y1="7.5" x2="7" y2="7.5" />
-      <line x1="7" y1="17" x2="7" y2="17" />
     </svg>
   );
 }
