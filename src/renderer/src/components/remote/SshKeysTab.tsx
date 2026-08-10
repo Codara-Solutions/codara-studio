@@ -177,6 +177,13 @@ function WarningChip({ label }: { label: string }) {
   );
 }
 
+// POSIX-safe single-quoting: the public key's comment field is free text (and
+// may come from an imported third-party key), so a bare '${…}' would let a
+// single quote break out of the echo command.
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 function SetupHelper({ keyInfo }: { keyInfo: SshKeyInfo }) {
   return (
     <div
@@ -205,7 +212,7 @@ function SetupHelper({ keyInfo }: { keyInfo: SshKeyInfo }) {
           authorized keys):
         </li>
       </ul>
-      <CopyableCode text={`echo '${keyInfo.publicKey}' >> ~/.ssh/authorized_keys`} />
+      <CopyableCode text={`echo ${shQuote(keyInfo.publicKey ?? "")} >> ~/.ssh/authorized_keys`} />
       <div style={{ color: "var(--muted-2)", fontSize: 11 }}>
         Never share the private half ({keyInfo.name}) — it stays on this machine.
       </div>
