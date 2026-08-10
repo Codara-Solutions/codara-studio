@@ -51,6 +51,16 @@ interface Props {
    * on its own when the viewport bottom would cut it off.
    */
   placement?: "above" | "below";
+  /**
+   * Optional containment edge for the "below" flip test. When set, the menu
+   * also flips above its trigger if hanging down would spill past this
+   * element's bottom — not just the viewport's. The workspace rail passes its
+   * workspaces scroll container here so a row menu near the section's end
+   * flips up instead of overhanging the Source Control section below it.
+   * Only the flip DECISION consults the boundary; the flipped-up position and
+   * `left` are still viewport-clamped as before.
+   */
+  boundaryRef?: React.RefObject<HTMLElement | null>;
   /** Which trigger edge the menu lines up with. "end" right-aligns. */
   align?: "start" | "end";
   /**
@@ -87,6 +97,7 @@ export default function AnchoredMenu({
   matchAnchorWidth,
   inset = 0,
   placement = "above",
+  boundaryRef,
   align = "start",
   zIndex = 60,
   children,
@@ -139,8 +150,16 @@ export default function AnchoredMenu({
       const height = menuRef.current?.offsetHeight ?? 0;
       // Flip above the trigger when the panel would spill past the viewport
       // bottom — the last account card's menu, with Settings scrolled to the
-      // end, is the case this exists for.
-      if (height > 0 && top + height > window.innerHeight - EDGE_PAD) {
+      // end, is the case this exists for. A boundaryRef tightens the limit to
+      // its element's bottom edge too (see the prop comment).
+      const boundary = boundaryRef?.current;
+      const bottomLimit = boundary
+        ? Math.min(
+            window.innerHeight - EDGE_PAD,
+            boundary.getBoundingClientRect().bottom,
+          )
+        : window.innerHeight - EDGE_PAD;
+      if (height > 0 && top + height > bottomLimit) {
         setPosition({ left, bottom: bottomAnchored });
       } else {
         setPosition({ left, top });
@@ -148,7 +167,7 @@ export default function AnchoredMenu({
       return;
     }
     setPosition({ left, bottom: bottomAnchored });
-  }, [anchorRef, matchAnchorWidth, inset, placement, align]);
+  }, [anchorRef, matchAnchorWidth, inset, placement, boundaryRef, align]);
 
   // Measure before paint so the menu never flashes at the wrong coordinates,
   // then again after it has a width so the right-edge clamp is real.

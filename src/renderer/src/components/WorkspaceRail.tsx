@@ -207,6 +207,10 @@ function WorkspaceRail(props: RailProps) {
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createBtnRef = useRef<HTMLButtonElement>(null);
+  // The workspaces scroll container — passed to the rail's AnchoredMenus as
+  // their flip boundary so a menu near the section's end opens upward instead
+  // of overhanging the section stacked below (Source Control / Explorer).
+  const wsScrollRef = useRef<HTMLDivElement | null>(null);
   const [railCtxMenu, setRailCtxMenu] = useState<{
     x: number;
     y: number;
@@ -399,6 +403,7 @@ function WorkspaceRail(props: RailProps) {
           tone={props.toneByWorkspaceId?.[w.id] ?? null}
           working={props.workingByWorkspaceId?.[w.id] ?? false}
           missing={missingWorkspaceIds.has(w.id)}
+          menuBoundaryRef={wsScrollRef}
           onActivate={() => props.onActivate(w.id)}
           onEdit={() => props.onEdit(w.id)}
           onChange={(patch) => props.onChange(w.id, patch)}
@@ -515,6 +520,7 @@ function WorkspaceRail(props: RailProps) {
                     role="menu"
                     ariaLabel="Create"
                     placement="below"
+                    boundaryRef={wsScrollRef}
                     align="end"
                   >
                     <div style={{ minWidth: 200, padding: 4, display: "grid", gap: 2 }}>
@@ -546,6 +552,7 @@ function WorkspaceRail(props: RailProps) {
             />
             {!collapsed.workspaces && (
               <div
+                ref={wsScrollRef}
                 style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}
                 onContextMenu={(event) => {
                   // Blank space only — rows and folders keep their "…" menus.
@@ -604,6 +611,7 @@ function WorkspaceRail(props: RailProps) {
                             accent={accent}
                             editing={editingGroupId === group.id}
                             dragging={groupDragId === group.id}
+                            menuBoundaryRef={wsScrollRef}
                             isWorkspaceDrag={isWorkspaceDrag}
                             isWorkspaceGroupDrag={isWorkspaceGroupDrag}
                             onGroupDragStart={(event) => {
@@ -862,6 +870,7 @@ function WorkspaceFolder({
   accent,
   editing = false,
   dragging = false,
+  menuBoundaryRef,
   isWorkspaceDrag,
   isWorkspaceGroupDrag,
   onDropWorkspace,
@@ -882,6 +891,8 @@ function WorkspaceFolder({
   accent: string;
   editing?: boolean;
   dragging?: boolean;
+  /** Flip boundary for the folder's "…" AnchoredMenu (the workspaces scroll container). */
+  menuBoundaryRef?: React.RefObject<HTMLElement | null>;
   isWorkspaceDrag: (event: React.DragEvent) => boolean;
   isWorkspaceGroupDrag: (event: React.DragEvent) => boolean;
   onDropWorkspace: (event: React.DragEvent) => void;
@@ -1156,6 +1167,7 @@ function WorkspaceFolder({
               role="menu"
               ariaLabel="Folder actions"
               placement="below"
+              boundaryRef={menuBoundaryRef}
               align="end"
             >
               <div style={{ minWidth: 160, padding: 4, display: "grid", gap: 2 }}>
@@ -1420,6 +1432,8 @@ interface RowProps {
   working?: boolean;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
   missing?: boolean;
+  /** Flip boundary for the row's "…" AnchoredMenu (the workspaces scroll container). */
+  menuBoundaryRef?: React.RefObject<HTMLElement | null>;
   onActivate: () => void;
   onEdit: () => void;
   onChange: (patch: Partial<Workspace>) => void;
@@ -1441,6 +1455,7 @@ function WorkspaceRow({
   tone,
   working = false,
   missing = false,
+  menuBoundaryRef,
   onActivate,
   onEdit,
   onChange,
@@ -1879,6 +1894,7 @@ function WorkspaceRow({
             role="menu"
             ariaLabel="Workspace actions"
             placement="below"
+            boundaryRef={menuBoundaryRef}
             align="end"
           >
             <div style={{ minWidth: 168, maxWidth: 240, padding: 4, display: "grid", gap: 2 }}>
