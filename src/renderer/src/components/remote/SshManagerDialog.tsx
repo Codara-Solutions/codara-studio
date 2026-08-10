@@ -271,6 +271,10 @@ function ServersTab({ onPick }: { onPick: (host: RemoteHostConfig, remotePath: s
       </div>
       {form ? (
         <HostForm
+          // Keyed by edit target: field state lives in mount-time useState
+          // initializers, so switching Edit targets (or Edit ↔ Add) must
+          // remount the form rather than show the previous host's values.
+          key={form.initial?.id ?? "__new__"}
           initial={form.initial}
           existingIds={hosts.map((h) => h.id)}
           onCancel={() => setForm(null)}
