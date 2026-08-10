@@ -21,6 +21,10 @@ interface Props {
 // this interval is the slow fallback for a window left open and untouched.
 const QUEUE_FALLBACK_REFRESH_MS = 300_000;
 
+// Focus fires on every alt-tab back, and each read is a `gh` subprocess tree.
+// A read this recent is still good enough to skip the next one.
+const RESUME_REFRESH_MIN_INTERVAL_MS = 60_000;
+
 // The list body of the Source Control GitHub block: open issues and pull
 // requests across the repository, each with its worktree/run action. The
 // header, count, refresh control and block-wide empty state live in
@@ -39,19 +43,26 @@ export default function GitHubWorkQueue({
   const [actionError, setActionError] = useState<string | null>(null);
   const [surface, setSurface] = useState<HTMLElement | null>(null);
   const generation = useRef(0);
-  const inFlight = useRef(false);
+  const inFlight = useRef<{ generation: number; silent: boolean } | null>(null);
   // Lets a silent load decide whether it has a good list worth keeping.
   const statusRef = useRef<GitHubWorkQueueStatus | null>(status);
   statusRef.current = status;
+  // When the list was last read successfully — the focus throttle's clock.
+  const lastReadAt = useRef(0);
 
   // `silent` is a background read: it reports no load state to the section
   // header (so the spinner stays down) and leaves the last good list in place
   // if it fails, since the user never asked for it.
   const load = useCallback(
     async ({ refresh, silent }: { refresh: boolean; silent: boolean }) => {
-      if (inFlight.current) return;
-      inFlight.current = true;
+      const active = inFlight.current;
+      // One read at a time — except that a read the user asked for must never
+      // be swallowed by a background poll that happens to be running. A focus
+      // refresh takes seconds, which is exactly when the Refresh button would
+      // otherwise look dead. The loud read supersedes it.
+      if (active && !(active.silent && !silent)) return;
       const current = ++generation.current;
+      inFlight.current = { generation: current, silent };
       if (!silent) {
         setLoading(true);
         setLoadError(null);
@@ -62,6 +73,7 @@ export default function GitHubWorkQueue({
           refresh,
         );
         if (generation.current === current) {
+          lastReadAt.current = Date.now();
           setStatus(next);
           setLoadError(null);
         }
@@ -70,7 +82,9 @@ export default function GitHubWorkQueue({
           setLoadError("The GitHub work queue could not be loaded.");
         }
       } finally {
-        inFlight.current = false;
+        // A superseded read must not release the slot the read that displaced
+        // it now holds.
+        if (inFlight.current?.generation === current) inFlight.current = null;
         if (generation.current === current) setLoading(false);
       }
     },
@@ -116,18 +130,26 @@ export default function GitHubWorkQueue({
       if (refresh) refreshSilently();
       start();
     };
+    // Coming back into view: read only if the list has had time to go stale,
+    // but always re-arm the fallback timer. Focus and visibility fire together
+    // on one alt-tab, and the surface goes off-screen every time a commit
+    // detail is opened — none of which should cost a `gh` run on its own, so
+    // they all share one clock.
+    const resume = (): void =>
+      sync(Date.now() - lastReadAt.current >= RESUME_REFRESH_MIN_INTERVAL_MS);
     const observer = new IntersectionObserver((entries) => {
       const next = entries.some((entry) => entry.isIntersecting);
       if (observed && next === onScreen) return;
       onScreen = next;
       // The mount effect already loaded the queue, so the first observation
-      // only starts the timer; later ones are the surface becoming visible.
-      sync(observed);
+      // only starts the timer; later ones are the surface coming back.
+      if (observed) resume();
+      else sync(false);
       observed = true;
     });
     observer.observe(surface);
-    const handleVisibilityChange = (): void => sync(true);
-    const handleFocus = (): void => sync(true);
+    const handleVisibilityChange = resume;
+    const handleFocus = resume;
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("focus", handleFocus);
     return () => {

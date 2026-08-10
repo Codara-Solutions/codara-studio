@@ -36,6 +36,11 @@ import {
   Spinner,
 } from "./git-ui";
 
+// How long the scroll restore keeps re-applying itself while the list above
+// History finishes loading. Long enough for a local git read, short enough that
+// it can never feel like the panel is scrolling on its own.
+const RESTORE_SETTLE_MS = 1_000;
+
 interface Props {
   cwd: string | null;
   workspace: Workspace | null;
@@ -94,6 +99,7 @@ export default function GitPanel({
   statusRef.current = status;
   // The panel body's scroll position, parked while the detail pane is open.
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const savedScrollRef = useRef<number | null>(null);
 
   // Reset panel-local state whenever the workspace changes.
@@ -285,9 +291,9 @@ export default function GitPanel({
   );
 
   // Open a commit in the inspection view (built by the history/inspection
-  // agent). The list keeps its scroll position for the trip back — the body
-  // switches to `overflow: hidden` while the detail pane is up, which zeroes
-  // scrollTop, so it has to be read before the state change.
+  // agent). The list keeps its scroll position for the trip back — hiding it
+  // takes it out of layout, which zeroes scrollTop, so it has to be read
+  // before the state change.
   const openCommitDetail = useCallback((hash: string) => {
     savedScrollRef.current = bodyRef.current?.scrollTop ?? null;
     setReturnHighlightHash(null);
@@ -303,23 +309,70 @@ export default function GitPanel({
   // commit the user ended on is actually on screen — after stepping through
   // prev/next it may be nowhere near the saved position, and seeing it beats
   // honouring a stale scrollTop.
+  //
+  // One pass is not enough. The sections above History (branch, GitHub, stash)
+  // finish loading on their own schedule, so at the moment of the restore the
+  // list can still be short enough to clamp the saved offset. The restore
+  // re-applies as the list resizes until the anchor row is genuinely in view,
+  // then stops — bounded by a deadline so it can never keep fighting the user,
+  // and abandoned outright the moment the user scrolls for themselves.
   useLayoutEffect(() => {
     if (detailHash !== null) return;
     const body = bodyRef.current;
+    const list = listRef.current;
     const saved = savedScrollRef.current;
     if (!body || saved === null) return;
     savedScrollRef.current = null;
-    body.scrollTop = saved;
-    if (!returnHighlightHash) return;
-    const row = body.querySelector<HTMLElement>(
-      `[data-commit-hash="${CSS.escape(returnHighlightHash)}"]`,
-    );
-    if (!row) return;
-    const rowBox = row.getBoundingClientRect();
-    const bodyBox = body.getBoundingClientRect();
-    if (rowBox.top < bodyBox.top || rowBox.bottom > bodyBox.bottom) {
-      row.scrollIntoView({ block: "nearest" });
-    }
+    const anchorHash = returnHighlightHash;
+    // Once the anchor row has had to pull the viewport off the saved offset,
+    // the saved offset stops being re-applied — otherwise the two fight.
+    let anchored = false;
+
+    const apply = (): boolean => {
+      if (!anchored) body.scrollTop = saved;
+      // scrollTop is fractional on HiDPI, and a clamped restore lands short —
+      // sub-pixel is landed, anything more means the list is still growing.
+      const restored = Math.abs(body.scrollTop - saved) < 1;
+      const row = anchorHash
+        ? body.querySelector<HTMLElement>(`[data-commit-hash="${CSS.escape(anchorHash)}"]`)
+        : null;
+      // No row to anchor on (no highlight, history collapsed, log still
+      // loading) — the saved offset landing exactly is all we can ask for.
+      if (!row) return restored;
+      const bodyBox = body.getBoundingClientRect();
+      let rowBox = row.getBoundingClientRect();
+      if (rowBox.top < bodyBox.top || rowBox.bottom > bodyBox.bottom) {
+        row.scrollIntoView({ block: "nearest" });
+        anchored = true;
+        rowBox = row.getBoundingClientRect();
+      }
+      return rowBox.top >= bodyBox.top && rowBox.bottom <= bodyBox.bottom;
+    };
+
+    let observer: ResizeObserver | null = null;
+    let timer = 0;
+    const finish = (): void => {
+      observer?.disconnect();
+      observer = null;
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = 0;
+      }
+      body.removeEventListener("wheel", finish);
+      body.removeEventListener("pointerdown", finish);
+    };
+
+    if (apply() || !list) return;
+    // The scroll container's own box never changes, so the content wrapper is
+    // what has to be watched for the sections above History settling.
+    observer = new ResizeObserver(() => {
+      if (apply()) finish();
+    });
+    observer.observe(list);
+    timer = window.setTimeout(finish, RESTORE_SETTLE_MS);
+    body.addEventListener("wheel", finish, { passive: true });
+    body.addEventListener("pointerdown", finish);
+    return finish;
   }, [detailHash, returnHighlightHash]);
 
   // The flash is a one-shot cue, not a selection — let it go once it has faded.
@@ -400,153 +453,165 @@ export default function GitPanel({
         >
           {!cwd ? (
             <PanelMessage text="No active workspace." />
-          ) : detailHash ? (
-            <CommitDetail
-              cwd={cwd}
-              hash={detailHash}
-              onClose={closeCommitDetail}
-              onNewer={showNewerCommit}
-              onOlder={showOlderCommit}
-            />
-          ) : status === null ? (
-            <PanelMessage text="" />
-          ) : !status.isRepo ? (
-            <NonRepoState busy={disabled} onInit={handleInit} />
           ) : (
             <>
-              <BranchMenu
-                cwd={cwd}
-                onChanged={handleGitChanged}
-                refreshKey={gitVersion}
-                disabled={disabled}
-              />
-              <GitHubSection
-                cwd={cwd}
-                gitStatus={status}
-                refreshKey={gitVersion}
-                userRefreshKey={githubRefreshNonce}
-                queue={
-                  workspace && !workspace.remote
-                    ? {
-                        sourceWorkspaceId: workspace.id,
-                        refreshKey: githubRefreshNonce,
-                        onOpenItem: onOpenGitHubQueueItem,
+              {detailHash && (
+                <CommitDetail
+                  cwd={cwd}
+                  hash={detailHash}
+                  onClose={closeCommitDetail}
+                  onNewer={showNewerCommit}
+                  onOlder={showOlderCommit}
+                />
+              )}
+              {/* The list is hidden, never unmounted, while a commit is open.
+                  Unmounting it would tear down the GitHub block and the work
+                  queue on every inspection, so each trip back would re-run
+                  `gh` and flash the spinner — the same reason the GitHub
+                  section hides its own queue rather than dropping it. */}
+              <div ref={listRef} style={{ display: detailHash ? "none" : "block" }}>
+                {status === null ? (
+                  <PanelMessage text="" />
+                ) : !status.isRepo ? (
+                  <NonRepoState busy={disabled} onInit={handleInit} />
+                ) : (
+                  <>
+                    <BranchMenu
+                      cwd={cwd}
+                      onChanged={handleGitChanged}
+                      refreshKey={gitVersion}
+                      disabled={disabled}
+                    />
+                    <GitHubSection
+                      cwd={cwd}
+                      gitStatus={status}
+                      refreshKey={gitVersion}
+                      userRefreshKey={githubRefreshNonce}
+                      queue={
+                        workspace && !workspace.remote
+                          ? {
+                              sourceWorkspaceId: workspace.id,
+                              refreshKey: githubRefreshNonce,
+                              onOpenItem: onOpenGitHubQueueItem,
+                            }
+                          : null
                       }
-                    : null
-                }
-                onRefresh={() => setGitHubRefreshNonce((value) => value + 1)}
-                onPublished={() => {
-                  setGitHubRefreshNonce((value) => value + 1);
-                  notifyChanged();
-                }}
-              />
-              {displayError && (
-                <ErrorStrip text={displayError} onDismiss={() => setOpError(null)} />
-              )}
-              <CommitComposer
-                message={message}
-                onMessageChange={setMessage}
-                onCommit={(amend) => void handleCommit(amend)}
-                onGenerateMessage={() => void handleGenerateMessage()}
-                canCommit={canCommit}
-                canGenerateMessage={canGenerateMessage}
-                commitLabel={commitLabel}
-                stagedCount={stagedCount}
-                busy={busy}
-                branch={status.branch}
-                detached={status.detached}
-                upstream={status.upstream}
-                ahead={status.ahead}
-                behind={status.behind}
-                onPush={handlePush}
-                onPull={handlePull}
-                onFetch={handleFetch}
-                onSmartMerge={(backend) => void handleSmartMerge(backend)}
-                canSmartMerge={Boolean(
-                  workspace && status.isRepo && (status.behind > 0 || status.hasConflicts),
+                      onRefresh={() => setGitHubRefreshNonce((value) => value + 1)}
+                      onPublished={() => {
+                        setGitHubRefreshNonce((value) => value + 1);
+                        notifyChanged();
+                      }}
+                    />
+                    {displayError && (
+                      <ErrorStrip text={displayError} onDismiss={() => setOpError(null)} />
+                    )}
+                    <CommitComposer
+                      message={message}
+                      onMessageChange={setMessage}
+                      onCommit={(amend) => void handleCommit(amend)}
+                      onGenerateMessage={() => void handleGenerateMessage()}
+                      canCommit={canCommit}
+                      canGenerateMessage={canGenerateMessage}
+                      commitLabel={commitLabel}
+                      stagedCount={stagedCount}
+                      busy={busy}
+                      branch={status.branch}
+                      detached={status.detached}
+                      upstream={status.upstream}
+                      ahead={status.ahead}
+                      behind={status.behind}
+                      onPush={handlePush}
+                      onPull={handlePull}
+                      onFetch={handleFetch}
+                      onSmartMerge={(backend) => void handleSmartMerge(backend)}
+                      canSmartMerge={Boolean(
+                        workspace && status.isRepo && (status.behind > 0 || status.hasConflicts),
+                      )}
+                    />
+
+                    {stagedCount > 0 && (
+                      <ChangeSection
+                        title="Staged Changes"
+                        count={stagedCount}
+                        collapsed={sections.staged}
+                        onToggle={() => setSections((s) => ({ ...s, staged: !s.staged }))}
+                        disabled={disabled}
+                        action={{
+                          title: "Unstage all changes",
+                          icon: <MinusGlyph />,
+                          onClick: unstageAll,
+                        }}
+                      >
+                        {staged.map((file) => (
+                          <ChangeRow
+                            key={`s:${file.path}`}
+                            file={file}
+                            staged
+                            selected={activeDiffTarget?.staged === true && activeDiffTarget.path === file.path}
+                            disabled={disabled}
+                            onOpenDiff={openDiff}
+                            onStage={stageOne}
+                            onUnstage={unstageOne}
+                            onDiscard={discardOne}
+                          />
+                        ))}
+                      </ChangeSection>
+                    )}
+
+                    {unstagedCount > 0 && (
+                      <ChangeSection
+                        title="Changes"
+                        count={unstagedCount}
+                        collapsed={sections.changes}
+                        onToggle={() => setSections((s) => ({ ...s, changes: !s.changes }))}
+                        disabled={disabled}
+                        action={{
+                          title: "Stage all changes",
+                          icon: <PlusGlyph />,
+                          onClick: stageAll,
+                        }}
+                      >
+                        {unstaged.map((file) => (
+                          <ChangeRow
+                            key={`u:${file.path}`}
+                            file={file}
+                            staged={false}
+                            selected={activeDiffTarget?.staged === false && activeDiffTarget.path === file.path}
+                            disabled={disabled}
+                            onOpenDiff={openDiff}
+                            onStage={stageOne}
+                            onUnstage={unstageOne}
+                            onDiscard={discardOne}
+                          />
+                        ))}
+                      </ChangeSection>
+                    )}
+
+                    {changeCount === 0 && <CleanState />}
+
+                    <StashSection
+                      cwd={cwd}
+                      onChanged={handleGitChanged}
+                      refreshKey={gitVersion}
+                      disabled={disabled}
+                    />
+
+                    <CommitHistory
+                      cwd={cwd}
+                      rows={log?.rows ?? []}
+                      loading={loading && !log}
+                      collapsed={sections.history}
+                      onToggle={() => setSections((s) => ({ ...s, history: !s.history }))}
+                      disabled={disabled}
+                      onCheckout={handleCheckout}
+                      onRevert={handleRevert}
+                      onUndoLastCommit={handleUndoLastCommit}
+                      onOpenCommit={openCommitDetail}
+                      highlightHash={returnHighlightHash}
+                    />
+                  </>
                 )}
-              />
-
-              {stagedCount > 0 && (
-                <ChangeSection
-                  title="Staged Changes"
-                  count={stagedCount}
-                  collapsed={sections.staged}
-                  onToggle={() => setSections((s) => ({ ...s, staged: !s.staged }))}
-                  disabled={disabled}
-                  action={{
-                    title: "Unstage all changes",
-                    icon: <MinusGlyph />,
-                    onClick: unstageAll,
-                  }}
-                >
-                  {staged.map((file) => (
-                    <ChangeRow
-                      key={`s:${file.path}`}
-                      file={file}
-                      staged
-                      selected={activeDiffTarget?.staged === true && activeDiffTarget.path === file.path}
-                      disabled={disabled}
-                      onOpenDiff={openDiff}
-                      onStage={stageOne}
-                      onUnstage={unstageOne}
-                      onDiscard={discardOne}
-                    />
-                  ))}
-                </ChangeSection>
-              )}
-
-              {unstagedCount > 0 && (
-                <ChangeSection
-                  title="Changes"
-                  count={unstagedCount}
-                  collapsed={sections.changes}
-                  onToggle={() => setSections((s) => ({ ...s, changes: !s.changes }))}
-                  disabled={disabled}
-                  action={{
-                    title: "Stage all changes",
-                    icon: <PlusGlyph />,
-                    onClick: stageAll,
-                  }}
-                >
-                  {unstaged.map((file) => (
-                    <ChangeRow
-                      key={`u:${file.path}`}
-                      file={file}
-                      staged={false}
-                      selected={activeDiffTarget?.staged === false && activeDiffTarget.path === file.path}
-                      disabled={disabled}
-                      onOpenDiff={openDiff}
-                      onStage={stageOne}
-                      onUnstage={unstageOne}
-                      onDiscard={discardOne}
-                    />
-                  ))}
-                </ChangeSection>
-              )}
-
-              {changeCount === 0 && <CleanState />}
-
-              <StashSection
-                cwd={cwd}
-                onChanged={handleGitChanged}
-                refreshKey={gitVersion}
-                disabled={disabled}
-              />
-
-              <CommitHistory
-                cwd={cwd}
-                rows={log?.rows ?? []}
-                loading={loading && !log}
-                collapsed={sections.history}
-                onToggle={() => setSections((s) => ({ ...s, history: !s.history }))}
-                disabled={disabled}
-                onCheckout={handleCheckout}
-                onRevert={handleRevert}
-                onUndoLastCommit={handleUndoLastCommit}
-                onOpenCommit={openCommitDetail}
-                highlightHash={returnHighlightHash}
-              />
+              </div>
             </>
           )}
         </div>

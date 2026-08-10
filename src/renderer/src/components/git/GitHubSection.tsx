@@ -42,6 +42,10 @@ interface Snapshot {
 // fallback only covers a window left open and untouched.
 const STATUS_FALLBACK_REFRESH_MS = 300_000;
 
+// Focus fires on every alt-tab back, and each read is a `gh` subprocess tree.
+// A read this recent is still good enough to skip the next one.
+const RESUME_REFRESH_MIN_INTERVAL_MS = 60_000;
+
 export default function GitHubSection({
   cwd,
   gitStatus,
@@ -68,6 +72,8 @@ export default function GitHubSection({
   const [mergeResult, setMergeResult] = useState<GitHubMergeResult | null>(null);
   const requestId = useRef(0);
   const markReadyRequestId = useRef(0);
+  // When the status was last read successfully — the focus throttle's clock.
+  const lastReadAt = useRef(0);
   const { branch: currentBranch } = gitStatus;
 
   const handleQueueSummary = useCallback(
@@ -103,7 +109,9 @@ export default function GitHubSection({
       void window.spark.github
         .status(cwd)
         .then((status) => {
-          if (requestId.current === id) setSnapshot({ cwd, status });
+          if (requestId.current !== id) return;
+          lastReadAt.current = Date.now();
+          setSnapshot({ cwd, status });
         })
         .catch(() => {
           if (requestId.current !== id) return;
@@ -157,11 +165,20 @@ export default function GitHubSection({
       if (document.visibilityState !== "visible") return;
       loadStatus(true);
     };
+    // Focus and visibility usually fire together on one alt-tab, and every
+    // read spawns a `gh` subprocess tree — so they share a clock, and a
+    // status read this recent is left alone.
+    const resume = (): void => {
+      if (Date.now() - lastReadAt.current < RESUME_REFRESH_MIN_INTERVAL_MS) return;
+      silentRefresh();
+    };
     const timer = window.setInterval(silentRefresh, STATUS_FALLBACK_REFRESH_MS);
-    window.addEventListener("focus", silentRefresh);
+    window.addEventListener("focus", resume);
+    document.addEventListener("visibilitychange", resume);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("focus", silentRefresh);
+      window.removeEventListener("focus", resume);
+      document.removeEventListener("visibilitychange", resume);
     };
   }, [collapsed, loadStatus]);
 
