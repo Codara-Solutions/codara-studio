@@ -7,6 +7,7 @@ import type {
 import { isValidHostId } from "@shared/remote";
 import type { SshKeyInfo } from "@shared/ssh-keys";
 import BrowsePane from "./BrowsePane";
+import SshKeysTab from "./SshKeysTab";
 
 interface Props {
   onClose: () => void;
@@ -73,7 +74,7 @@ export default function SshManagerDialog({ onClose, onPick }: Props) {
             Close
           </button>
         </div>
-        {tab === "servers" ? <ServersTab onPick={onPick} /> : <KeysPlaceholder />}
+        {tab === "servers" ? <ServersTab onPick={onPick} /> : <SshKeysTab />}
       </div>
     </div>
   );
@@ -90,11 +91,6 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
       {label}
     </button>
   );
-}
-
-// Swapped for <SshKeysTab /> in the next task.
-function KeysPlaceholder() {
-  return <div style={{ color: "var(--muted)", fontSize: 12, padding: 8 }}>Keys tab arrives in the next task.</div>;
 }
 
 type Stage = "list" | "browse";
