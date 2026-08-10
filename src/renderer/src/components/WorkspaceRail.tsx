@@ -842,7 +842,7 @@ function WorkspaceFolder({
   children: React.ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
+  const folderMenuBtnRef = useRef<HTMLButtonElement>(null);
   const [draftName, setDraftName] = useState(name);
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
@@ -854,24 +854,6 @@ function WorkspaceFolder({
     inputRef.current?.focus();
     inputRef.current?.select();
   }, [editing]);
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (event: MouseEvent) => {
-      if (menuRef.current && event.target instanceof Node && !menuRef.current.contains(event.target)) {
-        setMenuOpen(false);
-      }
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
-
   // Row drops stop propagation after moving the workspace, so the folder's
   // own onDrop is not guaranteed to run. Clear the transient drop wash at the
   // document boundary too, preventing a destination folder from remaining
@@ -1092,8 +1074,9 @@ function WorkspaceFolder({
           {count}
         </span>
         {group && !editing && (
-          <div ref={menuRef} style={{ position: "relative", flex: "0 0 18px" }}>
+          <div style={{ flex: "0 0 18px" }}>
             <button
+              ref={folderMenuBtnRef}
               type="button"
               className="spark-icon-btn"
               title="Folder actions"
@@ -1110,12 +1093,17 @@ function WorkspaceFolder({
                 <circle cx="8" cy="5" r="1" />
               </svg>
             </button>
-            {menuOpen && (
-              <div
-                role="menu"
-                className="spark-menu"
-                style={{ position: "absolute", top: 21, right: 0, minWidth: 160, padding: 4, zIndex: 30 }}
-              >
+            <AnchoredMenu
+              anchorRef={folderMenuBtnRef}
+              open={menuOpen}
+              onClose={() => setMenuOpen(false)}
+              className="spark-menu"
+              role="menu"
+              ariaLabel="Folder actions"
+              placement="below"
+              align="end"
+            >
+              <div style={{ minWidth: 160, padding: 4, display: "grid", gap: 2 }}>
                 <RowMenuItem
                   label="Rename folder"
                   onClick={() => {
@@ -1132,7 +1120,7 @@ function WorkspaceFolder({
                   }}
                 />
               </div>
-            )}
+            </AnchoredMenu>
           </div>
         )}
       </div>

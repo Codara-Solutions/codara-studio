@@ -2497,13 +2497,6 @@ a { color: inherit; }
    Square glyph button for toolbars and row affordances. Transparent at rest,
    ink-tint on hover — matches the .spark-tab__close idiom.
    Size via --spark-icon-btn-size (default 22px) for 20-26px targets. */
-/* Folder cards use backdrop-filter, which creates a stacking context. Lift the
-   focused card so a workspace/folder action menu can float over the following
-   folder instead of being visually present but pointer-blocked by it. */
-.spark-workspace-folder:focus-within {
-  z-index: 40;
-}
-
 .spark-icon-btn {
   --spark-icon-btn-size: 22px;
   display: inline-flex;
