@@ -17,6 +17,8 @@ interface Props {
   onUndoLastCommit: () => void;
   /** Open a commit in the inspection view (built by the inspection agent). */
   onOpenCommit: (hash: string) => void;
+  /** The commit just returned from — its row flashes once, then fades. */
+  highlightHash: string | null;
 }
 
 // Graph lane geometry + palette. The graph is a VS Code-style swimlane drawing
@@ -86,6 +88,7 @@ export default function CommitHistory({
   onRevert,
   onUndoLastCommit,
   onOpenCommit,
+  highlightHash,
 }: Props): React.ReactElement {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const commitCount = rows.filter((r) => r.hash).length;
@@ -138,6 +141,7 @@ export default function CommitHistory({
               <CommitRowView
                 key={viewModel.row.hash ?? `connector-${index}`}
                 viewModel={viewModel}
+                highlighted={Boolean(viewModel.row.hash) && viewModel.row.hash === highlightHash}
                 onOpen={onOpenCommit}
                 onOpenMenu={openMenu}
               />
@@ -168,10 +172,12 @@ export default function CommitHistory({
 // inspector; right-click opens the context menu.
 const CommitRowView = React.memo(function CommitRowView({
   viewModel,
+  highlighted,
   onOpen,
   onOpenMenu,
 }: {
   viewModel: CommitGraphViewModel;
+  highlighted: boolean;
   onOpen: (hash: string) => void;
   onOpenMenu: (row: GitLogRow, x: number, y: number) => void;
 }) {
@@ -179,6 +185,23 @@ const CommitRowView = React.memo(function CommitRowView({
   const [hover, setHover] = useState(false);
   const refs = row.refs ?? [];
   const isCommit = Boolean(row.hash);
+
+  // The return flash: the tint lands with no transition, then the very next
+  // frame drops it with a one-second fade, so the row catches the eye and
+  // releases it without ever looking selected.
+  const [fading, setFading] = useState(false);
+  useEffect(() => {
+    if (!highlighted) return;
+    setFading(false);
+    const frame = requestAnimationFrame(() => setFading(true));
+    return () => {
+      cancelAnimationFrame(frame);
+      setFading(false);
+    };
+  }, [highlighted]);
+
+  const restingBackground =
+    isCommit && hover ? "color-mix(in oklab, var(--ink) 4%, transparent)" : "transparent";
 
   const open = (e: React.MouseEvent): void => {
     if (!isCommit || !row.hash) return;
@@ -195,6 +218,7 @@ const CommitRowView = React.memo(function CommitRowView({
 
   return (
     <div
+      data-commit-hash={row.hash || undefined}
       onClick={open}
       onContextMenu={contextMenu}
       onMouseEnter={() => setHover(true)}
@@ -213,10 +237,14 @@ const CommitRowView = React.memo(function CommitRowView({
         paddingRight: 10,
         cursor: "default",
         background:
-          isCommit && hover
-            ? "color-mix(in oklab, var(--ink) 4%, transparent)"
-            : "transparent",
-        transition: "background var(--motion-fast) var(--ease-out)",
+          highlighted && !fading
+            ? "color-mix(in oklab, var(--ink) 11%, transparent)"
+            : restingBackground,
+        transition: highlighted
+          ? fading
+            ? "background 1000ms var(--ease-out)"
+            : "none"
+          : "background var(--motion-fast) var(--ease-out)",
       }}
     >
       <GraphLane viewModel={viewModel} refs={refs} isHead={row.isHead === true} />

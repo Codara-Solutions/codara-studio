@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   ChatBackendKind,
   GitFileChange,
@@ -76,17 +83,25 @@ export default function GitPanel({
   // A commit selected for inspection — when set, the body shows CommitDetail
   // (the history/inspection agent builds that view).
   const [detailHash, setDetailHash] = useState<string | null>(null);
+  // The commit the detail pane was showing when it closed. Its history row
+  // flashes briefly so the eye re-anchors on return.
+  const [returnHighlightHash, setReturnHighlightHash] = useState<string | null>(null);
 
   // Refs let action guards read live values without going stale.
   const busyRef = useRef<string | null>(busy);
   busyRef.current = busy;
   const statusRef = useRef<GitStatus | null>(status);
   statusRef.current = status;
+  // The panel body's scroll position, parked while the detail pane is open.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const savedScrollRef = useRef<number | null>(null);
 
   // Reset panel-local state whenever the workspace changes.
   useEffect(() => {
     setOpError(null);
     setDetailHash(null);
+    setReturnHighlightHash(null);
+    savedScrollRef.current = null;
     setMessage("");
     setSections({ staged: false, changes: false, history: false });
   }, [cwd]);
@@ -269,10 +284,63 @@ export default function GitPanel({
     [onOpenDiffTab],
   );
 
-  // Open a commit in the inspection view (built by the history/inspection agent).
+  // Open a commit in the inspection view (built by the history/inspection
+  // agent). The list keeps its scroll position for the trip back — the body
+  // switches to `overflow: hidden` while the detail pane is up, which zeroes
+  // scrollTop, so it has to be read before the state change.
   const openCommitDetail = useCallback((hash: string) => {
+    savedScrollRef.current = bodyRef.current?.scrollTop ?? null;
+    setReturnHighlightHash(null);
     setDetailHash(hash);
   }, []);
+
+  const closeCommitDetail = useCallback(() => {
+    setReturnHighlightHash(detailHash);
+    setDetailHash(null);
+  }, [detailHash]);
+
+  // Back to the list: put the scroll exactly where it was, then make sure the
+  // commit the user ended on is actually on screen — after stepping through
+  // prev/next it may be nowhere near the saved position, and seeing it beats
+  // honouring a stale scrollTop.
+  useLayoutEffect(() => {
+    if (detailHash !== null) return;
+    const body = bodyRef.current;
+    const saved = savedScrollRef.current;
+    if (!body || saved === null) return;
+    savedScrollRef.current = null;
+    body.scrollTop = saved;
+    if (!returnHighlightHash) return;
+    const row = body.querySelector<HTMLElement>(
+      `[data-commit-hash="${CSS.escape(returnHighlightHash)}"]`,
+    );
+    if (!row) return;
+    const rowBox = row.getBoundingClientRect();
+    const bodyBox = body.getBoundingClientRect();
+    if (rowBox.top < bodyBox.top || rowBox.bottom > bodyBox.bottom) {
+      row.scrollIntoView({ block: "nearest" });
+    }
+  }, [detailHash, returnHighlightHash]);
+
+  // The flash is a one-shot cue, not a selection — let it go once it has faded.
+  useEffect(() => {
+    if (!returnHighlightHash) return;
+    const timer = window.setTimeout(() => setReturnHighlightHash(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [returnHighlightHash]);
+
+  // History is newest-first, so the previous row is the newer commit.
+  const commitHashes = useMemo(
+    () => (log?.rows ?? []).map((row) => row.hash).filter((hash): hash is string => Boolean(hash)),
+    [log],
+  );
+  const detailIndex = detailHash ? commitHashes.indexOf(detailHash) : -1;
+  const showNewerCommit =
+    detailIndex > 0 ? () => setDetailHash(commitHashes[detailIndex - 1]) : null;
+  const showOlderCommit =
+    detailIndex >= 0 && detailIndex < commitHashes.length - 1
+      ? () => setDetailHash(commitHashes[detailIndex + 1])
+      : null;
 
   const disabled = busy !== null;
   const displayError = opError ?? status?.error ?? log?.error ?? readError ?? null;
@@ -322,6 +390,7 @@ export default function GitPanel({
 
       {!collapsed && (
         <div
+          ref={bodyRef}
           style={{
             flex: 1,
             minHeight: 0,
@@ -332,7 +401,13 @@ export default function GitPanel({
           {!cwd ? (
             <PanelMessage text="No active workspace." />
           ) : detailHash ? (
-            <CommitDetail cwd={cwd} hash={detailHash} onClose={() => setDetailHash(null)} />
+            <CommitDetail
+              cwd={cwd}
+              hash={detailHash}
+              onClose={closeCommitDetail}
+              onNewer={showNewerCommit}
+              onOlder={showOlderCommit}
+            />
           ) : status === null ? (
             <PanelMessage text="" />
           ) : !status.isRepo ? (
@@ -348,7 +423,8 @@ export default function GitPanel({
               <GitHubSection
                 cwd={cwd}
                 gitStatus={status}
-                refreshKey={gitVersion + githubRefreshNonce}
+                refreshKey={gitVersion}
+                userRefreshKey={githubRefreshNonce}
                 queue={
                   workspace && !workspace.remote
                     ? {
@@ -469,6 +545,7 @@ export default function GitPanel({
                 onRevert={handleRevert}
                 onUndoLastCommit={handleUndoLastCommit}
                 onOpenCommit={openCommitDetail}
+                highlightHash={returnHighlightHash}
               />
             </>
           )}

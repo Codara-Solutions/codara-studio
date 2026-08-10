@@ -16,8 +16,10 @@ interface Props {
 
 // The queue reads github.com through `gh`, so it never refreshes on its own
 // while the panel is closed, collapsed or scrolled out of view: the only
-// automatic reads happen while the section is genuinely on screen.
-const QUEUE_VISIBLE_REFRESH_MS = 60_000;
+// automatic reads happen while the section is genuinely on screen. Those reads
+// are event-driven (window focus, becoming visible, the user's own actions);
+// this interval is the slow fallback for a window left open and untouched.
+const QUEUE_FALLBACK_REFRESH_MS = 300_000;
 
 // The list body of the Source Control GitHub block: open issues and pull
 // requests across the repository, each with its worktree/run action. The
@@ -38,31 +40,47 @@ export default function GitHubWorkQueue({
   const [surface, setSurface] = useState<HTMLElement | null>(null);
   const generation = useRef(0);
   const inFlight = useRef(false);
+  // Lets a silent load decide whether it has a good list worth keeping.
+  const statusRef = useRef<GitHubWorkQueueStatus | null>(status);
+  statusRef.current = status;
 
-  const load = useCallback(async (refresh: boolean) => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    const current = ++generation.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const next = await window.spark.github.workQueue(
-        sourceWorkspaceId,
-        refresh,
-      );
-      if (generation.current === current) setStatus(next);
-    } catch {
-      if (generation.current === current) {
-        setLoadError("The GitHub work queue could not be loaded.");
+  // `silent` is a background read: it reports no load state to the section
+  // header (so the spinner stays down) and leaves the last good list in place
+  // if it fails, since the user never asked for it.
+  const load = useCallback(
+    async ({ refresh, silent }: { refresh: boolean; silent: boolean }) => {
+      if (inFlight.current) return;
+      inFlight.current = true;
+      const current = ++generation.current;
+      if (!silent) {
+        setLoading(true);
+        setLoadError(null);
       }
-    } finally {
-      inFlight.current = false;
-      if (generation.current === current) setLoading(false);
-    }
-  }, [sourceWorkspaceId]);
+      try {
+        const next = await window.spark.github.workQueue(
+          sourceWorkspaceId,
+          refresh,
+        );
+        if (generation.current === current) {
+          setStatus(next);
+          setLoadError(null);
+        }
+      } catch {
+        if (generation.current === current && !(silent && statusRef.current)) {
+          setLoadError("The GitHub work queue could not be loaded.");
+        }
+      } finally {
+        inFlight.current = false;
+        if (generation.current === current) setLoading(false);
+      }
+    },
+    [sourceWorkspaceId],
+  );
 
   useEffect(() => {
-    void load(refreshKey > 0);
+    // Mount is the first load, and a bumped key is the user's own refresh —
+    // both are loud.
+    void load({ refresh: refreshKey > 0, silent: false });
     return () => {
       generation.current += 1;
     };
@@ -80,19 +98,22 @@ export default function GitHubWorkQueue({
       window.clearInterval(timer);
       timer = null;
     };
+    // Every automatic read here is silent — the list updates under the user
+    // without the header ever flickering into a loading state.
+    const refreshSilently = (): void => void load({ refresh: true, silent: true });
     const start = (): void => {
       if (timer !== null || !shown()) return;
       timer = window.setInterval(() => {
-        if (shown()) void load(true);
+        if (shown()) refreshSilently();
         else stop();
-      }, QUEUE_VISIBLE_REFRESH_MS);
+      }, QUEUE_FALLBACK_REFRESH_MS);
     };
     const sync = (refresh: boolean): void => {
       if (!shown()) {
         stop();
         return;
       }
-      if (refresh) void load(true);
+      if (refresh) refreshSilently();
       start();
     };
     const observer = new IntersectionObserver((entries) => {
@@ -106,10 +127,13 @@ export default function GitHubWorkQueue({
     });
     observer.observe(surface);
     const handleVisibilityChange = (): void => sync(true);
+    const handleFocus = (): void => sync(true);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
     return () => {
       observer.disconnect();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
       stop();
     };
   }, [load, surface]);
@@ -137,7 +161,7 @@ export default function GitHubWorkQueue({
         );
       } finally {
         setBusyKey(null);
-        void load(true);
+        void load({ refresh: true, silent: false });
       }
     },
     [busyKey, load, onOpenItem],

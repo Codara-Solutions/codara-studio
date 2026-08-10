@@ -15,6 +15,10 @@ interface Props {
   cwd: string;
   hash: string;
   onClose: () => void;
+  /** Step to the newer commit in the history list — null at the newest end. */
+  onNewer: (() => void) | null;
+  /** Step to the older commit in the history list — null at the oldest end. */
+  onOlder: (() => void) | null;
 }
 
 // Per-line treatment for a diff line — mirrors DiffView's palette so a commit's
@@ -42,12 +46,40 @@ const LINE_STYLE: Record<GitDiffLineKind, React.CSSProperties> = {
 // window.spark.git.commitFileDiff as the file is expanded. Mounted inline by
 // GitPanel (replacing the panel body) when a commit is opened from the History
 // section's row click / "View Changes" menu item.
-export default function CommitDetail({ cwd, hash, onClose }: Props): React.ReactElement {
+export default function CommitDetail({
+  cwd,
+  hash,
+  onClose,
+  onNewer,
+  onOlder,
+}: Props): React.ReactElement {
   const [detail, setDetail] = useState<GitCommitDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Which file rows are expanded to show their diff.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const paneRef = useRef<HTMLDivElement | null>(null);
+
+  // Take focus on open so the arrow keys step through commits right away — but
+  // only when nothing else holds it, so an editor or a composer the user is
+  // typing in is never interrupted. Clicking a history row leaves focus on
+  // <body>, which is exactly the case this covers.
+  useEffect(() => {
+    const active = document.activeElement;
+    if (active === null || active === document.body) paneRef.current?.focus();
+  }, []);
+
+  // Scoped to the pane, so this cannot collide with arrow-key handling
+  // anywhere else in the workbench.
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === "ArrowLeft" && onNewer) {
+      event.preventDefault();
+      onNewer();
+    } else if (event.key === "ArrowRight" && onOlder) {
+      event.preventDefault();
+      onOlder();
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -102,7 +134,18 @@ export default function CommitDetail({ cwd, hash, onClose }: Props): React.React
   }, [files]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+    <div
+      ref={paneRef}
+      tabIndex={-1}
+      onKeyDown={handleKeyDown}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        minHeight: 0,
+        outline: "none",
+      }}
+    >
       <div
         style={{
           flex: "0 0 auto",
@@ -195,7 +238,47 @@ export default function CommitDetail({ cwd, hash, onClose }: Props): React.React
           </>
         ) : null}
       </div>
+
+      <div
+        style={{
+          flex: "0 0 auto",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "6px 8px",
+          borderTop: "1px solid var(--rule-soft)",
+        }}
+      >
+        <StepButton label="← Newer" title="Inspect the next newer commit" onClick={onNewer} />
+        <span style={{ flex: 1 }} />
+        <StepButton label="Older →" title="Inspect the next older commit" onClick={onOlder} />
+      </div>
     </div>
+  );
+}
+
+// One end of the commit stepper. Disabled rather than hidden at the ends of the
+// history list, so the footer never changes shape as the user walks it.
+function StepButton({
+  label,
+  title,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  onClick: (() => void) | null;
+}): React.ReactElement {
+  return (
+    <button
+      type="button"
+      className="spark-btn"
+      title={onClick ? title : "No further commits in the loaded history"}
+      disabled={onClick === null}
+      onClick={() => onClick?.()}
+      style={{ height: 22, padding: "0 9px", fontSize: 10.5, fontWeight: 650 }}
+    >
+      {label}
+    </button>
   );
 }
 

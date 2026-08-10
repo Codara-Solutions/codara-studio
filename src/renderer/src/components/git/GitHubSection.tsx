@@ -17,7 +17,10 @@ import { IconButton, RefreshIcon, Spinner } from "./git-ui";
 interface Props {
   cwd: string;
   gitStatus: GitStatus;
+  /** Bumped by local git activity — re-reads GitHub silently (no spinner). */
   refreshKey: number;
+  /** Bumped by the user (refresh button, publish, merge) — re-reads loudly. */
+  userRefreshKey: number;
   /** Present for local workspaces: the repository-wide issue/PR list. */
   queue: {
     sourceWorkspaceId: string;
@@ -34,10 +37,16 @@ interface Snapshot {
   status: GitHubWorkspaceStatus;
 }
 
+// GitHub is read through the `gh` CLI, so the block never polls hard. Focus,
+// local git activity and the user's own actions carry the refresh; this slow
+// fallback only covers a window left open and untouched.
+const STATUS_FALLBACK_REFRESH_MS = 300_000;
+
 export default function GitHubSection({
   cwd,
   gitStatus,
   refreshKey,
+  userRefreshKey,
   queue,
   onRefresh,
   onPublished,
@@ -82,33 +91,79 @@ export default function GitHubSection({
     markReadyRequestId.current += 1;
     setMarkingReady(false);
     setMarkReadyResult(null);
-  }, [cwd, currentBranch, refreshKey]);
+  }, [cwd, currentBranch, refreshKey, userRefreshKey]);
 
-  useEffect(() => {
-    const id = ++requestId.current;
-    setLoading(true);
-    void window.spark.github
-      .status(cwd)
-      .then((status) => {
-        if (requestId.current === id) setSnapshot({ cwd, status });
-      })
-      .catch(() => {
-        if (requestId.current !== id) return;
-        setSnapshot({
-          cwd,
-          status: {
-            kind: "error",
-            message: "GitHub status could not be loaded. Try refreshing Source Control.",
-          },
+  // One read of the workspace's GitHub status. A silent read never raises the
+  // spinner and never downgrades a good snapshot to an error — the user has
+  // not asked for anything, so a background failure stays invisible.
+  const loadStatus = useCallback(
+    (silent: boolean): void => {
+      const id = ++requestId.current;
+      if (!silent) setLoading(true);
+      void window.spark.github
+        .status(cwd)
+        .then((status) => {
+          if (requestId.current === id) setSnapshot({ cwd, status });
+        })
+        .catch(() => {
+          if (requestId.current !== id) return;
+          setSnapshot((current) => {
+            if (silent && current?.cwd === cwd) return current;
+            return {
+              cwd,
+              status: {
+                kind: "error",
+                message: "GitHub status could not be loaded. Try refreshing Source Control.",
+              },
+            };
+          });
+        })
+        .finally(() => {
+          if (requestId.current === id) setLoading(false);
         });
-      })
-      .finally(() => {
-        if (requestId.current === id) setLoading(false);
-      });
+    },
+    [cwd],
+  );
+
+  // A new workspace or branch has no snapshot yet, so that read is loud.
+  useEffect(() => {
+    loadStatus(false);
     return () => {
-      if (requestId.current === id) requestId.current += 1;
+      requestId.current += 1;
     };
-  }, [cwd, currentBranch, refreshKey]);
+  }, [loadStatus, currentBranch]);
+
+  // Both keys are watched together: the panel's own refresh bumps the user key
+  // and the git version at once, and this must be one read, not two. A read the
+  // user asked for (refresh button, publish, merge) is loud; one that only
+  // follows local git activity — a commit, a push, a branch switch — is silent.
+  const lastKeys = useRef({ refreshKey, userRefreshKey });
+  useEffect(() => {
+    const previous = lastKeys.current;
+    if (previous.refreshKey === refreshKey && previous.userRefreshKey === userRefreshKey) {
+      return;
+    }
+    const loud = previous.userRefreshKey !== userRefreshKey;
+    lastKeys.current = { refreshKey, userRefreshKey };
+    loadStatus(!loud);
+  }, [loadStatus, refreshKey, userRefreshKey]);
+
+  // Coming back to the window is the strongest signal that GitHub may have
+  // moved on without us; the slow interval only covers a window left open.
+  // Both stay quiet, and neither runs while the block is collapsed.
+  useEffect(() => {
+    if (collapsed) return;
+    const silentRefresh = (): void => {
+      if (document.visibilityState !== "visible") return;
+      loadStatus(true);
+    };
+    const timer = window.setInterval(silentRefresh, STATUS_FALLBACK_REFRESH_MS);
+    window.addEventListener("focus", silentRefresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", silentRefresh);
+    };
+  }, [collapsed, loadStatus]);
 
   const status = snapshot?.cwd === cwd ? snapshot.status : null;
 
@@ -229,7 +284,9 @@ export default function GitHubSection({
             <RefreshIcon />
           </IconButton>
         </span>
-        {count !== null ? (
+        {count !== null && count > 0 ? (
+          // Nothing open is already said in the body copy, so zero shows no
+          // badge at all — the header stays quiet until there is work.
           <span
             style={{
               fontFamily: "var(--font-mono)",
@@ -240,7 +297,7 @@ export default function GitHubSection({
               textAlign: "right",
             }}
           >
-            {String(count).padStart(2, "0")}
+            {count}
           </span>
         ) : null}
       </div>
