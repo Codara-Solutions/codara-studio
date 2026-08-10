@@ -8,6 +8,7 @@ import { statusToneColor } from "./chat/timeline";
 import { MinusIcon, PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
+import AnchoredMenu from "./chat/composer/AnchoredMenu";
 import {
   PANEL_HEADER_H,
   PANEL_SECTION_KEYS,
@@ -1416,7 +1417,7 @@ function WorkspaceRow({
   const [moreHover, setMoreHover] = useState(false);
   const [moreFocus, setMoreFocus] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const menuWrapRef = useRef<HTMLDivElement | null>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
   // In-flight color while the OS color dialog is open. The native
   // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
   // during a drag. We keep the live value here for a LOCAL preview only — just
@@ -1506,24 +1507,6 @@ function WorkspaceRow({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (menuWrapRef.current && e.target instanceof Node && !menuWrapRef.current.contains(e.target)) {
-        setMenuOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
 
   const commitName = () => {
     const v = name.trim();
@@ -1774,8 +1757,9 @@ function WorkspaceRow({
           </div>
         )}
 
-        <div ref={menuWrapRef} style={{ position: "relative", flex: "0 0 18px" }}>
+        <div style={{ flex: "0 0 18px" }}>
           <button
+            ref={menuBtnRef}
             type="button"
             onClick={(e) => {
               e.stopPropagation();
@@ -1842,24 +1826,17 @@ function WorkspaceRow({
               </svg>
             )}
           </button>
-          {menuOpen && !editing && (
-            <div
-              role="menu"
-              className="spark-menu"
-              style={{
-                position: "absolute",
-                top: 24,
-                right: 0,
-                minWidth: 168,
-                maxWidth: 240,
-                maxHeight: 280,
-                overflowY: "auto",
-                padding: 4,
-                zIndex: 20,
-                display: "grid",
-                gap: 2,
-              }}
-            >
+          <AnchoredMenu
+            anchorRef={menuBtnRef}
+            open={menuOpen && !editing}
+            onClose={() => setMenuOpen(false)}
+            className="spark-menu"
+            role="menu"
+            ariaLabel="Workspace actions"
+            placement="below"
+            align="end"
+          >
+            <div style={{ minWidth: 168, maxWidth: 240, padding: 4, display: "grid", gap: 2 }}>
               <RowMenuItem
                 label="Edit"
                 onClick={() => {
@@ -1885,7 +1862,7 @@ function WorkspaceRow({
                 }}
               />
             </div>
-          )}
+          </AnchoredMenu>
         </div>
       </div>
     </div>
