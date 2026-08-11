@@ -3704,6 +3704,14 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         for (const call of draft.sparkCalls) {
           if (!orphanedIds.has(call.id) || call.status !== "started") continue;
 
+          // A crash while a wait_for_workers call was parked leaves the
+          // renderer flag stamped on a call this pass is about to settle or
+          // fail; no wait survives a restart, so clear it with the orphan.
+          if (call.parkedInWaitForWorkers !== undefined) {
+            delete call.parkedInWaitForWorkers;
+            changed = true;
+          }
+
           const receipt = codaraCompleteReceiptForCall(call);
           if (receipt) {
             const settled = applyAtomicManagerCallSettlement(
@@ -5482,23 +5490,43 @@ export async function enterManagerWaitPark(
     refs: 1,
     wakeWaiters: new Set(),
   });
-  // One commit per wait entry (not per poll): the flag rides the ordinary run
-  // update stream so the composer flips to "Send" while Cora is parked.
-  await commitRunChange(run, {
-    type: "run.manager_wait_parked",
-    message: "Cora is parked in wait_for_workers; user messages now deliver mid-turn",
-    sparkCallId: call.id,
-    payload: { callId: call.id, conversationEpoch: epoch },
-    mutate: (draft, timestamp) => {
-      if (conversationEpoch(draft) !== epoch) return false;
-      const target = draft.sparkCalls.find(
-        (entry) => entry.id === call.id && entry.status === "started" && !entry.completedAt,
-      );
-      if (!target || target.parkedInWaitForWorkers === true) return false;
-      target.parkedInWaitForWorkers = true;
-      draft.updatedAt = timestamp;
-    },
-  });
+  try {
+    // One commit per wait entry (not per poll): the flag rides the ordinary run
+    // update stream so the composer flips to "Send" while Cora is parked.
+    await commitRunChange(run, {
+      type: "run.manager_wait_parked",
+      message: "Cora is parked in wait_for_workers; user messages now deliver mid-turn",
+      sparkCallId: call.id,
+      payload: { callId: call.id, conversationEpoch: epoch },
+      mutate: (draft, timestamp) => {
+        if (conversationEpoch(draft) !== epoch) return false;
+        const target = draft.sparkCalls.find(
+          (entry) => entry.id === call.id && entry.status === "started" && !entry.completedAt,
+        );
+        if (!target || target.parkedInWaitForWorkers === true) return false;
+        target.parkedInWaitForWorkers = true;
+        draft.updatedAt = timestamp;
+      },
+    });
+  } catch (error) {
+    // A failed commit means the caller gets no token (agent-socket's
+    // enterManagerWaitPark(...).catch(() => null)), so its finally never runs
+    // exitManagerWaitPark. Without this rollback the fresh entry would leak
+    // for the process lifetime and runHasParkedManagerWait would keep the
+    // steering-followup arm guard permanently on for the run. Decrement
+    // instead of blind-delete: a concurrent enter may have piggybacked on the
+    // entry while the commit was in flight.
+    const inserted = parkedManagerWaits.get(call.id);
+    if (inserted) {
+      inserted.refs -= 1;
+      if (inserted.refs <= 0) {
+        for (const wake of inserted.wakeWaiters) wake();
+        inserted.wakeWaiters.clear();
+        parkedManagerWaits.delete(call.id);
+      }
+    }
+    throw error;
+  }
   return token;
 }
 
@@ -5522,19 +5550,36 @@ export async function exitManagerWaitPark(token: ParkedManagerWaitToken): Promis
   const flagged = run.sparkCalls.some(
     (entry2) => entry2.id === token.callId && entry2.parkedInWaitForWorkers === true,
   );
-  if (!flagged) return;
-  await commitRunChange(run, {
-    type: "run.manager_wait_unparked",
-    message: "Cora left wait_for_workers; new user messages queue for the next turn",
-    sparkCallId: token.callId,
-    payload: { callId: token.callId, conversationEpoch: token.conversationEpoch },
-    mutate: (draft, timestamp) => {
-      const target = draft.sparkCalls.find((entry2) => entry2.id === token.callId);
-      if (!target || target.parkedInWaitForWorkers !== true) return false;
-      delete target.parkedInWaitForWorkers;
-      draft.updatedAt = timestamp;
-    },
-  });
+  if (flagged) {
+    await commitRunChange(run, {
+      type: "run.manager_wait_unparked",
+      message: "Cora left wait_for_workers; new user messages queue for the next turn",
+      sparkCallId: token.callId,
+      payload: { callId: token.callId, conversationEpoch: token.conversationEpoch },
+      mutate: (draft, timestamp) => {
+        const target = draft.sparkCalls.find((entry2) => entry2.id === token.callId);
+        if (!target || target.parkedInWaitForWorkers !== true) return false;
+        delete target.parkedInWaitForWorkers;
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
+  // Steering that arrived while parked was NOT armed as a follow-up
+  // (addRunMessage skips arming under runHasParkedManagerWait, expecting the
+  // wait's claim to consume it). If the wait exits without claiming - client
+  // disconnected before the response, run vanished mid-wait, or the message
+  // landed in the same instant the deadline hit - nothing owns it on the
+  // failure paths (releaseUnsubmittedManagerInput only requeues CLAIMED input,
+  // and the settlement re-arm runs only on success). Re-arm here, once the
+  // registry no longer reports a parked wait, restoring exactly the pre-park
+  // queue-then-follow-up semantics; the scheduler re-reads and no-ops when a
+  // turn start or another wait consumed the queue first.
+  if (!runHasParkedManagerWait(token.runId)) {
+    const latest = await getRun(token.runId);
+    if (latest && hasQueuedSteering(latest)) {
+      scheduleQueuedSteeringFollowup(latest);
+    }
+  }
 }
 
 /** True while any wait_for_workers call is parked for this run. */
@@ -5556,6 +5601,25 @@ function wakeParkedManagerWaits(runId: string): void {
 }
 
 /**
+ * The one deliverability predicate the sleep fast-path and the claim share: a
+ * parked token can deliver only onto ITS call while that call is still live in
+ * its own epoch. The sleep must not use anything weaker: skipping the sleep on
+ * "queued input exists" alone spins the wait handler's poll loop at CPU speed
+ * when the turn dies in the SAME epoch with the MCP socket still open (turn
+ * timeout, provider error) - the claim then returns null forever while the
+ * fast-path keeps returning immediately.
+ */
+function parkedWaitCallIsLive(run: RunState, token: ParkedManagerWaitToken): boolean {
+  return run.sparkCalls.some(
+    (entry) =>
+      entry.id === token.callId &&
+      (entry.conversationEpoch ?? 0) === token.conversationEpoch &&
+      entry.status === "started" &&
+      !entry.completedAt,
+  );
+}
+
+/**
  * The parked poll loop's sleep primitive. Resolves after `ms`, or EARLY the
  * moment a user message lands on the run (or the wait unparks), so a steering
  * message never sits out the poll interval. Skips sleeping entirely when
@@ -5570,10 +5634,15 @@ export async function sleepForParkedManagerWait(
     await new Promise<void>((resolve) => setTimeout(resolve, ms));
     return;
   }
+  // Fast-path only when the pending input is actually DELIVERABLE by this
+  // token (same predicate as the claim). Queued input against a dead call
+  // must sleep normally, or the poll loop spins at CPU speed until the wait
+  // deadline (see parkedWaitCallIsLive).
   const run = await getRun(token.runId);
   if (
     run &&
     conversationEpoch(run) === token.conversationEpoch &&
+    parkedWaitCallIsLive(run, token) &&
     queuedManagerInputMessages(run).length > 0
   ) {
     return;
@@ -5610,6 +5679,10 @@ export async function claimQueuedInputForParkedManagerWait(
 ): Promise<{ text: string; messageIds: string[] } | null> {
   const run = await getRun(token.runId);
   if (!run || conversationEpoch(run) !== token.conversationEpoch) return null;
+  // Cheap pre-checks off the cached run (authoritatively re-checked in the
+  // mutate): a dead call or an empty queue must not enqueue a run mutation on
+  // every poll iteration.
+  if (!parkedWaitCallIsLive(run, token)) return null;
   if (queuedManagerInputMessages(run).length === 0) return null;
   let claimedIds: string[] = [];
   const updated = await commitRunChange(run, {

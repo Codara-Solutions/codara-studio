@@ -3161,6 +3161,10 @@ async function handleOrchestratorWaitForWorkers(
   try {
     while (Date.now() < deadline) {
       // Client hung up - stop polling rather than block the loop for ~20 min.
+      // Any steering still queued (unclaimed - claimUserInput refuses once the
+      // client is gone) is NOT stranded by this return: the finally below runs
+      // exitManagerWaitPark, which re-arms the steering follow-up scheduler
+      // when queued steering remains and no other wait is parked.
       if (clientGone(res)) {
         return errorResponse(id, ERR_INTERNAL, "wait_for_workers aborted: client disconnected");
       }

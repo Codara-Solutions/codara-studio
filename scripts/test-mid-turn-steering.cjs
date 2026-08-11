@@ -613,6 +613,213 @@ async function main() {
     ),
   );
 
+  // ── 8. NO SPIN: queued input against a DEAD same-epoch call must sleep ───
+  // The reported hazard: the turn dies in the SAME epoch while the wait's MCP
+  // socket stays open (turn timeout, provider error). The claim then returns
+  // null forever, and a sleep fast-path keyed only on "queued input exists"
+  // would return immediately every iteration - a CPU-speed loop of
+  // snapshotWorkers + run reads until the wait deadline. Reproduced through
+  // the REAL death path (the stub turn throws, askManagerBackend fails the
+  // call in place without an epoch bump) and then executing the wait
+  // handler's exact per-iteration primitive sequence (claim, then sleep).
+  const STEER_E = "Drop the migration step, the schema is already live";
+  const runE = writeRun(pausedRun("run-mid-turn-dead-call-spin"));
+  const scenarioE = {};
+  const driverEEntered = gate();
+  const releaseDriverE = gate();
+  managerBehavior.set(runE, async (calls) => {
+    if (calls.length === 1) {
+      // Park, then die without claiming and WITHOUT exiting: the wait's poll
+      // loop is still running when a real turn dies under it.
+      scenarioE.token = await runStore.enterManagerWaitPark(runE);
+      throw new Error("stub provider died while the wait stayed parked");
+    }
+    if (calls.length === 2) {
+      driverEEntered.open();
+      await releaseDriverE.opened;
+    }
+    return askUserResult();
+  });
+  await runStore.resumeRun({ runId: runE }).catch(() => undefined);
+  check("the spin scenario parked before its turn died", Boolean(scenarioE.token));
+  check(
+    "the fallback driver turn dispatched and is gated",
+    await gateOpened(driverEEntered),
+  );
+  const deadStateE = readRun(runE);
+  const deadCallE = deadStateE.sparkCalls.find((call) => call.id === scenarioE.token?.callId);
+  check(
+    "the parked token's call is dead in the SAME epoch (the spin precondition)",
+    deadCallE?.status === "failed" &&
+      (deadStateE.conversationEpoch ?? 0) === scenarioE.token?.conversationEpoch,
+    JSON.stringify({ status: deadCallE?.status, epoch: deadStateE.conversationEpoch }),
+  );
+  await runStore.addRunMessage({
+    runId: runE,
+    author: "user",
+    kind: "note",
+    message: STEER_E,
+  });
+  const queuedE = readRun(runE).humanMessages.find((message) => message.message === STEER_E);
+  check(
+    "the message stays queued (arm guard active, driver turn already started)",
+    queuedE?.deliveryState === "queued" && !queuedE?.backendTurnId,
+    JSON.stringify({ deliveryState: queuedE?.deliveryState, backendTurnId: queuedE?.backendTurnId }),
+  );
+  check("the registry still reports the parked wait", runStore.runHasParkedManagerWait(runE));
+  const deadSleepStart = Date.now();
+  await runStore.sleepForParkedManagerWait(scenarioE.token, 350);
+  const deadSleepElapsed = Date.now() - deadSleepStart;
+  check(
+    "queued input against a dead call does NOT fast-path the sleep",
+    deadSleepElapsed >= 300,
+    `elapsed=${deadSleepElapsed}ms (timer was 350ms)`,
+  );
+  // The wait handler's real per-iteration sequence, bounded: with the fix the
+  // sleep throttles every iteration to its full timer, so a 1200ms window
+  // holds at most a handful of iterations. Under the reverted fix this counts
+  // hundreds (the sleep returns immediately) and the check fails.
+  let spinIterations = 0;
+  let spinClaimed = null;
+  const spinWindowStart = Date.now();
+  while (Date.now() - spinWindowStart < 1200) {
+    spinIterations += 1;
+    spinClaimed = await runStore.claimQueuedInputForParkedManagerWait(scenarioE.token);
+    if (spinClaimed) break;
+    await runStore.sleepForParkedManagerWait(scenarioE.token, 300);
+  }
+  check(
+    "the poll loop over a dead call is throttled to its sleep interval",
+    spinIterations <= 6 && spinClaimed === null,
+    `iterations=${spinIterations} in 1200ms, claimed=${JSON.stringify(spinClaimed)}`,
+  );
+  await runStore.exitManagerWaitPark(scenarioE.token);
+  check("the spin scenario exits its park cleanly", runStore.runHasParkedManagerWait(runE) === false);
+  releaseDriverE.open();
+  // The queued message is still owed to the manager: answering the driver
+  // turn's question must drain it into the next turn (never lost).
+  const questionArrivedE = await waitFor(() =>
+    readRun(runE).humanMessages.some(
+      (message) => message.author === "spark" && message.kind === "question" && !message.answersMessageId,
+    ),
+  );
+  check("the gated driver settles on its question", questionArrivedE);
+  const questionE = [...readRun(runE).humanMessages]
+    .reverse()
+    .find((message) => message.author === "spark" && message.kind === "question");
+  if (questionE) {
+    await runStore
+      .answerRunQuestion({
+        runId: runE,
+        questionMessageId: questionE.id,
+        message: "Understood, continue.",
+      })
+      .catch(() => undefined);
+    const drainedE = await waitFor(() =>
+      callsFor(runE).some((call) => call.prompt.includes(STEER_E)),
+    );
+    check("the survivor message drains into the next real turn", drainedE);
+  }
+
+  // ── 9. exit re-arms the follow-up for steering the wait never claimed ────
+  // The clientGone return path: the wait exits without claiming (claimUserInput
+  // refuses once the client is gone) while a steering message sits queued and
+  // the arm guard already skipped its follow-up. exitManagerWaitPark must
+  // re-arm the scheduler or the message strands until the user acts.
+  const STEER_F = "Rename the flag before anyone depends on it";
+  const runF = writeRun(
+    pausedRun("run-mid-turn-exit-nudge", {
+      status: "running",
+      autopilot: { status: "running", lastAction: "resumed_by_user", updatedAt: PAUSED_AT },
+      sparkCalls: [
+        {
+          id: "spark-live-nudge",
+          runId: "run-mid-turn-exit-nudge",
+          mode: "chat",
+          model: "stub-model",
+          status: "started",
+          inputMessageIds: [],
+          conversationEpoch: 1,
+          createdAt: PAUSED_AT,
+        },
+      ],
+    }),
+  );
+  const tokenF = await runStore.enterManagerWaitPark(runF);
+  check("the nudge scenario parks on the live fabricated call", tokenF?.callId === "spark-live-nudge");
+  await runStore.addRunMessage({
+    runId: runF,
+    author: "user",
+    kind: "note",
+    message: STEER_F,
+  });
+  await sleep(300);
+  check(
+    "while parked, the queued steering arms no follow-up turn",
+    callsFor(runF).length === 0,
+    `calls=${callsFor(runF).length}`,
+  );
+  await runStore.exitManagerWaitPark(tokenF);
+  const nudgedF = await waitFor(() =>
+    callsFor(runF).some((call) => call.prompt.includes(STEER_F)),
+  );
+  check(
+    "exiting the park without claiming re-arms the steering follow-up",
+    nudgedF,
+    JSON.stringify(callsFor(runF).map((call) => call.prompt.slice(0, 60))),
+  );
+
+  // ── 10. a failed park commit never leaks its registry entry ──────────────
+  // enterManagerWaitPark inserts the map entry BEFORE its awaited commit; the
+  // wait handler swallows the throw into parked=null, so its finally never
+  // exits the park. A leaked entry would keep runHasParkedManagerWait true for
+  // the process lifetime and permanently disable steering follow-ups for the
+  // run. Forced here with a real commit failure: the run directory is made
+  // read-only so saveRun throws.
+  const runG = writeRun(
+    pausedRun("run-mid-turn-enter-rollback", {
+      status: "running",
+      autopilot: { status: "running", lastAction: "resumed_by_user", updatedAt: PAUSED_AT },
+      sparkCalls: [
+        {
+          id: "spark-live-rollback",
+          runId: "run-mid-turn-enter-rollback",
+          mode: "chat",
+          model: "stub-model",
+          status: "started",
+          inputMessageIds: [],
+          conversationEpoch: 1,
+          createdAt: PAUSED_AT,
+        },
+      ],
+    }),
+  );
+  // Prime the cache while the directory is still writable.
+  await runStore.getRun(runG);
+  const runGDir = path.join(HOME, "runs", runG);
+  fs.chmodSync(runGDir, 0o555);
+  let enterFailed = null;
+  try {
+    await runStore.enterManagerWaitPark(runG);
+  } catch (error) {
+    enterFailed = error;
+  } finally {
+    fs.chmodSync(runGDir, 0o755);
+  }
+  check(
+    "a failed park commit rethrows to the caller (the wait degrades to unparked)",
+    enterFailed !== null,
+    "enterManagerWaitPark resolved despite the failed commit",
+  );
+  check(
+    "a failed park commit rolls the registry entry back (no leak)",
+    runStore.runHasParkedManagerWait(runG) === false,
+  );
+  // The registry stays healthy: the same run parks fine once the disk works.
+  const retryTokenG = await runStore.enterManagerWaitPark(runG);
+  check("the run parks normally after the failed attempt", Boolean(retryTokenG));
+  if (retryTokenG) await runStore.exitManagerWaitPark(retryTokenG);
+
   // ── negative controls on the primitives ──────────────────────────────────
   const idleId = writeRun(pausedRun("run-mid-turn-idle"));
   check(
@@ -668,6 +875,16 @@ async function main() {
   check(
     "addRunMessage's follow-up arming is guarded by the parked-wait registry",
     /recordedIntent === "steer" &&\s*\n\s*!runHasParkedManagerWait\(updated\.id\) &&/.test(storeSource),
+  );
+  check(
+    "the sleep fast-path requires the token's call to be live (the anti-spin pin)",
+    /parkedWaitCallIsLive\(run, token\) &&\s*\n\s*queuedManagerInputMessages\(run\)\.length > 0/.test(storeSource),
+  );
+  check(
+    "orphan recovery clears the parked flag off crashed calls",
+    /if \(call\.parkedInWaitForWorkers !== undefined\) \{\s*\n\s*delete call\.parkedInWaitForWorkers;/.test(
+      storeSource,
+    ),
   );
   check(
     "addRunMessage wakes parked waits for every recorded user message",
