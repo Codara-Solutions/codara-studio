@@ -445,6 +445,16 @@ export interface RemoteCoraStep {
 export interface RemoteCoraRunTruncation {
   messagesOmitted?: number;
   workersOmitted?: number;
+  /**
+   * How many of the omitted workers were still RUNNING. Almost always zero:
+   * the roster is filled actives-first and topped up with the newest settled
+   * attempts, so `workersOmitted` on a long run just means "old finished
+   * attempts scrolled off", which says nothing about whether the live picture
+   * is complete. A remote graph that needs a complete live fan — the peers
+   * thread does — must read this and not `workersOmitted`. Omitted when zero,
+   * so its mere presence is the signal.
+   */
+  activeWorkersOmitted?: number;
   stepsOmitted?: number;
   lastMessageOmitted?: true;
   workerDetailsOmitted?: true;

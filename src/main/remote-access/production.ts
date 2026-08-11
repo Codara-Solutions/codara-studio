@@ -1911,6 +1911,14 @@ function toRemoteRunSummary(
 function toRemoteRunWorkers(run: RunState): {
   workers: RemoteCoraWorker[];
   total: number;
+  /**
+   * How many still-running attempts did not make the roster. Zero on every
+   * ordinary run, however long: actives are placed first and only the settled
+   * tail is trimmed. It is only non-zero when there are genuinely more live
+   * workers than the roster can carry, which is the one case a remote client
+   * cannot reconstruct a step's live fan from what it received.
+   */
+  activeOmitted: number;
 } {
   const tasks = new Map(run.workerTasks.map((task) => [task.id, task]));
   const toWorker = (
@@ -1992,7 +2000,15 @@ function toRemoteRunWorkers(run: RunState): {
     bounded.push(worker);
     usedBytes += bytes;
   }
-  return { workers: bounded, total: run.workerAttempts.length };
+  // Counted from the rows that survived rather than from the cap, so every way
+  // an active attempt can fall out is caught at once: the roster cap, the byte
+  // bound, and toWorker rejecting a malformed attempt record outright.
+  const rosterIds = new Set(bounded.map((worker) => worker.id));
+  const activeOmitted = Math.max(
+    0,
+    active.filter((attempt) => !rosterIds.has(attempt.id)).length,
+  );
+  return { workers: bounded, total: run.workerAttempts.length, activeOmitted };
 }
 
 // Steps a step will never leave: the plan progress line counts all three as
@@ -2188,6 +2204,13 @@ function toRemoteRun(
   );
   const truncation = {
     ...(workersOmitted > 0 ? { workersOmitted } : {}),
+    // Only ever emitted when a LIVE worker is missing. `workersOmitted` alone
+    // is the ordinary long-run shape (old finished attempts scrolled off the
+    // roster) and must not be read as an incomplete live fan; this is the
+    // field that says so. See RemoteCoraRunTruncation.
+    ...(workerProjection.activeOmitted > 0
+      ? { activeWorkersOmitted: workerProjection.activeOmitted }
+      : {}),
     ...(stepsOmitted > 0 ? { stepsOmitted } : {}),
     ...(blockedQuestionBodyTruncated
       ? { blockedQuestionBodyTruncated: true as const }

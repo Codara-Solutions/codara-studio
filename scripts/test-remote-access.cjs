@@ -1161,6 +1161,26 @@ async function main() {
       rpcSource.includes("peerComms?: boolean;"),
   );
   check(
+    // The roster is filled actives-first and topped up with the newest settled
+    // attempts, so `workersOmitted` on a long run means "old finished attempts
+    // scrolled off" and says NOTHING about the live picture. A remote graph
+    // that needs a complete live fan (the peers thread does) reads this field
+    // instead, so it has to be counted from the rows that actually survived —
+    // catching the roster cap, the byte bound and a rejected attempt record
+    // alike — and emitted only when a LIVE worker is genuinely missing.
+    "the roster reports omitted LIVE workers apart from the settled tail",
+    productionSource.includes(
+      "const rosterIds = new Set(bounded.map((worker) => worker.id));",
+    ) &&
+      productionSource.includes(
+        "active.filter((attempt) => !rosterIds.has(attempt.id)).length",
+      ) &&
+      productionSource.includes(
+        "...(workerProjection.activeOmitted > 0\n      ? { activeWorkersOmitted: workerProjection.activeOmitted }\n      : {}),",
+      ) &&
+      rpcSource.includes("activeWorkersOmitted?: number;"),
+  );
+  check(
     // The arithmetic itself is a pure module so test-remote-cora-contract can
     // bundle it and run the real table — a source-shape assertion here could
     // not tell a correct denominator from a swapped ternary. All this pins is
@@ -3430,6 +3450,7 @@ async function main() {
     let coraHistoryTitle = "Remote work";
     let coraWorkerActivity = "Read src/main/index.ts";
     let coraWorkerPeerComms = false;
+    let coraRunTruncation = null;
     let coraRunContext = null;
     let fastModeSetting = false;
     let sharedTerminal = null;
@@ -3902,6 +3923,7 @@ async function main() {
             },
           ],
           ...(coraRunContext ? { context: coraRunContext } : {}),
+          ...(coraRunTruncation ? { truncation: coraRunTruncation } : {}),
         };
         return {
           run,
@@ -5278,6 +5300,51 @@ async function main() {
         ex.outbox.at(-1)?.result?.run?.workers?.[0]?.peerComms === true,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    // A long run scrolls old FINISHED attempts off a roster that is filled
+    // actives-first, so `workersOmitted` on its own says nothing about whether
+    // the live fan is complete — and a remote graph that treated it as if it
+    // did would switch its team thread off permanently after twelve lifetime
+    // attempts. `activeWorkersOmitted` is the field that answers the question,
+    // and it must stay absent for exactly this shape.
+    const peerRevision = ex.outbox.at(-1)?.result?.revision;
+    coraRunTruncation = { workersOmitted: 14 };
+    exReq(820, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: peerRevision,
+    });
+    await flush();
+    const scrolledRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "a long run's scrolled-off settled attempts claim no missing live worker",
+      ex.outbox.at(-1)?.result?.run?.truncation?.workersOmitted === 14 &&
+        ex.outbox.at(-1)?.result?.run?.truncation?.activeWorkersOmitted ===
+          undefined &&
+        !(
+          "activeWorkersOmitted" in
+          (ex.outbox.at(-1)?.result?.run?.truncation ?? {})
+        ),
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    // The genuinely incomplete live fan: more concurrent workers than the
+    // roster carries. Its arrival is a different projection, so the digest has
+    // to move or a parked phone would keep drawing a fan it no longer holds.
+    coraRunTruncation = { workersOmitted: 14, activeWorkersOmitted: 3 };
+    exReq(821, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: scrolledRevision,
+    });
+    await flush();
+    check(
+      "cora.get serializes activeWorkersOmitted and its arrival moves the revision",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string" &&
+        ex.outbox.at(-1)?.result?.revision !== scrolledRevision &&
+        ex.outbox.at(-1)?.result?.run?.truncation?.activeWorkersOmitted === 3,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    coraRunTruncation = null;
     coraWorkerPeerComms = false;
     coraRunContext = null;
     coraWorkerActivity = "Read src/main/index.ts";

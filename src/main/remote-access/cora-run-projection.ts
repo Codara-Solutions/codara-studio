@@ -150,6 +150,12 @@ export function pruneRemoteCoraRunBase(
 
   // Old settled workers are the first non-duplicated records to go. Active
   // identities and lifecycle status remain available as long as possible.
+  //
+  // That an ACTIVE row is never dropped here is load-bearing beyond taste:
+  // `truncation.activeWorkersOmitted` is counted upstream where the roster is
+  // built, and remote graphs read it to decide whether they hold a complete
+  // live fan. Dropping a live row in this loop without recounting would make
+  // that number a lie.
   while (overBudget() && base.workers?.some(isSettledWorker)) {
     const index = findLastIndex(base.workers, isSettledWorker);
     if (index < 0) break;
