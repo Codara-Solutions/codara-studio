@@ -1274,7 +1274,13 @@ async function main() {
     });
     check(
       "codara_complete rejects FEEDBACK without a newer passing verifier",
-      Boolean(failedVerifierComplete.error) && /newer passing verifier/i.test(failedVerifierComplete.error?.message ?? ""),
+      // Two refusal wordings since d2f4815 split the message: this fixture has
+      // a named blocking verifier ("does not cover its scope"), while a run
+      // with no verdict at all still gets the "newer passing verifier" text.
+      // Accept either, and require the blocking verifier be named when present.
+      Boolean(failedVerifierComplete.error) &&
+        /(newer passing verifier|does not cover its scope)/i.test(failedVerifierComplete.error?.message ?? "") &&
+        /verify async contract/.test(failedVerifierComplete.error?.message ?? ""),
       JSON.stringify(failedVerifierComplete).slice(0, 240),
     );
 
