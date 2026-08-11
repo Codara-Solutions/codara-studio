@@ -267,6 +267,55 @@ async function main() {
     contract.jsonUtf8Bytes(activityPruned) <= activityFullBytes - 400,
   );
 
+  // The run-level context gauge has no drop entry: two numbers that never grow
+  // with the run, against worker details and steps that do. It has to survive
+  // every stage of the prune ladder — from the first dropped activity line all
+  // the way down to a run stripped of its steps and blocked question — or the
+  // phone's meter would blank out exactly when the run got interesting.
+  const gaugeBase = {
+    ...activityBase,
+    steps: Array.from({ length: 12 }, () => ({
+      title: "\0".repeat(300),
+      status: "running",
+    })),
+    stepsTotal: 12,
+    stepsFinished: 0,
+    blockedQuestion: {
+      messageId: "message-5",
+      message: "q".repeat(4_096),
+    },
+    context: { usedTokens: 141_312, budgetTokens: 256_000 },
+  };
+  const gaugeFullBytes = contract.jsonUtf8Bytes(gaugeBase);
+  const gaugeBytes = gaugeFullBytes - contract.jsonUtf8Bytes({
+    ...gaugeBase,
+    context: undefined,
+  });
+  assert.equal(gaugeBytes, 54, "the gauge is ~60 bytes on the wire, not a page");
+  let deepestGaugePrune = gaugeBase;
+  for (const spend of [200, 400, 2_000, 8_000, 24_000]) {
+    deepestGaugePrune = projector.pruneRemoteCoraRunBase(
+      gaugeBase,
+      gaugeFullBytes - spend,
+    );
+    assert.deepEqual(
+      deepestGaugePrune.context,
+      { usedTokens: 141_312, budgetTokens: 256_000 },
+      `the context gauge survives ${spend} bytes of pressure`,
+    );
+    assert.ok(contract.jsonUtf8Bytes(deepestGaugePrune) <= gaugeFullBytes - spend);
+  }
+  // The deepest of those budgets spends the whole ladder — every worker detail,
+  // the entire plan, and part of the blocked question — and the gauge is still
+  // there, which is the whole point of leaving it off the drop order.
+  assert.equal(deepestGaugePrune.steps, undefined);
+  assert.equal(deepestGaugePrune.truncation.stepsOmitted, 12);
+  assert.equal(deepestGaugePrune.truncation.workerDetailsOmitted, true);
+  assert.equal(deepestGaugePrune.truncation.blockedQuestionBodyTruncated, true);
+  assert.ok(
+    deepestGaugePrune.blockedQuestion.message.length < 4_096,
+  );
+
   // A maximally-full run whose only prunable detail is the activity readout:
   // no lastMessage, no steps, no blockedQuestion, every worker still active.
   // The `workerDetailsOmitted` marker costs bytes of its own, so the drop loop

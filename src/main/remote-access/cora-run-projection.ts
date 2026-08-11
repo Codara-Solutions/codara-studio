@@ -160,6 +160,12 @@ export function pruneRemoteCoraRunBase(
   }
 
   // Remove descriptive worker details before identities or lifecycle state.
+  //
+  // Run-level optional fields deliberately have no drop entry of their own.
+  // `context` — the two-number context gauge — is ~60 bytes that do not grow
+  // with the run, so dropping it could never buy back what a single worker
+  // detail or step does, and losing it would blank a live meter on the phone
+  // for no measurable relief. It rides the run.
   const optionalWorkerFields = [
     // The live activity readout is the most volatile and least durable detail,
     // so it goes before the agent's lifecycle state.

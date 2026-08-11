@@ -1147,6 +1147,52 @@ async function main() {
       rpcSource.includes("runtimeActivity?: string;"),
   );
   {
+    const runContext =
+      productionSource.match(
+        /function toRemoteRunContext\([\s\S]*?\n\}/,
+      )?.[0] ?? "";
+    check(
+      // The phone renders a percentage, so a numerator or denominator picked
+      // differently from the desktop's composer pill would put two different
+      // numbers on the same conversation.
+      "the remote run context gauge reads the newest reported usage against the effective capacity",
+      runContext.includes(
+        "entry.promptTokens ?? entry.promptTokenEstimate",
+      ) &&
+        // Newest-first: a later turn that reported nothing must not shadow the
+        // last one that did.
+        /for \(let index = run\.sparkCalls\.length - 1; index >= 0; index -= 1\)/.test(
+          runContext,
+        ) &&
+        runContext.includes("chatContextCapacityTokens({") &&
+        runContext.includes(
+          "typeof call.contextWindowTokens === \"number\" && call.contextWindowTokens > 0",
+        ) &&
+        runContext.includes(
+          "effectiveChatOneMillionContext(chatBackend) && chatBackend === \"claude\"",
+        ) &&
+        runContext.includes("contextWindowForModel(call.model).tokens") &&
+        // compactAtTokens is never persisted, so the projection resolves the
+        // same launch override the Pi session was stamped with.
+        runContext.includes(
+          "resolveCompactAtTokens(\n      process.env.CODARA_PI_COMPACT_AT_TOKENS,\n    )",
+        ) &&
+        // Nothing partial ever reaches the wire.
+        runContext.includes("if (usedTokens === undefined || !call) return undefined;") &&
+        runContext.includes(
+          "if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return undefined;",
+        ),
+      runContext,
+    );
+    check(
+      "the run context gauge is omitted rather than zeroed, and the contract keeps it optional",
+      productionSource.includes("...(context ? { context } : {})") &&
+        rpcSource.includes(
+          "context?: { usedTokens: number; budgetTokens: number };",
+        ),
+    );
+  }
+  {
     const liveRunProjection = productionSource.slice(
       productionSource.indexOf("async function toRemoteAutomationLiveRun("),
       productionSource.indexOf("// The loom's detail:"),
@@ -3399,6 +3445,7 @@ async function main() {
     const calls = [];
     let coraHistoryTitle = "Remote work";
     let coraWorkerActivity = "Read src/main/index.ts";
+    let coraRunContext = null;
     let fastModeSetting = false;
     let sharedTerminal = null;
     const sharedTerminals = [];
@@ -3868,6 +3915,7 @@ async function main() {
                 : {}),
             },
           ],
+          ...(coraRunContext ? { context: coraRunContext } : {}),
         };
         return {
           run,
@@ -5171,6 +5219,51 @@ async function main() {
         ex.outbox.at(-1)?.result?.revision === activityRevision,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    // The context gauge is absent until a manager turn reports occupancy: an
+    // older Studio, or a chat that has never taken a turn, must send no key at
+    // all rather than a zeroed pair the phone would render as an empty meter.
+    check(
+      "cora.get omits run.context entirely while no turn has reported usage",
+      !("context" in (ex.outbox.at(-2)?.result?.run ?? {})) &&
+        ex.outbox.at(-2)?.result?.run?.id === "run-1",
+      { response: ex.outbox.at(-2) },
+    );
+    coraRunContext = { usedTokens: 128_000, budgetTokens: 256_000 };
+    exReq(817, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: activityRevision,
+    });
+    await flush();
+    const contextRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "cora.get serializes the run context gauge and its arrival moves the revision",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof contextRevision === "string" &&
+        contextRevision !== activityRevision &&
+        ex.outbox.at(-1)?.result?.run?.context?.usedTokens === 128_000 &&
+        ex.outbox.at(-1)?.result?.run?.context?.budgetTokens === 256_000,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    // A turn only ever grows usedTokens until compaction resets it; the poll
+    // has to see that movement or the phone's meter freezes at its first read.
+    coraRunContext = { usedTokens: 141_312, budgetTokens: 256_000 };
+    exReq(818, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: contextRevision,
+    });
+    await flush();
+    check(
+      "cora.get revision moves when only usedTokens moved",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string" &&
+        ex.outbox.at(-1)?.result?.revision !== contextRevision &&
+        ex.outbox.at(-1)?.result?.run?.context?.usedTokens === 141_312 &&
+        ex.outbox.at(-1)?.result?.run?.context?.budgetTokens === 256_000,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    coraRunContext = null;
     coraWorkerActivity = "Read src/main/index.ts";
     exReq(811, "cora.get", {
       workspaceId: "ws1",

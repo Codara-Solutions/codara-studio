@@ -473,6 +473,16 @@ export interface RemoteCoraRun extends RemoteCoraRunSummary {
   // Nodes on this chat's whiteboard. Only the count rides the run poll; the
   // diagram itself is fetched on demand through cora.whiteboard.get.
   whiteboardNodes?: number;
+  /**
+   * Context-window occupancy of the newest manager turn that reported any,
+   * measured against the EFFECTIVE ceiling this chat compacts at rather than
+   * the raw model window. Computed host-side from exactly the inputs the
+   * desktop composer's context pill uses, so a phone gauge can never disagree
+   * with the number on the desktop. `usedTokens` is truthful and may exceed
+   * `budgetTokens` right before a compaction lands — clamp for display, not on
+   * the wire. Absent when no turn has reported usage yet.
+   */
+  context?: { usedTokens: number; budgetTokens: number };
   /** Exact, content-free account of records omitted from this bounded DTO. */
   truncation?: RemoteCoraRunTruncation;
 }
