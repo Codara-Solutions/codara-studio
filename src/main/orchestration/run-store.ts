@@ -175,8 +175,10 @@ import {
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
 import {
+  countFollowUpLineageAttempts,
   reconcileAcceptedVerifierOnlySteps,
   rehomeSettledStepFeedbackRetry,
+  resolveFollowUpDestinationStep,
 } from "./step-lifecycle";
 import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
@@ -7874,7 +7876,11 @@ async function failManagerQuestionProtocol(
   });
 }
 
-async function applySparkManagerDecision(
+// Exported so harnesses can drive a manager decision without a provider:
+// scripts/test-followup-rehoming.cjs applies a worker_result_review verifier
+// follow-up to a settled run and asserts where the task lands. Production
+// callers stay inside this module.
+export async function applySparkManagerDecision(
   run: RunState,
   decision: SparkManagerDecision,
   mode: SparkCall["mode"],
@@ -8830,10 +8836,10 @@ async function applySparkManagerDecisionCurrent(
   for (const task of decision.tasks) {
     let stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
     if (!stepId && mode === "worker_result_review") {
-      const reopened = await maybeReopenCompletedStepForFollowUpTask(latest, task);
-      if (reopened) {
-        latest = reopened.run;
-        stepId = reopened.stepId;
+      const homed = await maybeHomeFollowUpTaskInCurrentStep(latest, task);
+      if (homed) {
+        latest = homed.run;
+        stepId = homed.stepId;
       }
     }
     if (!stepId) {
@@ -15279,7 +15285,30 @@ async function maybeQueueVerifierFeedbackRetry({
   const retriesUsed = reHomesToCurrentStep
     ? countFollowUpLineageAttempts(run, target)
     : countWorkerAttempts(run, target.id);
-  if (retriesUsed >= MAX_WORKER_ATTEMPTS) return null;
+  if (retriesUsed >= MAX_WORKER_ATTEMPTS) {
+    // Journal the decline. Without this the corrective loop simply stops and
+    // the task falls through to ordinary review, which reads in the timeline
+    // like the verdict was never acted on; the lineage count in particular is
+    // invisible from run.json alone.
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: target.stepId,
+      workerTaskId: target.id,
+      attemptId: attempt.id,
+      type: "autopilot.verifier_feedback_retry_capped",
+      message: `Verifier feedback not re-queued: "${target.title}" already used ${retriesUsed} of ${MAX_WORKER_ATTEMPTS} attempts`,
+      payload: {
+        targetTaskId: target.id,
+        verifierAttemptId: attempt.id,
+        retriesUsed,
+        maxAttempts: MAX_WORKER_ATTEMPTS,
+        countedAcrossFollowUpLineage: reHomesToCurrentStep,
+        correctivePrompt,
+      },
+    });
+    return null;
+  }
   // "Fast" means at most one corrective rework in code, not just in prose.
   // Count FEEDBACK-driven requeues specifically — countWorkerAttempts also
   // includes non-verification retries (e.g. environmental relaunches). The
@@ -15338,7 +15367,11 @@ async function maybeQueueVerifierFeedbackRetry({
     correctivePrompt,
     retriesUsed,
   };
-  return commitRunChange(run, {
+  // commitRunChange reads stepId/workerTaskId AFTER mutate runs, so the
+  // re-homing branch below retargets them onto the step and task the work
+  // actually landed in. Filing this under the settled step instead would put a
+  // "worker re-queued" row in the timeline of a step that is not running it.
+  const change: Parameters<typeof commitRunChange>[1] = {
     type: "autopilot.verifier_feedback_retry",
     stepId: target.stepId,
     workerTaskId: targetId,
@@ -15395,6 +15428,8 @@ async function maybeQueueVerifierFeedbackRetry({
         payload.followUpTaskId = rehomed.taskId;
         payload.reHomedFromStepId = targetTask.stepId;
         payload.createdStepForFollowUp = rehomed.createdStep;
+        change.stepId = rehomed.stepId;
+        change.workerTaskId = rehomed.taskId;
         draft.updatedAt = timestamp;
         return;
       }
@@ -15418,7 +15453,8 @@ async function maybeQueueVerifierFeedbackRetry({
       }
       draft.updatedAt = timestamp;
     },
-  });
+  };
+  return commitRunChange(run, change);
 }
 
 // Marks the report's newly-verified atomic claims green on the run (claim key ->
@@ -16381,27 +16417,6 @@ function countWorkerAttempts(run: RunState, taskId: string): number {
   return run.workerAttempts.filter((attempt) => attempt.workerTaskId === taskId).length;
 }
 
-/**
- * Attempts spent on one continuous line of work, following `followUpOfTaskId`
- * back through every task that continues an earlier one. A corrective rework
- * whose step already settled is re-homed onto a fresh follow-up task, so per-
- * task counting would restart the attempt budget on every round and the loop
- * would never hit MAX_WORKER_ATTEMPTS. The walk is bounded by a seen-set, so a
- * corrupted run whose links form a cycle terminates instead of hanging.
- */
-function countFollowUpLineageAttempts(run: RunState, task: WorkerTask): number {
-  const seen = new Set<string>();
-  let total = 0;
-  let cursor: WorkerTask | undefined = task;
-  while (cursor && !seen.has(cursor.id)) {
-    seen.add(cursor.id);
-    total += countWorkerAttempts(run, cursor.id);
-    const previousId: string | undefined = cursor.followUpOfTaskId;
-    cursor = previousId ? run.workerTasks.find((item) => item.id === previousId) : undefined;
-  }
-  return total;
-}
-
 // Pure selector with the downgrade reason exposed. pickAutopilotTasks wraps this
 // and discards the reason so its existing call sites keep their WorkerTask[]
 // semantics; only the launch site reads `downgrade` to emit an observability
@@ -16427,7 +16442,10 @@ function pickAutopilotTasksWithReason(run: RunState): {
   return selectAutopilotWave(candidates, evalMaxParallelWorkers());
 }
 
-function pickAutopilotTasks(run: RunState): WorkerTask[] {
+// Exported (pure, no I/O) so harnesses can assert against the REAL picker: any
+// path that homes a task in a step must home it where this selects, or the task
+// is queued into invisibility. scripts/test-followup-rehoming.cjs drives it.
+export function pickAutopilotTasks(run: RunState): WorkerTask[] {
   return pickAutopilotTasksWithReason(run).tasks;
 }
 
@@ -16528,55 +16546,68 @@ function resolveTaskStepId(
   return availableStepIds[0];
 }
 
-async function maybeReopenCompletedStepForFollowUpTask(
+// A manager-decision follow-up (verifier or corrective) that names a step which
+// has already completed. Trivial runs mark the impl step complete before the
+// verifier is queued, so dropping the task would ship unverified work - but the
+// completed step is history and must not be reopened to host it (the product
+// rule the verifier-feedback re-homing enforces). The follow-up is homed in the
+// CURRENT step instead, or in a worker_batch step appended for it, exactly like
+// the corrective rework. Returns the step the caller should create the task in.
+async function maybeHomeFollowUpTaskInCurrentStep(
   run: RunState,
   task: SparkManagerTaskDecision,
 ): Promise<{ run: RunState; stepId: string } | null> {
   const isVerifier = task.taskClass === "verifier";
-  // Verifier and corrective follow-ups both need a just-completed impl step
-  // reopened. Trivial runs mark the impl step complete before the verifier is
-  // queued, so without this the verifier task is dropped and the run ships
-  // unverified work.
   if (!isVerifier && !isCorrectiveFollowUpTask(task)) return null;
-  let step = resolveRequestedStepIncludingTerminal(run, task.stepIndex);
-  if ((!step || step.status !== "complete") && isVerifier) {
-    // The manager may omit or mis-index stepIndex on a verifier follow-up.
-    // Fall back to the most recently completed worker_batch step so the
-    // verifier still lands somewhere instead of being silently dropped.
-    step = [...run.steps]
+  // Only a follow-up to work that actually finished qualifies. Same resolution
+  // as before: the named step, or - when the manager omitted or mis-indexed
+  // stepIndex on a verifier - the most recently completed worker_batch step.
+  let settled = resolveRequestedStepIncludingTerminal(run, task.stepIndex);
+  if ((!settled || settled.status !== "complete") && isVerifier) {
+    settled = [...run.steps]
       .filter((s) => s.status === "complete" && (s.kind ?? "worker_batch") === "worker_batch")
       .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))[0];
   }
-  if (!step || step.status !== "complete") return null;
+  if (!settled || settled.status !== "complete") return null;
 
-  const updated = await commitRunChange(run, {
-    type: "spark_manager.completed_step_reopened_for_followup",
-    message: `Reopened completed step for verifier follow-up: ${step.title}`,
-    stepId: step.id,
-    payload: {
-      stepId: step.id,
-      stepIndex: step.index,
-      taskTitle: task.title,
-      requestedStepIndex: task.stepIndex,
-    },
+  const newStepId = makeId("step");
+  const payload: Record<string, unknown> = {
+    followsStepId: settled.id,
+    followsStepIndex: settled.index,
+    taskTitle: task.title,
+    requestedStepIndex: task.stepIndex,
+  };
+  const change: Parameters<typeof commitRunChange>[1] = {
+    type: "spark_manager.followup_homed_in_current_step",
+    message: `Homing follow-up in the current step rather than reopening "${settled.title}": ${task.title}`,
+    payload,
     mutate: (draft, timestamp) => {
-      const target = draft.steps.find((item) => item.id === step.id);
-      if (!target) return;
-      target.status = "reviewing";
-      target.updatedAt = timestamp;
+      const { step: destination, created } = resolveFollowUpDestinationStep(draft, {
+        newStepId,
+        title: task.title,
+        goal: task.description?.trim() || task.title,
+        acceptanceCriteria: [`Follow-up to "${settled.title}" is complete.`],
+        timestamp,
+      });
+      payload.stepId = destination.id;
+      payload.stepIndex = destination.index;
+      payload.createdStep = created;
+      change.stepId = destination.id;
       draft.status = "running";
-      draft.currentStepId = target.id;
+      draft.currentStepId = destination.id;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
         status: "running",
-        lastAction: "reopened_completed_step_for_followup",
+        lastAction: "followup_homed_in_current_step",
         updatedAt: timestamp,
       };
       draft.updatedAt = timestamp;
     },
-  });
-
-  return { run: updated, stepId: step.id };
+  };
+  const updated = await commitRunChange(run, change);
+  const stepId = typeof payload.stepId === "string" ? payload.stepId : undefined;
+  if (!stepId) return null;
+  return { run: updated, stepId };
 }
 
 function resolveRequestedStepIncludingTerminal(

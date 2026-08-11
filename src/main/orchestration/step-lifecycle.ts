@@ -93,6 +93,94 @@ export interface RehomedFollowUp {
   createdStep: boolean;
 }
 
+export interface FollowUpDestination {
+  step: StepState;
+  /** True when no usable current step existed and one was appended. */
+  created: boolean;
+}
+
+/**
+ * Where follow-up work lands when its own step is history.
+ *
+ * The current step, i.e. the first step that is neither settled nor a brake.
+ * It has to be a step run-store's autopilot picker will actually run, and the
+ * picker only launches tasks belonging to the first non-terminal step:
+ *
+ *   - a settled step never runs again, so a task homed there is invisible work;
+ *   - a BRAKE step is a no-op checkpoint. resolveActiveBrakeAndReplan marks it
+ *     complete without running anything the moment it becomes active, so a task
+ *     parked inside one is silently swallowed (it is queued, not failed, so the
+ *     loud capped-task branch never fires either). And if the picker got there
+ *     first the worker would run INSIDE the brake, which completes as an
+ *     ordinary step and the replan the brake exists for never happens. Either
+ *     way the brake must be left alone, so we fall through and append.
+ *
+ * A brake sitting BEFORE the appended step is not a problem: it stays the first
+ * non-terminal step, so it resolves and replans first and the follow-up runs
+ * after it. That is the brake doing its job, not work going missing.
+ *
+ * Mutates `run.steps` when it appends (it runs inside run-store's commit
+ * mutate).
+ */
+export function resolveFollowUpDestinationStep(
+  run: RunState,
+  input: {
+    /** Id for the appended step; unused when a current step exists. */
+    newStepId: string;
+    title: string;
+    goal: string;
+    acceptanceCriteria?: string[];
+    timestamp: string;
+  },
+): FollowUpDestination {
+  const current = (run.steps ?? []).find(
+    (step) => !isSettledStepStatus(step.status) && (step.kind ?? "worker_batch") !== "brake",
+  );
+  if (current) return { step: current, created: false };
+
+  const appended: StepState = {
+    id: input.newStepId,
+    runId: run.id,
+    index: (run.steps?.length ?? 0) + 1,
+    title: input.title,
+    goal: input.goal,
+    kind: "worker_batch",
+    plannedAgents: [],
+    status: "queued",
+    acceptanceCriteria: input.acceptanceCriteria ?? [],
+    verificationCommands: [],
+    workerTaskIds: [],
+    createdAt: input.timestamp,
+    updatedAt: input.timestamp,
+  };
+  (run.steps ??= []).push(appended);
+  return { step: appended, created: true };
+}
+
+/**
+ * Attempts spent on one continuous line of work, following `followUpOfTaskId`
+ * back through every task that continues an earlier one. A corrective rework
+ * whose step already settled is re-homed onto a fresh follow-up task, so
+ * per-task counting would restart the attempt budget on every round and the
+ * loop would never hit run-store's MAX_WORKER_ATTEMPTS. The walk is bounded by
+ * a seen-set, so a corrupted run whose links form a cycle terminates instead of
+ * hanging, and counts each task exactly once.
+ */
+export function countFollowUpLineageAttempts(run: RunState, task: WorkerTask): number {
+  const attempts = run.workerAttempts ?? [];
+  const seen = new Set<string>();
+  let total = 0;
+  let cursor: WorkerTask | undefined = task;
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    const id = cursor.id;
+    total += attempts.filter((attempt) => attempt.workerTaskId === id).length;
+    const previousId: string | undefined = cursor.followUpOfTaskId;
+    cursor = previousId ? (run.workerTasks ?? []).find((item) => item.id === previousId) : undefined;
+  }
+  return total;
+}
+
 /**
  * Re-home a corrective rework whose target sits in a step that already settled.
  *
@@ -104,12 +192,8 @@ export interface RehomedFollowUp {
  * current step, linked back through `followUpOfTaskId`. The settled step keeps
  * its tasks, its attempts and its counters byte-identical.
  *
- * Destination: the current step, i.e. the first step that is not settled. It
- * has to be exactly that one, because run-store's autopilot picker only
- * launches tasks belonging to the first non-terminal step, so a copy homed
- * anywhere else would sit queued forever. When every step is settled there is
- * no current step and one is appended, matching the "spawned work gets its own
- * worker_batch step" shape codara_spawn_workers uses for brand-new tasks.
+ * Destination: resolveFollowUpDestinationStep above, i.e. the current step, or
+ * a fresh worker_batch step when there is none to use.
  *
  * Mutates `run` in place (it runs inside run-store's commit mutate) and returns
  * null when re-homing does not apply, which is the caller's signal to retry the
@@ -132,26 +216,13 @@ export function rehomeSettledStepFeedbackRetry(
   const targetStep = (run.steps ?? []).find((step) => step.id === target.stepId);
   if (!targetStep || !isSettledStepStatus(targetStep.status)) return null;
 
-  let destination = (run.steps ?? []).find((step) => !isSettledStepStatus(step.status));
-  const createdStep = !destination;
-  if (!destination) {
-    destination = {
-      id: input.followUpStepId,
-      runId: run.id,
-      index: (run.steps?.length ?? 0) + 1,
-      title: `Corrective rework: ${target.title}`,
-      goal: `Address the verifier's corrective feedback on "${target.title}".`,
-      kind: "worker_batch",
-      plannedAgents: [],
-      status: "queued",
-      acceptanceCriteria: ["The verifier's corrective feedback is addressed."],
-      verificationCommands: [],
-      workerTaskIds: [],
-      createdAt: input.timestamp,
-      updatedAt: input.timestamp,
-    } satisfies StepState;
-    (run.steps ??= []).push(destination);
-  }
+  const { step: destination, created: createdStep } = resolveFollowUpDestinationStep(run, {
+    newStepId: input.followUpStepId,
+    title: `Corrective rework: ${target.title}`,
+    goal: `Address the verifier's corrective feedback on "${target.title}".`,
+    acceptanceCriteria: ["The verifier's corrective feedback is addressed."],
+    timestamp: input.timestamp,
+  });
 
   const followUp: WorkerTask = {
     id: input.followUpTaskId,
@@ -183,6 +254,13 @@ export function rehomeSettledStepFeedbackRetry(
     // by being re-homed.
     peers: target.peers,
     isolated: target.isolated,
+    // Council identity travels too. A plan-council candidate is deliberately
+    // mailbox-exempt (runsInParallelBatch bails on councilGroupId), so a copy
+    // that dropped the id would rejoin the batch mailbox its original was kept
+    // out of, and the graph would stop grouping it with its council.
+    councilGroupId: target.councilGroupId,
+    candidateIndex: target.candidateIndex,
+    councilRole: target.councilRole,
     // Loom identity and the node-derived launch fences survive re-homing for
     // the same reason they survive a runtime fallback: the follow-up is that
     // node's newest work and must run under its fence.
