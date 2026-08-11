@@ -1,7 +1,6 @@
 import React from "react";
 import type { PreviewTab, RunsTab, TabId } from "./types";
 import type { CoraView } from "../components/chat/cora-view";
-import AutomationsStripButton from "../components/automations/AutomationsStripButton";
 
 // The strip below the top TabBar that gives every real Cora run a stable
 // workbench: Chat | Runs | Board, plus the optional surfaces that exist for
@@ -54,9 +53,6 @@ interface Props {
   whiteboardAttention: boolean;
   runsTab: RunsTab | null;
   previews: PreviewTab[];
-  // Active workspace id for the strip's right-end Automations affordance (its
-  // live cue is workspace-scoped). Null hides the affordance entirely.
-  workspaceId: string | null;
   onChatClick: () => void;
   onTerminalClick: () => void;
   onWhiteboardClick: () => void;
@@ -76,7 +72,6 @@ export default function InnerTabStrip({
   whiteboardAttention,
   runsTab,
   previews,
-  workspaceId,
   onChatClick,
   onTerminalClick,
   onWhiteboardClick,
@@ -108,17 +103,20 @@ export default function InnerTabStrip({
     >
       <Pill label="Chat" active={chatActive} onClick={onChatClick} />
       {runsTab && (
-        <Pill
+        <IconTab
           label="Runs"
           active={runsActive}
           onClick={() => onSelectTab(runsTab.id)}
+          title="The runs canvas: this chat's Cora and every worker it spawned"
+          icon={<RunsGlyph />}
         />
       )}
-      <Pill
-        label="Board"
+      <IconTab
+        label="Kanban"
         active={boardActive}
         onClick={onBoardClick}
         title="This chat's Cora Board: queue cards and this chat's Cora works through them"
+        icon={<KanbanGlyph />}
       />
       {backendPtyExists && (
         <Pill
@@ -128,13 +126,14 @@ export default function InnerTabStrip({
           title="Live xterm attached to the backend Claude/Codex PTY for this chat. Read-only."
         />
       )}
-      {showWhiteboardPill && (
-        <Pill
+      {(showWhiteboardPill || whiteboardCreatable) && (
+        <IconTab
           label="Whiteboard"
           active={whiteboardActive}
           onClick={onWhiteboardClick}
           title="A persisted visual explanation Cora and you share"
           attention={whiteboardAttention && !whiteboardActive}
+          icon={<WhiteboardGlyph />}
         />
       )}
       {previews.map((preview) => (
@@ -146,9 +145,6 @@ export default function InnerTabStrip({
           title={preview.url}
         />
       ))}
-      {!showWhiteboardPill && whiteboardCreatable && (
-        <NewWhiteboardButton onClick={onWhiteboardClick} />
-      )}
       {/* Right-aligned slot the worker terminal guard portals its controls
           into (TerminalStack). Docking them here uses the strip's empty right
           half instead of floating over the top-right pane's title. */}
@@ -156,9 +152,6 @@ export default function InnerTabStrip({
         data-cora-guard-slot
         style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}
       />
-      {/* Far-right door to the Automations tab: quiet clock when idle, live
-          cue (spinner / needs-you dot + name) while an automation runs. */}
-      {workspaceId && <AutomationsStripButton workspaceId={workspaceId} />}
     </div>
   );
 }
@@ -254,54 +247,140 @@ function Pill({
   );
 }
 
-// Quiet icon-only affordance to start a whiteboard when none exists yet. Kept
-// deliberately smaller and dimmer than the pills so an unused surface never
-// competes with the real destinations.
-function NewWhiteboardButton({ onClick }: { onClick: () => void }) {
+// An icon-first surface door: a bare glyph until it is the active surface,
+// where it expands to carry its full name. Kanban and Whiteboard both use it
+// so the strip stays quiet while inactive surfaces still stay one click away.
+function IconTab({
+  label,
+  active,
+  attention = false,
+  onClick,
+  title,
+  icon,
+}: {
+  label: string;
+  active: boolean;
+  attention?: boolean;
+  onClick: () => void;
+  title?: string;
+  icon: React.ReactNode;
+}) {
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
-      aria-label="New whiteboard"
-      title="New whiteboard"
+      aria-label={label}
+      title={attention ? `${title ?? label} (updated by Cora)` : title ?? label}
       style={{
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        width: 22,
-        height: 22,
-        padding: 0,
+        gap: 5,
+        height: 24,
+        minWidth: 24,
+        padding: active ? "0 10px" : 0,
         border: "1px solid transparent",
         borderRadius: "var(--radius-control, 7px)",
-        background: "transparent",
-        color: "var(--muted-2)",
+        background: active ? "var(--accent-soft)" : "transparent",
+        color: active ? "var(--accent)" : "var(--muted-2)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 550,
         cursor: "default",
+        whiteSpace: "nowrap",
         transition:
           "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.background = "var(--hover)";
-        e.currentTarget.style.color = "var(--ink-dim)";
+        if (!active) {
+          e.currentTarget.style.background = "var(--hover)";
+          e.currentTarget.style.color = "var(--ink-dim)";
+        }
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.background = "transparent";
-        e.currentTarget.style.color = "var(--muted-2)";
+        if (!active) {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.color = "var(--muted-2)";
+        }
       }}
     >
-      <svg
-        width={12}
-        height={12}
-        viewBox="0 0 14 14"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={1.4}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden
-      >
-        <rect x="1.8" y="2.6" width="10.4" height="8.8" rx="1.6" />
-        <path d="M7 5.4v3.2M5.4 7h3.2" />
-      </svg>
+      {icon}
+      {active && <span>{label}</span>}
+      {attention && (
+        <span
+          aria-hidden
+          style={{
+            width: 5,
+            height: 5,
+            flex: "0 0 auto",
+            borderRadius: 999,
+            background: "var(--accent)",
+          }}
+        />
+      )}
     </button>
+  );
+}
+
+// An activity pulse: work moving through the system — the runs canvas is
+// where every live worker's heartbeat is visible.
+function RunsGlyph() {
+  return (
+    <svg
+      width={12}
+      height={12}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M1.6 7h2.4l1.6-3.6 2.8 7.2L10 7h2.4" />
+    </svg>
+  );
+}
+
+// Three columns with cards at different heights: the universal kanban shape.
+function KanbanGlyph() {
+  return (
+    <svg
+      width={12}
+      height={12}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="1.6" y="2" width="3" height="7.4" rx="1" />
+      <rect x="5.5" y="2" width="3" height="10" rx="1" />
+      <rect x="9.4" y="2" width="3" height="5.2" rx="1" />
+    </svg>
+  );
+}
+
+// A framed board with a hand-drawn stroke: a whiteboard being sketched on.
+function WhiteboardGlyph() {
+  return (
+    <svg
+      width={12}
+      height={12}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="1.8" y="2.6" width="10.4" height="8.8" rx="1.6" />
+      <path d="M4.2 8.7c1.1-2.2 2.2-3.1 3-2.4.8.7 1.7.3 2.6-1.2" />
+    </svg>
   );
 }

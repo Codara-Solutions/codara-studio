@@ -3,9 +3,9 @@
 // new-chat welcome row and the global chord) — this affordance sits at the
 // right end of the strip so the tab stays one click away from any chat.
 //
-// Quiet when idle: a small muted lightning bolt (the automations identity —
-// distinct from the chat-history clock), sized like the strip's other
-// icon-only affordance (NewWhiteboardButton). While an automation is RUNNING
+// Idle: the node-flow automations glyph on the same accent pill as the ✦ Cora
+// button beside it, so the two Cora-owned doors read as one family. While an
+// automation is RUNNING
 // or BLOCKED it becomes the glanceable live cue — spinner arc (or danger dot)
 // plus the automation's name — reusing the exact status logic of the welcome
 // row via the shared useAutomationsStatus hook.
@@ -43,6 +43,8 @@ export default function AutomationsStripButton({
       aria-label={label}
       title={label}
       onClick={open}
+      // Same accent-pill identity as the ✦ Cora button next door — the two
+      // Cora-owned doors read as one family, apart from the neutral controls.
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -50,30 +52,25 @@ export default function AutomationsStripButton({
         gap: 5,
         height: 22,
         minWidth: 22,
-        padding: live ? "0 8px" : 0,
+        padding: "0 9px 0 7px",
         border: "1px solid transparent",
-        borderRadius: "var(--radius-control, 7px)",
-        background: live ? "var(--accent-soft)" : "transparent",
-        color: blocked ? "var(--danger)" : live ? "var(--accent)" : "var(--muted-2)",
+        borderRadius: 999,
+        background: "var(--accent-soft)",
+        color: blocked ? "var(--danger)" : "var(--accent)",
         fontFamily: "var(--font-sans)",
         fontSize: 11,
-        fontWeight: 550,
+        fontWeight: 600,
         cursor: "default",
         whiteSpace: "nowrap",
         transition:
           "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
       onMouseEnter={(e) => {
-        if (!live) {
-          e.currentTarget.style.background = "var(--hover)";
-          e.currentTarget.style.color = "var(--ink-dim)";
-        }
+        e.currentTarget.style.background =
+          "color-mix(in oklab, var(--accent) 18%, transparent)";
       }}
       onMouseLeave={(e) => {
-        if (!live) {
-          e.currentTarget.style.background = "transparent";
-          e.currentTarget.style.color = "var(--muted-2)";
-        }
+        e.currentTarget.style.background = "var(--accent-soft)";
       }}
     >
       {running && !blocked ? (
@@ -107,17 +104,17 @@ export default function AutomationsStripButton({
       ) : (
         <AutomationsGlyph size={12} />
       )}
-      {live && (
-        <span
-          style={{
-            maxWidth: 140,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {live.name}
-        </span>
-      )}
+      {/* "Auto" at rest (the ✦ Cora pill's sibling); the live automation's
+          name takes the slot while one is running or needs input. */}
+      <span
+        style={{
+          maxWidth: 140,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {live ? live.name : "Auto"}
+      </span>
     </button>
   );
 }

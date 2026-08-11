@@ -6644,6 +6644,7 @@ const Workspace = React.memo(function Workspace({
         onPinEditorTab={onPinEditorTab}
         pickerHints={pickerHints}
         closeOnMiddleClick={closeTabsOnMiddleClick}
+        workspaceId={workspace?.id ?? null}
       />
       {innerStripVisible && (
         <InnerTabStrip
@@ -6656,7 +6657,6 @@ const Workspace = React.memo(function Workspace({
           whiteboardAttention={whiteboardAttention}
           runsTab={runOwnedTabs.runs}
           previews={runOwnedTabs.previews}
-          workspaceId={workspace?.id ?? null}
           onChatClick={handleInnerChatClick}
           onTerminalClick={handleInnerTerminalClick}
           onWhiteboardClick={handleInnerWhiteboardClick}

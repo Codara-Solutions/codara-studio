@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
+import AutomationsStripButton from "../components/automations/AutomationsStripButton";
 import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { collectLeaves } from "./paneTree";
 import {
@@ -79,6 +80,9 @@ interface Props {
   // When true, a middle-click (mouse wheel button) anywhere on a tab closes
   // it. User-configurable via Settings → General (closeTabsOnMiddleClick pref).
   closeOnMiddleClick: boolean;
+  // Active workspace id for the icon-only Automations door beside the ✦ Cora
+  // button (its live cue is workspace-scoped). Null hides the affordance.
+  workspaceId: string | null;
 }
 
 export interface PickerHints {
@@ -127,6 +131,7 @@ function TabBar({
   onPinEditorTab,
   pickerHints,
   closeOnMiddleClick,
+  workspaceId,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [stripOverflow, setStripOverflow] = useState<TabStripOverflow>({
@@ -814,6 +819,10 @@ function TabBar({
         <SparkIcon size={11} />
         <span>Cora</span>
       </button>
+      {/* Icon-only Automations door, a first-class neighbor of ✦ Cora rather
+          than a sub-tab affordance. Quiet loop glyph when idle; live cue
+          (spinner / needs-you dot + name) while an automation runs. */}
+      {workspaceId && <AutomationsStripButton workspaceId={workspaceId} />}
       <div ref={pickerRef} style={{ position: "relative" }}>
         <button
           type="button"
