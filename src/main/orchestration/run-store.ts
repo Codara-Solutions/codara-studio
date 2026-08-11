@@ -14528,6 +14528,13 @@ async function maybeQueueCliLaunchFallback({
         parallelTrust: task.parallelTrust,
         // The replacement joins the same batch, so it inherits the team marker
         // and the graph keeps showing the peer link across the runtime swap.
+        // Both mailbox flags travel with it: peer comms are opt-in per worker
+        // now, so a replacement that inherited only the outcome flag would be
+        // dropped from the step's group chat the moment prepareWorkerTask
+        // re-evaluated the gate, and a replacement that dropped `isolated`
+        // would silently rejoin peer traffic its predecessor was kept out of.
+        peers: task.peers,
+        isolated: task.isolated,
         peerComms: task.peerComms,
         // Loom identity survives the retry: newestAttemptForNode judges a graph
         // node by the newest attempt among tasks stamped with its id, so a

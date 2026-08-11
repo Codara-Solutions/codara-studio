@@ -219,6 +219,17 @@ check("createWorkerTask persists the flag, and planner tasks default off", () =>
   );
 });
 
+check("a runtime-fallback replacement inherits both mailbox flags", () => {
+  // The replacement rejoins the same batch. Inheriting only the outcome flag
+  // would drop it from the group chat the moment prepareWorkerTask re-evaluated
+  // the gate against a task with no `peers`, and dropping `isolated` would let
+  // it rejoin peer traffic its predecessor was deliberately kept out of.
+  const fallback = extractFunction(RUN_STORE, "      const fallbackTask: WorkerTask = {");
+  assert.match(fallback, /peers: task\.peers,/);
+  assert.match(fallback, /isolated: task\.isolated,/);
+  assert.match(fallback, /peerComms: task\.peerComms,/);
+});
+
 check("prepareWorkerTask persists membership but provisions on the wider gate", () => {
   assert.match(RUN_STORE, /const peerCommsEnabled = shouldUsePeerComms\(run, step, task\);/);
   assert.match(RUN_STORE, /if \(peerCommsEnabled\) task\.peerComms = true;\s*\n\s*else delete task\.peerComms;/);
