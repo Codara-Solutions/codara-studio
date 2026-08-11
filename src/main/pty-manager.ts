@@ -762,7 +762,7 @@ async function spawnWithSessionLock(
   // operations, and a restored shell should follow whatever account is
   // Active at restore time rather than a login pinned before the restart.
   if (
-    parsedStartup === undefined &&
+    parsedStartup === null &&
     !opts.startupCommand &&
     opts.nativeCodexProfileId === undefined &&
     opts.nativeClaudeProfileId === undefined &&
