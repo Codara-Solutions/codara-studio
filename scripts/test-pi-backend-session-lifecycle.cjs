@@ -195,8 +195,6 @@ async function loadBackend() {
       module.exports = {
         buildTalkReplyDecision: (reply) => ({ status: "reply", reply }),
       };`,
-    "./project-constitution": `
-      module.exports = { renderProjectConstitution: () => "" };`,
     "./project-policy": `
       module.exports = {
         renderRunProjectPolicy: () => "",

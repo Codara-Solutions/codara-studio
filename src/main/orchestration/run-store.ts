@@ -73,7 +73,6 @@ import type {
   WorkerTaskStatus,
   WorkerAttempt,
   WorkerArtifactPaths,
-  UserConstitutionCapture,
   WorkerRuntimeState,
   VerifierVerdict,
   PriorVerifierRound,
@@ -115,17 +114,6 @@ import {
 } from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
-import {
-  normalizeProjectConstitutionSnapshot,
-  readProjectConstitutionSnapshot,
-} from "./project-constitution";
-import { resolveCapturedManagerConstitutionBlock } from "./manager-constitution-resolver";
-import { captureCurrentUserConstitution } from "../user-constitution-store";
-import {
-  copyUserConstitutionCapture,
-  copyRunUserConstitutionCapture,
-  normalizeRunUserConstitutionProvenance,
-} from "../user-constitution-capture";
 import {
   resolveProjectPolicyMode,
   runProjectPolicyMode,
@@ -339,16 +327,6 @@ import {
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
 import type { PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
-import { resolveCapturedWorkerConstitutionBlock } from "./worker-constitution-resolver";
-import {
-  unsupportedEnabledWorkerConstitutionReason,
-  workerConstitutionLaunchSurface,
-} from "./worker-constitution-support";
-import {
-  cleanupPrivateWorkerConstitutionPrompt,
-  privateWorkerConstitutionPromptPath,
-  writePrivateWorkerConstitutionPrompt,
-} from "./worker-constitution-file";
 import {
   normalizePiAccountProfileId,
   preserveFrozenPiAccountProfileId,
@@ -869,10 +847,6 @@ async function createRunInternal(
     origin,
     projectPolicyMode: input.projectPolicyMode,
   });
-  const projectConstitution =
-    projectPolicyMode === "trusted"
-      ? await readProjectConstitutionSnapshot(input.cwd)
-      : null;
   const initialBackend = input.chatBackend ?? "pi";
   if (
     projectPolicyMode === "untrusted-pull-request" &&
@@ -895,10 +869,6 @@ async function createRunInternal(
   const initialChatFlags = normalizeChatFeatureFlags(initialBackend, {
     chat1mContext: input.chat1mContext,
   });
-  // This is the only global-constitution read in the managed-run lifecycle.
-  // Retries, resumes, compaction, and reserved-id replay inherit this exact
-  // pointer from the run and never consult current Settings again.
-  const userConstitution = await captureCurrentUserConstitution();
   const run: RunState = {
     id: reservedRunId ?? makeId("run"),
     workspaceId: input.workspaceId,
@@ -910,8 +880,6 @@ async function createRunInternal(
       workspaceCwd: input.cwd,
       projectPolicyMode,
     },
-    ...(projectConstitution ? { projectConstitution } : {}),
-    userConstitution: copyUserConstitutionCapture(userConstitution),
     artifactDir: "",
     createdAt: now,
     updatedAt: now,
@@ -2054,55 +2022,6 @@ async function launchDirectNodeTasks(
 
   scheduleAutopilotCycles(run.id, attempts.map((a) => a.attemptId));
   return requireRun(run.id);
-}
-
-// Reject before launch without pretending that a process started. The event
-// and persisted reason are deliberately content-free: no captured body,
-// revision, digest, command, argv, or environment crosses this seam.
-async function rejectWorkerAttemptLaunchForUnsupportedConstitution(
-  runId: string,
-  attemptId: string,
-  error: string,
-): Promise<RunState> {
-  const run = await requireRun(runId);
-  await commitRunChange(run, {
-    type: "worker_attempt.launch_rejected",
-    message: `Worker attempt launch rejected: ${error}`,
-    payload: { attemptId, error },
-    mutate: (draft, timestamp) => {
-      const attempt = draft.workerAttempts.find((item) => item.id === attemptId);
-      if (!attempt || (attempt.status !== "prompt_ready" && attempt.status !== "failed")) {
-        return false;
-      }
-      attempt.status = "failed";
-      attempt.startedAt = undefined;
-      attempt.finishedAt = timestamp;
-      attempt.exitCode = undefined;
-      attempt.error = error;
-      attempt.failureKind = classifyWorkerFailure(error);
-      attempt.command = undefined;
-      const task = draft.workerTasks.find((item) => item.id === attempt.workerTaskId);
-      if (task && !["accepted", "cancelled"].includes(task.status)) {
-        task.status = "failed";
-        task.updatedAt = timestamp;
-      }
-      const step = task?.stepId
-        ? draft.steps.find((item) => item.id === task.stepId)
-        : undefined;
-      if (
-        step &&
-        !["complete", "completed_unverified", "skipped"].includes(step.status)
-      ) {
-        step.status = "failed";
-        step.updatedAt = timestamp;
-        if (draft.currentStepId === step.id) draft.currentStepId = undefined;
-      }
-      draft.updatedAt = timestamp;
-    },
-  });
-  const latest = await requireRun(runId);
-  if (latest.executionMode === "direct") await finalizeDirectRun(runId);
-  return requireRun(runId);
 }
 
 // Force-fail a live (or stuck-preparing) attempt. Used by the automation-loop
@@ -5799,11 +5718,9 @@ async function askManagerBackend(
   // work identically across backends.
   const backend = getBackend(chatConfig.backend);
   const callId = makeId("spark");
-  const callUserConstitution = copyRunUserConstitutionCapture(run);
   const sparkCall: SparkCall = {
     id: callId,
     runId: run.id,
-    ...(callUserConstitution ? { userConstitution: callUserConstitution } : {}),
     stepId: run.currentStepId,
     mode,
     model: chatConfig.model,
@@ -5906,15 +5823,12 @@ async function askManagerBackend(
 
   const callStartedMs = Date.now();
   try {
-    const managerConstitutionBlock =
-      await resolveCapturedManagerConstitutionBlock(frozenRun);
     const result = await backend.requestManagerDecision(
       {
         run: frozenRun,
         cwd,
         mode: normalizeManagerMode(mode),
         settings,
-        managerConstitutionBlock,
         chat: { ...chatConfig },
         prompt: preparedTurn.prompt,
         inputMessageIds: preparedTurn.call.inputMessageIds ?? [],
@@ -12576,11 +12490,9 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   const settings = await loadSettings();
   const attemptNumber =
     run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id).length + 1;
-  const attemptUserConstitution = copyRunUserConstitutionCapture(run);
   const attempt: WorkerAttempt = {
     id: makeId("attempt"),
     runId: run.id,
-    ...(attemptUserConstitution ? { userConstitution: attemptUserConstitution } : {}),
     workerTaskId: task.id,
     attemptNumber,
     runtime: task.runtimePreference,
@@ -12836,12 +12748,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     throw new Error(`Cannot launch worker task for ${taskStep.status} step: ${taskStep.title}`);
   }
 
-  // Select the concrete launch seam before performing any launch work. An
-  // enabled immutable capture may proceed only through a seam that can deliver
-  // its exact block as provider-owned system guidance (or Claude's append-only
-  // system-prompt file). The legacy visible Codex CLI, shell/manual terminals,
-  // and unknown persisted runtimes have no secure equivalent, so fail closed
-  // before log creation, trust preparation, running state, PTY, or provider.
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const untrustedPullRequest =
     runProjectPolicyMode(run) === "untrusted-pull-request";
@@ -12849,24 +12755,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     (untrustedPullRequest ||
       process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1") &&
     (task.runtimePreference === "claude" || task.runtimePreference === "codex");
-  const constitutionLaunchSurface = workerConstitutionLaunchSurface({
-    runtimePreference: task.runtimePreference,
-    isAutomationRun,
-    usePiWorkerHarness,
-  });
-  const unsupportedConstitutionReason =
-    unsupportedEnabledWorkerConstitutionReason(
-      attempt.userConstitution,
-      constitutionLaunchSurface,
-    );
-  if (unsupportedConstitutionReason) {
-    return rejectWorkerAttemptLaunchForUnsupportedConstitution(
-      run.id,
-      attempt.id,
-      unsupportedConstitutionReason,
-    );
-  }
-
   const nativeCodexFastMode =
     !usePiWorkerHarness && task.runtimePreference === "codex"
       ? await loadSettings().then(
@@ -12920,26 +12808,10 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     paths.attemptDir,
     ...(task.collabMailDirHint ? [task.collabMailDirHint] : []),
   ];
-  // The legacy visible Claude CLI accepts an append-only system prompt file.
-  // Derive its path now for the display command, but do not create it until
-  // the launch driver has completed every PTY prerequisite and resolved this
-  // exact attempt capture. Pi owns a separate process-scoped file below.
-  const cliWorkerConstitutionPrompt =
-    task.runtimePreference === "claude" &&
-    attempt.userConstitution?.enabledAtCapture
-      ? {
-          directory: join(paths.attemptDir, ".system"),
-          fileStem: "global-user-constitution",
-        }
-      : undefined;
-  const cliWorkerConstitutionPromptPath = cliWorkerConstitutionPrompt
-    ? privateWorkerConstitutionPromptPath(cliWorkerConstitutionPrompt)
-    : undefined;
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
     isAutomation: isAutomationRun,
     extraWritableDirs,
-    workerConstitutionPromptPath: cliWorkerConstitutionPromptPath,
     openAiFastMode: nativeCodexFastMode,
   });
   const command = usePiWorkerHarness
@@ -13068,7 +12940,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           cwd: attempt.cwd,
           promptText,
           command,
-          userConstitution: attempt.userConstitution,
         })
       : isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
       ? await runStructuredAutomationWorkerSession({
@@ -13084,7 +12955,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           sandboxed: Boolean(attempt.sandboxWorktreePath),
           extraWritableDirs,
           openAiFastMode: nativeCodexFastMode,
-          userConstitution: attempt.userConstitution,
         })
       : await runWorkerSession({
           run,
@@ -13095,8 +12965,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           launchCommand,
           promptText,
           command,
-          userConstitution: attempt.userConstitution,
-          workerConstitutionPromptFile: cliWorkerConstitutionPrompt,
         });
   } finally {
     if (peerCommsAcquired) releasePeerCommsWatcher(run.id);
@@ -13637,11 +13505,9 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
     }
     const backend = getBackend(chatConfig.backend);
     const callId = makeId("spark");
-    const callUserConstitution = copyRunUserConstitutionCapture(run);
     const summarizeCall: SparkCall = {
       id: callId,
       runId: run.id,
-      ...(callUserConstitution ? { userConstitution: callUserConstitution } : {}),
       stepId: run.currentStepId,
       mode: "chat",
       purpose: "compaction",
@@ -13689,14 +13555,11 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
     const startedMs = Date.now();
     let result: Awaited<ReturnType<typeof backend.requestManagerDecision>>;
     try {
-      const managerConstitutionBlock =
-        await resolveCapturedManagerConstitutionBlock(run);
       result = await backend.requestManagerDecision({
         run: structuredClone(run),
         cwd,
         mode: "chat",
         settings,
-        managerConstitutionBlock,
         chat: { ...chatConfig },
         prompt: AUTO_COMPACTION_SUMMARY_PROMPT,
         inputMessageIds: [],
@@ -15999,11 +15862,23 @@ async function requireRun(runId: string): Promise<RunState> {
   return run;
 }
 
+function dropLegacyConstitutionFields(run: RunState): void {
+  const legacy = run as unknown as Record<string, unknown>;
+  delete legacy.projectConstitution;
+  delete legacy.userConstitution;
+  for (const owner of [
+    ...(Array.isArray(run.sparkCalls) ? run.sparkCalls : []),
+    ...(Array.isArray(run.workerAttempts) ? run.workerAttempts : []),
+  ]) {
+    delete (owner as unknown as Record<string, unknown>).userConstitution;
+  }
+}
+
 function normalizeRun(run: RunState): RunState {
-  // Validate all present provenance before mutating legacy/default fields.
-  // Absence remains absence: a reload must never capture current Settings on
-  // behalf of a run, call, or attempt created by an older build.
-  normalizeRunUserConstitutionProvenance(run);
+  // Runs persisted before the constitution feature was removed can still carry
+  // captured-constitution fields on the run, its calls, and its attempts. They
+  // mean nothing now, so drop them quietly instead of failing to load the run.
+  dropLegacyConstitutionFields(run);
   const origin = normalizeGitHubOrigin(run.origin);
   if (origin) run.origin = origin;
   else delete run.origin;
@@ -16013,15 +15888,6 @@ function normalizeRun(run: RunState): RunState {
   });
   if (run.settingsSnapshot && typeof run.settingsSnapshot === "object") {
     run.settingsSnapshot.projectPolicyMode = run.projectPolicyMode;
-  }
-  const projectConstitution =
-    run.projectPolicyMode === "trusted"
-      ? normalizeProjectConstitutionSnapshot(run.projectConstitution)
-      : null;
-  if (projectConstitution) {
-    run.projectConstitution = projectConstitution;
-  } else {
-    delete run.projectConstitution;
   }
   run.humanMessages ??= [];
   run.sparkCalls ??= [];
@@ -18320,7 +18186,6 @@ async function runStructuredAutomationWorkerSession({
   sandboxed,
   extraWritableDirs,
   openAiFastMode,
-  userConstitution,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -18334,21 +18199,7 @@ async function runStructuredAutomationWorkerSession({
   sandboxed: boolean;
   extraWritableDirs: string[];
   openAiFastMode: boolean;
-  userConstitution?: UserConstitutionCapture;
 }): Promise<{ exitCode: number; error?: string; costUsd?: number }> {
-  let workerConstitutionBlock: string;
-  try {
-    workerConstitutionBlock = await resolveCapturedWorkerConstitutionBlock({
-      userConstitution,
-    });
-  } catch (error) {
-    return {
-      exitCode: 1,
-      error: `Worker global constitution could not be resolved from the attempt capture: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    };
-  }
   const runningTimestamp = new Date().toISOString();
   await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
   const transport = task.runtimePreference === "claude" ? "agent-sdk" : "app-server";
@@ -18402,7 +18253,6 @@ async function runStructuredAutomationWorkerSession({
       nativeClaudeProfileId,
       cwd,
       prompt: promptText,
-      workerConstitutionBlock,
       paths,
       sandboxed,
       extraWritableDirs,
@@ -18841,7 +18691,6 @@ async function runPiWorkerSession({
   cwd,
   promptText,
   command,
-  userConstitution,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -18850,7 +18699,6 @@ async function runPiWorkerSession({
   cwd: string;
   promptText: string;
   command: string;
-  userConstitution?: UserConstitutionCapture;
 }): Promise<{
   exitCode: number;
   error?: string;
@@ -18914,7 +18762,6 @@ async function runPiWorkerSession({
       : 0;
   // Mode-600 MCP roster written for this attempt; removed with the session.
   let mcpConfigPath: string | null = null;
-  let workerConstitutionPromptPath: string | null = null;
   let agentSocketCapabilityId: string | undefined;
   let logQueue: Promise<void> = Promise.resolve();
   const appendWorkerLog = (text: string) => {
@@ -18997,12 +18844,6 @@ async function runPiWorkerSession({
       attemptId,
       resolvedWorkerAccount.accountProfileId,
     );
-    // Resolve only this attempt's immutable provenance after account/runtime
-    // prerequisites, immediately before the plan can create a provider-owned
-    // prompt file or start Pi. Current Settings and run-level fallback are not
-    // available through this resolver's type or implementation.
-    const workerConstitutionBlock =
-      await resolveCapturedWorkerConstitutionBlock({ userConstitution });
     const plan = await createCodaraPiWorkerLaunchPlan({
       provider,
       runId: run.id,
@@ -19015,7 +18856,6 @@ async function runPiWorkerSession({
       resolvedAccount: resolvedWorkerAccount,
       executionPolicy: effectiveRunExecutionPolicy(run),
       projectPolicyMode: runProjectPolicyMode(run),
-      workerConstitutionBlock,
       untrustedWriteAllowFiles:
         runProjectPolicyMode(run) === "untrusted-pull-request"
           ? [paths.finalReportJson]
@@ -19053,7 +18893,6 @@ async function runPiWorkerSession({
     // before the durable profile stamp so any stamp failure still reaches the
     // finally cleanup path.
     mcpConfigPath = plan.mcpConfigPath;
-    workerConstitutionPromptPath = plan.workerConstitutionPromptPath;
     agentSocketCapabilityId = plan.agentSocketCapabilityId;
     piSessionId = plan.sessionId;
     if (plan.accountProfileId !== resolvedWorkerAccount.accountProfileId) {
@@ -19276,7 +19115,6 @@ async function runPiWorkerSession({
     await client?.stop().catch(() => undefined);
     await cleanupPiMcpBridgeConfig({
       mcpConfigPath,
-      workerConstitutionPromptPath,
       agentSocketCapabilityId,
     }).catch(() => undefined);
     // Keep the completed frame in xterm; disposing the idle host shell matches
@@ -19299,8 +19137,6 @@ async function runWorkerSession({
   launchCommand,
   promptText,
   command,
-  userConstitution,
-  workerConstitutionPromptFile,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -19310,11 +19146,6 @@ async function runWorkerSession({
   launchCommand: string | null;
   promptText: string;
   command: string;
-  userConstitution?: UserConstitutionCapture;
-  workerConstitutionPromptFile?: {
-    directory: string;
-    fileStem: string;
-  };
 }): Promise<{ exitCode: number; error?: string }> {
   // Wait until the renderer's TerminalView mounts and calls pty:spawn for
   // this attempt. The "worker_attempt.launch_requested" event (emitted by
@@ -19411,9 +19242,7 @@ async function runWorkerSession({
       ).catch(() => undefined);
     }
   };
-  // Preserve the historical legacy/disabled timing exactly. Enabled captures
-  // defer the running transition until their immutable file exists.
-  if (!workerConstitutionPromptFile) await announceCliWorkerRunning();
+  await announceCliWorkerRunning();
 
   activeWorkerProcesses.set(attemptId, {
     runId: run.id,
@@ -19591,36 +19420,11 @@ async function runWorkerSession({
   //     model id, etc.) fails the worker fast instead of hanging the whole
   //     run waiting for a final report that will never come,
   //  4. paste the prompt and submit.
-  let workerConstitutionPromptPath: string | null = null;
   void (async () => {
     try {
       await delay(1500);
       if (sessionSettled) return;
       if (launchCommand) {
-        if (workerConstitutionPromptFile) {
-          // Final prerequisite before the provider command: resolve this exact
-          // attempt and materialize an owner-only append-system-prompt file.
-          // The task prompt and event stream never receive these bytes.
-          const block = await resolveCapturedWorkerConstitutionBlock({
-            userConstitution,
-          });
-          workerConstitutionPromptPath =
-            await writePrivateWorkerConstitutionPrompt({
-              block,
-              ...workerConstitutionPromptFile,
-            });
-          if (sessionSettled) {
-            await cleanupPrivateWorkerConstitutionPrompt(
-              workerConstitutionPromptPath,
-            );
-            workerConstitutionPromptPath = null;
-            return;
-          }
-        }
-        if (workerConstitutionPromptFile) {
-          await announceCliWorkerRunning();
-        }
-        if (sessionSettled) return;
         // Armed before the command is typed so the watcher sees that command's
         // own pre-exec marker; without a pre-exec first it would fire on the
         // marker the shell already emitted for its startup prompt.
@@ -19677,9 +19481,6 @@ async function runWorkerSession({
     return await exitPromise;
   } finally {
     activeWorkerProcesses.delete(attemptId);
-    await cleanupPrivateWorkerConstitutionPrompt(
-      workerConstitutionPromptPath,
-    ).catch(() => undefined);
   }
 }
 
@@ -19780,7 +19581,6 @@ function buildLaunchCommandLine(
     sandboxDir?: string;
     isAutomation?: boolean;
     extraWritableDirs?: string[];
-    workerConstitutionPromptPath?: string;
     openAiFastMode?: boolean;
   },
 ): string | null {
@@ -19817,12 +19617,6 @@ function buildLaunchCommandLine(
     args.push("--model", quoteShellArg(launchModel || WORKER_DEFAULT_CLAUDE_MODEL));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
-    if (opts?.workerConstitutionPromptPath) {
-      args.push(
-        "--append-system-prompt-file",
-        quoteShellArg(opts.workerConstitutionPromptPath),
-      );
-    }
     // Tool fence LAST: --dangerously-skip-permissions suppresses the prompts, but
     // a preset (or the node's extra blockedTools) still hard-denies tools on top.
     // "edits" removes shell + web, "readonly" removes existing-file edits + shell

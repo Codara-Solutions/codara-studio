@@ -1,5 +1,4 @@
 import { createRequire } from "node:module";
-import { lstatSync, readFileSync } from "node:fs";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerContextCompaction } from "./compaction";
@@ -27,30 +26,6 @@ interface BridgeToolResult {
 interface CodaraBridge {
   listTools(): BridgeTool[];
   callToolByName(name: string, args: unknown): Promise<BridgeToolResult>;
-}
-
-const MANAGER_CONSTITUTION_MAX_BYTES = 40 * 1024;
-
-function loadManagerConstitutionBlock(): string {
-  const path = process.env.CODARA_PI_MANAGER_CONSTITUTION_PATH?.trim();
-  if (!path) return "";
-  const stat = lstatSync(path);
-  if (
-    stat.isSymbolicLink() ||
-    !stat.isFile() ||
-    stat.size > MANAGER_CONSTITUTION_MAX_BYTES
-  ) {
-    throw new Error("Cora's immutable manager constitution file is invalid.");
-  }
-  const bytes = readFileSync(path);
-  if (bytes.byteLength > MANAGER_CONSTITUTION_MAX_BYTES) {
-    throw new Error("Cora's immutable manager constitution file is invalid.");
-  }
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new Error("Cora's immutable manager constitution file is invalid.");
-  }
 }
 
 const requireFromExtension = createRequire(import.meta.url);
@@ -112,7 +87,6 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   registerServiceTierPolicy(pi);
 
   pi.on("before_agent_start", async (event) => {
-    const managerConstitution = loadManagerConstitutionBlock();
     const untrustedContract = untrustedPullRequest
       ? `
 
@@ -134,9 +108,7 @@ Imported pull-request security contract:
     return {
       systemPrompt: `${event.systemPrompt}
 
-${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy())}${
-  managerConstitution ? `\n\n${managerConstitution}` : ""
-}
+${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy())}
 ${untrustedContract}
 ${mcp?.promptSuffix() ?? ""}`,
     };

@@ -32,7 +32,6 @@ import type {
   ChatMode,
   CoraExecutionPolicy,
   HumanRunMessage,
-  ProjectConstitutionSnapshot,
   RunState,
 } from "@shared/types";
 import { DEFAULT_CODEX_CHAT_MODEL } from "@shared/model-catalog";
@@ -47,8 +46,6 @@ import {
   effectiveChatOneMillionContext,
 } from "@shared/chat-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
-import { appendProjectConstitution } from "./project-constitution";
-import { appendManagerConstitutionBlock } from "./manager-constitution";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -99,8 +96,6 @@ export interface ManagerRequestInput {
   availableRuntimes?: AgentRuntimeDiagnostic[];
   agentSyncContext?: string;
   settings: AppSettings;
-  /** Pre-resolved immutable global-then-project manager guidance. */
-  managerConstitutionBlock: string;
   /** Ordered immutable user input bundled by run-store before backend startup. */
   prompt: string;
   /** Durable message ownership mirrored onto the SparkCall. */
@@ -626,8 +621,8 @@ function buildManagerTurnInput(
  *   <stable prefix>  MANAGER_PROMPT_DYNAMIC_MARKER  <per-turn dynamic suffix>
  *
  * The stable prefix is what the provider caches. It is the mode's shipped
- * guidance plus the run's workspace cwd and immutable project-constitution
- * snapshot, and NOTHING else: no clock, no mutable run state, no worker
+ * guidance plus the run's workspace cwd, and NOTHING else: no clock, no
+ * mutable run state, no worker
  * digests, no message counts. Every one of those belongs after the marker,
  * where a changed byte costs nothing because the suffix was never cacheable to
  * begin with.
@@ -656,15 +651,8 @@ export interface ManagerPromptParts {
 export function buildManagerStablePrefix(input: {
   guidance: string;
   cwd: string;
-  /** Pre-resolved global-then-project block for active manager backends. */
-  managerConstitutionBlock?: string;
-  /** Legacy/project-only seam retained for pure prompt and worker tests. */
-  projectConstitution?: ProjectConstitutionSnapshot;
 }): string {
-  const prompt = `${input.guidance}\n\nWorkspace cwd: ${input.cwd}\n`;
-  return input.managerConstitutionBlock !== undefined
-    ? appendManagerConstitutionBlock(prompt, input.managerConstitutionBlock)
-    : appendProjectConstitution(prompt, input.projectConstitution);
+  return `${input.guidance}\n\nWorkspace cwd: ${input.cwd}\n`;
 }
 
 /** Join the two halves for auditing. `turnPrompt` is buildManagerTurnPrompt's output. */
@@ -672,8 +660,6 @@ export function assembleManagerPrompt(input: {
   guidance: string;
   cwd: string;
   turnPrompt: string;
-  managerConstitutionBlock?: string;
-  projectConstitution?: ProjectConstitutionSnapshot;
 }): ManagerPromptParts {
   const stablePrefix = buildManagerStablePrefix(input);
   return {

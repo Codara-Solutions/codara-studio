@@ -72,7 +72,7 @@ import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex
 import { resolveCodexTranscriptPath } from "./orchestration/codex-home";
 import { latestSessionStart } from "./agent-session-registry";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
-import { parseManualAgentStartupCommand } from "./manual-agent-constitution";
+import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import {
   resolveFrozenNativeCodexProfile,
@@ -196,26 +196,6 @@ let githubReadyMod: typeof import("./github-ready") | undefined;
 async function getGitHubReady(): Promise<typeof import("./github-ready")> {
   githubReadyMod ??= await import("./github-ready");
   return githubReadyMod;
-}
-
-let projectConstitutionSettingsMod:
-  | typeof import("./project-constitution-settings")
-  | undefined;
-async function getProjectConstitutionSettings(): Promise<
-  typeof import("./project-constitution-settings")
-> {
-  projectConstitutionSettingsMod ??= await import("./project-constitution-settings");
-  return projectConstitutionSettingsMod;
-}
-
-let userConstitutionStoreMod:
-  | typeof import("./user-constitution-store")
-  | undefined;
-async function getUserConstitutionStore(): Promise<
-  typeof import("./user-constitution-store")
-> {
-  userConstitutionStoreMod ??= await import("./user-constitution-store");
-  return userConstitutionStoreMod;
 }
 
 async function getGitWorktrees(): Promise<typeof import("./git-worktrees")> {
@@ -393,11 +373,7 @@ import type {
   PiSubscriptionProvider,
   PiSubscriptionReconnectAccountInput,
   PiSubscriptionRenameAccountInput,
-  ProjectConstitutionInspection,
-  ProjectConstitutionWorkspaceInput,
   ProjectPolicyMode,
-  UserConstitutionDocument,
-  UserConstitutionSaveInput,
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
@@ -614,29 +590,6 @@ async function spawnPreparedNativeCliLogin(
     });
 
   return started;
-}
-
-async function projectConstitutionWorkspaceFromIpc(input: unknown) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new TypeError("A workspace id is required.");
-  }
-  const workspaceId = (input as Partial<ProjectConstitutionWorkspaceInput>).workspaceId;
-  if (
-    typeof workspaceId !== "string" ||
-    workspaceId.length === 0 ||
-    workspaceId.length > 256 ||
-    /[\u0000-\u001f\u007f]/.test(workspaceId)
-  ) {
-    throw new TypeError("A valid workspace id is required.");
-  }
-  // Security boundary: resolve the cwd exclusively from persisted app state.
-  // Renderer payloads never supply a path for inspect/create/open/reveal.
-  const state = await loadState();
-  const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
-  if (!workspace) {
-    throw new Error("That workspace is no longer open. Reopen it and try again.");
-  }
-  return workspace;
 }
 
 const PI_ACCOUNT_PROFILE_ID_PATTERN =
@@ -873,60 +826,6 @@ export function registerIpc(): void {
   handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
     return saveSettings(settings);
   });
-
-  handle("user-constitution:load", async (): Promise<UserConstitutionDocument> => {
-    const { loadUserConstitution } = await getUserConstitutionStore();
-    return loadUserConstitution();
-  });
-
-  handle(
-    "user-constitution:save",
-    async (
-      _event,
-      input: UserConstitutionSaveInput,
-    ): Promise<UserConstitutionDocument> => {
-      const { saveUserConstitution } = await getUserConstitutionStore();
-      return saveUserConstitution(input);
-    },
-  );
-
-  handle(
-    "project-constitution:inspect",
-    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<ProjectConstitutionInspection> => {
-      const workspace = await projectConstitutionWorkspaceFromIpc(input);
-      const { inspectProjectConstitution } = await getProjectConstitutionSettings();
-      return inspectProjectConstitution(workspace);
-    },
-  );
-  handle(
-    "project-constitution:create",
-    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<ProjectConstitutionInspection> => {
-      const workspace = await projectConstitutionWorkspaceFromIpc(input);
-      const { createDefaultProjectConstitution } = await getProjectConstitutionSettings();
-      return createDefaultProjectConstitution(workspace);
-    },
-  );
-  handle(
-    "project-constitution:open",
-    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<void> => {
-      const workspace = await projectConstitutionWorkspaceFromIpc(input);
-      const { activeProjectConstitutionPath } = await getProjectConstitutionSettings();
-      const sourcePath = await activeProjectConstitutionPath(workspace);
-      const error = await shell.openPath(sourcePath);
-      if (error) {
-        throw new Error(`Could not open .codara/constitution.md: ${error}`);
-      }
-    },
-  );
-  handle(
-    "project-constitution:reveal",
-    async (_event, input: ProjectConstitutionWorkspaceInput): Promise<void> => {
-      const workspace = await projectConstitutionWorkspaceFromIpc(input);
-      const { activeProjectConstitutionPath } = await getProjectConstitutionSettings();
-      const sourcePath = await activeProjectConstitutionPath(workspace);
-      shell.showItemInFolder(sourcePath);
-    },
-  );
 
   handle("cora-cli:status", async () => {
     const { inspectCoraCliInstall } = await import("./cora-cli-install");

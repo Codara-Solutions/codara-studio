@@ -572,63 +572,18 @@ async function main() {
       path.join(configDir, "sessions"),
     );
 
-    const managerConstitutionBody = "[GLOBAL USER CONSTITUTION]\nprivate fixture body";
-    const failingSessionId = "session-manager-prompt-failpoint";
-    const failingPromptPath = path.join(
-      configDir,
-      "manager-prompts",
-      `${failingSessionId}.md`,
-    );
     await assert.rejects(
       plans.createCodaraPiLaunchPlan({
         provider: "anthropic",
-        runId: "run-manager-prompt-failpoint",
+        runId: "run-manager-model-mismatch",
         mode: "execute",
-        sessionId: failingSessionId,
+        sessionId: "session-manager-model-mismatch",
         cwd: directory,
         model: "gpt-5.6-sol",
-        managerConstitutionBlock: managerConstitutionBody,
       }),
       /not compatible/,
-      "post-write pure-plan validation failpoint rejects the launch",
+      "pure-plan validation rejects a manager launch whose model is not the provider's",
     );
-    assert.equal(
-      fs.existsSync(failingPromptPath),
-      false,
-      "post-write plan failure removes the otherwise-unowned constitution file",
-    );
-
-    const constitutionPlan = await plans.createCodaraPiLaunchPlan({
-      provider: "anthropic",
-      runId: "run-manager-prompt",
-      mode: "execute",
-      sessionId: "session-manager-prompt",
-      cwd: directory,
-      managerConstitutionBlock: managerConstitutionBody,
-    });
-    assert.equal(
-      fs.readFileSync(constitutionPlan.managerConstitutionPromptPath, "utf8"),
-      managerConstitutionBody,
-    );
-    assert.equal(
-      constitutionPlan.env.CODARA_PI_MANAGER_CONSTITUTION_PATH,
-      constitutionPlan.managerConstitutionPromptPath,
-    );
-    assert.equal(
-      JSON.stringify({ args: constitutionPlan.args, env: constitutionPlan.env }).includes(
-        managerConstitutionBody,
-      ),
-      false,
-      "constitution bodies never enter Pi argv or env",
-    );
-    if (process.platform !== "win32") {
-      assert.equal(
-        fs.statSync(constitutionPlan.managerConstitutionPromptPath).mode & 0o777,
-        0o600,
-      );
-    }
-    await plans.cleanupPiMcpBridgeConfig(constitutionPlan);
-    assert.equal(fs.existsSync(constitutionPlan.managerConstitutionPromptPath), false);
 
     const untrustedManagerPlan = await plans.createCodaraPiLaunchPlan({
       provider: "anthropic",
@@ -653,31 +608,16 @@ async function main() {
       4_102_444_800_000,
     );
 
-    const workerConstitutionBody =
-      "[GLOBAL USER CONSTITUTION - WORKER]\nworker-only private body\n[END GLOBAL USER CONSTITUTION - WORKER]";
-    const failingWorkerSessionId =
-      "run-worker-prompt-fail-attempt-worker-prompt-fail";
-    const failingWorkerPromptPath = path.join(
-      configDir,
-      "worker-prompts",
-      `${failingWorkerSessionId}.md`,
-    );
     await assert.rejects(
       plans.createCodaraPiWorkerLaunchPlan({
         provider: "anthropic",
-        runId: "run-worker-prompt-fail",
-        attemptId: "attempt-worker-prompt-fail",
+        runId: "run-worker-model-mismatch",
+        attemptId: "attempt-worker-model-mismatch",
         cwd: directory,
         model: "gpt-5.6-sol",
-        workerConstitutionBlock: workerConstitutionBody,
       }),
       /not compatible/,
-      "post-write worker plan failure rejects before provider launch",
-    );
-    assert.equal(
-      fs.existsSync(failingWorkerPromptPath),
-      false,
-      "post-write worker plan failure removes its private prompt file",
+      "pure-plan validation rejects a worker launch before provider launch",
     );
 
     const workerPlan = await plans.createCodaraPiWorkerLaunchPlan({
@@ -685,7 +625,6 @@ async function main() {
       runId: "run-web-search",
       attemptId: "attempt-1",
       cwd: directory,
-      workerConstitutionBlock: workerConstitutionBody,
     });
     const workerExtensions = extensionArgs(workerPlan);
     assert.equal(workerExtensions.length, 2);
@@ -695,35 +634,7 @@ async function main() {
       workerPlan.env.PI_CODING_AGENT_SESSION_DIR,
       path.join(configDir, "sessions"),
     );
-    assert.equal(
-      fs.readFileSync(workerPlan.workerConstitutionPromptPath, "utf8"),
-      workerConstitutionBody,
-    );
-    assert.equal(
-      workerPlan.env.CODARA_PI_WORKER_CONSTITUTION_PATH,
-      workerPlan.workerConstitutionPromptPath,
-    );
-    assert.equal(
-      workerPlan.env.CODARA_PI_MANAGER_CONSTITUTION_PATH,
-      undefined,
-      "a worker Pi process never receives the manager constitution path",
-    );
-    assert.equal(
-      JSON.stringify({ args: workerPlan.args, env: workerPlan.env }).includes(
-        workerConstitutionBody,
-      ),
-      false,
-      "worker constitution bodies never enter Pi argv or env",
-    );
-    if (process.platform !== "win32") {
-      assert.equal(
-        fs.statSync(workerPlan.workerConstitutionPromptPath).mode & 0o777,
-        0o600,
-      );
-    }
-    const workerPromptPath = workerPlan.workerConstitutionPromptPath;
     await plans.cleanupPiMcpBridgeConfig(workerPlan);
-    assert.equal(fs.existsSync(workerPromptPath), false);
 
     const untrustedReport = path.join(directory, "attempt", "final-report.json");
     const untrustedWorkerPlan = await plans.createCodaraPiWorkerLaunchPlan({

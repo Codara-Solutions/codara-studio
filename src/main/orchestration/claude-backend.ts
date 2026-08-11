@@ -77,9 +77,6 @@ import {
   type ManagerRequestInput,
   type SparkAgentBackend,
 } from "./spark-agent-backend";
-import {
-  appendManagerConstitutionBlock,
-} from "./manager-constitution";
 
 const TURN_POLL_INTERVAL_MS = 200;
 // codara_wait_for_workers legitimately blocks for up to twenty minutes. Claude's
@@ -298,9 +295,6 @@ export const claudeBackend: SparkAgentBackend = {
     };
 
     try {
-      // Run-store resolved the exact capture before dispatch. Backends only
-      // deliver these frozen bytes and never consult mutable Settings.
-      const managerConstitutionBlock = input.managerConstitutionBlock;
       const home = sparkHome();
       const queueDir = join(home, "queues");
       const turnDir = join(home, "turns");
@@ -349,7 +343,6 @@ export const claudeBackend: SparkAgentBackend = {
           requestGeneration,
           startedAt,
           emit,
-          managerConstitutionBlock,
         });
       }
       if (useClaudePrintTransport()) {
@@ -360,7 +353,6 @@ export const claudeBackend: SparkAgentBackend = {
           requestGeneration,
           startedAt,
           emit,
-          managerConstitutionBlock,
         });
       }
 
@@ -436,7 +428,6 @@ export const claudeBackend: SparkAgentBackend = {
           chatEffort: input.chat.effort,
           resumeSessionUuid: input.chat.sessionUuid,
           talkPromptPath: systemPromptPath,
-          managerConstitutionBlock,
           nativeClaudeProfileId: input.chat.nativeClaudeProfileId,
           onStream: emit,
         });
@@ -786,7 +777,6 @@ interface ClaudePrintTurnOptions {
   input: ManagerRequestInput;
   mode: ChatMode;
   systemPromptPath: string;
-  managerConstitutionBlock: string;
   requestGeneration: number;
   startedAt: number;
   emit: ChatStreamHandler;
@@ -886,7 +876,6 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
         sessionUuid: turnSessionUuid,
         resume: shouldResume,
         systemPromptPath: opts.systemPromptPath,
-        managerConstitutionBlock: opts.managerConstitutionBlock,
         abortController,
         onStderr(data) {
           stderrTail = `${stderrTail}${data}`.slice(-8_000);
@@ -1056,7 +1045,6 @@ async function buildClaudeAgentSdkOptions(input: {
   sessionUuid: string;
   resume: boolean;
   systemPromptPath: string;
-  managerConstitutionBlock: string;
   abortController: AbortController;
   onStderr: (data: string) => void;
   env: NodeJS.ProcessEnv;
@@ -1072,26 +1060,19 @@ async function buildClaudeAgentSdkOptions(input: {
       fs.readFile(input.systemPromptPath, "utf8"),
     );
   if (input.mode === "execute") {
-    systemPrompt = appendManagerConstitutionBlock(
-      buildExecuteSystemPrompt(input.cwd),
-      input.managerConstitutionBlock,
-    );
+    systemPrompt = buildExecuteSystemPrompt(input.cwd);
     tools = [];
   } else if (input.mode === "auto") {
     systemPrompt = buildManagerStablePrefix({
       guidance: await guidance(),
       cwd: input.cwd,
-      managerConstitutionBlock: input.managerConstitutionBlock,
     });
     tools = ["Read", "Glob", "Grep"];
   } else {
     systemPrompt = {
       type: "preset",
       preset: "claude_code",
-      append: appendManagerConstitutionBlock(
-        await guidance(),
-        input.managerConstitutionBlock,
-      ),
+      append: await guidance(),
     };
     tools = { type: "preset", preset: "claude_code" };
     disallowedTools.push("Edit", "Write", "Bash", "NotebookEdit", "MultiEdit");
@@ -1264,7 +1245,6 @@ async function runClaudePrintTurn(opts: ClaudePrintTurnOptions): Promise<Manager
     sessionUuid,
     resume: Boolean(input.chat.sessionUuid),
     systemPromptPath: opts.systemPromptPath,
-    managerConstitutionBlock: opts.managerConstitutionBlock,
   });
 
   let prompt = input.prompt;
@@ -1415,7 +1395,6 @@ async function materializeClaudeManagerPrompt(input: {
   cwd: string;
   mode: ChatMode;
   guidancePath: string;
-  managerConstitutionBlock: string;
 }): Promise<string> {
   const guidance =
     input.mode === "execute"
@@ -1426,12 +1405,8 @@ async function materializeClaudeManagerPrompt(input: {
       ? buildManagerStablePrefix({
           guidance,
           cwd: input.cwd,
-          managerConstitutionBlock: input.managerConstitutionBlock,
         })
-      : appendManagerConstitutionBlock(
-          guidance,
-          input.managerConstitutionBlock,
-        );
+      : guidance;
   const directory = join(sparkHome(), "manager-prompts", "claude");
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") await fs.chmod(directory, 0o700);
@@ -1450,7 +1425,6 @@ async function buildClaudePrintArgs(input: {
   sessionUuid: string;
   resume: boolean;
   systemPromptPath: string;
-  managerConstitutionBlock: string;
 }): Promise<string[]> {
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   if (input.resume) args.push("--resume", input.sessionUuid);
@@ -1486,7 +1460,6 @@ async function buildClaudePrintArgs(input: {
     cwd: input.cwd,
     mode: input.mode,
     guidancePath: input.systemPromptPath,
-    managerConstitutionBlock: input.managerConstitutionBlock,
   });
   if (input.mode === "execute" || input.mode === "auto") {
     args.push(
@@ -1671,7 +1644,6 @@ interface SpawnChatSessionOpts {
    *  the legacy parameter name, this works for both Talk and Execute prompts
    *  — the caller picks the right path based on `mode`. */
   talkPromptPath: string;
-  managerConstitutionBlock: string;
   nativeClaudeProfileId?: string;
   onStream: ChatStreamHandler;
 }
@@ -1804,7 +1776,6 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     cwd: opts.cwd,
     mode: opts.mode,
     guidancePath: opts.talkPromptPath,
-    managerConstitutionBlock: opts.managerConstitutionBlock,
   });
   // Mode shapes the spawn args sharply because Talk and Execute are
   // fundamentally different jobs.

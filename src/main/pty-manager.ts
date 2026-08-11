@@ -4,7 +4,7 @@ import { promises as fsp, chmodSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { app, type WebContents } from "electron";
+import type { WebContents } from "electron";
 import type {
   PtyExitInfo,
   PtyResourceSnapshot,
@@ -18,15 +18,7 @@ import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { sparkHome } from "./spark-home";
 import { getConnection, shQuote } from "./remote/connections";
-import {
-  manualAgentWrapperCommand,
-  manualAgentWrapperEnv,
-  parseManualAgentStartupCommand,
-} from "./manual-agent-constitution";
-import {
-  readProjectConstitutionSnapshot,
-  renderProjectConstitution,
-} from "./orchestration/project-constitution";
+import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliProfileEnvironment } from "./orchestration/codex-cli-profile-execution";
 import { buildClaudeCliProfileEnvironment } from "./orchestration/claude-cli-profile-environment";
@@ -702,18 +694,12 @@ async function spawnWithSessionLock(
 
   // Prepared native-account login is already fully resolved and sanitized by
   // native-cli-accounts. It launches the executable directly, with no shell,
-  // constitution wrapper, account re-resolution, hook install, or environment
-  // augmentation at this layer.
+  // account re-resolution, hook install, or environment augmentation at this
+  // layer.
   if (opts.exactEnvironment !== undefined) {
     return doSpawn(opts, null, false);
   }
 
-  // Studio-created fresh/resume panes carry a bounded startupCommand. When
-  // that command is one of the exact UI-generated Claude/Codex forms, give
-  // the agent the workspace constitution through the hidden Cora wrapper.
-  // Later user-typed commands only travel through write()/inject() and never
-  // pass this seam. Cora-managed panes already inject their immutable run
-  // snapshot through their backend, so SPARK_RUN_ID explicitly opts out.
   let preparedOpts = opts;
   if (
     opts.nativeCodexProfileId !== undefined ||
@@ -804,31 +790,6 @@ async function spawnWithSessionLock(
       };
     }
   }
-  if (!Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID")) {
-    const startup = parsedStartup;
-    if (startup) {
-      const snapshot = await readProjectConstitutionSnapshot(opts.cwd);
-      const constitution = renderProjectConstitution(snapshot);
-      if (constitution) {
-        const wrapperCommand = manualAgentWrapperCommand(
-          opts.shell.family,
-          manualAgentRuntimeExecutable(),
-          manualAgentWrapperPath(),
-        );
-        if (wrapperCommand) {
-          preparedOpts = {
-            ...preparedOpts,
-            startupCommand: wrapperCommand,
-            env: {
-              ...(preparedOpts.env ?? {}),
-              ...manualAgentWrapperEnv(startup, constitution),
-            },
-          };
-        }
-      }
-    }
-  }
-
   const noShellIntegration =
     preparedOpts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
   const launch = withStartupCommand(
@@ -863,23 +824,6 @@ async function spawnWithSessionLock(
     spawnOpts.releaseNativeClaudeProfileLease?.();
     throw err;
   }
-}
-
-function manualAgentRuntimeExecutable(): string {
-  if (
-    process.platform === "linux" &&
-    app.isPackaged &&
-    process.env.APPIMAGE?.trim()
-  ) {
-    return process.env.APPIMAGE;
-  }
-  return process.execPath;
-}
-
-function manualAgentWrapperPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "cora-cli", "cora.cjs")
-    : join(app.getAppPath(), "bin", "cora.cjs");
 }
 
 function serializeSessionSpawn<T>(id: string, operation: () => Promise<T>): Promise<T> {

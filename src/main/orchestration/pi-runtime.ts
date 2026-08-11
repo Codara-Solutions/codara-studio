@@ -97,10 +97,6 @@ export interface PiManagerLaunchOptions {
   model?: string;
   thinking?: PiThinkingLevel;
   sessionName?: string;
-  /** Owner-only file containing the pre-rendered immutable manager block. */
-  managerConstitutionPromptPath?: string;
-  /** Owner-only file containing the exact attempt-scoped worker block. */
-  workerConstitutionPromptPath?: string;
   /** Repository policy/resource discovery mode. Missing preserves legacy trusted behavior. */
   projectPolicyMode?: ProjectPolicyMode;
   /**
@@ -140,10 +136,6 @@ export interface PiManagerLaunchPlan {
   /** Set only when a roster was handed over, so the caller can delete the file
    * when the session ends. */
   mcpConfigPath: string | null;
-  /** Owner-only manager constitution file; removed with the Pi process. */
-  managerConstitutionPromptPath: string | null;
-  /** Owner-only worker constitution file; removed with the Pi process. */
-  workerConstitutionPromptPath: string | null;
   /** Process-local revocation handle for an untrusted Pi socket claim. Never
    * serialized or exposed to the renderer. */
   agentSocketCapabilityId?: string;
@@ -335,14 +327,6 @@ export function buildPiSubscriptionEnvironment(
 export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiManagerLaunchPlan {
   assertSafeSegment(options.sessionId, "Pi session id");
   assertSafeSegment(options.runId, "Codara run id");
-  if (
-    options.managerConstitutionPromptPath &&
-    options.workerConstitutionPromptPath
-  ) {
-    throw new Error(
-      "A Pi process cannot receive manager and worker constitution prompts together",
-    );
-  }
   const model = options.model?.trim() || DEFAULT_MODELS[options.provider];
   validateProviderModel(options.provider, model);
   const thinking = options.thinking ?? "high";
@@ -447,16 +431,6 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   if (options.openAiFastMode === true && options.provider !== "anthropic") {
     env.CODARA_PI_FAST_MODE = "1";
   }
-  if (options.managerConstitutionPromptPath) {
-    env.CODARA_PI_MANAGER_CONSTITUTION_PATH = resolve(
-      options.managerConstitutionPromptPath,
-    );
-  }
-  if (options.workerConstitutionPromptPath) {
-    env.CODARA_PI_WORKER_CONSTITUTION_PATH = resolve(
-      options.workerConstitutionPromptPath,
-    );
-  }
   // Both names or neither: a half-configured bridge would leave the extension
   // unable to load the SDK and would surface as a session-start failure.
   const mcpEnabled =
@@ -496,11 +470,5 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
       ? options.frontierAdmissionArtifactSha256 ?? null
       : null,
     mcpConfigPath: mcpEnabled ? resolve(options.mcpConfigPath!) : null,
-    managerConstitutionPromptPath: options.managerConstitutionPromptPath
-      ? resolve(options.managerConstitutionPromptPath)
-      : null,
-    workerConstitutionPromptPath: options.workerConstitutionPromptPath
-      ? resolve(options.workerConstitutionPromptPath)
-      : null,
   };
 }

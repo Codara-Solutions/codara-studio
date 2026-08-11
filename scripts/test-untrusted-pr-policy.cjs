@@ -157,7 +157,6 @@ async function main() {
     for (const marker of [
       "AGENTS.md",
       "CLAUDE.md",
-      ".codara/constitution.md",
       "hooks",
       "skills",
       "package lifecycle scripts",
@@ -167,10 +166,6 @@ async function main() {
     }
 
     const runStore = source("src/main/orchestration/run-store.ts");
-    assert.match(
-      runStore,
-      /projectPolicyMode === "trusted"\s*\?\s*await readProjectConstitutionSnapshot/,
-    );
     assert.match(
       runStore,
       /runProjectPolicyMode\(run\) === "untrusted-pull-request"[\s\S]{0,300}chatConfig\.backend !== "pi"/,

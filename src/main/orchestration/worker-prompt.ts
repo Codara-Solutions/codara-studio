@@ -25,7 +25,6 @@ import { DEFAULT_MANAGER_PROMPT_PROFILE, loadManagerPromptProfile } from "./prom
 import { isConfigShieldActive } from "./agent-config-shield";
 import { renderAgentSyncPromptLines } from "../agent-sync";
 import { isSparkPreviewMcpAvailable } from "../mcp-installer";
-import { renderProjectConstitution } from "./project-constitution";
 import {
   renderRunProjectPolicy,
   runProjectPolicyMode,
@@ -656,14 +655,12 @@ function renderImplementationWorkerPrompt({
 }): string {
   const lines: string[] = [];
   const promptProfile = loadManagerPromptProfile();
-  const projectConstitution = renderProjectConstitution(run.projectConstitution);
   const projectPolicy = renderRunProjectPolicy(run);
 
   lines.push(
     ...promptProfile.workerPrompt.opening,
     ...personalConfigFallbackLines(run),
     ...(projectPolicy ? ["", projectPolicy] : []),
-    ...(projectConstitution ? ["", projectConstitution] : []),
     "",
     "## TASK",
     task.title,
@@ -864,14 +861,12 @@ function renderVerifierWorkerPrompt({
     promptProfile.workerPrompt.verifierFinalReportIntro?.length
       ? promptProfile.workerPrompt.verifierFinalReportIntro
       : DEFAULT_MANAGER_PROMPT_PROFILE.workerPrompt.verifierFinalReportIntro ?? [];
-  const projectConstitution = renderProjectConstitution(run.projectConstitution);
   const projectPolicy = renderRunProjectPolicy(run);
 
   lines.push(
     ...verifierOpening,
     ...personalConfigFallbackLines(run),
     ...(projectPolicy ? ["", projectPolicy] : []),
-    ...(projectConstitution ? ["", projectConstitution] : []),
     "",
     "## VERIFICATION TASK",
     task.title,

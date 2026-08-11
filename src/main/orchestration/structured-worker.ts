@@ -32,7 +32,6 @@ import {
   acquireNativeClaudeProfileLease,
   resolveFrozenNativeClaudeProfile,
 } from "./native-claude-profile-runtime";
-import { structuredWorkerSystemPrompt } from "./structured-worker-system";
 
 export interface StructuredWorkerInput {
   runId: string;
@@ -45,8 +44,6 @@ export interface StructuredWorkerInput {
   nativeClaudeProfileId?: string;
   cwd: string;
   prompt: string;
-  /** Exact attempt-scoped global block, resolved by the launch owner. */
-  workerConstitutionBlock: string;
   paths: WorkerArtifactPaths;
   sandboxed?: boolean;
   extraWritableDirs?: string[];
@@ -67,6 +64,9 @@ export interface StructuredWorkerResult {
    */
   costUsd?: number;
 }
+
+const WORKER_SYSTEM_PROMPT = `You are a Codara automation worker running without an interactive terminal.
+Execute the user's worker brief autonomously with the tools available to you. The brief is authoritative about scope, access, verification, and the required final-report.json path. Do not merely explain what should be done: perform the work, verify it, and write the structured report before finishing.`;
 
 function normalizeEffort(effort: AgentEffortLevel | undefined): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
   if (!effort) return undefined;
@@ -162,7 +162,7 @@ async function runClaudeWorker(input: StructuredWorkerInput): Promise<Structured
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        append: structuredWorkerSystemPrompt(input.workerConstitutionBlock),
+        append: WORKER_SYSTEM_PROMPT,
       },
       tools: { type: "preset", preset: "claude_code" },
       disallowedTools,
@@ -493,9 +493,7 @@ async function runCodexWorker(input: StructuredWorkerInput): Promise<StructuredW
       cwd: input.cwd,
       approvalPolicy: "never",
       sandbox: access.sandboxMode ?? "danger-full-access",
-      baseInstructions: structuredWorkerSystemPrompt(
-        input.workerConstitutionBlock,
-      ),
+      baseInstructions: WORKER_SYSTEM_PROMPT,
       threadSource: "startup",
       ephemeral: true,
     });

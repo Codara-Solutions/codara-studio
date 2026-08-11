@@ -13,10 +13,6 @@ import {
   isAutomationWorker,
   isWorkerSafeBridgeTool,
 } from "./worker-policy";
-import {
-  appendPiWorkerConstitution,
-  loadWorkerConstitutionBlock,
-} from "./worker-constitution";
 
 interface BridgeTool {
   name: string;
@@ -71,7 +67,6 @@ function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string 
 export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   const bridge = loadBridge();
   const untrustedPullRequest = isUntrustedPullRequest();
-  const workerConstitutionBlock = loadWorkerConstitutionBlock();
   const peerComms = activePeerCommsContext();
   const fence = fencedToolNames();
   let mcp: McpBridgeHandle | null = null;
@@ -83,10 +78,7 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   registerServiceTierPolicy(pi);
 
   pi.on("before_agent_start", async (event) => {
-    const systemPrompt = appendPiWorkerConstitution(
-      event.systemPrompt,
-      workerConstitutionBlock,
-    );
+    const { systemPrompt } = event;
     return {
     systemPrompt: untrustedPullRequest
       ? `${systemPrompt}

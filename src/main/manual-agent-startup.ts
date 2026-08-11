@@ -1,22 +1,7 @@
-import type { ShellInfo } from "@shared/types";
-
-export const MANUAL_AGENT_WRAPPER_MODE_ENV =
-  "CODARA_MANUAL_AGENT_WRAPPER";
-export const MANUAL_AGENT_WRAPPER_ARGV_ENV =
-  "CODARA_MANUAL_AGENT_ARGV";
-export const MANUAL_AGENT_WRAPPER_CONSTITUTION_ENV =
-  "CODARA_MANUAL_AGENT_CONSTITUTION";
-
 const MAX_STARTUP_COMMAND_LENGTH = 8_192;
 const MAX_STARTUP_ARG_COUNT = 48;
 const SAFE_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/;
 const SAFE_EFFORT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-const WRAPPER_ENV_NAMES = [
-  "ELECTRON_RUN_AS_NODE",
-  MANUAL_AGENT_WRAPPER_MODE_ENV,
-  MANUAL_AGENT_WRAPPER_ARGV_ENV,
-  MANUAL_AGENT_WRAPPER_CONSTITUTION_ENV,
-] as const;
 
 export interface ManualAgentStartup {
   runtime: "claude" | "codex";
@@ -46,61 +31,6 @@ export function parseManualAgentStartupCommand(
   }
   if (tokens[0] === "codex" && validCodexArgs(tokens.slice(1))) {
     return { runtime: "codex", childArgv: tokens };
-  }
-  return null;
-}
-
-export function manualAgentWrapperEnv(
-  startup: ManualAgentStartup,
-  renderedConstitution: string,
-): Record<string, string> {
-  return {
-    ELECTRON_RUN_AS_NODE: "1",
-    [MANUAL_AGENT_WRAPPER_MODE_ENV]: "1",
-    [MANUAL_AGENT_WRAPPER_ARGV_ENV]: JSON.stringify(startup.childArgv),
-    [MANUAL_AGENT_WRAPPER_CONSTITUTION_ENV]: renderedConstitution,
-  };
-}
-
-/**
- * Render only trusted executable/script paths into the shell bootstrap.
- * Constitution bytes and agent argv never participate in this string.
- */
-export function manualAgentWrapperCommand(
-  family: ShellInfo["family"],
-  executablePath: string,
-  wrapperPath: string,
-): string | null {
-  if (!executablePath || !wrapperPath || /[\u0000\r\n]/.test(executablePath + wrapperPath)) {
-    return null;
-  }
-  if (family === "pwsh" || family === "powershell") {
-    const cleanup = WRAPPER_ENV_NAMES.map((name) => `Env:${name}`).join(",");
-    return (
-      `& ${quotePowerShell(executablePath)} ${quotePowerShell(wrapperPath)}; ` +
-      `Remove-Item ${cleanup} -ErrorAction SilentlyContinue`
-    );
-  }
-  if (family === "cmd") {
-    if (executablePath.includes('"') || wrapperPath.includes('"')) return null;
-    const cleanup = WRAPPER_ENV_NAMES.map((name) => `set "${name}="`).join(" & ");
-    return `"${executablePath}" "${wrapperPath}" & ${cleanup}`;
-  }
-  if (
-    family === "bash" ||
-    family === "zsh" ||
-    family === "sh"
-  ) {
-    return (
-      `${quotePosix(executablePath)} ${quotePosix(wrapperPath)}; ` +
-      `unset ${WRAPPER_ENV_NAMES.join(" ")}`
-    );
-  }
-  if (family === "fish") {
-    return (
-      `${quotePosix(executablePath)} ${quotePosix(wrapperPath)}; ` +
-      WRAPPER_ENV_NAMES.map((name) => `set -e ${name}`).join("; ")
-    );
   }
   return null;
 }
@@ -249,10 +179,3 @@ function tokenizeKnownStartup(source: string): string[] | null {
   return tokens;
 }
 
-function quotePosix(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function quotePowerShell(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}

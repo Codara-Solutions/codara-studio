@@ -122,10 +122,6 @@ import type {
   PiSubscriptionRenameAccountInput,
   PiUsageOverview,
   PiSubscriptionProvider,
-  ProjectConstitutionInspection,
-  ProjectConstitutionWorkspaceInput,
-  UserConstitutionDocument,
-  UserConstitutionSaveInput,
   PlanFile,
   PrefKey,
   PreferencesChange,
@@ -252,28 +248,6 @@ const api = {
       ipcRenderer.on("settings:changed", listener);
       return () => ipcRenderer.off("settings:changed", listener);
     },
-  },
-  userConstitution: {
-    load: (): Promise<UserConstitutionDocument> =>
-      ipcRenderer.invoke("user-constitution:load"),
-    save: (
-      input: UserConstitutionSaveInput,
-    ): Promise<UserConstitutionDocument> =>
-      ipcRenderer.invoke("user-constitution:save", input),
-  },
-  projectConstitution: {
-    inspect: (
-      input: ProjectConstitutionWorkspaceInput,
-    ): Promise<ProjectConstitutionInspection> =>
-      ipcRenderer.invoke("project-constitution:inspect", input),
-    create: (
-      input: ProjectConstitutionWorkspaceInput,
-    ): Promise<ProjectConstitutionInspection> =>
-      ipcRenderer.invoke("project-constitution:create", input),
-    open: (input: ProjectConstitutionWorkspaceInput): Promise<void> =>
-      ipcRenderer.invoke("project-constitution:open", input),
-    reveal: (input: ProjectConstitutionWorkspaceInput): Promise<void> =>
-      ipcRenderer.invoke("project-constitution:reveal", input),
   },
   coraCli: {
     status: (): Promise<CoraCliInstallStatus> => ipcRenderer.invoke("cora-cli:status"),

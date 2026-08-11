@@ -16,93 +16,6 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
-const { spawn } = require("node:child_process");
-
-// Hidden RUN_AS_NODE mode used only by pty-manager for Studio-created manual
-// Claude/Codex startup commands. The constitution and complete parsed child
-// argv arrive through the process environment; neither is reconstructed into
-// a shell command.
-const MANUAL_AGENT_WRAPPER_MODE_ENV = "CODARA_MANUAL_AGENT_WRAPPER";
-const MANUAL_AGENT_WRAPPER_ARGV_ENV = "CODARA_MANUAL_AGENT_ARGV";
-const MANUAL_AGENT_WRAPPER_CONSTITUTION_ENV =
-  "CODARA_MANUAL_AGENT_CONSTITUTION";
-
-async function runManualAgentWrapper() {
-  if (process.env.ELECTRON_RUN_AS_NODE !== "1") {
-    throw new Error("manual agent wrapper requires Electron RUN_AS_NODE mode");
-  }
-  const rawArgv = process.env[MANUAL_AGENT_WRAPPER_ARGV_ENV] ?? "";
-  const constitution =
-    process.env[MANUAL_AGENT_WRAPPER_CONSTITUTION_ENV] ?? "";
-  if (
-    !rawArgv ||
-    rawArgv.length > 16_384 ||
-    !constitution ||
-    Buffer.byteLength(constitution, "utf8") > 32 * 1024 ||
-    constitution.includes("\u0000")
-  ) {
-    throw new Error("manual agent wrapper received an invalid launch envelope");
-  }
-
-  let childArgv;
-  try {
-    childArgv = JSON.parse(rawArgv);
-  } catch {
-    throw new Error("manual agent wrapper received invalid child argv");
-  }
-  if (
-    !Array.isArray(childArgv) ||
-    childArgv.length < 2 ||
-    childArgv.length > 48 ||
-    childArgv.some(
-      (value) =>
-        typeof value !== "string" ||
-        value.length === 0 ||
-        value.length > 8_192 ||
-        /[\u0000\r\n]/.test(value),
-    )
-  ) {
-    throw new Error("manual agent wrapper received invalid child argv");
-  }
-
-  const [program, ...originalArgs] = childArgv;
-  let args;
-  if (program === "claude") {
-    args = [
-      ...originalArgs,
-      "--append-system-prompt",
-      constitution,
-    ];
-  } else if (program === "codex") {
-    args = [
-      ...originalArgs,
-      "-c",
-      `developer_instructions=${JSON.stringify(constitution)}`,
-    ];
-  } else {
-    throw new Error("manual agent wrapper only launches claude or codex");
-  }
-
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  delete env[MANUAL_AGENT_WRAPPER_MODE_ENV];
-  delete env[MANUAL_AGENT_WRAPPER_ARGV_ENV];
-  delete env[MANUAL_AGENT_WRAPPER_CONSTITUTION_ENV];
-
-  await new Promise((resolve, reject) => {
-    const child = spawn(program, args, {
-      env,
-      stdio: "inherit",
-      windowsHide: false,
-    });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      process.exitCode =
-        typeof code === "number" ? code : signal ? 1 : 0;
-      resolve();
-    });
-  });
-}
 
 const HELP = `cora — drive the running Codara Studio app from your terminal
 
@@ -1965,8 +1878,4 @@ function formatUptime(sec) {
   return `${(sec / 3600).toFixed(1)}h`;
 }
 
-const entrypoint =
-  process.env[MANUAL_AGENT_WRAPPER_MODE_ENV] === "1"
-    ? runManualAgentWrapper
-    : main;
-entrypoint().catch((err) => fail(err.message ?? String(err)));
+main().catch((err) => fail(err.message ?? String(err)));

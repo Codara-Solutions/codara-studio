@@ -56,10 +56,6 @@ import {
   type PiExecutionAccount,
   type PiExecutionAccountRequest,
 } from "./pi-account-execution";
-import {
-  cleanupPrivateWorkerConstitutionPrompt,
-  writePrivateWorkerConstitutionPrompt,
-} from "./worker-constitution-file";
 
 export interface CodaraPiPaths {
   configDir: string;
@@ -72,8 +68,6 @@ export interface CodaraPiPaths {
   frontierManifestDir: string;
   frontierAdmissionCachePath: string;
   mcpConfigDir: string;
-  managerPromptDir: string;
-  workerPromptDir: string;
   managedAgentDir: string;
   managedAgentSources: string[];
 }
@@ -90,7 +84,6 @@ export interface CreateCodaraPiLaunchOptions {
   thinking?: PiThinkingLevel;
   sessionName?: string;
   contractPrompt?: string;
-  managerConstitutionBlock?: string;
   projectPolicyMode?: ProjectPolicyMode;
   /** Explicit profile pin; undefined asks the central resolver for its default. */
   accountProfileId?: string;
@@ -129,8 +122,6 @@ export function codaraPiPaths(configDir = join(sparkHome(), "pi-agent")): Codara
     frontierManifestDir: join(configDir, "frontier", "manifests"),
     frontierAdmissionCachePath: join(configDir, "frontier", "admission-cache.json"),
     mcpConfigDir: join(configDir, "mcp"),
-    managerPromptDir: join(configDir, "manager-prompts"),
-    workerPromptDir: join(configDir, "worker-prompts"),
     managedAgentDir: join(configDir, "agents"),
     managedAgentSources: [
       resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-contract-tracer.md"),
@@ -254,43 +245,15 @@ async function writePiMcpBridgeConfig(input: {
   return { mcpConfigPath, mcpSdkDir: sdkDir };
 }
 
-async function writePiManagerConstitutionPrompt(input: {
-  block?: string;
-  sessionId: string;
-  directory: string;
-}): Promise<string | null> {
-  if (!input.block) return null;
-  if (
-    input.sessionId.length > 200 ||
-    !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(input.sessionId)
-  ) {
-    throw new Error("Pi session id cannot be used as a manager prompt filename");
-  }
-  await mkdir(input.directory, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") await chmod(input.directory, 0o700);
-  const path = join(input.directory, `${input.sessionId}.md`);
-  await writeFileAtomic(path, input.block, { mode: 0o600 });
-  if (process.platform !== "win32") await chmod(path, 0o600);
-  return path;
-}
-
 /** Remove every process-scoped bridge resource once its Pi process is gone. */
 export async function cleanupPiMcpBridgeConfig(plan: {
   mcpConfigPath: string | null;
-  managerConstitutionPromptPath?: string | null;
-  workerConstitutionPromptPath?: string | null;
   agentSocketCapabilityId?: string;
 }): Promise<void> {
   revokeAgentSocketCapability(plan.agentSocketCapabilityId);
   if (plan.mcpConfigPath) {
     await rm(plan.mcpConfigPath, { force: true }).catch(() => undefined);
   }
-  if (plan.managerConstitutionPromptPath) {
-    await rm(plan.managerConstitutionPromptPath, { force: true }).catch(() => undefined);
-  }
-  await cleanupPrivateWorkerConstitutionPrompt(
-    plan.workerConstitutionPromptPath,
-  );
 }
 
 function attachUntrustedSocketCapability(
@@ -460,73 +423,54 @@ export async function createCodaraPiLaunchPlan(
       // with a fresh managed audit and never trusts a partially parsed entry.
     }
   }
-  let managerConstitutionPromptPath: string | null = null;
-  try {
-    // Write this final process-owned prerequisite only after discovery and
-    // Frontier preparation have succeeded. If pure plan validation or socket
-    // capability minting still fails, remove it before the error escapes: no
-    // caller has a plan yet and therefore no later cleanup can see the path.
-    managerConstitutionPromptPath = await writePiManagerConstitutionPrompt({
-      block: options.managerConstitutionBlock,
-      sessionId: options.sessionId,
-      directory: paths.managerPromptDir,
-    });
-    const plan = buildPiManagerLaunchPlan({
-      runtime,
-      provider: options.provider,
-      accountProfileId: account.accountProfileId,
-      openAiFastMode:
-        options.openAiFastMode ?? (await resolveCodaraPiFastMode(options.provider)),
-      configDir: paths.configDir,
-      sessionDir: paths.sessionDir,
-      sessionId: options.sessionId,
-      runId: options.runId,
-      mode: options.mode,
-      chatMode: options.chatMode,
-      executionPolicy: options.executionPolicy,
-      cwd: options.cwd,
-      bridgePath: paths.bridgePath,
-      extensionPaths: [
-        ...(frontierEnabled
-          ? [
-              paths.extensionPath,
-              join(runtime.packageRoot, "examples", "extensions", "subagent", "index.ts"),
-              paths.frontierExtensionPath,
-            ]
-          : [paths.extensionPath]),
-        // Web search is optional: an absent package simply leaves the roster
-        // unchanged rather than handing Pi a path it cannot load.
-        ...(!untrustedPullRequest && webSearchExtensionPath
-          ? [webSearchExtensionPath]
-          : []),
-      ],
-      frontierManifestPath,
-      frontierManifestSha256,
-      frontierAdmissionArtifactPath,
-      frontierAdmissionArtifactSha256,
-      mcpConfigPath: mcp?.mcpConfigPath,
-      mcpSdkDir: mcp?.mcpSdkDir,
-      model: options.model,
-      thinking: options.thinking ?? "high",
-      sessionName: options.sessionName,
-      managerConstitutionPromptPath:
-        managerConstitutionPromptPath ?? undefined,
-      projectPolicyMode: options.projectPolicyMode,
-      codaraHomeDir: sparkHome(),
-      processExecutable: electronAsNodeInterpreter(),
-    });
-    return untrustedPullRequest
-      ? attachUntrustedSocketCapability(plan, {
-          audience: "untrusted-pi-manager",
-          runId: options.runId,
-        })
-      : plan;
-  } catch (error) {
-    if (managerConstitutionPromptPath) {
-      await rm(managerConstitutionPromptPath, { force: true }).catch(() => undefined);
-    }
-    throw error;
-  }
+  const plan = buildPiManagerLaunchPlan({
+    runtime,
+    provider: options.provider,
+    accountProfileId: account.accountProfileId,
+    openAiFastMode:
+      options.openAiFastMode ?? (await resolveCodaraPiFastMode(options.provider)),
+    configDir: paths.configDir,
+    sessionDir: paths.sessionDir,
+    sessionId: options.sessionId,
+    runId: options.runId,
+    mode: options.mode,
+    chatMode: options.chatMode,
+    executionPolicy: options.executionPolicy,
+    cwd: options.cwd,
+    bridgePath: paths.bridgePath,
+    extensionPaths: [
+      ...(frontierEnabled
+        ? [
+            paths.extensionPath,
+            join(runtime.packageRoot, "examples", "extensions", "subagent", "index.ts"),
+            paths.frontierExtensionPath,
+          ]
+        : [paths.extensionPath]),
+      // Web search is optional: an absent package simply leaves the roster
+      // unchanged rather than handing Pi a path it cannot load.
+      ...(!untrustedPullRequest && webSearchExtensionPath
+        ? [webSearchExtensionPath]
+        : []),
+    ],
+    frontierManifestPath,
+    frontierManifestSha256,
+    frontierAdmissionArtifactPath,
+    frontierAdmissionArtifactSha256,
+    mcpConfigPath: mcp?.mcpConfigPath,
+    mcpSdkDir: mcp?.mcpSdkDir,
+    model: options.model,
+    thinking: options.thinking ?? "high",
+    sessionName: options.sessionName,
+    projectPolicyMode: options.projectPolicyMode,
+    codaraHomeDir: sparkHome(),
+    processExecutable: electronAsNodeInterpreter(),
+  });
+  return untrustedPullRequest
+    ? attachUntrustedSocketCapability(plan, {
+        audience: "untrusted-pi-manager",
+        runId: options.runId,
+      })
+    : plan;
 }
 
 export interface CreateCodaraPiWorkerLaunchOptions {
@@ -541,8 +485,6 @@ export interface CreateCodaraPiWorkerLaunchOptions {
   accountProfileId?: string;
   /** Main-only exact account resolved and stamped before plan side effects. */
   resolvedAccount?: PiExecutionAccount;
-  /** Exact pre-rendered block resolved from this attempt's capture. */
-  workerConstitutionBlock?: string;
   /** The run's actual orchestration policy. Undefined falls back to fast so
    * legacy callers keep the historical behavior. */
   executionPolicy?: CoraExecutionPolicy;
@@ -637,17 +579,7 @@ export async function createCodaraPiWorkerLaunchPlan(
           cwd: options.cwd,
           mcpConfigDir: paths.mcpConfigDir,
         });
-  let workerConstitutionPromptPath: string | null = null;
   try {
-    // This is the final process-owned prerequisite. Runtime/auth discovery,
-    // private directories, and the MCP roster all succeed first; any later
-    // pure-plan or capability failure removes both process-scoped files.
-    workerConstitutionPromptPath =
-      await writePrivateWorkerConstitutionPrompt({
-        block: options.workerConstitutionBlock,
-        directory: paths.workerPromptDir,
-        fileStem: sessionId,
-      });
     const plan = buildPiManagerLaunchPlan({
       runtime,
       provider: options.provider,
@@ -676,8 +608,6 @@ export async function createCodaraPiWorkerLaunchPlan(
       model: options.model,
       thinking: options.thinking ?? "high",
       sessionName: options.sessionName,
-      workerConstitutionPromptPath:
-        workerConstitutionPromptPath ?? undefined,
       codaraHomeDir: sparkHome(),
       processExecutable: electronAsNodeInterpreter(),
     });
@@ -731,7 +661,6 @@ export async function createCodaraPiWorkerLaunchPlan(
   } catch (error) {
     await cleanupPiMcpBridgeConfig({
       mcpConfigPath: mcp?.mcpConfigPath ?? null,
-      workerConstitutionPromptPath,
     });
     throw error;
   }

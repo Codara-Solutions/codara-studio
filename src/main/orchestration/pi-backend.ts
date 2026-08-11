@@ -252,7 +252,6 @@ function supersededStartupError(): Error {
 
 async function ensureSession(
   input: ManagerRequestInput,
-  managerConstitutionBlock: string,
   onStream?: ChatStreamHandler,
   restartAccountProfileId?: string,
 ): Promise<PiBackendSession> {
@@ -319,7 +318,6 @@ async function ensureSession(
     thinking,
     sessionName: input.run.title,
     contractPrompt: contractPrompt ?? undefined,
-    managerConstitutionBlock: managerConstitutionBlock || undefined,
     projectPolicyMode,
   });
   if (GENERATIONS.get(runId) !== generation) {
@@ -458,7 +456,6 @@ async function requestPiDecision(
   try {
     session = await ensureSession(
       input,
-      input.managerConstitutionBlock,
       onStream,
       restartContext?.accountProfileId,
     );

@@ -729,7 +729,6 @@ async function codexManagerInstructions(input: ManagerRequestInput): Promise<str
   return buildManagerStablePrefix({
     guidance,
     cwd: input.cwd,
-    managerConstitutionBlock: input.managerConstitutionBlock,
   });
 }
 
