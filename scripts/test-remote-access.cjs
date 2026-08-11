@@ -1201,6 +1201,32 @@ async function main() {
       remoteIndexSource.includes("ledger.execute("),
   );
   check(
+    "remote run controls call the host Stop/Resume through workspace scoping",
+    productionSource.includes(
+      "const run = await requireOwnedRun(input.workspaceId, input.runId);\n  await forcePauseRun(run.id);",
+    ) &&
+      productionSource.includes(
+        "const run = await requireOwnedRun(input.workspaceId, input.runId);\n  await resumeRun({ runId: run.id });",
+      ) &&
+      rpcSource.includes("forcePauseCoraRun?(input: {") &&
+      rpcSource.includes("resumePausedCoraRun?(input: {"),
+  );
+  {
+    // The parked-recovery method keeps its own case, its recoveryId guard, and
+    // its own service. Run controls must never be folded into it.
+    const parkedResumeCase = rpcSource.slice(
+      rpcSource.indexOf('case "cora.resume": {'),
+      rpcSource.indexOf('case "cora.run.stop": {'),
+    );
+    check(
+      "cora.resume stays parked-recovery only and is not overloaded as a run control",
+      parkedResumeCase.includes('!p.recoveryId.startsWith("recovery-")') &&
+        parkedResumeCase.includes("this.services.resumeCoraRun") &&
+        !parkedResumeCase.includes("resumePausedCoraRun"),
+      parkedResumeCase.length,
+    );
+  }
+  check(
     "per-chat Cora account switching is removed while sanitized listing survives",
     !remoteIndexSource.includes('"cora.account.select"') &&
       !remoteIndexSource.includes('"cora.nativeCliAccount.select"') &&
@@ -3816,6 +3842,22 @@ async function main() {
           recoveryId: input.recoveryId,
         };
       },
+      forcePauseCoraRun: async (input) => {
+        calls.push(["cora.run.stop", input]);
+        if (input.runId !== "run-1") {
+          throw new Error(
+            `Cora run not found in this workspace: ${input.runId}`,
+          );
+        }
+      },
+      resumePausedCoraRun: async (input) => {
+        calls.push(["cora.run.resume", input]);
+        if (input.runId !== "run-1") {
+          throw new Error(
+            `Cora run not found in this workspace: ${input.runId}`,
+          );
+        }
+      },
       sendCoraMessage: async (input) => {
         calls.push(["cora.send", input]);
         if (input.clientMessageId === "phone-message-too-large-service") {
@@ -5205,6 +5247,69 @@ async function main() {
         ex.outbox.at(-1)?.ok === true,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    const parkedResumeCallsBefore = calls.filter(
+      (entry) => entry[0] === "cora.resume",
+    ).length;
+    exReq(210, "cora.run.stop", { workspaceId: "ws1", runId: "run-1" });
+    await flush();
+    check(
+      "cora.run.stop force-pauses the workspace-scoped run",
+      calls.at(-1)?.[0] === "cora.run.stop" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        calls.at(-1)?.[1]?.runId === "run-1" &&
+        ex.outbox.at(-1)?.ok === true &&
+        ex.outbox.at(-1)?.result?.ok === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(211, "cora.run.resume", { workspaceId: "ws1", runId: "run-1" });
+    await flush();
+    check(
+      "cora.run.resume resumes the workspace-scoped run",
+      calls.at(-1)?.[0] === "cora.run.resume" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        calls.at(-1)?.[1]?.runId === "run-1" &&
+        ex.outbox.at(-1)?.ok === true &&
+        ex.outbox.at(-1)?.result?.ok === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    check(
+      "run controls never reach the parked-recovery cora.resume service",
+      calls.filter((entry) => entry[0] === "cora.resume").length ===
+        parkedResumeCallsBefore,
+      calls.filter((entry) => entry[0] === "cora.resume"),
+    );
+    for (const [id, method, params] of [
+      [212, "cora.run.stop", { runId: "run-1" }],
+      [213, "cora.run.stop", { workspaceId: "ws1" }],
+      [214, "cora.run.resume", { workspaceId: "ws1", runId: "" }],
+      [215, "cora.run.resume", { workspaceId: 7, runId: "run-1" }],
+    ]) {
+      const before = calls.length;
+      exReq(id, method, params);
+      await flush();
+      check(
+        `${method} rejects malformed identities before mutation (${id})`,
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+          calls.length === before,
+        ex.outbox.at(-1),
+      );
+    }
+    exReq(216, "cora.run.stop", { workspaceId: "ws1", runId: "run-gone" });
+    await flush();
+    check(
+      "cora.run.stop surfaces an unknown run as a readable failure",
+      ex.outbox.at(-1)?.ok === false &&
+        /run-gone/.test(ex.outbox.at(-1)?.error?.message ?? ""),
+      ex.outbox.at(-1),
+    );
+    exReq(217, "cora.run.resume", { workspaceId: "ws1", runId: "run-gone" });
+    await flush();
+    check(
+      "cora.run.resume surfaces an unknown run as a readable failure",
+      ex.outbox.at(-1)?.ok === false &&
+        /run-gone/.test(ex.outbox.at(-1)?.error?.message ?? ""),
+      ex.outbox.at(-1),
+    );
     exReq(9, "cora.send", {
       workspaceId: "ws1",
       runId: "run-1",
@@ -6194,11 +6299,25 @@ async function main() {
         params: {},
       }),
     );
+    old.inject(
+      rpc.encodeFrame({
+        id: 9,
+        method: "cora.run.stop",
+        params: { workspaceId: "ws1", runId: "run-1" },
+      }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 10,
+        method: "cora.run.resume",
+        params: { workspaceId: "ws1", runId: "run-1" },
+      }),
+    );
     await flush();
     const answers = old.outbox.slice(before);
     check(
       "an older Studio answers unknown-method for newer phone surfaces",
-      answers.length === 7 &&
+      answers.length === 9 &&
         answers.every(
           (frame) =>
             frame?.ok === false && frame?.error?.code === "unknown-method",

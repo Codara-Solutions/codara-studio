@@ -157,6 +157,8 @@ export interface RemoteAccessDeps {
     recoveryId: string;
     account?: RemoteCoraResumeAccount;
   }): Promise<RemoteCoraResumeResult>;
+  forcePauseCoraRun?: RemoteRpcServices["forcePauseCoraRun"];
+  resumePausedCoraRun?: RemoteRpcServices["resumePausedCoraRun"];
   getCoraWhiteboard?: RemoteRpcServices["getCoraWhiteboard"];
   getCoraBoard?: RemoteRpcServices["getCoraBoard"];
   updateCoraBoard?: RemoteRpcServices["updateCoraBoard"];
@@ -967,6 +969,11 @@ export class RemoteAccessService {
                 }),
             )
         : undefined,
+      // Idempotent state transitions with no side effect to replay: stopping a
+      // stopped run or resuming a running one is a no-op, so they pass through
+      // without a mutation-ledger receipt (same as automations.pause/resume).
+      forcePauseCoraRun: this.deps.forcePauseCoraRun,
+      resumePausedCoraRun: this.deps.resumePausedCoraRun,
       getCoraWhiteboard: this.deps.getCoraWhiteboard,
       getCoraBoard: this.deps.getCoraBoard,
       updateCoraBoard: this.deps.updateCoraBoard,

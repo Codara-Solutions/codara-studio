@@ -64,12 +64,14 @@ import {
   activeWorkerInputDescriptor,
   answerRunQuestion,
   deleteRun,
+  forcePauseRun,
   getRun,
   getRunBoard,
   listRecentRunsForRetryRepair,
   listRuns,
   onRunDeleted,
   resumeManagerTurnRecovery,
+  resumeRun,
   startAutopilot,
   updateChatBackend,
   updateRunBoard,
@@ -318,6 +320,8 @@ export function getRemoteAccessService(): RemoteAccessService {
       deleteCoraRun: deleteCoraRunForRemote,
       sendCoraMessage: sendCoraMessageForRemote,
       resumeCoraRun: resumeCoraRunForRemote,
+      forcePauseCoraRun: forcePauseCoraRunForRemote,
+      resumePausedCoraRun: resumePausedCoraRunForRemote,
       getCoraWhiteboard: getCoraWhiteboardForRemote,
       getCoraBoard: getCoraBoardForRemote,
       updateCoraBoard: updateCoraBoardForRemote,
@@ -1524,6 +1528,25 @@ async function deleteCoraRunForRemote(input: {
   // A run owned by another workspace is treated as absent and never touched.
   if (!run || run.workspaceId !== input.workspaceId) return;
   await deleteRun(run.id);
+}
+
+// Stop means stop in place — the same host call as Studio's own Stop button
+// (orchestration:forcePauseRun). Chat turns and completed workspace changes
+// survive; rewinding stays an explicit desktop-only Undo.
+async function forcePauseCoraRunForRemote(input: {
+  workspaceId: string;
+  runId: string;
+}): Promise<void> {
+  const run = await requireOwnedRun(input.workspaceId, input.runId);
+  await forcePauseRun(run.id);
+}
+
+async function resumePausedCoraRunForRemote(input: {
+  workspaceId: string;
+  runId: string;
+}): Promise<void> {
+  const run = await requireOwnedRun(input.workspaceId, input.runId);
+  await resumeRun({ runId: run.id });
 }
 
 async function sendCoraMessageForRemote(input: {

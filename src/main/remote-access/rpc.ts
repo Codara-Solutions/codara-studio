@@ -1164,6 +1164,17 @@ export interface RemoteRpcServices {
     requestId: string;
     account?: RemoteCoraResumeAccount;
   }): Promise<RemoteCoraResumeResult>;
+  // Run controls: the phone's Stop/Resume buttons, the same two host calls
+  // Studio's own run header uses. Distinct from resumeCoraRun above, which
+  // only recovers a parked manager turn.
+  forcePauseCoraRun?(input: {
+    workspaceId: string;
+    runId: string;
+  }): Promise<void>;
+  resumePausedCoraRun?(input: {
+    workspaceId: string;
+    runId: string;
+  }): Promise<void>;
   // Resolves null when the chat has no whiteboard yet.
   getCoraWhiteboard?(input: {
     workspaceId: string;
@@ -2788,6 +2799,68 @@ export class RpcSession {
             ...(account ? { account } : {}),
           });
           this.reply(id, result);
+          return;
+        }
+        case "cora.run.stop": {
+          if (!this.services.forcePauseCoraRun) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Stopping a Cora run is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+          };
+          if (
+            !isRemoteCoraIdentity(p.workspaceId) ||
+            !isRemoteCoraIdentity(p.runId)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.run.stop needs workspaceId and runId.",
+            );
+            return;
+          }
+          await this.services.forcePauseCoraRun({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+          });
+          this.reply(id, { ok: true });
+          return;
+        }
+        case "cora.run.resume": {
+          if (!this.services.resumePausedCoraRun) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Resuming a Cora run is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+          };
+          if (
+            !isRemoteCoraIdentity(p.workspaceId) ||
+            !isRemoteCoraIdentity(p.runId)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.run.resume needs workspaceId and runId.",
+            );
+            return;
+          }
+          await this.services.resumePausedCoraRun({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+          });
+          this.reply(id, { ok: true });
           return;
         }
         case "cora.send": {
