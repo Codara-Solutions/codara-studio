@@ -1960,6 +1960,15 @@ function toRemoteRunWorkers(run: RunState): {
       attempt.runtimeActivity.trim()
         ? { runtimeActivity: truncateUtf8(attempt.runtimeActivity.trim(), 120) }
         : {}),
+      // Peer-group membership, the same predicate the desktop graph draws its
+      // team thread from (renderer graph-layout.ts): the task recorded the
+      // group-chat outcome AND was not asked to be independent, since
+      // `isolated` beats an explicit flag everywhere else too. Omitted rather
+      // than sent as `false` — the default is off, so the empty case must cost
+      // nothing on a roster that ships on every poll.
+      ...(task?.peerComms === true && task?.isolated !== true
+        ? { peerComms: true as const }
+        : {}),
     };
   };
   const active = run.workerAttempts.filter((attempt) =>

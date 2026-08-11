@@ -1147,6 +1147,20 @@ async function main() {
       rpcSource.includes("runtimeActivity?: string;"),
   );
   check(
+    // Peer-group membership is `task.peerComms` (the persisted outcome of
+    // shouldUsePeerComms) minus the isolated hard opt-out — the same pair the
+    // desktop graph reads. It must be omitted, never sent as `false`: the flag
+    // is opt-in, so the default case is the whole roster and a `false` per
+    // worker would be pure waste on every poll.
+    "remote worker rows carry opt-in peer-group membership, present only when true",
+    /\{\s*peerComms:\s*true as const\s*\}/s.test(productionSource) &&
+      productionSource.includes(
+        "task?.peerComms === true && task?.isolated !== true",
+      ) &&
+      !/peerComms:\s*false/.test(productionSource) &&
+      rpcSource.includes("peerComms?: boolean;"),
+  );
+  check(
     // The arithmetic itself is a pure module so test-remote-cora-contract can
     // bundle it and run the real table — a source-shape assertion here could
     // not tell a correct denominator from a swapped ternary. All this pins is
@@ -3415,6 +3429,7 @@ async function main() {
     const calls = [];
     let coraHistoryTitle = "Remote work";
     let coraWorkerActivity = "Read src/main/index.ts";
+    let coraWorkerPeerComms = false;
     let coraRunContext = null;
     let fastModeSetting = false;
     let sharedTerminal = null;
@@ -3883,6 +3898,7 @@ async function main() {
               ...(coraWorkerActivity
                 ? { runtimeActivity: coraWorkerActivity }
                 : {}),
+              ...(coraWorkerPeerComms ? { peerComms: true } : {}),
             },
           ],
           ...(coraRunContext ? { context: coraRunContext } : {}),
@@ -5233,6 +5249,36 @@ async function main() {
         ex.outbox.at(-1)?.result?.run?.context?.budgetTokens === 256_000,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    // Peer-group membership is opt-in, so an unflagged worker must carry no key
+    // at all: a phone that saw `peerComms: false` and a phone that saw nothing
+    // have to draw the identical graph, and only omission keeps an old Studio
+    // honest about a field it never had.
+    const peerBaseRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "cora.get omits worker.peerComms entirely for an unflagged worker",
+      !("peerComms" in (ex.outbox.at(-1)?.result?.run?.workers?.[0] ?? {})) &&
+        ex.outbox.at(-1)?.result?.run?.workers?.[0]?.id === "attempt-1",
+      { response: ex.outbox.at(-1) },
+    );
+    // The flag lands mid-run, when the batch's first flagged attempt starts.
+    // The revision hashes the whole bounded DTO, so its arrival has to move the
+    // digest or a phone parked on notModified would never draw the team thread.
+    coraWorkerPeerComms = true;
+    exReq(819, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: peerBaseRevision,
+    });
+    await flush();
+    check(
+      "cora.get serializes worker.peerComms and its arrival moves the revision",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string" &&
+        ex.outbox.at(-1)?.result?.revision !== peerBaseRevision &&
+        ex.outbox.at(-1)?.result?.run?.workers?.[0]?.peerComms === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    coraWorkerPeerComms = false;
     coraRunContext = null;
     coraWorkerActivity = "Read src/main/index.ts";
     exReq(811, "cora.get", {

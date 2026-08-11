@@ -405,6 +405,11 @@ export interface RemoteCoraWorker {
   // just started). Display-only, rewritten constantly, and the first worker
   // detail dropped under byte pressure.
   runtimeActivity?: string;
+  // True when this attempt's task joined its step's worker group chat (flagged
+  // `peers`, not `isolated`), so remote graphs can draw the same team thread
+  // the desktop does. Only ever `true` — an unflagged worker omits the key
+  // rather than sending `false`, which keeps the common case free on the wire.
+  peerComms?: boolean;
 }
 
 // The one question currently blocking a run. cora.send to a blocked run

@@ -521,6 +521,70 @@ async function main() {
     contract.jsonUtf8Bytes(activityPruned) <= activityFullBytes - 400,
   );
 
+  // Peer-group membership drops SECOND: after the volatile activity readout,
+  // before the lifecycle state. Losing it costs a dashed thread between two
+  // cards that are both still drawn; losing runtimeState costs the status pill
+  // each card is rendered from. The exact byte arithmetic is not the claim —
+  // the ladder's order is — so this sweeps every budget from "nothing to drop"
+  // down to "everything dropped" and asserts no rung ever overtakes the one
+  // above it.
+  const peerBase = () => ({
+    ...activityBase,
+    workers: activityBase.workers.map((worker) => ({
+      ...worker,
+      peerComms: true,
+    })),
+  });
+  const peerFullBytes = contract.jsonUtf8Bytes(peerBase());
+  assert.equal(
+    peerFullBytes - activityFullBytes,
+    68,
+    "an opt-in flag costs 17 bytes per flagged worker, and only when flagged",
+  );
+  const peerStripped = peerBase();
+  for (const worker of peerStripped.workers) {
+    delete worker.runtimeActivity;
+    delete worker.peerComms;
+    delete worker.runtimeState;
+    delete worker.finishedAt;
+    delete worker.startedAt;
+    delete worker.model;
+    delete worker.effort;
+  }
+  const peerFloor = contract.jsonUtf8Bytes(peerStripped) + 80;
+  const has = (run, field) =>
+    run.workers.filter((worker) => worker[field] !== undefined).length;
+  let sawPartialPeerDrop = false;
+  for (let budget = peerFloor; budget <= peerFullBytes; budget += 1) {
+    const pruned = projector.pruneRemoteCoraRunBase(peerBase(), budget);
+    assert.ok(
+      contract.jsonUtf8Bytes(pruned) <= budget,
+      `pruned run exceeded its budget of ${budget} bytes`,
+    );
+    const activity = has(pruned, "runtimeActivity");
+    const peers = has(pruned, "peerComms");
+    const state = has(pruned, "runtimeState");
+    if (activity > 0) {
+      assert.equal(
+        peers,
+        4,
+        `peer flags were spent at ${budget} bytes while activity lines remained`,
+      );
+    }
+    if (peers > 0) {
+      assert.equal(
+        state,
+        4,
+        `lifecycle state was spent at ${budget} bytes while peer flags remained`,
+      );
+    }
+    if (peers > 0 && peers < 4) sawPartialPeerDrop = true;
+  }
+  assert.ok(
+    sawPartialPeerDrop,
+    "the sweep never landed mid-rung, so it never exercised the peer flag's position",
+  );
+
   // The run-level context gauge has no drop entry: two numbers that never grow
   // with the run, against worker details and steps that do. It has to survive
   // every stage of the prune ladder — from the first dropped activity line all

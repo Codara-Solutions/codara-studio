@@ -170,6 +170,12 @@ export function pruneRemoteCoraRunBase(
     // The live activity readout is the most volatile and least durable detail,
     // so it goes before the agent's lifecycle state.
     "runtimeActivity",
+    // Peer-group membership is decoration on top of the roster: losing it drops
+    // a dashed thread between two cards that are both still drawn, where losing
+    // runtimeState below drops the status pill the phone renders each card
+    // from. So it goes second — after the volatile readout, before anything the
+    // card needs to be legible at all.
+    "peerComms",
     "runtimeState",
     "finishedAt",
     "startedAt",
