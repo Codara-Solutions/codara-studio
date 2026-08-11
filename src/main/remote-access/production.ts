@@ -28,6 +28,7 @@ import type {
 } from "@shared/github";
 import { isRemotePath } from "@shared/remote";
 import type {
+  AppSettings,
   AppState,
   AgentEffortLevel,
   AutomationTrigger,
@@ -106,7 +107,13 @@ import {
 import { getPreferenceCached, getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
 import { sparkHome } from "../spark-home";
-import { loadState, onStateSaved, saveState } from "../storage";
+import {
+  loadSettings,
+  loadState,
+  onStateSaved,
+  saveSettings,
+  saveState,
+} from "../storage";
 import { requestTerminalOp } from "../terminal-bridge";
 import {
   deleteWorkerSession as deleteLocalWorkerSession,
@@ -325,6 +332,8 @@ export function getRemoteAccessService(): RemoteAccessService {
       getCoraWhiteboard: getCoraWhiteboardForRemote,
       getCoraBoard: getCoraBoardForRemote,
       updateCoraBoard: updateCoraBoardForRemote,
+      getOpenAiFastMode: getOpenAiFastModeForRemote,
+      setOpenAiFastMode: setOpenAiFastModeForRemote,
       listWorkerSessions: listWorkerSessionsForRemote,
       deleteWorkerSession: deleteWorkerSessionForRemote,
       listAutomations: listAutomationsForRemote,
@@ -1044,6 +1053,22 @@ function broadcastStateChanged(state: AppState): void {
     if (contents.isDestroyed()) continue;
     try {
       contents.send("state:changed", state);
+    } catch {
+      // A window can disappear between enumeration and send.
+    }
+  }
+}
+
+// The renderer caches AppSettings and only re-hydrates from what a writer
+// republishes (useOpenAiFastMode). A phone-side write happens in main, so it
+// has to push the saved record itself; without this the composer bolt would
+// stay stale and the next Settings save would revert the phone's flip.
+function broadcastSettingsChanged(settings: AppSettings): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const contents = window.webContents;
+    if (contents.isDestroyed()) continue;
+    try {
+      contents.send("settings:changed", settings);
     } catch {
       // A window can disappear between enumeration and send.
     }
@@ -2501,6 +2526,32 @@ async function updateCoraBoardForRemote(input: {
     workspaceCwd: root,
   });
   return { board: toRemoteBoard(result.board), applied: result.ok };
+}
+
+/* ------------------------------------------------------------- fast mode */
+
+// Fast mode is one global app setting (AppSettings.openAiFastMode), the same
+// one Studio's composer bolt writes. An absent value means OFF, matching the
+// desktop hook's fail-closed read: the wrong answer costs 2x on every OpenAI
+// token rather than merely running at normal speed.
+async function getOpenAiFastModeForRemote(): Promise<boolean> {
+  const settings = await loadSettings();
+  return settings.openAiFastMode === true;
+}
+
+// Declarative, not a toggle, so a retried set converges. Writing goes through
+// saveSettings — the same path settings:save uses — so the value pi-backend
+// reads at the next manager turn changes, relaunching the Pi session exactly
+// as a desktop flip would.
+async function setOpenAiFastModeForRemote(input: {
+  enabled: boolean;
+}): Promise<void> {
+  const current = await loadSettings();
+  const saved = await saveSettings({
+    ...current,
+    openAiFastMode: input.enabled,
+  });
+  broadcastSettingsChanged(saved);
 }
 
 /* ----------------------------------------------------------- automations */

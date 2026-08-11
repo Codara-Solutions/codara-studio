@@ -162,6 +162,8 @@ export interface RemoteAccessDeps {
   getCoraWhiteboard?: RemoteRpcServices["getCoraWhiteboard"];
   getCoraBoard?: RemoteRpcServices["getCoraBoard"];
   updateCoraBoard?: RemoteRpcServices["updateCoraBoard"];
+  getOpenAiFastMode?: RemoteRpcServices["getOpenAiFastMode"];
+  setOpenAiFastMode?: RemoteRpcServices["setOpenAiFastMode"];
   listWorkerSessions?: RemoteRpcServices["listWorkerSessions"];
   deleteWorkerSession?: RemoteRpcServices["deleteWorkerSession"];
   listAutomations?: RemoteRpcServices["listAutomations"];
@@ -978,6 +980,10 @@ export class RemoteAccessService {
       getCoraWhiteboard: this.deps.getCoraWhiteboard,
       getCoraBoard: this.deps.getCoraBoard,
       updateCoraBoard: this.deps.updateCoraBoard,
+      // Writing one global boolean is idempotent, so no ledger receipt: a
+      // replayed set lands on the value the phone already asked for.
+      getOpenAiFastMode: this.deps.getOpenAiFastMode,
+      setOpenAiFastMode: this.deps.setOpenAiFastMode,
       listWorkerSessions: this.deps.listWorkerSessions,
       deleteWorkerSession: this.deps.deleteWorkerSession,
       listAutomations: this.deps.listAutomations,

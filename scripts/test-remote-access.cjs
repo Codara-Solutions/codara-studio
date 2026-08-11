@@ -1219,6 +1219,34 @@ async function main() {
       rpcSource.includes("resumePausedCoraRun?(input: {"),
   );
   check(
+    "remote fast mode writes the one global setting through saveSettings",
+    productionSource.includes(
+      "const saved = await saveSettings({\n    ...current,\n    openAiFastMode: input.enabled,\n  });",
+    ) &&
+      productionSource.includes("return settings.openAiFastMode === true;") &&
+      rpcSource.includes("getOpenAiFastMode?(): Promise<boolean>;"),
+  );
+  {
+    // A phone write happens in main, where the renderer's settings cache is
+    // out of reach. Without the push the composer bolt would stay stale and
+    // the next desktop Settings save would revert the phone's flip.
+    const preloadSource = fs.readFileSync(
+      path.join(ROOT, "src", "preload", "index.ts"),
+      "utf8",
+    );
+    const appSource = fs.readFileSync(
+      path.join(ROOT, "src", "renderer", "src", "App.tsx"),
+      "utf8",
+    );
+    check(
+      "a phone-side settings write is pushed to the open renderer",
+      productionSource.includes('contents.send("settings:changed", settings)') &&
+        productionSource.includes("broadcastSettingsChanged(saved)") &&
+        preloadSource.includes('ipcRenderer.on("settings:changed", listener)') &&
+        appSource.includes("window.spark.settings.onChanged?.(publishSettings)"),
+    );
+  }
+  check(
     // No requestId and no ledger means a blind retry of resume is a real second
     // resume. The hazard is documented at the service so the phone knows to
     // re-poll instead; if the comment goes, the reasoning goes with it.
@@ -3342,6 +3370,7 @@ async function main() {
     const calls = [];
     let coraHistoryTitle = "Remote work";
     let coraWorkerActivity = "Read src/main/index.ts";
+    let fastModeSetting = false;
     let sharedTerminal = null;
     const sharedTerminals = [];
     let sharedWorkerTerminal = null;
@@ -3879,6 +3908,16 @@ async function main() {
             `Cora run not found in this workspace: ${input.runId}`,
           );
         }
+      },
+      // Stands in for the one global AppSettings.openAiFastMode record so a
+      // set is observable through a later get, as it is on disk.
+      getOpenAiFastMode: async () => {
+        calls.push(["cora.fastMode.get", {}]);
+        return fastModeSetting;
+      },
+      setOpenAiFastMode: async (input) => {
+        calls.push(["cora.fastMode.set", input]);
+        fastModeSetting = input.enabled;
       },
       sendCoraMessage: async (input) => {
         calls.push(["cora.send", input]);
@@ -5332,6 +5371,64 @@ async function main() {
         /run-gone/.test(ex.outbox.at(-1)?.error?.message ?? ""),
       ex.outbox.at(-1),
     );
+    exReq(218, "cora.fastMode.get", {});
+    await flush();
+    check(
+      "cora.fastMode.get reports the stored global setting",
+      calls.at(-1)?.[0] === "cora.fastMode.get" &&
+        ex.outbox.at(-1)?.result?.enabled === false,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(219, "cora.fastMode.set", { enabled: true });
+    await flush();
+    check(
+      "cora.fastMode.set persists through the settings path",
+      calls.at(-1)?.[0] === "cora.fastMode.set" &&
+        calls.at(-1)?.[1]?.enabled === true &&
+        ex.outbox.at(-1)?.result?.ok === true &&
+        fastModeSetting === true,
+      { call: calls.at(-1), response: ex.outbox.at(-1), fastModeSetting },
+    );
+    exReq(220, "cora.fastMode.get", {});
+    await flush();
+    check(
+      "a later cora.fastMode.get sees the value the phone set",
+      ex.outbox.at(-1)?.result?.enabled === true,
+      ex.outbox.at(-1),
+    );
+    // Setting is declarative, not a toggle: a retried set converges rather
+    // than flipping the price of every OpenAI token back.
+    exReq(221, "cora.fastMode.set", { enabled: true });
+    await flush();
+    check(
+      "a replayed cora.fastMode.set converges on the same value",
+      ex.outbox.at(-1)?.result?.ok === true && fastModeSetting === true,
+      { response: ex.outbox.at(-1), fastModeSetting },
+    );
+    for (const [id, params] of [
+      [222, {}],
+      [223, { enabled: "true" }],
+      [224, { enabled: 1 }],
+      [225, { enabled: null }],
+    ]) {
+      const before = calls.length;
+      exReq(id, "cora.fastMode.set", params);
+      await flush();
+      check(
+        `cora.fastMode.set rejects a non-boolean before mutation (${id})`,
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+          calls.length === before &&
+          fastModeSetting === true,
+        { response: ex.outbox.at(-1), fastModeSetting },
+      );
+    }
+    exReq(226, "cora.fastMode.set", { enabled: false });
+    await flush();
+    check(
+      "cora.fastMode.set turns the setting back off",
+      ex.outbox.at(-1)?.result?.ok === true && fastModeSetting === false,
+      { response: ex.outbox.at(-1), fastModeSetting },
+    );
     exReq(9, "cora.send", {
       workspaceId: "ws1",
       runId: "run-1",
@@ -6335,11 +6432,21 @@ async function main() {
         params: { workspaceId: "ws1", runId: "run-1" },
       }),
     );
+    old.inject(
+      rpc.encodeFrame({ id: 11, method: "cora.fastMode.get", params: {} }),
+    );
+    old.inject(
+      rpc.encodeFrame({
+        id: 12,
+        method: "cora.fastMode.set",
+        params: { enabled: true },
+      }),
+    );
     await flush();
     const answers = old.outbox.slice(before);
     check(
       "an older Studio answers unknown-method for newer phone surfaces",
-      answers.length === 9 &&
+      answers.length === 11 &&
         answers.every(
           (frame) =>
             frame?.ok === false && frame?.error?.code === "unknown-method",

@@ -2840,6 +2840,10 @@ export default function App() {
   // AppSettings record, so App must adopt it or the next Settings save would
   // write back the stale copy it is still holding.
   useEffect(() => onSettingsChanged(setSettings), []);
+  // Same reverse direction, one process further out: a paired phone flips fast
+  // mode in main, which pushes the saved record here. Feeding it to
+  // publishSettings lands it on App and the composer bolt at once.
+  useEffect(() => window.spark.settings.onChanged?.(publishSettings), []);
   const handleSettingsOpenRun = useCallback(
     (runId: string, workspaceId: string) => {
       if (workspaces.some((w) => w.id === workspaceId)) {

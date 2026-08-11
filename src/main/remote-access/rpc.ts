@@ -1196,6 +1196,11 @@ export interface RemoteRpcServices {
     title?: string;
     description?: string;
   }): Promise<RemoteBoardUpdateResult>;
+  // Fast mode is one global app setting (AppSettings.openAiFastMode), not a
+  // per-run one: flipping it from the phone is exactly clicking Studio's own
+  // bolt, down to relaunching the Pi session on the next manager turn.
+  getOpenAiFastMode?(): Promise<boolean>;
+  setOpenAiFastMode?(input: { enabled: boolean }): Promise<void>;
   listWorkerSessions?(input: {
     workspaceId: string;
     runtime: "claude" | "codex";
@@ -3015,6 +3020,43 @@ export class RpcSession {
           }
           const result = await this.services.updateCoraBoard(p);
           this.reply(id, result);
+          return;
+        }
+        case "cora.fastMode.get": {
+          if (!this.services.getOpenAiFastMode) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Fast mode is not available.",
+            );
+            return;
+          }
+          const enabled = await this.services.getOpenAiFastMode();
+          this.reply(id, { enabled });
+          return;
+        }
+        case "cora.fastMode.set": {
+          if (!this.services.setOpenAiFastMode) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Fast mode is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as { enabled?: unknown };
+          // A real boolean only. Coercing a truthy string here would let a
+          // malformed phone build silently double every OpenAI token's price.
+          if (typeof p.enabled !== "boolean") {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.fastMode.set needs enabled as a boolean.",
+            );
+            return;
+          }
+          await this.services.setOpenAiFastMode({ enabled: p.enabled });
+          this.reply(id, { ok: true });
           return;
         }
         case "workerSessions.list": {

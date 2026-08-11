@@ -243,6 +243,15 @@ const api = {
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
+    // A paired phone can flip a global setting (fast mode) while the renderer
+    // is open. Push the saved record so the composer bolt and App's settings
+    // copy re-hydrate instead of reverting it on the next Settings save.
+    onChanged: (handler: (settings: AppSettings) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, settings: AppSettings) =>
+        handler(settings);
+      ipcRenderer.on("settings:changed", listener);
+      return () => ipcRenderer.off("settings:changed", listener);
+    },
   },
   userConstitution: {
     load: (): Promise<UserConstitutionDocument> =>
