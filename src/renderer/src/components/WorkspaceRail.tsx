@@ -1,8 +1,9 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
-import type { ChatBackendKind, FsEntry, GitFileChange, RunState, Workspace, WorkspaceGroup } from "@shared/types";
+import type { ChatBackendKind, FsEntry, GitFileChange, Workspace, WorkspaceGroup } from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
+import { WORKSPACE_COLORS } from "@shared/workspace-colors";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor } from "./chat/timeline";
@@ -19,17 +20,6 @@ import {
 } from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
 import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
-
-const WORKSPACE_COLORS = [
-  "#2AA298",
-  "#7FB3FF",
-  "#5BD68F",
-  "#FF5C2B",
-  "#C99BFF",
-  "#E0E0E0",
-  "#FF8FB1",
-  "#5DD6D6",
-];
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
@@ -99,10 +89,6 @@ interface RailProps {
   onMoveSection: (section: PanelSectionKey, side: PanelSide, index: number) => void;
   onSectionDragStart: (section: PanelSectionKey) => void;
   onSectionDragEnd: () => void;
-  onRunSnapshot: (
-    run: RunState,
-    options?: { select?: boolean; focusRuns?: boolean },
-  ) => void;
   onOpenGitHubQueueItem: (item: GitHubWorkQueueItem) => Promise<void>;
   onOpenFile: (absolutePath: string) => void;
   onOpenFileEntry: (entry: FsEntry, options?: { preview?: boolean }) => void;
@@ -408,6 +394,7 @@ function WorkspaceRail(props: RailProps) {
           tone={props.toneByWorkspaceId?.[w.id] ?? null}
           working={props.workingByWorkspaceId?.[w.id] ?? false}
           missing={missingWorkspaceIds.has(w.id)}
+          folderColorManaged={groupId !== null}
           menuBoundaryRef={wsScrollRef}
           onActivate={() => props.onActivate(w.id)}
           onEdit={() => props.onEdit(w.id)}
@@ -613,7 +600,7 @@ function WorkspaceRail(props: RailProps) {
                             group={group}
                             name={group.name}
                             count={members.length}
-                            accent={accent}
+                            accent={group.color ?? members[0]?.color ?? accent}
                             editing={editingGroupId === group.id}
                             dragging={groupDragId === group.id}
                             menuBoundaryRef={wsScrollRef}
@@ -652,6 +639,9 @@ function WorkspaceRail(props: RailProps) {
                             onRename={(name) => {
                               props.onChangeWorkspaceGroup(group.id, { name });
                               setEditingGroupId(null);
+                            }}
+                            onChangeColor={(color) => {
+                              props.onChangeWorkspaceGroup(group.id, { color });
                             }}
                             onStartRename={() => setEditingGroupId(group.id)}
                             onCancelRename={() => setEditingGroupId(null)}
@@ -715,7 +705,6 @@ function WorkspaceRail(props: RailProps) {
             collapsed={collapsed.graph}
             onToggleCollapse={() => onToggleSection("graph")}
             headerDrag={headerDrag("graph")}
-            onRunSnapshot={props.onRunSnapshot}
             onOpenGitHubQueueItem={props.onOpenGitHubQueueItem}
             git={props.git}
             onOpenDiffTab={props.onOpenDiffTab}
@@ -885,6 +874,7 @@ function WorkspaceFolder({
   onGroupDragEnd,
   onToggle,
   onRename,
+  onChangeColor,
   onStartRename,
   onCancelRename,
   onDelete,
@@ -907,12 +897,14 @@ function WorkspaceFolder({
   onGroupDragEnd?: () => void;
   onToggle?: () => void;
   onRename?: (name: string) => void;
+  onChangeColor?: (color: string) => void;
   onStartRename?: () => void;
   onCancelRename?: () => void;
   onDelete?: () => void;
   children: React.ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const colorInputRef = useRef<HTMLInputElement | null>(null);
   const folderMenuBtnRef = useRef<HTMLButtonElement>(null);
   const [draftName, setDraftName] = useState(name);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1065,7 +1057,7 @@ function WorkspaceFolder({
         ) : (
           <span style={{ width: 14 }} />
         )}
-        <FolderGlyph color={group ? accent : "var(--muted)"} open={!collapsed} />
+        <FolderGlyph color="var(--muted)" open={!collapsed} />
         {editing ? (
           <input
             ref={inputRef}
@@ -1085,7 +1077,7 @@ function WorkspaceFolder({
               flex: 1,
               appearance: "none",
               background: "transparent",
-              color: "var(--ink)",
+              color: accent,
               border: "none",
               borderBottom: `1px solid ${accent}`,
               outline: "none",
@@ -1105,7 +1097,7 @@ function WorkspaceFolder({
               appearance: "none",
               border: "none",
               background: "transparent",
-              color: "var(--ink-dim)",
+              color: accent,
               textAlign: "left",
               padding: 0,
               fontFamily: "inherit",
@@ -1175,7 +1167,78 @@ function WorkspaceFolder({
               boundaryRef={menuBoundaryRef}
               align="end"
             >
-              <div style={{ minWidth: 160, padding: 4, display: "grid", gap: 2 }}>
+              <div style={{ minWidth: 180, padding: 4, display: "grid", gap: 2 }}>
+                <div
+                  style={{
+                    padding: "4px 7px 3px",
+                    color: "var(--muted)",
+                    fontSize: 9,
+                    fontWeight: 750,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Folder color
+                </div>
+                <div
+                  role="group"
+                  aria-label="Folder colors"
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(8, 1fr)",
+                    gap: 5,
+                    padding: "3px 7px 6px",
+                  }}
+                >
+                  {WORKSPACE_COLORS.map((color) => {
+                    const selected = normalizeHex(accent) === normalizeHex(color);
+                    return (
+                      <button
+                        key={color}
+                        type="button"
+                        aria-label={`Set ${name} folder color to ${color}`}
+                        title={color}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onChangeColor?.(color);
+                          setMenuOpen(false);
+                        }}
+                        style={{
+                          appearance: "none",
+                          width: 15,
+                          height: 15,
+                          padding: 0,
+                          borderRadius: 999,
+                          border: selected
+                            ? "2px solid var(--ink)"
+                            : "1px solid color-mix(in oklab, var(--ink) 22%, transparent)",
+                          background: color,
+                          boxShadow: selected
+                            ? `0 0 0 2px color-mix(in oklab, ${color} 30%, transparent)`
+                            : "none",
+                          cursor: "default",
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+                <RowMenuItem
+                  label="Custom color…"
+                  onClick={() => colorInputRef.current?.click()}
+                />
+                <input
+                  ref={colorInputRef}
+                  type="color"
+                  value={normalizeHex(accent)}
+                  onChange={(event) => {
+                    onChangeColor?.(event.currentTarget.value);
+                    setMenuOpen(false);
+                  }}
+                  tabIndex={-1}
+                  aria-hidden="true"
+                  style={{ position: "absolute", width: 0, height: 0, opacity: 0 }}
+                />
+                <div style={{ height: 1, margin: "3px 5px", background: "var(--rule-soft)" }} />
                 <RowMenuItem
                   label="Rename folder"
                   onClick={() => {
@@ -1437,6 +1500,8 @@ interface RowProps {
   working?: boolean;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
   missing?: boolean;
+  /** Folder members inherit their ordered shade from the folder family. */
+  folderColorManaged?: boolean;
   /** Flip boundary for the row's "…" AnchoredMenu (the workspaces scroll container). */
   menuBoundaryRef?: React.RefObject<HTMLElement | null>;
   onActivate: () => void;
@@ -1460,6 +1525,7 @@ function WorkspaceRow({
   tone,
   working = false,
   missing = false,
+  folderColorManaged = false,
   menuBoundaryRef,
   onActivate,
   onEdit,
@@ -1658,12 +1724,14 @@ function WorkspaceRow({
             type="button"
             onClick={(e) => {
               e.stopPropagation();
-              if (editing) colorRef.current?.click();
+              if (editing && !folderColorManaged) colorRef.current?.click();
             }}
-            tabIndex={editing ? 0 : -1}
+            tabIndex={editing && !folderColorManaged ? 0 : -1}
             title={
               editing
-                ? "Change color"
+                ? folderColorManaged
+                  ? "This workspace's shade follows its folder color and position"
+                  : "Change color"
                 : working
                   ? `${ws.name} — agent working`
                   : undefined
@@ -1717,7 +1785,7 @@ function WorkspaceRow({
           </button>
         )}
         <StatusDot tone={tone} />
-        {editing && (
+        {editing && !folderColorManaged && (
           <input
             ref={colorRef}
             type="color"
@@ -2218,5 +2286,3 @@ function FolderGlyph({ color, open }: { color: string; open: boolean }) {
     </svg>
   );
 }
-
-export { WORKSPACE_COLORS };

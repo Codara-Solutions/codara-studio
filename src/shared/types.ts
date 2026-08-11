@@ -512,6 +512,9 @@ export interface WorkspaceGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  // Stable family color for this organizational folder. Member workspaces use
+  // lighter/darker shades of it; optional only for pre-family persisted state.
+  color?: string;
 }
 
 export interface AppState {

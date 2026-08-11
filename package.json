@@ -52,6 +52,7 @@
     "profile:pi-subagent-lifecycle": "node scripts/profile-pi-subagent-lifecycle.cjs",
     "inspect-run": "node scripts/inspect-run.cjs",
     "test:worktrees": "node scripts/test-worktrees.cjs",
+    "test:workspace-colors": "node scripts/test-workspace-colors.cjs",
     "test:worktree-delete-dialog": "node scripts/test-worktree-delete-dialog.cjs",
     "eval:v2:noop": "node evals-v2/run-benchmark.cjs --adapter noop --repetitions 1",
     "eval:v2:peer": "node evals-v2/run-benchmark.cjs --variants spark_sequential,spark_hybrid_parallel --tasks peer-mailbox-analytics-contract --repetitions 1",

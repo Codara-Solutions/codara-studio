@@ -31,8 +31,14 @@ import type {
 } from "@shared/github";
 import { makeId } from "@shared/ids";
 import { backendPtySessionId } from "@shared/backend-pty";
+import {
+  applyWorkspaceGroupShades,
+  ensureWorkspaceGroupColors,
+  normalizeWorkspaceColor,
+  pickWorkspaceColor,
+} from "@shared/workspace-colors";
 import WindowChrome from "./components/WindowChrome";
-import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
+import WorkspaceRail from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
 import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
@@ -1238,8 +1244,9 @@ export default function App() {
           window.spark.app.home(),
         ]);
         if (cancelled) return;
-        setWorkspaces(state.workspaces);
-        setWorkspaceGroups(state.workspaceGroups ?? []);
+        const coloredGroups = ensureWorkspaceGroupColors(state.workspaceGroups ?? []);
+        setWorkspaces(applyWorkspaceGroupShades(state.workspaces, coloredGroups));
+        setWorkspaceGroups(coloredGroups);
         setWorkspaceRailOrder(state.workspaceRailOrder ?? []);
         setActiveId(state.activeWorkspaceId);
         setSettings(appSettings);
@@ -1265,8 +1272,9 @@ export default function App() {
   // existing active id. Mirror that authoritative selection here.
   useEffect(() => {
     const off = window.spark.state.onChanged?.((state) => {
-      setWorkspaces(state.workspaces);
-      setWorkspaceGroups(state.workspaceGroups ?? []);
+      const coloredGroups = ensureWorkspaceGroupColors(state.workspaceGroups ?? []);
+      setWorkspaces(applyWorkspaceGroupShades(state.workspaces, coloredGroups));
+      setWorkspaceGroups(coloredGroups);
       setWorkspaceRailOrder(state.workspaceRailOrder ?? []);
       const next = state.activeWorkspaceId;
       activeIdRef.current = next;
@@ -2862,7 +2870,13 @@ export default function App() {
   }, [handleOpenCapabilities]);
 
   const updateWs = useCallback((id: string, patch: Partial<Workspace>) => {
-    setWorkspaces((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
+    setWorkspaces((ws) => ws.map((w) => {
+      if (w.id !== id) return w;
+      if (!w.groupId || patch.color === undefined) return { ...w, ...patch };
+      const safePatch = { ...patch };
+      delete safePatch.color;
+      return { ...w, ...safePatch };
+    }));
   }, []);
 
   const moveWs = useCallback((workspaceId: string, groupId: string | null, beforeWorkspaceId: string | null) => {
@@ -2871,11 +2885,16 @@ export default function App() {
       if (sourceIndex < 0 || beforeWorkspaceId === workspaceId) return list;
       const source = list[sourceIndex];
       const remaining = list.filter((workspace) => workspace.id !== workspaceId);
+      const color = (source.groupId ?? null) === groupId
+        ? source.color
+        : groupId
+          ? source.color
+          : pickWorkspaceColor(remaining.map((workspace) => workspace.color), source.cwd);
       const moved: Workspace = groupId
-        ? { ...source, groupId }
+        ? { ...source, groupId, color }
         : (() => {
           const { groupId: _discarded, ...ungrouped } = source;
-          return ungrouped;
+          return { ...ungrouped, color };
         })();
 
       let insertAt = beforeWorkspaceId
@@ -2894,7 +2913,13 @@ export default function App() {
         workspace.id === list[index].id && workspace.groupId === list[index].groupId)) {
         return list;
       }
-      return next;
+      const affectedGroups = [source.groupId, groupId]
+        .filter((id): id is string => Boolean(id));
+      return applyWorkspaceGroupShades(
+        next,
+        workspaceGroupsRef.current,
+        [...new Set(affectedGroups)],
+      );
     });
   }, []);
 
@@ -2906,14 +2931,30 @@ export default function App() {
       for (let suffix = 2; names.has(name.toLocaleLowerCase()); suffix += 1) {
         name = `New folder ${suffix}`;
       }
-      return [...groups, { id, name, collapsed: false }];
+      const color = pickWorkspaceColor(
+        groups.flatMap((group) => group.color ? [group.color] : []),
+        id,
+      );
+      return [...groups, { id, name, collapsed: false, color }];
     });
     return id;
   }, []);
 
   const updateWorkspaceGroup = useCallback((id: string, patch: Partial<WorkspaceGroup>) => {
-    setWorkspaceGroups((groups) => groups.map((group) =>
-      group.id === id ? { ...group, ...patch } : group));
+    const { color: requestedColor, ...rest } = patch;
+    const normalizedColor = requestedColor === undefined
+      ? undefined
+      : normalizeWorkspaceColor(requestedColor);
+    const safePatch: Partial<WorkspaceGroup> = {
+      ...rest,
+      ...(normalizedColor ? { color: normalizedColor } : {}),
+    };
+    const nextGroups = workspaceGroupsRef.current.map((group) =>
+      group.id === id ? { ...group, ...safePatch } : group);
+    setWorkspaceGroups(nextGroups);
+    if (normalizedColor) {
+      setWorkspaces((items) => applyWorkspaceGroupShades(items, nextGroups, [id]));
+    }
   }, []);
 
   const reorderWorkspaceRailItem = useCallback((id: string, beforeItemId: string | null) => {
@@ -2932,11 +2973,18 @@ export default function App() {
 
   const deleteWorkspaceGroup = useCallback((id: string) => {
     setWorkspaceGroups((groups) => groups.filter((group) => group.id !== id));
-    setWorkspaces((items) => items.map((workspace) => {
-      if (workspace.groupId !== id) return workspace;
-      const { groupId: _discarded, ...ungrouped } = workspace;
-      return ungrouped;
-    }));
+    setWorkspaces((items) => {
+      const usedColors = items
+        .filter((workspace) => workspace.groupId !== id)
+        .map((workspace) => workspace.color);
+      return items.map((workspace) => {
+        if (workspace.groupId !== id) return workspace;
+        const { groupId: _discarded, ...ungrouped } = workspace;
+        const color = pickWorkspaceColor(usedColors, workspace.cwd);
+        usedColors.push(color);
+        return { ...ungrouped, color };
+      });
+    });
   }, []);
 
   const previewWsColor = useCallback((id: string, color: string) => {
@@ -2957,8 +3005,15 @@ export default function App() {
       /* best-effort cleanup only */
     }
     setWorkspaces((ws) => {
-      const next = ws.filter((w) => w.id !== id);
       const removed = ws.find((w) => w.id === id);
+      const filtered = ws.filter((w) => w.id !== id);
+      const next = removed?.groupId
+        ? applyWorkspaceGroupShades(
+            filtered,
+            workspaceGroupsRef.current,
+            [removed.groupId],
+          )
+        : filtered;
       if (removed) {
         for (const worker of removed.workers) {
           void window.spark.pty.dispose(worker.id);
@@ -2988,8 +3043,7 @@ export default function App() {
   const createWs = useCallback(async () => {
     const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
     if (!path) return;
-    const usedColors = new Set(workspaces.map((w) => w.color.toLowerCase()));
-    const color = WORKSPACE_COLORS.find((c) => !usedColors.has(c.toLowerCase())) ?? WORKSPACE_COLORS[0];
+    const color = pickWorkspaceColor(workspaces.map((workspace) => workspace.color), path);
     const ws: Workspace = {
       id: makeId("ws"),
       name: basename(path) || "workspace",
@@ -3023,9 +3077,7 @@ export default function App() {
   const createRemoteWs = useCallback(
     async (host: RemoteHostConfig, remotePath: string) => {
       const cwd = makeRemotePath(host.id, remotePath);
-      const usedColors = new Set(workspaces.map((w) => w.color.toLowerCase()));
-      const color =
-        WORKSPACE_COLORS.find((c) => !usedColors.has(c.toLowerCase())) ?? WORKSPACE_COLORS[0];
+      const color = pickWorkspaceColor(workspaces.map((workspace) => workspace.color), cwd);
       const ws: Workspace = {
         id: makeId("ws"),
         name: basename(remotePath) || host.id,
@@ -3079,14 +3131,24 @@ export default function App() {
         );
         if (!res.ok) throw new Error(res.error);
 
+        const list = workspacesRef.current;
+        const group = sourceWs.groupId
+          ? workspaceGroupsRef.current.find((candidate) => candidate.id === sourceWs.groupId)
+          : null;
+        const color = group?.color ?? pickWorkspaceColor(
+          list.map((workspace) => workspace.color),
+          res.path,
+        );
+
         const ws: Workspace = {
           id: makeId("ws"),
           // The branch is always user-meaningful now (picked or typed), so it
           // names the workspace in both modes.
           name: res.branch,
           cwd: res.path,
-          // Inherit the parent's color so the copy reads as a branch of it.
-          color: sourceWs.color,
+          // A copy stays in its parent's folder family, but gets its own shade
+          // so adjacent branches remain individually recognizable.
+          color,
           workers: [],
           ...(sourceWs.groupId ? { groupId: sourceWs.groupId } : {}),
           copyBranch: {
@@ -3106,7 +3168,6 @@ export default function App() {
         // child effects ahead of the parent setAllowedRoots effect, and a
         // sandbox-denied probe reports exists:false — striking the brand-new
         // copy through as "folder not found" until the next re-check.
-        const list = workspacesRef.current;
         const existingCwds = list
           .map((w) => w.cwd)
           .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
@@ -3130,9 +3191,17 @@ export default function App() {
           }
           nextWorkspaces.splice(insertAt, 0, ws);
         }
+        const coloredNextWorkspaces = group
+          ? applyWorkspaceGroupShades(
+              nextWorkspaces,
+              workspaceGroupsRef.current,
+              [group.id],
+            )
+          : nextWorkspaces;
+        const persistedWorkspace = coloredNextWorkspaces.find((item) => item.id === ws.id) ?? ws;
         const nextRailOrder = normalizedWorkspaceRailOrder(
           workspaceRailOrderRef.current,
-          nextWorkspaces,
+          coloredNextWorkspaces,
           workspaceGroupsRef.current,
         );
         const previousActiveId = activeIdRef.current;
@@ -3143,7 +3212,7 @@ export default function App() {
           activeWorkspaceId: previousActiveId,
         };
         const nextState: AppState = {
-          workspaces: nextWorkspaces,
+          workspaces: coloredNextWorkspaces,
           workspaceGroups: workspaceGroupsRef.current,
           workspaceRailOrder: nextRailOrder,
           activeWorkspaceId: activate ? ws.id : previousActiveId,
@@ -3256,10 +3325,10 @@ export default function App() {
         if (activate && previousActiveId) {
           activeRunIdsByWorkspaceRef.current[previousActiveId] = activeRunIdRef.current;
         }
-        workspacesRef.current = nextWorkspaces;
+        workspacesRef.current = coloredNextWorkspaces;
         workspaceRailOrderRef.current = nextRailOrder;
         activeRunIdsByWorkspaceRef.current[ws.id] = null;
-        setWorkspaces(nextWorkspaces);
+        setWorkspaces(coloredNextWorkspaces);
         setWorkspaceRailOrder(nextRailOrder);
         if (activate) {
           activeIdRef.current = ws.id;
@@ -3278,7 +3347,7 @@ export default function App() {
             if (cmd) newTerminalTab(res.path, cmd);
           }).catch(() => undefined);
         }
-        return ws;
+        return persistedWorkspace;
       } catch (cause) {
         const error = cause instanceof Error ? cause : new Error(String(cause));
         // Surfaced inline by CreateCopyDialog or the GitHub issue row.
@@ -3982,10 +4051,10 @@ export default function App() {
       let workspace = currentWorkspaces.find((item) => normalized(item.cwd) === normalized(cwd));
 
       if (!workspace) {
-        const usedColors = new Set(currentWorkspaces.map((item) => item.color.toLowerCase()));
-        const color =
-          WORKSPACE_COLORS.find((item) => !usedColors.has(item.toLowerCase())) ??
-          WORKSPACE_COLORS[0];
+        const color = pickWorkspaceColor(
+          currentWorkspaces.map((item) => item.color),
+          cwd,
+        );
         workspace = {
           id: makeId("ws"),
           name: basename(cwd) || "workspace",
@@ -5314,7 +5383,6 @@ export default function App() {
             onMoveSection={movePanelSection}
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
-            onRunSnapshot={handleRunSnapshot}
             onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}
@@ -5452,7 +5520,6 @@ export default function App() {
             onMoveSection={movePanelSection}
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
-            onRunSnapshot={handleRunSnapshot}
             onOpenGitHubQueueItem={handleOpenGitHubQueueItem}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}

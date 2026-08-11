@@ -12,7 +12,7 @@ import {
 import type { GitStatus } from "@shared/types";
 import { ChevronIcon } from "../icons";
 import GitHubWorkQueue from "./GitHubWorkQueue";
-import { IconButton, RefreshIcon, Spinner } from "./git-ui";
+import { RefreshIcon, Spinner } from "./git-ui";
 
 interface Props {
   cwd: string;
@@ -60,6 +60,11 @@ export default function GitHubSection({
   const [collapsed, setCollapsed] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [headerHover, setHeaderHover] = useState(false);
+  const [refreshHover, setRefreshHover] = useState(false);
+  // Background/initial reads are intentionally invisible in the header. Only
+  // an explicit click earns a progress label; otherwise a slow `gh` command
+  // looked like the section was stuck in a permanent refresh loop.
+  const [manualRefresh, setManualRefresh] = useState(false);
   const [queueSummary, setQueueSummary] = useState<{
     loading: boolean;
     total: number | null;
@@ -236,6 +241,11 @@ export default function GitHubSection({
   };
 
   const busySignal = loading || queueSummary.loading;
+  useEffect(() => {
+    if (!manualRefresh || busySignal) return;
+    const timer = window.setTimeout(() => setManualRefresh(false), 160);
+    return () => window.clearTimeout(timer);
+  }, [busySignal, manualRefresh]);
   const ready = status?.kind === "ready" ? status : null;
   // The queue count already includes this branch's PR; without a queue the
   // only countable item is that PR itself.
@@ -262,61 +272,117 @@ export default function GitHubSection({
       style={{ borderBottom: "1px solid var(--rule-soft)" }}
     >
       <div
-        onClick={() => setCollapsed((value) => !value)}
-        onMouseEnter={() => setHeaderHover(true)}
-        onMouseLeave={() => setHeaderHover(false)}
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 4,
-          height: 26,
-          padding: "0 8px",
-          cursor: "default",
-          background: headerHover ? "var(--hover)" : "transparent",
-          transition: "background var(--motion-fast) var(--ease-out)",
+          gap: 5,
+          minHeight: 34,
+          padding: "3px 8px",
+          background: "color-mix(in oklab, var(--panel-raised, var(--panel)) 52%, transparent)",
         }}
       >
-        <ChevronIcon open={!collapsed} />
-        <span
+        <button
+          type="button"
+          aria-expanded={!collapsed}
+          title={collapsed ? "Show GitHub issues and pull requests" : "Hide GitHub issues and pull requests"}
+          onClick={() => setCollapsed((value) => !value)}
+          onMouseEnter={() => setHeaderHover(true)}
+          onMouseLeave={() => setHeaderHover(false)}
           style={{
+            appearance: "none",
+            minWidth: 0,
+            flex: 1,
+            height: 27,
+            padding: "0 6px",
+            border: "none",
+            borderRadius: 6,
+            background: headerHover ? "var(--hover)" : "transparent",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            cursor: "default",
+            textAlign: "left",
+            transition: "background var(--motion-fast) var(--ease-out)",
+          }}
+        >
+          <ChevronIcon open={!collapsed} />
+          <span
+            style={{
             fontFamily: "var(--font-sans)",
             fontSize: 10,
             letterSpacing: "0.12em",
             fontWeight: 800,
             textTransform: "uppercase",
-            color: "var(--muted)",
-          }}
-        >
-          GitHub
-        </span>
-        <span style={{ flex: 1 }} />
-        {busySignal && <Spinner size={11} />}
-        <span onClick={(event) => event.stopPropagation()} style={{ display: "inline-flex" }}>
-          <IconButton
-            title="Refresh GitHub"
-            onClick={onRefresh}
-            disabled={busySignal}
-            size={20}
-          >
-            <RefreshIcon />
-          </IconButton>
-        </span>
-        {count !== null && count > 0 ? (
-          // Nothing open is already said in the body copy, so zero shows no
-          // badge at all — the header stays quiet until there is work.
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              fontVariantNumeric: "tabular-nums",
-              color: "var(--muted-2)",
-              minWidth: 16,
-              textAlign: "right",
+            color: "var(--ink-dim)",
             }}
           >
-            {count}
+            GitHub
           </span>
-        ) : null}
+          {count !== null && count > 0 ? (
+            <span
+              style={{
+                minWidth: 17,
+                padding: "1px 5px",
+                borderRadius: 999,
+                background: "var(--hover)",
+                color: "var(--muted)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 9,
+                fontVariantNumeric: "tabular-nums",
+                textAlign: "center",
+              }}
+            >
+              {count}
+            </span>
+          ) : null}
+          <span style={{ flex: 1 }} />
+          <span
+            style={{
+              color: "var(--muted-2)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 9,
+              fontWeight: 650,
+            }}
+          >
+            {collapsed ? "Show" : "Hide"}
+          </span>
+        </button>
+        <button
+          type="button"
+          title="Refresh GitHub issues and pull requests"
+          aria-label="Refresh GitHub issues and pull requests"
+          disabled={manualRefresh}
+          onClick={() => {
+            setManualRefresh(true);
+            onRefresh();
+          }}
+          onMouseEnter={() => setRefreshHover(true)}
+          onMouseLeave={() => setRefreshHover(false)}
+          style={{
+            appearance: "none",
+            height: 27,
+            minWidth: manualRefresh ? 76 : 65,
+            padding: "0 7px",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 6,
+            background: refreshHover && !manualRefresh ? "var(--hover)" : "transparent",
+            color: manualRefresh ? "var(--muted-2)" : "var(--muted)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 5,
+            cursor: "default",
+            fontFamily: "var(--font-sans)",
+            fontSize: 9,
+            fontWeight: 650,
+            opacity: manualRefresh ? 0.78 : 1,
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          }}
+        >
+          {manualRefresh ? <Spinner size={10} /> : <RefreshIcon />}
+          <span>{manualRefresh ? "Updating" : "Refresh"}</span>
+        </button>
       </div>
 
       <div

@@ -176,6 +176,7 @@ export interface RemoteWorkspaceGroupInfo {
   id: string;
   name: string;
   collapsed: boolean;
+  color?: string;
 }
 
 export interface RemoteWorkspaceOrganization {
@@ -1105,6 +1106,7 @@ export interface RemoteRpcServices {
     groupId: string;
     name?: string;
     collapsed?: boolean;
+    color?: string;
   }): Promise<RemoteWorkspaceGroupInfo>;
   deleteWorkspaceGroup?(groupId: string): Promise<void>;
   moveWorkspace?(input: {
@@ -1978,22 +1980,25 @@ export class RpcSession {
             groupId?: unknown;
             name?: unknown;
             collapsed?: unknown;
+            color?: unknown;
           };
           if (
             typeof p.groupId !== "string" ||
             p.groupId.length === 0 ||
             p.groupId.length > 256 ||
-            (p.name === undefined && p.collapsed === undefined) ||
+            (p.name === undefined && p.collapsed === undefined && p.color === undefined) ||
             (p.name !== undefined &&
               (typeof p.name !== "string" ||
                 p.name.trim().length === 0 ||
                 p.name.length > 120)) ||
-            (p.collapsed !== undefined && typeof p.collapsed !== "boolean")
+            (p.collapsed !== undefined && typeof p.collapsed !== "boolean") ||
+            (p.color !== undefined &&
+              (typeof p.color !== "string" || !/^#[\da-f]{6}$/i.test(p.color)))
           ) {
             this.replyError(
               id,
               "invalid-params",
-              "workspaces.group.update needs a groupId and a valid name or collapsed state.",
+              "workspaces.group.update needs a groupId and a valid name, collapsed state, or #RRGGBB color.",
             );
             return;
           }
@@ -2003,6 +2008,7 @@ export class RpcSession {
             ...(typeof p.collapsed === "boolean"
               ? { collapsed: p.collapsed }
               : {}),
+            ...(typeof p.color === "string" ? { color: p.color } : {}),
           });
           this.reply(id, { group });
           return;

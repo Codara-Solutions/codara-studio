@@ -4347,6 +4347,7 @@ async function main() {
           id: input.groupId,
           name: input.name ?? "Studio",
           collapsed: input.collapsed ?? false,
+          ...(input.color ? { color: input.color } : {}),
         };
       },
       deleteWorkspaceGroup: async (groupId) => {
@@ -5190,13 +5191,16 @@ async function main() {
       groupId: "group-studio",
       name: "  Products  ",
       collapsed: true,
+      color: "#FF5C2B",
     });
     await flush();
     check(
-      "workspaces.group.update delegates name and collapsed state",
+      "workspaces.group.update delegates name, collapsed state, and folder color",
       calls.at(-1)?.[0] === "workspaces.group.update" &&
         calls.at(-1)?.[1]?.name === "Products" &&
-        calls.at(-1)?.[1]?.collapsed === true,
+        calls.at(-1)?.[1]?.collapsed === true &&
+        calls.at(-1)?.[1]?.color === "#FF5C2B" &&
+        ex.outbox.at(-1)?.result?.group?.color === "#FF5C2B",
       calls.at(-1),
     );
     exReq(33, "workspaces.move", {

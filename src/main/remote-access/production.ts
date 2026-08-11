@@ -27,6 +27,12 @@ import type {
   StartGitHubPullRequestResult,
 } from "@shared/github";
 import { isRemotePath } from "@shared/remote";
+import {
+  applyWorkspaceGroupShades,
+  ensureWorkspaceGroupColors,
+  normalizeWorkspaceColor,
+  pickWorkspaceColor,
+} from "@shared/workspace-colors";
 import type {
   AppSettings,
   AppState,
@@ -231,17 +237,6 @@ const coraRunMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
 let lastRemoteImagePruneAt = 0;
 let accountProfileRegistry: PiAccountProfileRegistry | null = null;
-
-const WORKSPACE_COLORS = [
-  "#2AA298",
-  "#7FB3FF",
-  "#5BD68F",
-  "#FF5C2B",
-  "#C99BFF",
-  "#E0E0E0",
-  "#FF8FB1",
-  "#5DD6D6",
-] as const;
 
 // DTO budgets deliberately leave generous headroom under the 1 MiB frame
 // ceiling for JSON escaping and the response envelope.
@@ -611,6 +606,7 @@ function workspaceGroupInfo(group: WorkspaceGroup): RemoteWorkspaceGroupInfo {
     id: group.id,
     name: truncateUtf8(group.name, 512),
     collapsed: group.collapsed,
+    ...(group.color ? { color: group.color } : {}),
   };
 }
 
@@ -706,13 +702,10 @@ async function addWorkspaceForRemote(input: {
       if (existing === selected.path) return workspaceInfo(workspace);
     }
 
-    const usedColors = new Set(
-      state.workspaces.map((workspace) => workspace.color.toLowerCase()),
+    const color = pickWorkspaceColor(
+      state.workspaces.map((workspace) => workspace.color),
+      selected.path,
     );
-    const color =
-      WORKSPACE_COLORS.find(
-        (candidate) => !usedColors.has(candidate.toLowerCase()),
-      ) ?? WORKSPACE_COLORS[state.workspaces.length % WORKSPACE_COLORS.length];
     const requestedName = input.name?.trim();
     const workspace: Workspace = {
       id: `ws-mobile-${randomUUID()}`,
@@ -747,18 +740,24 @@ async function createWorkspaceGroupForRemote(
         `Codara Studio supports at most ${MAX_REMOTE_WORKSPACE_GROUPS} remote workspace folders.`,
       );
     }
+    const id = `workspace-group-mobile-${randomUUID()}`;
+    const coloredGroups = ensureWorkspaceGroupColors(state.workspaceGroups);
     const group: WorkspaceGroup = {
-      id: `workspace-group-mobile-${randomUUID()}`,
+      id,
       name: remoteWorkspaceGroupName(name),
       collapsed: false,
+      color: pickWorkspaceColor(
+        coloredGroups.flatMap((candidate) => candidate.color ? [candidate.color] : []),
+        id,
+      ),
     };
     const next: AppState = {
       ...state,
-      workspaceGroups: [...state.workspaceGroups, group],
+      workspaceGroups: [...coloredGroups, group],
       workspaceRailOrder: normalizeWorkspaceRailOrderForRemote(
         [...(state.workspaceRailOrder ?? []), group.id],
         state.workspaces,
-        [...state.workspaceGroups, group],
+        [...coloredGroups, group],
       ),
     };
     await persistRemoteWorkspaceState(next);
@@ -770,6 +769,7 @@ async function updateWorkspaceGroupForRemote(input: {
   groupId: string;
   name?: string;
   collapsed?: boolean;
+  color?: string;
 }): Promise<RemoteWorkspaceGroupInfo> {
   return serializeWorkspaceMutation(async () => {
     const state = await loadState();
@@ -784,10 +784,16 @@ async function updateWorkspaceGroupForRemote(input: {
         ? { name: remoteWorkspaceGroupName(input.name) }
         : {}),
       ...(input.collapsed !== undefined ? { collapsed: input.collapsed } : {}),
+      ...(input.color !== undefined
+        ? { color: normalizeWorkspaceColor(input.color) ?? current.color }
+        : {}),
     };
     const workspaceGroups = state.workspaceGroups.slice();
     workspaceGroups[index] = updated;
-    await persistRemoteWorkspaceState({ ...state, workspaceGroups });
+    const workspaces = input.color === undefined
+      ? state.workspaces
+      : applyWorkspaceGroupShades(state.workspaces, workspaceGroups, [updated.id]);
+    await persistRemoteWorkspaceState({ ...state, workspaces, workspaceGroups });
     return workspaceGroupInfo(updated);
   });
 }
@@ -804,11 +810,16 @@ async function deleteWorkspaceGroupForRemote(groupId: string): Promise<void> {
       (group) => group.id !== groupId,
     );
     const releasedIds: string[] = [];
+    const usedColors = state.workspaces
+      .filter((workspace) => workspace.groupId !== groupId)
+      .map((workspace) => workspace.color);
     const workspaces = state.workspaces.map((workspace) => {
       if (workspace.groupId !== groupId) return workspace;
       releasedIds.push(workspace.id);
       const { groupId: _discarded, ...ungrouped } = workspace;
-      return ungrouped;
+      const color = pickWorkspaceColor(usedColors, workspace.cwd);
+      usedColors.push(color);
+      return { ...ungrouped, color };
     });
     const oldOrder = state.workspaceRailOrder ?? [];
     const oldIndex = oldOrder.indexOf(groupId);
@@ -887,11 +898,16 @@ async function moveWorkspaceForRemote(input: {
     const remaining = state.workspaces.filter(
       (workspace) => workspace.id !== input.workspaceId,
     );
+    const color = (source.groupId ?? null) === input.groupId
+      ? source.color
+      : input.groupId
+        ? source.color
+        : pickWorkspaceColor(remaining.map((workspace) => workspace.color), source.cwd);
     const moved: Workspace = input.groupId
-      ? { ...source, groupId: input.groupId }
+      ? { ...source, groupId: input.groupId, color }
       : (() => {
           const { groupId: _discarded, ...ungrouped } = source;
-          return ungrouped;
+          return { ...ungrouped, color };
         })();
     let insertAt = input.beforeWorkspaceId
       ? remaining.findIndex(
@@ -908,8 +924,16 @@ async function moveWorkspaceForRemote(input: {
       insertAt =
         lastInDestination >= 0 ? lastInDestination + 1 : remaining.length;
     }
-    const workspaces = remaining.slice();
-    workspaces.splice(insertAt, 0, moved);
+    const insertedWorkspaces = remaining.slice();
+    insertedWorkspaces.splice(insertAt, 0, moved);
+    const affectedGroups = [source.groupId, input.groupId]
+      .filter((id): id is string => Boolean(id));
+    const workspaces = applyWorkspaceGroupShades(
+      insertedWorkspaces,
+      state.workspaceGroups,
+      [...new Set(affectedGroups)],
+    );
+    const persistedWorkspace = workspaces.find((workspace) => workspace.id === moved.id) ?? moved;
 
     let railOrder = normalizeWorkspaceRailOrderForRemote(
       state.workspaceRailOrder ?? [],
@@ -958,7 +982,7 @@ async function moveWorkspaceForRemote(input: {
       workspaces,
       workspaceRailOrder: railOrder,
     });
-    return workspaceInfo(moved);
+    return workspaceInfo(persistedWorkspace);
   });
 }
 

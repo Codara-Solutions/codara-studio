@@ -38,7 +38,8 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
 
     // The Electron window is visible under Wayland, where the real desktop
     // pointer can keep Playwright's stability check oscillating by a pixel.
-    await page.getByTitle("New workspace folder").click({ force: true });
+    await page.getByTitle("New…").click({ force: true });
+    await page.getByRole("menuitem", { name: "New folder", exact: true }).click({ force: true });
     const folderName = page.getByLabel("Workspace folder name");
     await expect(folderName).toBeVisible();
     await folderName.fill("Client projects");
@@ -55,7 +56,8 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
     const activeNeutralPixel = await renderedBackgroundPixel(page.locator('[data-workspace-id="ws-alpha"]'));
     expect(activeNeutralPixel.r).toBeLessThanOrEqual(activeNeutralPixel.b);
 
-    await page.getByTitle("New workspace folder").click({ force: true });
+    await page.getByTitle("New…").click({ force: true });
+    await page.getByRole("menuitem", { name: "New folder", exact: true }).click({ force: true });
     await page.getByLabel("Workspace folder name").fill("Archive");
     await page.getByLabel("Workspace folder name").press("Enter");
     const archiveGroup = page.locator('[data-workspace-group-id]').filter({ hasText: "Archive" });
@@ -97,22 +99,66 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
     await dispatchWorkspaceDrag(page, alphaRow, group.getByText("Drop workspaces here"));
     await expect(group.locator('[data-workspace-id="ws-alpha"]')).toBeVisible();
 
+    // Folder color is one family control: changing it recolors the title and
+    // every member, with the workspace order mapped dark -> light.
+    await dispatchWorkspaceDrag(
+      page,
+      page.locator('[data-workspace-id="ws-beta"]'),
+      group.locator('[data-workspace-id="ws-alpha"]'),
+    );
+    await group.getByTitle("Folder actions").click({ force: true });
+    await page
+      .getByRole("button", { name: "Set Client projects folder color to #FF5C2B" })
+      .click({ force: true });
+    await expect(
+      group.getByRole("button", { name: "Client projects", exact: true }),
+    ).toHaveCSS("color", "rgb(255, 92, 43)");
+
     await group.getByTitle("Collapse Client projects").click();
     await expect(group.locator('[data-workspace-id="ws-alpha"]')).toHaveCount(0);
     await expect.poll(async () => {
       const state = JSON.parse(await readFile(statePath, "utf8"));
+      const persistedGroup = state.workspaceGroups?.find(
+        (candidate: { name?: string }) => candidate.name === "Client projects",
+      );
+      const persistedAlpha = state.workspaces?.find(
+        (workspace: { id: string }) => workspace.id === "ws-alpha",
+      );
       return {
-        group: state.workspaceGroups?.find((candidate: { name?: string }) => candidate.name === "Client projects"),
+        group: persistedGroup,
         archiveFirst:
           state.workspaceRailOrder?.[0] ===
           state.workspaceGroups?.find((candidate: { name?: string }) => candidate.name === "Archive")?.id,
-        alphaGroupId: state.workspaces?.find((workspace: { id: string }) => workspace.id === "ws-alpha")?.groupId,
+        alphaGroupId: persistedAlpha?.groupId,
+        familyColor: persistedGroup?.color,
+        orderedMemberColors: state.workspaces
+          ?.filter((workspace: { groupId?: string }) => workspace.groupId === persistedGroup?.id)
+          .map((workspace: { color: string }) => workspace.color),
       };
     }).toMatchObject({
-      group: { name: "Client projects", collapsed: true },
+      group: {
+        name: "Client projects",
+        collapsed: true,
+        color: "#FF5C2B",
+      },
       archiveFirst: true,
       alphaGroupId: expect.any(String),
+      familyColor: "#FF5C2B",
+      orderedMemberColors: expect.arrayContaining([
+        expect.stringMatching(/^#[0-9A-F]{6}$/),
+        expect.stringMatching(/^#[0-9A-F]{6}$/),
+      ]),
     });
+
+    const persistedState = JSON.parse(await readFile(statePath, "utf8"));
+    const persistedClientGroup = persistedState.workspaceGroups.find(
+      (candidate: { name?: string }) => candidate.name === "Client projects",
+    );
+    const memberColors = persistedState.workspaces
+      .filter((workspace: { groupId?: string }) => workspace.groupId === persistedClientGroup.id)
+      .map((workspace: { color: string }) => workspace.color);
+    expect(memberColors).toHaveLength(2);
+    expect(hexLightness(memberColors[0])).toBeLessThan(hexLightness(memberColors[1]));
 
     await app.close();
     app = await electron.launch({ args: ["."], env });
@@ -165,6 +211,13 @@ async function renderedBackgroundPixel(locator: Locator): Promise<{ r: number; g
     const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
     return { r, g, b };
   });
+}
+
+function hexLightness(value: string): number {
+  const red = Number.parseInt(value.slice(1, 3), 16) / 255;
+  const green = Number.parseInt(value.slice(3, 5), 16) / 255;
+  const blue = Number.parseInt(value.slice(5, 7), 16) / 255;
+  return (Math.max(red, green, blue) + Math.min(red, green, blue)) / 2;
 }
 
 async function dispatchWorkspaceDrag(page: Page, source: Locator, target: Locator): Promise<void> {

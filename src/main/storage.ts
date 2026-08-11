@@ -13,6 +13,7 @@ import {
 } from "@shared/types";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
+import { normalizeWorkspaceColor } from "@shared/workspace-colors";
 
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
@@ -156,10 +157,12 @@ function normalizeWorkspaceGroups(value: unknown): WorkspaceGroup[] {
     const id = typeof raw.id === "string" ? raw.id.trim() : "";
     if (!id || seen.has(id)) continue;
     seen.add(id);
+    const color = normalizeWorkspaceColor(raw.color);
     groups.push({
       id,
       name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : "Workspace group",
       collapsed: raw.collapsed === true,
+      ...(color ? { color } : {}),
     });
   }
   return groups;
