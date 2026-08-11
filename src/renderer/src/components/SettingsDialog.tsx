@@ -811,7 +811,7 @@ function ApiSettings({
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="OpenRouter"
-        detail="Powers the editor's inline AI and git commit-message drafts. Cora's own models are picked in the chat composer, not here."
+        detail="Powers only the editor's inline AI. Cora and git commit drafts use subscription-backed Pi."
       />
       <Label text="OpenRouter API key">
         <input
@@ -831,6 +831,27 @@ function ApiSettings({
           onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
           placeholder="google/gemini-flash-latest"
           style={inputShellStyle}
+        />
+      </Label>
+      <hr className="spark-divider" style={{ margin: "6px 0" }} />
+      <SectionTitle
+        title="Git commit messages"
+        detail="Runs a private, sessionless Pi one-shot with no tools. Automatic prefers an available OpenAI subscription, then Anthropic."
+      />
+      <Label text="Commit message model">
+        <CustomSelect
+          value={draft.commitMessageModel}
+          options={[
+            { value: "auto", label: "Automatic (OpenAI first)" },
+            { value: "gpt-5.6-luna", label: "OpenAI, gpt-5.6-luna" },
+            { value: "claude-sonnet-5", label: "Anthropic, claude-sonnet-5" },
+          ]}
+          onChange={(value) =>
+            onChange({
+              ...draft,
+              commitMessageModel: value as AppSettings["commitMessageModel"],
+            })
+          }
         />
       </Label>
     </div>
@@ -1703,7 +1724,7 @@ function EditorSettings() {
 
       <SectionTitle
         title="Inline AI"
-        detail="Ghost-text autocomplete and git commit-message drafts share this OpenRouter model."
+        detail="Ghost-text autocomplete uses the OpenRouter key and model configured in Settings."
       />
       <ToggleRow
         title="Inline AI autocomplete"

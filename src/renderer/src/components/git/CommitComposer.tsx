@@ -258,7 +258,7 @@ export default function CommitComposer({
         type="button"
         disabled={!canGenerateMessage || anyBusy}
         onClick={onGenerateMessage}
-        title="Generate commit message with Inline AI"
+        title="Draft a commit message with your Pi subscription"
         style={{
           appearance: "none",
           display: "flex",

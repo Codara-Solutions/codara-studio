@@ -227,6 +227,7 @@ test("failed transitions are atomic", () => {
       terminalScrollbackLineLimit: 10_000,
       openRouterApiKey: "",
       openRouterModel: "",
+      commitMessageModel: "auto",
       agentMcpSyncEnabled: false,
       agentSkillSyncEnabled: false,
       agentDisabledMcpIds: [],

@@ -170,6 +170,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: "google/gemini-flash-latest",
+  commitMessageModel: "auto",
   agentMcpSyncEnabled: true,
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],

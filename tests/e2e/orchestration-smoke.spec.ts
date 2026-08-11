@@ -263,7 +263,7 @@ test("spark chat renders as a workbench tab", async () => {
   }
 });
 
-test("settings dialog saves default terminal, OpenRouter, and inline model settings", async () => {
+test("settings dialog saves default terminal, OpenRouter, commit, and inline model settings", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-settings-e2e-");
   const piAuthDir = join(userDataDir, "pi-agent");
   await mkdir(piAuthDir, { recursive: true });
@@ -293,10 +293,12 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
 
   let app: ElectronApplication | null = null;
   try {
+    const { ELECTRON_RENDERER_URL: _electronRendererUrl, ...electronEnv } = process.env;
     app = await electron.launch({
       args: ["."],
+      cwd: process.cwd(),
       env: {
-        ...process.env,
+        ...electronEnv,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
         // point this instance at the user's real ~/.Codara state.
@@ -404,7 +406,9 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
 
     await clickAttached(page.getByRole("button", { name: "API and model" }));
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
-    await page.getByLabel("MODEL").fill("test/settings-model");
+    await page.getByLabel("Model", { exact: true }).fill("test/settings-model");
+    await clickAttached(page.getByLabel("Commit message model"));
+    await clickAttached(page.getByRole("option", { name: "Anthropic, claude-sonnet-5" }));
     await clickButton(page, "Save");
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeHidden();
 
@@ -412,10 +416,12 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
       defaultShellId?: string;
       openRouterApiKey?: string;
       openRouterModel?: string;
+      commitMessageModel?: string;
     };
     expect(settings.defaultShellId).toBeTruthy();
     expect(settings.openRouterApiKey).toBe("test-openrouter-key");
     expect(settings.openRouterModel).toBe("test/settings-model");
+    expect(settings.commitMessageModel).toBe("claude-sonnet-5");
 
     await expect
       .poll(async () => {

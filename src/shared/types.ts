@@ -548,22 +548,20 @@ export function trimTerminalScrollbackLines(value: string, maxLines: number): st
   return lines.slice(-limit).join("\n");
 }
 
+export type CommitMessageModel = "auto" | "gpt-5.6-luna" | "claude-sonnet-5";
+
+export const DEFAULT_COMMIT_MESSAGE_MODEL: CommitMessageModel = "auto";
+
 export interface AppSettings {
   defaultShellId: string | null;
   terminalScrollbackLineLimit: number;
-  // OpenRouter credentials for Codara's two small LLM utilities: git
-  // commit-message drafting (git-commit-message.ts) and the code editor's
-  // inline AI, ghost-text autocomplete + inline edit (inline-ai.ts). Cora's
-  // orchestration NEVER reads these: the manager and its workers run on the
-  // pinned Pi runtime / CLI backends, on subscription auth that lives outside
-  // AppSettings entirely. An empty key just disables those two conveniences.
+  // OpenRouter stays dedicated to the code editor's inline AI. Commit drafts
+  // use the separate subscription-backed Pi selection below.
   openRouterApiKey: string;
-  // OpenRouter model id for commit-message drafting: git-commit-message.ts
-  // tries AppPreferences.inlineAutocompleteModelId first and uses this as the
-  // second route (either one alone is enough; with neither set the button
-  // falls back to a deterministic non-LLM draft). Same scope caveat as the key
-  // above: this is not a Cora manager model.
   openRouterModel: string;
+  // Auto prefers OpenAI when its subscription is usable, then Anthropic.
+  // Either concrete model is an explicit provider override.
+  commitMessageModel: CommitMessageModel;
   agentMcpSyncEnabled: boolean;
   agentSkillSyncEnabled: boolean;
   agentDisabledMcpIds: string[];
@@ -1123,7 +1121,7 @@ export const INLINE_AI_MODEL_PRESETS: ReadonlyArray<{
   {
     id: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
     label: "Gemini 3.5 Flash",
-    hint: "Recommended for ghost text and commit-message drafts.",
+    hint: "Recommended for editor ghost text.",
     detail: "Flash latency, 1M context, minimal thinking in Codara.",
     badge: "Default",
   },
@@ -1138,7 +1136,7 @@ export const INLINE_AI_MODEL_PRESETS: ReadonlyArray<{
     id: "z-ai/glm-4.7:nitro",
     label: "GLM-4.7 Nitro",
     hint: "Z.ai GLM model on OpenRouter's nitro route.",
-    detail: "Use as a custom fast route for inline suggestions and commit drafts.",
+    detail: "Use as a custom fast route for inline suggestions.",
     badge: "Nitro",
   },
 ];
@@ -1855,7 +1853,7 @@ export type GitCopyWorktreeResult =
     }
   | { ok: false; error: string };
 
-/** Result of asking Inline AI to draft an editable commit message. */
+/** Result of asking the subscription-backed Pi one-shot to draft a commit message. */
 export type GitCommitMessageResult =
   | { ok: true; message: string }
   | { ok: false; error: string };

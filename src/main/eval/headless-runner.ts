@@ -470,8 +470,8 @@ async function applyVariantConfig(config: VariantConfig, configPath: string): Pr
   // chatBackend/chatModel/chatEffort/chatMode, which is the only channel the
   // manager reads. (They used to be mirrored into AppSettings.openRouterModel
   // back when the manager could be routed through the OpenRouter API; that
-  // setting now only feeds commit-message drafting and the editor's inline AI,
-  // so writing it here would change nothing about the run.)
+  // setting now only feeds the editor's inline AI, so writing it here would
+  // change nothing about the run.)
 
   // Manager profile path. The variant config records a path relative to
   // the repo root (the JSON lives under evals-v2/configs/, the profile lives

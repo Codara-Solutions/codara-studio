@@ -1,20 +1,18 @@
 import type { GitCommitMessageResult, GitFileChange, GitStatus } from "@shared/types";
 import { computeGitStatus, readUntrackedAsDiff } from "./git-ops";
 import { readGitText } from "./git-exec";
-import { runInlineAiChatCompletion } from "./inline-ai";
-import { loadPreferences } from "./preferences-store";
+import { runSessionlessPiCommitMessage } from "./orchestration/pi-commit-one-shot";
 import { loadSettings } from "./storage";
 
-// Drafts an editable commit message from the current changes using the
-// configured OpenRouter model (see [[inline_ai_openrouter]]). The model does
-// the real summarizing; the deterministic fallback below only runs when the
-// model is unavailable or returns something unusable, and it stays fully
+// Drafts an editable commit message from the current changes using an
+// isolated, subscription-backed Pi one-shot. The model does the real
+// summarizing; the deterministic fallback below runs when no subscription is
+// usable or generation fails, and it stays fully
 // general — no repository-specific phrasing.
 
 const MAX_PROMPT_CHARS = 28_000;
 const MAX_DIFF_CHARS = 10_000;
 const MAX_UNTRACKED_FILES = 10;
-const MAX_TOKENS = 320;
 
 type Scope = "staged" | "all";
 
@@ -297,18 +295,6 @@ Write the commit message for the commit target described above.`;
   return truncate(body, MAX_PROMPT_CHARS);
 }
 
-function resolveModels(inlineModel: string, managerModel: string): { primary: string; fallback: string } | null {
-  const primary = inlineModel || managerModel;
-  if (!primary) return null;
-  const fallback =
-    managerModel && managerModel !== primary
-      ? managerModel
-      : inlineModel && inlineModel !== primary
-        ? inlineModel
-        : primary;
-  return { primary, fallback };
-}
-
 export async function generateCommitMessage(cwd: string): Promise<GitCommitMessageResult> {
   try {
     const status = await computeGitStatus(cwd);
@@ -326,17 +312,7 @@ export async function generateCommitMessage(cwd: string): Promise<GitCommitMessa
     // front so both paths can use it. Best-effort: "" on an unborn branch.
     const recentSubjects = await readGitText(cwd, ["log", "--max-count=12", "--pretty=format:%s"]);
 
-    const preferences = await loadPreferences();
     const settings = await loadSettings();
-    const models = resolveModels(
-      preferences.inlineAutocompleteModelId.trim(),
-      settings.openRouterModel.trim(),
-    );
-    if (!models) {
-      // No model configured at all — hand back a deterministic draft so the
-      // button still does something useful instead of erroring out.
-      return { ok: true, message: buildFallbackMessage(files, recentSubjects) };
-    }
 
     const [statusShort, stagedDiff, unstagedDiff, untrackedDiff] = await Promise.all([
       readGitText(cwd, ["status", "--short"]),
@@ -357,54 +333,16 @@ export async function generateCommitMessage(cwd: string): Promise<GitCommitMessa
       untrackedDiff,
     });
 
-    const requestBase = `git-commit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const first = await runInlineAiChatCompletion({
-      modelId: models.primary,
-      requestId: requestBase,
-      maxTokens: MAX_TOKENS,
-      temperature: 0.25,
-      reasoningEffort: "none",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: prompt },
-      ],
-    });
-
-    // A configured API-key problem is worth surfacing rather than papering over.
-    if (first.error && /api key|unauthorized|401/i.test(first.error)) {
-      return { ok: false, error: first.error };
-    }
-
-    let message = first.error ? "" : sanitize(first.text);
-
+    const generated = await runSessionlessPiCommitMessage({
+      cwd,
+      modelSelection: settings.commitMessageModel,
+      systemPrompt: SYSTEM_PROMPT,
+      prompt,
+    }).catch(() => null);
+    let message = sanitize(generated?.text ?? "");
     if (!message || looksWeak(message)) {
-      const retry = await runInlineAiChatCompletion({
-        modelId: models.fallback,
-        requestId: `${requestBase}-retry`,
-        maxTokens: MAX_TOKENS * 2,
-        temperature: 0.1,
-        reasoningEffort: "none",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: `${prompt}\n\n${
-              first.error
-                ? `The previous model failed (${first.error}). Draft the message now.`
-                : `The previous draft "${firstLine(message)}" was too vague. Rewrite it so the subject names the specific change.`
-            } Return only the commit message.`,
-          },
-        ],
-      });
-      const retryMessage = retry.error ? "" : sanitize(retry.text);
-      if (retryMessage && !looksWeak(retryMessage)) {
-        message = retryMessage;
-      } else if (!message && retryMessage) {
-        message = retryMessage;
-      }
+      message = buildFallbackMessage(files, recentSubjects);
     }
-
-    if (!message) message = buildFallbackMessage(files, recentSubjects);
     return { ok: true, message };
   } catch (err) {
     const e = err as { message?: unknown };

@@ -2,6 +2,7 @@ import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
+  DEFAULT_COMMIT_MESSAGE_MODEL,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   normalizeGitHubOrigin,
   normalizeTerminalScrollbackLineLimit,
@@ -15,10 +16,7 @@ import { writeFileAtomic } from "./fs-atomic";
 
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
-// Default model for the OpenRouter-backed utilities (git commit-message
-// drafting; the editor's inline AI keeps its own preference). Cheap and fast
-// because these are one-shot helper calls, not orchestration, Cora's manager
-// and workers never read this setting.
+// Legacy OpenRouter setting retained for editor inline AI only.
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
 
 const EMPTY: AppState = {
@@ -32,6 +30,7 @@ const EMPTY_SETTINGS: AppSettings = {
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
+  commitMessageModel: DEFAULT_COMMIT_MESSAGE_MODEL,
   agentMcpSyncEnabled: true,
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
@@ -192,7 +191,7 @@ function normalizeWorkspaceRailOrder(
   return result;
 }
 
-function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
+export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
   return {
     defaultShellId:
       typeof settings.defaultShellId === "string" && settings.defaultShellId.trim()
@@ -205,6 +204,13 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.openRouterModel === "string" && settings.openRouterModel.trim()
         ? settings.openRouterModel.trim()
         : DEFAULT_OPENROUTER_MODEL,
+    // Existing settings files have no commitMessageModel. They migrate to auto
+    // without changing the preserved OpenRouter key or editor model.
+    commitMessageModel:
+      settings.commitMessageModel === "gpt-5.6-luna" ||
+      settings.commitMessageModel === "claude-sonnet-5"
+        ? settings.commitMessageModel
+        : DEFAULT_COMMIT_MESSAGE_MODEL,
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled !== false,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled !== false,
     agentDisabledMcpIds: normalizeStringArray(settings.agentDisabledMcpIds),
@@ -377,7 +383,7 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
 // manager backend/model/effort do NOT come through here, they are passed to
 // startAutopilot as the run's chat* fields (they were mirrored onto
 // openRouterModel back when the manager ran on the OpenRouter API; that
-// setting now only feeds commit messages and the editor's inline AI). No
+// setting now only feeds the editor's inline AI). No
 // caller today, kept as the headless override hook.
 export async function applyInMemorySettingsOverride(
   partial: Partial<AppSettings>,
