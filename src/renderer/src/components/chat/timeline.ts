@@ -453,12 +453,16 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     });
   });
 
+  // The generation the run store will actually drain from: a queued message
+  // from an older epoch is an orphan, not an outbox entry (see below).
+  const currentEpoch = run.conversationEpoch ?? 0;
   items.sort((a, b) => {
     // Everything Cora has not seen yet sinks below everything that happened.
     // Within each block the ordinary rules apply, so the queued block is itself
     // chronological — it is the outbox, in the order it will be delivered.
     const byDelivery =
-      Number(isUndeliveredQueuedMessage(a)) - Number(isUndeliveredQueuedMessage(b));
+      Number(isUndeliveredQueuedMessage(a, currentEpoch)) -
+      Number(isUndeliveredQueuedMessage(b, currentEpoch));
     if (byDelivery !== 0) return byDelivery;
     const byTime = a.at.localeCompare(b.at);
     if (byTime !== 0) return byTime;
@@ -471,6 +475,14 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   // interleaved. The pre-sort duplicate pass catches bursty re-renders even
   // when a step/event lands between copies; this keeps the older adjacent
   // case covered too.
+  //
+  // It carries the pre-sort pass's TIME WINDOW as well, because adjacency here
+  // is a layout accident: two identical notes sent minutes apart both pin to
+  // the bottom and land side by side, and merging them would show "×2" for a
+  // message the user really did send twice — which the manager will receive as
+  // two [Queued steering] sections. Delivery state has to match for the same
+  // reason: a delivered note and its still-queued twin are two different facts,
+  // and they are never in the same block anyway.
   const merged: ChatTimelineItem[] = [];
   for (const item of items) {
     const prev = merged[merged.length - 1];
@@ -484,8 +496,10 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       prev.text === item.text &&
       prev.answersMessageId === item.answersMessageId &&
       prev.intent === item.intent &&
+      prev.deliveryState === item.deliveryState &&
       prev.targetTurnId === item.targetTurnId &&
       prev.conversationEpoch === item.conversationEpoch &&
+      isWithinDuplicateWindow(prev.at, item.at) &&
       attachmentSignature(prev.attachments) === attachmentSignature(item.attachments)
     ) {
       prev.repeatCount += 1;
@@ -494,6 +508,16 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     merged.push(item);
   }
   return merged;
+}
+
+// Two copies close enough in time to be one send, on the pre-sort pass's own
+// window. Unparseable stamps are never merged: an unknown gap is not a small
+// one.
+function isWithinDuplicateWindow(earlier: string, later: string): boolean {
+  const from = Date.parse(earlier);
+  const to = Date.parse(later);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return false;
+  return to - from >= 0 && to - from <= DUPLICATE_MESSAGE_WINDOW_MS;
 }
 
 // A user message that is still queued and that no manager turn has claimed has
@@ -505,12 +529,25 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
 // claims it (`backendTurnId`, set by the mid-turn claim or by turn start) or
 // delivery moves past "queued". A cancelled message is NOT pinned: a rewind
 // undid it, and when it was said is the whole point of keeping the row.
-function isUndeliveredQueuedMessage(item: ChatTimelineItem): boolean {
+//
+// The predicate is queuedManagerInputMessages (run-store.ts:5235) verbatim,
+// EPOCH CLAUSE INCLUDED, and that clause is the whole difference between a
+// message that is about to be sent and one that never will be. A rewind that
+// fails after the interrupt (markConversationRewindFailed) re-queues the
+// interrupted input while the epoch has already moved, so the store will never
+// look at it again. Pinning that orphan would park it at the bottom of the
+// conversation forever, permanently claiming it is on its way. It renders
+// chronologically instead: old, undelivered, and visibly in the past.
+function isUndeliveredQueuedMessage(
+  item: ChatTimelineItem,
+  currentEpoch: number,
+): boolean {
   return (
     item.kind === "message" &&
     item.author === "user" &&
     item.deliveryState === "queued" &&
-    !item.backendTurnId
+    !item.backendTurnId &&
+    item.conversationEpoch === currentEpoch
   );
 }
 

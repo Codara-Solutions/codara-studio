@@ -2088,6 +2088,21 @@ function toRemoteCoraMessage(
   // key at all, which the phone reads as ordinary delivered history. Together
   // they cost at most 49 bytes on a user message and nothing on Cora's, well
   // inside the message window's byte budget.
+  //
+  // SHIP TOGETHER, NOT MERELY IN THE SAME TASK. The phone's message validator
+  // rejects unknown KEYS outright (hasOnlyKeys over MESSAGE_KEYS), and these
+  // land on essentially every user message, so a phone built before the mirror
+  // would refuse every projection this Studio sends and show a permanently
+  // blank chat on every run. The mirror is in the same commit pair for exactly
+  // this reason; never release one side alone.
+  //
+  // HOW A CHANGE OF STATE REACHES A PHONE ON THE DELTA PATH: the message cursor
+  // digests the full JSON of every message in the window it was issued for
+  // (buildCursor, cora-run-message-window.ts), so mutating a message ALREADY
+  // sent invalidates that cursor and the next poll receives the whole window
+  // instead of an append. That is the only delivery mechanism for an in-place
+  // edit — the append delta carries new messages only — and it is why
+  // deliveryState may live on the message rather than in a side channel.
   return {
     id: requireRemoteCoraIdentity(message.id, "message.id"),
     author,

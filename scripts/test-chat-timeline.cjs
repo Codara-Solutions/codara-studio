@@ -876,6 +876,99 @@ async function main() {
     ]);
   });
 
+  test("a queued message from a spent epoch is an orphan, not an outbox entry", () => {
+    // markConversationRewindFailed re-queues the interrupted input after the
+    // epoch has already moved, so queuedManagerInputMessages (which filters on
+    // the current epoch) will never look at it again. Pinned, it would sit at
+    // the bottom of the conversation forever claiming it is about to be sent.
+    const state = steeringRun({ conversationEpoch: 0 });
+    state.conversationEpoch = 1;
+    for (const message of state.humanMessages) {
+      if (message.id === "msg-first") message.conversationEpoch = 1;
+    }
+    assert.deepEqual(idsOf(T.buildChatTimeline(state)), [
+      "msg-first",
+      "msg-steer",
+      "step-2",
+      "spark-call:spark-2",
+    ]);
+  });
+
+  test("two identical queued messages minutes apart stay two bubbles", () => {
+    // Pinning makes them adjacent; adjacency here is a layout accident, not a
+    // double-send. Cora receives two [Queued steering] sections, so the chat
+    // must show two — a "×2" badge would under-report what she was told.
+    const state = steeringRun();
+    state.humanMessages.push({
+      id: "msg-steer-again",
+      runId: "run-1",
+      author: "user",
+      kind: "note",
+      message: "use the streaming lexer",
+      intent: "steer",
+      deliveryState: "queued",
+      conversationEpoch: 0,
+      // Five minutes after the first copy, well past the 90s duplicate window.
+      createdAt: "2026-07-25T16:50:30.000Z",
+    });
+    const timeline = T.buildChatTimeline(state);
+    assert.deepEqual(idsOf(timeline), [
+      "msg-first",
+      "step-2",
+      "spark-call:spark-2",
+      "msg-steer",
+      "msg-steer-again",
+    ]);
+    for (const item of timeline) {
+      if (item.kind === "message") assert.equal(item.repeatCount, 1);
+    }
+  });
+
+  test("a delivered message never merges with its still-queued twin", () => {
+    const state = steeringRun();
+    // Same words, same second: the first was delivered, the second is waiting.
+    state.humanMessages[0] = {
+      ...state.humanMessages[0],
+      message: "use the streaming lexer",
+    };
+    state.humanMessages[1] = {
+      ...state.humanMessages[1],
+      createdAt: at(25),
+    };
+    const timeline = T.buildChatTimeline(state);
+    const messages = timeline.filter((item) => item.kind === "message");
+    assert.deepEqual(
+      messages.map((item) => [item.id, item.repeatCount]),
+      [
+        ["msg-first", 1],
+        ["msg-steer", 1],
+      ],
+    );
+  });
+
+  test("a burst of the same message inside the window still collapses", () => {
+    // The pre-sort pass owns the ordinary case; this only proves the bounded
+    // post-sort pass did not switch collapsing off altogether.
+    const state = steeringRun();
+    state.humanMessages.push({
+      id: "msg-steer-burst",
+      runId: "run-1",
+      author: "user",
+      kind: "note",
+      message: "use the streaming lexer",
+      intent: "steer",
+      deliveryState: "queued",
+      conversationEpoch: 0,
+      createdAt: at(31),
+    });
+    const timeline = T.buildChatTimeline(state);
+    const steer = timeline.filter(
+      (item) => item.kind === "message" && item.text === "use the streaming lexer",
+    );
+    assert.equal(steer.length, 1);
+    assert.equal(steer[0].repeatCount, 2);
+  });
+
   test("a queued synthetic note keeps its system row in place", () => {
     // Board and resume notes are authored "user" for delivery only and are
     // born queued. They are not the person's steering, and their system row

@@ -75,7 +75,7 @@ async function loadCoraMessageProjection(productionSource) {
   const between = (from, to) => {
     const start = productionSource.indexOf(from);
     const end = productionSource.indexOf(to, start + 1);
-    if (start === -1 || end === -1) {
+    if (start === -1 || end === -1 || end <= start) {
       throw new Error(`production.ts no longer contains ${from} … ${to}`);
     }
     return productionSource.slice(start, end);
@@ -88,6 +88,22 @@ async function loadCoraMessageProjection(productionSource) {
     "remote-cora-contract.ts",
   );
   const policy = path.join(ROOT, "src", "main", "remote-access", "local-policy.ts");
+  // One whole declaration, wherever it currently sits.
+  const declaration = (name) => {
+    const start = productionSource.indexOf(`function ${name}(`);
+    const end = productionSource.indexOf("\n}\n", start + 1);
+    if (start === -1 || end === -1) {
+      throw new Error(`production.ts no longer declares ${name}`);
+    }
+    return productionSource.slice(start, end + 3);
+  };
+  const band = between("function toRemoteCoraMessage(", "\nfunction toRemoteRun(");
+  // isSyntheticCoraNote is shared with the undo-target projection, so it sits
+  // either side of the band depending on who touched the file last; lift it in
+  // when it is outside rather than pinning it to one address.
+  const projectionBand = band.includes("function isSyntheticCoraNote(")
+    ? band
+    : `${declaration("isSyntheticCoraNote")}\n${band}`;
   const out = await esbuild.build({
     stdin: {
       contents: [
@@ -97,7 +113,7 @@ async function loadCoraMessageProjection(productionSource) {
           "const REMOTE_CORA_MESSAGE_AUTHORS",
           "const REMOTE_CORA_WORKER_STATUSES",
         ),
-        between("function toRemoteCoraMessage(", "\nfunction toRemoteRun("),
+        projectionBand,
         "export { toRemoteCoraMessage, remoteCoraSourceMessages };",
       ].join("\n"),
       resolveDir: ROOT,
