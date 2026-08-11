@@ -109,13 +109,25 @@ function targetMatches(message, self) {
   return Array.isArray(to) && to.includes(self);
 }
 
-// Out of the step's group chat: deliberately independent, or simply never
-// flagged for it. Both keep the manager channel and lose peer traffic in both
-// directions. An absent card means the roster moved on to another step, never
-// "not a member" — the run-level registry is rewritten per attempt — so
-// absence must stay permissive.
-function outOfPeerGroup(card) {
-  if (!card) return false;
+// True when this roster was written by a Studio that knows about the opt-in
+// group chat: every worker card then carries an explicit membership boolean. A
+// roster without them predates the flag and is read as all-members, which is
+// what those runs were, so upgrading mid-run never severs a live batch.
+function rosterIsPeersAware(agents) {
+  return agents.some(
+    (agent) => agent.workerTaskId !== "manager" && typeof agent.peers === "boolean"
+  );
+}
+
+// Out of the step's group chat: deliberately independent, never flagged for it,
+// or ABSENT from a roster that lists its step's membership. That last case is
+// the load-bearing one: agents.json is per-run and is rewritten with whichever
+// step prepares an attempt next, so a still-running worker of an earlier step
+// finds itself missing. Read permissively that would restore the old
+// everyone-can-talk default for exactly the workers most likely to be
+// mid-flight, so absence fails CLOSED.
+function outOfPeerGroup(card, rosterAware) {
+  if (!card) return rosterAware === true;
   return card.isolated === true || card.peers === false;
 }
 
@@ -124,13 +136,31 @@ function readAgents(dir) {
   return Array.isArray(registry.agents) ? registry.agents.filter(Boolean) : [];
 }
 
-// A worker outside the chat does not receive peer BROADCASTS: an "all" from a
-// peer is peer traffic, and delivering it would hand back through the inbox
-// exactly what send refuses. An "all" from the manager always lands.
-function deliverable(message, self, excluded) {
+// Everything the chat rules need from one read of the registry.
+function peerGroupView(dir, self) {
+  const agents = readAgents(dir);
+  const rosterAware = rosterIsPeersAware(agents);
+  const selfCard = self ? agents.find((agent) => agent.workerTaskId === self) : undefined;
+  return {
+    agents,
+    rosterAware,
+    selfCard,
+    selfExcluded: self ? outOfPeerGroup(selfCard, rosterAware) : false,
+    excludes: (id) =>
+      outOfPeerGroup(agents.find((agent) => agent.workerTaskId === id), rosterAware),
+  };
+}
+
+// Addressed to me, and peer traffic only between two participants that are both
+// in the chat: delivering what send would have refused would hand the rule
+// straight back through the inbox, and a message that slipped in during a
+// stale-roster window would otherwise stay deliverable forever. Manager mail
+// always lands, directed or broadcast.
+function deliverable(message, self, view) {
   if (!targetMatches(message, self)) return false;
-  if (!excluded) return true;
-  return message.to !== "all" || message.from === "manager";
+  if (message.from === "manager") return true;
+  if (view.selfExcluded) return false;
+  return !view.excludes(message.from);
 }
 
 function renderMessage(message) {
@@ -153,15 +183,20 @@ async function bodyFromArgs(args) {
 
 function commandList(dir, args) {
   const registry = readJson(path.join(dir, "agents.json"), { agents: [] });
-  const all = Array.isArray(registry.agents) ? registry.agents.filter(Boolean) : [];
   // Show only who this worker may actually address: the group chat plus the
-  // manager. A worker outside the chat sees the manager alone — listing peers
-  // it may not message would only invite refused sends.
+  // manager. A worker outside the chat sees the manager alone, and so does a
+  // caller that did not say who it is: on a roster that carries membership,
+  // an anonymous list cannot be answered without handing out peers the caller
+  // may well not be allowed to message. Rosters that predate the flag keep
+  // answering in full.
   const self = args.self && args.self !== true ? String(args.self) : null;
-  const selfCard = self ? all.find((agent) => agent.workerTaskId === self) : null;
-  const agents = outOfPeerGroup(selfCard)
-    ? all.filter((agent) => agent.workerTaskId === "manager")
-    : all.filter((agent) => agent.workerTaskId === "manager" || !outOfPeerGroup(agent));
+  const view = peerGroupView(dir, self);
+  const managerOnly = view.agents.filter((agent) => agent.workerTaskId === "manager");
+  const agents = view.selfExcluded || (!self && view.rosterAware)
+    ? managerOnly
+    : view.agents.filter(
+        (agent) => agent.workerTaskId === "manager" || !outOfPeerGroup(agent, view.rosterAware)
+      );
   if (args.json) {
     console.log(JSON.stringify({ ...registry, agents }, null, 2));
     return;
@@ -187,8 +222,8 @@ function commandList(dir, args) {
 function commandInbox(dir, args) {
   const self = required(args, "self");
   const limit = Math.max(1, Number(args.limit || 20));
-  const excluded = outOfPeerGroup(readAgents(dir).find((agent) => agent.workerTaskId === self));
-  const messages = readMessages(dir).filter((message) => deliverable(message, self, excluded));
+  const view = peerGroupView(dir, self);
+  const messages = readMessages(dir).filter((message) => deliverable(message, self, view));
   const filtered = args.unread
     ? messages.filter((message) => !Array.isArray(message.readBy) || !message.readBy.includes(self))
     : messages;
@@ -222,19 +257,20 @@ async function commandSend(dir, args, replyTo) {
   // because a mixed batch can have one worker on each transport and a rule that
   // only one of them obeys is not a rule. Registry is the single source of
   // truth for both who is independent and who was flagged into the chat.
-  const cards = readAgents(dir);
-  const selfCard = cards.find((agent) => agent.workerTaskId === from);
-  if (outOfPeerGroup(selfCard) && to !== "manager") {
+  const view = peerGroupView(dir, from);
+  if (view.selfExcluded && to !== "manager") {
     throw new Error(
-      selfCard.isolated
+      view.selfCard && view.selfCard.isolated
         ? "this task is running independently on purpose: send may only address the manager"
         : "this task is not in the step's worker group chat: send may only address the manager",
     );
   }
-  const targetCard = cards.find((agent) => agent.workerTaskId === to);
-  if (outOfPeerGroup(targetCard)) {
+  // "all" and "manager" are not participants to look up: the first is the chat
+  // itself and the second is never subject to it.
+  const targetCard = view.agents.find((agent) => agent.workerTaskId === to);
+  if (to !== "all" && to !== "manager" && view.excludes(to)) {
     throw new Error(
-      targetCard.isolated
+      targetCard && targetCard.isolated
         ? '"' + to + '" is running independently on purpose and cannot receive peer messages'
         : '"' + to + '" is not in the step\'s worker group chat and cannot receive peer messages',
     );
@@ -261,9 +297,11 @@ async function commandAwait(dir, args) {
   const replyTo = args["reply-to"] && args["reply-to"] !== true ? String(args["reply-to"]) : null;
   const timeoutSeconds = Math.max(1, Number(args.timeout || 120));
   const deadline = Date.now() + timeoutSeconds * 1000;
-  const excluded = outOfPeerGroup(readAgents(dir).find((agent) => agent.workerTaskId === self));
   while (Date.now() <= deadline) {
-    const messages = readMessages(dir).filter((message) => deliverable(message, self, excluded));
+    // Re-read the roster each pass: a wait can outlive the step that wrote it,
+    // and the membership that decides delivery must be the current one.
+    const view = peerGroupView(dir, self);
+    const messages = readMessages(dir).filter((message) => deliverable(message, self, view));
     const match = messages.find((message) => {
       if (from && message.from !== from) return false;
       if (replyTo && message.replyTo !== replyTo) return false;

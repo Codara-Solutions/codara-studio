@@ -332,8 +332,8 @@ check("the Pi mailbox enforces the same rule as the CLI one", () => {
   // valid recipient. scripts/test-peer-comms-opt-in.cjs executes both
   // transports against the same fixtures to prove they agree.
   assert.match(pi, /card\.isolated === true \|\| card\.peers === false/);
-  assert.match(pi, /outOfPeerGroup\(selfCard\) && to !== MANAGER_PEER_ID/);
-  assert.match(pi, /outOfPeerGroup\(targetCard\)/);
+  assert.match(pi, /view\.selfExcluded && to !== MANAGER_PEER_ID/);
+  assert.match(pi, /to !== "all" && to !== MANAGER_PEER_ID && view\.excludes\(to\)/);
   assert.match(pi, /const MANAGER_PEER_ID = "manager"/);
 });
 

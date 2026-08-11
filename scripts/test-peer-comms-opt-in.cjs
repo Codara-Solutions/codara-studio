@@ -330,6 +330,13 @@ async function registryChecks() {
 // Materialize the CLI mailbox exactly as a run does, and load the Pi tools for
 // real, then run the same matrix through both. A rule only one transport obeys
 // is not a rule: a mixed batch can have one worker on each.
+function writeRoster(dir, agents, extra = {}) {
+  fs.writeFileSync(
+    path.join(dir, "agents.json"),
+    JSON.stringify({ version: 1, runId: "run-1", ...extra, agents }),
+  );
+}
+
 function materializeMailbox() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "spark-peers-optin-"));
   fs.mkdirSync(path.join(dir, "messages"), { recursive: true });
@@ -343,18 +350,16 @@ function materializeMailbox() {
   )();
   const script = path.join(dir, "spark-peer-comms.cjs");
   fs.writeFileSync(script, PEER_COMMS_HELPER_SCRIPT);
-  fs.writeFileSync(
-    path.join(dir, "agents.json"),
-    JSON.stringify({
-      version: 1,
-      agents: [
-        { workerTaskId: "manager", title: "Cora manager" },
-        { workerTaskId: "task-in-a", title: "Flagged A", peers: true },
-        { workerTaskId: "task-in-b", title: "Flagged B", peers: true },
-        { workerTaskId: "task-out", title: "Unflagged", peers: false },
-        { workerTaskId: "task-lone", title: "Independent", peers: false, isolated: true },
-      ],
-    }),
+  writeRoster(
+    dir,
+    [
+      { workerTaskId: "manager", title: "Cora manager" },
+      { workerTaskId: "task-in-a", title: "Flagged A", peers: true },
+      { workerTaskId: "task-in-b", title: "Flagged B", peers: true },
+      { workerTaskId: "task-out", title: "Unflagged", peers: false },
+      { workerTaskId: "task-lone", title: "Independent", peers: false, isolated: true },
+    ],
+    { stepId: "step-1" },
   );
   return { dir, script };
 }
@@ -501,16 +506,97 @@ async function transportChecks() {
     .details.agents.map((a) => a.workerTaskId);
   assert.deepEqual(piOutList, ["manager"]);
 
+  // An anonymous `list` cannot be answered without handing out peers the caller
+  // may not be allowed to address, so on a membership-carrying roster it
+  // answers with the manager alone.
+  const anonymousList = JSON.parse(listFor(null)).agents.map((a) => a.workerTaskId);
+  assert.deepEqual(anonymousList, ["manager"]);
+
   results.push("the roster shows only reachable participants, in both transports");
 
+  // A directed peer message from a party that has since left the chat must stop
+  // being delivered, not sit unread forever. task-in-a wrote to task-in-b
+  // above; demote the sender and the note must disappear from b's inbox.
+  const demoted = [
+    { workerTaskId: "manager", title: "Cora manager" },
+    { workerTaskId: "task-in-a", title: "Flagged A", peers: false },
+    { workerTaskId: "task-in-b", title: "Flagged B", peers: true },
+  ];
+  execFileSync(
+    process.execPath,
+    [script, "send", "--dir", dir, "--from", "task-in-a", "--to", "task-in-b", "--body", "directed"],
+    { encoding: "utf8" },
+  );
+  assert.equal(
+    JSON.parse(inboxOf("task-in-b")).some((message) => message.from === "task-in-a"),
+    true,
+    "the directed note lands while both are in the chat",
+  );
+  writeRoster(dir, demoted, { stepId: "step-1" });
+  assert.equal(
+    JSON.parse(inboxOf("task-in-b")).some((message) => message.from === "task-in-a"),
+    false,
+    "a note from a sender no longer in the chat must stop being delivered",
+  );
+  assert.equal(
+    (await piInboxOf("task-in-b")).some((message) => message.from === "task-in-a"),
+    false,
+  );
+
+  results.push("peer mail from a party that left the chat stops being delivered");
+
+  // OVERLAPPING STEPS, the durable default-off case. agents.json is per-run and
+  // is rewritten with whichever step prepares an attempt next, so a worker of
+  // step 1 that is still running finds its own card gone. Absence from a roster
+  // that carries membership must read as "out", never as "unrestricted".
+  writeRoster(
+    dir,
+    [
+      { workerTaskId: "manager", title: "Cora manager" },
+      { workerTaskId: "task-s2-a", title: "Step 2 A", peers: true },
+      { workerTaskId: "task-s2-b", title: "Step 2 B", peers: true },
+    ],
+    { stepId: "step-2" },
+  );
+  for (const to of ["task-in-b", "task-s2-a", "all"]) {
+    assert.match(
+      cliRefusal("task-in-a", to) ?? "",
+      /not in the step's worker group chat/,
+      `CLI must refuse a step-1 worker's send to ${to} once the roster moved on`,
+    );
+    assert.match((await piRefusal("task-in-a", to)) ?? "", /not in the step's worker group chat/);
+  }
+  assert.equal(cliRefusal("task-in-a", "manager"), null, "the manager channel survives the overwrite");
+  assert.equal(await piRefusal("task-in-a", "manager"), null);
+  assert.deepEqual(JSON.parse(listFor("task-in-a")).agents.map((a) => a.workerTaskId), ["manager"]);
+  assert.deepEqual(
+    (await loadPiPeerTools(dir, "task-in-a").get("peer_list").execute("call-5", {})).details.agents.map(
+      (a) => a.workerTaskId,
+    ),
+    ["manager"],
+  );
+  // The step-2 batch itself is unaffected.
+  assert.equal(cliRefusal("task-s2-a", "task-s2-b"), null);
+  assert.equal(await piRefusal("task-s2-a", "task-s2-b"), null);
+
+  results.push("a worker whose step's roster was overwritten falls back to manager-only");
+
   // Legacy rosters — written before the flag existed — must keep working
-  // exactly as they did: everyone is a member.
+  // exactly as they did: everyone is a member, including ids the file never
+  // listed, because absence there means "this Studio never recorded membership"
+  // rather than "not a member".
   fs.writeFileSync(
     path.join(dir, "agents.json"),
     JSON.stringify({ version: 1, agents: [{ workerTaskId: "task-a" }, { workerTaskId: "task-b" }] }),
   );
   assert.equal(cliRefusal("task-a", "task-b"), null, "a pre-flag batch must still coordinate freely");
   assert.equal(await piRefusal("task-a", "task-b"), null);
+  assert.equal(cliRefusal("task-unlisted", "task-a"), null, "absence stays permissive on a pre-flag roster");
+  assert.deepEqual(
+    JSON.parse(listFor(null)).agents.map((a) => a.workerTaskId),
+    ["task-a", "task-b"],
+    "an anonymous list on a pre-flag roster still answers in full",
+  );
 
   results.push("a registry written before the flag keeps its whole batch in the chat");
 }

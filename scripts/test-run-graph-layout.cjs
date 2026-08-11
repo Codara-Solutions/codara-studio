@@ -203,25 +203,72 @@ async function main() {
     );
   }
 
-  // ── A single flagged peer in a fan (mixed batch) draws nothing ──
-  const mixedSteps = [step("s1")];
-  const mixedRows = new Map([
-    ["s1", [row("s1-w1", { peerComms: true }), row("s1-w2"), row("s1-w3")]],
+  // ── A single flagged peer in a fan draws nothing: a chat of one ──
+  const loneSteps = [step("s1")];
+  const loneRows = new Map([
+    ["s1", [row("s1-w1", { peerComms: true, peers: true }), row("s1-w2"), row("s1-w3")]],
   ]);
   check(
     "one flagged worker among three: no thread to draw",
-    computeRunGraphLayout(mixedSteps, mixedRows).peerWires.length === 0,
+    computeRunGraphLayout(loneSteps, loneRows).peerWires.length === 0,
   );
+
+  // ── A mixed step is the NORM under the opt-in chat ──
+  // The manager flags the two workers that share a contract and leaves the
+  // third out. The thread must join the two flagged cards and skip the third.
+  const chosenSteps = [step("s1")];
+  const chosenRows = new Map([
+    [
+      "s1",
+      [
+        row("s1-w1", { peerComms: true, peers: true }),
+        row("s1-w2", { peerComms: true, peers: true }),
+        row("s1-w3"),
+      ],
+    ],
+  ]);
+  const chosen = computeRunGraphLayout(chosenSteps, chosenRows);
+  check("two flagged among three: the thread is drawn", chosen.peerWires.length === 1);
+  {
+    const unflagged = chosen.steps[0].workers.find((w) => w.rowKey === "s1-w3");
+    const onThread = chosen.peerWires.some((wire) =>
+      wire.points.some(
+        (point) =>
+          Math.abs(point.x - (unflagged.box.x + unflagged.box.w / 2)) < 0.001 &&
+          (Math.abs(point.y - unflagged.box.y) < 0.001 ||
+            Math.abs(point.y - (unflagged.box.y + unflagged.box.h)) < 0.001),
+      ),
+    );
+    check("two flagged among three: the unflagged card is not on it", !onThread);
+  }
+
+  // ── The upgrade boundary still vetoes ──
+  // Membership with no `peers` intent behind it anywhere in the step came from
+  // the old auto-gate, so a mix there means "some siblings predate the flag",
+  // not "the manager chose", and enrolling them visually would be a lie.
+  const upgradeSteps = [step("s1")];
+  const upgradeRows = new Map([
+    [
+      "s1",
+      [row("s1-w1", { peerComms: true }), row("s1-w2", { peerComms: true }), row("s1-w3")],
+    ],
+  ]);
+  check(
+    "pre-flag membership in a mixed step: no thread to draw",
+    computeRunGraphLayout(upgradeSteps, upgradeRows).peerWires.length === 0,
+  );
+  // ...but an unmixed pre-flag batch still draws, exactly as it used to.
+  check("pre-flag membership across the whole step: still drawn", layoutOf([4], { peerComms: true }).peerWires.length === 3);
 
   // ── Old runs (no flag on any task) render exactly as before ──
   const legacy = layoutOf([4]);
-  const flagged = layoutOf([4], { peerComms: true });
+  const flagged = layoutOf([4], { peerComms: true, peers: true });
   check(
     "the peer flag never moves a box",
     JSON.stringify(legacy.steps) === JSON.stringify(
       JSON.parse(JSON.stringify(flagged.steps)).map((s) => ({
         ...s,
-        workers: s.workers.map((w) => ({ ...w, peerComms: false })),
+        workers: s.workers.map((w) => ({ ...w, peerComms: false, peersFlagged: false })),
       })),
     ),
   );

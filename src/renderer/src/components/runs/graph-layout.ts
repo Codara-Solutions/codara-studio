@@ -64,6 +64,13 @@ export interface WorkerLayout {
   // independent investigators were talking to each other, which was the exact
   // opposite of what they had asked for and of what was happening.
   peerComms: boolean;
+  // True when the manager explicitly asked for this worker to be in the step's
+  // group chat (WorkerTask.peers). Only used to tell "a batch where the manager
+  // chose who coordinates" apart from "a batch prepared before the chat became
+  // opt-in", which are the two ways a step can end up with a mix of flagged and
+  // unflagged cards and which want opposite drawings. Never gates a wire on its
+  // own: peerComms is still the fact that a worker can message its siblings.
+  peersFlagged: boolean;
   // Where this worker's branch lands: the midpoint of the card edge facing the
   // step's centreline. The wire layer draws its port here too, so the wire and
   // the port can never disagree about where the branch meets the card.
@@ -211,13 +218,20 @@ function fanSlots(count: number): Array<{ side: FanSide; row: number }> {
 function peerWiresForStep(stepId: string, workers: readonly WorkerLayout[]): PeerWire[] {
   const peers = workers.filter((worker) => worker.peerComms);
   if (peers.length < 2) return [];
-  // Peer comms is a per-batch fact, so a step is either all-flagged or (across
-  // an upgrade boundary, where some sibling tasks predate the flag) mixed. In
-  // the mixed case the chain and bridge would run behind the unflagged cards,
-  // visually enrolling them in a mailbox they do not have, so draw nothing:
-  // truthful and only transitional. Task-less agent slots never veto.
+  // A mixed step is now the NORM: the group chat is opt-in per worker, so the
+  // manager routinely flags the two workers that share a contract and leaves
+  // their independent siblings out. Drawing the thread among the flagged cards
+  // is exactly the truth in that case.
+  //
+  // The one step that still draws nothing is the upgrade boundary: a batch
+  // prepared before the chat became opt-in has membership it never asked for
+  // (peerComms with no `peers` intent behind it anywhere in the step), and a
+  // mix there means "some siblings predate the flag", not "the manager chose".
+  // Running the chain and bridge behind those unflagged cards would enrol them
+  // in a mailbox they do not have. Truthful, and only transitional.
   const mixed = workers.some((worker) => worker.taskId && !worker.peerComms);
-  if (mixed) return [];
+  const chosen = peers.some((peer) => peer.peersFlagged);
+  if (mixed && !chosen) return [];
   const left = peers.filter((peer) => peer.side === "left");
   const right = peers.filter((peer) => peer.side === "right");
   const wires: PeerWire[] = [];
@@ -343,6 +357,7 @@ export function computeRunGraphLayout(
         box: workerBox,
         side: slot.side,
         peerComms: row.task?.peerComms === true && row.task?.isolated !== true,
+        peersFlagged: row.task?.peers === true && row.task?.isolated !== true,
         port: {
           x: slot.side === "right" ? workerBox.x : workerBox.x + workerBox.w,
           y: workerBox.y + workerBox.h / 2,
