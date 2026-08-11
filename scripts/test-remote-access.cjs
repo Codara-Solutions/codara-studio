@@ -1146,52 +1146,22 @@ async function main() {
     ) &&
       rpcSource.includes("runtimeActivity?: string;"),
   );
-  {
-    const runContext =
-      productionSource.match(
-        /function toRemoteRunContext\([\s\S]*?\n\}/,
-      )?.[0] ?? "";
-    check(
-      // The phone renders a percentage, so a numerator or denominator picked
-      // differently from the desktop's composer pill would put two different
-      // numbers on the same conversation.
-      "the remote run context gauge reads the newest reported usage against the effective capacity",
-      runContext.includes(
-        "entry.promptTokens ?? entry.promptTokenEstimate",
-      ) &&
-        // Newest-first: a later turn that reported nothing must not shadow the
-        // last one that did.
-        /for \(let index = run\.sparkCalls\.length - 1; index >= 0; index -= 1\)/.test(
-          runContext,
-        ) &&
-        runContext.includes("chatContextCapacityTokens({") &&
-        runContext.includes(
-          "typeof call.contextWindowTokens === \"number\" && call.contextWindowTokens > 0",
-        ) &&
-        runContext.includes(
-          "effectiveChatOneMillionContext(chatBackend) && chatBackend === \"claude\"",
-        ) &&
-        runContext.includes("contextWindowForModel(call.model).tokens") &&
-        // compactAtTokens is never persisted, so the projection resolves the
-        // same launch override the Pi session was stamped with.
-        runContext.includes(
-          "resolveCompactAtTokens(\n      process.env.CODARA_PI_COMPACT_AT_TOKENS,\n    )",
-        ) &&
-        // Nothing partial ever reaches the wire.
-        runContext.includes("if (usedTokens === undefined || !call) return undefined;") &&
-        runContext.includes(
-          "if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return undefined;",
-        ),
-      runContext,
-    );
-    check(
-      "the run context gauge is omitted rather than zeroed, and the contract keeps it optional",
+  check(
+    // The arithmetic itself is a pure module so test-remote-cora-contract can
+    // bundle it and run the real table — a source-shape assertion here could
+    // not tell a correct denominator from a swapped ternary. All this pins is
+    // that the projection still delegates to it and still omits rather than
+    // zeroes.
+    "the run context gauge is delegated, omitted rather than zeroed, and optional on the contract",
+    productionSource.includes(
+      'import { remoteCoraRunContext } from "./cora-run-context";',
+    ) &&
+      productionSource.includes("const context = remoteCoraRunContext(run);") &&
       productionSource.includes("...(context ? { context } : {})") &&
-        rpcSource.includes(
-          "context?: { usedTokens: number; budgetTokens: number };",
-        ),
-    );
-  }
+      rpcSource.includes(
+        "context?: { usedTokens: number; budgetTokens: number };",
+      ),
+  );
   {
     const liveRunProjection = productionSource.slice(
       productionSource.indexOf("async function toRemoteAutomationLiveRun("),

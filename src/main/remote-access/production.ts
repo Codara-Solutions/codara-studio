@@ -12,12 +12,6 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
-import { effectiveChatOneMillionContext } from "@shared/chat-policy";
-import {
-  chatContextCapacityTokens,
-  resolveCompactAtTokens,
-} from "@shared/context-compaction";
-import { contextWindowForModel } from "@shared/context-window";
 import { makeId } from "@shared/ids";
 import type {
   GitHubMarkReadyInput,
@@ -40,7 +34,6 @@ import type {
   AutomationTrigger,
   BoardCard,
   BoardCardStatus,
-  ChatBackendKind,
   RunBoard,
   RunState,
   RunStatus,
@@ -140,6 +133,7 @@ import {
 } from "./cora-policy";
 import { CoraSendReceiptIndex } from "./cora-send-receipts";
 import { normalizeCoraMessage } from "./cora-message-policy";
+import { remoteCoraRunContext } from "./cora-run-context";
 import { projectBoundedRemoteCoraRun } from "./cora-run-projection";
 import {
   CORA_HISTORY_RUNS_JSON_MAX_BYTES,
@@ -2113,65 +2107,6 @@ function remoteCoraSourceMessages(run: RunState): RunState["humanMessages"] {
     }));
 }
 
-/**
- * The context gauge Studio's composer pill shows, computed host-side so the
- * phone's percentage can never drift from the desktop's.
- *
- * Numerator: the newest manager call that reported occupancy at all.
- * `promptTokens` is the provider's own count and `promptTokenEstimate` is
- * Studio's stand-in for a backend that reported none — the same preference
- * RunsView's context readout uses.
- *
- * Denominator: `chatContextCapacityTokens`, i.e. the EFFECTIVE ceiling the
- * conversation actually reaches (Pi's early-compaction cap, Claude's 1M
- * normalization), not the raw model window. The inputs mirror
- * ChatComposer's ContextPill and maybeAutoCompactConversation exactly.
- *
- * `compactAtTokens` is not persisted anywhere: it is the app-wide
- * CODARA_PI_COMPACT_AT_TOKENS launch value that the composer only learns from
- * a live chat.usage event, so a reopened chat has nothing on the run or the
- * SparkCall to read it from. This projection runs inside the very main
- * process that stamps the Pi session, so it resolves the override from the
- * environment the same way the auto-compaction trigger does rather than
- * guessing from a persisted field.
- *
- * Undefined when no call reported usage or the capacity is unusable — the
- * phone then simply shows no gauge, exactly as an older Studio would.
- */
-function toRemoteRunContext(
-  run: RunState,
-): { usedTokens: number; budgetTokens: number } | undefined {
-  let usedTokens: number | undefined;
-  let call: RunState["sparkCalls"][number] | undefined;
-  for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
-    const entry = run.sparkCalls[index];
-    const reported = entry.promptTokens ?? entry.promptTokenEstimate;
-    if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) {
-      usedTokens = Math.floor(reported);
-      call = entry;
-      break;
-    }
-  }
-  if (usedTokens === undefined || !call) return undefined;
-  // Same normalization the dispatch layer applies: a run written before the
-  // field existed is a Pi chat.
-  const chatBackend: ChatBackendKind = run.chatBackend ?? "pi";
-  const budgetTokens = chatContextCapacityTokens({
-    contextWindowTokens:
-      typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0
-        ? call.contextWindowTokens
-        : effectiveChatOneMillionContext(chatBackend) && chatBackend === "claude"
-          ? 1_000_000
-          : contextWindowForModel(call.model).tokens,
-    backend: chatBackend,
-    compactAtTokens: resolveCompactAtTokens(
-      process.env.CODARA_PI_COMPACT_AT_TOKENS,
-    ),
-  });
-  if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return undefined;
-  return { usedTokens, budgetTokens: Math.floor(budgetTokens) };
-}
-
 function toRemoteRun(
   run: RunState,
   automation?: RemoteAutomationJoin,
@@ -2234,7 +2169,7 @@ function toRemoteRun(
   const projectedBlockedMessage = blockedMessage
     ? toRemoteCoraMessage(blockedMessage)
     : undefined;
-  const context = toRemoteRunContext(run);
+  const context = remoteCoraRunContext(run);
   const workersOmitted = Math.max(0, workerProjection.total - workers.length);
   const stepsOmitted = Math.max(0, plan.total - plan.steps.length);
   const blockedQuestionBodyTruncated = Boolean(

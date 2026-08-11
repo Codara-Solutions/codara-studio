@@ -103,6 +103,10 @@ async function main() {
     path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
     "remote-cora-rpc-test.cjs",
   );
+  const runContext = await bundle(
+    path.join(ROOT, "src", "main", "remote-access", "cora-run-context.ts"),
+    "remote-cora-run-context-test.cjs",
+  );
 
   assert.equal(contract.CORA_HISTORY_RUNS_JSON_MAX_BYTES, 72 * 1024);
   assert.equal(contract.CORA_RUN_JSON_MAX_BYTES, 400 * 1024);
@@ -110,6 +114,256 @@ async function main() {
   assert.equal(contract.CORA_WIRE_ID_MAX_BYTES, 256);
   assert.equal(contract.CORA_WIRE_TIMESTAMP_MAX_BYTES, 64);
   assert.equal(contract.jsonUtf8Bytes("\0".repeat(512)), 3_074);
+
+  /* -- the run context gauge ---------------------------------------------- */
+  // The phone renders a percentage, so a numerator or denominator chosen
+  // differently from the desktop composer's pill puts two different numbers on
+  // one conversation. Every branch is exercised for real: a source-shape
+  // assertion cannot tell a correct ternary from a swapped one.
+  {
+    const managerCall = (overrides = {}) => ({
+      id: "spark-1",
+      runId: "run-context",
+      mode: "chat",
+      model: "claude-opus-5",
+      status: "completed",
+      createdAt: "2026-08-11T00:00:00.000Z",
+      ...overrides,
+    });
+    const gauge = (run) => runContext.remoteCoraRunContext(run);
+
+    // Pi compacts long before the model's window runs out, so the ceiling is
+    // the compaction cap even when the turn reported a 1M window.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "pi",
+        sparkCalls: [
+          managerCall({ promptTokens: 141_312, contextWindowTokens: 1_000_000 }),
+        ],
+      }),
+      { usedTokens: 141_312, budgetTokens: 256_000 },
+    );
+
+    // No window on the turn: the model catalogue stands in, and a window
+    // SMALLER than the compaction cap becomes the binding ceiling.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "pi",
+        sparkCalls: [managerCall({ model: "gpt-4o", promptTokens: 50_000 })],
+      }),
+      { usedTokens: 50_000, budgetTokens: 111_616 },
+    );
+
+    // Claude Code is normalized to 1M context. Reading the model catalogue
+    // here instead would advertise 200k and put the phone at five times the
+    // desktop's percentage — the exact drift this projection exists to stop.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "claude",
+        sparkCalls: [managerCall({ promptTokens: 200_000 })],
+      }),
+      { usedTokens: 200_000, budgetTokens: 1_000_000 },
+    );
+
+    // Codex drives its own CLI, which compacts on its own terms, so the whole
+    // catalogued window stands.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "codex",
+        sparkCalls: [managerCall({ model: "gpt-5.6-sol", promptTokens: 12_000 })],
+      }),
+      { usedTokens: 12_000, budgetTokens: 400_000 },
+    );
+
+    // A turn that reported a zero window reported nothing usable: fall through
+    // to the catalogue rather than dividing the gauge by zero.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "codex",
+        sparkCalls: [
+          managerCall({
+            model: "gpt-5.6-sol",
+            promptTokens: 12_000,
+            contextWindowTokens: 0,
+          }),
+        ],
+      }),
+      { usedTokens: 12_000, budgetTokens: 400_000 },
+    );
+
+    // A run written before chatBackend existed is a Pi chat.
+    assert.deepEqual(
+      gauge({
+        sparkCalls: [
+          managerCall({ promptTokens: 9_000, contextWindowTokens: 1_000_000 }),
+        ],
+      }),
+      { usedTokens: 9_000, budgetTokens: 256_000 },
+    );
+
+    // Nothing to measure: a chat that never took a turn, and a turn that
+    // reported no usage at all, both send no gauge rather than a zeroed pair.
+    assert.equal(gauge({ chatBackend: "pi", sparkCalls: [] }), undefined);
+    assert.equal(
+      gauge({ chatBackend: "pi", sparkCalls: [managerCall()] }),
+      undefined,
+    );
+
+    // Newest wins. Occupancy grows across a conversation, so reading the
+    // oldest reporting turn would freeze the gauge at whatever the chat looked
+    // like on its first turn and never move again.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "claude",
+        sparkCalls: [
+          managerCall({ promptTokens: 20_000, contextWindowTokens: 200_000 }),
+          managerCall({
+            id: "spark-2",
+            promptTokens: 150_000,
+            contextWindowTokens: 1_000_000,
+          }),
+        ],
+      }),
+      { usedTokens: 150_000, budgetTokens: 1_000_000 },
+    );
+
+    // A trailing turn that reported nothing must not shadow the last one that
+    // did — and the budget has to come from THAT turn, so numerator and
+    // denominator always describe the same request.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "claude",
+        sparkCalls: [
+          managerCall({ promptTokens: 90_000, contextWindowTokens: 200_000 }),
+          managerCall({
+            id: "spark-2",
+            model: "claude-fable-5",
+            contextWindowTokens: 1_000_000,
+          }),
+        ],
+      }),
+      { usedTokens: 90_000, budgetTokens: 200_000 },
+    );
+
+    // Zero, negative and non-finite counts are not usage.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "pi",
+        sparkCalls: [
+          managerCall({ promptTokens: 7_000, contextWindowTokens: 1_000_000 }),
+          managerCall({ id: "spark-2", promptTokens: 0 }),
+          managerCall({ id: "spark-3", promptTokens: -5 }),
+          managerCall({ id: "spark-4", promptTokens: Number.NaN }),
+        ],
+      }),
+      { usedTokens: 7_000, budgetTokens: 256_000 },
+    );
+
+    // The provider's own count wins over Studio's estimate; the estimate is
+    // the fallback for a backend that reported none, floored to whole tokens.
+    assert.equal(
+      gauge({
+        chatBackend: "pi",
+        sparkCalls: [
+          managerCall({ promptTokens: 33_000, promptTokenEstimate: 41_000 }),
+        ],
+      }).usedTokens,
+      33_000,
+    );
+    assert.equal(
+      gauge({
+        chatBackend: "pi",
+        sparkCalls: [managerCall({ promptTokenEstimate: 90_000.5 })],
+      }).usedTokens,
+      90_000,
+    );
+
+    // The auto-compaction summarize call measures the OUTGOING session, so its
+    // occupancy is the full pre-compaction transcript. Counting it would pin
+    // the gauge near 100% for the whole window between a compaction landing
+    // and the next real turn — exactly when the room just came back.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "pi",
+        sparkCalls: [
+          managerCall({ promptTokens: 12_000, contextWindowTokens: 1_000_000 }),
+          managerCall({
+            id: "spark-2",
+            purpose: "compaction",
+            promptTokens: 250_000,
+          }),
+        ],
+      }),
+      { usedTokens: 12_000, budgetTokens: 256_000 },
+    );
+
+    // Only the manager's own conversational turns count. A mode that ran
+    // against a separate session would be describing a different window.
+    assert.deepEqual(
+      gauge({
+        chatBackend: "pi",
+        sparkCalls: [
+          managerCall({ promptTokens: 12_000, contextWindowTokens: 1_000_000 }),
+          managerCall({
+            id: "spark-2",
+            mode: "final_summary",
+            promptTokens: 250_000,
+          }),
+        ],
+      }),
+      { usedTokens: 12_000, budgetTokens: 256_000 },
+    );
+    for (const mode of [
+      "plan_analysis",
+      "chat",
+      "step_planning",
+      "worker_result_review",
+    ]) {
+      assert.deepEqual(
+        gauge({
+          chatBackend: "pi",
+          sparkCalls: [
+            managerCall({ mode, promptTokens: 5_000, contextWindowTokens: 1_000_000 }),
+          ],
+        }),
+        { usedTokens: 5_000, budgetTokens: 256_000 },
+        `${mode} is a manager turn on this chat's own session`,
+      );
+    }
+
+    // compactAtTokens is persisted nowhere: it is the app-wide launch override
+    // the Pi session was stamped with, so the projection resolves it from the
+    // environment exactly as the auto-compaction trigger does.
+    const previousCompactAt = process.env.CODARA_PI_COMPACT_AT_TOKENS;
+    process.env.CODARA_PI_COMPACT_AT_TOKENS = "120000";
+    try {
+      assert.deepEqual(
+        gauge({
+          chatBackend: "pi",
+          sparkCalls: [
+            managerCall({ promptTokens: 60_000, contextWindowTokens: 1_000_000 }),
+          ],
+        }),
+        { usedTokens: 60_000, budgetTokens: 120_000 },
+      );
+      // The override never applies to a CLI backend that compacts itself.
+      assert.deepEqual(
+        gauge({
+          chatBackend: "claude",
+          sparkCalls: [
+            managerCall({ promptTokens: 60_000, contextWindowTokens: 200_000 }),
+          ],
+        }),
+        { usedTokens: 60_000, budgetTokens: 200_000 },
+      );
+    } finally {
+      if (previousCompactAt === undefined) {
+        delete process.env.CODARA_PI_COMPACT_AT_TOKENS;
+      } else {
+        process.env.CODARA_PI_COMPACT_AT_TOKENS = previousCompactAt;
+      }
+    }
+  }
 
   const exactIdentity = "i".repeat(256);
   assert.equal(
