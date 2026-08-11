@@ -25,6 +25,7 @@ import {
   type TabReorderTarget,
   type TabSlot,
 } from "./tabReorder";
+import { tabStripOverflow, type TabStripOverflow } from "./tabStripOverflow";
 
 // Delay before a terminal-pane drag hovering over an inactive tab in the strip
 // activates that tab. Long enough that brushing past a tab during a drag
@@ -128,6 +129,18 @@ function TabBar({
   closeOnMiddleClick,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [stripOverflow, setStripOverflow] = useState<TabStripOverflow>({
+    left: false,
+    right: false,
+  });
+  const updateStripOverflow = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const next = tabStripOverflow(el.scrollLeft, el.clientWidth, el.scrollWidth);
+    setStripOverflow((current) =>
+      current.left === next.left && current.right === next.right ? current : next,
+    );
+  }, []);
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const [terminalDropActive, setTerminalDropActive] = useState(false);
@@ -350,6 +363,7 @@ function TabBar({
           const next = Math.max(0, Math.min(limit, el.scrollLeft + delta));
           if (next !== el.scrollLeft) {
             el.scrollLeft = next;
+            updateStripOverflow();
             // The pointer didn't move but the content under it did, so the
             // insertion index has to be recomputed against the new scroll.
             applyReorderPlan(clientX);
@@ -359,7 +373,7 @@ function TabBar({
       autoScrollRef.current = requestAnimationFrame(step);
     };
     autoScrollRef.current = requestAnimationFrame(step);
-  }, [applyReorderPlan]);
+  }, [applyReorderPlan, updateStripOverflow]);
 
   const endReorderDrag = useCallback(() => {
     stopAutoScroll();
@@ -582,6 +596,25 @@ function TabBar({
     };
   }, [tabs, activeId, onSelect]);
 
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => updateStripOverflow();
+    const resizeObserver = new ResizeObserver(updateStripOverflow);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    resizeObserver.observe(el);
+    for (const tab of el.querySelectorAll<HTMLElement>("[data-tab-id]")) {
+      resizeObserver.observe(tab);
+    }
+    updateStripOverflow();
+    const frame = window.requestAnimationFrame(updateStripOverflow);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, [tabs, updateStripOverflow]);
+
   // Convert vertical wheel deltas to horizontal scroll on the tab strip,
   // but only when there's actually overflow to scroll. We register with
   // passive: false so preventDefault works.
@@ -593,18 +626,22 @@ function TabBar({
       if (el.scrollWidth <= el.clientWidth) return;
       e.preventDefault();
       el.scrollLeft += e.deltaY;
+      updateStripOverflow();
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [updateStripOverflow]);
 
   // Keep the active tab in view after a selection or open.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || !activeId) return;
     const active = el.querySelector<HTMLElement>(`[data-tab-id="${cssEscape(activeId)}"]`);
     active?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [activeId, tabs.length]);
+    updateStripOverflow();
+    const frame = window.requestAnimationFrame(updateStripOverflow);
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeId, tabs.length, updateStripOverflow]);
 
   return (
     <div
@@ -678,11 +715,14 @@ function TabBar({
         // and it is removed in the SAME commit that applies the new order — so
         // the tabs slide while dragging and settle instantly on drop, with no
         // reverse animation from the preview offsets to the committed layout.
-        className={
-          draggingTabId || reorderPlan
-            ? "spark-tabbar-scroll spark-tabbar-scroll--reordering"
-            : "spark-tabbar-scroll"
-        }
+        className={[
+          "spark-tabbar-scroll",
+          stripOverflow.left && "spark-tabbar-scroll--overflow-left",
+          stripOverflow.right && "spark-tabbar-scroll--overflow-right",
+          (draggingTabId || reorderPlan) && "spark-tabbar-scroll--reordering",
+        ]
+          .filter(Boolean)
+          .join(" ")}
       >
         {/* Ghost slot: a soft placeholder the exact size of the dragged tab,
             sitting in the hole its neighbours slid apart to open. Kept mounted

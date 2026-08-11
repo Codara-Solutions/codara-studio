@@ -37,6 +37,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const ENTRY = path.join(ROOT, "src", "renderer", "src", "tabs", "tabReorder.ts");
+const OVERFLOW_ENTRY = path.join(ROOT, "src", "renderer", "src", "tabs", "tabStripOverflow.ts");
 const TABBAR = path.join(ROOT, "src", "renderer", "src", "tabs", "TabBar.tsx");
 const STYLES = path.join(ROOT, "src", "renderer", "src", "styles.css");
 
@@ -84,6 +85,21 @@ async function main() {
     edgeAutoScrollDelta,
     TAB_STRIP_AUTOSCROLL_MAX,
   } = require(outfile);
+
+  const overflowOutfile = path.join(
+    os.tmpdir(),
+    "codara-tab-reorder-test",
+    "tabStripOverflow.cjs",
+  );
+  await esbuild.build({
+    entryPoints: [OVERFLOW_ENTRY],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: overflowOutfile,
+    logLevel: "silent",
+  });
+  const { tabStripOverflow } = require(overflowOutfile);
 
   let failures = 0;
   const check = (name, cond, detail) => {
@@ -355,6 +371,35 @@ async function main() {
     check("a zero-width strip never scrolls", edgeAutoScrollDelta(5, 10, 10) === 0);
   }
 
+  // 10. Tab strip overflow fades
+  {
+    const noOverflow = tabStripOverflow(0, 400, 400);
+    const stalePosition = tabStripOverflow(50, 400, 400);
+    check("a fitting strip has no edge fades",
+      noOverflow.left === false && noOverflow.right === false &&
+        stalePosition.left === false && stalePosition.right === false);
+
+    const beginning = tabStripOverflow(0, 300, 600);
+    check("the beginning shows only the right fade",
+      beginning.left === false && beginning.right === true,
+      JSON.stringify(beginning));
+
+    const middle = tabStripOverflow(150, 300, 600);
+    check("the middle shows both edge fades",
+      middle.left === true && middle.right === true,
+      JSON.stringify(middle));
+
+    const end = tabStripOverflow(300, 300, 600);
+    check("the end shows only the left fade",
+      end.left === true && end.right === false,
+      JSON.stringify(end));
+
+    const roundingOnly = tabStripOverflow(0.5, 300, 300.5);
+    check("subpixel rounding does not create a false fade",
+      roundingOnly.left === false && roundingOnly.right === false,
+      JSON.stringify(roundingOnly));
+  }
+
   // ── 10. Source shape: the behaviours the geometry can't prove ─────────────
   {
     const tabbar = fs.readFileSync(TABBAR, "utf8");
@@ -403,6 +448,20 @@ async function main() {
     const activeRule = styles.match(/\.spark-tab--active\s*\{[^}]*\}/s)?.[0] ?? "";
     const barRule = styles.match(/\.spark-tabbar\s*\{[^}]*\}/s)?.[0] ?? "";
     const scrollRule = styles.match(/\.spark-tabbar-scroll\s*\{[^}]*\}/s)?.[0] ?? "";
+    check("the strip start has no unconditional left mask",
+      !/(?:-webkit-)?mask-image/.test(scrollRule),
+      scrollRule.match(/(?:-webkit-)?mask-image:[^;]*/)?.[0]);
+    check("overflow state selects the left and right fade modifiers",
+      tabbar.includes("spark-tabbar-scroll--overflow-left") &&
+        tabbar.includes("spark-tabbar-scroll--overflow-right") &&
+        styles.includes(".spark-tabbar-scroll--overflow-left") &&
+        styles.includes(".spark-tabbar-scroll--overflow-right"));
+    check("scroll and resize changes refresh overflow state",
+      tabbar.includes('addEventListener("scroll"') &&
+        tabbar.includes("new ResizeObserver(updateStripOverflow)"));
+    check("wheel, active-tab visibility and reorder auto-scroll refresh overflow state",
+      (tabbar.match(/updateStripOverflow\(\)/g) ?? []).length >= 5 &&
+        tabbar.includes("scrollIntoView"));
     check("tabs are rounded on all four corners",
       /border-radius:\s*var\(--tab-radius\);/.test(tabRule), tabRule.match(/border-radius:[^;]*/)?.[0]);
     check("tabs are chips of a fixed height, inset from the strip",

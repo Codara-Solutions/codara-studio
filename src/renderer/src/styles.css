@@ -582,8 +582,29 @@ a { color: inherit; }
   /* Containing block for the reorder ghost slot, which is positioned in strip
      CONTENT coordinates so it scrolls with the tabs. */
   position: relative;
-  /* Soft edge-fade so an overflowing strip dissolves at its right edge instead
-     of hard-clipping a tab glyph mid-shape. Pure paint (mask), no layout. */
+}
+
+.spark-tabbar-scroll--overflow-left {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 10px);
+  mask-image: linear-gradient(to right, transparent 0, #000 10px);
+}
+
+.spark-tabbar-scroll--overflow-right {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
+}
+
+.spark-tabbar-scroll--overflow-left.spark-tabbar-scroll--overflow-right {
   -webkit-mask-image: linear-gradient(
     to right,
     transparent 0,
