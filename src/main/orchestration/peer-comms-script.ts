@@ -119,16 +119,27 @@ function rosterIsPeersAware(agents) {
   );
 }
 
-// Out of the step's group chat: deliberately independent, never flagged for it,
-// or ABSENT from a roster that lists its step's membership. That last case is
-// the load-bearing one: agents.json is per-run and is rewritten with whichever
-// step prepares an attempt next, so a still-running worker of an earlier step
-// finds itself missing. Read permissively that would restore the old
-// everyone-can-talk default for exactly the workers most likely to be
-// mid-flight, so absence fails CLOSED.
+// Out of the group: deliberately independent, never flagged for it, or ABSENT
+// from a roster that records membership. The roster is a union over the run's
+// live workers, so a participant still running is in the file by construction
+// and absence means the task is over, unknown, or from a Studio that never
+// recorded it. On a membership-carrying roster that fails CLOSED; on a pre-flag
+// roster it stays permissive, because there absence only ever meant "this file
+// predates the rule".
 function outOfPeerGroup(card, rosterAware) {
   if (!card) return rosterAware === true;
   return card.isolated === true || card.peers === false;
+}
+
+// The chat is per STEP and the roster spans the run, so membership alone is not
+// enough: two live steps each have their own flagged workers in the same file
+// and must not reach each other. Cards without a stepId (stepless tasks, or a
+// roster written before the union) all compare equal, so those files behave
+// exactly as they did.
+function sameStep(a, b) {
+  const left = a && a.stepId ? a.stepId : null;
+  const right = b && b.stepId ? b.stepId : null;
+  return left === right;
 }
 
 function readAgents(dir) {
@@ -146,8 +157,13 @@ function peerGroupView(dir, self) {
     rosterAware,
     selfCard,
     selfExcluded: self ? outOfPeerGroup(selfCard, rosterAware) : false,
-    excludes: (id) =>
-      outOfPeerGroup(agents.find((agent) => agent.workerTaskId === id), rosterAware),
+    // Not in my chat: out of the group, or in another step's. Both refuse the
+    // same way, since from this worker's side there is nothing to tell apart.
+    excludes: (id) => {
+      const card = agents.find((agent) => agent.workerTaskId === id);
+      if (outOfPeerGroup(card, rosterAware)) return true;
+      return !sameStep(card, selfCard);
+    },
   };
 }
 
@@ -195,7 +211,7 @@ function commandList(dir, args) {
   const agents = view.selfExcluded || (!self && view.rosterAware)
     ? managerOnly
     : view.agents.filter(
-        (agent) => agent.workerTaskId === "manager" || !outOfPeerGroup(agent, view.rosterAware)
+        (agent) => agent.workerTaskId === "manager" || !view.excludes(agent.workerTaskId)
       );
   if (args.json) {
     console.log(JSON.stringify({ ...registry, agents }, null, 2));

@@ -47,6 +47,14 @@ interface PeerAgentCard {
   status?: string;
   title?: string;
   label?: string;
+  /**
+   * The step this worker belongs to. The roster is a union over the run's live
+   * workers, so two steps can be in the file at once and the chat is the
+   * intersection of "in the group" and "in MY step". Undefined on stepless
+   * tasks and on rosters written before the union, where every card compares
+   * equal and the file behaves exactly as it did.
+   */
+  stepId?: string;
   allowedPaths?: string[];
   /** Deliberately independent: reachable only by `manager`, and reaches only `manager`. */
   isolated?: boolean;
@@ -75,19 +83,28 @@ function rosterIsPeersAware(agents: PeerAgentCard[]): boolean {
 }
 
 /**
- * Out of the step's group chat: deliberately independent, never flagged
- * `peers`, or ABSENT from a roster that lists its step's membership. The last
- * case is the load-bearing one: agents.json is per-run and is rewritten with
- * the roster of whichever step prepares an attempt next, so a worker of an
- * earlier step that is still running finds itself missing from the file. Read
- * permissively that would silently restore the old everyone-can-talk default
- * for exactly the workers most likely to be mid-flight, so absence fails
- * CLOSED. All three populations keep the manager channel and lose peer traffic
- * in both directions; only the refusal wording differs.
+ * Out of the group: deliberately independent, never flagged `peers`, or ABSENT
+ * from a roster that records membership. The roster is a union over the run's
+ * live workers, so a participant that is genuinely still running is in the
+ * file by construction and absence means the task is over, unknown, or from a
+ * Studio that never recorded it. On a membership-carrying roster that fails
+ * CLOSED; on a pre-flag roster it stays permissive, because there absence only
+ * ever meant "this file predates the rule".
  */
 function outOfPeerGroup(card: PeerAgentCard | undefined, rosterAware: boolean): boolean {
   if (!card) return rosterAware;
   return card.isolated === true || card.peers === false;
+}
+
+/**
+ * The chat is per STEP, and the roster spans the run, so membership alone is
+ * not enough: two live steps each have their own flagged workers in the same
+ * file and must not be able to reach each other. Cards without a stepId (a
+ * stepless task, or a roster written before the union) all compare equal, so
+ * those files behave exactly as they did.
+ */
+function sameStep(a: PeerAgentCard | undefined, b: PeerAgentCard | undefined): boolean {
+  return (a?.stepId ?? null) === (b?.stepId ?? null);
 }
 
 export interface PeerCommsContext {
@@ -216,11 +233,13 @@ function peerGroupView(ctx: PeerCommsContext, agents = listAgents(ctx)): PeerGro
     rosterAware,
     selfCard,
     selfExcluded: outOfPeerGroup(selfCard, rosterAware),
-    excludes: (workerTaskId) =>
-      outOfPeerGroup(
-        agents.find((agent) => agent.workerTaskId === workerTaskId),
-        rosterAware,
-      ),
+    // Not in my chat: out of the group, or in another step's. Both refuse the
+    // same way, since from this worker's side there is nothing to tell apart.
+    excludes: (workerTaskId) => {
+      const card = agents.find((agent) => agent.workerTaskId === workerTaskId);
+      if (outOfPeerGroup(card, rosterAware)) return true;
+      return !sameStep(card, selfCard);
+    },
   };
 }
 
@@ -233,7 +252,7 @@ function visibleAgents(view: PeerGroupView): PeerAgentCard[] {
   if (view.selfExcluded) return manager;
   return view.agents.filter(
     (agent) =>
-      agent.workerTaskId === MANAGER_PEER_ID || !outOfPeerGroup(agent, view.rosterAware),
+      agent.workerTaskId === MANAGER_PEER_ID || !view.excludes(agent.workerTaskId ?? ""),
   );
 }
 

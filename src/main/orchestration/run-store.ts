@@ -17392,6 +17392,14 @@ function workerArtifactPaths(
 interface PeerCommsAgentCard {
   workerTaskId: string;
   attemptId?: string;
+  /**
+   * The step this worker belongs to. The chat is per step, and the roster is a
+   * union over the whole run (see updatePeerCommsRegistry), so this is what
+   * tells two live steps apart inside one file. Undefined for a stepless task,
+   * and on rosters written before the union, where every card compares equal
+   * and the file behaves exactly as it did.
+   */
+  stepId?: string;
   label?: string;
   title: string;
   runtime: WorkerRuntime;
@@ -17406,13 +17414,11 @@ interface PeerCommsAgentCard {
   isolated?: boolean;
   /**
    * Group-chat membership (WorkerTask.peers / peerComms). False cards are in
-   * the file only so the transports can refuse their traffic from POSITIVE
-   * evidence — the registry is per-run and gets rewritten by whichever step
-   * prepares an attempt last, so "absent from the roster" can also mean "the
-   * roster moved on", which must never harden into a refusal. `list` /
-   * `peer_list` hide false cards, so a worker is never shown a peer it may not
-   * address. Undefined on rosters written before the flag existed: those runs
-   * were all-members, and the transports read undefined as such.
+   * the file so the transports can refuse their traffic from POSITIVE evidence
+   * rather than from absence. `list` / `peer_list` hide them, so a worker is
+   * never shown a peer it may not address. Undefined on rosters written before
+   * the flag existed: those runs were all-members, and the transports read
+   * undefined as such, so upgrading mid-run never severs a live batch.
    */
   peers?: boolean;
   allowedPaths: string[];
@@ -17446,12 +17452,30 @@ function isPeerGroupMember(task: WorkerTask): boolean {
   return task.peers === true || task.peerComms === true;
 }
 
-// The roster every mailbox transport reads. Cards for the current step's
-// workers, each stamped with its group-chat membership: peer traffic is
-// allowed only between members, and `list` / `peer_list` show members only, so
-// an unflagged worker is never advertised as reachable. The `manager` card is
-// separate and is not subject to the rule — steering must survive a batch
-// where nobody was flagged.
+// A task whose work is over: its card is dropped from the roster on the next
+// write, which is what keeps a union over the whole run small and makes the
+// file read as "who is live right now". The preparing task is always kept
+// regardless, because its own card is what tells the transports it is a known
+// participant rather than a worker whose roster moved on.
+const TERMINAL_PEER_ROSTER_STATUSES = new Set<WorkerTaskStatus>([
+  "accepted",
+  "failed",
+  "cancelled",
+]);
+
+// The roster every mailbox transport reads. A UNION over the run's live worker
+// tasks, not a snapshot of the preparing step: agents.json lives at the run
+// root, so a per-step snapshot silently evicted the workers of an earlier step
+// that was still running, and eviction is indistinguishable from "never a
+// member". Every card carries its own stepId instead, and the transports pair
+// membership with a same-step check, which keeps the chat per step (the rule
+// has not changed) while letting two live steps share one file.
+//
+// Peer traffic is allowed only between members of the same step, and
+// `list` / `peer_list` show only those, so an unflagged or cross-step worker is
+// never advertised as reachable. The `manager` card is separate and is not
+// subject to either rule: steering must survive a batch where nobody was
+// flagged, and a manager broadcast reaches every step.
 async function updatePeerCommsRegistry(
   run: RunState,
   step: StepState | undefined,
@@ -17462,18 +17486,18 @@ async function updatePeerCommsRegistry(
 ): Promise<void> {
   if (!paths.peerCommsAgents) return;
   const timestamp = new Date().toISOString();
-  const stepTaskIds = new Set(step?.workerTaskIds ?? []);
-  const peers = run.workerTasks.filter((task) => {
-    if (currentTask.stepId && task.stepId === currentTask.stepId) return true;
-    if (stepTaskIds.has(task.id)) return true;
-    return task.id === currentTask.id;
-  });
+  const peers = run.workerTasks.filter(
+    (task) => task.id === currentTask.id || !TERMINAL_PEER_ROSTER_STATUSES.has(task.status),
+  );
   const cards: PeerCommsAgentCard[] = peers.map((peer) => {
     const latestAttempt = run.workerAttempts
       .slice()
       .reverse()
       .find((attempt) => attempt.workerTaskId === peer.id);
-    const planned = step?.plannedAgents?.find(
+    // Labels come from the peer's OWN step: matching a cross-step card against
+    // the preparing step's plannedAgents would hand it a stranger's label.
+    const peerStep = peer.stepId === step?.id ? step : run.steps.find((item) => item.id === peer.stepId);
+    const planned = peerStep?.plannedAgents?.find(
       (agent) =>
         agent.summary === peer.description ||
         agent.label === peer.title ||
@@ -17482,6 +17506,7 @@ async function updatePeerCommsRegistry(
     return {
       workerTaskId: peer.id,
       attemptId: peer.id === currentTask.id ? attemptId : latestAttempt?.id,
+      stepId: peer.stepId,
       label: planned?.label,
       title: peer.title,
       runtime: peer.runtimePreference,
@@ -17499,6 +17524,8 @@ async function updatePeerCommsRegistry(
   const registry = {
     version: 1,
     runId: run.id,
+    // Provenance only, now that cards carry their own stepId: this says which
+    // attempt last rewrote the file, not who is in it.
     stepId: currentTask.stepId,
     stepTitle: step?.title,
     updatedAt: timestamp,

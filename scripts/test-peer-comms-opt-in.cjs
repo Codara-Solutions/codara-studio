@@ -251,11 +251,26 @@ const REGISTRY_SRC =
   "\n" +
   extractFunction(RUN_STORE, "async function updatePeerCommsRegistry");
 
+// The pruned statuses come from the module itself rather than a copy here, so
+// the roster's idea of "over" cannot drift from the run's.
+const TERMINAL_ROSTER_STATUSES = JSON.parse(
+  RUN_STORE.match(/const TERMINAL_PEER_ROSTER_STATUSES = new Set<WorkerTaskStatus>\(([\s\S]*?)\);/)[1]
+    .replace(/\s+/g, "")
+    .replace(/,\]$/, "]"),
+);
+assert.deepEqual(TERMINAL_ROSTER_STATUSES, ["accepted", "failed", "cancelled"]);
+
 async function buildRegistry(run, step, currentTask, { managerReads = true } = {}) {
   let written = null;
   const updatePeerCommsRegistry = compileWithDeps(
     `${REGISTRY_SRC}\n`,
-    ["join", "writeFileAtomic", "runHasMcpManager", "managerAgentCard"],
+    [
+      "join",
+      "writeFileAtomic",
+      "runHasMcpManager",
+      "managerAgentCard",
+      "TERMINAL_PEER_ROSTER_STATUSES",
+    ],
     "updatePeerCommsRegistry",
   )(
     path.join,
@@ -264,6 +279,7 @@ async function buildRegistry(run, step, currentTask, { managerReads = true } = {
     },
     () => managerReads,
     (timestamp) => ({ workerTaskId: "manager", title: "Cora manager", updatedAt: timestamp }),
+    new Set(TERMINAL_ROSTER_STATUSES),
   );
   await updatePeerCommsRegistry(run, step, currentTask, "attempt-1", { peerCommsAgents: "/agents.json" }, "running");
   return written;
@@ -298,6 +314,40 @@ async function registryChecks() {
   assert.equal(byId.get("task-d").peers, false, "isolated beats every other signal");
   assert.equal(byId.get("task-d").isolated, true, "the isolated marker survives for the wording");
   assert.ok(byId.has("manager"), "the manager card is unconditional on membership");
+  assert.equal(byId.get("task-a").stepId, "step-1", "every card carries its own step");
+
+  // The roster is a UNION over the run's live workers, not a snapshot of the
+  // preparing step: agents.json sits at the run root, so evicting the other
+  // step's workers is what used to cut a still-running batch out of its chat.
+  const s2a = { ...flaggedA, id: "task-s2a", stepId: "step-2", title: "Step 2 A" };
+  const s2b = { ...flaggedA, id: "task-s2b", stepId: "step-2", title: "Step 2 B" };
+  const done = { ...flaggedA, id: "task-old", stepId: "step-0", title: "Finished", status: "accepted" };
+  const step2 = { id: "step-2", title: "Step 2", workerTaskIds: [], plannedAgents: [] };
+  const twoSteps = await buildRegistry(
+    { ...run, workerTasks: [flaggedA, flaggedB, done, s2a, s2b], steps: [step, step2] },
+    step2,
+    s2a,
+  );
+  const twoById = new Map(twoSteps.agents.map((agent) => [agent.workerTaskId, agent]));
+  assert.equal(twoById.get("task-a").stepId, "step-1", "step-1's live workers stay in the file");
+  assert.equal(twoById.get("task-b").peers, true);
+  assert.equal(twoById.get("task-s2a").stepId, "step-2");
+  assert.equal(
+    twoById.has("task-old"),
+    false,
+    "a task whose work is over is pruned, so the union stays small",
+  );
+  // ...except the preparing task itself, whose own card is what tells the
+  // transports it is a known participant even as it finishes.
+  const finishing = await buildRegistry(
+    { ...run, workerTasks: [{ ...flaggedA, status: "accepted" }, flaggedB], steps: [step] },
+    step,
+    { ...flaggedA, status: "accepted" },
+  );
+  assert.ok(
+    finishing.agents.some((agent) => agent.workerTaskId === "task-a"),
+    "the preparing task is always in its own roster",
+  );
 
   // A run already in flight when the flag shipped: its tasks carry only the
   // per-attempt outcome, and must keep their chat.
@@ -323,6 +373,7 @@ async function registryChecks() {
 
   results.push("the registry marks group-chat membership per worker");
   results.push("the registry keeps the manager card independent of membership");
+  results.push("the registry unions the run's live workers and stamps each with its step");
 }
 
 // ── 4) Both transports refuse traffic across the chat boundary ───────────
@@ -354,10 +405,16 @@ function materializeMailbox() {
     dir,
     [
       { workerTaskId: "manager", title: "Cora manager" },
-      { workerTaskId: "task-in-a", title: "Flagged A", peers: true },
-      { workerTaskId: "task-in-b", title: "Flagged B", peers: true },
-      { workerTaskId: "task-out", title: "Unflagged", peers: false },
-      { workerTaskId: "task-lone", title: "Independent", peers: false, isolated: true },
+      { workerTaskId: "task-in-a", title: "Flagged A", stepId: "step-1", peers: true },
+      { workerTaskId: "task-in-b", title: "Flagged B", stepId: "step-1", peers: true },
+      { workerTaskId: "task-out", title: "Unflagged", stepId: "step-1", peers: false },
+      {
+        workerTaskId: "task-lone",
+        title: "Independent",
+        stepId: "step-1",
+        peers: false,
+        isolated: true,
+      },
     ],
     { stepId: "step-1" },
   );
@@ -519,8 +576,8 @@ async function transportChecks() {
   // above; demote the sender and the note must disappear from b's inbox.
   const demoted = [
     { workerTaskId: "manager", title: "Cora manager" },
-    { workerTaskId: "task-in-a", title: "Flagged A", peers: false },
-    { workerTaskId: "task-in-b", title: "Flagged B", peers: true },
+    { workerTaskId: "task-in-a", title: "Flagged A", stepId: "step-1", peers: false },
+    { workerTaskId: "task-in-b", title: "Flagged B", stepId: "step-1", peers: true },
   ];
   execFileSync(
     process.execPath,
@@ -545,41 +602,83 @@ async function transportChecks() {
 
   results.push("peer mail from a party that left the chat stops being delivered");
 
-  // OVERLAPPING STEPS, the durable default-off case. agents.json is per-run and
-  // is rewritten with whichever step prepares an attempt next, so a worker of
-  // step 1 that is still running finds its own card gone. Absence from a roster
-  // that carries membership must read as "out", never as "unrestricted".
-  writeRoster(
-    dir,
-    [
-      { workerTaskId: "manager", title: "Cora manager" },
-      { workerTaskId: "task-s2-a", title: "Step 2 A", peers: true },
-      { workerTaskId: "task-s2-b", title: "Step 2 B", peers: true },
-    ],
-    { stepId: "step-2" },
-  );
-  for (const to of ["task-in-b", "task-s2-a", "all"]) {
-    assert.match(
-      cliRefusal("task-in-a", to) ?? "",
-      /not in the step's worker group chat/,
-      `CLI must refuse a step-1 worker's send to ${to} once the roster moved on`,
-    );
-    assert.match((await piRefusal("task-in-a", to)) ?? "", /not in the step's worker group chat/);
-  }
-  assert.equal(cliRefusal("task-in-a", "manager"), null, "the manager channel survives the overwrite");
-  assert.equal(await piRefusal("task-in-a", "manager"), null);
-  assert.deepEqual(JSON.parse(listFor("task-in-a")).agents.map((a) => a.workerTaskId), ["manager"]);
-  assert.deepEqual(
-    (await loadPiPeerTools(dir, "task-in-a").get("peer_list").execute("call-5", {})).details.agents.map(
-      (a) => a.workerTaskId,
-    ),
-    ["manager"],
-  );
-  // The step-2 batch itself is unaffected.
-  assert.equal(cliRefusal("task-s2-a", "task-s2-b"), null);
-  assert.equal(await piRefusal("task-s2-a", "task-s2-b"), null);
+  // OVERLAPPING STEPS. agents.json sits at the run root, so a step-2 prepare
+  // rewrites the same file a still-running step-1 batch is reading. The roster
+  // is a union stamped per card, so step 1 keeps its chat, step 2 gets its own,
+  // and neither can reach the other.
+  const union = [
+    { workerTaskId: "manager", title: "Cora manager" },
+    { workerTaskId: "task-in-a", title: "Flagged A", stepId: "step-1", peers: true },
+    { workerTaskId: "task-in-b", title: "Flagged B", stepId: "step-1", peers: true },
+    { workerTaskId: "task-out", title: "Unflagged", stepId: "step-1", peers: false },
+    { workerTaskId: "task-s2-a", title: "Step 2 A", stepId: "step-2", peers: true },
+    { workerTaskId: "task-s2-b", title: "Step 2 B", stepId: "step-2", peers: true },
+  ];
+  writeRoster(dir, union, { stepId: "step-2" });
 
-  results.push("a worker whose step's roster was overwritten falls back to manager-only");
+  // The flagship: the step-1 pair is still talking after step 2 prepared.
+  assert.equal(cliRefusal("task-in-a", "task-in-b"), null, "step 1 keeps its chat");
+  assert.equal(await piRefusal("task-in-a", "task-in-b"), null);
+  assert.equal(cliRefusal("task-s2-a", "task-s2-b"), null, "step 2 has its own chat");
+  assert.equal(await piRefusal("task-s2-a", "task-s2-b"), null);
+  // ...and the two steps cannot reach each other, in either direction.
+  for (const [from, to] of [
+    ["task-in-a", "task-s2-a"],
+    ["task-s2-a", "task-in-a"],
+  ]) {
+    assert.match(
+      cliRefusal(from, to) ?? "",
+      /not in the step's worker group chat/,
+      `CLI must refuse the cross-step send ${from} -> ${to}`,
+    );
+    assert.match((await piRefusal(from, to)) ?? "", /not in the step's worker group chat/);
+  }
+  // A broadcast is scoped to the sender's step.
+  execFileSync(
+    process.execPath,
+    [script, "send", "--dir", dir, "--from", "task-in-a", "--to", "all", "--body", "step one only"],
+    { encoding: "utf8" },
+  );
+  const inStep = JSON.parse(inboxOf("task-in-b"));
+  assert.equal(
+    inStep.some((message) => message.body === "step one only"),
+    true,
+    "a step-1 broadcast reaches the step-1 members",
+  );
+  for (const outsider of ["task-s2-a", "task-out"]) {
+    assert.equal(
+      JSON.parse(inboxOf(outsider)).some((message) => message.body === "step one only"),
+      false,
+      `a step-1 broadcast must not reach ${outsider}`,
+    );
+    assert.equal(
+      (await piInboxOf(outsider)).some((message) => message.body === "step one only"),
+      false,
+    );
+  }
+  // Discovery is scoped the same way.
+  assert.deepEqual(
+    JSON.parse(listFor("task-in-a")).agents.map((a) => a.workerTaskId).sort(),
+    ["manager", "task-in-a", "task-in-b"],
+  );
+  assert.deepEqual(
+    (await loadPiPeerTools(dir, "task-s2-a").get("peer_list").execute("call-5", {})).details.agents
+      .map((a) => a.workerTaskId)
+      .sort(),
+    ["manager", "task-s2-a", "task-s2-b"],
+  );
+  // Genuine absence still fails closed: the union carries every live worker, so
+  // a caller the file does not know is over, unknown, or forged.
+  assert.match(
+    cliRefusal("task-gone", "task-in-a") ?? "",
+    /not in the step's worker group chat/,
+    "an id absent from a membership-carrying roster may only reach the manager",
+  );
+  assert.match((await piRefusal("task-gone", "task-in-a")) ?? "", /not in the step's worker group chat/);
+  assert.equal(cliRefusal("task-gone", "manager"), null, "even then the manager channel is open");
+
+  results.push("two live steps share one roster without sharing a chat");
+  results.push("a broadcast reaches the sender's step members and nobody else");
 
   // Legacy rosters — written before the flag existed — must keep working
   // exactly as they did: everyone is a member, including ids the file never
