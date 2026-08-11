@@ -245,6 +245,16 @@ export type ChatTimelineItem =
       targetTurnId: HumanRunMessage["targetTurnId"];
       backendTurnId: HumanRunMessage["backendTurnId"];
       conversationEpoch: number;
+      /**
+       * The epoch the run store files this message under when it decides
+       * whether the message is still deliverable: the message's own stamp with
+       * a bare `0` fallback, exactly as queuedManagerInputMessages reads it.
+       * Deliberately NOT the same number as `conversationEpoch` above, whose
+       * run-level fallback is what the duplicate passes want — a legacy message
+       * carrying no stamp of its own is epoch 0 to the store, however far the
+       * run's epoch has moved. Only the pin decision reads this.
+       */
+      deliveryEpoch: number;
       at: string;
       // How many identical copies of this message were collapsed into this
       // one entry. 1 means it stood alone.
@@ -380,6 +390,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       targetTurnId: message.targetTurnId,
       backendTurnId: message.backendTurnId,
       conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,
+      deliveryEpoch: message.conversationEpoch ?? 0,
       at: message.createdAt,
       repeatCount: 1,
     });
@@ -482,7 +493,10 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   // message the user really did send twice — which the manager will receive as
   // two [Queued steering] sections. Delivery state has to match for the same
   // reason: a delivered note and its still-queued twin are two different facts,
-  // and they are never in the same block anyway.
+  // and they are never in the same block anyway. `deliveryEpoch` matches for
+  // the third: the pinned block's last row is adjacent to the chronological
+  // block's, and a stranded orphan must never be folded into the live outbox
+  // entry it is a twin of.
   const merged: ChatTimelineItem[] = [];
   for (const item of items) {
     const prev = merged[merged.length - 1];
@@ -499,6 +513,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       prev.deliveryState === item.deliveryState &&
       prev.targetTurnId === item.targetTurnId &&
       prev.conversationEpoch === item.conversationEpoch &&
+      prev.deliveryEpoch === item.deliveryEpoch &&
       isWithinDuplicateWindow(prev.at, item.at) &&
       attachmentSignature(prev.attachments) === attachmentSignature(item.attachments)
     ) {
@@ -530,13 +545,17 @@ function isWithinDuplicateWindow(earlier: string, later: string): boolean {
 // delivery moves past "queued". A cancelled message is NOT pinned: a rewind
 // undid it, and when it was said is the whole point of keeping the row.
 //
-// The predicate is queuedManagerInputMessages (run-store.ts:5235) verbatim,
-// EPOCH CLAUSE INCLUDED, and that clause is the whole difference between a
-// message that is about to be sent and one that never will be. A rewind that
-// fails after the interrupt (markConversationRewindFailed) re-queues the
-// interrupted input while the epoch has already moved, so the store will never
-// look at it again. Pinning that orphan would park it at the bottom of the
-// conversation forever, permanently claiming it is on its way. It renders
+// The predicate is queuedManagerInputMessages (run-store.ts:5185) verbatim,
+// EPOCH CLAUSE INCLUDED — including its fallback, `(message.conversationEpoch
+// ?? 0) === run epoch`, which is why the pin reads `deliveryEpoch` and not the
+// item's run-defaulted `conversationEpoch`. That clause is the whole difference
+// between a message that is about to be sent and one that never will be. A
+// rewind that fails after the interrupt (markConversationRewindFailed) re-queues
+// the interrupted input while the epoch has already moved, so the store will
+// never look at it again; a legacy message that predates the per-message stamp
+// is epoch 0 to the store and is stranded the same way once the run's epoch has
+// moved past 0. Pinning either orphan would park it at the bottom of the
+// conversation forever, permanently claiming it is on its way. They render
 // chronologically instead: old, undelivered, and visibly in the past.
 function isUndeliveredQueuedMessage(
   item: ChatTimelineItem,
@@ -547,7 +566,7 @@ function isUndeliveredQueuedMessage(
     item.author === "user" &&
     item.deliveryState === "queued" &&
     !item.backendTurnId &&
-    item.conversationEpoch === currentEpoch
+    item.deliveryEpoch === currentEpoch
   );
 }
 

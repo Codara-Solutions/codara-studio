@@ -894,6 +894,25 @@ async function main() {
     ]);
   });
 
+  test("a legacy queued message with no epoch of its own is an orphan too", () => {
+    // Messages written before conversationEpoch existed carry no stamp, and the
+    // store reads them as `(message.conversationEpoch ?? 0)` — epoch 0 — so a
+    // run whose epoch has moved past 0 will never drain this one. Defaulting to
+    // the RUN's epoch here would call it an outbox entry and pin it to the
+    // bottom forever, promising a delivery that cannot happen.
+    const state = steeringRun({ conversationEpoch: undefined });
+    state.conversationEpoch = 2;
+    for (const message of state.humanMessages) {
+      if (message.id === "msg-first") message.conversationEpoch = 2;
+    }
+    assert.deepEqual(idsOf(T.buildChatTimeline(state)), [
+      "msg-first",
+      "msg-steer",
+      "step-2",
+      "spark-call:spark-2",
+    ]);
+  });
+
   test("two identical queued messages minutes apart stay two bubbles", () => {
     // Pinning makes them adjacent; adjacency here is a layout accident, not a
     // double-send. Cora receives two [Queued steering] sections, so the chat
