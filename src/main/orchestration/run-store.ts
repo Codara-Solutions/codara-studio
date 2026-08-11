@@ -9921,6 +9921,103 @@ export async function resumeManagerTurnRecovery(
   return { outcome: decision.outcome, run };
 }
 
+/** One worker attempt a pause killed before it could finish. */
+interface ResumeInterruptedAttempt {
+  attemptId: string;
+  attemptNumber: number;
+  taskId: string;
+  taskTitle: string;
+  stepLabel: string;
+}
+
+// forcePauseRun kills the PTYs first and commits the pause after, so an attempt
+// killed by that pause can carry a finishedAt slightly EARLIER than the recorded
+// pausedAt. Attempts that settled further back than this belong to an older
+// pause and are not this resume's business.
+const PAUSE_KILL_LEAD_MS = 60_000;
+
+// Header of the synthetic queued note the chat-route resume hands the manager.
+// Doubles as the "one undelivered resume note at a time" marker.
+const RESUME_INTERRUPTED_NOTE_HEADER = "[Cora resume — worker attempts interrupted by the pause]";
+
+// How many interrupted attempts are named individually before the note tails
+// off into a count. A killed wave is usually 2-6 workers; the cap only guards
+// against a pathological run bloating the manager prompt.
+const RESUME_INTERRUPTED_NOTE_LIMIT = 12;
+
+/**
+ * The attempts a pause interrupted and nobody has picked back up: their task is
+ * still `cancelled` (so no follow-up task superseded it) and their newest
+ * attempt is `cancelled` (killed, not failed and not retried). This is the list
+ * the manager needs on resume — it owns retry bookkeeping, so Resume's job is
+ * to tell it exactly what stopped mid-flight, not to relaunch behind its back.
+ */
+function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[] {
+  const pausedAtMs = Date.parse(run.autopilot?.pausedAt ?? "");
+  const supersededTaskIds = new Set(
+    run.workerTasks
+      .map((task) => task.supersedesTaskId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const rows: ResumeInterruptedAttempt[] = [];
+  for (const task of run.workerTasks) {
+    if (task.status !== "cancelled") continue;
+    if (supersededTaskIds.has(task.id)) continue;
+    const attempts = run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id);
+    if (attempts.length === 0) continue;
+    const latest = attempts.reduce((best, attempt) =>
+      (attempt.attemptNumber ?? 0) >= (best.attemptNumber ?? 0) ? attempt : best,
+    );
+    if (latest.status !== "cancelled") continue;
+    if (Number.isFinite(pausedAtMs)) {
+      const finishedMs = Date.parse(latest.finishedAt ?? "");
+      if (Number.isFinite(finishedMs) && finishedMs < pausedAtMs - PAUSE_KILL_LEAD_MS) continue;
+    }
+    const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+    rows.push({
+      attemptId: latest.id,
+      attemptNumber: latest.attemptNumber ?? 1,
+      taskId: task.id,
+      taskTitle: task.title,
+      stepLabel: step ? `Step ${step.index} "${step.title}"` : "No step",
+    });
+  }
+  return rows;
+}
+
+/**
+ * The manager turn a paused resume dispatches gets its context the same way the
+ * board nudge does: one synthetic queued user note (the house pattern for
+ * synthetic conversation input — see nudgeBoardManager). Anything else would
+ * have to travel through the prompt builder, which is a pure function of the
+ * run plus its queued input.
+ */
+function composeResumeInterruptedNote(rows: ResumeInterruptedAttempt[]): string {
+  const listed = rows.slice(0, RESUME_INTERRUPTED_NOTE_LIMIT);
+  const remaining = rows.length - listed.length;
+  return [
+    RESUME_INTERRUPTED_NOTE_HEADER,
+    "Resume this run. The pause stopped the attempts below before they finished, and nothing is running now:",
+    ...listed.map(
+      (row) =>
+        `- ${row.stepLabel} · ${row.taskTitle} — task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted)`,
+    ),
+    ...(remaining > 0 ? [`- …and ${remaining} more interrupted attempt(s).`] : []),
+    "Re-issue the work that is still needed (relaunch those tasks, or replace them if the plan changed), then carry on.",
+  ].join("\n");
+}
+
+/** True once this resume already queued its note in the current conversation. */
+function hasQueuedResumeInterruptedNote(run: RunState): boolean {
+  const epoch = conversationEpoch(run);
+  return run.humanMessages.some(
+    (message) =>
+      message.deliveryState === "queued" &&
+      (message.conversationEpoch ?? 0) === epoch &&
+      message.message.startsWith(RESUME_INTERRUPTED_NOTE_HEADER),
+  );
+}
+
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   // A run blocked on an open question resumes by ANSWERING it, never by a plain
@@ -9953,22 +10050,64 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // instead of replaying the side effect.
   const parkedChatTurn =
     run.status === "paused" && run.autopilot?.lastAction === "chat_turn_parked";
+  // A force-paused run has no live worker left to receive a resume signal:
+  // forcePauseRun killed every PTY. sendResumeSignals is then a no-op, and the
+  // fallback below commits "running" with nothing driving the run — the wedge
+  // users hit as "Stop, Resume, nothing happens" (run.json: status running,
+  // last spark call failed, no workers, no autopilot cycle). So ANY paused
+  // resume that finds no worker in flight goes through the manager chat turn:
+  // it is the one driver that can relaunch the interrupted work, and it owns
+  // the retry bookkeeping. Direct (loom) runs keep the signal path — their
+  // manager calls are deliberately suppressed, so a chat turn drives nothing —
+  // and a run paused with a manager turn STILL in flight (the soft pauseRun
+  // path, which never kills the turn) already has its driver; a second
+  // concurrent turn would race the first one's decision.
+  const pausedWithNoWorkers =
+    run.status === "paused" && run.executionMode !== "direct" && !activeManagerCall(run);
+  // Sticky for the fallback below: a resume that already spent its chat turn
+  // must still leave a driver behind if that turn neither settled the run nor
+  // spawned work (a failed/suppressed manager call returns null here).
+  let routedToChat = false;
   if (
     activeWorkersForRun(run.id).length === 0 &&
-    (parkedChatTurn || shouldRoutePausedResumeToChat(run))
+    (parkedChatTurn || pausedWithNoWorkers || shouldRoutePausedResumeToChat(run))
   ) {
+    routedToChat = true;
     // Leave "paused" BEFORE the turn dispatches. The turn-failure policy and
     // its retry guards read run.status: a turn resumed while the run still
     // says "paused" would forfeit its transient-retry budget (the post-sleep
     // guard rejects non-driving states), and the header would keep the parked
     // parked banner through a perfectly healthy resumed turn.
+    const interruptedAttempts = interruptedAttemptsForResume(run);
     const driving = await commitRunChange(run, {
       type: "run.resumed",
       message: parkedChatTurn
         ? "Run resumed to retry the parked chat turn"
         : "Run resumed with a chat turn",
-      payload: { route: "chat", parkedChatTurn },
+      payload: {
+        route: "chat",
+        parkedChatTurn,
+        interruptedAttemptIds: interruptedAttempts.map((row) => row.attemptId),
+      },
       mutate: (draft, timestamp) => {
+        // Recomputed off the authoritative draft: the cached run this call read
+        // may be a mutation or two old by the time the commit runs.
+        const interrupted = interruptedAttemptsForResume(draft);
+        if (interrupted.length > 0 && !hasQueuedResumeInterruptedNote(draft)) {
+          draft.humanMessages.push({
+            id: makeId("msg"),
+            runId: draft.id,
+            author: "user",
+            kind: "note",
+            message: composeResumeInterruptedNote(interrupted),
+            intent: "turn",
+            // "queued" (not acknowledged) is what makes the chat turn dispatched
+            // below consume this as its input — see queuedManagerInputMessages.
+            deliveryState: "queued",
+            conversationEpoch: conversationEpoch(draft),
+            createdAt: timestamp,
+          });
+        }
         draft.status = "running";
         draft.verificationRounds = 0;
         draft.autopilot = {
@@ -10047,8 +10186,14 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // turn that would have driven it died with the provider, so the resume
   // signals sent above have no live manager to land on. Schedule a driver.
   const parkedManagerTurn = isParkedManagerTurnAction(run.autopilot?.lastAction);
+  // Reaching here after the chat route means that turn neither settled the run
+  // nor spawned work — a failed or suppressed manager call returns null, and a
+  // reply-only decision leaves the run driving nothing. The exemption above
+  // assumes a live manager session is listening to the resume signals; the turn
+  // that would have been it just died. Schedule a driver so a resumed run is
+  // never left "running" with nothing scheduled.
   const shouldScheduleDriver =
-    (parkedByRestart || parkedManagerTurn || !isExecuteModeCliManager) &&
+    (parkedByRestart || parkedManagerTurn || routedToChat || !isExecuteModeCliManager) &&
     activeWorkersForRun(resumed.id).length === 0;
   if (shouldScheduleManagerAfterResume || shouldScheduleDriver) {
     if (resumed.workerAttempts.length > 0) {
@@ -12616,7 +12761,17 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (!finishedTask) throw new Error(`Worker task not found: ${task.id}`);
 
   const finishedAt = new Date().toISOString();
-  finishedAttempt.status = result.exitCode === 0 ? "succeeded" : "failed";
+  // A worker the user's Stop killed did not fail — it was interrupted. Record it
+  // that way whichever side of the pause commit this exit lands on, so Resume
+  // and the report surfaces don't carry a phantom failure for a process the
+  // user stopped on purpose.
+  const pauseInterrupted = workerExitInterruptedByForcePause({
+    runId: run.id,
+    exitCode: result.exitCode,
+    attemptStatus: finishedAttempt.status,
+  });
+  finishedAttempt.status =
+    result.exitCode === 0 ? "succeeded" : pauseInterrupted ? "cancelled" : "failed";
   finishedAttempt.finishedAt = finishedAt;
   finishedAttempt.exitCode = result.exitCode;
   finishedAttempt.error = result.error;
@@ -12639,16 +12794,25 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   }
   // Classify the failure at the one point every worker session funnels through,
   // so the retry path can branch on a kind instead of re-reading error prose.
-  finishedAttempt.failureKind = result.exitCode === 0 ? undefined : classifyWorkerFailure(result.error);
+  finishedAttempt.failureKind =
+    result.exitCode === 0 || pauseInterrupted ? undefined : classifyWorkerFailure(result.error);
   finishedAttempt.command = command;
   finishedAttempt.stdoutLogPath = paths.stdoutLog;
   finishedAttempt.stderrLogPath = paths.stderrLog;
   finishedAttempt.rawLogPath = paths.rawLog;
   finishedAttempt.finalReportPath = paths.finalReportJson;
-  finishedTask.status = result.exitCode === 0 ? "needs_review" : "failed";
+  finishedTask.status =
+    result.exitCode === 0 ? "needs_review" : pauseInterrupted ? "cancelled" : "failed";
   finishedTask.updatedAt = finishedAt;
   const finishedStep = finishedTask.stepId ? run.steps.find((item) => item.id === finishedTask.stepId) : undefined;
-  if (finishedStep && !["complete", "completed_unverified", "skipped"].includes(finishedStep.status)) {
+  // A pause-interrupted worker says nothing about its step: the force pause owns
+  // the run's state (and cancels the task itself), so failing the step here
+  // would make Resume look at a failure that never happened.
+  if (
+    finishedStep &&
+    !pauseInterrupted &&
+    !["complete", "completed_unverified", "skipped"].includes(finishedStep.status)
+  ) {
     if (result.exitCode !== 0) {
       finishedStep.status = "failed";
       if (run.currentStepId === finishedStep.id) run.currentStepId = undefined;
@@ -12667,15 +12831,23 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     workerTaskId: finishedTask.id,
     attemptId: finishedAttempt.id,
     type: "worker_attempt.finished",
-    message: `Worker attempt finished with exit code ${result.exitCode}`,
+    message: pauseInterrupted
+      ? `Worker attempt interrupted by a force pause (exit code ${result.exitCode})`
+      : `Worker attempt finished with exit code ${result.exitCode}`,
     payload: {
       exitCode: result.exitCode,
       error: result.error,
       paths,
+      ...(pauseInterrupted ? { interruptedByForcePause: true } : {}),
     },
   });
   await updatePeerCommsRegistry(run, finishedStep, finishedTask, finishedAttempt.id, paths, finishedAttempt.status)
     .catch(() => undefined);
+
+  // Nothing downstream may run for an interrupted attempt: the report review
+  // queues launch fallbacks and verifier retries, and relaunching a worker into
+  // a run the user just stopped is exactly what the pause was for.
+  if (pauseInterrupted) return run;
 
   // Converge a successful sandboxed worker's edits back into the run workspace.
   // The worker ran in an isolated worktree forked off the run checkpoint, so its
@@ -13707,6 +13879,47 @@ export async function undoToCheckpoint(
   });
 }
 
+// Runs whose force-pause is inside its kill+commit window. A worker killed by
+// the pause reports its exit through launchWorkerAttempt's finish path, which
+// lands on its own (unqueued) write and races the pause commit either way
+// round. Both orderings must record the same thing — see
+// workerExitInterruptedByForcePause. Counted, not a flag: two overlapping Stops
+// on the same run (double click, Stop + stopAndUndoPending) must not have the
+// first one to finish close the window under the second.
+const forcePausingRuns = new Map<string, number>();
+
+function openForcePauseWindow(runId: string): void {
+  forcePausingRuns.set(runId, (forcePausingRuns.get(runId) ?? 0) + 1);
+}
+
+function closeForcePauseWindow(runId: string): void {
+  const depth = (forcePausingRuns.get(runId) ?? 0) - 1;
+  if (depth > 0) forcePausingRuns.set(runId, depth);
+  else forcePausingRuns.delete(runId);
+}
+
+/**
+ * Did this worker exit belong to a force pause rather than to the work?
+ *
+ * The kill/exit race has two orderings and both used to end in a phantom
+ * failure: run run-msojtvqk-qjklvo recorded attempt attempt-msok8193 as
+ * failed/exit 1 "Pi worker runtime stopped." while the user's Stop was in
+ * flight, so Resume and the report surfaces showed a step that "failed" when in
+ * truth it was interrupted. `forcePausingRuns` covers the exit landing first,
+ * the persisted `cancelled` status covers the pause commit landing first.
+ * Everything outside that window is a genuine failure and stays `failed`.
+ *
+ * Exported for scripts/test-force-pause-resume.cjs.
+ */
+export function workerExitInterruptedByForcePause(input: {
+  runId: string;
+  exitCode: number;
+  attemptStatus: WorkerAttempt["status"];
+}): boolean {
+  if (input.exitCode === 0) return false;
+  return (forcePausingRuns.get(input.runId) ?? 0) > 0 || input.attemptStatus === "cancelled";
+}
+
 // Force-pause: hard-kill every active worker for the run, stop all autopilot
 // cycles, transition active attempts/tasks to cancelled, set status=paused.
 // This is the "pause everything NOW" button — the graceful pauseRun path
@@ -13715,6 +13928,17 @@ export async function undoToCheckpoint(
 // deleteRun trips the OS file-in-use prompt. Use this before deleting.
 export async function forcePauseRun(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
+  // Opened BEFORE the first teardown step and closed only once the pause commit
+  // is durable: every worker exit inside this window is the pause's doing.
+  openForcePauseWindow(run.id);
+  try {
+    return await forcePauseRunInner(run);
+  } finally {
+    closeForcePauseWindow(run.id);
+  }
+}
+
+async function forcePauseRunInner(run: RunState): Promise<RunState> {
   const reason = "Force-paused by user";
   const activeWorkers = activeWorkersForRun(run.id);
   const oldEpoch = conversationEpoch(run);
