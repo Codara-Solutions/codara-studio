@@ -452,6 +452,13 @@ async function main() {
   assert.equal(prunedBase.workers.length, 6);
   assert.ok(prunedBase.workers.every((worker) => worker.status === "running"));
   assert.equal(prunedBase.truncation.workersOmitted, 6);
+  // This prune is a SECOND truncation stage: the roster fitted when it was
+  // projected and was squeezed here by the rest of the run. It evicts settled
+  // rows only, so the honest breakdown is zero — and it has to SAY zero. A bare
+  // `workersOmitted` is indistinguishable on the wire from an older Studio that
+  // cannot answer, which would force every client to read this run as if its
+  // live fan might be incomplete when all six survivors are running.
+  assert.equal(prunedBase.truncation.activeWorkersOmitted, 0);
   assert.equal(prunedBase.truncation.workerDetailsOmitted, true);
   assert.equal(prunedBase.steps, undefined);
   assert.equal(prunedBase.truncation.stepsOmitted, 12);
@@ -469,6 +476,89 @@ async function main() {
   assert.ok(
     contract.jsonUtf8Bytes(pressureProjection.run) <=
       contract.CORA_RUN_JSON_MAX_BYTES,
+  );
+
+  // When the projection already reported live workers missing, this stage adds
+  // its own settled evictions on top: the total grows, the live count does not
+  // move, and the two stay consistent with each other. Losing the live count
+  // here would be worse than never having sent it — the client would downgrade
+  // a run it had already been told the truth about.
+  const carriedBase = {
+    ...hostileBase(),
+    blockedQuestion: {
+      messageId: "message-5",
+      message: "\0".repeat(100 * 1024),
+    },
+    truncation: { workersOmitted: 14, activeWorkersOmitted: 3 },
+  };
+  const carriedPruned = projector.pruneRemoteCoraRunBase(carriedBase);
+  assert.ok(
+    carriedPruned.truncation.workersOmitted > 14,
+    "the second stage adds its evictions to the count the first stage reported",
+  );
+  assert.equal(carriedPruned.truncation.activeWorkersOmitted, 3);
+  assert.ok(
+    carriedPruned.workers.every((worker) => worker.status === "running"),
+    "only settled rows are evicted, which is what makes the live count stand",
+  );
+  assert.ok(
+    carriedPruned.truncation.workersOmitted >=
+      carriedPruned.truncation.activeWorkersOmitted,
+    "a live worker missing from the roster is one the roster is missing",
+  );
+
+  // And the invariant itself, at every budget the eviction loop can stop at:
+  // the receipt never travels without its breakdown, whichever stage wrote it
+  // and however many rows it took. Swept rather than sampled, because the
+  // regression this guards was a single budget window nobody had a case for.
+  const pairBase = () => ({
+    ...hostileBase(),
+    blockedQuestion: undefined,
+    steps: undefined,
+    workers: Array.from({ length: 12 }, (_, index) => ({
+      id: `worker-${index}`,
+      title: "w".repeat(120),
+      runtime: "claude",
+      // Half the roster settled, so the eviction loop has rows to spend and
+      // still leaves a live remainder it must report zero missing live for.
+      status: index < 6 ? "running" : "succeeded",
+    })),
+  });
+  const pairFull = contract.jsonUtf8Bytes(pairBase());
+  // The floor is a run the pruner has already spent everything on: every
+  // settled row evicted and the duplicated summary snippet gone. Below it even
+  // a fully stripped run cannot fit and throwing is the correct answer; the
+  // headroom covers the receipts those drops write, including the reserve the
+  // budget check holds back for `messagesOmitted`.
+  const pairStripped = pairBase();
+  pairStripped.workers = pairStripped.workers.filter(
+    (worker) => worker.status === "running",
+  );
+  delete pairStripped.lastMessage;
+  const pairFloor = contract.jsonUtf8Bytes(pairStripped) + 200;
+  let sawEviction = false;
+  let sawSurvival = false;
+  for (let budget = pairFloor; budget <= pairFull; budget += 1) {
+    const pruned = projector.pruneRemoteCoraRunBase(pairBase(), budget);
+    const omitted = pruned.truncation?.workersOmitted;
+    if (omitted === undefined) {
+      sawSurvival = true;
+      continue;
+    }
+    sawEviction = true;
+    assert.equal(
+      pruned.truncation.activeWorkersOmitted,
+      0,
+      `a bare workersOmitted escaped at ${budget} bytes`,
+    );
+    assert.ok(
+      omitted >= pruned.truncation.activeWorkersOmitted,
+      `the breakdown exceeded the total at ${budget} bytes`,
+    );
+  }
+  assert.ok(
+    sawEviction && sawSurvival,
+    "the sweep must cover both an evicting budget and a comfortable one",
   );
 
   // Live activity is the most volatile worker detail and the least useful once

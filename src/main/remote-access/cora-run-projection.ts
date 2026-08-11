@@ -152,15 +152,15 @@ export function pruneRemoteCoraRunBase(
   // identities and lifecycle status remain available as long as possible.
   //
   // That an ACTIVE row is never dropped here is load-bearing beyond taste:
-  // `truncation.activeWorkersOmitted` is counted upstream where the roster is
-  // built, and remote graphs read it to decide whether they hold a complete
-  // live fan. Dropping a live row in this loop without recounting would make
-  // that number a lie.
+  // remote graphs read `truncation.activeWorkersOmitted` to decide whether they
+  // hold a complete live fan, and this loop reports zero of them by name (see
+  // addOmittedSettledWorker). Dropping a live row here without counting it
+  // would make that number a lie.
   while (overBudget() && base.workers?.some(isSettledWorker)) {
     const index = findLastIndex(base.workers, isSettledWorker);
     if (index < 0) break;
     base.workers.splice(index, 1);
-    truncation = addOmitted(truncation, "workersOmitted", 1);
+    truncation = addOmittedSettledWorker(truncation);
     base.truncation = truncation;
     if (base.workers.length === 0) delete base.workers;
   }
@@ -265,14 +265,42 @@ function mergeTruncation(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+// Deliberately NOT offered for "workersOmitted": that receipt may never travel
+// without its `activeWorkersOmitted` breakdown, so it has a writer of its own
+// below and the union here is what stops a future stage reaching past it.
 function addOmitted(
   current: RemoteCoraRunTruncation | undefined,
-  field: "workersOmitted" | "stepsOmitted",
+  field: "stepsOmitted",
   count: number,
 ): RemoteCoraRunTruncation {
   return {
     ...(current ?? {}),
     [field]: (current?.[field] ?? 0) + count,
+  };
+}
+
+/**
+ * Record one evicted SETTLED worker row.
+ *
+ * The roster receipt and its breakdown are one fact, so one function writes
+ * both. A bare `workersOmitted` is indistinguishable on the wire from an older
+ * Studio that cannot answer the question at all, which forces every client into
+ * the pessimistic reading — and this is a SECOND truncation stage, so a run
+ * whose roster fitted at projection time and was squeezed here by its steps or
+ * its blocked question would land in exactly that shape.
+ *
+ * The name carries the proof for `?? 0`: the only eviction path in this file is
+ * guarded on isSettledWorker, so a live worker is never lost here and the live
+ * count carries forward untouched. A future path that CAN evict a live row must
+ * add to that count rather than come through here.
+ */
+function addOmittedSettledWorker(
+  current: RemoteCoraRunTruncation | undefined,
+): RemoteCoraRunTruncation {
+  return {
+    ...(current ?? {}),
+    workersOmitted: (current?.workersOmitted ?? 0) + 1,
+    activeWorkersOmitted: current?.activeWorkersOmitted ?? 0,
   };
 }
 
