@@ -1775,6 +1775,12 @@ const REMOTE_CORA_MESSAGE_KINDS = new Set<RemoteCoraMessage["kind"]>([
   "decision",
   "assistant_stream",
 ]);
+const REMOTE_CORA_MESSAGE_DELIVERY_STATES = new Set<
+  NonNullable<RemoteCoraMessage["deliveryState"]>
+>(["queued", "submitted", "acknowledged", "cancelled"]);
+const REMOTE_CORA_MESSAGE_INTENTS = new Set<
+  NonNullable<RemoteCoraMessage["intent"]>
+>(["turn", "steer", "answer"]);
 const REMOTE_CORA_WORKER_STATUSES = new Set<RemoteCoraWorker["status"]>([
   "preparing",
   "prompt_ready",
@@ -2056,13 +2062,32 @@ function toRemoteRunSteps(run: RunState): {
 function toRemoteCoraMessage(
   message: RunState["humanMessages"][number],
 ): RemoteCoraMessage {
-  const author = message.author === "spark" ? "cora" : message.author;
+  // The board nudge and the pause-resume note are authored "user" only so the
+  // next manager turn consumes them as its input; their bodies are lists of
+  // card titles and attempt ids, never the person's own words. Studio's own
+  // timeline demotes both to quiet system rows (buildChatTimeline), so the
+  // phone is told the same truth here rather than being handed machine text
+  // wearing the user's name. They stay in the transcript — the reader still
+  // needs to see that the board handed Cora work, or that a resume did — and
+  // the wire enum already carries "system", so this is a projection choice and
+  // not a contract change.
+  const syntheticNote = message.boardNote === true || message.resumeNote === true;
+  const author = syntheticNote
+    ? "system"
+    : message.author === "spark"
+      ? "cora"
+      : message.author;
   if (!isOneOf(author, REMOTE_CORA_MESSAGE_AUTHORS)) {
     throw new TypeError("message.author is not a supported remote Cora author.");
   }
   if (!isOneOf(message.kind, REMOTE_CORA_MESSAGE_KINDS)) {
     throw new TypeError("message.kind is not a supported remote Cora kind.");
   }
+  // Delivery state and intent are copied, never inferred: a message the run
+  // store left unlabelled (Cora's own prose, an older run's history) sends no
+  // key at all, which the phone reads as ordinary delivered history. Together
+  // they cost at most 49 bytes on a user message and nothing on Cora's, well
+  // inside the message window's byte budget.
   return {
     id: requireRemoteCoraIdentity(message.id, "message.id"),
     author,
@@ -2072,6 +2097,12 @@ function toRemoteCoraMessage(
       message.createdAt,
       "message.createdAt",
     ),
+    ...(isOneOf(message.deliveryState, REMOTE_CORA_MESSAGE_DELIVERY_STATES)
+      ? { deliveryState: message.deliveryState }
+      : {}),
+    ...(isOneOf(message.intent, REMOTE_CORA_MESSAGE_INTENTS)
+      ? { intent: message.intent }
+      : {}),
   };
 }
 

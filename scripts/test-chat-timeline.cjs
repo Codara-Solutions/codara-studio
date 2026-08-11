@@ -511,8 +511,14 @@ async function main() {
         author: "user",
         kind: "note",
         message: "make the translation automation",
-        deliveryState: "queued",
+        // The turn below was started BY this message, so the run store has
+        // claimed it: backendTurnId names the call and delivery has settled.
+        // Left "queued" it would be an undelivered note, which the timeline
+        // now (correctly) files at the bottom instead of at its timestamp.
+        deliveryState: "acknowledged",
         intent: "turn",
+        targetTurnId: "spark-1",
+        backendTurnId: "spark-1",
         conversationEpoch: 0,
         createdAt: at(25),
       },
@@ -725,6 +731,175 @@ async function main() {
     assert.ok(row, "the board note must render as its own system row");
     assert.equal(row.title, "Cora Board");
     assert.equal(row.detail, "3 queued cards handed to Cora");
+  });
+
+  // ── Undelivered steering sinks to the bottom ──────────────────────────────
+  //
+  // Cora can sit inside wait_for_workers for twenty minutes. A message typed
+  // during that window is queued: it has not reached her, and nothing she does
+  // afterwards is a response to it. Filed by its timestamp it read as though it
+  // had been answered — steps and manager rows that started later appeared
+  // BELOW it, in the position a reply occupies.
+  function steeringRun(messageOverrides = {}) {
+    return run([], {
+      steps: [
+        {
+          id: "step-2",
+          runId: "run-1",
+          index: 2,
+          title: "Wire the parser",
+          goal: "Parse the feed",
+          kind: "worker_batch",
+          status: "running",
+          plannedAgents: [],
+          acceptanceCriteria: [],
+          verificationCommands: [],
+          workerTaskIds: [],
+          createdAt: at(40),
+          updatedAt: at(40),
+        },
+      ],
+      sparkCalls: [
+        {
+          id: "spark-2",
+          runId: "run-1",
+          mode: "chat",
+          model: "claude-opus-5",
+          status: "completed",
+          prompt: "carry on",
+          createdAt: at(45),
+          completedAt: at(48),
+          conversationEpoch: 0,
+        },
+      ],
+      humanMessages: [
+        {
+          id: "msg-first",
+          runId: "run-1",
+          author: "user",
+          kind: "note",
+          message: "build the parser",
+          intent: "turn",
+          deliveryState: "acknowledged",
+          targetTurnId: "spark-2",
+          backendTurnId: "spark-2",
+          conversationEpoch: 0,
+          createdAt: at(25),
+        },
+        {
+          id: "msg-steer",
+          runId: "run-1",
+          author: "user",
+          kind: "note",
+          message: "use the streaming lexer",
+          intent: "steer",
+          deliveryState: "queued",
+          conversationEpoch: 0,
+          createdAt: at(30),
+          ...messageOverrides,
+        },
+      ],
+    });
+  }
+
+  const idsOf = (timeline) => timeline.map((item) => item.id);
+
+  test("queued steering sits below the activity that started after it", () => {
+    const order = idsOf(T.buildChatTimeline(steeringRun()));
+    assert.deepEqual(order, [
+      "msg-first",
+      "step-2",
+      "spark-call:spark-2",
+      "msg-steer",
+    ]);
+  });
+
+  test("a claimed message returns to its chronological position", () => {
+    // The mid-turn claim is what changes: same timestamp, same text, now owned
+    // by a manager call. It belongs where it was typed again.
+    const order = idsOf(
+      T.buildChatTimeline(
+        steeringRun({ backendTurnId: "spark-2", targetTurnId: "spark-2" }),
+      ),
+    );
+    assert.deepEqual(order, [
+      "msg-first",
+      "msg-steer",
+      "step-2",
+      "spark-call:spark-2",
+    ]);
+    // Delivery moving on its own (turn start submits, then acknowledges) does
+    // the same, so the bubble does not jump twice for one delivery.
+    for (const deliveryState of ["submitted", "acknowledged"]) {
+      assert.equal(
+        idsOf(T.buildChatTimeline(steeringRun({ deliveryState })))[1],
+        "msg-steer",
+        `a ${deliveryState} message is not pinned to the bottom`,
+      );
+    }
+  });
+
+  test("a cancelled message keeps its chronological place", () => {
+    // Audit trail: a rewind or a stranded epoch undid it, and WHEN it was said
+    // is the whole reason the row is still there. Pinning it to the bottom
+    // would put undone history under live activity.
+    const order = idsOf(
+      T.buildChatTimeline(steeringRun({ deliveryState: "cancelled" })),
+    );
+    assert.deepEqual(order, [
+      "msg-first",
+      "msg-steer",
+      "step-2",
+      "spark-call:spark-2",
+    ]);
+  });
+
+  test("several queued messages stay in the order they were typed", () => {
+    const state = steeringRun();
+    state.humanMessages.push({
+      id: "msg-steer-2",
+      runId: "run-1",
+      author: "user",
+      kind: "note",
+      message: "and cache the tokens",
+      intent: "steer",
+      deliveryState: "queued",
+      conversationEpoch: 0,
+      createdAt: at(35),
+    });
+    assert.deepEqual(idsOf(T.buildChatTimeline(state)), [
+      "msg-first",
+      "step-2",
+      "spark-call:spark-2",
+      "msg-steer",
+      "msg-steer-2",
+    ]);
+  });
+
+  test("a queued synthetic note keeps its system row in place", () => {
+    // Board and resume notes are authored "user" for delivery only and are
+    // born queued. They are not the person's steering, and their system row
+    // reports something that already happened, so they never sink.
+    const state = steeringRun();
+    state.humanMessages.push({
+      id: "msg-board",
+      runId: "run-1",
+      author: "user",
+      kind: "note",
+      boardNote: true,
+      message: "[Cora Board — queued cards waiting for you]\n- Card one",
+      intent: "turn",
+      deliveryState: "queued",
+      conversationEpoch: 0,
+      createdAt: at(38),
+    });
+    assert.deepEqual(idsOf(T.buildChatTimeline(state)), [
+      "msg-first",
+      "board-note:msg-board",
+      "step-2",
+      "spark-call:spark-2",
+      "msg-steer",
+    ]);
   });
 
   test("wait task ids are read only off the wait tool", () => {

@@ -66,6 +66,59 @@ async function bundle(entry, outName) {
   return require(outfile);
 }
 
+// production.ts imports Electron and half the main process, so it cannot be
+// required here. The message projection is small and self-contained, though,
+// and a source-shape pin cannot tell a copied delivery state from an invented
+// one — so lift the real slice (the wire enums, plus toRemoteCoraMessage down
+// to its legacy-failure helpers) onto the real contract helpers and run it.
+async function loadCoraMessageProjection(productionSource) {
+  const between = (from, to) => {
+    const start = productionSource.indexOf(from);
+    const end = productionSource.indexOf(to, start + 1);
+    if (start === -1 || end === -1) {
+      throw new Error(`production.ts no longer contains ${from} … ${to}`);
+    }
+    return productionSource.slice(start, end);
+  };
+  const contract = path.join(
+    ROOT,
+    "src",
+    "main",
+    "remote-access",
+    "remote-cora-contract.ts",
+  );
+  const policy = path.join(ROOT, "src", "main", "remote-access", "local-policy.ts");
+  const out = await esbuild.build({
+    stdin: {
+      contents: [
+        `import { isOneOf, requireRemoteCoraIdentity, requireRemoteCoraTimestamp } from ${JSON.stringify(contract)};`,
+        `import { truncateUtf8 } from ${JSON.stringify(policy)};`,
+        between(
+          "const REMOTE_CORA_MESSAGE_AUTHORS",
+          "const REMOTE_CORA_WORKER_STATUSES",
+        ),
+        between("function toRemoteCoraMessage(", "\nfunction toRemoteRun("),
+        "export { toRemoteCoraMessage, remoteCoraSourceMessages };",
+      ].join("\n"),
+      resolveDir: ROOT,
+      loader: "ts",
+    },
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    write: false,
+    logLevel: "silent",
+  });
+  const mod = { exports: {} };
+  // eslint-disable-next-line no-new-func
+  new Function("module", "exports", "require", out.outputFiles[0].text)(
+    mod,
+    mod.exports,
+    require,
+  );
+  return mod.exports;
+}
+
 let failures = 0;
 const check = (name, cond, detail) => {
   if (!cond) {
@@ -1215,6 +1268,113 @@ async function main() {
         "context?: { usedTokens: number; budgetTokens: number };",
       ),
   );
+  {
+    // The real projection, executed rather than pinned: delivery state and
+    // intent decide where the phone files a bubble, so a copied value and an
+    // invented one have to be told apart for real.
+    const projection = await loadCoraMessageProjection(productionSource);
+    const source = (extra = {}) => ({
+      id: "message-1",
+      runId: "run-1",
+      author: "user",
+      kind: "note",
+      message: "ship the parser",
+      createdAt: "2026-08-11T00:00:00.000Z",
+      ...extra,
+    });
+    const projected = projection.toRemoteCoraMessage(
+      source({ deliveryState: "queued", intent: "steer" }),
+    );
+    check(
+      "a queued user message carries its delivery state and intent to the phone",
+      projected.deliveryState === "queued" &&
+        projected.intent === "steer" &&
+        projected.author === "user" &&
+        projected.message === "ship the parser",
+      projected,
+    );
+    const legacy = projection.toRemoteCoraMessage(source());
+    check(
+      // Absent is the legacy/delivered reading. A projection that filled in
+      // "acknowledged" would make an old run's history indistinguishable from
+      // input a manager turn actually consumed.
+      "an unlabelled message sends no delivery keys at all",
+      !("deliveryState" in legacy) && !("intent" in legacy),
+      legacy,
+    );
+    const invented = projection.toRemoteCoraMessage(
+      source({ deliveryState: "delivered", intent: "nudge" }),
+    );
+    check(
+      "an unknown delivery state or intent is dropped, never forwarded or guessed",
+      !("deliveryState" in invented) && !("intent" in invented),
+      invented,
+    );
+    // A rewind DELETES the messages it undoes (undoToCheckpoint slices
+    // humanMessages), so the only cancelled row that survives to the wire is a
+    // stranded resume note. Studio's own transcript keeps it and chips it
+    // "Cancelled" (ChatConversation deliveryStateLabel); the phone is told the
+    // same thing rather than being handed a hole in the audit trail.
+    const cancelled = projection.toRemoteCoraMessage(
+      source({ deliveryState: "cancelled", intent: "turn" }),
+    );
+    check(
+      "a cancelled message still travels, labelled, instead of being filtered out",
+      cancelled.deliveryState === "cancelled" && cancelled.id === "message-1",
+      cancelled,
+    );
+    // Both synthetic notes are authored "user" only so the next manager turn
+    // consumes them; their bodies are card titles and attempt ids. Studio's
+    // timeline demotes them to system rows, and the wire enum already carries
+    // "system", so the phone is told the same truth instead of rendering
+    // machine text in the person's own bubble.
+    for (const flag of ["boardNote", "resumeNote"]) {
+      const note = projection.toRemoteCoraMessage(
+        source({ [flag]: true, message: "- attempt-a\n- attempt-b" }),
+      );
+      check(
+        `a ${flag} projects as system authorship, body intact`,
+        note.author === "system" && note.message === "- attempt-a\n- attempt-b",
+        note,
+      );
+    }
+    check(
+      "Cora's own prose keeps its author rewrite and gains no delivery keys",
+      (() => {
+        const spark = projection.toRemoteCoraMessage(
+          source({ author: "spark", message: "Working on it." }),
+        );
+        return (
+          spark.author === "cora" &&
+          !("deliveryState" in spark) &&
+          !("intent" in spark)
+        );
+      })(),
+    );
+    // Byte cost, measured rather than asserted from memory: the pair is at most
+    // 49 bytes on a user message and zero on Cora's, against a 384 KiB message
+    // window — a 200-message window pays under 10 KiB in the worst case, so
+    // nothing in the drop order needs a new entry for it.
+    const costliest = Buffer.byteLength(
+      JSON.stringify(
+        projection.toRemoteCoraMessage(
+          source({ deliveryState: "acknowledged", intent: "answer" }),
+        ),
+      ),
+      "utf8",
+    ) - Buffer.byteLength(JSON.stringify(legacy), "utf8");
+    check(
+      "the delivery fields cost at most 49 bytes on the widest message",
+      costliest > 0 && costliest <= 49,
+      { costliest },
+    );
+    check(
+      "the wire contract carries both fields as optional additions",
+      rpcSource.includes(
+        'deliveryState?: "queued" | "submitted" | "acknowledged" | "cancelled";',
+      ) && rpcSource.includes('intent?: "turn" | "steer" | "answer";'),
+    );
+  }
   {
     const liveRunProjection = productionSource.slice(
       productionSource.indexOf("async function toRemoteAutomationLiveRun("),
@@ -3881,6 +4041,9 @@ async function main() {
     let coraWorkerPeerComms = false;
     let coraRunTruncation = null;
     let coraRunContext = null;
+    // The delivery state of a second, user-authored message, or null while the
+    // run has none. Drives the queued → acknowledged digest check below.
+    let coraUserMessageDelivery = null;
     let fastModeSetting = false;
     let sharedTerminal = null;
     const sharedTerminals = [];
@@ -4327,7 +4490,7 @@ async function main() {
           status: "running",
           createdAt: "2026-01-01T00:00:00.000Z",
           updatedAt: "2026-01-01T00:01:00.000Z",
-          messageCount: 1,
+          messageCount: coraUserMessageDelivery ? 2 : 1,
           activeWorkers: 1,
           messages: [
             {
@@ -4337,6 +4500,19 @@ async function main() {
               message: "hello",
               createdAt: "2026-01-01T00:01:00.000Z",
             },
+            ...(coraUserMessageDelivery
+              ? [
+                  {
+                    id: "message-2",
+                    author: "user",
+                    kind: "note",
+                    message: "also update the changelog",
+                    createdAt: "2026-01-01T00:02:00.000Z",
+                    deliveryState: coraUserMessageDelivery,
+                    intent: "steer",
+                  },
+                ]
+              : []),
           ],
           workers: [
             {
@@ -5768,6 +5944,54 @@ async function main() {
         ex.outbox.at(-1)?.result?.run?.truncation?.activeWorkersOmitted === 3,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    // Queued steering the manager has not read yet. The phone pins such a
+    // bubble to the bottom of its transcript and chips it "Queued", so both the
+    // state and its later movement have to survive the wire.
+    const deliveryBaseRevision = ex.outbox.at(-1)?.result?.revision;
+    coraUserMessageDelivery = "queued";
+    exReq(822, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: deliveryBaseRevision,
+    });
+    await flush();
+    const queuedRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "cora.get serializes a message's queued delivery state and intent",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof queuedRevision === "string" &&
+        queuedRevision !== deliveryBaseRevision &&
+        ex.outbox.at(-1)?.result?.run?.messages?.[1]?.deliveryState ===
+          "queued" &&
+        ex.outbox.at(-1)?.result?.run?.messages?.[1]?.intent === "steer" &&
+        !("deliveryState" in
+          (ex.outbox.at(-1)?.result?.run?.messages?.[0] ?? {})),
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    // The transition is the ONLY thing that changes: same id, same text, same
+    // timestamp, same workers. Because the digest hashes the whole bounded DTO
+    // it still has to move — otherwise a phone parked on notModified keeps the
+    // bubble at the bottom of the thread, chipped "Queued", long after Cora
+    // read it.
+    coraUserMessageDelivery = "acknowledged";
+    exReq(823, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: queuedRevision,
+    });
+    await flush();
+    check(
+      "cora.get revision moves when only a message's delivery state moved",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string" &&
+        ex.outbox.at(-1)?.result?.revision !== queuedRevision &&
+        ex.outbox.at(-1)?.result?.run?.messages?.[1]?.deliveryState ===
+          "acknowledged" &&
+        ex.outbox.at(-1)?.result?.run?.messages?.[1]?.message ===
+          "also update the changelog",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    coraUserMessageDelivery = null;
     coraRunTruncation = null;
     coraWorkerPeerComms = false;
     coraRunContext = null;

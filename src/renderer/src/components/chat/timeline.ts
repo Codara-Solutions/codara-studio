@@ -454,6 +454,12 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   });
 
   items.sort((a, b) => {
+    // Everything Cora has not seen yet sinks below everything that happened.
+    // Within each block the ordinary rules apply, so the queued block is itself
+    // chronological — it is the outbox, in the order it will be delivered.
+    const byDelivery =
+      Number(isUndeliveredQueuedMessage(a)) - Number(isUndeliveredQueuedMessage(b));
+    if (byDelivery !== 0) return byDelivery;
     const byTime = a.at.localeCompare(b.at);
     if (byTime !== 0) return byTime;
     const byKind = timelineItemOrder(a) - timelineItemOrder(b);
@@ -488,6 +494,24 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     merged.push(item);
   }
   return merged;
+}
+
+// A user message that is still queued and that no manager turn has claimed has
+// not reached Cora at all. Filed by its timestamp it sits ABOVE every step,
+// worker and manager row that started after it was typed, which reads as if
+// Cora had seen it and carried on regardless — the exact opposite of the truth.
+// Such a message pins to the bottom of the timeline instead, where an unsent
+// note belongs, and drops back into its chronological place the moment a turn
+// claims it (`backendTurnId`, set by the mid-turn claim or by turn start) or
+// delivery moves past "queued". A cancelled message is NOT pinned: a rewind
+// undid it, and when it was said is the whole point of keeping the row.
+function isUndeliveredQueuedMessage(item: ChatTimelineItem): boolean {
+  return (
+    item.kind === "message" &&
+    item.author === "user" &&
+    item.deliveryState === "queued" &&
+    !item.backendTurnId
+  );
 }
 
 // Tie-break for items sharing one timestamp. Worker rows sort AFTER steps:

@@ -371,6 +371,15 @@ export interface RemoteCoraMessage {
   kind: "note" | "question" | "answer" | "decision" | "assistant_stream";
   message: string;
   createdAt: string;
+  /**
+   * Delivery lifecycle of user input, mirrored from the desktop transcript so
+   * the phone can pin what Cora has not seen yet to the bottom of the thread
+   * and dim what a rewind undid. Absent means the message predates the field
+   * or was never user input at all — in both cases it is delivered history.
+   */
+  deliveryState?: "queued" | "submitted" | "acknowledged" | "cancelled";
+  /** Ordinary turn, mid-turn steering, or a reply to Cora's question. */
+  intent?: "turn" | "steer" | "answer";
 }
 
 export type RemoteCoraWorkerStatus =
