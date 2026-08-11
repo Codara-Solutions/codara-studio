@@ -1201,15 +1201,37 @@ async function main() {
       remoteIndexSource.includes("ledger.execute("),
   );
   check(
-    "remote run controls call the host Stop/Resume through workspace scoping",
+    // The local-workspace gate must come FIRST, exactly like every sibling
+    // run-scoped handler: an SSH-host workspace refuses run control for the
+    // same reason it refuses reads, and it refuses before any run is touched.
+    "remote run controls call the host Stop/Resume behind the local-workspace and run-ownership gates",
     productionSource.includes(
-      "const run = await requireOwnedRun(input.workspaceId, input.runId);\n  await forcePauseRun(run.id);",
+      "  await requireLocalWorkspace(input.workspaceId);\n" +
+        "  const run = await requireOwnedRun(input.workspaceId, input.runId);\n" +
+        "  await forcePauseRun(run.id);",
     ) &&
       productionSource.includes(
-        "const run = await requireOwnedRun(input.workspaceId, input.runId);\n  await resumeRun({ runId: run.id });",
+        "  await requireLocalWorkspace(input.workspaceId);\n" +
+          "  const run = await requireOwnedRun(input.workspaceId, input.runId);\n" +
+          "  await resumeRun({ runId: run.id });",
       ) &&
       rpcSource.includes("forcePauseCoraRun?(input: {") &&
       rpcSource.includes("resumePausedCoraRun?(input: {"),
+  );
+  check(
+    // No requestId and no ledger means a blind retry of resume is a real second
+    // resume. The hazard is documented at the service so the phone knows to
+    // re-poll instead; if the comment goes, the reasoning goes with it.
+    "the resume run control documents its duplicate-delivery hazard",
+    /DUPLICATE DELIVERY IS NOT FREE[\s\S]*?async function resumePausedCoraRunForRemote/.test(
+      productionSource,
+    ) &&
+      remoteIndexSource.includes(
+        "forcePauseCoraRun: this.deps.forcePauseCoraRun,",
+      ) &&
+      remoteIndexSource.includes(
+        "resumePausedCoraRun: this.deps.resumePausedCoraRun,",
+      ),
   );
   {
     // The parked-recovery method keeps its own case, its recoveryId guard, and

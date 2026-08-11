@@ -1537,14 +1537,21 @@ async function forcePauseCoraRunForRemote(input: {
   workspaceId: string;
   runId: string;
 }): Promise<void> {
+  await requireLocalWorkspace(input.workspaceId);
   const run = await requireOwnedRun(input.workspaceId, input.runId);
   await forcePauseRun(run.id);
 }
 
+// DUPLICATE DELIVERY IS NOT FREE. Unlike the stop above, a second resume of an
+// already-running run re-commits run.resumed: it resets verification rounds and
+// re-signals live workers. There is deliberately no requestId and no mutation
+// ledger here, so the client must not blind-retry this call after a lost reply
+// — re-poll cora.get and read the run's status instead.
 async function resumePausedCoraRunForRemote(input: {
   workspaceId: string;
   runId: string;
 }): Promise<void> {
+  await requireLocalWorkspace(input.workspaceId);
   const run = await requireOwnedRun(input.workspaceId, input.runId);
   await resumeRun({ runId: run.id });
 }

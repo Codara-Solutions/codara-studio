@@ -969,9 +969,10 @@ export class RemoteAccessService {
                 }),
             )
         : undefined,
-      // Idempotent state transitions with no side effect to replay: stopping a
-      // stopped run or resuming a running one is a no-op, so they pass through
-      // without a mutation-ledger receipt (same as automations.pause/resume).
+      // Run controls carry no requestId and take no ledger receipt, the same
+      // as automations.pause/resume. Stopping a stopped run really is a no-op;
+      // resuming a running one is not (see resumePausedCoraRunForRemote), so
+      // the phone must re-poll rather than blind-retry a lost reply.
       forcePauseCoraRun: this.deps.forcePauseCoraRun,
       resumePausedCoraRun: this.deps.resumePausedCoraRun,
       getCoraWhiteboard: this.deps.getCoraWhiteboard,
