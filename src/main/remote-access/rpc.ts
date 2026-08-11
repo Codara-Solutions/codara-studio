@@ -514,6 +514,19 @@ export interface RemoteCoraRun extends RemoteCoraRunSummary {
    * the wire. Absent when no turn has reported usage yet.
    */
   context?: { usedTokens: number; budgetTokens: number };
+  /**
+   * The one chat rewind this run currently affords, computed exactly like the
+   * desktop's Undo pill (ChatConversation `latestUndoableCheckpoint`): the
+   * genuinely-LAST user message, and only once its `user-message` checkpoint
+   * has landed. `messageId` names the bubble the affordance belongs on, so a
+   * client shows it on that message and nowhere else; `checkpointId` is the
+   * token `cora.undo` demands back, which is what makes a stale double-tap
+   * refusable rather than a second rewind. Absent whenever the desktop would
+   * show no pill — no user message, no landed checkpoint, or a synthetic note
+   * (board nudge / resume note) sitting last. ~90 bytes, and it does not grow
+   * with the run, so like `context` it has no drop-order entry of its own.
+   */
+  undo?: { checkpointId: string; messageId: string };
   /** Exact, content-free account of records omitted from this bounded DTO. */
   truncation?: RemoteCoraRunTruncation;
 }
@@ -1216,6 +1229,16 @@ export interface RemoteRpcServices {
     workspaceId: string;
     runId: string;
   }): Promise<void>;
+  // Chat-scope undo: the rewind behind Studio's own Undo pill, restricted to
+  // the conversation. `checkpointId` is the token the run's `undo` field
+  // published, and the service refuses anything else — a rewind whose target
+  // moved on is a different rewind. `restoredText` is the undone message, so
+  // the caller can put it back in the composer.
+  undoCoraRun?(input: {
+    workspaceId: string;
+    runId: string;
+    checkpointId: string;
+  }): Promise<{ restoredText?: string }>;
   // Resolves null when the chat has no whiteboard yet.
   getCoraWhiteboard?(input: {
     workspaceId: string;
@@ -2909,6 +2932,45 @@ export class RpcSession {
           this.reply(id, { ok: true });
           return;
         }
+        case "cora.undo": {
+          if (!this.services.undoCoraRun) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "Undoing a Cora message is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            runId?: unknown;
+            checkpointId?: unknown;
+          };
+          if (
+            !isRemoteCoraIdentity(p.workspaceId) ||
+            !isRemoteCoraIdentity(p.runId) ||
+            !isRemoteCoraIdentity(p.checkpointId)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "cora.undo needs workspaceId, runId and checkpointId.",
+            );
+            return;
+          }
+          const undone = await this.services.undoCoraRun({
+            workspaceId: p.workspaceId,
+            runId: p.runId,
+            checkpointId: p.checkpointId,
+          });
+          this.reply(id, {
+            ok: true,
+            ...(undone.restoredText !== undefined
+              ? { restoredText: undone.restoredText }
+              : {}),
+          });
+          return;
+        }
         case "cora.send": {
           if (!this.services.sendCoraMessage) {
             this.replyError(
@@ -3826,6 +3888,20 @@ export class RpcSession {
           "mutation-outcome-unknown",
           (err as Error).message ||
             "The change may have completed. Refresh before trying a different request.",
+        );
+      } else if (code === "CORA_UNDO_STALE_CHECKPOINT") {
+        // The one outcome cora.undo's caller MUST be able to branch on. The
+        // rewind is not idempotent and carries no ledger receipt, so a client
+        // that cannot tell "your target moved" from "the host broke" is a
+        // client that will retry a rewind. Coarsened to the existing
+        // mutation-conflict code rather than a new one: the phone already
+        // knows it as "the state you composed against moved on", which is
+        // exactly what happened.
+        this.replyError(
+          id,
+          "mutation-conflict",
+          (err as Error).message ||
+            "This message can no longer be undone.",
         );
       } else if (code === "CORA_MESSAGE_TOO_LARGE") {
         this.replyError(

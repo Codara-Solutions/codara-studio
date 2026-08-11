@@ -73,6 +73,7 @@ import {
   resumeManagerTurnRecovery,
   resumeRun,
   startAutopilot,
+  undoToCheckpoint,
   updateChatBackend,
   updateRunBoard,
   writeActiveWorkerInput,
@@ -330,6 +331,7 @@ export function getRemoteAccessService(): RemoteAccessService {
       resumeCoraRun: resumeCoraRunForRemote,
       forcePauseCoraRun: forcePauseCoraRunForRemote,
       resumePausedCoraRun: resumePausedCoraRunForRemote,
+      undoCoraRun: undoCoraRunForRemote,
       getCoraWhiteboard: getCoraWhiteboardForRemote,
       getCoraBoard: getCoraBoardForRemote,
       updateCoraBoard: updateCoraBoardForRemote,
@@ -1582,6 +1584,39 @@ async function resumePausedCoraRunForRemote(input: {
   await resumeRun({ runId: run.id });
 }
 
+// DUPLICATE DELIVERY IS NOT FREE, and here it would cost a whole user turn:
+// undoToCheckpoint deletes the messages after the checkpoint, so a blind retry
+// of a lost reply peels off the message BEFORE the one the operator meant.
+// There is no requestId and no mutation ledger; what stands in for one is the
+// checkpoint token. The caller must send back the exact id the run's `undo`
+// field published, and this refuses anything else — a second delivery, a
+// double tap, or a tap composed against a poll that has since moved arrives
+// pointing at a checkpoint that is no longer the target, and is refused
+// without touching the run. Clients still re-poll cora.get rather than retry.
+//
+// Scope is "chat" and only ever "chat": rewinding the workspace tree is a
+// desktop decision made in front of a diff, never a phone tap.
+async function undoCoraRunForRemote(input: {
+  workspaceId: string;
+  runId: string;
+  checkpointId: string;
+}): Promise<{ restoredText?: string }> {
+  await requireLocalWorkspace(input.workspaceId);
+  const run = await requireOwnedRun(input.workspaceId, input.runId);
+  const target = remoteCoraUndoTarget(run);
+  if (!target || target.checkpointId !== input.checkpointId) {
+    throw Object.assign(new Error("This message can no longer be undone."), {
+      code: "CORA_UNDO_STALE_CHECKPOINT",
+    });
+  }
+  const { restoredText } = await undoToCheckpoint({
+    runId: run.id,
+    checkpointId: target.checkpointId,
+    scope: "chat",
+  });
+  return restoredText === null ? {} : { restoredText };
+}
+
 async function sendCoraMessageForRemote(input: {
   workspaceId: string;
   runId?: string;
@@ -2059,19 +2094,25 @@ function toRemoteRunSteps(run: RunState): {
   };
 }
 
+// The board nudge and the pause-resume note are authored "user" only so the
+// next manager turn consumes them as its input; their bodies are lists of card
+// titles and attempt ids, never the person's own words. Studio's own timeline
+// demotes both to quiet system rows (buildChatTimeline), and so does this
+// projection — which also means neither may ever be an undo target.
+function isSyntheticCoraNote(
+  message: RunState["humanMessages"][number],
+): boolean {
+  return message.boardNote === true || message.resumeNote === true;
+}
+
 function toRemoteCoraMessage(
   message: RunState["humanMessages"][number],
 ): RemoteCoraMessage {
-  // The board nudge and the pause-resume note are authored "user" only so the
-  // next manager turn consumes them as its input; their bodies are lists of
-  // card titles and attempt ids, never the person's own words. Studio's own
-  // timeline demotes both to quiet system rows (buildChatTimeline), so the
-  // phone is told the same truth here rather than being handed machine text
-  // wearing the user's name. They stay in the transcript — the reader still
-  // needs to see that the board handed Cora work, or that a resume did — and
-  // the wire enum already carries "system", so this is a projection choice and
-  // not a contract change.
-  const syntheticNote = message.boardNote === true || message.resumeNote === true;
+  // A synthetic note stays in the transcript — the reader still needs to see
+  // that the board handed Cora work, or that a resume did — and the wire enum
+  // already carries "system", so this is a projection choice and not a
+  // contract change.
+  const syntheticNote = isSyntheticCoraNote(message);
   const author = syntheticNote
     ? "system"
     : message.author === "spark"
@@ -2184,6 +2225,56 @@ function remoteCoraSourceMessages(run: RunState): RunState["humanMessages"] {
     }));
 }
 
+/**
+ * The one chat rewind this run affords right now, or undefined.
+ *
+ * A faithful port of the desktop pill's `latestUndoableCheckpoint`
+ * (ChatConversation.tsx): find the genuinely-LAST user message, then the
+ * `user-message` checkpoint that names it. Both halves of that order matter,
+ * and they are the renderer's reasons, kept here verbatim:
+ *
+ *   1. "Undo my last message" is the only mental model that does not surprise
+ *      — one tap peels off exactly one user turn, and successive taps keep
+ *      walking backwards.
+ *   2. Checkpoints land a tick late, in the background. Matching "the latest
+ *      checkpoint that has a message" instead would briefly point at the
+ *      PREVIOUS user message right after a send, and a tap there would wipe
+ *      two messages instead of one.
+ *
+ * The scan reads raw authorship, exactly as the renderer does, which is what
+ * makes a synthetic note (board nudge / pause-resume note) SUPPRESS the
+ * affordance while it is last rather than shifting it onto the real message
+ * underneath: those notes are queued manager input, and a rewind past one
+ * would silently drop work the board handed over. They can never be targets
+ * either — no checkpoint is ever recorded for them, since they are pushed
+ * straight into a commit rather than through addRunMessage — and the explicit
+ * guard below says so rather than leaving it to that coincidence.
+ */
+function remoteCoraUndoTarget(
+  run: RunState,
+): { checkpointId: string; messageId: string } | undefined {
+  let lastUserMessage: RunState["humanMessages"][number] | undefined;
+  for (let index = run.humanMessages.length - 1; index >= 0; index -= 1) {
+    if (run.humanMessages[index].author === "user") {
+      lastUserMessage = run.humanMessages[index];
+      break;
+    }
+  }
+  if (!lastUserMessage || isSyntheticCoraNote(lastUserMessage)) return undefined;
+  const messageId = lastUserMessage.id;
+  const checkpoint = (run.checkpoints ?? []).find(
+    (entry) => entry.kind === "user-message" && entry.messageId === messageId,
+  );
+  if (
+    !checkpoint ||
+    !isRemoteCoraIdentity(checkpoint.id) ||
+    !isRemoteCoraIdentity(messageId)
+  ) {
+    return undefined;
+  }
+  return { checkpointId: checkpoint.id, messageId };
+}
+
 function toRemoteRun(
   run: RunState,
   automation?: RemoteAutomationJoin,
@@ -2247,6 +2338,7 @@ function toRemoteRun(
     ? toRemoteCoraMessage(blockedMessage)
     : undefined;
   const context = remoteCoraRunContext(run);
+  const undo = remoteCoraUndoTarget(run);
   const workersOmitted = Math.max(0, workerProjection.total - workers.length);
   const stepsOmitted = Math.max(0, plan.total - plan.steps.length);
   const blockedQuestionBodyTruncated = Boolean(
@@ -2295,6 +2387,7 @@ function toRemoteRun(
     ...(boardCards > 0 ? { boardCards } : {}),
     ...(whiteboardNodes > 0 ? { whiteboardNodes } : {}),
     ...(context ? { context } : {}),
+    ...(undo ? { undo } : {}),
     ...(run.blockedOn && projectedBlockedMessage
       ? {
           blockedQuestion: {

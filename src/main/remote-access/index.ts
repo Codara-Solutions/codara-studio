@@ -159,6 +159,7 @@ export interface RemoteAccessDeps {
   }): Promise<RemoteCoraResumeResult>;
   forcePauseCoraRun?: RemoteRpcServices["forcePauseCoraRun"];
   resumePausedCoraRun?: RemoteRpcServices["resumePausedCoraRun"];
+  undoCoraRun?: RemoteRpcServices["undoCoraRun"];
   getCoraWhiteboard?: RemoteRpcServices["getCoraWhiteboard"];
   getCoraBoard?: RemoteRpcServices["getCoraBoard"];
   updateCoraBoard?: RemoteRpcServices["updateCoraBoard"];
@@ -977,6 +978,13 @@ export class RemoteAccessService {
       // the phone must re-poll rather than blind-retry a lost reply.
       forcePauseCoraRun: this.deps.forcePauseCoraRun,
       resumePausedCoraRun: this.deps.resumePausedCoraRun,
+      // Also unledgered, and the least replayable call on this surface: a
+      // second delivery of cora.undo would peel off a SECOND user turn. What
+      // makes that safe is the checkpoint token — the service refuses any id
+      // that is no longer the run's published undo target, so a duplicate
+      // arrives stale and is refused rather than obeyed. Clients still re-poll
+      // cora.get instead of blind-retrying; see undoCoraRunForRemote.
+      undoCoraRun: this.deps.undoCoraRun,
       getCoraWhiteboard: this.deps.getCoraWhiteboard,
       getCoraBoard: this.deps.getCoraBoard,
       updateCoraBoard: this.deps.updateCoraBoard,

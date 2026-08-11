@@ -693,6 +693,11 @@ async function main() {
       message: "q".repeat(4_096),
     },
     context: { usedTokens: 141_312, budgetTokens: 256_000 },
+    // Same argument, same absence from the drop order: two ids that do not
+    // grow with the run. Losing them would take away the only way to undo a
+    // message from a phone — and losing them SILENTLY would be worse, because
+    // the checkpoint token is also what makes a stale tap refusable.
+    undo: { checkpointId: "checkpoint-9", messageId: "message-9" },
   };
   const gaugeFullBytes = contract.jsonUtf8Bytes(gaugeBase);
   const gaugeBytes = gaugeFullBytes - contract.jsonUtf8Bytes({
@@ -700,6 +705,11 @@ async function main() {
     context: undefined,
   });
   assert.equal(gaugeBytes, 54, "the gauge is ~60 bytes on the wire, not a page");
+  const undoBytes = gaugeFullBytes - contract.jsonUtf8Bytes({
+    ...gaugeBase,
+    undo: undefined,
+  });
+  assert.equal(undoBytes, 63, "the undo target is two ids, not a page");
   let deepestGaugePrune = gaugeBase;
   for (const spend of [200, 400, 2_000, 8_000, 24_000]) {
     deepestGaugePrune = projector.pruneRemoteCoraRunBase(
@@ -710,6 +720,11 @@ async function main() {
       deepestGaugePrune.context,
       { usedTokens: 141_312, budgetTokens: 256_000 },
       `the context gauge survives ${spend} bytes of pressure`,
+    );
+    assert.deepEqual(
+      deepestGaugePrune.undo,
+      { checkpointId: "checkpoint-9", messageId: "message-9" },
+      `the undo target survives ${spend} bytes of pressure`,
     );
     assert.ok(contract.jsonUtf8Bytes(deepestGaugePrune) <= gaugeFullBytes - spend);
   }

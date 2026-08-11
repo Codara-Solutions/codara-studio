@@ -107,14 +107,14 @@ async function loadCoraMessageProjection(productionSource) {
   const out = await esbuild.build({
     stdin: {
       contents: [
-        `import { isOneOf, requireRemoteCoraIdentity, requireRemoteCoraTimestamp } from ${JSON.stringify(contract)};`,
+        `import { isOneOf, isRemoteCoraIdentity, requireRemoteCoraIdentity, requireRemoteCoraTimestamp } from ${JSON.stringify(contract)};`,
         `import { truncateUtf8 } from ${JSON.stringify(policy)};`,
         between(
           "const REMOTE_CORA_MESSAGE_AUTHORS",
           "const REMOTE_CORA_WORKER_STATUSES",
         ),
         projectionBand,
-        "export { toRemoteCoraMessage, remoteCoraSourceMessages };",
+        "export { toRemoteCoraMessage, remoteCoraSourceMessages, remoteCoraUndoTarget };",
       ].join("\n"),
       resolveDir: ROOT,
       loader: "ts",
@@ -1390,6 +1390,113 @@ async function main() {
         'deliveryState?: "queued" | "submitted" | "acknowledged" | "cancelled";',
       ) && rpcSource.includes('intent?: "turn" | "steer" | "answer";'),
     );
+    // The undo target, executed rather than pinned. It is a PORT of a renderer
+    // memo, and the two conditions that make the desktop pill safe — last
+    // MESSAGE not last checkpoint, and a landed checkpoint — are exactly the
+    // pair a source-shape assertion cannot tell apart from their inverses.
+    const undoRun = (messages, checkpoints) => ({
+      humanMessages: messages,
+      checkpoints,
+    });
+    const userMessage = (id, extra = {}) => ({
+      id,
+      runId: "run-1",
+      author: "user",
+      kind: "note",
+      message: `type ${id}`,
+      createdAt: "2026-08-11T00:00:00.000Z",
+      ...extra,
+    });
+    const coraMessage = (id) => ({
+      ...userMessage(id),
+      author: "spark",
+      message: "on it",
+    });
+    const messageCheckpoint = (id, messageId) => ({
+      id,
+      runId: "run-1",
+      kind: "user-message",
+      messagePointer: 1,
+      sha: null,
+      messageId,
+      label: "type",
+      createdAt: "2026-08-11T00:00:00.000Z",
+    });
+    check(
+      "the undo target names the last user message and the checkpoint that landed for it",
+      (() => {
+        const target = projection.remoteCoraUndoTarget(
+          undoRun(
+            [userMessage("m1"), coraMessage("m2"), userMessage("m3")],
+            [
+              messageCheckpoint("cp-1", "m1"),
+              messageCheckpoint("cp-3", "m3"),
+            ],
+          ),
+        );
+        return (
+          target?.checkpointId === "cp-3" && target?.messageId === "m3"
+        );
+      })(),
+    );
+    check(
+      // Checkpoints land a tick late. Matching "the latest checkpoint that has
+      // a message" instead would point at m1 here, and one tap would wipe two
+      // user turns instead of one.
+      "a user message whose checkpoint has not landed yet offers no undo at all",
+      projection.remoteCoraUndoTarget(
+        undoRun(
+          [userMessage("m1"), userMessage("m2")],
+          [messageCheckpoint("cp-1", "m1")],
+        ),
+      ) === undefined,
+    );
+    check(
+      "a run with no user message, and one with no checkpoints, offer nothing",
+      projection.remoteCoraUndoTarget(
+        undoRun([coraMessage("m1")], [messageCheckpoint("cp-1", "m1")]),
+      ) === undefined &&
+        projection.remoteCoraUndoTarget(undoRun([userMessage("m1")], [])) ===
+          undefined &&
+        projection.remoteCoraUndoTarget(undoRun([], undefined)) === undefined,
+    );
+    check(
+      // run-start and pre-worker checkpoints exist on the same run and are not
+      // message rewinds; only the kind the desktop pill reads may be offered.
+      "only a user-message checkpoint can be an undo target",
+      projection.remoteCoraUndoTarget(
+        undoRun(
+          [userMessage("m1")],
+          [{ ...messageCheckpoint("cp-1", "m1"), kind: "pre-worker" }],
+        ),
+      ) === undefined,
+    );
+    for (const flag of ["boardNote", "resumeNote"]) {
+      check(
+        // Both are authored "user" so a manager turn consumes them, and both
+        // project as system rows. The scan reads raw authorship exactly as the
+        // renderer does, so a trailing note SUPPRESSES the affordance rather
+        // than sliding it onto the real message underneath — undoing past
+        // queued board work would silently drop it — and the note can never be
+        // the target itself even if a checkpoint somehow named it.
+        `a trailing ${flag} withdraws the undo affordance instead of retargeting it`,
+        projection.remoteCoraUndoTarget(
+          undoRun(
+            [userMessage("m1"), userMessage("m2", { [flag]: true })],
+            [
+              messageCheckpoint("cp-1", "m1"),
+              messageCheckpoint("cp-2", "m2"),
+            ],
+          ),
+        ) === undefined,
+      );
+    }
+    check(
+      "the undo target is the same two ids the wire contract declares",
+      rpcSource.includes("undo?: { checkpointId: string; messageId: string };") &&
+        productionSource.includes("const undo = remoteCoraUndoTarget(run);") &&
+        productionSource.includes("...(undo ? { undo } : {}),"),
+    );
   }
   {
     const liveRunProjection = productionSource.slice(
@@ -1502,6 +1609,77 @@ async function main() {
       rpcSource.includes("forcePauseCoraRun?(input: {") &&
       rpcSource.includes("resumePausedCoraRun?(input: {"),
   );
+  {
+    const undoService = productionSource.slice(
+      productionSource.indexOf("async function undoCoraRunForRemote("),
+      productionSource.indexOf("async function sendCoraMessageForRemote("),
+    );
+    check(
+      // Same gate order as its siblings, and the same reason: an SSH-host
+      // workspace refuses a rewind before any run is read.
+      "remote undo rewinds behind the local-workspace and run-ownership gates",
+      productionSource.includes(
+        "  await requireLocalWorkspace(input.workspaceId);\n" +
+          "  const run = await requireOwnedRun(input.workspaceId, input.runId);\n" +
+          "  const target = remoteCoraUndoTarget(run);",
+      ) && rpcSource.includes("undoCoraRun?(input: {"),
+    );
+    check(
+      // CODE REWIND STAYS ON THE DESKTOP. "chat+code" restores the workspace
+      // tree from a shadow-ref snapshot; that decision is made in front of a
+      // diff, never from a phone, so the scope is a literal here and the phone
+      // has no say in it.
+      "remote undo passes scope chat and nothing else",
+      undoService.includes('scope: "chat",') &&
+        !undoService.includes("chat+code") &&
+        !undoService.includes("input.scope") &&
+        // The phone cannot ask for a scope either: it is not on the wire.
+        !rpcSource
+          .slice(
+            rpcSource.indexOf('case "cora.undo": {'),
+            rpcSource.indexOf('case "cora.send": {'),
+          )
+          .includes("scope") &&
+        !rpcSource
+          .slice(
+            rpcSource.indexOf("undoCoraRun?(input: {"),
+            rpcSource.indexOf("getCoraWhiteboard?(input: {"),
+          )
+          .includes("scope"),
+    );
+    check(
+      // The refusal is the whole safety story: without it a duplicate delivery
+      // of a call that carries no requestId and takes no ledger receipt would
+      // peel off a SECOND user turn. It compares against the target computed
+      // fresh from the run, not against whatever the caller remembered.
+      "remote undo refuses a checkpoint that is no longer the run's target, before touching the run",
+      undoService.includes("if (!target || target.checkpointId !== input.checkpointId)") &&
+        undoService.includes('code: "CORA_UNDO_STALE_CHECKPOINT"') &&
+        undoService.indexOf('code: "CORA_UNDO_STALE_CHECKPOINT"') <
+          undoService.indexOf("await undoToCheckpoint(") &&
+        undoService.includes("checkpointId: target.checkpointId"),
+    );
+    check(
+      // A stale target is an outcome the caller must be able to branch on: a
+      // client that cannot tell it from a broken host is a client that retries
+      // a rewind. It is the one code cora.undo splits out of "internal".
+      "a stale undo answers a typed conflict the phone can read",
+      rpcSource.includes('} else if (code === "CORA_UNDO_STALE_CHECKPOINT") {') &&
+        /CORA_UNDO_STALE_CHECKPOINT[\s\S]{0,700}?"mutation-conflict"/.test(
+          rpcSource,
+        ),
+    );
+    check(
+      // No requestId and no ledger, exactly like resume — and a worse blast
+      // radius. The hazard is documented at the service so a future caller
+      // finds it where they would look; if the comment goes, the reasoning
+      // goes with it.
+      "the undo service documents its duplicate-delivery hazard",
+      /DUPLICATE DELIVERY IS NOT FREE[\s\S]*?async function undoCoraRunForRemote/.test(
+        productionSource,
+      ) && remoteIndexSource.includes("undoCoraRun: this.deps.undoCoraRun,"),
+    );
+  }
   check(
     "remote fast mode writes the one global setting through saveSettings",
     productionSource.includes(
@@ -4057,6 +4235,11 @@ async function main() {
     let coraWorkerPeerComms = false;
     let coraRunTruncation = null;
     let coraRunContext = null;
+    // The undo target the run currently publishes, or null when it affords no
+    // rewind. Both the projection and the undo service read it, so a test that
+    // moves it moves the run's real target — which is what a phone holding a
+    // stale poll is up against.
+    let coraRunUndo = null;
     // The delivery state of a second, user-authored message, or null while the
     // run has none. Drives the queued → acknowledged digest check below.
     let coraUserMessageDelivery = null;
@@ -4544,6 +4727,7 @@ async function main() {
             },
           ],
           ...(coraRunContext ? { context: coraRunContext } : {}),
+          ...(coraRunUndo ? { undo: coraRunUndo } : {}),
           ...(coraRunTruncation ? { truncation: coraRunTruncation } : {}),
         };
         return {
@@ -4614,6 +4798,27 @@ async function main() {
             `Cora run not found in this workspace: ${input.runId}`,
           );
         }
+      },
+      // The run-store seam, standing in for undoCoraRunForRemote's own
+      // refusal: the service compares the caller's checkpoint against the one
+      // the run currently publishes and throws the typed staleness before it
+      // reaches undoToCheckpoint. `coraRunUndo` is that published target, so
+      // moving it here is the same thing as the run moving on underneath a
+      // phone that is still holding a poll from before.
+      undoCoraRun: async (input) => {
+        calls.push(["cora.undo", input]);
+        if (input.runId !== "run-1") {
+          throw new Error(
+            `Cora run not found in this workspace: ${input.runId}`,
+          );
+        }
+        if (!coraRunUndo || coraRunUndo.checkpointId !== input.checkpointId) {
+          throw Object.assign(
+            new Error("This message can no longer be undone."),
+            { code: "CORA_UNDO_STALE_CHECKPOINT" },
+          );
+        }
+        return { restoredText: "also update the changelog" };
       },
       // Stands in for the one global AppSettings.openAiFastMode record so a
       // set is observable through a later get, as it is on disk.
@@ -6007,10 +6212,63 @@ async function main() {
           "also update the changelog",
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    // The undo target is absent for most of a run's life — no user message
+    // yet, a checkpoint still landing, a synthetic note sitting last — and an
+    // absent key is what tells an older phone, and this one, that there is
+    // nothing to offer. A zeroed or empty pair would put a live control on a
+    // bubble that cannot be rewound.
+    const undoBaseRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "cora.get omits run.undo entirely while the run affords no rewind",
+      !("undo" in (ex.outbox.at(-1)?.result?.run ?? {})),
+      { response: ex.outbox.at(-1) },
+    );
+    coraRunUndo = { checkpointId: "checkpoint-2", messageId: "message-2" };
+    exReq(824, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: undoBaseRevision,
+    });
+    await flush();
+    const undoRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      // The checkpoint lands a tick after the message it belongs to, so the
+      // affordance appears on a poll where NOTHING else about the run moved.
+      // The digest hashes the whole bounded DTO, so its arrival has to move it
+      // — a phone parked on notModified would otherwise never grow an Undo.
+      "cora.get serializes the undo target and its arrival moves the revision",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof undoRevision === "string" &&
+        undoRevision !== undoBaseRevision &&
+        ex.outbox.at(-1)?.result?.run?.undo?.checkpointId === "checkpoint-2" &&
+        ex.outbox.at(-1)?.result?.run?.undo?.messageId === "message-2",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    // A NEW user message moves the target to a new checkpoint, and the phone
+    // must see that: it decides both which bubble carries the control and
+    // which token the call sends back. A frozen digest here would leave a
+    // phone tapping Undo with the previous turn's checkpoint — the one call
+    // the host then has to refuse.
+    coraRunUndo = { checkpointId: "checkpoint-3", messageId: "message-3" };
+    exReq(825, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: undoRevision,
+    });
+    await flush();
+    check(
+      "cora.get revision moves when only the undo target moved",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof ex.outbox.at(-1)?.result?.revision === "string" &&
+        ex.outbox.at(-1)?.result?.revision !== undoRevision &&
+        ex.outbox.at(-1)?.result?.run?.undo?.checkpointId === "checkpoint-3",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
     coraUserMessageDelivery = null;
     coraRunTruncation = null;
     coraWorkerPeerComms = false;
     coraRunContext = null;
+    coraRunUndo = null;
     coraWorkerActivity = "Read src/main/index.ts";
     exReq(811, "cora.get", {
       workspaceId: "ws1",
@@ -6240,6 +6498,89 @@ async function main() {
         /run-gone/.test(ex.outbox.at(-1)?.error?.message ?? ""),
       ex.outbox.at(-1),
     );
+    // Undo, driven through the same seam the projection publishes its target
+    // from. The happy path sends back the token the run advertised and gets
+    // the undone text, so the composer can be refilled with what was typed.
+    coraRunUndo = { checkpointId: "checkpoint-2", messageId: "message-2" };
+    exReq(230, "cora.undo", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      checkpointId: "checkpoint-2",
+    });
+    await flush();
+    check(
+      "cora.undo rewinds the run at the checkpoint the run published and returns the undone text",
+      calls.at(-1)?.[0] === "cora.undo" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        calls.at(-1)?.[1]?.runId === "run-1" &&
+        calls.at(-1)?.[1]?.checkpointId === "checkpoint-2" &&
+        ex.outbox.at(-1)?.ok === true &&
+        ex.outbox.at(-1)?.result?.ok === true &&
+        ex.outbox.at(-1)?.result?.restoredText === "also update the changelog",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    // THE DOUBLE-TAP. The run has moved on — the same checkpoint is no longer
+    // its target — and the answer is a typed conflict, not a second rewind.
+    // This is the whole reason the token is on the wire.
+    coraRunUndo = { checkpointId: "checkpoint-3", messageId: "message-3" };
+    exReq(231, "cora.undo", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      checkpointId: "checkpoint-2",
+    });
+    await flush();
+    check(
+      "a stale checkpoint is refused with a conflict the phone can branch on",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "mutation-conflict" &&
+        /no longer be undone/.test(ex.outbox.at(-1)?.error?.message ?? ""),
+      ex.outbox.at(-1),
+    );
+    // Nothing to undo at all reads the same way: refused, not obeyed.
+    coraRunUndo = null;
+    exReq(232, "cora.undo", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      checkpointId: "checkpoint-2",
+    });
+    await flush();
+    check(
+      "a run that affords no rewind refuses one",
+      ex.outbox.at(-1)?.ok === false &&
+        ex.outbox.at(-1)?.error?.code === "mutation-conflict",
+      ex.outbox.at(-1),
+    );
+    for (const [id, params] of [
+      [233, { runId: "run-1", checkpointId: "checkpoint-2" }],
+      [234, { workspaceId: "ws1", checkpointId: "checkpoint-2" }],
+      [235, { workspaceId: "ws1", runId: "run-1" }],
+      [236, { workspaceId: "ws1", runId: "run-1", checkpointId: "" }],
+      [237, { workspaceId: "ws1", runId: "run-1", checkpointId: 7 }],
+    ]) {
+      const before = calls.length;
+      exReq(id, "cora.undo", params);
+      await flush();
+      check(
+        `cora.undo rejects malformed identities before mutation (${id})`,
+        ex.outbox.at(-1)?.error?.code === "invalid-params" &&
+          calls.length === before,
+        ex.outbox.at(-1),
+      );
+    }
+    coraRunUndo = { checkpointId: "checkpoint-2", messageId: "message-2" };
+    exReq(238, "cora.undo", {
+      workspaceId: "ws1",
+      runId: "run-gone",
+      checkpointId: "checkpoint-2",
+    });
+    await flush();
+    check(
+      "cora.undo surfaces an unknown run as a readable failure",
+      ex.outbox.at(-1)?.ok === false &&
+        /run-gone/.test(ex.outbox.at(-1)?.error?.message ?? ""),
+      ex.outbox.at(-1),
+    );
+    coraRunUndo = null;
     exReq(218, "cora.fastMode.get", {});
     await flush();
     check(
@@ -7302,6 +7643,17 @@ async function main() {
       }),
     );
     old.inject(
+      rpc.encodeFrame({
+        id: 13,
+        method: "cora.undo",
+        params: {
+          workspaceId: "ws1",
+          runId: "run-1",
+          checkpointId: "checkpoint-1",
+        },
+      }),
+    );
+    old.inject(
       rpc.encodeFrame({ id: 11, method: "cora.fastMode.get", params: {} }),
     );
     old.inject(
@@ -7315,7 +7667,7 @@ async function main() {
     const answers = old.outbox.slice(before);
     check(
       "an older Studio answers unknown-method for newer phone surfaces",
-      answers.length === 11 &&
+      answers.length === 12 &&
         answers.every(
           (frame) =>
             frame?.ok === false && frame?.error?.code === "unknown-method",
