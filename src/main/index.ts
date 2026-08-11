@@ -510,6 +510,36 @@ function destroyTray(): void {
 // in the background. Idempotent and best-effort: tray creation can throw on
 // some Linux setups (no system tray), so a failure is logged and never blocks
 // boot — the app simply runs without a tray there.
+// Convert the colored app icon into a macOS menu-bar template image: every
+// pixel goes black with its alpha preserved, and the image is marked as a
+// template so the system tints it white on dark menu bars and dark on light
+// ones — matching the monochrome treatment of the surrounding status icons.
+// Ships 1x and 2x representations so retina menu bars stay sharp.
+function menuBarTemplateImage(
+  source: Electron.NativeImage,
+): Electron.NativeImage {
+  const out = nativeImage.createEmpty();
+  for (const scaleFactor of [1, 2]) {
+    const size = 18 * scaleFactor;
+    const bitmap = source.resize({ width: size, height: size }).toBitmap();
+    for (let i = 0; i < bitmap.length; i += 4) {
+      bitmap[i] = 0;
+      bitmap[i + 1] = 0;
+      bitmap[i + 2] = 0;
+    }
+    out.addRepresentation({
+      scaleFactor,
+      width: size,
+      height: size,
+      buffer: nativeImage
+        .createFromBitmap(bitmap, { width: size, height: size })
+        .toPNG(),
+    });
+  }
+  out.setTemplateImage(true);
+  return out;
+}
+
 function ensureTray(): void {
   if (tray) return;
   try {
@@ -519,7 +549,9 @@ function ensureTray(): void {
     // macOS menu bar (Win32 uses the path directly; the taskbar notification
     // area handles DPI scaling on its own).
     let trayImage = nativeImage.createFromPath(windowIcon);
-    if (process.platform !== "win32") {
+    if (process.platform === "darwin") {
+      trayImage = menuBarTemplateImage(trayImage);
+    } else if (process.platform !== "win32") {
       trayImage = trayImage.resize({ width: 18, height: 18 });
     }
     tray = new Tray(trayImage);
