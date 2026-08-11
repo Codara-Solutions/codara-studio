@@ -1176,8 +1176,13 @@ async function main() {
         "active.filter((attempt) => !rosterIds.has(attempt.id)).length",
       ) &&
       productionSource.includes(
-        "...(workerProjection.activeOmitted > 0\n      ? { activeWorkersOmitted: workerProjection.activeOmitted }\n      : {}),",
+        "...(workersOmitted > 0\n      ? {\n          workersOmitted,\n          activeWorkersOmitted: workerProjection.activeOmitted,\n        }\n      : {}),",
       ) &&
+      // The breakdown travels with the receipt, zero included: a field that
+      // vanished at zero would be indistinguishable from an older Studio that
+      // cannot answer, and every client would have to read the ordinary long
+      // run pessimistically. `workersOmitted` may never be emitted alone.
+      !/\{ workersOmitted \}/.test(productionSource) &&
       rpcSource.includes("activeWorkersOmitted?: number;"),
   );
   check(
@@ -5307,7 +5312,7 @@ async function main() {
     // attempts. `activeWorkersOmitted` is the field that answers the question,
     // and it must stay absent for exactly this shape.
     const peerRevision = ex.outbox.at(-1)?.result?.revision;
-    coraRunTruncation = { workersOmitted: 14 };
+    coraRunTruncation = { workersOmitted: 14, activeWorkersOmitted: 0 };
     exReq(820, "cora.get", {
       workspaceId: "ws1",
       runId: "run-1",
@@ -5316,14 +5321,9 @@ async function main() {
     await flush();
     const scrolledRevision = ex.outbox.at(-1)?.result?.revision;
     check(
-      "a long run's scrolled-off settled attempts claim no missing live worker",
+      "a long run's scrolled-off settled attempts report no missing live worker",
       ex.outbox.at(-1)?.result?.run?.truncation?.workersOmitted === 14 &&
-        ex.outbox.at(-1)?.result?.run?.truncation?.activeWorkersOmitted ===
-          undefined &&
-        !(
-          "activeWorkersOmitted" in
-          (ex.outbox.at(-1)?.result?.run?.truncation ?? {})
-        ),
+        ex.outbox.at(-1)?.result?.run?.truncation?.activeWorkersOmitted === 0,
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
     // The genuinely incomplete live fan: more concurrent workers than the
@@ -5337,7 +5337,7 @@ async function main() {
     });
     await flush();
     check(
-      "cora.get serializes activeWorkersOmitted and its arrival moves the revision",
+      "cora.get moves the revision when omitted workers turn out to be live",
       ex.outbox.at(-1)?.result?.notModified === undefined &&
         typeof ex.outbox.at(-1)?.result?.revision === "string" &&
         ex.outbox.at(-1)?.result?.revision !== scrolledRevision &&

@@ -2203,13 +2203,19 @@ function toRemoteRun(
       blockedMessage.message !== projectedBlockedMessage.message,
   );
   const truncation = {
-    ...(workersOmitted > 0 ? { workersOmitted } : {}),
-    // Only ever emitted when a LIVE worker is missing. `workersOmitted` alone
-    // is the ordinary long-run shape (old finished attempts scrolled off the
-    // roster) and must not be read as an incomplete live fan; this is the
-    // field that says so. See RemoteCoraRunTruncation.
-    ...(workerProjection.activeOmitted > 0
-      ? { activeWorkersOmitted: workerProjection.activeOmitted }
+    // The roster receipt and its breakdown travel together, zero included.
+    // `workersOmitted` alone is the ordinary long-run shape — old finished
+    // attempts scrolled off a window filled actives-first — and must not be
+    // read as an incomplete live fan. A client deciding whether it holds one
+    // has to tell "no live worker was dropped" from "this computer is too old
+    // to say", and a field that vanished at zero would collapse those two into
+    // the same silence. Nothing is emitted at all when nothing was omitted, so
+    // the ordinary run still pays nothing. See RemoteCoraRunTruncation.
+    ...(workersOmitted > 0
+      ? {
+          workersOmitted,
+          activeWorkersOmitted: workerProjection.activeOmitted,
+        }
       : {}),
     ...(stepsOmitted > 0 ? { stepsOmitted } : {}),
     ...(blockedQuestionBodyTruncated

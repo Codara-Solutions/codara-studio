@@ -451,8 +451,15 @@ export interface RemoteCoraRunTruncation {
    * attempts, so `workersOmitted` on a long run just means "old finished
    * attempts scrolled off", which says nothing about whether the live picture
    * is complete. A remote graph that needs a complete live fan — the peers
-   * thread does — must read this and not `workersOmitted`. Omitted when zero,
-   * so its mere presence is the signal.
+   * thread does — must read this and not `workersOmitted`.
+   *
+   * Deliberately NOT omitted at zero, unlike everything else here: it is the
+   * BREAKDOWN of `workersOmitted` and travels exactly when that does. A zero
+   * is the informative case ("the roster lost only settled attempts"), and a
+   * field that vanished at zero would be indistinguishable from an older
+   * Studio that cannot answer at all, forcing every client into the pessimistic
+   * reading on runs where nothing live was lost. Absent alongside a present
+   * `workersOmitted` therefore means "older Studio", and nothing else.
    */
   activeWorkersOmitted?: number;
   stepsOmitted?: number;
