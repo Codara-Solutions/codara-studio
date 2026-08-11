@@ -495,7 +495,6 @@ const HUMAN_INPUT_PAUSE_REASON = "Cora needs human input before continuing.";
 // of them even when they exceed this budget, then fill the remaining slots with
 // the newest known-terminal runs.
 const RUN_RETENTION_KEEP = 50;
-const RUN_RETRY_REPAIR_READ_LIMIT = 64;
 const RETENTION_TERMINAL_STATUSES = new Set<RunStatus>([
   "complete",
   "failed",
@@ -1173,55 +1172,6 @@ export async function listRuns(workspaceId?: string): Promise<RunState[]> {
     .filter((run): run is RunState => Boolean(run))
     .filter((run) => !workspaceId || run.workspaceId === workspaceId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-/**
- * One-time legacy repair surface for durable retry indexes. Directory metadata
- * may be inspected to find the newest candidates, but no more than 64 run
- * bodies are ever read. Normal indexed retries use getRun(runId) directly.
- */
-export async function listRecentRunsForRetryRepair(
-  requestedLimit = RUN_RETRY_REPAIR_READ_LIMIT,
-): Promise<{ runs: RunState[]; truncated: boolean }> {
-  const limit = Math.max(
-    0,
-    Math.min(
-      RUN_RETRY_REPAIR_READ_LIMIT,
-      Number.isSafeInteger(requestedLimit)
-        ? Math.floor(requestedLimit)
-        : RUN_RETRY_REPAIR_READ_LIMIT,
-    ),
-  );
-  if (limit === 0) return { runs: [], truncated: true };
-  let names: string[];
-  try {
-    names = await fs.readdir(runsRoot());
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { runs: [], truncated: false };
-    }
-    throw err;
-  }
-  const candidates = await Promise.all(
-    names.map(async (name) => {
-      try {
-        return { name, mtimeMs: (await fs.stat(runPath(name))).mtimeMs };
-      } catch {
-        return { name, mtimeMs: Number.NEGATIVE_INFINITY };
-      }
-    }),
-  );
-  const recent = candidates
-    .sort(
-      (left, right) =>
-        right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name),
-    )
-    .slice(0, limit);
-  const runs = await Promise.all(recent.map(({ name }) => getRun(name)));
-  return {
-    runs: runs.filter((run): run is RunState => Boolean(run)),
-    truncated: candidates.length > recent.length,
-  };
 }
 
 export async function getRunArtifactPaths(runId: string): Promise<RunArtifactPaths> {

@@ -1573,7 +1573,11 @@ async function main() {
       // history can neither fill the scan nor raise `truncated`.
       coraRetryRepairSource.includes("windowed.slice(0, readLimit)") &&
       coraRetryRepairSource.includes("truncated: windowed.length > readLimit") &&
-      !productionSource.includes("listRecentRunsForRetryRepair"),
+      // The unbounded reader this replaced is gone from the run store, not
+      // merely unreferenced by the remote layer: asserting its absence from
+      // production.ts alone would go quietly vacuous the moment anything else
+      // picked it back up.
+      !runStoreSource.includes("listRecentRunsForRetryRepair"),
   );
   check(
     "run retention and explicit deletion remove compact Cora send routes",
