@@ -3386,9 +3386,16 @@ export interface WorkerTask {
    */
   collabMailDirHint?: string;
   /**
-   * Warm follow-up provenance: the ACCEPTED worker task whose runtime session
-   * this task continues (codara_spawn_workers `follow_up_of`). Set only when
-   * the reuse gate passed at spawn time; purely informational thereafter.
+   * Follow-up provenance: the earlier worker task this one continues. Two
+   * producers, both informational thereafter:
+   *   - codara_spawn_workers `follow_up_of`, when the warm session-reuse gate
+   *     passed (paired with `resumeSessionId` below);
+   *   - a verifier-FEEDBACK rework whose target sat in an already-settled step.
+   *     The settled step is history, so the rework is re-homed onto a copy of
+   *     the target in the current step and linked back through this field
+   *     rather than reopening the completed step.
+   * Also what bounds the corrective loop: the attempt cap counts the whole
+   * follow-up lineage, not the newest task record.
    */
   followUpOfTaskId?: string;
   /**

@@ -19,6 +19,7 @@
     "test:cora-cli": "node scripts/test-cora-cli.cjs",
     "test:cora-agent-cli": "node scripts/test-cora-agent-cli.cjs",
     "test:step-lifecycle": "node scripts/test-step-lifecycle.cjs",
+    "test:followup-rehoming": "node scripts/test-followup-rehoming.cjs",
     "test:spawn-batch-guard": "node scripts/test-spawn-batch-guard.cjs",
     "test:wedged-run": "node scripts/test-wedged-run-recovery.cjs",
     "test:agent-liveness": "node scripts/test-agent-liveness.cjs",
