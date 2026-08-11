@@ -267,6 +267,85 @@ async function main() {
     contract.jsonUtf8Bytes(activityPruned) <= activityFullBytes - 400,
   );
 
+  // A maximally-full run whose only prunable detail is the activity readout:
+  // no lastMessage, no steps, no blockedQuestion, every worker still active.
+  // The `workerDetailsOmitted` marker costs bytes of its own, so the drop loop
+  // has to spend them from its own budget. When it did not, the loop stopped
+  // just under budget, the truthful marker pushed the run back over, and the
+  // final guard threw instead of serving the pruned run the phone can render.
+  const markerBoundaryBase = () => ({
+    id: "run-marker-boundary",
+    workspaceId: "workspace-hostile",
+    title: "t",
+    status: "running",
+    createdAt: "2026-07-31T00:00:00.000Z",
+    updatedAt: "2026-07-31T00:01:00.000Z",
+    messageCount: 1,
+    activeWorkers: 900,
+    messages: [],
+    workers: Array.from({ length: 900 }, (_, index) => ({
+      id: `worker-${index}`,
+      title: "w".repeat(300),
+      runtime: "claude",
+      status: "running",
+      runtimeActivity: "a".repeat(120),
+    })),
+  });
+  const markerBoundary = projector.projectBoundedRemoteCoraRun({
+    base: markerBoundaryBase(),
+    runId: "run-marker-boundary",
+    conversationEpoch: 0,
+    // Sized so the run lands inside the window where the drop loop stops
+    // under budget and the marker alone would push it back over.
+    sourceMessages: [message("message-1", "b".repeat(74))],
+    projectMessage: (source) => projectMessage(contract, source),
+    maxMessageCount: 10,
+    maxMessageBytes: 384 * 1024,
+  });
+  assert.equal(markerBoundary.run.truncation.workerDetailsOmitted, true);
+  assert.equal(markerBoundary.run.workers.length, 900);
+  assert.ok(
+    contract.jsonUtf8Bytes(markerBoundary.run) <=
+      contract.CORA_RUN_JSON_MAX_BYTES,
+    "the marker-boundary run is served pruned, inside its exact budget",
+  );
+
+  // Every budget between "nothing to drop" and "everything dropped" has to
+  // land on a pruned run, never a throw: the marker's bytes must never be the
+  // difference between success and failure.
+  const sweepBase = () => ({
+    ...markerBoundaryBase(),
+    activeWorkers: 4,
+    workers: Array.from({ length: 4 }, (_, index) => ({
+      id: `worker-${index}`,
+      title: "w",
+      runtime: "claude",
+      status: "running",
+      runtimeActivity: "a".repeat(120),
+    })),
+  });
+  const sweepFull = contract.jsonUtf8Bytes(sweepBase());
+  const sweepStripped = sweepBase();
+  for (const worker of sweepStripped.workers) delete worker.runtimeActivity;
+  // Below this floor even a fully stripped run cannot fit, and throwing is the
+  // correct answer; the reserve for `messagesOmitted` accounts for the rest.
+  const sweepFloor = contract.jsonUtf8Bytes(sweepStripped) + 80;
+  for (let budget = sweepFloor; budget <= sweepFull; budget += 1) {
+    const pruned = projector.pruneRemoteCoraRunBase(sweepBase(), budget);
+    assert.ok(
+      contract.jsonUtf8Bytes(pruned) <= budget,
+      `pruned run exceeded its budget of ${budget} bytes`,
+    );
+    const droppedActivity = pruned.workers.some(
+      (worker) => worker.runtimeActivity === undefined,
+    );
+    assert.equal(
+      pruned.truncation?.workerDetailsOmitted ?? false,
+      droppedActivity,
+      `the omission marker disagrees with the drops at ${budget} bytes`,
+    );
+  }
+
   // Defense in depth at the final RPC result boundary. A hostile injected
   // service can duplicate one enormous message id into both delta boundaries;
   // the result builder must choose the smaller bounded full projection.

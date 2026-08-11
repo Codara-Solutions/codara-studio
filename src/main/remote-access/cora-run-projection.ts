@@ -135,8 +135,18 @@ export function pruneRemoteCoraRunBase(
   }
   if (truncation) base.truncation = truncation;
 
-  const overBudget = () =>
-    jsonUtf8Bytes(withMessageOmissionReserve(base, true)) > maxJsonBytes;
+  // `workerDetailsOmitted` is only merged in once the field-drop loop below
+  // has finished, so its bytes are reserved from the first dropped field
+  // onward. Without that reserve the loop stops just under budget and the
+  // truthful marker pushes the run back over it, leaving the final guard
+  // nothing left to prune and forcing a throw instead of a pruned run.
+  const overBudget = (reserveWorkerDetails = false) =>
+    jsonUtf8Bytes(
+      withMessageOmissionReserve(
+        reserveWorkerDetails ? withWorkerDetailsReserve(base) : base,
+        true,
+      ),
+    ) > maxJsonBytes;
 
   // Old settled workers are the first non-duplicated records to go. Active
   // identities and lifecycle status remain available as long as possible.
@@ -162,9 +172,9 @@ export function pruneRemoteCoraRunBase(
   ] as const;
   let workerDetailsOmitted = false;
   for (const field of optionalWorkerFields) {
-    if (!overBudget()) break;
+    if (!overBudget(workerDetailsOmitted)) break;
     for (const worker of [...(base.workers ?? [])].reverse()) {
-      if (!overBudget()) break;
+      if (!overBudget(workerDetailsOmitted)) break;
       if (worker[field] !== undefined) {
         delete worker[field];
         workerDetailsOmitted = true;
@@ -219,6 +229,13 @@ function withMessageOmissionReserve(
       ...(base.truncation ?? {}),
       messagesOmitted: Number.MAX_SAFE_INTEGER,
     },
+  };
+}
+
+function withWorkerDetailsReserve(base: RemoteCoraRun): RemoteCoraRun {
+  return {
+    ...base,
+    truncation: { ...(base.truncation ?? {}), workerDetailsOmitted: true },
   };
 }
 

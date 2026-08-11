@@ -703,6 +703,35 @@ async function main() {
         !JSON.stringify(projection.agents).includes("/private/"),
       projection.agents,
     );
+    const shoutyActivity = `Read ${"deep/".repeat(80)}file.ts`;
+    const cappedActivity = fleetOverview.projectRemoteFleetOverview(
+      workspaces,
+      [
+        {
+          id: "shouty-run",
+          workspaceId: "ws-1",
+          status: "running",
+          createdAt: "2026-07-30T10:00:00.000Z",
+          updatedAt: "2026-07-30T10:01:00.000Z",
+          workerAttempts: [
+            attempt("shouty-1", "running", {
+              runtimeActivity: `  ${shoutyActivity}  `,
+            }),
+          ],
+          workerTasks: [{ id: "task-shouty-1", title: "Shouty worker" }],
+        },
+      ],
+      [],
+    );
+    const cappedAgentActivity = cappedActivity.agents[0]?.runtimeActivity ?? "";
+    check(
+      "fleet projection caps a hostile runtimeActivity at the run-projection byte cap",
+      shoutyActivity.length > 120 &&
+        Buffer.byteLength(cappedAgentActivity, "utf8") <= 120 &&
+        cappedAgentActivity.startsWith("Read deep/") &&
+        cappedAgentActivity.endsWith("…"),
+      cappedAgentActivity,
+    );
     const oneRow = fleetOverview.projectRemoteFleetOverview(
       workspaces,
       runs,

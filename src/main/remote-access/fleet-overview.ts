@@ -5,6 +5,7 @@ import type {
   RemoteFleetWorkspaceOverview,
   RemoteWorkspaceInfo,
 } from "./rpc";
+import { truncateUtf8 } from "./local-policy";
 
 // Compact enough for a frequent mobile landing-page poll, while still covering
 // substantially more projects than a phone can render at once.
@@ -142,8 +143,10 @@ export function projectRemoteFleetOverview(
         : {}),
       status: attempt.status,
       ...(attempt.runtimeState ? { runtimeState: attempt.runtimeState } : {}),
+      // Live tool-call readout, capped the same way the run projection caps it
+      // so one hostile or legacy attempt record cannot dominate the budget.
       ...(attempt.runtimeActivity?.trim()
-        ? { runtimeActivity: attempt.runtimeActivity.trim() }
+        ? { runtimeActivity: truncateUtf8(attempt.runtimeActivity.trim(), 120) }
         : {}),
       ...(attempt.startedAt ? { startedAt: attempt.startedAt } : {}),
       ...(run.automationId
