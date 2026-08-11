@@ -11,12 +11,18 @@
 //
 // Gating: the tools register only when the launch plan stamped
 // CODARA_PI_PEER_DIR + CODARA_PI_SELF_ID, which run-store does exactly when
-// shouldUsePeerComms allows it — council candidates and solo workers never see
-// the env, keeping best-of-N candidates independent. Manager reachability is
-// carried by the registry itself: run-store prepends the reserved "manager"
-// card only when the orchestrator actually reads this mailbox, so peer_send
-// warns on recipients that are not registered instead of stranding a worker
-// on a reply that will never come.
+// shouldProvisionWorkerMailbox allows it — council candidates and solo workers
+// never see the env, keeping best-of-N candidates independent. Manager
+// reachability is carried by the registry itself: run-store prepends the
+// reserved "manager" card only when the orchestrator actually reads this
+// mailbox, so peer_send warns on recipients that are not registered instead of
+// stranding a worker on a reply that will never come.
+//
+// Having the mailbox is NOT the same as being in the step's group chat. The
+// chat is opt-in per worker (WorkerTask.peers), and the registry says who is
+// in it; every batch worker gets the mailbox anyway so the manager can always
+// steer it. Peer traffic between non-members is refused here, not merely
+// discouraged in the prompt.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -44,10 +50,28 @@ interface PeerAgentCard {
   allowedPaths?: string[];
   /** Deliberately independent: reachable only by `manager`, and reaches only `manager`. */
   isolated?: boolean;
+  /**
+   * Group-chat membership (run-store's WorkerTask.peers / peerComms). Explicit
+   * false = in the run but not in this step's chat, so it is neither a valid
+   * recipient nor a valid sender of peer traffic. Undefined = a registry
+   * written before the chat became opt-in, where everyone was a member.
+   */
+  peers?: boolean;
 }
 
 /** Reserved registry id for the orchestrator. Mirrors run-store's MANAGER_PEER_ID. */
 const MANAGER_PEER_ID = "manager";
+
+/**
+ * Out of the step's group chat: deliberately independent, or simply never
+ * flagged `peers`. Both populations keep the manager channel and lose peer
+ * traffic in both directions, so the mailbox rules treat them the same and
+ * only the refusal wording differs.
+ */
+function outOfPeerGroup(card: PeerAgentCard | undefined): boolean {
+  if (!card) return false;
+  return card.isolated === true || card.peers === false;
+}
 
 export interface PeerCommsContext {
   dir: string;
@@ -108,6 +132,17 @@ function targetMatches(message: PeerMessage, self: string): boolean {
   return Array.isArray(to) && to.includes(self);
 }
 
+// What actually lands in this worker's inbox. Same as addressing, except that a
+// worker outside the group chat does not receive peer BROADCASTS: `all` from a
+// peer is peer traffic, and delivering it would hand back through the inbox
+// exactly what peer_send refuses to send. `all` from the manager is a manager
+// broadcast and always lands.
+function deliverable(message: PeerMessage, ctx: PeerCommsContext, excluded: boolean): boolean {
+  if (!targetMatches(message, ctx.selfId)) return false;
+  if (!excluded) return true;
+  return message.to !== "all" || message.from === MANAGER_PEER_ID;
+}
+
 function isUnread(message: PeerMessage, self: string): boolean {
   return !Array.isArray(message.readBy) || !message.readBy.includes(self);
 }
@@ -138,10 +173,27 @@ function listAgents(ctx: PeerCommsContext): PeerAgentCard[] {
   return Array.isArray(registry.agents) ? (registry.agents as PeerAgentCard[]) : [];
 }
 
+function selfCardOf(ctx: PeerCommsContext, agents: PeerAgentCard[]): PeerAgentCard | undefined {
+  return agents.find((agent) => agent.workerTaskId === ctx.selfId);
+}
+
+// The roster this worker is allowed to see. Workers outside the group chat see
+// the `manager` alone — showing them peers they may not address would only
+// invite refused sends. Members see the chat plus the manager, never the
+// workers that were left out of it.
+function visibleAgents(ctx: PeerCommsContext, agents: PeerAgentCard[]): PeerAgentCard[] {
+  const manager = agents.filter((agent) => agent.workerTaskId === MANAGER_PEER_ID);
+  if (outOfPeerGroup(selfCardOf(ctx, agents))) return manager;
+  return agents.filter(
+    (agent) => agent.workerTaskId === MANAGER_PEER_ID || !outOfPeerGroup(agent),
+  );
+}
+
 export function countUnreadPeerMessages(ctx: PeerCommsContext): number {
   try {
+    const excluded = outOfPeerGroup(selfCardOf(ctx, listAgents(ctx)));
     return readMessages(ctx).filter(
-      (message) => targetMatches(message, ctx.selfId) && isUnread(message, ctx.selfId),
+      (message) => deliverable(message, ctx, excluded) && isUnread(message, ctx.selfId),
     ).length;
   } catch {
     return 0;
@@ -182,7 +234,7 @@ export function registerWorkerPeerComms(pi: ExtensionAPI, ctx: PeerCommsContext)
       additionalProperties: false,
     } as never,
     async execute() {
-      const agents = listAgents(ctx);
+      const agents = visibleAgents(ctx, listAgents(ctx));
       if (agents.length === 0) {
         return textResult("No peer agents registered.", { agents });
       }
@@ -227,7 +279,8 @@ export function registerWorkerPeerComms(pi: ExtensionAPI, ctx: PeerCommsContext)
       const unreadOnly = params.unreadOnly !== false;
       const markAsRead = params.markAsRead !== false;
       const limit = Math.max(1, Math.min(100, Number(params.limit ?? 20)));
-      const matched = readMessages(ctx).filter((message) => targetMatches(message, ctx.selfId));
+      const excluded = outOfPeerGroup(selfCardOf(ctx, listAgents(ctx)));
+      const matched = readMessages(ctx).filter((message) => deliverable(message, ctx, excluded));
       const filtered = unreadOnly
         ? matched.filter((message) => isUnread(message, ctx.selfId))
         : matched;
@@ -274,25 +327,32 @@ export function registerWorkerPeerComms(pi: ExtensionAPI, ctx: PeerCommsContext)
       const body = String(params.body || "").trim();
       if (!to) throw new Error("peer_send requires a recipient");
       if (!body) throw new Error("peer_send requires a non-empty body");
-      // Independence is enforced, not merely requested. A worker marked
-      // isolated in the registry may only reach `manager`, and nobody may reach
+      // Group-chat membership is enforced, not merely requested. A worker the
+      // registry leaves out of the chat — deliberately independent, or simply
+      // never flagged `peers` — may only reach `manager`, and no peer may reach
       // it. Checked here rather than left to the prompt because a contradictory
       // prompt is exactly how this went wrong before: the task said "do not
       // communicate with any peer" while the generated guidance said "share
       // findings early", and which one won was luck.
       const registry = listAgents(ctx);
-      const selfCard = registry.find((agent) => agent.workerTaskId === ctx.selfId);
-      if (selfCard?.isolated && to !== MANAGER_PEER_ID) {
+      const selfCard = selfCardOf(ctx, registry);
+      if (outOfPeerGroup(selfCard) && to !== MANAGER_PEER_ID) {
         throw new Error(
-          "This task is running independently on purpose: peer_send may only address `manager`. " +
-            "Reach your own conclusion from your own evidence, and tell Cora if you are blocked.",
+          selfCard?.isolated
+            ? "This task is running independently on purpose: peer_send may only address `manager`. " +
+              "Reach your own conclusion from your own evidence, and tell Cora if you are blocked."
+            : "This task is not in the step's worker group chat: peer_send may only address `manager`. " +
+              "Your brief stands on its own; tell Cora if you are blocked or if it is wrong.",
         );
       }
       const targetCard = registry.find((agent) => agent.workerTaskId === to);
-      if (targetCard?.isolated) {
+      if (outOfPeerGroup(targetCard)) {
         throw new Error(
-          `"${to}" is running independently on purpose and cannot receive peer messages. ` +
-            "Send it to `manager` instead if it genuinely needs to reach that worker.",
+          targetCard?.isolated
+            ? `"${to}" is running independently on purpose and cannot receive peer messages. ` +
+              "Send it to `manager` instead if it genuinely needs to reach that worker."
+            : `"${to}" is not in the step's worker group chat and cannot receive peer messages. ` +
+              "Send it to `manager` instead if it genuinely needs to reach that worker.",
         );
       }
       const message: PeerMessage = {
@@ -315,9 +375,8 @@ export function registerWorkerPeerComms(pi: ExtensionAPI, ctx: PeerCommsContext)
       // Registry-based reachability warning, mirroring codara_message_workers:
       // an unregistered recipient (including `manager` in runs where the
       // orchestrator never reads this mailbox) will likely never see the note.
-      const agents = listAgents(ctx);
       const known =
-        to === "all" || agents.some((agent) => agent.workerTaskId === to);
+        to === "all" || registry.some((agent) => agent.workerTaskId === to);
       const warning = known
         ? null
         : `Warning: "${to}" is not in the peer registry — the message may never be read. Do not block on a reply; check peer_list for valid recipients.`;
@@ -357,9 +416,10 @@ export function registerWorkerPeerComms(pi: ExtensionAPI, ctx: PeerCommsContext)
       const replyTo = params.replyTo?.trim() || null;
       const timeoutSeconds = Math.max(1, Math.min(600, Number(params.timeoutSeconds ?? 120)));
       const deadline = Date.now() + timeoutSeconds * 1000;
+      const excluded = outOfPeerGroup(selfCardOf(ctx, listAgents(ctx)));
       while (Date.now() <= deadline && !signal?.aborted) {
         const match = readMessages(ctx).find((message) => {
-          if (!targetMatches(message, ctx.selfId)) return false;
+          if (!deliverable(message, ctx, excluded)) return false;
           if (from && message.from !== from) return false;
           if (replyTo && message.replyTo !== replyTo) return false;
           return isUnread(message, ctx.selfId);

@@ -194,14 +194,23 @@ check("every complexity tier tells the manager artifacts are deliverables", () =
 // ── 2) Enforceable independence ───────────────────────────────────────────
 
 check("an isolated worker keeps the manager channel and loses the peer one", () => {
+  // Since the group chat became opt-in the rule lives in two predicates: the
+  // membership gate refuses an isolated worker outright, and the provisioning
+  // gate still hands it the mailbox whenever the manager reads that mailbox.
   const gate = extractFunction(WORKER_PROMPT, "export function shouldUsePeerComms");
-  assert.match(gate, /task\.isolated === true && !managerInboxIsRead\(run\)/);
-  assert.match(gate, /councilGroupId !== undefined\) return false/, "the council carve-out survives");
+  assert.match(gate, /task\.isolated === true\) return false/);
+  const mailbox = extractFunction(WORKER_PROMPT, "export function shouldProvisionWorkerMailbox");
+  assert.match(mailbox, /return managerInboxIsRead\(run\)/);
+  const batch = extractFunction(WORKER_PROMPT, "function runsInParallelBatch");
+  assert.match(batch, /councilGroupId !== undefined\) return false/, "the council carve-out survives");
 });
 
 check("the isolated prompt replaces the coordination block rather than softening it", () => {
   const guidance = extractFunction(WORKER_PROMPT, "function renderPeerCommsGuidance");
-  const isolatedBranch = guidance.slice(guidance.indexOf("if (isolated)"), guidance.indexOf("const opening"));
+  const isolatedBranch = guidance.slice(
+    guidance.indexOf("if (!peerGroupMember)"),
+    guidance.indexOf("const opening"),
+  );
   assert.ok(isolatedBranch.length > 0, "there must be a distinct isolated branch");
   // The exact contradiction that shipped: these must not reach an isolated
   // worker whose brief says not to communicate.
@@ -318,8 +327,13 @@ async function mailboxChecks() {
 
 check("the Pi mailbox enforces the same rule as the CLI one", () => {
   const pi = read("resources/pi-cora/worker-peer-comms.ts");
-  assert.match(pi, /selfCard\?\.isolated && to !== MANAGER_PEER_ID/);
-  assert.match(pi, /targetCard\?\.isolated/);
+  // outOfPeerGroup() folds isolated together with "never flagged into the
+  // step's group chat": both may only address the manager, and neither is a
+  // valid recipient. scripts/test-peer-comms-opt-in.cjs executes both
+  // transports against the same fixtures to prove they agree.
+  assert.match(pi, /card\.isolated === true \|\| card\.peers === false/);
+  assert.match(pi, /outOfPeerGroup\(selfCard\) && to !== MANAGER_PEER_ID/);
+  assert.match(pi, /outOfPeerGroup\(targetCard\)/);
   assert.match(pi, /const MANAGER_PEER_ID = "manager"/);
 });
 

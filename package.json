@@ -94,6 +94,7 @@
     "test:composer-fast-mode": "node scripts/test-composer-fast-mode.cjs",
     "test:codex-worker-fast-mode": "node scripts/test-codex-worker-fast-mode.cjs",
     "test:worker-independence": "node scripts/test-worker-independence.cjs",
+    "test:peer-comms-opt-in": "node scripts/test-peer-comms-opt-in.cjs",
     "test:verifier-scoping": "node scripts/test-verifier-scoping.cjs",
     "test:user-message-resume": "node scripts/test-user-message-resume.cjs",
     "test:run-resume-guard": "node scripts/test-run-resume-guard.cjs",

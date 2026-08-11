@@ -34,7 +34,7 @@ function usage() {
     "Cora peer comms",
     "",
     "Commands:",
-    "  list  --dir <peer-comms-dir>",
+    "  list  --dir <peer-comms-dir> [--self <workerTaskId>]",
     "  inbox --dir <peer-comms-dir> --self <workerTaskId> [--limit 20] [--unread] [--mark-read]",
     "  send  --dir <peer-comms-dir> --from <workerTaskId> --to <workerTaskId|all> --subject <text> --body <text>",
     "  send  --dir <peer-comms-dir> --from <workerTaskId> --to <workerTaskId|all> --subject <text> --stdin",
@@ -109,6 +109,30 @@ function targetMatches(message, self) {
   return Array.isArray(to) && to.includes(self);
 }
 
+// Out of the step's group chat: deliberately independent, or simply never
+// flagged for it. Both keep the manager channel and lose peer traffic in both
+// directions. An absent card means the roster moved on to another step, never
+// "not a member" — the run-level registry is rewritten per attempt — so
+// absence must stay permissive.
+function outOfPeerGroup(card) {
+  if (!card) return false;
+  return card.isolated === true || card.peers === false;
+}
+
+function readAgents(dir) {
+  const registry = readJson(path.join(dir, "agents.json"), { agents: [] });
+  return Array.isArray(registry.agents) ? registry.agents.filter(Boolean) : [];
+}
+
+// A worker outside the chat does not receive peer BROADCASTS: an "all" from a
+// peer is peer traffic, and delivering it would hand back through the inbox
+// exactly what send refuses. An "all" from the manager always lands.
+function deliverable(message, self, excluded) {
+  if (!targetMatches(message, self)) return false;
+  if (!excluded) return true;
+  return message.to !== "all" || message.from === "manager";
+}
+
 function renderMessage(message) {
   const head = [
     "[" + message.id + "]",
@@ -129,9 +153,17 @@ async function bodyFromArgs(args) {
 
 function commandList(dir, args) {
   const registry = readJson(path.join(dir, "agents.json"), { agents: [] });
-  const agents = Array.isArray(registry.agents) ? registry.agents : [];
+  const all = Array.isArray(registry.agents) ? registry.agents.filter(Boolean) : [];
+  // Show only who this worker may actually address: the group chat plus the
+  // manager. A worker outside the chat sees the manager alone — listing peers
+  // it may not message would only invite refused sends.
+  const self = args.self && args.self !== true ? String(args.self) : null;
+  const selfCard = self ? all.find((agent) => agent.workerTaskId === self) : null;
+  const agents = outOfPeerGroup(selfCard)
+    ? all.filter((agent) => agent.workerTaskId === "manager")
+    : all.filter((agent) => agent.workerTaskId === "manager" || !outOfPeerGroup(agent));
   if (args.json) {
-    console.log(JSON.stringify(registry, null, 2));
+    console.log(JSON.stringify({ ...registry, agents }, null, 2));
     return;
   }
   if (agents.length === 0) {
@@ -155,7 +187,8 @@ function commandList(dir, args) {
 function commandInbox(dir, args) {
   const self = required(args, "self");
   const limit = Math.max(1, Number(args.limit || 20));
-  const messages = readMessages(dir).filter((message) => targetMatches(message, self));
+  const excluded = outOfPeerGroup(readAgents(dir).find((agent) => agent.workerTaskId === self));
+  const messages = readMessages(dir).filter((message) => deliverable(message, self, excluded));
   const filtered = args.unread
     ? messages.filter((message) => !Array.isArray(message.readBy) || !message.readBy.includes(self))
     : messages;
@@ -185,21 +218,25 @@ async function commandSend(dir, args, replyTo) {
   const subject = args.subject && args.subject !== true ? String(args.subject) : "";
   const body = await bodyFromArgs(args);
   if (!body.trim()) throw new Error("message body is empty; pass --body or --stdin");
-  // Independence is enforced here as well as in the Pi peer_send tool, because
-  // a mixed batch can have one worker on each transport and a rule that only
-  // one of them obeys is not a rule. Registry is the single source of truth.
-  const registry = readJson(path.join(dir, "agents.json"), { agents: [] });
-  const cards = Array.isArray(registry.agents) ? registry.agents : [];
-  const selfCard = cards.find((agent) => agent && agent.workerTaskId === from);
-  if (selfCard && selfCard.isolated && to !== "manager") {
+  // Group-chat membership is enforced here as well as in the Pi peer_send tool,
+  // because a mixed batch can have one worker on each transport and a rule that
+  // only one of them obeys is not a rule. Registry is the single source of
+  // truth for both who is independent and who was flagged into the chat.
+  const cards = readAgents(dir);
+  const selfCard = cards.find((agent) => agent.workerTaskId === from);
+  if (outOfPeerGroup(selfCard) && to !== "manager") {
     throw new Error(
-      "this task is running independently on purpose: send may only address the manager",
+      selfCard.isolated
+        ? "this task is running independently on purpose: send may only address the manager"
+        : "this task is not in the step's worker group chat: send may only address the manager",
     );
   }
-  const targetCard = cards.find((agent) => agent && agent.workerTaskId === to);
-  if (targetCard && targetCard.isolated) {
+  const targetCard = cards.find((agent) => agent.workerTaskId === to);
+  if (outOfPeerGroup(targetCard)) {
     throw new Error(
-      '"' + to + '" is running independently on purpose and cannot receive peer messages',
+      targetCard.isolated
+        ? '"' + to + '" is running independently on purpose and cannot receive peer messages'
+        : '"' + to + '" is not in the step\'s worker group chat and cannot receive peer messages',
     );
   }
   const message = {
@@ -224,8 +261,9 @@ async function commandAwait(dir, args) {
   const replyTo = args["reply-to"] && args["reply-to"] !== true ? String(args["reply-to"]) : null;
   const timeoutSeconds = Math.max(1, Number(args.timeout || 120));
   const deadline = Date.now() + timeoutSeconds * 1000;
+  const excluded = outOfPeerGroup(readAgents(dir).find((agent) => agent.workerTaskId === self));
   while (Date.now() <= deadline) {
-    const messages = readMessages(dir).filter((message) => targetMatches(message, self));
+    const messages = readMessages(dir).filter((message) => deliverable(message, self, excluded));
     const match = messages.find((message) => {
       if (from && message.from !== from) return false;
       if (replyTo && message.replyTo !== replyTo) return false;

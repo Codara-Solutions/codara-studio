@@ -1111,7 +1111,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_spawn_workers",
     description:
-      "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via codara_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn. Workers that produce something (including read-only research) are taskClass skeleton/feature/leaf; taskClass 'verifier' is only for a read-only re-check of an artifact an implementation worker already produced.",
+      "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via codara_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn. Workers that produce something (including read-only research) are taskClass skeleton/feature/leaf; taskClass 'verifier' is only for a read-only re-check of an artifact an implementation worker already produced. Workers do NOT talk to each other unless you say so: set `peers: true` on each worker that belongs in the step's group chat (there is no chat between an unflagged worker and anyone). You can message and be messaged by every worker either way.",
     inputSchema: {
       type: "object",
       required: ["workers"],
@@ -1183,10 +1183,15 @@ const EXECUTE_TOOLS = [
                 description:
                   "Optional worker_task_id of an ACCEPTED worker from this run. Use it for follow-up or corrective work on files that finished worker just covered: Codara resumes that worker's runtime session (same runtime and model, prior context intact) so the new prompt lands as its next turn instead of paying a cold start. Only honored while the finished attempt's context usage is low; otherwise Codara spawns cold and the result note says why. Never allowed on taskClass verifier; verification must start fresh.",
               },
+              peers: {
+                type: "boolean",
+                description:
+                  "Default false. Set true to add this worker to the step's group chat: only flagged workers can send peer messages to each other, and both mailbox transports refuse a send to or from an unflagged worker. Flag the workers that need to coordinate; leave independent workers unflagged. Flag a worker when its slice shares an interface/contract with another worker in the same batch, when two slices could duplicate or collide on shared territory, or when one worker must settle something with another before building on it, and flag EVERY member of that conversation, since a group of one is nothing. Leave it off for slices that are already fully specified by their own brief, for verifiers, and for anything the user asked to be independent. Unflagged costs you nothing: you can still message every worker with codara_message_workers and it can still message you, flagged or not.",
+              },
               isolated: {
                 type: "boolean",
                 description:
-                  "Set true when this worker's conclusion is only worth anything if it reached it ALONE: independent investigations of the same question whose answers you intend to compare, cross-checks, second opinions, or any time the user asks for workers that do not talk to each other. It removes the peer mailbox for this worker (peers cannot message it and it cannot message them; both transports refuse the send) and removes the coordinate-with-your-peers guidance from its prompt. You can still message it and it can still message you, so independence never costs you steering. Default false: for ordinary parallel slices of one job, peers coordinating is what stops duplicated work and contract drift. Putting 'do not talk to each other' in the description alone does NOT do this.",
+                  "Set true when this worker's conclusion is only worth anything if it reached it ALONE: independent investigations of the same question whose answers you intend to compare, cross-checks, second opinions, or any time the user asks for workers that do not talk to each other. It tells the worker so in its prompt, in as many words, and it overrides `peers` if you set both. Peer traffic to and from it is refused by both transports. You can still message it and it can still message you, so independence never costs you steering. Since the group chat is opt-in (`peers`), simply leaving `peers` off already keeps a worker out of it; use `isolated` when the independence is the POINT of the task and the worker must know it. Putting 'do not talk to each other' in the description alone does NOT do this.",
               },
             },
             additionalProperties: false,

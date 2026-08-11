@@ -1782,6 +1782,8 @@ interface OrchestratorWorkerInput {
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
   /** No peer-to-peer mailbox for this worker. See WorkerTask.isolated. */
   isolated?: boolean;
+  /** Opt in to the step's worker group chat (default off). See WorkerTask.peers. */
+  peers?: boolean;
   /** Accepted worker task whose runtime session this worker should continue.
    *  Gated by evaluateWorkerSessionReuse; falls back to a cold spawn with an
    *  explanatory note when the gate fails. Never valid on a verifier. */
@@ -2369,11 +2371,12 @@ async function handleOrchestratorSpawnWorkers(
   const synthStep = stepRunState.steps.at(-1);
   const synthStepId = synthStep?.id;
 
-  // A batch of ≥2 workers coordinates through the shared peer-comms mailbox and
-  // the manager channel, so mark every task in a multi-worker spawn parallel.
-  // shouldUsePeerComms gates on canRunParallel, so this is what makes the
-  // mailbox + guidance fire for manager-spawned fleets. Single-worker spawns
-  // stay sequential (no peers to coordinate with).
+  // A batch of ≥2 workers shares the mailbox (the manager channel always, the
+  // peer group chat for whichever workers were flagged `peers`), so mark every
+  // task in a multi-worker spawn parallel. Both mailbox gates require
+  // canRunParallel, so this is what lets them fire at all for manager-spawned
+  // fleets. Single-worker spawns stay sequential (no peers to coordinate with,
+  // and nothing to steer around).
   const isParallelBatch = workerTitles.length >= 2;
 
   const workerTaskIds: string[] = [];
@@ -2452,6 +2455,10 @@ async function handleOrchestratorSpawnWorkers(
       // suppresses peer-to-peer traffic ONLY: the manager can still reach an
       // isolated worker, so asking for independence never costs steering.
       isolated: isParallelBatch && w.isolated === true ? true : undefined,
+      // Opt-in group chat, default off. Also only meaningful inside a parallel
+      // batch (a solo worker has nobody to talk to) and it never widens what
+      // the manager can reach, only what this worker's peers can.
+      peers: isParallelBatch && w.peers === true ? true : undefined,
       // Every attempt of a multi-worker spawn launches simultaneously below
       // (scheduleAutopilotCycles), bypassing pickAutopilotTasks. Mark the
       // tasks so retry/fallback waves keep that concurrency: without the

@@ -3269,8 +3269,23 @@ export interface WorkerTask {
    * workers could only put the request in prose, directly above a generated
    * PEER WORKER COMMUNICATION section telling the same worker to "share
    * findings early". Whichever instruction a model followed was luck.
+   *
+   * Since `peers` made the group chat opt-in, this is the hard opt-out that
+   * wins over an explicit `peers: true` as well — a worker asked for BOTH is
+   * contradictory, and independence is the safer half to honour.
    */
   isolated?: boolean;
+  /**
+   * Opt-in membership of the step's worker group chat (default OFF). Only
+   * flagged, non-isolated workers of a step can peer_send to each other; the
+   * manager channel is separate and stays open for every batch worker, so
+   * leaving this unset costs steering nothing.
+   *
+   * Set by the manager per worker at spawn time (codara_spawn_workers `peers`).
+   * Planner/autopilot-created tasks have no way to set it, so they default off.
+   * This is the INTENT flag; `peerComms` below is the per-attempt outcome.
+   */
+  peers?: boolean;
   // How allowedPaths was decided. Optional + backward-compatible: undefined on
   // existing tasks reads as manager-provided scopes. Set to "derived" when
   // overwritten from real filesChanged and "fan-out" when forced by a
@@ -3287,12 +3302,15 @@ export interface WorkerTask {
   // serial chain. Undefined on planner/autopilot-created tasks, which stay
   // subject to the fan-out no-concrete-scope serial downgrade.
   parallelTrust?: "manager_batch";
-  // True when this task's attempt was wired for peer comms: the worker got the
-  // shared mailbox (peer_send / peer_inbox and the manager channel riding the
-  // same artifacts) because it runs alongside same-step siblings. Written by
+  // True when this task's attempt joined the step's worker group chat: the
+  // worker was flagged `peers` and runs alongside same-step siblings, so it can
+  // peer_send to (and be reached by) the other flagged workers. Written by
   // prepareWorkerTask from shouldUsePeerComms, so the renderer can draw the
   // batch as a team instead of guessing at the gate. Undefined on tasks that
-  // predate the flag and on every solo worker, both of which render unchanged.
+  // predate the flag and on every unflagged or solo worker, all of which render
+  // unchanged. NOT the same as "has a mailbox": every batch worker gets the
+  // mailbox artifacts for the manager channel (shouldProvisionWorkerMailbox);
+  // this flag is peer-group membership alone.
   peerComms?: boolean;
   // Plan-mode council: candidates of the same council share this id and each
   // carries its 0-based candidateIndex. Undefined for normal tasks. Lets same-
@@ -4068,6 +4086,8 @@ export interface CreateWorkerTaskInput {
   taskClass?: PlannedStepAgentTaskClass;
   /** Threads onto the created WorkerTask. See WorkerTask.isolated. */
   isolated?: boolean;
+  /** Threads onto the created WorkerTask. See WorkerTask.peers. */
+  peers?: boolean;
   // Provenance for allowedPaths; threads onto the created WorkerTask. Optional
   // so existing createWorkerTask call sites keep compiling (undefined =
   // manager-provided scopes).

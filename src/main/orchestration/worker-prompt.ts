@@ -4,8 +4,10 @@
 // or verifier prompt renderer, each of which assembles the markdown launch
 // prompt from the task/step/run context plus synced MCP-skill, peer-comms,
 // runtime-delegation, and UI-quality guidance blocks. readWorkerPromptForLaunch
-// reads the prepared prompt.md back at launch time. shouldUsePeerComms gates
-// the peer mailbox both here and at launch/registry sites in run-store.
+// reads the prepared prompt.md back at launch time. shouldUsePeerComms (who is
+// in the step's opt-in group chat) and shouldProvisionWorkerMailbox (who has a
+// mailbox at all, so Cora can steer them) gate the peer artifacts both here and
+// at the launch/registry sites in run-store.
 // Extracted from run-store.ts (move-only).
 
 import { promises as fs } from "node:fs";
@@ -190,13 +192,11 @@ function shouldRenderAgentSyncPromptLines(step: StepState | undefined, task: Wor
   );
 }
 
-// Peer comms (and the manager mailbox that rides on the same artifacts) fire
-// for any parallel batch: a task that may run alongside same-step peers gets
-// the mailbox + guidance automatically. Every ≥2-worker spawn marks its tasks
-// canRunParallel, so manager-spawned fleets always coordinate. The earlier
-// keyword-regex gate is gone, a shared mailbox is cheap and the manager may
-// need to steer any batch worker regardless of how its brief was phrased.
-export function shouldUsePeerComms(
+// True when this task runs inside a real parallel batch: a step exists, the
+// task may run alongside siblings, and at least one sibling (created or merely
+// planned) actually exists. The shared precondition of both mailbox gates
+// below: a mailbox with exactly one participant is furniture.
+function runsInParallelBatch(
   run: RunState,
   step: StepState | undefined,
   task: WorkerTask,
@@ -204,17 +204,59 @@ export function shouldUsePeerComms(
   if (!step || !task.canRunParallel) return false;
   // Best-of-N plan-council candidates are DELIBERATELY independent, their
   // prompt promises N independent planners, so cross-candidate mailbox chatter
-  // would converge the drafts and defeat the council. No peer comms for them.
+  // would converge the drafts and defeat the council. No mailbox for them.
   if (task.councilGroupId !== undefined) return false;
-  // Same reasoning, reached explicitly: an isolated worker keeps the mailbox
-  // ONLY while the manager can read it, because that channel is what makes
-  // independence free (Cora can still steer). With no manager reader there is
-  // nobody left to talk to, so provisioning a mailbox would just re-offer the
-  // peer traffic the caller asked us to suppress.
-  if (task.isolated === true && !managerInboxIsRead(run)) return false;
   const peerTasks = run.workerTasks.filter((item) => item.stepId === task.stepId && item.id !== task.id);
   const plannedPeerCount = Math.max(0, (step.plannedAgents?.length ?? 0) - 1);
   return peerTasks.length + plannedPeerCount > 0;
+}
+
+// PEER-GROUP MEMBERSHIP. Opt-in per worker since the group chat stopped being
+// automatic: only workers the manager explicitly flagged `peers` are in the
+// step's chat, and only they can peer_send to each other. This is what
+// prepareWorkerTask persists as task.peerComms, what the registry roster is
+// restricted to, what draws the peers wires in the run graph, and what selects
+// the coordinate-with-your-peers prompt block.
+//
+// It is NOT what decides whether a worker has a mailbox at all, see
+// shouldProvisionWorkerMailbox. Cora must be able to steer every worker she
+// spawned, flagged or not, so the manager channel outlives this gate.
+export function shouldUsePeerComms(
+  run: RunState,
+  step: StepState | undefined,
+  task: WorkerTask,
+): boolean {
+  if (!runsInParallelBatch(run, step, task)) return false;
+  // Default OFF. An unflagged worker is exactly as independent as an isolated
+  // one where peer traffic is concerned; it simply did not have to say so.
+  if (task.peers !== true) return false;
+  // Hard opt-out, and it beats an explicit `peers: true`: a worker asked to be
+  // both independent and chatty is a contradiction, and honouring independence
+  // is the half that cannot be undone by a model reading the prompt wrong.
+  if (task.isolated === true) return false;
+  return true;
+}
+
+// MAILBOX PROVISIONING. Broader than group membership on purpose: the manager
+// channel (codara_message_workers / codara_check_messages / the wait_for_workers
+// drain) rides the same on-disk artifacts as peer traffic, so gating the
+// artifacts on group membership would silently make every unflagged worker,
+// i.e. the default, unsteerable. Group membership decides who a worker may
+// talk to; this decides whether the mailbox exists.
+//
+// The manager-reader condition is the same one that has always applied to
+// isolated workers: with nobody reading the manager inbox (fan-out, council,
+// loom, non-execute autopilot) a non-member's mailbox has no counterparty at
+// all, so provisioning one would only re-offer the peer traffic the caller
+// declined.
+export function shouldProvisionWorkerMailbox(
+  run: RunState,
+  step: StepState | undefined,
+  task: WorkerTask,
+): boolean {
+  if (!runsInParallelBatch(run, step, task)) return false;
+  if (shouldUsePeerComms(run, step, task)) return true;
+  return managerInboxIsRead(run);
 }
 
 // Mirror of run-store's usePiWorkerHarness gate (kept local to avoid an import
@@ -340,25 +382,39 @@ function renderPeerCommsGuidance(
   // on-disk mailbox; CLI transports keep the node script incantation. The two
   // interoperate file-for-file, so mixed batches still coordinate.
   nativePeerTools: boolean,
-  // Deliberate independence (WorkerTask.isolated). The whole coordinate-with-
-  // your-peers block is REPLACED rather than softened: leaving "share findings
-  // early, reply before resuming your own work" in a prompt whose task
-  // description says "do not communicate with any peer" is a contradiction, and
-  // which half a model honours is luck. Observed live in run-msatwoee-dqndvr.
+  // Peer-group membership (shouldUsePeerComms). False for the two populations
+  // that share one mailbox shape: deliberately independent workers
+  // (WorkerTask.isolated) and workers the manager simply never flagged `peers`.
+  // Both get a MANAGER-ONLY block. The coordinate-with-your-peers
+  // block is REPLACED rather than softened: leaving "share findings early,
+  // reply before resuming your own work" in a prompt for a worker whose sends
+  // the transports will refuse is a contradiction, and which half a model
+  // honours is luck. Observed live in run-msatwoee-dqndvr.
+  peerGroupMember: boolean,
+  // Deliberate independence (WorkerTask.isolated) rather than merely unflagged.
+  // Only changes WHY the manager-only block says what it says: an isolated
+  // worker was asked to reach its conclusion alone and must be told so;
+  // an unflagged one just has no group chat and should not be handed a
+  // no-peers narrative its brief never mentioned.
   isolated: boolean,
 ): string[] {
   if (!paths.peerCommsDir || !paths.peerCommsScript) return [];
-  if (isolated) {
-    // shouldUsePeerComms refuses the mailbox entirely when the manager cannot
-    // read it, so reaching here with managerReachable false would mean the two
-    // predicates have drifted apart. Say nothing rather than advertise a
-    // recipient that does not exist.
+  if (!peerGroupMember) {
+    // shouldProvisionWorkerMailbox refuses the mailbox entirely for a
+    // non-member when the manager cannot read it, so reaching here with
+    // managerReachable false would mean the two predicates have drifted apart.
+    // Say nothing rather than advertise a recipient that does not exist.
     if (!managerReachable) return [];
-    const header = [
-      "You are running INDEPENDENTLY. Other workers may be running the same or a related brief at the same time, on purpose, so that their conclusions can be compared against yours.",
-      "Do NOT contact them, do not read their notes, and do not try to discover what they are doing. Reach your own conclusion from the evidence you gather yourself. Agreement you arrived at by yourself is a signal; agreement you arrived at by coordinating is not.",
-      "The one open channel is `manager` (Cora, the orchestrator that spawned you). Use it if you are blocked, if the brief is wrong, or at a significant milestone. Cora may also message you to steer or answer; you will see it next time you read your inbox.",
-    ];
+    const header = isolated
+      ? [
+          "You are running INDEPENDENTLY. Other workers may be running the same or a related brief at the same time, on purpose, so that their conclusions can be compared against yours.",
+          "Do NOT contact them, do not read their notes, and do not try to discover what they are doing. Reach your own conclusion from the evidence you gather yourself. Agreement you arrived at by yourself is a signal; agreement you arrived at by coordinating is not.",
+          "The one open channel is `manager` (Cora, the orchestrator that spawned you). Use it if you are blocked, if the brief is wrong, or at a significant milestone. Cora may also message you to steer or answer; you will see it next time you read your inbox.",
+        ]
+      : [
+          "This mailbox is MANAGER-ONLY for you. You are not in a group chat with other workers: you cannot message them and they cannot message you, and both mailbox transports refuse the send. Your task brief is complete on its own; work from it and from the evidence you gather yourself.",
+          "The one open channel is `manager` (Cora, the orchestrator that spawned you). Use it if you are blocked, if the brief is wrong or impossible, or at a significant milestone. Cora may also message you to steer or answer; you will see it next time you read your inbox.",
+        ];
     return nativePeerTools
       ? [
           ...header,
@@ -376,8 +432,9 @@ function renderPeerCommsGuidance(
   }
   const opening = [
     managerReachable
-      ? "Cora may be running several workers for this same step, plus the `manager` that spawned this batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
-      : "Cora may be running several workers for this same step. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, or ask a peer for a second opinion.",
+      ? "Cora put you in a group chat with the other workers she flagged for this step, plus the `manager` that spawned the batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
+      : "Cora put you in a group chat with the other workers she flagged for this step. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, or ask a peer for a second opinion.",
+    "The chat is opt-in per worker, so it may not contain every worker of the step. Your reachable peers are exactly the ones the roster shows; anyone else is out of the chat and a send to them is refused.",
     "Peers are teammates, not competitors: share findings early, claim a scope before working in shared territory, and ask before duplicating work another peer may already own. Cora, the orchestrator that spawned this batch, oversees the fleet, and only Cora ends a worker session: finish your task and write your final report; never idle waiting for peers.",
     "This is a run-artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
   ];
@@ -419,7 +476,7 @@ function renderPeerCommsGuidance(
     managerReachable
       ? "Addressable recipients: any peer worker task id shown by `list`, `all` (every peer), or `manager` (the orchestrator that spawned you)."
       : "Addressable recipients: any peer worker task id shown by `list`, or `all` (every peer).",
-    `List participants: node "${script}" list --dir "${dir}"`,
+    `List participants: node "${script}" list --dir "${dir}" --self ${self}`,
     `Check your inbox at natural checkpoints (after finishing a phase, before starting integration): node "${script}" inbox --dir "${dir}" --self ${self} --unread --mark-read`,
     managerReachable ? "Send a message to a peer, `all`, or `manager`:" : "Send a message to a peer or `all`:",
     `  node "${script}" send --dir "${dir}" --from ${self} --to "${managerReachable ? "<peer_task_id|all|manager>" : "<peer_task_id|all>"}" --subject "<topic>" --body "Short note, under ~300 words; include exact files/commands when useful."`,
@@ -707,12 +764,13 @@ function renderImplementationWorkerPrompt({
     lines.push("", "## SYNCED MCP / SKILL CONTEXT", ...syncGuidance);
   }
 
-  const peerCommsGuidance = shouldUsePeerComms(run, step, task)
+  const peerCommsGuidance = shouldProvisionWorkerMailbox(run, step, task)
     ? renderPeerCommsGuidance(
         task,
         paths,
         managerInboxIsRead(run),
         usesPiWorkerHarness(run, task),
+        shouldUsePeerComms(run, step, task),
         task.isolated === true,
       )
     : [];
@@ -891,12 +949,13 @@ function renderVerifierWorkerPrompt({
     lines.push("", "## SYNCED MCP / SKILL CONTEXT", ...syncGuidance);
   }
 
-  const peerCommsGuidance = shouldUsePeerComms(run, step, task)
+  const peerCommsGuidance = shouldProvisionWorkerMailbox(run, step, task)
     ? renderPeerCommsGuidance(
         task,
         paths,
         managerInboxIsRead(run),
         usesPiWorkerHarness(run, task),
+        shouldUsePeerComms(run, step, task),
         task.isolated === true,
       )
     : [];

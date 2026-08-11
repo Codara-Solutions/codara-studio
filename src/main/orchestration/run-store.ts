@@ -210,6 +210,7 @@ import { collectRunResultManifest } from "./result-manifest";
 import {
   readWorkerPromptForLaunch,
   renderWorkerPrompt,
+  shouldProvisionWorkerMailbox,
   shouldUsePeerComms,
 } from "./worker-prompt";
 import {
@@ -11986,6 +11987,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     verificationCommands: input.verificationCommands ?? [],
     canRunParallel: input.canRunParallel ?? false,
     ...(input.isolated === true ? { isolated: true as const } : {}),
+    ...(input.peers === true ? { peers: true as const } : {}),
     conflictsWith: input.conflictsWith ?? [],
     taskClass: input.taskClass,
     writeScopeSource: input.writeScopeSource,
@@ -12211,13 +12213,17 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     createdAt: timestamp,
   };
   const peerCommsEnabled = shouldUsePeerComms(run, step, task);
-  // Persist the gate's answer on the task itself. The renderer already receives
-  // workerTasks, so this is what lets the run graph draw the batch as a team
-  // that can message itself rather than as isolated satellites. `task` is the
-  // live run record, and both the envelope JSON below and saveRun pick it up.
+  // Persist the group-chat gate's answer on the task itself. The renderer
+  // already receives workerTasks, so this is what lets the run graph draw the
+  // flagged workers as a team that can message itself rather than as isolated
+  // satellites. `task` is the live run record, and both the envelope JSON below
+  // and saveRun pick it up.
   if (peerCommsEnabled) task.peerComms = true;
   else delete task.peerComms;
-  if (peerCommsEnabled) {
+  // Broader than the group chat on purpose: an unflagged batch worker still
+  // gets the mailbox so Cora can steer it (codara_message_workers). The
+  // registry roster inside keeps peer traffic restricted to flagged workers.
+  if (shouldProvisionWorkerMailbox(run, step, task)) {
     await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
   }
   const priorHandoffs = await collectPriorWorkerHandoffs(run, task);
@@ -12540,12 +12546,14 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     }
   }
 
-  // Peer-traffic observability rides the batch lifecycle: the first
-  // peer-comms worker to launch opens the run's mailbox watcher, the last one
-  // to finish closes it. Best-effort — traffic events must never block a run.
-  // Release is paired strictly with a successful acquire so a failed acquire
-  // can never decrement a sibling worker's refcount.
-  const watchPeerComms = shouldUsePeerComms(run, launchStep, task);
+  // Mailbox-traffic observability rides the batch lifecycle: the first worker
+  // with a mailbox to launch opens the run's watcher, the last one to finish
+  // closes it. Gated on provisioning rather than group membership so
+  // manager↔worker steering stays visible in the event log even in a batch
+  // where nobody was flagged for the group chat. Best-effort — traffic events
+  // must never block a run. Release is paired strictly with a successful
+  // acquire so a failed acquire can never decrement a sibling's refcount.
+  const watchPeerComms = shouldProvisionWorkerMailbox(run, launchStep, task);
   const peerCommsAcquired = watchPeerComms
     ? await acquirePeerCommsWatcher(run).catch(() => false)
     : false;
@@ -17160,6 +17168,17 @@ interface PeerCommsAgentCard {
    * this card, so the registry is the single source of truth for the rule.
    */
   isolated?: boolean;
+  /**
+   * Group-chat membership (WorkerTask.peers / peerComms). False cards are in
+   * the file only so the transports can refuse their traffic from POSITIVE
+   * evidence — the registry is per-run and gets rewritten by whichever step
+   * prepares an attempt last, so "absent from the roster" can also mean "the
+   * roster moved on", which must never harden into a refusal. `list` /
+   * `peer_list` hide false cards, so a worker is never shown a peer it may not
+   * address. Undefined on rosters written before the flag existed: those runs
+   * were all-members, and the transports read undefined as such.
+   */
+  peers?: boolean;
   allowedPaths: string[];
   forbiddenPaths: string[];
   expectedOutputs: string[];
@@ -17180,6 +17199,23 @@ async function ensurePeerCommsArtifacts(
   await updatePeerCommsRegistry(run, step, task, attemptId, paths, status);
 }
 
+// Who is in the step's group chat, from the task record alone. Deliberately
+// reads BOTH flags: `peers` is the manager's intent, stamped at task creation,
+// so a batch launching simultaneously never has a window where a flagged peer
+// is not yet addressable; `peerComms` is the per-attempt outcome, which also
+// keeps runs that were already in flight before `peers` existed working (their
+// tasks carry the outcome flag and nothing else). isolated beats both.
+function isPeerGroupMember(task: WorkerTask): boolean {
+  if (task.isolated === true) return false;
+  return task.peers === true || task.peerComms === true;
+}
+
+// The roster every mailbox transport reads. Cards for the current step's
+// workers, each stamped with its group-chat membership: peer traffic is
+// allowed only between members, and `list` / `peer_list` show members only, so
+// an unflagged worker is never advertised as reachable. The `manager` card is
+// separate and is not subject to the rule — steering must survive a batch
+// where nobody was flagged.
 async function updatePeerCommsRegistry(
   run: RunState,
   step: StepState | undefined,
@@ -17217,6 +17253,7 @@ async function updatePeerCommsRegistry(
       status: peer.id === currentTask.id ? status : latestAttempt?.status ?? peer.status,
       canRunParallel: peer.canRunParallel,
       ...(peer.isolated === true ? { isolated: true as const } : {}),
+      peers: isPeerGroupMember(peer),
       allowedPaths: peer.allowedPaths,
       forbiddenPaths: peer.forbiddenPaths,
       expectedOutputs: peer.expectedOutputs,
@@ -17626,7 +17663,7 @@ async function runStructuredAutomationWorkerSession({
     },
   });
   const step = run.steps.find((item) => item.id === task.stepId);
-  if (shouldUsePeerComms(run, step, task)) {
+  if (shouldProvisionWorkerMailbox(run, step, task)) {
     await updatePeerCommsRegistry(run, step, task, attemptId, paths, "running")
       .catch(() => undefined);
   }
@@ -18218,9 +18255,12 @@ async function runPiWorkerSession({
 
   try {
     const step = run.steps.find((item) => item.id === task.stepId);
+    // Mailbox provisioning, not group membership: an unflagged batch worker
+    // still gets the peer_* tools so Cora can reach it. Which recipients those
+    // tools accept is decided by the registry roster, not by the env stamp.
     const peerCommsEnabled =
       runProjectPolicyMode(run) === "trusted" &&
-      shouldUsePeerComms(run, step, task);
+      shouldProvisionWorkerMailbox(run, step, task);
     const persistedAttempt = run.workerAttempts.find(
       (item) => item.id === attemptId,
     );
@@ -18654,7 +18694,7 @@ async function runWorkerSession({
         session: "pty",
       },
     });
-    if (shouldUsePeerComms(run, step, task)) {
+    if (shouldProvisionWorkerMailbox(run, step, task)) {
       await updatePeerCommsRegistry(
         run,
         step,
