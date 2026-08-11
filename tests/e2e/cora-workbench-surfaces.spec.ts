@@ -88,17 +88,16 @@ test("every Cora run exposes a stable Runs surface immediately and the Whiteboar
 
     // No plan, step, or worker exists. Chat and Runs must still be in the
     // first rendered run snapshot instead of appearing later after delegation.
-    // The Whiteboard is deliberately conditional: with no board yet there is
-    // no pill — only the quiet "New whiteboard" affordance.
+    // The whiteboard door is one icon-only tab that exists for every real run
+    // (a bare glyph until active, when it carries the "Whiteboard" label); it
+    // both opens an existing board and creates the first one.
     for (const name of ["Chat", "Runs"]) {
       await expect(page.getByRole("tab", { name, exact: true })).toBeVisible();
     }
     await expect(page.getByRole("tab", { name: "Workers", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("tab", { name: "Whiteboard", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "New whiteboard" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Whiteboard", exact: true })).toBeVisible();
 
-    // As soon as a board exists (here: Cora persists one), the Whiteboard
-    // pill joins the strip and the creation affordance retires.
+    // Persisting a board (here: Cora does) keeps the same single door.
     await page.evaluate(async (runId) => {
       const spark = (window as unknown as { spark: any }).spark;
       await spark.orchestration.updateWhiteboard({
@@ -363,11 +362,11 @@ test("a draft chat's Board promotes to an idle run on the first card without sta
     );
     await expect(composer).toBeVisible();
 
-    // The sub-view strip is available immediately on the draft: Chat + Board.
+    // The sub-view strip is available immediately on the draft: Chat + Kanban.
     // Run-scoped surfaces stay hidden — no Runs/Terminal/Whiteboard pill, and
     // no "New whiteboard" affordance (a whiteboard needs a run to attach to).
     const chatPill = page.getByRole("tab", { name: "Chat", exact: true });
-    const boardPill = page.getByRole("tab", { name: "Board", exact: true });
+    const boardPill = page.getByRole("tab", { name: "Kanban", exact: true });
     await expect(chatPill).toBeVisible();
     await expect(boardPill).toBeVisible();
     await expect(chatPill).toHaveAttribute("aria-selected", "true");

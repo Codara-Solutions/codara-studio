@@ -4395,3 +4395,232 @@ a { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .usage-bar { animation: none; }
 }
+
+/* ── Cora Board (kanban) ─────────────────────────────────────────────────── */
+
+/* A lane fills its share of the width (min 168px, then the board scrolls) so
+   the whole flow fits one screen instead of forcing a sideways safari. The
+   lane's identity color arrives as --lane-tint from the column spec. */
+.spark-board-lane {
+  flex: 1 1 0;
+  min-width: 168px;
+  max-width: 340px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-surface, 7px);
+  border: 1px solid var(--rule-soft, var(--rule));
+  background: var(--panel-2, var(--bg));
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+/* Drop highlight in the LANE'S own tint, so which lane will take the card is
+   readable in peripheral vision mid-drag. */
+.spark-board-lane--drop {
+  border-color: color-mix(in oklch, var(--lane-tint, var(--accent)) 55%, transparent);
+  background: color-mix(in oklch, var(--lane-tint, var(--accent)) 6%, var(--panel-2, var(--bg)));
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--lane-tint, var(--accent)) 25%, transparent) inset;
+}
+
+.spark-board-card {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-surface, 7px);
+  background: var(--bg);
+  box-shadow: var(--shadow-1);
+  transition:
+    transform var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
+
+.spark-board-card:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--ink) 18%, var(--rule));
+  box-shadow: var(--shadow-2);
+}
+
+/* The drag source stays in place, dimmed and slightly shrunk — the browser's
+   drag image is the moving copy. */
+.spark-board-card--dragging {
+  opacity: 0.4;
+  transform: scale(0.98);
+}
+
+/* Insertion line: grows out from the middle so a fast drag reads as the line
+   snapping to the slot, not popping. */
+.spark-board-dropline {
+  flex: 0 0 auto;
+  height: 2px;
+  margin: 0 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in oklch, var(--accent) 55%, transparent);
+  animation: spark-board-dropline-in 120ms var(--ease-out) both;
+}
+
+@keyframes spark-board-dropline-in {
+  from { transform: scaleX(0.35); opacity: 0.4; }
+  to   { transform: scaleX(1); opacity: 1; }
+}
+
+/* One-click lane hop (Queue / Done / Retry / Requeue), tinted to the lane the
+   card would move TO. */
+.spark-board-quick {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in oklch, var(--quick-tint, var(--accent)) 32%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--quick-tint, var(--accent)) 10%, transparent);
+  color: var(--quick-tint, var(--accent));
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+
+.spark-board-quick:hover {
+  background: color-mix(in oklch, var(--quick-tint, var(--accent)) 18%, transparent);
+  border-color: color-mix(in oklch, var(--quick-tint, var(--accent)) 50%, transparent);
+}
+
+/* Soft breathing dot on the "in progress" summary chip. */
+.spark-board-pulse {
+  animation: spark-board-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes spark-board-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spark-board-dropline { animation: none; }
+  .spark-board-pulse { animation: none; }
+  .spark-board-card:hover { transform: none; }
+}
+
+/* Card composer / inline card editor: one card-shaped form — borderless
+   fields separated by hairlines instead of nested boxy inputs, and a quiet
+   footer. No heavy focus ring; the container itself tints on focus. */
+.spark-board-composer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-surface, 7px);
+  background: var(--bg);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+
+.spark-board-composer:focus-within {
+  border-color: color-mix(in oklch, var(--accent) 45%, var(--rule));
+}
+
+.spark-board-composer__title,
+.spark-board-composer__desc {
+  appearance: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  width: 100%;
+}
+
+.spark-board-composer__title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  padding: 8px 10px 6px;
+}
+
+.spark-board-composer__desc {
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 6px 10px;
+  resize: none;
+  border-top: 1px solid var(--rule-soft, var(--rule));
+}
+
+.spark-board-composer__title::placeholder,
+.spark-board-composer__desc::placeholder {
+  color: var(--muted);
+}
+
+.spark-board-composer__footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--rule-soft, var(--rule));
+  background: color-mix(in oklab, var(--ink) 3%, transparent);
+}
+
+.spark-board-composer__add {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 2px 11px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: default;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.spark-board-composer__add:not(:disabled):hover {
+  background: color-mix(in oklch, var(--accent) 90%, var(--ink));
+}
+
+.spark-board-composer__add:disabled {
+  opacity: 0.4;
+}
+
+.spark-board-composer__cancel {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 550;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.spark-board-composer__cancel:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+
+.spark-board-composer__hint {
+  margin-left: auto;
+  font-size: 9.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  opacity: 0.8;
+}

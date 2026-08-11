@@ -73,6 +73,28 @@ const STATUS_TINT: Record<BoardCardStatus, string> = {
   done: "var(--ok)",
 };
 
+// Lane identity color — drives the header dot, the count chip, and the tinted
+// drop highlight, so "which lane am I over" is answerable in peripheral vision.
+const LANE_TINT: Record<string, string> = {
+  idea: "var(--muted)",
+  queued: "var(--accent)",
+  running: "var(--info)",
+  blocked: "var(--warn)",
+  review: "var(--accent)",
+  done: "var(--ok)",
+};
+
+// What lands in an empty lane — shown as a ghost caption inside the lane
+// itself, replacing the old board-wide instruction banner.
+const LANE_HINTS: Record<string, string> = {
+  idea: "Capture ideas. A title or a pasted screenshot is enough.",
+  queued: "Drop a card here and Cora picks it up.",
+  running: "Cards Cora's workers are building appear here.",
+  blocked: "Cards waiting on an answer from you.",
+  review: "Finished work to look over.",
+  done: "Shipped.",
+};
+
 const NOTICE_MS = 3200;
 
 const EMPTY_BOARD: RunBoard = { revision: 0, cards: [] };
@@ -441,6 +463,59 @@ export default function BoardView({
     [commit],
   );
 
+  // Inline edit: replace a card's title/description in place.
+  const patchCard = useCallback(
+    (cardId: string, patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>) => {
+      const current = boardRef.current;
+      if (!current) return;
+      const card = current.cards.find((item) => item.id === cardId);
+      if (!card) return;
+      if (card.title === patch.title && (card.description ?? "") === (patch.description ?? "")) {
+        return;
+      }
+      const timestamp = new Date().toISOString();
+      commit(
+        current.cards.map((item) =>
+          item.id === cardId
+            ? {
+                ...item,
+                title: patch.title,
+                // Omission IS the delete for optional fields.
+                ...(patch.description
+                  ? { description: patch.description }
+                  : { description: undefined }),
+                updatedAt: timestamp,
+              }
+            : item,
+        ),
+      );
+    },
+    [commit],
+  );
+
+  // One-click lane hop (Queue an idea, mark Review done, retry a failure):
+  // appends to the end of the target lane so drag stays the precise tool and
+  // the button stays the fast one.
+  const advanceCard = useCallback(
+    (cardId: string, status: BoardCardStatus) => {
+      const current = boardRef.current;
+      if (!current) return;
+      const card = current.cards.find((item) => item.id === cardId);
+      if (!card || card.status === status) return;
+      const lane = current.cards.filter((item) => item.status === status);
+      const order = lane.length > 0 ? Math.max(...lane.map((item) => item.order)) + 1 : 1;
+      const timestamp = new Date().toISOString();
+      commit(
+        current.cards.map((item) =>
+          item.id === cardId
+            ? { ...item, status, order, error: undefined, updatedAt: timestamp }
+            : item,
+        ),
+      );
+    },
+    [commit],
+  );
+
   const handleColumnDrop = useCallback(
     (column: ColumnSpec, event: React.DragEvent) => {
       const payload = parseBoardCardDrag(event.dataTransfer);
@@ -503,22 +578,7 @@ export default function BoardView({
         </div>
       )}
 
-      <div
-        style={{
-          flex: "0 0 auto",
-          display: "flex",
-          alignItems: "baseline",
-          gap: 14,
-          flexWrap: "wrap",
-          padding: "14px 16px 12px",
-        }}
-      >
-        <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "0.01em" }}>Cora Board</div>
-        <span style={{ flex: "1 1 auto", minWidth: 0, color: "var(--muted)", fontSize: 11 }}>
-          This chat&apos;s board: queue a card and Cora picks it up, spawns workers, and moves
-          it along.
-        </span>
-      </div>
+      <BoardHeader board={board} />
 
       {loadError ? (
         <div
@@ -535,30 +595,13 @@ export default function BoardView({
         </div>
       ) : (
         <>
-          {board && board.cards.length === 0 && (
-            <div
-              style={{
-                margin: "0 16px 10px",
-                padding: "10px 12px",
-                borderRadius: "var(--radius-surface, 7px)",
-                border: "1px dashed var(--rule)",
-                color: "var(--muted)",
-                fontSize: 12,
-                lineHeight: 1.5,
-              }}
-            >
-              Drop your ideas here. A terse title or a pasted screenshot is enough. Drag a card
-              to Queued and this chat&apos;s Cora will flesh it out, spawn workers (several at
-              once when cards are independent), and move it through the lanes.
-            </div>
-          )}
           <div
             style={{
               flex: 1,
               minHeight: 0,
               display: "flex",
-              gap: 10,
-              padding: "0 16px 16px",
+              gap: 8,
+              padding: "0 14px 14px",
               overflowX: "auto",
               overflowY: "hidden",
               alignItems: "stretch",
@@ -585,6 +628,8 @@ export default function BoardView({
                 onDrop={(event) => handleColumnDrop(column, event)}
                 onAddCard={(draft) => addCard(column.dropStatus, draft)}
                 onDeleteCard={deleteCard}
+                onPatchCard={patchCard}
+                onAdvanceCard={advanceCard}
                 knownWorkerTaskIds={knownWorkerTaskIds}
                 onOpenCardRun={onOpenCardRun}
                 onOpenWorkerTerminal={(workerTaskId) => {
@@ -607,6 +652,71 @@ export default function BoardView({
   );
 }
 
+// ── Header ──────────────────────────────────────────────────────────────────
+
+// One compact line: title, a live "what's happening" summary (only the lanes
+// that mean something is happening), and — on an empty board — the single
+// sentence of instruction the old full-width banner used to spend 3 lines on.
+function BoardHeader({ board }: { board: RunBoard | null }) {
+  const cards = board?.cards ?? [];
+  const count = (statuses: BoardCardStatus[]) =>
+    cards.filter((card) => statuses.includes(card.status)).length;
+  const running = count(["running"]);
+  const blocked = count(["blocked"]);
+  const review = count(["review", "failed"]);
+  return (
+    <div
+      style={{
+        flex: "0 0 auto",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flexWrap: "wrap",
+        padding: "12px 14px 10px",
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: "0.01em" }}>Kanban</div>
+      {running > 0 && (
+        <SummaryChip tint="var(--info)" text={`${running} in progress`} pulse />
+      )}
+      {blocked > 0 && <SummaryChip tint="var(--warn)" text={`${blocked} need${blocked === 1 ? "s" : ""} input`} />}
+      {review > 0 && <SummaryChip tint="var(--accent)" text={`${review} to review`} />}
+      {cards.length === 0 && (
+        <span style={{ color: "var(--muted)", fontSize: 11, minWidth: 0 }}>
+          Add an idea, drag it to Queued, and this chat&apos;s Cora takes it from there.
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SummaryChip({ tint, text, pulse = false }: { tint: string; text: string; pulse?: boolean }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "2px 8px",
+        borderRadius: 999,
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: tint,
+        background: `color-mix(in oklch, ${tint} 12%, transparent)`,
+        border: `1px solid color-mix(in oklch, ${tint} 26%, transparent)`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span
+        aria-hidden
+        className={pulse ? "spark-board-pulse" : undefined}
+        style={{ width: 5, height: 5, borderRadius: 999, background: tint }}
+      />
+      {text}
+    </span>
+  );
+}
+
 // ── Column ──────────────────────────────────────────────────────────────────
 
 function BoardColumn({
@@ -618,6 +728,8 @@ function BoardColumn({
   onDrop,
   onAddCard,
   onDeleteCard,
+  onPatchCard,
+  onAdvanceCard,
   knownWorkerTaskIds,
   onOpenCardRun,
   onOpenWorkerTerminal,
@@ -631,6 +743,11 @@ function BoardColumn({
   onDrop: (event: React.DragEvent) => void;
   onAddCard: (draft: CardDraft) => void;
   onDeleteCard: (cardId: string) => void;
+  onPatchCard: (
+    cardId: string,
+    patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>,
+  ) => void;
+  onAdvanceCard: (cardId: string, status: BoardCardStatus) => void;
   knownWorkerTaskIds: ReadonlySet<string>;
   onOpenCardRun: (runId: string) => void;
   onOpenWorkerTerminal: (workerTaskId: string) => void;
@@ -643,6 +760,8 @@ function BoardColumn({
 
   return (
     <div
+      className={dropActive ? "spark-board-lane spark-board-lane--drop" : "spark-board-lane"}
+      style={{ "--lane-tint": LANE_TINT[column.key] } as React.CSSProperties}
       onDragOver={(event) => {
         if (!acceptsCard(event)) return;
         event.preventDefault();
@@ -662,42 +781,57 @@ function BoardColumn({
         onDropIndexChange(null);
       }}
       onDrop={onDrop}
-      style={{
-        flex: "0 0 236px",
-        width: 236,
-        minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        borderRadius: "var(--radius-surface, 7px)",
-        border: `1px solid ${dropActive ? "var(--accent)" : "var(--rule-soft, var(--rule))"}`,
-        background: dropActive ? "var(--hover)" : "var(--panel-2, var(--bg))",
-        transition:
-          "border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
-      }}
     >
       <div
         style={{
           flex: "0 0 auto",
           display: "flex",
-          alignItems: "baseline",
+          alignItems: "center",
           gap: 6,
-          padding: "9px 10px 7px",
+          padding: "8px 10px 6px",
         }}
       >
         <span
+          aria-hidden
           style={{
-            fontSize: 11,
+            width: 6,
+            height: 6,
+            flex: "0 0 auto",
+            borderRadius: 999,
+            background: LANE_TINT[column.key],
+          }}
+        />
+        <span
+          style={{
+            fontSize: 10.5,
             fontWeight: 600,
-            letterSpacing: "0.06em",
+            letterSpacing: "0.07em",
             textTransform: "uppercase",
-            color: "var(--muted)",
+            color: "var(--ink-dim)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
         >
           {column.label}
         </span>
-        <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
-          {cards.length}
-        </span>
+        {cards.length > 0 && (
+          <span
+            style={{
+              marginLeft: "auto",
+              minWidth: 16,
+              textAlign: "center",
+              padding: "0 4px",
+              borderRadius: 999,
+              fontSize: 10,
+              fontFamily: "var(--font-mono)",
+              color: "var(--ink-dim)",
+              background: "color-mix(in oklab, var(--ink) 7%, transparent)",
+            }}
+          >
+            {cards.length}
+          </span>
+        )}
       </div>
 
       <div
@@ -709,7 +843,7 @@ function BoardColumn({
           display: "flex",
           flexDirection: "column",
           gap: 6,
-          padding: "0 8px 8px",
+          padding: "0 7px 7px",
         }}
       >
         {column.composer && ready && (
@@ -726,31 +860,71 @@ function BoardColumn({
               onOpenCardRun={onOpenCardRun}
               onOpenWorkerTerminal={onOpenWorkerTerminal}
               onDelete={() => onDeleteCard(card.id)}
+              onPatch={(patch) => onPatchCard(card.id, patch)}
+              onAdvance={(status) => onAdvanceCard(card.id, status)}
             />
           </React.Fragment>
         ))}
         {dropIndex === cards.length && <DropLine />}
+        {cards.length === 0 && !dropActive && (
+          <div
+            aria-hidden
+            style={{
+              flex: "0 0 auto",
+              padding: "10px 6px",
+              color: "var(--muted)",
+              fontSize: 10.5,
+              lineHeight: 1.5,
+              textAlign: "center",
+              opacity: 0.75,
+            }}
+          >
+            {LANE_HINTS[column.key]}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 function DropLine() {
-  return (
-    <div
-      aria-hidden
-      style={{
-        flex: "0 0 auto",
-        height: 2,
-        margin: "0 2px",
-        borderRadius: 1,
-        background: "var(--accent)",
-      }}
-    />
-  );
+  return <div aria-hidden className="spark-board-dropline" />;
 }
 
 // ── Card ────────────────────────────────────────────────────────────────────
+
+// One-click lane hop offered on the card itself, so the common transitions
+// (send an idea to Cora, sign off a review, retry a failure) never require a
+// drag across the whole board.
+function quickActionFor(
+  status: BoardCardStatus,
+): { label: string; title: string; to: BoardCardStatus } | null {
+  if (status === "idea") {
+    return { label: "Queue", title: "Hand this card to Cora", to: "queued" };
+  }
+  if (status === "review") {
+    return { label: "Done", title: "Sign this card off as done", to: "done" };
+  }
+  if (status === "failed") {
+    return { label: "Retry", title: "Queue this card again", to: "queued" };
+  }
+  if (status === "blocked") {
+    return { label: "Requeue", title: "Send this card back to Queued", to: "queued" };
+  }
+  return null;
+}
+
+// "3m ago" — glanceable card age without a timestamp's noise.
+function relativeTime(iso: string): string {
+  const delta = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(delta) || delta < 60_000) return "just now";
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
 
 function BoardCardView({
   card,
@@ -760,6 +934,8 @@ function BoardCardView({
   onOpenCardRun,
   onOpenWorkerTerminal,
   onDelete,
+  onPatch,
+  onAdvance,
 }: {
   card: BoardCard;
   index: number;
@@ -768,9 +944,14 @@ function BoardCardView({
   onOpenCardRun: (runId: string) => void;
   onOpenWorkerTerminal: (workerTaskId: string) => void;
   onDelete: () => void;
+  onPatch: (
+    patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>,
+  ) => void;
+  onAdvance: (status: BoardCardStatus) => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const [errorOpen, setErrorOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   // The delete control is ALWAYS mounted (so it stays tab-reachable) and only
   // revealed via opacity: on card hover, while it holds focus, or while armed.
   const [hovered, setHovered] = useState(false);
@@ -806,9 +987,26 @@ function BoardCardView({
     onDelete();
   };
 
+  if (editing) {
+    return (
+      <CardEditor
+        card={card}
+        onSave={(patch) => {
+          setEditing(false);
+          onPatch(patch);
+        }}
+        onCancel={() => setEditing(false)}
+      />
+    );
+  }
+
+  const quick = quickActionFor(card.status);
+
   return (
     <div
       draggable
+      className={dragging ? "spark-board-card spark-board-card--dragging" : "spark-board-card"}
+      onDoubleClick={() => setEditing(true)}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => {
         setHovered(false);
@@ -844,18 +1042,6 @@ function BoardCardView({
         const self = peekBoardCardDrag()?.cardId === card.id;
         onHoverIndexChange(self || before ? index : index + 1);
       }}
-      style={{
-        flex: "0 0 auto",
-        borderRadius: "var(--radius-surface, 7px)",
-        border: "1px solid var(--rule)",
-        background: "var(--bg)",
-        padding: "8px 10px",
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-        opacity: dragging ? 0.5 : 1,
-        boxShadow: "var(--shadow-1)",
-      }}
     >
       <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
         {/* Status DOT (matches the mobile card dot and the session picker),
@@ -888,6 +1074,22 @@ function BoardCardView({
         >
           {card.title}
         </span>
+        <button
+          type="button"
+          className="spark-icon-btn"
+          aria-label={`Edit card "${card.title}"`}
+          title="Edit this card (double-click also works)"
+          onClick={() => setEditing(true)}
+          style={
+            {
+              "--spark-icon-btn-size": "18px",
+              opacity: hovered ? 1 : 0,
+              transition: "opacity var(--motion-fast) var(--ease-out)",
+            } as React.CSSProperties
+          }
+        >
+          <PencilIcon />
+        </button>
         {/* One always-mounted element for both states so arming never drops
             focus: idle it is the opacity-revealed trash icon, armed it becomes
             the confirm chip. Enter/Space activate it natively; Escape (card
@@ -1009,38 +1211,151 @@ function BoardCardView({
         </div>
       )}
 
-      {(card.workerTaskId || card.runId) && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          {card.workerTaskId && (
-            <button
-              type="button"
-              className="spark-btn"
-              disabled={!workerKnown}
-              title={
-                workerKnown
-                  ? "Open the terminal of the worker on this card"
-                  : "This card's worker is no longer available"
-              }
-              onClick={() => onOpenWorkerTerminal(card.workerTaskId as string)}
-              style={{ fontSize: 11, padding: "2px 8px", opacity: workerKnown ? 1 : 0.5 }}
-            >
-              Open terminal
-            </button>
-          )}
-          {!card.workerTaskId && card.runId && (
-            // LEGACY: the retired engine spawned a separate run for this card.
-            <button
-              type="button"
-              className="spark-btn"
-              onClick={() => onOpenCardRun(card.runId as string)}
-              style={{ fontSize: 11, padding: "2px 8px" }}
-            >
-              Open chat
-            </button>
-          )}
-        </div>
-      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minHeight: 16 }}>
+        {quick && (
+          <button
+            type="button"
+            className="spark-board-quick"
+            title={quick.title}
+            onClick={() => onAdvance(quick.to)}
+            style={{ "--quick-tint": STATUS_TINT[quick.to] } as React.CSSProperties}
+          >
+            {quick.label}
+            <span aria-hidden>{quick.to === "done" ? "✓" : "→"}</span>
+          </button>
+        )}
+        {card.workerTaskId && (
+          <button
+            type="button"
+            className="spark-btn"
+            disabled={!workerKnown}
+            title={
+              workerKnown
+                ? "Open the terminal of the worker on this card"
+                : "This card's worker is no longer available"
+            }
+            onClick={() => onOpenWorkerTerminal(card.workerTaskId as string)}
+            style={{ fontSize: 10.5, padding: "1px 8px", opacity: workerKnown ? 1 : 0.5 }}
+          >
+            Terminal
+          </button>
+        )}
+        {!card.workerTaskId && card.runId && (
+          // LEGACY: the retired engine spawned a separate run for this card.
+          <button
+            type="button"
+            className="spark-btn"
+            onClick={() => onOpenCardRun(card.runId as string)}
+            style={{ fontSize: 10.5, padding: "1px 8px" }}
+          >
+            Open chat
+          </button>
+        )}
+        <span
+          title={new Date(card.updatedAt).toLocaleString()}
+          style={{
+            marginLeft: "auto",
+            fontSize: 9.5,
+            color: "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            whiteSpace: "nowrap",
+            opacity: 0.85,
+          }}
+        >
+          {relativeTime(card.updatedAt)}
+        </span>
+      </div>
     </div>
+  );
+}
+
+// Inline editor swapped in for the card on pencil / double-click. Same fields
+// as the composer; Enter in the title saves, Escape cancels.
+function CardEditor({
+  card,
+  onSave,
+  onCancel,
+}: {
+  card: BoardCard;
+  onSave: (
+    patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>,
+  ) => void;
+  onCancel: () => void;
+}) {
+  const [title, setTitle] = useState(card.title);
+  const [description, setDescription] = useState(card.description ?? "");
+
+  const save = () => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    const nextDescription = description.trim();
+    onSave(nextDescription ? { title: trimmed, description: nextDescription } : { title: trimmed });
+  };
+
+  return (
+    <div
+      className="spark-board-composer"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          onCancel();
+        }
+      }}
+    >
+      <input
+        className="spark-board-composer__title"
+        autoFocus
+        value={title}
+        onChange={(event) => setTitle(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            save();
+          }
+        }}
+      />
+      <textarea
+        className="spark-board-composer__desc"
+        value={description}
+        placeholder="Details (optional)"
+        rows={3}
+        spellCheck={false}
+        onChange={(event) => setDescription(event.target.value)}
+      />
+      <div className="spark-board-composer__footer">
+        <button
+          type="button"
+          className="spark-board-composer__add"
+          disabled={!title.trim()}
+          onClick={save}
+        >
+          Save
+        </button>
+        <button type="button" className="spark-board-composer__cancel" onClick={onCancel}>
+          Cancel
+        </button>
+        <span className="spark-board-composer__hint">Enter to save</span>
+      </div>
+    </div>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M2 12l1-3 7-7 2 2-7 7-3 1z" />
+      <path d="M9 3l2 2" />
+    </svg>
   );
 }
 
@@ -1184,6 +1499,7 @@ function AddCardComposer({
 
   return (
     <div
+      className="spark-board-composer"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.stopPropagation();
@@ -1191,20 +1507,10 @@ function AddCardComposer({
           setOpen(false);
         }
       }}
-      style={{
-        flex: "0 0 auto",
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-        border: "1px solid var(--rule)",
-        borderRadius: "var(--radius-surface, 7px)",
-        background: "var(--bg)",
-        padding: 8,
-      }}
     >
       <input
         ref={titleRef}
-        className="spark-input"
+        className="spark-board-composer__title"
         autoFocus
         value={title}
         placeholder={`New card in ${columnLabel}`}
@@ -1216,27 +1522,18 @@ function AddCardComposer({
             submit();
           }
         }}
-        style={{ fontSize: 12 }}
       />
       <textarea
-        className="spark-input"
+        className="spark-board-composer__desc"
         value={description}
-        placeholder="Description (optional). Paste screenshots here too"
+        placeholder="Details (optional) — screenshots paste here"
         rows={2}
         spellCheck={false}
         onChange={(event) => setDescription(event.target.value)}
         onPaste={onPaste}
-        style={{
-          fontSize: 11,
-          resize: "none",
-          height: "auto",
-          padding: "5px 8px",
-          fontFamily: "var(--font-sans)",
-          lineHeight: 1.4,
-        }}
       />
       {imagePaths.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: "0 10px 6px" }}>
           {imagePaths.map((path) => (
             <span key={path} style={{ position: "relative", display: "inline-flex" }}>
               <img
@@ -1282,28 +1579,28 @@ function AddCardComposer({
           ))}
         </div>
       )}
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div className="spark-board-composer__footer">
         <button
           type="button"
-          className="spark-btn is-primary"
+          className="spark-board-composer__add"
           disabled={!title.trim() || pasting}
           onClick={submit}
-          style={{ fontSize: 11, padding: "2px 10px" }}
         >
           Add
         </button>
         <button
           type="button"
-          className="spark-btn"
+          className="spark-board-composer__cancel"
           onClick={() => {
             reset();
             setOpen(false);
           }}
-          style={{ fontSize: 11, padding: "2px 10px" }}
         >
           Cancel
         </button>
-        {pasting && <span style={{ fontSize: 10, color: "var(--muted)" }}>Adding image…</span>}
+        <span className="spark-board-composer__hint">
+          {pasting ? "Adding image…" : "Enter to add"}
+        </span>
       </div>
     </div>
   );
