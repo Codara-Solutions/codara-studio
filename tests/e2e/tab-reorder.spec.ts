@@ -47,6 +47,11 @@ test("tabs reorder from anywhere in the strip, including the gaps and the empty 
       await page.getByRole("button", { name: "Terminal" }).click();
       await expect.poll(() => tabIds(page), { timeout: 20_000 }).toHaveLength(before + 1);
     }
+    // Park the pointer away from the "+" picker before the first gesture and
+    // let the strip settle. dragTab verifies its own press target, but starting
+    // from a neutral position keeps the first drag of a run out of the picker's
+    // click coordinates entirely.
+    await page.mouse.move(4, 4);
     const start = await tabIds(page);
     expect(start.length).toBeGreaterThanOrEqual(4);
 
@@ -128,18 +133,45 @@ async function stripBox(page: Page) {
 // A real drag: press on the tab, cross the drag threshold, travel to the target
 // in steps (so dragover fires along the way, which is what feeds the strip's
 // hit-test), settle, release.
+//
+// Two gates keep this from testing the wrong gesture. Pressing immediately
+// after a click somewhere else (the "+" picker rows that created these tabs)
+// can attribute the mousedown to the previous pointer position, which starts
+// the drag on whichever tab sat there — a wrong-source drag that then reads as
+// a bogus reorder. And the native drag begins asynchronously, so travelling
+// before dragstart lands is a no-op drop. Both are asserted, not slept on.
 async function dragTab(page: Page, id: string, toX: number, toY: number): Promise<void> {
   const box = await tabBox(page, id);
   const fromX = box.x + box.width / 2;
   const fromY = box.y + box.height / 2;
+  await page.mouse.move(fromX - 6, fromY);
   await page.mouse.move(fromX, fromY);
+  await expect.poll(() => tabUnderPoint(page, fromX, fromY), { timeout: 5_000 }).toBe(id);
   await page.mouse.down();
-  await page.mouse.move(fromX + 8, fromY, { steps: 4 });
+  await page.mouse.move(fromX + 6, fromY, { steps: 3 });
+  await page.mouse.move(fromX + 14, fromY, { steps: 3 });
+  // The strip marks its source the frame after dragstart: this waits for the
+  // drag to actually exist AND pins that it is the tab we aimed at.
+  await expect(page.locator(`.spark-tab--dragging[data-tab-id="${id}"]`)).toHaveCount(1, {
+    timeout: 5_000,
+  });
   await page.mouse.move(toX, toY, { steps: 16 });
   await page.mouse.move(toX, toY);
   await page.waitForTimeout(120);
   await page.mouse.up();
   await page.waitForTimeout(120);
+}
+
+// Which tab, if any, actually owns the pixel the press is about to land on.
+function tabUnderPoint(page: Page, x: number, y: number): Promise<string | null> {
+  return page.evaluate(
+    ([px, py]) => {
+      const el = document.elementFromPoint(px as number, py as number);
+      const tab = el?.closest("[data-tab-id]") as HTMLElement | null;
+      return tab?.dataset.tabId ?? null;
+    },
+    [x, y],
+  );
 }
 
 async function prepareWorkspace(): Promise<{ userDataDir: string; workspaceDir: string }> {
