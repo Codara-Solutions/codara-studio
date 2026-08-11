@@ -1135,6 +1135,49 @@ async function main() {
         reusedFeedbackRetry.result?.worker_task_ids?.[0] === "wt-live-feedback-retry",
       JSON.stringify(reusedFeedbackRetry).slice(0, 260),
     );
+    // Use a separate durable run for the batch assertion. The real app's
+    // background picker is intentionally live in this integration test and may
+    // accept the single retry above before the second RPC reaches it.
+    fabricateRun("run-live-feedback-batch", {
+      chatMode: "execute",
+      workerTasks: [{
+        id: "wt-live-feedback-batch",
+        title: "Create calculator",
+        description: "Original brief\n\n## VERIFIER FEEDBACK\nFix repeat equals.",
+        status: "retry_queued",
+        taskClass: "feature",
+        runtimePreference: "claude",
+        createdBy: "system",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }],
+      workerAttempts: [],
+    });
+    const reusedUnscopedFeedbackBatch = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-live-feedback-batch",
+      workers: [
+        {
+          title: "Complete remaining integration",
+          description: "Address the verifier and finish the settings wiring.",
+          taskClass: "feature",
+          runtimePreference: "codex",
+        },
+        {
+          title: "Polish adjacent UI",
+          description: "Wait until the corrective workspace is stable.",
+          taskClass: "feature",
+          runtimePreference: "claude",
+          allowedPaths: ["README.md"],
+        },
+      ],
+    });
+    check(
+      "spawn_workers blocks an entire overlapping manager wave behind the automatic correction",
+      reusedUnscopedFeedbackBatch.result?.reused_feedback_retry === true &&
+        reusedUnscopedFeedbackBatch.result?.worker_task_ids?.length === 1 &&
+        reusedUnscopedFeedbackBatch.result?.worker_task_ids?.[0] === "wt-live-feedback-batch",
+      JSON.stringify(reusedUnscopedFeedbackBatch).slice(0, 320),
+    );
 
     // ── Warm session reuse (follow_up_of) ─────────────────────────────────
     fabricateRun("run-warm-reuse", {

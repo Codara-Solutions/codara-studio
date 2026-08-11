@@ -55,7 +55,9 @@ function flowPath(wire: {
   from: { x: number; y: number };
   to: { x: number; y: number };
   enter?: "left" | "right";
+  points?: readonly Point[];
 }): string {
+  if (wire.points && wire.points.length >= 2) return polylinePath(wire.points, 10);
   const { from, to } = wire;
   if (wire.enter) {
     const dy = Math.max(30, (to.y - from.y) * 0.55);

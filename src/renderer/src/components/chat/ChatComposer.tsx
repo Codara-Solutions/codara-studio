@@ -435,14 +435,20 @@ export default function ChatComposer({
     return () => observer.disconnect();
   }, [autosizeTextarea]);
 
-  // Re-seed the gauge on run change so a freshly-selected chat never carries
-  // the previous chat's number. chat.usage only streams while a turn is live,
-  // so a chat that is merely opened has to read its occupancy from the last
-  // manager call the run persisted; the stream takes over from there.
+  // Re-seed on both run and conversation-epoch changes. Compaction keeps the
+  // same run id but cuts over to a fresh session; carrying the previous epoch's
+  // occupancy made the meter look as if nothing had happened.
   useEffect(() => {
+    const epoch = runRef.current?.conversationEpoch ?? 0;
     const call = [...(runRef.current?.sparkCalls ?? [])]
       .reverse()
-      .find((item) => typeof item.promptTokens === "number" && item.promptTokens > 0);
+      .find(
+        (item) =>
+          item.purpose !== "compaction" &&
+          (item.conversationEpoch ?? 0) === epoch &&
+          typeof item.promptTokens === "number" &&
+          item.promptTokens > 0,
+      );
     setTokensUsed(call?.promptTokens ?? 0);
     setReportedContextBudget(
       typeof call?.contextWindowTokens === "number" && call.contextWindowTokens > 0
@@ -452,7 +458,7 @@ export default function ChatComposer({
     // Not persisted on the SparkCall: it is an app-wide launch value, so a
     // reopened chat falls back to the shared default until its next turn.
     setReportedCompactAt(null);
-  }, [run?.id]);
+  }, [run?.id, run?.conversationEpoch]);
 
   // Track the latest live context gauge. Modern backends provide
   // contextTokens explicitly; older ones expose only inputTokens, which is
@@ -464,6 +470,12 @@ export default function ChatComposer({
     if (!runId) return;
     const off = window.spark.orchestration.onEvent((event: SparkEvent) => {
       if (event.runId !== runId) return;
+      if (event.type === "run.conversation_compacted") {
+        setTokensUsed(0);
+        setReportedContextBudget(null);
+        setReportedCompactAt(null);
+        return;
+      }
       if (event.type !== "chat.usage") return;
       const payload = (event.payload ?? {}) as Record<string, unknown>;
       const raw =
@@ -482,7 +494,7 @@ export default function ChatComposer({
       }
     });
     return off;
-  }, [run?.id]);
+  }, [run?.id, run?.conversationEpoch]);
 
   useEffect(() => {
     setFileReferences([]);

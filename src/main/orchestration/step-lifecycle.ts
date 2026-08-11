@@ -16,6 +16,23 @@ export function isSettledStepStatus(status: string): boolean {
   return TERMINAL_STEP_STATUSES.has(status);
 }
 
+/**
+ * Dependency generation for a manager-spawned batch.
+ *
+ * A batch created after the latest step settled continues that step. A batch
+ * created while the latest step is live is a sibling and therefore inherits
+ * the live step's predecessors. Legacy steps have no explicit metadata, so
+ * their effective predecessor is the previous step in persisted order.
+ */
+export function dependencyIdsForSpawnedStep(run: RunState): string[] {
+  const latestIndex = (run.steps?.length ?? 0) - 1;
+  if (latestIndex < 0) return [];
+  const latest = run.steps[latestIndex];
+  if (isSettledStepStatus(latest.status)) return [latest.id];
+  if (latest.dependsOnStepIds !== undefined) return [...latest.dependsOnStepIds];
+  return latestIndex > 0 ? [run.steps[latestIndex - 1].id] : [];
+}
+
 const LIVE_FEEDBACK_RETRY_STATUSES = new Set([
   "created",
   "queued",
@@ -80,7 +97,17 @@ export function findLiveVerifierFeedbackRetry(
         taskPaths.some((right) => pathsOverlap(left, right)));
     }
 
-    return requestedTitle.length > 0 && requestedTitle === task.title.trim().toLowerCase();
+    // An empty scope means "the shared worktree", not "no files". Treat it as
+    // overlapping while an automatic corrective is live: the manager can wait
+    // a few seconds and spawn genuinely independent work afterwards, whereas
+    // guessing independence here lets two workers edit the same files. Title
+    // equality remains useful for old, fully-scoped records whose paths were
+    // normalized away by an earlier schema.
+    return (
+      requestedPaths.length === 0 ||
+      taskPaths.length === 0 ||
+      (requestedTitle.length > 0 && requestedTitle === task.title.trim().toLowerCase())
+    );
   });
 }
 
@@ -137,6 +164,13 @@ export function resolveFollowUpDestinationStep(
     (step) => !isSettledStepStatus(step.status) && (step.kind ?? "worker_batch") !== "brake",
   );
   if (current) return { step: current, created: false };
+  const predecessor = [...(run.steps ?? [])]
+    .reverse()
+    .find(
+      (step) =>
+        isSettledStepStatus(step.status) &&
+        (step.kind ?? "worker_batch") !== "brake",
+    );
 
   const appended: StepState = {
     id: input.newStepId,
@@ -150,6 +184,7 @@ export function resolveFollowUpDestinationStep(
     acceptanceCriteria: input.acceptanceCriteria ?? [],
     verificationCommands: [],
     workerTaskIds: [],
+    dependsOnStepIds: predecessor ? [predecessor.id] : [],
     createdAt: input.timestamp,
     updatedAt: input.timestamp,
   };

@@ -8,6 +8,7 @@ import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+import { waitForLoopbackPreviewServer } from "./preview-navigation";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
   AgentTerminalOwnershipError,
@@ -35,7 +36,10 @@ import {
   subscribeToEvents,
 } from "./orchestration/event-log";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
-import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
+import {
+  dependencyIdsForSpawnedStep,
+  findLiveVerifierFeedbackRetry,
+} from "./orchestration/step-lifecycle";
 import {
   MAX_BULLETS_ADDED_PER_RUN,
   MAX_REMEMBER_CALLS_PER_RUN,
@@ -96,6 +100,7 @@ import type {
   ScheduledJob,
   UpdateScheduledJobInput,
   UpdateCoraWhiteboardInput,
+  WorkerTask,
   Workspace,
 } from "@shared/types";
 
@@ -931,6 +936,15 @@ async function handlePreviewOp(
   const op = method.replace(/^preview\./, "") as PreviewOpName;
   const previewParams: PreviewOpParams = { ...params };
   try {
+    if (op === "navigate" && typeof previewParams.url === "string") {
+      const reachable = await waitForLoopbackPreviewServer(previewParams.url);
+      if (!reachable) {
+        throw new Error(
+          `Preview server is not accepting connections at ${previewParams.url}. ` +
+          "Start the server (or keep it running) before navigating the Electron preview.",
+        );
+      }
+    }
     const result = await requestPreviewOp(op, previewParams);
     return successResponse(id, result);
   } catch (err) {
@@ -2089,24 +2103,30 @@ async function handleOrchestratorSpawnWorkers(
     }
   }
 
-  if (onlyRequestedWorker && onlyRequestedWorker.taskClass !== "verifier") {
-    const liveFeedbackRetry = findLiveVerifierFeedbackRetry(run, onlyRequestedWorker);
-    if (liveFeedbackRetry) {
-      return successResponse(id, {
-        worker_task_ids: [liveFeedbackRetry.id],
-        reused_feedback_retry: true,
-        note:
-          `Reused verifier-feedback retry ${liveFeedbackRetry.id} (${liveFeedbackRetry.status}) instead of ` +
-          "starting another corrective worker on the same files. Wait for this worker before deciding " +
-          "whether more implementation work is needed.",
-      });
-    }
-  }
-
   const workerEntries = rawWorkers.filter(
     (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
       Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
   );
+  const liveFeedbackRetries = [
+    ...new Map(
+      workerEntries
+        .filter((worker) => worker.taskClass !== "verifier")
+        .map((worker) => findLiveVerifierFeedbackRetry(run, worker))
+        .filter((task): task is WorkerTask => Boolean(task))
+        .map((task) => [task.id, task]),
+    ).values(),
+  ];
+  if (liveFeedbackRetries.length > 0) {
+    return successResponse(id, {
+      worker_task_ids: liveFeedbackRetries.map((task) => task.id),
+      reused_feedback_retry: true,
+      note:
+        `Reused ${liveFeedbackRetries.length} verifier-feedback corrective ` +
+        `${liveFeedbackRetries.length === 1 ? "worker" : "workers"} already queued by the verifier instead of ` +
+        "starting another manager-owned corrective wave. Wait for this work before deciding " +
+        "whether more implementation work is needed.",
+    });
+  }
 
   // Structural shape guard, before anything is created and before the round cap
   // can spend budget on it: an all-verifier batch on a run with no
@@ -2367,6 +2387,7 @@ async function handleOrchestratorSpawnWorkers(
     kind: "worker_batch",
     plannedAgents: [],
     acceptanceCriteria: ["All spawned worker tasks complete."],
+    dependsOnStepIds: dependencyIdsForSpawnedStep(run),
   });
   const synthStep = stepRunState.steps.at(-1);
   const synthStepId = synthStep?.id;

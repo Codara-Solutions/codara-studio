@@ -12276,6 +12276,12 @@ export async function createStep(input: CreateStepInput): Promise<RunState> {
       acceptanceCriteria: input.acceptanceCriteria ?? [],
     verificationCommands: input.verificationCommands ?? [],
     workerTaskIds: [],
+    ...(input.dependsOnStepIds !== undefined
+      ? {
+          dependsOnStepIds: [...new Set(input.dependsOnStepIds)].filter((id) =>
+            run.steps.some((candidate) => candidate.id === id)),
+        }
+      : {}),
     createdAt: now,
     updatedAt: now,
   };

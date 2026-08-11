@@ -278,6 +278,25 @@ async function main() {
   check("stepless fans: spine still links every node", bare.spineWires.length === 3);
   check("stepless fans: no fan or peer wires", bare.fanWires.length === 0 && bare.peerWires.length === 0);
 
+  // ── Explicit dependencies: concurrent manager steps are siblings ──
+  const forkSteps = [
+    { id: "root", dependsOnStepIds: [] },
+    { id: "left", dependsOnStepIds: ["root"] },
+    { id: "right", dependsOnStepIds: ["root"] },
+  ];
+  const fork = computeRunGraphLayout(
+    forkSteps,
+    new Map(forkSteps.map((s) => [s.id, []])),
+  );
+  const spineIds = new Set(fork.spineWires.map((wire) => wire.id));
+  check("dependency fork: both siblings leave the root", spineIds.has("root-left") && spineIds.has("root-right"));
+  check("dependency fork: no false left-to-right sibling chain", !spineIds.has("left-right"));
+  check("dependency fork: both leaves join COMPLETE", spineIds.has("left-end") && spineIds.has("right-end"));
+  check(
+    "dependency fork: non-adjacent edges route around cards",
+    fork.spineWires.some((wire) => wire.id === "root-right" && wire.points?.length >= 4),
+  );
+
   if (failures > 0) {
     console.error(`${failures} failure(s)`);
     process.exit(1);

@@ -278,6 +278,9 @@ export type ChatTimelineItem =
       // ticker underneath it would contradict it (and be false, nothing runs
       // until the answer lands).
       awaitingReply?: boolean;
+      // Maintenance calls remain visible as compact activity but never render
+      // their internal streamed prose as an assistant answer.
+      maintenance?: "compaction";
       title: string;
       detail: string;
       // "queued" is a worker-only state: the lineage is between attempts, so
@@ -321,6 +324,10 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
 
   const messageItems: Extract<ChatTimelineItem, { kind: "message" }>[] = [];
   for (const message of run.humanMessages) {
+    // The compaction note is durable backend replay state, not something Cora
+    // said to the user. Its matching SparkCall below supplies the small
+    // "Compacting" / "Compacted" maintenance row.
+    if (message.compaction) continue;
     const text = message.message.trim();
     if (!text) continue;
     // The synthetic board-nudge note is authored "user" only so delivery
@@ -745,6 +752,7 @@ function sparkCallTimelineItem(
     status: isLast ? call.status : "completed",
     tone: failed ? "failed" : live ? "live" : "done",
     awaitingReply: awaiting || undefined,
+    maintenance: compaction ? "compaction" : undefined,
     at: segment?.at ?? call.createdAt,
     meta,
     files: [],

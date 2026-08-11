@@ -2986,9 +2986,8 @@ export interface HumanRunMessage {
   /** For kind "answer": the id of the question message this answers (set by
    *  every question-card/toast answer path). Consent gates match on it. */
   answersMessageId?: string;
-  /** Marks the spark note that carries an auto-compaction summary. Currently
-   *  informational — the note's "**Conversation compacted.**" header is what
-   *  labels it in the timeline; no renderer styling reads this flag yet. */
+  /** Marks the durable auto-compaction summary used for backend replay. The
+   *  renderer hides its body and shows the matching call as maintenance. */
   compaction?: true;
   /** Marks the synthetic note the board nudge injects when queued cards are
    *  waiting for this chat's manager (see board-nudge.ts). Informational, like
@@ -3037,6 +3036,13 @@ export interface StepState {
   acceptanceCriteria: string[];
   verificationCommands: string[];
   workerTaskIds: string[];
+  /**
+   * Explicit graph predecessors. Undefined is a legacy/planned sequential
+   * step, while [] means this step starts directly from Cora. Dynamic manager
+   * steps persist this so concurrent sibling waves render as a fork instead of
+   * a misleading step-number chain.
+   */
+  dependsOnStepIds?: string[];
   reviewSummary?: string;
   /**
    * Per-step roll-up of manager-call USD cost. Computed from the SparkCall
@@ -3988,6 +3994,7 @@ export interface CreateStepInput {
   riskLevel?: StepState["riskLevel"];
   acceptanceCriteria?: string[];
   verificationCommands?: string[];
+  dependsOnStepIds?: string[];
 }
 
 export interface UpdateStepInput {

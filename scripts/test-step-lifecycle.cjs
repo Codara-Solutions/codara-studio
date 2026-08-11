@@ -31,9 +31,36 @@ function runFixture(step, tasks) {
 
 async function main() {
   const {
+    dependencyIdsForSpawnedStep,
     findLiveVerifierFeedbackRetry,
     reconcileAcceptedVerifierOnlySteps,
   } = await loadContract();
+
+  assert.deepEqual(dependencyIdsForSpawnedStep({ steps: [] }), []);
+  assert.deepEqual(
+    dependencyIdsForSpawnedStep({ steps: [{ id: "done", status: "complete" }] }),
+    ["done"],
+  );
+  assert.deepEqual(
+    dependencyIdsForSpawnedStep({
+      steps: [
+        { id: "root", status: "complete" },
+        { id: "live-legacy", status: "running" },
+      ],
+    }),
+    ["root"],
+    "a branch beside a live legacy step inherits its effective predecessor",
+  );
+  assert.deepEqual(
+    dependencyIdsForSpawnedStep({
+      steps: [
+        { id: "root", status: "complete" },
+        { id: "live-explicit", status: "running", dependsOnStepIds: [] },
+      ],
+    }),
+    [],
+    "an explicit root dependency is preserved",
+  );
 
   const standalone = runFixture(
     { id: "verify", status: "reviewing", updatedAt: "old" },
@@ -109,6 +136,16 @@ async function main() {
       expectedOutputs: ["README.md"],
     }),
     undefined,
+  );
+  assert.equal(
+    findLiveVerifierFeedbackRetry(feedbackRun, {
+      title: "Complete the remaining settings surfaces",
+      taskClass: "feature",
+      allowedPaths: [],
+      expectedOutputs: [],
+    })?.id,
+    "feedback-retry",
+    "an unscoped manager corrective conservatively reuses the live automatic retry",
   );
   assert.equal(
     findLiveVerifierFeedbackRetry(feedbackRun, {

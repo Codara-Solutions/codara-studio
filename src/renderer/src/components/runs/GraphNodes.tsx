@@ -379,47 +379,57 @@ export function stepVerdict(
   return "none";
 }
 
-// The run's verdict is the worst step verdict across its completed steps. An
-// 'unverified-accepted' step counts only when no step carries a real (failed /
-// partial) verdict — a genuine FAILED step should win the headline.
+// The run headline reads only CURRENT verification. A verifier that began
+// before a later implementation attempt finished describes an older workspace
+// snapshot and is superseded history; keeping its FEEDBACK forever made a run
+// stay "Partial" after corrective work and a fresh verifier both passed. Peer
+// verdicts from the newest workspace generation still combine by weakest-wins.
 export function runVerdict(
   run: RunState,
   maps: { attemptByTask: Map<string, WorkerAttempt>; taskById: Map<string, WorkerTask> },
   reportByAttempt: ReadonlyMap<string, WorkerReport>,
 ): StepVerdictKind {
-  let worst: StepVerdictKind = "none";
+  let worst: VerifierConfidence | null = null;
   let unverified = false;
+  const implementationFinishedAt = run.workerAttempts
+    .filter((attempt) => {
+      if (maps.taskById.get(attempt.workerTaskId)?.taskClass === "verifier") return false;
+      const report = reportByAttempt.get(attempt.id);
+      // A failed/no-op attempt does not create a new workspace generation and
+      // therefore must not erase the last meaningful verifier result. When an
+      // older persisted attempt has no report, success is the best evidence we
+      // have that its implementation may have changed the workspace.
+      if (report) return (report.filesChanged?.length ?? 0) > 0;
+      return attempt.status === "succeeded";
+    })
+    .map((attempt) => Date.parse(attempt.finishedAt ?? ""))
+    .filter(Number.isFinite);
   for (const step of run.steps) {
-    if (step.status !== "complete" && step.status !== "skipped") continue;
-    const kind = stepVerdict(step, maps.attemptByTask, reportByAttempt, maps.taskById);
-    if (kind === "none") continue;
-    if (kind === "unverified-accepted") {
+    if (step.status === "completed_unverified") {
       unverified = true;
       continue;
     }
-    if (worst === "none" || VERDICT_RANK[kindToConfidence(kind)] > VERDICT_RANK[kindToConfidence(worst)]) {
-      worst = kind;
+    if (step.status !== "complete" && step.status !== "skipped") continue;
+    for (const taskId of step.workerTaskIds) {
+      const task = maps.taskById.get(taskId);
+      if (task?.forceAccepted) unverified = true;
+      if (task?.taskClass !== "verifier") continue;
+      const attempt = maps.attemptByTask.get(taskId);
+      if (!attempt) continue;
+      const beganAt = Date.parse(attempt.startedAt ?? task.createdAt);
+      const superseded =
+        Number.isFinite(beganAt) &&
+        implementationFinishedAt.some((finishedAt) => finishedAt > beganAt);
+      if (superseded) continue;
+      const confidence = reportByAttempt.get(attempt.id)?.verifier?.confidence;
+      if (!confidence) continue;
+      if (worst === null || VERDICT_RANK[confidence] > VERDICT_RANK[worst]) {
+        worst = confidence;
+      }
     }
   }
-  if (worst !== "none") return worst;
+  if (worst !== null) return confidenceToKind(worst);
   return unverified ? "unverified-accepted" : "none";
-}
-
-// Inverse of confidenceToKind, for ranking real verdicts against each other.
-// Only the five ladder kinds are valid inputs here (callers gate the rest).
-function kindToConfidence(kind: StepVerdictKind): VerifierConfidence {
-  switch (kind) {
-    case "perfect":
-      return "PERFECT";
-    case "verified":
-      return "VERIFIED";
-    case "partial":
-      return "PARTIAL";
-    case "feedback":
-      return "FEEDBACK";
-    default:
-      return "FAILED";
-  }
 }
 
 export interface VerdictTone {

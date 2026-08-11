@@ -15,6 +15,33 @@ const IGNORED_TOP_LEVEL = new Set([
 ]);
 const DEBOUNCE_MS = 200;
 const CHANNEL = "fs:changed";
+const EINTR_RETRY_DELAYS_MS = [0, 40, 160] as const;
+
+function fsErrorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error
+    ? String((error as NodeJS.ErrnoException).code ?? "") || undefined
+    : undefined;
+}
+
+function fsErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function openRootWatcher(root: string): Promise<FSWatcher> {
+  let lastError: unknown;
+  for (const delayMs of EINTR_RETRY_DELAYS_MS) {
+    if (delayMs > 0) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs));
+    }
+    try {
+      return watch(root, { recursive: false, persistent: true });
+    } catch (error) {
+      lastError = error;
+      if (fsErrorCode(error) !== "EINTR") throw error;
+    }
+  }
+  throw lastError;
+}
 
 // Native recursive watcher registration may synchronously walk a large tree
 // before `fs.watch()` returns. Run those registrations in a Node worker so a
@@ -225,13 +252,18 @@ export async function setWatchRoot(
   // discover newly-created top-level directories.
   let rootWatcher: FSWatcher;
   try {
-    rootWatcher = watch(root, { recursive: false, persistent: true });
+    rootWatcher = await openRootWatcher(root);
   } catch (err) {
-    console.warn("[fs-watcher] failed to watch", root, err);
+    console.warn(`[fs-watcher] failed to watch ${root}: ${fsErrorMessage(err)}`);
     return;
   }
   rootWatcher.on("error", (err) => {
-    console.warn("[fs-watcher] error", err);
+    if (fsErrorCode(err) === "EINTR" && byContents.get(id) === state) {
+      console.warn(`[fs-watcher] watch interrupted for ${root}; retrying`);
+      void setWatchRoot(webContents, root);
+      return;
+    }
+    console.warn(`[fs-watcher] watch error for ${root}: ${fsErrorMessage(err)}`);
   });
   rootWatcher.on("change", (eventType, filename) => {
     // See per-directory watcher above: only 'rename' indicates create/delete/

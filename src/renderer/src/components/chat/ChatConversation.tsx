@@ -243,7 +243,11 @@ export default function ChatConversation({ run }: { run: RunState }) {
             context={renderContext}
             style={{ height: "100%", width: "100%" }}
             totalCount={rowCount}
-            initialItemCount={Math.min(rowCount, 12)}
+            // Paint a full short conversation even if Electron has not yet
+            // delivered Virtuoso a measurement frame. Twelve rows could stop
+            // at an older turn (the chat-polish fixture landed on question 6)
+            // and leave the actual final answer absent until a later resize.
+            initialItemCount={Math.min(rowCount, 24)}
             defaultItemHeight={96}
             initialTopMostItemIndex={Math.max(0, rowCount - 1)}
             // "auto" (instant) rather than "smooth": while a turn streams, a new
@@ -1846,7 +1850,8 @@ function AssistantLiveTurn({
   finalAnswer?: string;
 }) {
   const sparkCallId = timelineSparkCallId(item);
-  const blocks = executionTurn
+  const compaction = item.maintenance === "compaction";
+  const blocks = executionTurn && !compaction
     ? omitDuplicatedFinalAnswer(
         blocksInTraceWindow(executionTurn.blocks, item.traceWindow),
         finalAnswer,
@@ -1869,6 +1874,16 @@ function AssistantLiveTurn({
           <div style={WORKING_LINE_STYLE}>
             <StatusDot color="var(--warn)" pulse={false} size={6} />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+            {item.detail ? (
+              <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
+            ) : null}
+          </div>
+        ) : compaction ? (
+          <div style={WORKING_LINE_STYLE}>
+            <WorkingDots />
+            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
+              {item.title}<ElapsedSince since={item.at} />
+            </span>
             {item.detail ? (
               <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
             ) : null}

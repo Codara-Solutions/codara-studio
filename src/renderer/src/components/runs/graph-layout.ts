@@ -94,6 +94,9 @@ export interface SpineWire {
   id: string;
   from: Point;
   to: Point;
+  // Non-adjacent dependency edges route above the step cards so a fork/join
+  // never draws a false line through an unrelated sibling node.
+  points?: Point[];
   // null source => the wire leaves SPARK; null target => it enters COMPLETE.
   sourceStepId: string | null;
   targetStepId: string | null;
@@ -375,11 +378,10 @@ export function computeRunGraphLayout(
     h: END_H,
   };
 
-  // Wires. The spine always links every adjacent pair of spine nodes —
-  // SPARK -> step 1 -> ... -> COMPLETE — so the flow of the run is one
-  // unbroken line through the steps. Fan wires branch a step to each of its
-  // workers and stop there: agents are satellites of the step they belong
-  // to, never stops on the spine.
+  // Wires. Legacy/planned runs without dependency metadata keep their adjacent
+  // SPARK -> step 1 -> ... -> COMPLETE spine. Dynamic manager steps persist
+  // dependsOnStepIds: those edges are rendered as the actual DAG, including
+  // sibling forks and leaf joins. Fan wires still stop at worker satellites.
   const spineWires: SpineWire[] = [];
   const fanWires: FanWire[] = [];
   const peerWires: PeerWire[] = [];
@@ -392,24 +394,97 @@ export function computeRunGraphLayout(
       targetStepId: null,
     });
   } else {
-    spineWires.push({
-      id: `spark-${stepLayouts[0].stepId}`,
-      from: rightPort(sparkBox),
-      to: leftPort(stepLayouts[0].box),
-      sourceStepId: null,
-      targetStepId: stepLayouts[0].stepId,
+    const layoutById = new Map(stepLayouts.map((layout) => [layout.stepId, layout]));
+    const indexById = new Map(stepLayouts.map((layout, index) => [layout.stepId, index]));
+    const hasExplicitDependencies = steps.some(
+      (step) => step.dependsOnStepIds !== undefined,
+    );
+    const children = new Map<string, Set<string>>();
+    let routedWireIndex = 0;
+    const dependencyPoints = (
+      from: Point,
+      to: Point,
+      sourceIndex: number,
+      targetIndex: number,
+    ): Point[] | undefined => {
+      if (targetIndex === sourceIndex + 1) return undefined;
+      const laneY = 22 + (routedWireIndex++ % 3) * 12;
+      const sourceBendX = from.x + 26;
+      const targetBendX = to.x - 26;
+      return [
+        from,
+        { x: sourceBendX, y: from.y },
+        { x: sourceBendX, y: laneY },
+        { x: targetBendX, y: laneY },
+        { x: targetBendX, y: to.y },
+        to,
+      ];
+    };
+
+    steps.forEach((step, index) => {
+      const target = layoutById.get(step.id);
+      if (!target) return;
+      const dependencies = hasExplicitDependencies
+        ? step.dependsOnStepIds === undefined
+          ? index > 0
+            ? [steps[index - 1].id]
+            : []
+          : step.dependsOnStepIds.filter(
+              (id) => layoutById.has(id) && (indexById.get(id) ?? index) < index,
+            )
+        : index > 0
+          ? [steps[index - 1].id]
+          : [];
+      if (dependencies.length === 0) {
+        const from = rightPort(sparkBox);
+        const to = leftPort(target.box);
+        spineWires.push({
+          id: `spark-${step.id}`,
+          from,
+          to,
+          points: dependencyPoints(from, to, -1, index),
+          sourceStepId: null,
+          targetStepId: step.id,
+        });
+        return;
+      }
+      for (const sourceId of dependencies) {
+        const source = layoutById.get(sourceId);
+        if (!source) continue;
+        const from = rightPort(source.box);
+        const to = leftPort(target.box);
+        spineWires.push({
+          id: `${sourceId}-${step.id}`,
+          from,
+          to,
+          points: dependencyPoints(
+            from,
+            to,
+            indexById.get(sourceId) ?? index - 1,
+            index,
+          ),
+          sourceStepId: sourceId,
+          targetStepId: step.id,
+        });
+        const sourceChildren = children.get(sourceId) ?? new Set<string>();
+        sourceChildren.add(step.id);
+        children.set(sourceId, sourceChildren);
+      }
     });
-    stepLayouts.forEach((layout, i) => {
-      const next = stepLayouts[i + 1];
-      const nextBox = next ? next.box : endBox;
-      const nextStepId = next ? next.stepId : null;
-      spineWires.push({
-        id: `${layout.stepId}-${nextStepId ?? "end"}`,
-        from: rightPort(layout.box),
-        to: leftPort(nextBox),
-        sourceStepId: layout.stepId,
-        targetStepId: nextStepId,
-      });
+
+    stepLayouts.forEach((layout, index) => {
+      if ((children.get(layout.stepId)?.size ?? 0) === 0) {
+        const from = rightPort(layout.box);
+        const to = leftPort(endBox);
+        spineWires.push({
+          id: `${layout.stepId}-end`,
+          from,
+          to,
+          points: dependencyPoints(from, to, index, stepLayouts.length),
+          sourceStepId: layout.stepId,
+          targetStepId: null,
+        });
+      }
       for (const worker of layout.workers) {
         fanWires.push({
           id: `out:${layout.stepId}:${worker.rowKey}`,

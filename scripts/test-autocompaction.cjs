@@ -278,6 +278,18 @@ async function main() {
     "the composer meter measures against the shared capacity helper",
     /budget=\{chatContextCapacityTokens\(\{/.test(composer),
   );
+  check(
+    "the composer resets its meter when the conversation epoch changes",
+    /\[run\?\.id, run\?\.conversationEpoch\]/.test(composer),
+  );
+  check(
+    "the composer excludes compaction calls when restoring context usage",
+    /item\.purpose !== "compaction"/.test(composer),
+  );
+  check(
+    "the compaction event resets the live context snapshot",
+    /event\.type === "run\.conversation_compacted"[\s\S]{0,180}setTokensUsed\(0\)/.test(composer),
+  );
 
   // Finding 8: newline-bearing attachment names/paths must not forge markers.
   const evil = backend.buildManagerTurnPrompt(

@@ -1356,6 +1356,62 @@ async function main() {
     }
   });
 
+  test("compaction renders as maintenance and never as a Cora answer", () => {
+    const state = run([], {
+      status: "complete",
+      conversationEpoch: 1,
+      steps: [],
+      sparkCalls: [
+        managerCall({
+          id: "spark-compact",
+          purpose: "compaction",
+          status: "completed",
+          completedAt: at(55),
+          durationMs: 25_000,
+        }),
+      ],
+      humanMessages: [
+        {
+          id: "answer-real",
+          runId: "run-1",
+          author: "spark",
+          kind: "note",
+          message: "The durable final answer.",
+          attachments: [],
+          conversationEpoch: 0,
+          createdAt: at(29),
+        },
+        {
+          id: "summary-internal",
+          runId: "run-1",
+          author: "spark",
+          kind: "note",
+          compaction: true,
+          message: "Internal workspace summary that must stay hidden.",
+          attachments: [],
+          conversationEpoch: 1,
+          createdAt: at(55),
+        },
+      ],
+    });
+    const timeline = T.buildChatTimeline(state);
+    assert.ok(timeline.some((item) => item.kind === "message" && item.id === "answer-real"));
+    assert.ok(!timeline.some((item) => item.kind === "message" && item.id === "summary-internal"));
+    const maintenance = managerRows(timeline)[0];
+    assert.equal(maintenance.title, "Compacted conversation");
+    assert.equal(maintenance.maintenance, "compaction");
+  });
+
+  test("live compaction has an explicit compacting title", () => {
+    const state = run([], {
+      steps: [],
+      sparkCalls: [managerCall({ id: "spark-compact-live", purpose: "compaction" })],
+    });
+    const maintenance = managerRows(T.buildChatTimeline(state))[0];
+    assert.equal(maintenance.title, "Compacting conversation");
+    assert.equal(maintenance.maintenance, "compaction");
+  });
+
   // The component-side wiring the projection cannot see: AssistantLiveTurn
   // must gate the pulsing "Working for Ns" header on awaitingReply, so the
   // waiting row renders without a ticker (no WorkingDots, no ElapsedSince).
@@ -1369,12 +1425,13 @@ async function main() {
     assert.match(component, /item\.awaitingReply \? \(/, "the header must branch on awaitingReply");
     const awaitingBranch = component.slice(
       component.indexOf("item.awaitingReply ? ("),
-      component.indexOf(") : ("),
+      component.indexOf(") : compaction ? ("),
     );
     assert.doesNotMatch(awaitingBranch, /WorkingDots|ElapsedSince|Working</,
       "the awaiting branch must not render the working ticker");
-    const elseBranch = component.slice(component.indexOf(") : ("));
-    assert.match(elseBranch, /Working<ElapsedSince/, "the live branch keeps its ticker");
+    assert.match(component, /Working<ElapsedSince/, "the ordinary live branch keeps its ticker");
+    assert.match(component, /compaction \? \(/, "compaction gets its own live header");
+    assert.match(component, /\{item\.title\}<ElapsedSince/, "the compaction header uses the explicit title");
   });
 
   // A failed manager turn the user already retried must vanish once the
