@@ -324,6 +324,7 @@ import {
   buildManagerTurnPrompt,
   isCheckpointJobCurrent,
   isManagerTurnCurrent,
+  renderBundledManagerInput,
   resolveChatBackendConfig,
   shouldIncludeCanonicalReplay,
   type ChatBackendConfig,
@@ -5400,6 +5401,253 @@ async function updateManagerInputDelivery(
       draft.updatedAt = timestamp;
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Mid-turn steering delivery: the parked wait_for_workers registry.
+//
+// Cora can sit inside orchestrator.wait_for_workers for up to ~20 minutes with
+// no user-text channel: a message typed during that window used to queue until
+// the NEXT manager turn start (prepareManagerTurn). While the manager is parked
+// there it is not generating anything, so its wait response is a safe seam to
+// carry user text mid-turn. agent-socket's wait handler drives this registry:
+//   enterManagerWaitPark   - on entering the poll loop (stamps the SparkCall
+//                            flag the renderer reads),
+//   sleepForParkedManagerWait - the poll's sleep primitive; wakes early when a
+//                            user message lands (addRunMessage calls
+//                            wakeParkedManagerWaits),
+//   claimQueuedInputForParkedManagerWait - claims queued messages onto the
+//                            ACTIVE call right before the wait response is
+//                            serialized,
+//   exitManagerWaitPark    - in the handler's finally (clears the flag).
+//
+// Delivery-state choice (the crash/timeout window): a claimed message is
+// marked "submitted", NOT "acknowledged". "submitted" already means "handed to
+// the provider, consumption not yet proven" (onPromptAccepted uses it for the
+// whole live turn), and every recovery path then does the right thing for
+// free: turn success acknowledges via applyAtomicManagerCallSettlement
+// (the ids are appended to call.inputMessageIds), turn failure/abort requeues
+// via releaseUnsubmittedManagerInput, force-pause and orphan recovery requeue
+// into the bumped epoch. Acknowledging at delivery time instead would strand a
+// message as "seen" when the wait response was serialized but lost (client
+// socket drop, MCP transport timeout) - the turn then dies and the skip-
+// acknowledged requeue loops would never return the text to the queue. The
+// residual window with "submitted" is benign in the other direction: a
+// response lost after the claim re-delivers the text on the next turn start
+// with the same section labels, which is the worker-mail precedent (re-surface
+// until provably consumed) rather than silent loss. Claimed messages are
+// invisible to queuedManagerInputMessages (backendTurnId is set), so neither a
+// later wait, the next turn start, nor the steering-followup scheduler can
+// double-render a message that was delivered and settled.
+// ---------------------------------------------------------------------------
+
+export interface ParkedManagerWaitToken {
+  runId: string;
+  callId: string;
+  conversationEpoch: number;
+}
+
+interface ParkedManagerWaitEntry {
+  runId: string;
+  conversationEpoch: number;
+  /** Concurrent waits for the same call (parallel tool calls) share the entry. */
+  refs: number;
+  wakeWaiters: Set<() => void>;
+}
+
+const parkedManagerWaits = new Map<string, ParkedManagerWaitEntry>();
+
+/**
+ * Register the caller as parked inside wait_for_workers for this run's active
+ * manager call. Returns null (and changes nothing) when no conversational
+ * manager call is live - the wait then behaves exactly as before this feature.
+ */
+export async function enterManagerWaitPark(
+  runId: string,
+): Promise<ParkedManagerWaitToken | null> {
+  const run = await getRun(runId);
+  if (!run) return null;
+  const call = activeManagerCall(run);
+  if (!call) return null;
+  const epoch = conversationEpoch(run);
+  const token: ParkedManagerWaitToken = { runId, callId: call.id, conversationEpoch: epoch };
+  const existing = parkedManagerWaits.get(call.id);
+  if (existing) {
+    existing.refs += 1;
+    return token;
+  }
+  parkedManagerWaits.set(call.id, {
+    runId,
+    conversationEpoch: epoch,
+    refs: 1,
+    wakeWaiters: new Set(),
+  });
+  // One commit per wait entry (not per poll): the flag rides the ordinary run
+  // update stream so the composer flips to "Send" while Cora is parked.
+  await commitRunChange(run, {
+    type: "run.manager_wait_parked",
+    message: "Cora is parked in wait_for_workers; user messages now deliver mid-turn",
+    sparkCallId: call.id,
+    payload: { callId: call.id, conversationEpoch: epoch },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== epoch) return false;
+      const target = draft.sparkCalls.find(
+        (entry) => entry.id === call.id && entry.status === "started" && !entry.completedAt,
+      );
+      if (!target || target.parkedInWaitForWorkers === true) return false;
+      target.parkedInWaitForWorkers = true;
+      draft.updatedAt = timestamp;
+    },
+  });
+  return token;
+}
+
+/**
+ * Counterpart of enterManagerWaitPark; run from the wait handler's finally, so
+ * the registry entry and the renderer flag cannot outlive the wait. The flag
+ * clear is deliberately NOT epoch-guarded: after a force-pause the call is
+ * already failed in a bumped epoch and the stale flag is what gets removed.
+ */
+export async function exitManagerWaitPark(token: ParkedManagerWaitToken): Promise<void> {
+  const entry = parkedManagerWaits.get(token.callId);
+  if (entry) {
+    entry.refs -= 1;
+    if (entry.refs > 0) return;
+    for (const wake of entry.wakeWaiters) wake();
+    entry.wakeWaiters.clear();
+    parkedManagerWaits.delete(token.callId);
+  }
+  const run = await getRun(token.runId);
+  if (!run) return;
+  const flagged = run.sparkCalls.some(
+    (entry2) => entry2.id === token.callId && entry2.parkedInWaitForWorkers === true,
+  );
+  if (!flagged) return;
+  await commitRunChange(run, {
+    type: "run.manager_wait_unparked",
+    message: "Cora left wait_for_workers; new user messages queue for the next turn",
+    sparkCallId: token.callId,
+    payload: { callId: token.callId, conversationEpoch: token.conversationEpoch },
+    mutate: (draft, timestamp) => {
+      const target = draft.sparkCalls.find((entry2) => entry2.id === token.callId);
+      if (!target || target.parkedInWaitForWorkers !== true) return false;
+      delete target.parkedInWaitForWorkers;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+/** True while any wait_for_workers call is parked for this run. */
+export function runHasParkedManagerWait(runId: string): boolean {
+  for (const entry of parkedManagerWaits.values()) {
+    if (entry.runId === runId) return true;
+  }
+  return false;
+}
+
+/** Wake every parked wait for the run so its poll loop re-checks the queue now. */
+function wakeParkedManagerWaits(runId: string): void {
+  for (const entry of parkedManagerWaits.values()) {
+    if (entry.runId !== runId) continue;
+    const waiters = [...entry.wakeWaiters];
+    entry.wakeWaiters.clear();
+    for (const wake of waiters) wake();
+  }
+}
+
+/**
+ * The parked poll loop's sleep primitive. Resolves after `ms`, or EARLY the
+ * moment a user message lands on the run (or the wait unparks), so a steering
+ * message never sits out the poll interval. Skips sleeping entirely when
+ * deliverable input is already queued.
+ */
+export async function sleepForParkedManagerWait(
+  token: ParkedManagerWaitToken,
+  ms: number,
+): Promise<void> {
+  const entry = parkedManagerWaits.get(token.callId);
+  if (!entry) {
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+    return;
+  }
+  const run = await getRun(token.runId);
+  if (
+    run &&
+    conversationEpoch(run) === token.conversationEpoch &&
+    queuedManagerInputMessages(run).length > 0
+  ) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const wake = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      entry.wakeWaiters.delete(wake);
+      resolve();
+    }, ms);
+    entry.wakeWaiters.add(wake);
+  });
+}
+
+/**
+ * Claim every queued user message of the wait's conversation epoch onto its
+ * ACTIVE manager call and render them for the wait response. Returns null when
+ * there is nothing to deliver or the token went stale (epoch bump, call
+ * settled). The claim (backendTurnId + "submitted" + call.inputMessageIds) is
+ * one serialized commit, so the follow-up scheduler, a later wait, and the
+ * next turn start all see the messages as owned; see the section comment above
+ * for why "submitted" rather than "acknowledged".
+ */
+export async function claimQueuedInputForParkedManagerWait(
+  token: ParkedManagerWaitToken,
+): Promise<{ text: string; messageIds: string[] } | null> {
+  const run = await getRun(token.runId);
+  if (!run || conversationEpoch(run) !== token.conversationEpoch) return null;
+  if (queuedManagerInputMessages(run).length === 0) return null;
+  let claimedIds: string[] = [];
+  const updated = await commitRunChange(run, {
+    type: "run.manager_input_delivered_mid_turn",
+    message: "Queued user input delivered to Cora inside wait_for_workers",
+    sparkCallId: token.callId,
+    payload: { callId: token.callId, conversationEpoch: token.conversationEpoch },
+    mutate: (draft, timestamp) => {
+      claimedIds = [];
+      if (conversationEpoch(draft) !== token.conversationEpoch) return false;
+      const target = draft.sparkCalls.find(
+        (entry) =>
+          entry.id === token.callId &&
+          (entry.conversationEpoch ?? 0) === token.conversationEpoch &&
+          entry.status === "started" &&
+          !entry.completedAt,
+      );
+      if (!target) return false;
+      const selected = queuedManagerInputMessages(draft);
+      if (selected.length === 0) return false;
+      claimedIds = selected.map((message) => message.id);
+      for (const message of selected) {
+        message.targetTurnId ??= target.id;
+        message.backendTurnId = target.id;
+        message.deliveryState = "submitted";
+      }
+      // Append onto the frozen id list so applyAtomicManagerCallSettlement
+      // acknowledges these together with the turn-start input on success.
+      target.inputMessageIds = [...(target.inputMessageIds ?? []), ...claimedIds];
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (claimedIds.length === 0) return null;
+  const messages = claimedIds
+    .map((id) => updated.humanMessages.find((message) => message.id === id))
+    .filter((message): message is HumanRunMessage => Boolean(message));
+  if (messages.length === 0) return null;
+  return { text: renderBundledManagerInput(messages), messageIds: claimedIds };
 }
 
 function normalizeManagerMode(mode: SparkCall["mode"]): ManagerMode {
@@ -10602,14 +10850,27 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     const autopilotInput = autopilotInputFromRun(updated);
     scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
   }
+  // A parked wait_for_workers call consumes this message MID-TURN (the wake
+  // below returns its poll loop within milliseconds and the claim delivers it
+  // in the wait response), so arming a follow-up turn here would race a live
+  // manager call with a second one. Skip arming while parked; if the wait
+  // exits in the same instant without claiming, the message is still owned by
+  // the ordinary paths (the follow-up re-arm at turn settlement, the retried
+  // turn's own queue drain, or Resume), never stranded.
   if (
     input.author === "user" &&
     recordedIntent === "steer" &&
+    !runHasParkedManagerWait(updated.id) &&
     (Boolean(activeManagerCall(updated)) ||
       activeAutopilotPlans.has(updated.id) ||
       activeAutopilotReviews.has(updated.id))
   ) {
     scheduleQueuedSteeringFollowup(updated);
+  }
+  // Wake any parked wait_for_workers poll so a steering message reaches Cora
+  // now instead of after the poll interval (or, worse, the next turn).
+  if (input.author === "user") {
+    wakeParkedManagerWaits(updated.id);
   }
   // A paused run has no manager turn to queue behind, so neither branch above
   // fires and the message would sit unread until the user pressed Resume.

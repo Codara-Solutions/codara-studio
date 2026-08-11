@@ -3116,38 +3116,86 @@ async function handleOrchestratorWaitForWorkers(
       `unknown worker_task_ids: ${unknownIds.join(", ")}`,
     );
   }
-  while (Date.now() < deadline) {
-    // Client hung up - stop polling rather than block the loop for ~20 min.
-    if (clientGone(res)) {
-      return errorResponse(id, ERR_INTERNAL, "wait_for_workers aborted: client disconnected");
+  // Register this wait as PARKED for the run's active manager call: the flag
+  // flips the composer to "Send", user messages wake the sleep below, and
+  // every success response also carries any queued user input (claimed onto
+  // the active call right before serialization, so nothing re-delivers it).
+  // Null when no conversational manager call is live; the wait then behaves
+  // exactly as it did before mid-turn delivery existed.
+  const parked = await runStore.enterManagerWaitPark(runId).catch(() => null);
+  // Claim queued user input for a response that is about to be serialized.
+  // Only on success paths, and only while the client is still connected: the
+  // claim marks the messages "submitted" onto the live call, and if the
+  // response is lost anyway the turn's failure path requeues them (see the
+  // parked-wait registry in run-store for the full crash-window contract).
+  // A claim failure degrades to "no user input this response"; the messages
+  // stay queued for the next wait or turn start, never lost.
+  const claimUserInput = async (): Promise<string | null> => {
+    if (!parked || clientGone(res)) return null;
+    const delivered = await runStore
+      .claimQueuedInputForParkedManagerWait(parked)
+      .catch(() => null);
+    return delivered?.text ?? null;
+  };
+  const buildWaitResponse = async (
+    snapshot: Awaited<ReturnType<typeof snapshotWorkers>>,
+    reason: string,
+    userMessages: string | null,
+  ): Promise<JsonRpcResponse> =>
+    successResponse(id, {
+      workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
+      manager_messages: await peekManagerInbox(runStore, runId),
+      ...(userMessages
+        ? {
+            user_messages: userMessages,
+            user_messages_note:
+              "New input from the user, delivered while you were waiting. It will NOT be re-sent at your next turn: act on it now (steer or restructure the in-flight work, answer, or wait again).",
+          }
+        : {}),
+      reason,
+    });
+  const waitResult = async (
+    snapshot: Awaited<ReturnType<typeof snapshotWorkers>>,
+    reason: string,
+  ): Promise<JsonRpcResponse> => buildWaitResponse(snapshot, reason, await claimUserInput());
+  try {
+    while (Date.now() < deadline) {
+      // Client hung up - stop polling rather than block the loop for ~20 min.
+      if (clientGone(res)) {
+        return errorResponse(id, ERR_INTERNAL, "wait_for_workers aborted: client disconnected");
+      }
+      const run = await runStore.getRun(runId);
+      if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
+      const snapshot = await snapshotWorkers(run);
+      const terminalCount = snapshot.filter((w) => w.is_terminal).length;
+      if (mode === "any" && terminalCount > 0) {
+        return await waitResult(snapshot, "any_terminal");
+      }
+      if (mode === "all" && terminalCount === snapshot.length) {
+        return await waitResult(snapshot, "all_terminal");
+      }
+      // A user message arrived while Cora is parked here: return early and
+      // carry it, instead of holding it for the next manager turn.
+      if (parked) {
+        const userMessages = await claimUserInput();
+        if (userMessages) {
+          return await buildWaitResponse(snapshot, "user_message", userMessages);
+        }
+        // The sleep wakes early when a user message lands (addRunMessage
+        // signals the parked-wait registry), so delivery is near-immediate.
+        await runStore.sleepForParkedManagerWait(parked, WAIT_FOR_WORKERS_POLL_MS);
+      } else {
+        await new Promise<void>((resolve) => setTimeout(resolve, WAIT_FOR_WORKERS_POLL_MS));
+      }
     }
-    const run = await runStore.getRun(runId);
-    if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
-    const snapshot = await snapshotWorkers(run);
-    const terminalCount = snapshot.filter((w) => w.is_terminal).length;
-    if (mode === "any" && terminalCount > 0) {
-      return successResponse(id, {
-        workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
-        manager_messages: await peekManagerInbox(runStore, runId),
-        reason: "any_terminal",
-      });
+    const finalRun = await runStore.getRun(runId);
+    const finalSnapshot = await snapshotWorkers(finalRun ?? firstRun);
+    return await waitResult(finalSnapshot, "timeout");
+  } finally {
+    if (parked) {
+      await runStore.exitManagerWaitPark(parked).catch(() => undefined);
     }
-    if (mode === "all" && terminalCount === snapshot.length) {
-      return successResponse(id, {
-        workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
-        manager_messages: await peekManagerInbox(runStore, runId),
-        reason: "all_terminal",
-      });
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, WAIT_FOR_WORKERS_POLL_MS));
   }
-  const finalRun = await runStore.getRun(runId);
-  const finalSnapshot = await snapshotWorkers(finalRun ?? firstRun);
-  return successResponse(id, {
-    workers: finalSnapshot.map(({ is_terminal: _t, ...rest }) => rest),
-    manager_messages: await peekManagerInbox(runStore, runId),
-    reason: "timeout",
-  });
 }
 
 // Collect the manager's unread inbox (worker→manager messages and worker `all`

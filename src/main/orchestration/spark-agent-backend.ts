@@ -432,7 +432,15 @@ function renderMessageAttachments(message: HumanRunMessage): string[] {
   ];
 }
 
-function renderBundledManagerInput(messages: HumanRunMessage[]): string {
+/**
+ * Render ordered user input the way a manager turn receives it. Exported
+ * because it is the ONE formatting seam for user text reaching the manager:
+ * prepareManagerTurn renders turn-start input through buildManagerTurnPrompt,
+ * and the parked wait_for_workers path (run-store's mid-turn steering
+ * delivery) renders the same shape into the wait response, so the model sees
+ * identical [Queued steering]/[User turn] section labels either way.
+ */
+export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
   if (messages.length === 0) {
     return "Continue Cora's current manager workflow from the existing run state. There is no new user message attached to this turn.";
   }
