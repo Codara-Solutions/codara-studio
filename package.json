@@ -97,6 +97,7 @@
     "test:peer-comms-opt-in": "node scripts/test-peer-comms-opt-in.cjs",
     "test:verifier-scoping": "node scripts/test-verifier-scoping.cjs",
     "test:user-message-resume": "node scripts/test-user-message-resume.cjs",
+    "test:force-pause-resume": "node scripts/test-force-pause-resume.cjs",
     "test:run-resume-guard": "node scripts/test-run-resume-guard.cjs",
     "test:run-graph-layout": "node scripts/test-run-graph-layout.cjs",
     "test:pane-format": "node scripts/test-pane-format.cjs",

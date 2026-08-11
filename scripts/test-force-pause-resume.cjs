@@ -18,7 +18,7 @@
 // during the pause), so Resume and the report surfaces showed a step that
 // "failed" when it had merely been interrupted.
 //
-// Three layers are pinned here:
+// Four layers are pinned here:
 //   1. the chat route — the REAL run-store.ts, driven over a fabricated
 //      run.json with the manager backend stubbed at backend-registry (the one
 //      seam every provider goes through), asserting a force-paused resume with
@@ -33,7 +33,11 @@
 //      for both orderings of the race (pause window still open; pause commit
 //      already landed on the attempt) and only for those, plus a source pin
 //      that launchWorkerAttempt's finish path routes attempt status, task
-//      status and the report review through it.
+//      status and the report review through it;
+//   4. attribution — the note is authored "user" only so the manager turn
+//      consumes it, so it carries resumeNote:true (the boardNote house
+//      pattern): the timeline renders it as a system row instead of the user's
+//      own bubble, and isHeuristicUserMessage never reads it as user intent.
 //
 //   node scripts/test-force-pause-resume.cjs
 //
@@ -50,6 +54,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const RUN_STORE_TS = path.join(ROOT, "src", "main", "orchestration", "run-store.ts");
+const USER_INTENT_TS = path.join(ROOT, "src", "main", "orchestration", "user-intent.ts");
 // Bundles live under node_modules so the externalized runtime deps (ssh2 and
 // friends) still resolve from the file that requires them.
 const CACHE = path.join(ROOT, "node_modules", ".cache", "cora-force-pause-resume-test");
@@ -337,6 +342,11 @@ async function main() {
     plugins: [stubPlugin],
     packages: "external",
   });
+  // The plan rewriters' view of "what the user said": the synthetic resume note
+  // must be invisible to it, exactly like the board note (see user-intent.ts).
+  const userIntent = await bundle(USER_INTENT_TS, "user-intent.cjs", {
+    packages: "external",
+  });
 
   // ── 1. a force-paused resume drives the run through a chat turn ──────────
   const runId = writeRun(forcePausedRun("run-force-pause-chat"));
@@ -405,6 +415,30 @@ async function main() {
     "the resume note is no longer queued once delivered",
     resumeNote?.deliveryState !== "queued",
     resumeNote?.deliveryState,
+  );
+
+  // It is authored "user" for delivery only. Everything that reads the
+  // conversation as the user's own words must be able to tell it apart, the
+  // same way it tells a board note apart.
+  check(
+    "the resume note is flagged resumeNote so no surface reads it as the user",
+    resumeNote?.resumeNote === true,
+    JSON.stringify({ author: resumeNote?.author, resumeNote: resumeNote?.resumeNote }),
+  );
+  check(
+    "resume notes are not heuristic user messages",
+    userIntent.isHeuristicUserMessage(resumeNote) === false,
+  );
+  check(
+    "latestUserRunMessageText skips the resume note",
+    userIntent.latestUserRunMessageText(persisted) === "build the parser",
+    userIntent.latestUserRunMessageText(persisted),
+  );
+  check(
+    "a real user note is still heuristic user text",
+    userIntent.isHeuristicUserMessage(
+      persisted.humanMessages.find((message) => message.id === "msg-1"),
+    ) === true,
   );
 
   check(

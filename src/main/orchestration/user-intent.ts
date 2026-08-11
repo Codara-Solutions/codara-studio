@@ -5,16 +5,18 @@
 import type { HumanRunMessage, RunState } from "@shared/types";
 
 /**
- * User-intent heuristics must never read the synthetic board-nudge note: it
- * is authored "user" only so delivery treats it as manager input, and its
- * tool-name instructions would otherwise masquerade as the user's own words
- * (e.g. arming the parallel/staging plan rewriters on every nudge).
+ * User-intent heuristics must never read a synthetic note: the board nudge and
+ * the pause-resume note are authored "user" only so delivery treats them as
+ * manager input, and their tool/attempt instructions would otherwise
+ * masquerade as the user's own words (e.g. arming the parallel/staging plan
+ * rewriters on every nudge or resume).
  */
 export function isHeuristicUserMessage(message: HumanRunMessage): boolean {
   return (
     message.author === "user" &&
     (message.kind === "note" || message.kind === "answer") &&
-    !message.boardNote
+    !message.boardNote &&
+    !message.resumeNote
   );
 }
 

@@ -6745,11 +6745,12 @@ function councilAlreadyFinalized(run: RunState): boolean {
 }
 
 // The original planning task for a council run (latest user message / note).
-// Board-nudge notes are synthetic and never the task the council should plan.
+// Board-nudge and pause-resume notes are synthetic and never the task the
+// council should plan.
 function councilTaskFromRun(run: RunState): string {
   return (
     run.humanMessages
-      .filter((message) => message.author === "user" && !message.boardNote)
+      .filter((message) => message.author === "user" && !message.boardNote && !message.resumeNote)
       .at(-1)
       ?.message?.trim() ?? ""
   );
@@ -10099,6 +10100,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
             runId: draft.id,
             author: "user",
             kind: "note",
+            // Same contract as boardNote: authored "user" so delivery hands it
+            // to the manager, flagged so no surface or heuristic mistakes it
+            // for something the user typed.
+            resumeNote: true,
             message: composeResumeInterruptedNote(interrupted),
             intent: "turn",
             // "queued" (not acknowledged) is what makes the chat turn dispatched

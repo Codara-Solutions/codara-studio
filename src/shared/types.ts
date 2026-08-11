@@ -3076,6 +3076,11 @@ export interface HumanRunMessage {
    *  waiting for this chat's manager (see board-nudge.ts). Informational, like
    *  `compaction` — the note's header labels it in the timeline. */
   boardNote?: true;
+  /** Marks the synthetic note a paused resume injects to tell the manager which
+   *  worker attempts the pause interrupted (see resumeRun). Authored "user"
+   *  only so delivery treats it as manager input — like `boardNote`, it is not
+   *  the user's own words, so attribution and intent heuristics skip it. */
+  resumeNote?: true;
 }
 
 export interface RunArtifactPaths {

@@ -627,6 +627,106 @@ async function main() {
     assert.equal(rows[0].title, "Turn failed");
   });
 
+  // Synthetic notes (the board nudge, the pause-resume note) are authored
+  // "user" only so the next manager turn consumes them as its input. Their
+  // bodies are lists of card titles and attempt ids, so rendering either as the
+  // user's own bubble misattributes machine text to the person. Both are
+  // flagged on the message and surface as quiet system rows instead.
+  function syntheticNoteRun(id, flag, message) {
+    return run([], {
+      steps: [],
+      humanMessages: [
+        {
+          id: "msg-user",
+          runId: "run-1",
+          author: "user",
+          kind: "note",
+          message: "build the parser",
+          deliveryState: "acknowledged",
+          intent: "turn",
+          conversationEpoch: 0,
+          createdAt: at(25),
+        },
+        {
+          id,
+          runId: "run-1",
+          author: "user",
+          kind: "note",
+          [flag]: true,
+          message,
+          deliveryState: "queued",
+          intent: "turn",
+          conversationEpoch: 0,
+          createdAt: at(30),
+        },
+      ],
+    });
+  }
+
+  const RESUME_NOTE_BODY = [
+    "[Cora resume — worker attempts interrupted by the pause]",
+    "Resume this run. The pause stopped the attempts below before they finished, and nothing is running now:",
+    '- Step 3 "Wire the parser" · Implement the tokenizer — task task-parser, attempt attempt-a (attempt #1, interrupted)',
+    '- Step 3 "Wire the parser" · Wire the lexer — task task-lexer, attempt attempt-b (attempt #2, interrupted)',
+    "Re-issue the work that is still needed (relaunch those tasks, or replace them if the plan changed), then carry on.",
+  ].join("\n");
+
+  test("the resume note renders as a system row, never as a user bubble", () => {
+    const timeline = T.buildChatTimeline(
+      syntheticNoteRun("msg-resume", "resumeNote", RESUME_NOTE_BODY),
+    );
+    assert.equal(
+      timeline.some((item) => item.kind === "message" && item.id === "msg-resume"),
+      false,
+      "the resume note must never render as a chat message",
+    );
+    const row = timeline.find((item) => item.id === "resume-note:msg-resume");
+    assert.ok(row, "the resume note must render as its own system row");
+    assert.equal(row.kind, "tool");
+    assert.equal(row.activity, "context");
+    assert.equal(row.title, "Run resumed");
+    assert.equal(row.detail, "2 interrupted attempts handed back to Cora");
+    assert.equal(row.tone, "done");
+    assert.equal(row.at, at(30));
+    assert.deepEqual(row.meta, [{ label: "Attempts", value: "2" }]);
+    // The real user turn beside it is untouched.
+    const user = timeline.find((item) => item.kind === "message" && item.id === "msg-user");
+    assert.equal(user.author, "user");
+    assert.equal(user.text, "build the parser");
+  });
+
+  test("the resume note counts the attempts its cap collapsed", () => {
+    const capped = [
+      "[Cora resume — worker attempts interrupted by the pause]",
+      "Resume this run. The pause stopped the attempts below before they finished, and nothing is running now:",
+      "- Step 1 \"A\" · one — task task-a, attempt attempt-a (attempt #1, interrupted)",
+      "- …and 4 more interrupted attempt(s).",
+      "Re-issue the work that is still needed, then carry on.",
+    ].join("\n");
+    const timeline = T.buildChatTimeline(syntheticNoteRun("msg-capped", "resumeNote", capped));
+    const row = timeline.find((item) => item.id === "resume-note:msg-capped");
+    assert.equal(row.detail, "5 interrupted attempts handed back to Cora");
+    assert.deepEqual(row.meta, [{ label: "Attempts", value: "5" }]);
+  });
+
+  test("the board note keeps its own system row (the pattern resume notes copy)", () => {
+    const body = [
+      "[Cora Board — queued cards waiting for you]",
+      "- Card one",
+      "- Card two",
+      "- Card three",
+    ].join("\n");
+    const timeline = T.buildChatTimeline(syntheticNoteRun("msg-board", "boardNote", body));
+    assert.equal(
+      timeline.some((item) => item.kind === "message" && item.id === "msg-board"),
+      false,
+    );
+    const row = timeline.find((item) => item.id === "board-note:msg-board");
+    assert.ok(row, "the board note must render as its own system row");
+    assert.equal(row.title, "Cora Board");
+    assert.equal(row.detail, "3 queued cards handed to Cora");
+  });
+
   test("wait task ids are read only off the wait tool", () => {
     assert.deepEqual(
       T.waitForWorkersTaskIds("mcp__codara-studio__codara_wait_for_workers", {
