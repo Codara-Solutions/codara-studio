@@ -41,6 +41,7 @@ import type {
 } from "./types";
 import { isRunOwnedTab } from "./types";
 import { createManualAgentLaunchWorker } from "./terminalAgentState";
+import { moveTabInList } from "./tabReorder";
 import { runtimeFromAgentSessionLaunchCommand } from "../workers/launch-commands";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
@@ -1542,17 +1543,12 @@ export function useTabs(
     (fromId: TabId, toId: TabId, position: "before" | "after") => {
       if (fromId === toId) return;
       setTabs((curr) => {
-        const fromIdx = curr.findIndex((t) => t.id === fromId);
-        const toIdx = curr.findIndex((t) => t.id === toId);
-        if (fromIdx === -1 || toIdx === -1) return curr;
-        const next = curr.slice();
-        const [moving] = next.splice(fromIdx, 1);
-        // After the splice, indices to the right of fromIdx shifted left by 1.
-        const adjustedToIdx = toIdx > fromIdx ? toIdx - 1 : toIdx;
-        const insertIdx = position === "after" ? adjustedToIdx + 1 : adjustedToIdx;
-        if (insertIdx === fromIdx) return curr;
-        next.splice(insertIdx, 0, moving);
-        return normalizeTerminalTitles(next);
+        // Index math lives in tabReorder.ts so the strip previews exactly the
+        // move the model commits (and both are covered by the same tests).
+        // Null = no-op or unknown id: keep the array identity so the strip
+        // doesn't repaint for nothing.
+        const next = moveTabInList(curr, fromId, toId, position);
+        return next ? normalizeTerminalTitles(next) : curr;
       });
     },
     [],

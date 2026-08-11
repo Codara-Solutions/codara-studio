@@ -564,6 +564,9 @@ a { color: inherit; }
   overflow-y: hidden;
   scrollbar-width: none;
   padding-top: 4px;
+  /* Containing block for the reorder insertion marker, which is positioned in
+     strip CONTENT coordinates so it scrolls with the tabs. */
+  position: relative;
   /* Soft edge-fade so an overflowing strip dissolves at its right edge instead
      of hard-clipping a tab glyph mid-shape. Pure paint (mask), no layout. */
   -webkit-mask-image: linear-gradient(
@@ -696,23 +699,47 @@ a { color: inherit; }
   font-synthesis: style;
 }
 
-.spark-tab__reorder-edge {
+/* Reorder insertion marker: ONE line owned by the strip, centred in the gap the
+   displaced tabs open up, rather than a per-tab edge that had to choose between
+   "after tab N" and "before tab N+1" for the same slot (two lines 2px apart for
+   one destination). Rendered only while the drop would actually move the tab,
+   so it never promises a reorder that the release won't make.
+   `left` is set inline from the plan's content-space x; the negative margin
+   centres the 2px stroke on it. */
+.spark-tab-reorder-marker {
   position: absolute;
-  top: 4px;
+  top: 8px;
   bottom: 4px;
   width: 2px;
+  margin-left: -1px;
   border-radius: 999px;
   background: var(--accent);
   box-shadow: 0 0 8px var(--accent-glow);
+  pointer-events: none;
   z-index: 3;
 }
 
-.spark-tab__reorder-edge--before {
-  left: -2px;
+/* While a reorder drag is live, tabs slide to open the landing gap instead of
+   snapping into a new layout at drop time. The modifier is dropped in the same
+   commit that applies the new order, so the settle is instant — the committed
+   layout never animates backwards out of the preview offsets. */
+.spark-tabbar-scroll--reordering .spark-tab {
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion) var(--ease-out-fast);
 }
 
-.spark-tab__reorder-edge--after {
-  right: -2px;
+@media (prefers-reduced-motion: reduce) {
+  .spark-tabbar-scroll--reordering .spark-tab {
+    transition:
+      background var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out),
+      opacity var(--motion-fast) var(--ease-out);
+  }
 }
 
 .spark-tab__close {
@@ -730,6 +757,9 @@ a { color: inherit; }
   color: var(--muted);
   cursor: default;
   opacity: 0;
+  /* The tab row is draggable; its controls are not. Without this, a press that
+     wobbles a pixel on the × starts a tab reorder instead of closing the tab. */
+  -webkit-user-drag: none;
   transition:
     opacity var(--motion-fast) var(--ease-out),
     background var(--motion-fast) var(--ease-out),

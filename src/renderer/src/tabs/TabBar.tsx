@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
@@ -7,12 +7,24 @@ import { collectLeaves } from "./paneTree";
 import {
   TAB_REORDER_DRAG_MIME,
   TERMINAL_PANE_DRAG_MIME,
+  beginTabReorderDrag,
+  endTabReorderDrag,
   parseTabReorderDrag,
   parseTerminalPaneDrag,
+  peekTabReorderDrag,
   peekTerminalPaneDrag,
   subscribeTerminalPaneDrag,
+  type TabReorderDragPayload,
   type TerminalPaneDragPayload,
 } from "./terminalDrag";
+import {
+  edgeAutoScrollDelta,
+  planTabReorder,
+  reorderTargetFor,
+  toStripContentX,
+  type TabReorderTarget,
+  type TabSlot,
+} from "./tabReorder";
 
 // Delay before a terminal-pane drag hovering over an inactive tab in the strip
 // activates that tab. Long enough that brushing past a tab during a drag
@@ -71,6 +83,24 @@ interface Props {
 export interface PickerHints {
   terminal?: string;
   preview?: string;
+}
+
+// Live preview of where a reorder drag would land. Derived entirely from
+// planTabReorder, so what the strip paints and what the drop commits come from
+// the same math.
+interface ReorderPreview {
+  draggedId: TabId;
+  // Index into the strip WITHOUT the dragged tab — the list the drop splices
+  // into, which is what keeps rightward moves free of an off-by-one.
+  insertIndex: number;
+  // False for a "home" drop (releasing here changes nothing): the marker is
+  // suppressed and no tab is displaced, so the strip never promises a move it
+  // won't make.
+  changed: boolean;
+  // Strip content-space x of the insertion marker.
+  markerX: number;
+  // translateX px by tab id; absent means 0.
+  offsets: Record<TabId, number>;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -166,6 +196,234 @@ function TabBar({
 
   const acceptsTerminalPane = (event: React.DragEvent): boolean =>
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
+  const acceptsTabReorder = (event: React.DragEvent): boolean =>
+    Array.from(event.dataTransfer.types).includes(TAB_REORDER_DRAG_MIME);
+
+  // ── Tab reorder ──────────────────────────────────────────────────────────
+  // The whole gesture is owned by the STRIP, not by the individual tabs: one
+  // hit-test against one cached geometry, so there are no dead pixels in the
+  // 4px gaps between tabs or in the empty space past the last one (dropping
+  // there used to be a silent cancel), and no per-tab indicator that can get
+  // stranded when a fast drag skips a dragleave.
+  //
+  // Geometry is measured ONCE at dragstart, in strip content coordinates.
+  // Re-measuring during the drag would read the live transforms of the sliding
+  // tabs, and moving boundaries make the insertion index oscillate whenever the
+  // pointer rests near a midpoint. Content coordinates also survive the edge
+  // auto-scroll below without a re-measure.
+  const reorderSlotsRef = useRef<TabSlot[] | null>(null);
+  const reorderPointerRef = useRef<number | null>(null);
+  const autoScrollRef = useRef<number | null>(null);
+  const reorderPlanRef = useRef<ReorderPreview | null>(null);
+  const [reorderPlan, setReorderPlan] = useState<ReorderPreview | null>(null);
+  // Applied one frame after dragstart: dimming the source synchronously can be
+  // caught by the browser's drag-image snapshot, handing the user a ghost that
+  // is already faded.
+  const [draggingTabId, setDraggingTabId] = useState<TabId | null>(null);
+
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollRef.current === null) return;
+    cancelAnimationFrame(autoScrollRef.current);
+    autoScrollRef.current = null;
+  }, []);
+
+  // Layout boxes of every tab, in strip content space. `offsets` (when given)
+  // undoes the preview transforms so a mid-gesture re-measure still reads
+  // layout positions.
+  const measureSlots = useCallback(
+    (offsets?: Record<TabId, number>): TabSlot[] => {
+      const el = scrollRef.current;
+      if (!el) return [];
+      const stripLeft = el.getBoundingClientRect().left;
+      const scrollLeft = el.scrollLeft;
+      const slots: TabSlot[] = [];
+      for (const node of el.querySelectorAll<HTMLElement>("[data-tab-id]")) {
+        const id = node.dataset.tabId;
+        if (!id) continue;
+        const rect = node.getBoundingClientRect();
+        const shift = offsets?.[id] ?? 0;
+        slots.push({
+          id,
+          start: toStripContentX(rect.left, stripLeft, scrollLeft) - shift,
+          end: toStripContentX(rect.right, stripLeft, scrollLeft) - shift,
+        });
+      }
+      return slots;
+    },
+    [],
+  );
+
+  // Cached geometry, refreshed only when the strip's membership changed under
+  // the drag (an agent opening or closing a tab mid-gesture).
+  const ensureSlots = useCallback(
+    (offsets?: Record<TabId, number>): TabSlot[] => {
+      const el = scrollRef.current;
+      const cached = reorderSlotsRef.current;
+      if (el && cached) {
+        const nodes = el.querySelectorAll<HTMLElement>("[data-tab-id]");
+        if (nodes.length === cached.length) {
+          let same = true;
+          nodes.forEach((node, index) => {
+            if (node.dataset.tabId !== cached[index].id) same = false;
+          });
+          if (same) return cached;
+        }
+      }
+      const next = measureSlots(offsets);
+      reorderSlotsRef.current = next;
+      return next;
+    },
+    [measureSlots],
+  );
+
+  const clearReorderPreview = useCallback(() => {
+    reorderPlanRef.current = null;
+    setReorderPlan((curr) => (curr === null ? curr : null));
+  }, []);
+
+  const applyReorderPlan = useCallback(
+    (clientX: number) => {
+      const dragged = peekTabReorderDrag()?.tabId;
+      const el = scrollRef.current;
+      if (!dragged || !el) return;
+      reorderPointerRef.current = clientX;
+      const slots = ensureSlots(reorderPlanRef.current?.offsets);
+      const plan = planTabReorder(
+        slots,
+        dragged,
+        toStripContentX(clientX, el.getBoundingClientRect().left, el.scrollLeft),
+      );
+      // Dragged tab is not in this strip (another window, or it was closed
+      // mid-gesture) — show nothing rather than guess a destination.
+      if (!plan) {
+        clearReorderPreview();
+        return;
+      }
+      const prev = reorderPlanRef.current;
+      if (
+        prev &&
+        prev.draggedId === plan.draggedId &&
+        prev.insertIndex === plan.insertIndex &&
+        prev.markerX === plan.markerX
+      ) {
+        return;
+      }
+      const offsets: Record<TabId, number> = {};
+      plan.offsets.forEach((offset, index) => {
+        if (offset !== 0) offsets[slots[index].id] = offset;
+      });
+      const next: ReorderPreview = {
+        draggedId: plan.draggedId,
+        insertIndex: plan.insertIndex,
+        changed: plan.changed,
+        markerX: plan.markerX,
+        offsets,
+      };
+      reorderPlanRef.current = next;
+      setReorderPlan(next);
+    },
+    [clearReorderPreview, ensureSlots],
+  );
+
+  // Edge auto-scroll: without it, an overflowing strip can only be reordered
+  // inside the visible window — the slot the user wants is off-screen and
+  // unreachable, because HTML5 drag events never scroll a container themselves.
+  const startAutoScroll = useCallback(() => {
+    if (autoScrollRef.current !== null) return;
+    const step = () => {
+      autoScrollRef.current = null;
+      const el = scrollRef.current;
+      // The gesture itself is over — stop burning frames.
+      if (!el || !peekTabReorderDrag()) return;
+      // Pointer is off the bar (it's cleared on dragleave): idle rather than
+      // stop, otherwise a drag that wandered out near an edge would keep
+      // scrolling the strip on a stale coordinate.
+      const clientX = reorderPointerRef.current;
+      if (clientX !== null) {
+        const rect = el.getBoundingClientRect();
+        const delta = edgeAutoScrollDelta(clientX, rect.left, rect.right);
+        if (delta !== 0) {
+          const limit = el.scrollWidth - el.clientWidth;
+          const next = Math.max(0, Math.min(limit, el.scrollLeft + delta));
+          if (next !== el.scrollLeft) {
+            el.scrollLeft = next;
+            // The pointer didn't move but the content under it did, so the
+            // insertion index has to be recomputed against the new scroll.
+            applyReorderPlan(clientX);
+          }
+        }
+      }
+      autoScrollRef.current = requestAnimationFrame(step);
+    };
+    autoScrollRef.current = requestAnimationFrame(step);
+  }, [applyReorderPlan]);
+
+  const endReorderDrag = useCallback(() => {
+    stopAutoScroll();
+    endTabReorderDrag();
+    reorderSlotsRef.current = null;
+    reorderPointerRef.current = null;
+    clearReorderPreview();
+    setDraggingTabId((curr) => (curr === null ? curr : null));
+  }, [clearReorderPreview, stopAutoScroll]);
+
+  const handleReorderDragStart = useCallback(
+    (id: TabId, event: React.DragEvent) => {
+      event.dataTransfer.setData(TAB_REORDER_DRAG_MIME, JSON.stringify({ tabId: id }));
+      event.dataTransfer.effectAllowed = "move";
+      // Mirror the payload module-side: DataTransfer.getData is empty during
+      // dragover, and the strip needs the id on every move to place the marker.
+      beginTabReorderDrag({ tabId: id });
+      reorderSlotsRef.current = measureSlots();
+      reorderPointerRef.current = event.clientX;
+      window.requestAnimationFrame(() => {
+        if (peekTabReorderDrag()?.tabId !== id) return;
+        setDraggingTabId(id);
+      });
+      startAutoScroll();
+    },
+    [measureSlots, startAutoScroll],
+  );
+
+  // Resolve the drop from the release position rather than trusting the last
+  // dragover: a fast flick can outrun the dragover stream, and the frame the
+  // user released on is the one they aimed with.
+  const handleReorderDrop = useCallback(
+    (event: React.DragEvent, payload: TabReorderDragPayload) => {
+      const el = scrollRef.current;
+      let target: TabReorderTarget | null = null;
+      if (el) {
+        const slots = ensureSlots(reorderPlanRef.current?.offsets);
+        const plan = planTabReorder(
+          slots,
+          payload.tabId,
+          toStripContentX(event.clientX, el.getBoundingClientRect().left, el.scrollLeft),
+        );
+        if (plan) target = reorderTargetFor(slots, plan);
+      }
+      endReorderDrag();
+      if (target) onReorderTab(payload.tabId, target.toId, target.position);
+    },
+    [endReorderDrag, ensureSlots, onReorderTab],
+  );
+
+  // A tab closed mid-drag (agents can close tabs) never fires dragend on its
+  // own element, so the preview would stay frozen on screen. Drop it.
+  useEffect(() => {
+    if (!draggingTabId) return;
+    if (tabs.some((tab) => tab.id === draggingTabId)) return;
+    endReorderDrag();
+  }, [tabs, draggingTabId, endReorderDrag]);
+
+  // Unmount safety (workspace switch mid-drag): never leave the module-level
+  // payload set or an auto-scroll frame scheduled behind us.
+  useEffect(
+    () => () => {
+      stopAutoScroll();
+      endTabReorderDrag();
+    },
+    [stopAutoScroll],
+  );
 
   // The pane drag uses pointer events (see PaneDragHandle), so the HTML5
   // onDragEnter hover-activate on each TabItem never fires for it. We
@@ -347,12 +605,27 @@ function TabBar({
 
   return (
     <div
+      // The reorder branch lives on the WHOLE bar, not on the tabs: the gaps
+      // between tabs, the strip's padding and the empty run past the last tab
+      // are all valid drop ground, so there is no position the user can aim at
+      // that silently cancels the drag.
       onDragEnter={(event) => {
+        if (acceptsTabReorder(event)) {
+          event.preventDefault();
+          applyReorderPlan(event.clientX);
+          return;
+        }
         if (!acceptsTerminalPane(event)) return;
         event.preventDefault();
         setTerminalDropActive(true);
       }}
       onDragOver={(event) => {
+        if (acceptsTabReorder(event)) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          applyReorderPlan(event.clientX);
+          return;
+        }
         if (!acceptsTerminalPane(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
@@ -366,8 +639,24 @@ function TabBar({
           return;
         }
         setTerminalDropActive(false);
+        // Left the bar: no drop target out there accepts a tab, so the gesture
+        // reverts. Drop the preview to say so — the tab slides back home and
+        // the marker goes away — and forget the pointer so edge auto-scroll
+        // stops chasing a coordinate the user has abandoned.
+        reorderPointerRef.current = null;
+        clearReorderPreview();
       }}
+      // dragend bubbles from the source tab and fires for cancels (Escape,
+      // release over a non-target) as well as completed drops, so it is the one
+      // reliable teardown point for the whole gesture.
+      onDragEnd={endReorderDrag}
       onDrop={(event) => {
+        const reorder = parseTabReorderDrag(event.dataTransfer);
+        if (reorder) {
+          event.preventDefault();
+          handleReorderDrop(event, reorder);
+          return;
+        }
         const payload = parseTerminalPaneDrag(event.dataTransfer);
         if (!payload) return;
         event.preventDefault();
@@ -380,17 +669,40 @@ function TabBar({
           : "spark-tabbar"
       }
     >
-      <div ref={scrollRef} className="spark-tabbar-scroll">
+      <div
+        ref={scrollRef}
+        // The --reordering modifier is what turns the transform transition on,
+        // and it is removed in the SAME commit that applies the new order — so
+        // the tabs slide while dragging and settle instantly on drop, with no
+        // reverse animation from the preview offsets to the committed layout.
+        className={
+          draggingTabId || reorderPlan
+            ? "spark-tabbar-scroll spark-tabbar-scroll--reordering"
+            : "spark-tabbar-scroll"
+        }
+      >
+        {reorderPlan?.changed && (
+          <span
+            aria-hidden
+            className="spark-tab-reorder-marker"
+            // Rounded to a whole CSS pixel: the plan's centre is fractional
+            // (real tab widths are), and a 2px rule at a half-pixel offset
+            // paints as three blurry columns.
+            style={{ left: Math.round(reorderPlan.markerX) }}
+          />
+        )}
         {tabs.map((t) =>
           t.kind === "chat" ? (
             <ChatTabItem
               key={t.id}
               tab={t}
               active={t.id === activeId}
+              dragging={t.id === draggingTabId}
+              dragOffset={reorderPlan?.offsets[t.id] ?? 0}
               onSelect={onSelect}
               onRename={onRenameChat}
               onClose={onCloseChat}
-              onReorderTab={onReorderTab}
+              onReorderDragStart={handleReorderDragStart}
               closeOnMiddleClick={closeOnMiddleClick}
             />
           ) : (
@@ -409,10 +721,12 @@ function TabBar({
               // unreachable by clicking. closeTab no longer enforces a floor.
               canClose
               paneDragHover={t.id === paneHoverTabId}
+              dragging={t.id === draggingTabId}
+              dragOffset={reorderPlan?.offsets[t.id] ?? 0}
               onSelect={onSelect}
               onClose={onClose}
               onTerminalPaneDrop={onTerminalPaneDrop}
-              onReorderTab={onReorderTab}
+              onReorderDragStart={handleReorderDragStart}
               onPinEditorTab={onPinEditorTab}
               onContextMenu={onTabContextMenu}
               closeOnMiddleClick={closeOnMiddleClick}
@@ -521,13 +835,22 @@ interface TabItemProps {
   // so the parent TabBar hit-tests pointer position against each tab and
   // feeds the result here so the row can still show drop-target styling.
   paneDragHover: boolean;
+  // True while THIS tab is the reorder drag's source. Owned by the strip (not
+  // local state) so a drag that ends without a dragend on this element — the
+  // tab was closed mid-gesture — can still be cleaned up.
+  dragging: boolean;
+  // translateX px the strip's reorder preview assigns this tab, so the row
+  // slides out of the way of the incoming tab instead of the list reflowing in
+  // one discrete jump at drop time. 0 at rest.
+  dragOffset: number;
   // Take the tab id rather than a pre-bound closure: the parent can hand
   // down ONE stable callback for every row, which (together with React.memo
   // below) lets a single tab's change skip re-rendering its siblings.
   onSelect: (id: TabId) => void;
   onClose: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId: TabId) => void;
-  onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+  // Hands the gesture to the strip, which owns all reorder hit-testing.
+  onReorderDragStart: (id: TabId, event: React.DragEvent) => void;
   onPinEditorTab: (id: TabId) => void;
   // Right-click. Only file-backed tab kinds report it (currently editors);
   // the parent owns the menu state so one menu serves the whole strip.
@@ -543,10 +866,12 @@ const TabItem = React.memo(function TabItem({
   active,
   canClose,
   paneDragHover,
+  dragging,
+  dragOffset,
   onSelect,
   onClose,
   onTerminalPaneDrop,
-  onReorderTab,
+  onReorderDragStart,
   onPinEditorTab,
   onContextMenu,
   closeOnMiddleClick,
@@ -554,12 +879,6 @@ const TabItem = React.memo(function TabItem({
   const [closeHover, setCloseHover] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const isPreviewEditor = tab.kind === "editor" && Boolean(tab.preview);
-  // "before" | "after" while a tab-reorder drag is hovering this item, used
-  // to render the insertion indicator on the correct edge. Null otherwise.
-  const [reorderEdge, setReorderEdge] = useState<"before" | "after" | null>(null);
-  // While dragging this tab as a reorder source, dim it so the user gets
-  // visual confirmation that the strip understood the gesture.
-  const [dragging, setDragging] = useState(false);
   // Hover-activate timer: a terminal-pane drag that lingers over an
   // inactive tab flips the workbench to that tab so the user can drop on a
   // specific pane edge inside.
@@ -575,15 +894,6 @@ const TabItem = React.memo(function TabItem({
   const acceptsPaneDrop = (event: React.DragEvent): boolean =>
     tab.kind === "terminal" &&
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
-  const acceptsReorderDrop = (event: React.DragEvent): boolean =>
-    Array.from(event.dataTransfer.types).includes(TAB_REORDER_DRAG_MIME);
-
-  // Decide whether the pointer is on the left or right half of the tab —
-  // that's the edge the reorder insertion line snaps to.
-  const reorderPositionFor = (event: React.DragEvent): "before" | "after" => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
-  };
 
   // Terminals a background agent spawned carry an opaque color token; tint the
   // pill edge + wash so the user can tell an agent owns the tab. The token is
@@ -598,9 +908,7 @@ const TabItem = React.memo(function TabItem({
   ]
     .filter(Boolean)
     .join(" ");
-  const tabStyle = agentColor
-    ? ({ "--agent-accent": agentColor } as React.CSSProperties)
-    : undefined;
+  const tabStyle = tabStyleFor(agentColor, dragOffset);
 
   return (
     <div
@@ -611,29 +919,12 @@ const TabItem = React.memo(function TabItem({
       className={tabClass}
       style={tabStyle}
       draggable
-      onDragStart={(event) => {
-        // Use a tab-specific MIME so the strip's terminal-pane drop handler
-        // ignores this drag — and so a pane drag from a TerminalPane drag
-        // handle never collides with a tab reorder.
-        event.dataTransfer.setData(
-          TAB_REORDER_DRAG_MIME,
-          JSON.stringify({ tabId: tab.id }),
-        );
-        event.dataTransfer.effectAllowed = "move";
-        setDragging(true);
-      }}
-      onDragEnd={() => {
-        setDragging(false);
-        setReorderEdge(null);
-        clearHoverActivate();
-      }}
+      // The strip owns the gesture from here: it stamps the tab-specific MIME
+      // (so the terminal-pane drop path ignores this drag) and takes its one
+      // geometry measurement while the layout is still untransformed.
+      onDragStart={(event) => onReorderDragStart(tab.id, event)}
+      onDragEnd={clearHoverActivate}
       onDragEnter={(event) => {
-        if (acceptsReorderDrop(event)) {
-          event.preventDefault();
-          event.stopPropagation();
-          setReorderEdge(reorderPositionFor(event));
-          return;
-        }
         if (!acceptsPaneDrop(event)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -649,14 +940,10 @@ const TabItem = React.memo(function TabItem({
         }
       }}
       onDragOver={(event) => {
-        if (acceptsReorderDrop(event)) {
-          event.preventDefault();
-          event.stopPropagation();
-          event.dataTransfer.dropEffect = "move";
-          const next = reorderPositionFor(event);
-          setReorderEdge((curr) => (curr === next ? curr : next));
-          return;
-        }
+        // Reorder drags are deliberately NOT handled here: they bubble to the
+        // strip, which hit-tests them against one cached geometry. Handling
+        // them per-tab is what left the 4px gaps between tabs (and the empty
+        // run past the last one) as dead, drop-cancelling ground.
         if (!acceptsPaneDrop(event)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -671,23 +958,9 @@ const TabItem = React.memo(function TabItem({
           return;
         }
         setDropActive(false);
-        setReorderEdge(null);
         clearHoverActivate();
       }}
       onDrop={(event) => {
-        const reorder = parseTabReorderDrag(event.dataTransfer);
-        if (reorder) {
-          event.preventDefault();
-          event.stopPropagation();
-          const position = reorderPositionFor(event);
-          setReorderEdge(null);
-          setDropActive(false);
-          clearHoverActivate();
-          if (reorder.tabId !== tab.id) {
-            onReorderTab(reorder.tabId, tab.id, position);
-          }
-          return;
-        }
         const payload = parseTerminalPaneDrag(event.dataTransfer);
         if (!payload || tab.kind !== "terminal") return;
         event.preventDefault();
@@ -719,12 +992,6 @@ const TabItem = React.memo(function TabItem({
       }}
       title={titleFor(tab)}
     >
-      {reorderEdge && (
-        <span
-          aria-hidden
-          className={`spark-tab__reorder-edge spark-tab__reorder-edge--${reorderEdge}`}
-        />
-      )}
       <KindIcon tab={tab} />
       <span
         className={
@@ -751,6 +1018,10 @@ const TabItem = React.memo(function TabItem({
         <button
           type="button"
           className="spark-tab__close"
+          // draggable={false} (plus -webkit-user-drag: none in the stylesheet)
+          // so a press-and-wobble on the × closes the tab instead of dragging
+          // the whole tab out from under the click.
+          draggable={false}
           onMouseEnter={() => setCloseHover(true)}
           onMouseLeave={() => setCloseHover(false)}
           onClick={(e) => {
@@ -777,27 +1048,30 @@ const TabItem = React.memo(function TabItem({
 interface ChatTabItemProps {
   tab: ChatTab;
   active: boolean;
+  // Same strip-owned reorder contract as TabItem — see TabItemProps.
+  dragging: boolean;
+  dragOffset: number;
   onSelect: (id: TabId) => void;
   onRename: (id: TabId, title: string) => void;
   onClose: (id: TabId) => void;
-  onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+  onReorderDragStart: (id: TabId, event: React.DragEvent) => void;
   closeOnMiddleClick: boolean;
 }
 
 const ChatTabItem = React.memo(function ChatTabItem({
   tab,
   active,
+  dragging,
+  dragOffset,
   onSelect,
   onRename,
   onClose,
-  onReorderTab,
+  onReorderDragStart,
   closeOnMiddleClick,
 }: ChatTabItemProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(tab.title);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [reorderEdge, setReorderEdge] = useState<"before" | "after" | null>(null);
-  const [dragging, setDragging] = useState(false);
 
   // Mirror title updates from the run snapshot into the draft state when the
   // user is NOT in the middle of editing.
@@ -828,13 +1102,6 @@ const ChatTabItem = React.memo(function ChatTabItem({
     setEditing(false);
   };
 
-  const acceptsReorderDrop = (event: React.DragEvent): boolean =>
-    Array.from(event.dataTransfer.types).includes(TAB_REORDER_DRAG_MIME);
-  const reorderPositionFor = (event: React.DragEvent): "before" | "after" => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
-  };
-
   const className = [
     "spark-tab",
     active && "spark-tab--active",
@@ -849,51 +1116,13 @@ const ChatTabItem = React.memo(function ChatTabItem({
       aria-selected={active}
       data-tab-id={tab.id}
       className={className}
+      style={tabStyleFor(undefined, dragOffset)}
+      // Not draggable while renaming: the text selection inside the input has
+      // to win over the tab gesture.
       draggable={!editing}
-      onDragStart={(event) => {
-        event.dataTransfer.setData(
-          TAB_REORDER_DRAG_MIME,
-          JSON.stringify({ tabId: tab.id }),
-        );
-        event.dataTransfer.effectAllowed = "move";
-        setDragging(true);
-      }}
-      onDragEnd={() => {
-        setDragging(false);
-        setReorderEdge(null);
-      }}
-      onDragEnter={(event) => {
-        if (!acceptsReorderDrop(event)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        setReorderEdge(reorderPositionFor(event));
-      }}
-      onDragOver={(event) => {
-        if (!acceptsReorderDrop(event)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        const next = reorderPositionFor(event);
-        setReorderEdge((curr) => (curr === next ? curr : next));
-      }}
-      onDragLeave={(event) => {
-        if (
-          event.relatedTarget instanceof Node &&
-          event.currentTarget.contains(event.relatedTarget)
-        ) {
-          return;
-        }
-        setReorderEdge(null);
-      }}
-      onDrop={(event) => {
-        const reorder = parseTabReorderDrag(event.dataTransfer);
-        if (!reorder) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const position = reorderPositionFor(event);
-        setReorderEdge(null);
-        if (reorder.tabId !== tab.id) onReorderTab(reorder.tabId, tab.id, position);
-      }}
+      // Reorder drags are hit-tested by the strip (see TabItem) — this row only
+      // starts the gesture and slides when the preview asks it to.
+      onDragStart={(event) => onReorderDragStart(tab.id, event)}
       onClick={(e) => {
         e.stopPropagation();
         if (!editing) onSelect(tab.id);
@@ -907,12 +1136,6 @@ const ChatTabItem = React.memo(function ChatTabItem({
       }}
       title={tab.title}
     >
-      {reorderEdge && (
-        <span
-          aria-hidden
-          className={`spark-tab__reorder-edge spark-tab__reorder-edge--${reorderEdge}`}
-        />
-      )}
       <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
         <SparkIcon size={13} />
       </span>
@@ -955,12 +1178,14 @@ const ChatTabItem = React.memo(function ChatTabItem({
       {/* Rename + close are always rendered (gated only by !editing) and revealed
           via the .spark-tab:hover .spark-tab__close opacity rule — so the tab's
           width never changes on hover, and a keyboard-focused rename button is
-          no longer invisible (see .spark-tab__close:focus-visible). */}
+          no longer invisible (see .spark-tab__close:focus-visible).
+          Both opt out of dragging so a press on either never yanks the tab. */}
       {!editing && (
         <>
           <button
             type="button"
             className="spark-tab__close"
+            draggable={false}
             title="Rename chat"
             aria-label="Rename chat"
             onClick={(e) => {
@@ -973,6 +1198,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
           <button
             type="button"
             className="spark-tab__close"
+            draggable={false}
             title="Close chat"
             aria-label="Close chat"
             onClick={(e) => {
@@ -987,6 +1213,23 @@ const ChatTabItem = React.memo(function ChatTabItem({
     </div>
   );
 });
+
+// Inline style for a tab row: the agent tint (a CSS custom property the
+// .spark-tab--agent rules consume) and the reorder preview's slide. translate3d
+// keeps the slide on the compositor — the strip never reflows mid-drag, which
+// is what makes the motion smooth instead of a per-frame layout pass.
+// undefined (not an empty object) when neither applies, so the common case
+// hands React the same "no style" it had before.
+function tabStyleFor(
+  agentColor: string | undefined,
+  dragOffset: number,
+): React.CSSProperties | undefined {
+  if (!agentColor && !dragOffset) return undefined;
+  const style: React.CSSProperties = {};
+  if (agentColor) (style as Record<string, string>)["--agent-accent"] = agentColor;
+  if (dragOffset) style.transform = `translate3d(${dragOffset}px, 0, 0)`;
+  return style;
+}
 
 function PencilGlyph() {
   return (

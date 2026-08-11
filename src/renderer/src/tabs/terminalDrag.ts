@@ -92,6 +92,27 @@ export function peekTerminalPaneDragState(): TerminalPaneDragState | null {
   return activeTerminalPaneDrag;
 }
 
+// Module-level tab-reorder tracker, same reason as the pane tracker above:
+// DataTransfer.getData is empty during dragenter/dragover, but the strip has to
+// know WHICH tab is in flight on every dragover to place the insertion marker,
+// slide the other tabs, and suppress the preview for a drop that wouldn't move
+// anything. The dragged tab stashes its id here at dragstart; the strip clears
+// it at dragend. A drag started in another window leaves this null, so the
+// strip simply declines the reorder instead of guessing.
+let activeTabReorderDrag: TabReorderDragPayload | null = null;
+
+export function beginTabReorderDrag(payload: TabReorderDragPayload): void {
+  activeTabReorderDrag = payload;
+}
+
+export function endTabReorderDrag(): void {
+  activeTabReorderDrag = null;
+}
+
+export function peekTabReorderDrag(): TabReorderDragPayload | null {
+  return activeTabReorderDrag;
+}
+
 export function parseTabReorderDrag(dataTransfer: DataTransfer): TabReorderDragPayload | null {
   if (!Array.from(dataTransfer.types).includes(TAB_REORDER_DRAG_MIME)) return null;
   try {
