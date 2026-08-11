@@ -104,9 +104,15 @@ test("tabs reorder from anywhere in the strip, including the gaps and the empty 
     const home = await tabBox(page, settled[1]);
     await dragTab(page, settled[1], home.x + home.width * 0.9, home.y + home.height / 2);
     expect(await tabIds(page)).toEqual(settled);
-    // And the drag left nothing stuck behind it.
-    expect(await page.locator(".spark-tab-reorder-marker").count()).toBe(0);
+    // And the drag left nothing stuck behind it: no ghost slot, no dimmed
+    // source, no residual displacement on any tab.
+    expect(await page.locator(".spark-tab-reorder-ghost").count()).toBe(0);
     expect(await page.locator(".spark-tab--dragging").count()).toBe(0);
+    expect(
+      await page.$$eval(".spark-tabbar-scroll [data-tab-id]", (nodes) =>
+        nodes.map((n) => getComputedStyle(n as HTMLElement).transform),
+      ),
+    ).toEqual(settled.map(() => "none"));
   } finally {
     await app?.close();
   }

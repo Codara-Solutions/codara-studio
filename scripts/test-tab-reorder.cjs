@@ -178,7 +178,7 @@ async function main() {
       planTabReorder(slots, "t1", centre(slots[0]) - 1).changed === true);
   }
 
-  // ── 5. Displacement offsets + marker geometry ─────────────────────────────
+  // ── 5. Displacement offsets + ghost-slot geometry ─────────────────────────
   {
     const slots = layout([100, 100, 100, 100]);
     const advance = 100 + GAP; // dragged width + strip gap
@@ -191,26 +191,55 @@ async function main() {
     check("the dragged tab is never displaced",
       right.offsets[0] === 0 && left.offsets[3] === 0);
     // The gap that opens is exactly wide enough for the tab plus both gaps, and
-    // the marker sits at its centre. With t0 landing at index 2, the hole is
-    // between the displaced t2 and the untouched t3.
+    // the ghost slot fills it with one strip gap of air on each side. With t0
+    // landing at index 2, the hole is between the displaced t2 and the
+    // untouched t3.
     const holeStart = slots[2].end + right.offsets[2];
     const holeEnd = slots[3].start + right.offsets[3];
     check("the opened gap fits the dragged tab exactly",
       holeEnd - holeStart === 100 + 2 * GAP, holeEnd - holeStart);
-    check("the marker sits at the centre of the opened gap",
-      right.markerX === (holeStart + holeEnd) / 2, right.markerX);
-    // In a uniform strip, the marker for a given destination is the same
-    // wherever the tab came from: the line the user aims at doesn't jitter
+    check("the ghost slot is exactly the dragged tab's width",
+      right.ghostWidth === 100, right.ghostWidth);
+    check("the ghost slot sits one strip gap from each displaced neighbour",
+      right.ghostStart - holeStart === GAP &&
+        holeEnd - (right.ghostStart + right.ghostWidth) === GAP,
+      `${right.ghostStart - holeStart} / ${holeEnd - (right.ghostStart + right.ghostWidth)}`);
+    check("the plan's centre is the ghost slot's centre",
+      right.markerX === right.ghostStart + right.ghostWidth / 2, right.markerX);
+    // In a uniform strip, the slot for a given destination is the same wherever
+    // the tab came from: the placeholder the user aims at doesn't jitter
     // depending on which side they approached from.
     const fromRight = planTabReorder(slots, "t3", centre(slots[1]) - 1); // → index 1
     const fromLeft = planTabReorder(slots, "t0", centre(slots[1]) + 1); // → index 1
-    check("both approaches to the same destination draw the marker in one place",
+    check("both approaches to the same destination draw one identical slot",
       fromLeft.insertIndex === 1 &&
         fromRight.insertIndex === 1 &&
-        fromLeft.markerX === fromRight.markerX,
-      `${fromLeft.markerX} / ${fromRight.markerX}`);
-    check("marker for an end append sits past the last survivor",
-      planTabReorder(slots, "t0", 10_000).markerX > slots[3].end - advance);
+        fromLeft.ghostStart === fromRight.ghostStart &&
+        fromLeft.ghostWidth === fromRight.ghostWidth,
+      `${fromLeft.ghostStart} / ${fromRight.ghostStart}`);
+    // Ends of the strip: the hole there is one gap narrower than in the middle,
+    // so a slot centred on the midpoint between two boxes would overhang the
+    // edge tab. Landing first takes over the flow origin exactly; landing last
+    // follows the final survivor by one gap.
+    const first = planTabReorder(slots, "t3", slots[0].start - 400);
+    check("landing first puts the slot at the strip's flow origin",
+      first.insertIndex === 0 && first.ghostStart === slots[0].start, first.ghostStart);
+    check("landing first leaves exactly one gap before the displaced first tab",
+      slots[0].start + first.offsets[0] - (first.ghostStart + first.ghostWidth) === GAP,
+      slots[0].start + first.offsets[0] - (first.ghostStart + first.ghostWidth));
+    const end = planTabReorder(slots, "t0", 10_000);
+    check("landing last follows the final survivor by one gap",
+      end.ghostStart === slots[3].end + end.offsets[3] + GAP, end.ghostStart);
+    // Variable widths: the slot is always the DRAGGED tab's width, never the
+    // width of whatever it is landing next to.
+    const mixed = layout([180, 52, 160]);
+    const narrow = planTabReorder(mixed, "t1", 10_000);
+    check("a narrow tab keeps its own narrow slot at the end",
+      narrow.ghostWidth === 52 && narrow.ghostStart === mixed[2].end + narrow.offsets[2] + GAP,
+      `${narrow.ghostWidth} / ${narrow.ghostStart}`);
+    const wide = planTabReorder(mixed, "t0", 10_000);
+    check("a wide tab keeps its own wide slot at the end",
+      wide.ghostWidth === 180, wide.ghostWidth);
   }
 
   // ── 6. Scrolled strip ─────────────────────────────────────────────────────
@@ -339,20 +368,57 @@ async function main() {
       /\.spark-tab__close\s*\{[^}]*-webkit-user-drag:\s*none/s.test(styles));
     check("reorder hit-testing is not per-tab any more",
       !tabbar.includes("reorderPositionFor") && !tabbar.includes("spark-tab__reorder-edge"));
-    check("the strip owns one insertion marker",
-      tabbar.includes("spark-tab-reorder-marker") &&
-        /\.spark-tab-reorder-marker\s*\{/.test(styles));
+    const ghostRule = styles.match(/\.spark-tab-reorder-ghost\s*\{[^}]*\}/s)?.[0] ?? "";
+    check("the strip owns one ghost slot (no insertion line left)",
+      tabbar.includes("spark-tab-reorder-ghost") &&
+        ghostRule.length > 0 &&
+        !tabbar.includes("spark-tab-reorder-marker") &&
+        !styles.includes("spark-tab-reorder-marker"));
+    check("the ghost is a chip: tab height, tab radius, soft fill + hairline",
+      /height:\s*var\(--tab-h\)/.test(ghostRule) &&
+        /border-radius:\s*var\(--tab-radius\)/.test(ghostRule) &&
+        /background:\s*var\(--accent-soft\)/.test(ghostRule) &&
+        /border:\s*1px solid var\(--accent-edge\)/.test(ghostRule));
+    check("the ghost is sized and placed from the plan, not from CSS guesses",
+      tabbar.includes("reorderPlan.ghostWidth") && tabbar.includes("reorderPlan.ghostStart"));
+    check("the ghost fades rather than unmounting between destinations",
+      /opacity:\s*0/.test(ghostRule) &&
+        /\.spark-tab-reorder-ghost--visible\s*\{[^}]*opacity:\s*1/s.test(styles) &&
+        /\.spark-tab-reorder-ghost\s*\{[^}]*transition:[^}]*transform var\(--motion\)/s.test(styles));
     check("the slide is transform-based and transitioned",
       tabbar.includes("translate3d") &&
         /\.spark-tabbar-scroll--reordering \.spark-tab\s*\{[^}]*transform var\(--motion\)/s.test(styles));
-    check("the marker's containing block is the scroll container",
+    check("reduced motion drops the travel but keeps the fade",
+      /@media \(prefers-reduced-motion: reduce\)\s*\{(?:[^{}]|\{[^{}]*\})*\.spark-tab-reorder-ghost\s*\{[^}]*transition:\s*opacity/s.test(styles));
+    check("the ghost's containing block is the scroll container",
       /\.spark-tabbar-scroll\s*\{[^}]*position:\s*relative/s.test(styles));
     check("middle-click close and the close button survive",
       tabbar.includes("closeOnMiddleClick") && tabbar.includes('aria-label="Close tab"'));
     check("chat tabs still refuse to drag while renaming", tabbar.includes("draggable={!editing}"));
     check("no magic hex in the reorder styling",
-      /\.spark-tab-reorder-marker\s*\{[^}]*var\(--accent\)/s.test(styles) &&
-        !/\.spark-tab-reorder-marker\s*\{[^}]*#[0-9a-fA-F]{3}/s.test(styles));
+      /var\(--accent-soft\)/.test(ghostRule) && !/#[0-9a-fA-F]{3}/.test(ghostRule));
+
+    // ── Floating pill tabs ────────────────────────────────────────────────
+    const tabRule = styles.match(/\n\.spark-tab\s*\{[^}]*\}/s)?.[0] ?? "";
+    const activeRule = styles.match(/\.spark-tab--active\s*\{[^}]*\}/s)?.[0] ?? "";
+    const barRule = styles.match(/\.spark-tabbar\s*\{[^}]*\}/s)?.[0] ?? "";
+    const scrollRule = styles.match(/\.spark-tabbar-scroll\s*\{[^}]*\}/s)?.[0] ?? "";
+    check("tabs are rounded on all four corners",
+      /border-radius:\s*var\(--tab-radius\);/.test(tabRule), tabRule.match(/border-radius:[^;]*/)?.[0]);
+    check("tabs are chips of a fixed height, inset from the strip",
+      /height:\s*var\(--tab-h\)/.test(tabRule) && !/border-bottom:\s*none/.test(tabRule));
+    check("the chip is shorter than the strip, leaving breathing room",
+      /--tab-h:\s*28px/.test(styles) && /--tabbar-h:\s*36px/.test(styles));
+    check("the strip centres its chips instead of standing them on its floor",
+      /align-items:\s*center/.test(barRule) && /align-items:\s*center/.test(scrollRule));
+    check("the active tab is a raised chip, not a merged panel",
+      /background:\s*var\(--panel-2\)/.test(activeRule) &&
+        /box-shadow:\s*var\(--lift-hi\)/.test(activeRule) &&
+        !/margin-bottom:\s*-1px/.test(activeRule));
+    check("active and inactive chips are the same box (no reflow on select)",
+      !/padding-bottom/.test(activeRule) && !/height/.test(activeRule));
+    check("no magic hex in the chip styling",
+      !/#[0-9a-fA-F]{3}/.test(tabRule) && !/#[0-9a-fA-F]{3}/.test(activeRule));
     const useTabs = fs.readFileSync(
       path.join(ROOT, "src", "renderer", "src", "tabs", "useTabs.ts"),
       "utf8",

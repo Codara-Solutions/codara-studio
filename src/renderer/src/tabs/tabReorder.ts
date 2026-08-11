@@ -42,12 +42,22 @@ export interface TabReorderPlan {
   /** False when releasing here leaves the order untouched (a "home" drop). */
   changed: boolean;
   /**
-   * Content-space x of the insertion marker: the exact centre of the gap the
-   * displaced neighbours open up. Only meaningful when `changed` — a home drop
-   * has no gap to point at, and drawing a line there would promise a move the
-   * drop won't make.
+   * Content-space x of the dragged tab's future centre — the middle of the
+   * ghost slot below. Only meaningful when `changed`: a home drop has no gap
+   * to point at, and showing a placeholder there would promise a move the drop
+   * won't make.
    */
   markerX: number;
+  /**
+   * Left edge of the ghost slot: the placeholder that fills the hole the
+   * displaced neighbours open, sitting exactly one strip gap from each of
+   * them. At the ends of the strip the hole is only one gap wide on the outer
+   * side, so this is computed from the neighbour it follows rather than
+   * assumed symmetric around the centre.
+   */
+  ghostStart: number;
+  /** Width of the ghost slot — exactly the dragged tab's own width. */
+  ghostWidth: number;
   /**
    * translateX px for each slot, in the same order as the input slots. The
    * dragged slot is always 0 (it stays put and dims; the drag ghost is what
@@ -113,12 +123,17 @@ export function planTabReorder(
     for (let i = insertIndex; i < fromIndex; i += 1) offsets[i] = advance;
   }
 
+  const ghostWidth = Math.max(0, dragged.end - dragged.start);
+  const ghostStart = ghostStartFor(slots, others, offsets, fromIndex, insertIndex, gap);
+
   return {
     draggedId,
     fromIndex,
     insertIndex,
     changed: insertIndex !== fromIndex,
-    markerX: markerFor(dragged, others, offsets, fromIndex, insertIndex, gap),
+    markerX: ghostStart + ghostWidth / 2,
+    ghostStart,
+    ghostWidth,
     offsets,
   };
 }
@@ -212,23 +227,28 @@ function gapAround(slots: readonly TabSlot[], index: number): number {
   return 0;
 }
 
-// Centre of the hole the displaced neighbours open. Computed on the DISPLACED
-// boxes (layout position + the offset this plan applies) so the marker lands
-// exactly where the dragged tab will come to rest, not where the tabs were
-// before they slid.
-function markerFor(
-  dragged: TabSlot,
+// Left edge of the hole the displaced neighbours open. Computed on the
+// DISPLACED boxes (layout position + the offset this plan applies) so the
+// placeholder lands exactly where the dragged tab will come to rest, not where
+// the tabs were before they slid.
+//
+// Landing first means taking over the flow origin — the strip's content start,
+// which no displacement moves. Every other position follows the tab it lands
+// behind, one strip gap along. Deriving it from a neighbour (rather than
+// centring on the midpoint between two) is what keeps a full-width placeholder
+// from overlapping the first tab at the left end, where the hole is one gap
+// narrower than in the middle of the strip.
+function ghostStartFor(
+  slots: readonly TabSlot[],
   others: readonly TabSlot[],
   offsets: readonly number[],
   fromIndex: number,
   insertIndex: number,
   gap: number,
 ): number {
-  if (others.length === 0) return (dragged.start + dragged.end) / 2;
+  if (others.length === 0) return slots[fromIndex].start;
+  if (insertIndex <= 0) return slots[0].start;
+  const previous = Math.min(insertIndex, others.length) - 1;
   const offsetOf = (k: number): number => offsets[k < fromIndex ? k : k + 1];
-  const displacedStart = (k: number): number => others[k].start + offsetOf(k);
-  const displacedEnd = (k: number): number => others[k].end + offsetOf(k);
-  if (insertIndex <= 0) return displacedStart(0) - gap / 2;
-  if (insertIndex >= others.length) return displacedEnd(others.length - 1) + gap / 2;
-  return (displacedEnd(insertIndex - 1) + displacedStart(insertIndex)) / 2;
+  return others[previous].end + offsetOf(previous) + gap;
 }

@@ -85,6 +85,12 @@
   --tabbar-h: 36px;
   --tab-radius: 10px;
   --tab-pad-x: 12px;
+  /* Tab chip height. The strip stays --tabbar-h; the chip is deliberately
+     shorter so it floats with equal breathing room above and below
+     ((36 - 28) / 2 = 4px) instead of being welded to the strip's bottom edge.
+     The ghost slot the reorder preview drops into shares this height, so the
+     placeholder and a real tab are the same object. */
+  --tab-h: 28px;
 
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);          /* expo-ish out  */
@@ -132,7 +138,10 @@
 
   /* The active-tab top seam highlight — ink-based so it stays in-key on light
      paper (a white inset smudges on bright surfaces). Re-tinted under each
-     light theme block exactly as --lift-hi is. */
+     light theme block exactly as --lift-hi is.
+     Currently unconsumed: the tab strip's active state became a floating chip
+     (no seam to patch) and now lifts with --lift-hi, like every other selected
+     chip. Kept because tokens here are append-only and every theme defines it. */
   --tab-active-hi: inset 0 1px 0 color-mix(in oklab, var(--ink) 6%, transparent);
 
   /* The universal pressed-fill tint for surfaces/rows/tabs/pills that cannot
@@ -540,7 +549,9 @@ a { color: inherit; }
   flex: 0 0 var(--tabbar-h);
   height: var(--tabbar-h);
   display: flex;
-  align-items: flex-end;
+  /* Centred, not flex-end: tabs are floating chips inset from both edges of
+     the strip rather than panels standing on its floor. */
+  align-items: center;
   gap: 8px;
   padding: 0 10px;
   background: var(--panel);
@@ -558,14 +569,18 @@ a { color: inherit; }
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 4px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
-  padding-top: 4px;
-  /* Containing block for the reorder insertion marker, which is positioned in
-     strip CONTENT coordinates so it scrolls with the tabs. */
+  /* Full bar height with centred children: that is what gives every chip its
+     equal top/bottom inset, and it leaves the ((36 - 28) / 2 = 4px) of slack
+     the drop-target outline needs — a scroller sized exactly to the chip band
+     would clip it, since overflow-x: auto clips the cross axis too. */
+  align-self: stretch;
+  /* Containing block for the reorder ghost slot, which is positioned in strip
+     CONTENT coordinates so it scrolls with the tabs. */
   position: relative;
   /* Soft edge-fade so an overflowing strip dissolves at its right edge instead
      of hard-clipping a tab glyph mid-shape. Pure paint (mask), no layout. */
@@ -589,18 +604,25 @@ a { color: inherit; }
   display: none;
 }
 
+/* A tab is a floating chip: rounded on all four corners, full height of the
+   chip band, and never touching the strip's edges. It used to be a panel with
+   a square bottom that merged into the content area below (negative bottom
+   margin, no bottom border, a seam highlight patching the join). Nothing
+   merges any more, so the shape is simply a chip and the active state carries
+   its emphasis the way every other selected chip does — see
+   .spark-segmented-item.is-selected: a --panel-2 face plus --lift-hi. */
 .spark-tab {
   position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex: 0 0 auto;
+  height: var(--tab-h);
   max-width: 200px;
   min-width: 0;
-  padding: 5px var(--tab-pad-x) 6px;
+  padding: 0 var(--tab-pad-x);
   border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: var(--tab-radius) var(--tab-radius) 0 0;
+  border-radius: var(--tab-radius);
   background: color-mix(in oklab, var(--ink) 3%, var(--panel));
   /* Inactive tabs rest a step dimmer (--muted) so the active tab clearly leads
      by ink alone, without spending any color. */
@@ -621,25 +643,26 @@ a { color: inherit; }
   color: var(--ink-dim);
 }
 
-/* Tactile press: a momentary darker fill only — no translateY, which would
-   break the seam where the active tab joins the content area. Composite the
-   full --press tint (ink 12%) over the panel so it reads a clear step below
-   the hover fill (ink 6%). */
+/* Tactile press: a momentary darker fill only. No translateY — the chips sit
+   on one centreline in a tight row, where a lifting neighbour reads as jitter
+   (and the reorder preview already owns transform on these elements).
+   Composite the full --press tint (ink 12%) over the panel so it reads a clear
+   step below the hover fill (ink 6%). */
 .spark-tab:active:not(.spark-tab--active) {
   background: color-mix(in oklab, var(--ink) 12%, var(--panel));
   color: var(--ink);
 }
 
+/* Raised chip: the --panel-2 face reads a step above the strip, the hairline
+   gives it an edge, and --lift-hi is the same 1px top highlight that lifts
+   every other raised surface. No geometry changes between states, so
+   activating a tab never nudges its neighbours. */
 .spark-tab--active {
   z-index: 2;
-  margin-bottom: -1px;
-  padding-bottom: 7px;
-  background: var(--bg);
+  background: var(--panel-2);
   color: var(--ink);
   border-color: var(--rule-soft);
-  box-shadow:
-    var(--tab-active-hi),
-    0 -1px 0 var(--bg);
+  box-shadow: var(--lift-hi);
 }
 
 .spark-tab--dragging {
@@ -653,10 +676,11 @@ a { color: inherit; }
 
 /* Agent-owned tab: a background agent created this terminal. An amber edge +
    faint amber wash mark it as not-user-opened in BOTH the inactive and active
-   states, without disturbing the seam where the active tab joins the content
-   area (border-bottom stays none from .spark-tab). The pill reads its accent
-   from --agent-accent, set inline from the tab's stored color token, so the
-   tab model owns the color and the stylesheet only consumes it. */
+   states. The pill reads its accent from --agent-accent, set inline from the
+   tab's stored color token, so the tab model owns the color and the stylesheet
+   only consumes it. Each state washes over the same face its plain counterpart
+   uses (--panel resting, --panel-2 raised), so an agent chip is the ordinary
+   chip plus a tint rather than a differently-lit object. */
 .spark-tab--agent {
   border-color: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 55%, transparent);
   background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 8%, var(--panel));
@@ -666,7 +690,7 @@ a { color: inherit; }
 }
 .spark-tab--agent.spark-tab--active {
   border-color: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 65%, transparent);
-  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 12%, var(--bg));
+  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 12%, var(--panel-2));
 }
 
 .spark-tab__label {
@@ -699,24 +723,37 @@ a { color: inherit; }
   font-synthesis: style;
 }
 
-/* Reorder insertion marker: ONE line owned by the strip, centred in the gap the
-   displaced tabs open up, rather than a per-tab edge that had to choose between
-   "after tab N" and "before tab N+1" for the same slot (two lines 2px apart for
-   one destination). Rendered only while the drop would actually move the tab,
-   so it never promises a reorder that the release won't make.
-   `left` is set inline from the plan's content-space x; the negative margin
-   centres the 2px stroke on it. */
-.spark-tab-reorder-marker {
+/* Reorder ghost slot: the macOS-style drop preview. A placeholder chip the
+   exact size and shape of the tab in flight, sitting in the hole its
+   neighbours slid apart to open — the destination is shown as a SLOT the tab
+   drops into, not as a line between two things. One per strip, owned by the
+   strip, so there is never a choice to make between "after tab N" and "before
+   tab N+1" for what is one destination.
+   Width + x come from the plan (inline, content-space); it is kept mounted for
+   the whole gesture and merely faded out on a home drop, so it glides between
+   destinations instead of blinking. Painted first in DOM order, so the sliding
+   tabs pass over it. */
+.spark-tab-reorder-ghost {
   position: absolute;
-  top: 8px;
-  bottom: 4px;
-  width: 2px;
-  margin-left: -1px;
-  border-radius: 999px;
-  background: var(--accent);
-  box-shadow: 0 0 8px var(--accent-glow);
+  /* Centred on the scroller exactly the way flexbox centres the chips — the
+     inline transform carries the matching translateY(-50%). Deriving the inset
+     arithmetically instead would land half a pixel high, because the bar's 1px
+     bottom border makes the content box an odd height. */
+  top: 50%;
+  left: 0;
+  height: var(--tab-h);
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--tab-radius);
+  background: var(--accent-soft);
+  opacity: 0;
   pointer-events: none;
-  z-index: 3;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion) var(--ease-out-fast);
+}
+
+.spark-tab-reorder-ghost--visible {
+  opacity: 1;
 }
 
 /* While a reorder drag is live, tabs slide to open the landing gap instead of
@@ -739,6 +776,11 @@ a { color: inherit; }
       color var(--motion-fast) var(--ease-out),
       box-shadow var(--motion-fast) var(--ease-out),
       opacity var(--motion-fast) var(--ease-out);
+  }
+
+  /* The ghost still fades — only its travel is dropped. */
+  .spark-tab-reorder-ghost {
+    transition: opacity var(--motion-fast) var(--ease-out);
   }
 }
 
@@ -792,7 +834,9 @@ a { color: inherit; }
   flex: 0 0 22px;
   width: 22px;
   height: 22px;
-  margin-bottom: 5px;
+  /* No bottom margin: the bar centres its children now, so the button rides
+     the same centreline as the tab chips instead of being lifted off a
+     flex-end baseline. */
   border: none;
   border-radius: 50%;
   background: color-mix(in oklab, var(--ink) 4%, transparent);

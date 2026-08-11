@@ -93,12 +93,14 @@ interface ReorderPreview {
   // Index into the strip WITHOUT the dragged tab — the list the drop splices
   // into, which is what keeps rightward moves free of an off-by-one.
   insertIndex: number;
-  // False for a "home" drop (releasing here changes nothing): the marker is
-  // suppressed and no tab is displaced, so the strip never promises a move it
+  // False for a "home" drop (releasing here changes nothing): the ghost slot
+  // fades out and no tab is displaced, so the strip never promises a move it
   // won't make.
   changed: boolean;
-  // Strip content-space x of the insertion marker.
-  markerX: number;
+  // Strip content-space box of the ghost slot — the placeholder that fills the
+  // hole the displaced tabs open, sized to the dragged tab.
+  ghostStart: number;
+  ghostWidth: number;
   // translateX px by tab id; absent means 0.
   offsets: Record<TabId, number>;
 }
@@ -304,7 +306,7 @@ function TabBar({
         prev &&
         prev.draggedId === plan.draggedId &&
         prev.insertIndex === plan.insertIndex &&
-        prev.markerX === plan.markerX
+        prev.ghostStart === plan.ghostStart
       ) {
         return;
       }
@@ -316,7 +318,8 @@ function TabBar({
         draggedId: plan.draggedId,
         insertIndex: plan.insertIndex,
         changed: plan.changed,
-        markerX: plan.markerX,
+        ghostStart: plan.ghostStart,
+        ghostWidth: plan.ghostWidth,
         offsets,
       };
       reorderPlanRef.current = next;
@@ -681,14 +684,26 @@ function TabBar({
             : "spark-tabbar-scroll"
         }
       >
-        {reorderPlan?.changed && (
+        {/* Ghost slot: a soft placeholder the exact size of the dragged tab,
+            sitting in the hole its neighbours slid apart to open. Kept mounted
+            for the whole drag and faded (not unmounted) on a home drop, so it
+            glides between destinations instead of blinking in and out.
+            Positioned by transform for the same compositor-only reason the
+            tabs are. Whole-pixel so the hairline stays crisp. */}
+        {reorderPlan && (
           <span
             aria-hidden
-            className="spark-tab-reorder-marker"
-            // Rounded to a whole CSS pixel: the plan's centre is fractional
-            // (real tab widths are), and a 2px rule at a half-pixel offset
-            // paints as three blurry columns.
-            style={{ left: Math.round(reorderPlan.markerX) }}
+            className={
+              reorderPlan.changed
+                ? "spark-tab-reorder-ghost spark-tab-reorder-ghost--visible"
+                : "spark-tab-reorder-ghost"
+            }
+            style={{
+              width: Math.round(reorderPlan.ghostWidth),
+              // -50% pairs with the rule's top: 50% to sit on the chips' own
+              // centreline; x is whole-pixel so the hairline stays crisp.
+              transform: `translate3d(${Math.round(reorderPlan.ghostStart)}px, -50%, 0)`,
+            }}
           />
         )}
         {tabs.map((t) =>
