@@ -733,13 +733,12 @@ async function main() {
     assert.equal(row.detail, "3 queued cards handed to Cora");
   });
 
-  // ── Undelivered steering sinks to the bottom ──────────────────────────────
+  // ── Queued messages stay strictly chronological ───────────────────────────
   //
-  // Cora can sit inside wait_for_workers for twenty minutes. A message typed
-  // during that window is queued: it has not reached her, and nothing she does
-  // afterwards is a response to it. Filed by its timestamp it read as though it
-  // had been answered — steps and manager rows that started later appeared
-  // BELOW it, in the position a reply occupies.
+  // The Claude Code model: a message typed mid-turn renders in place, marked
+  // "Queued", with the work that continued after it appearing below. The chip
+  // is what says "Cora has not read this yet"; position never lies about when
+  // it was said.
   function steeringRun(messageOverrides = {}) {
     return run([], {
       steps: [
@@ -804,37 +803,35 @@ async function main() {
 
   const idsOf = (timeline) => timeline.map((item) => item.id);
 
-  test("queued steering sits below the activity that started after it", () => {
+  test("queued steering keeps its chronological place while undelivered", () => {
     const order = idsOf(T.buildChatTimeline(steeringRun()));
     assert.deepEqual(order, [
       "msg-first",
+      "msg-steer",
       "step-2",
       "spark-call:spark-2",
-      "msg-steer",
     ]);
   });
 
-  test("a claimed message returns to its chronological position", () => {
-    // The mid-turn claim is what changes: same timestamp, same text, now owned
-    // by a manager call. It belongs where it was typed again.
-    const order = idsOf(
+  test("delivery never moves the bubble", () => {
+    // Claim and delivery-state changes alter the chip, not the position, so
+    // the bubble never jumps when the turn picks the message up.
+    const claimed = idsOf(
       T.buildChatTimeline(
         steeringRun({ backendTurnId: "spark-2", targetTurnId: "spark-2" }),
       ),
     );
-    assert.deepEqual(order, [
+    assert.deepEqual(claimed, [
       "msg-first",
       "msg-steer",
       "step-2",
       "spark-call:spark-2",
     ]);
-    // Delivery moving on its own (turn start submits, then acknowledges) does
-    // the same, so the bubble does not jump twice for one delivery.
     for (const deliveryState of ["submitted", "acknowledged"]) {
       assert.equal(
         idsOf(T.buildChatTimeline(steeringRun({ deliveryState })))[1],
         "msg-steer",
-        `a ${deliveryState} message is not pinned to the bottom`,
+        `a ${deliveryState} message stays in its chronological place`,
       );
     }
   });
@@ -869,18 +866,17 @@ async function main() {
     });
     assert.deepEqual(idsOf(T.buildChatTimeline(state)), [
       "msg-first",
-      "step-2",
-      "spark-call:spark-2",
       "msg-steer",
       "msg-steer-2",
+      "step-2",
+      "spark-call:spark-2",
     ]);
   });
 
-  test("a queued message from a spent epoch is an orphan, not an outbox entry", () => {
+  test("a queued message from a spent epoch keeps its chronological place", () => {
     // markConversationRewindFailed re-queues the interrupted input after the
-    // epoch has already moved, so queuedManagerInputMessages (which filters on
-    // the current epoch) will never look at it again. Pinned, it would sit at
-    // the bottom of the conversation forever claiming it is about to be sent.
+    // epoch has already moved, so the store will never drain it again. It
+    // renders where it was said, like everything else.
     const state = steeringRun({ conversationEpoch: 0 });
     state.conversationEpoch = 1;
     for (const message of state.humanMessages) {
@@ -894,12 +890,7 @@ async function main() {
     ]);
   });
 
-  test("a legacy queued message with no epoch of its own is an orphan too", () => {
-    // Messages written before conversationEpoch existed carry no stamp, and the
-    // store reads them as `(message.conversationEpoch ?? 0)` — epoch 0 — so a
-    // run whose epoch has moved past 0 will never drain this one. Defaulting to
-    // the RUN's epoch here would call it an outbox entry and pin it to the
-    // bottom forever, promising a delivery that cannot happen.
+  test("a legacy queued message with no epoch of its own stays in place too", () => {
     const state = steeringRun({ conversationEpoch: undefined });
     state.conversationEpoch = 2;
     for (const message of state.humanMessages) {
@@ -914,9 +905,8 @@ async function main() {
   });
 
   test("two identical queued messages minutes apart stay two bubbles", () => {
-    // Pinning makes them adjacent; adjacency here is a layout accident, not a
-    // double-send. Cora receives two [Queued steering] sections, so the chat
-    // must show two — a "×2" badge would under-report what she was told.
+    // Cora receives two [Queued message] sections, so the chat must show two;
+    // a "×2" badge would under-report what she was told.
     const state = steeringRun();
     state.humanMessages.push({
       id: "msg-steer-again",
@@ -933,9 +923,9 @@ async function main() {
     const timeline = T.buildChatTimeline(state);
     assert.deepEqual(idsOf(timeline), [
       "msg-first",
+      "msg-steer",
       "step-2",
       "spark-call:spark-2",
-      "msg-steer",
       "msg-steer-again",
     ]);
     for (const item of timeline) {
@@ -990,8 +980,8 @@ async function main() {
 
   test("a queued synthetic note keeps its system row in place", () => {
     // Board and resume notes are authored "user" for delivery only and are
-    // born queued. They are not the person's steering, and their system row
-    // reports something that already happened, so they never sink.
+    // born queued. They render as system rows at their own timestamps, like
+    // every other timeline item.
     const state = steeringRun();
     state.humanMessages.push({
       id: "msg-board",
@@ -1007,10 +997,10 @@ async function main() {
     });
     assert.deepEqual(idsOf(T.buildChatTimeline(state)), [
       "msg-first",
+      "msg-steer",
       "board-note:msg-board",
       "step-2",
       "spark-call:spark-2",
-      "msg-steer",
     ]);
   });
 

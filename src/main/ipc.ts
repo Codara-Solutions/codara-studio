@@ -310,6 +310,8 @@ async function isLiveWorkerAttemptPty(id: string): Promise<boolean> {
 }
 import type {
   AddRunMessageInput,
+  CancelQueuedMessageInput,
+  CancelQueuedMessageResult,
   AnswerRunQuestionInput,
   AppPreferences,
   AppSettings,
@@ -2198,6 +2200,22 @@ export function registerIpc(): void {
     const { addRunMessage } = await getRunStore();
     return addRunMessage(input);
   });
+
+  handle(
+    "orchestration:cancelQueuedMessage",
+    async (_e, input: CancelQueuedMessageInput): Promise<CancelQueuedMessageResult> => {
+      const { cancelQueuedMessage } = await getRunStore();
+      return cancelQueuedMessage(input);
+    },
+  );
+
+  handle(
+    "orchestration:deliverQueuedMessagesNow",
+    async (_e, runId: string): Promise<RunState> => {
+      const { deliverQueuedMessagesNow } = await getRunStore();
+      return deliverQueuedMessagesNow(runId);
+    },
+  );
 
   handle(
     "orchestration:answerRunQuestion",

@@ -471,17 +471,11 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     });
   });
 
-  // The generation the run store will actually drain from: a queued message
-  // from an older epoch is an orphan, not an outbox entry (see below).
-  const currentEpoch = run.conversationEpoch ?? 0;
+  // Strictly chronological, queued or not (the Claude Code model): a message
+  // typed mid-turn renders in place, marked "Queued", with the work that
+  // continued after it appearing below. The chip is what says "Cora has not
+  // read this yet"; position never lies about when it was said.
   items.sort((a, b) => {
-    // Everything Cora has not seen yet sinks below everything that happened.
-    // Within each block the ordinary rules apply, so the queued block is itself
-    // chronological — it is the outbox, in the order it will be delivered.
-    const byDelivery =
-      Number(isUndeliveredQueuedMessage(a, currentEpoch)) -
-      Number(isUndeliveredQueuedMessage(b, currentEpoch));
-    if (byDelivery !== 0) return byDelivery;
     const byTime = a.at.localeCompare(b.at);
     if (byTime !== 0) return byTime;
     const byKind = timelineItemOrder(a) - timelineItemOrder(b);
@@ -542,40 +536,6 @@ function isWithinDuplicateWindow(earlier: string, later: string): boolean {
   return to - from >= 0 && to - from <= DUPLICATE_MESSAGE_WINDOW_MS;
 }
 
-// A user message that is still queued and that no manager turn has claimed has
-// not reached Cora at all. Filed by its timestamp it sits ABOVE every step,
-// worker and manager row that started after it was typed, which reads as if
-// Cora had seen it and carried on regardless — the exact opposite of the truth.
-// Such a message pins to the bottom of the timeline instead, where an unsent
-// note belongs, and drops back into its chronological place the moment a turn
-// claims it (`backendTurnId`, set by the mid-turn claim or by turn start) or
-// delivery moves past "queued". A cancelled message is NOT pinned: a rewind
-// undid it, and when it was said is the whole point of keeping the row.
-//
-// The predicate is queuedManagerInputMessages (run-store.ts:5185) verbatim,
-// EPOCH CLAUSE INCLUDED — including its fallback, `(message.conversationEpoch
-// ?? 0) === run epoch`, which is why the pin reads `deliveryEpoch` and not the
-// item's run-defaulted `conversationEpoch`. That clause is the whole difference
-// between a message that is about to be sent and one that never will be. A
-// rewind that fails after the interrupt (markConversationRewindFailed) re-queues
-// the interrupted input while the epoch has already moved, so the store will
-// never look at it again; a legacy message that predates the per-message stamp
-// is epoch 0 to the store and is stranded the same way once the run's epoch has
-// moved past 0. Pinning either orphan would park it at the bottom of the
-// conversation forever, permanently claiming it is on its way. They render
-// chronologically instead: old, undelivered, and visibly in the past.
-function isUndeliveredQueuedMessage(
-  item: ChatTimelineItem,
-  currentEpoch: number,
-): boolean {
-  return (
-    item.kind === "message" &&
-    item.author === "user" &&
-    item.deliveryState === "queued" &&
-    !item.backendTurnId &&
-    item.deliveryEpoch === currentEpoch
-  );
-}
 
 // Tie-break for items sharing one timestamp. Worker rows sort AFTER steps:
 // the first worker task of a spawn batch is created in the same millisecond

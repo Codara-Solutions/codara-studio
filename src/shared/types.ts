@@ -3678,16 +3678,6 @@ export interface SparkCall {
    * decision, and the timeline styles it as maintenance rather than a reply.
    */
   purpose?: "compaction";
-  /**
-   * The live turn is currently parked inside orchestrator.wait_for_workers,
-   * where queued user messages deliver mid-turn instead of waiting for the
-   * next turn start. Stamped on wait entry and cleared on wait exit by
-   * run-store's parked-wait registry; only meaningful while status is
-   * "started" (a failed/completed call may retain a stale flag after a crash,
-   * which every reader must ignore). The renderer uses it to flip the
-   * composer from "Queue steering" to "Send".
-   */
-  parkedInWaitForWorkers?: boolean;
   contextPacketId?: string;
   requestPath?: string;
   responsePath?: string;
@@ -4188,6 +4178,17 @@ export interface AddRunMessageInput {
    *  their own question — an unlinked affirmative ("yes" to some other
    *  question, a casual "ok" note) must never approve a pending change. */
   answersMessageId?: string;
+}
+
+export interface CancelQueuedMessageInput {
+  runId: string;
+  messageId: string;
+}
+
+export interface CancelQueuedMessageResult {
+  run: RunState;
+  /** The unqueued message's text, for prefilling the composer. */
+  restoredText: string;
 }
 
 export interface AnswerRunQuestionInput {

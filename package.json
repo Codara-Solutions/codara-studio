@@ -97,7 +97,7 @@
     "test:verifier-scoping": "node scripts/test-verifier-scoping.cjs",
     "test:user-message-resume": "node scripts/test-user-message-resume.cjs",
     "test:force-pause-resume": "node scripts/test-force-pause-resume.cjs",
-    "test:mid-turn-steering": "node scripts/test-mid-turn-steering.cjs",
+    "test:queued-messages": "node scripts/test-queued-messages.cjs",
     "test:run-resume-guard": "node scripts/test-run-resume-guard.cjs",
     "test:run-graph-layout": "node scripts/test-run-graph-layout.cjs",
     "test:run-verdict": "node scripts/test-run-verdict.cjs",

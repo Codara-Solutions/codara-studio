@@ -36,6 +36,8 @@ import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
+  CancelQueuedMessageInput,
+  CancelQueuedMessageResult,
   AgentAssetDeleteResult,
   AgentAssetInstallResult,
   AgentAssetInventory,
@@ -813,6 +815,10 @@ const api = {
       ipcRenderer.invoke("orchestration:addRunMessage", input),
     answerRunQuestion: (input: AnswerRunQuestionInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:answerRunQuestion", input),
+    cancelQueuedMessage: (input: CancelQueuedMessageInput): Promise<CancelQueuedMessageResult> =>
+      ipcRenderer.invoke("orchestration:cancelQueuedMessage", input),
+    deliverQueuedMessagesNow: (runId: string): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:deliverQueuedMessagesNow", runId),
     undoToCheckpoint: (input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> =>
       ipcRenderer.invoke("orchestration:undoToCheckpoint", input),
     interruptRunWithMessage: (input: InterruptRunWithMessageInput): Promise<RunState> =>

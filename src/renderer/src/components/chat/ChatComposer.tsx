@@ -546,25 +546,6 @@ export default function ChatComposer({
   const status = run?.status;
   const isActive =
     status === "running" || status === "planning" || status === "reviewing";
-  // Cora's live manager call is parked inside wait_for_workers: a message sent
-  // now is delivered INTO the turn (the wait wakes and returns it), so the
-  // composer must say "Send", not "Queue steering". The flag is stamped on the
-  // SparkCall by run-store's parked-wait registry and rides ordinary run
-  // updates; it is only trusted on a started, current-epoch, conversational
-  // call so a stale flag on a crashed call can never flip the label.
-  const steeringDeliversNow =
-    isActive &&
-    Boolean(
-      [...(run?.sparkCalls ?? [])]
-        .reverse()
-        .find(
-          (call) =>
-            (call.conversationEpoch ?? 0) === (run?.conversationEpoch ?? 0) &&
-            call.purpose !== "compaction" &&
-            call.status === "started" &&
-            !call.completedAt,
-        )?.parkedInWaitForWorkers,
-    );
   // A run blocked on an open question resumes by ANSWERING it — the options
   // rendered right above this bar ARE its resume path. Offering a plain Resume
   // beside them wedged the run, so resumeRun now refuses that call outright
@@ -1079,10 +1060,8 @@ export default function ChatComposer({
           // must not send the user hunting for the Resume button. Resume
           // still works on its own for an empty composer.
           ? "Send to resume — your message goes with it."
-          : steeringDeliversNow
-            ? "Cora is waiting on workers. Your message reaches it right away."
-            : isActive
-            ? "Queue steering for Cora's next manager turn."
+          : isActive
+            ? "Queue a message. Cora reads it after this turn."
             : "Reply, steer, or add context.";
 
   return (
@@ -1243,8 +1222,7 @@ export default function ChatComposer({
           {workerActivity ? (
             <WorkerActivityStatus
               activity={workerActivity}
-              steeringQueues={isActive && !steeringDeliversNow}
-              steeringDelivers={steeringDeliversNow}
+              steeringQueues={isActive}
             />
           ) : (
             <span className="composer-toolbar__hint">
@@ -1252,10 +1230,8 @@ export default function ChatComposer({
                 ? "Working..."
                 : pastingImages
                   ? "Adding pasted image..."
-                : steeringDeliversNow
-                  ? "Enter to send · Cora reads it right away"
                 : isActive
-                  ? "Enter to queue steering · Stop remains separate"
+                  ? "Enter to queue · delivered when this turn ends"
                   : openQuestion
                     // No Resume button here — the answer IS the resume — so the
                     // hint must not point at one.
@@ -1301,7 +1277,7 @@ export default function ChatComposer({
             <SendButton
               onClick={send}
               disabled={!canSend}
-              label={isActive && !steeringDeliversNow ? "Queue steering" : "Send"}
+              label={isActive ? "Queue" : "Send"}
             />
             {/* Stop follows the work, not only the run status. A soft-paused
                 run can still own a live worker process (pause stops autopilot;
@@ -1340,12 +1316,9 @@ function messageForSend(draft: string, attachmentCount: number): string {
 function WorkerActivityStatus({
   activity,
   steeringQueues,
-  steeringDelivers,
 }: {
   activity: ComposerWorkerActivity;
   steeringQueues: boolean;
-  /** Cora is parked in wait_for_workers: a message delivers mid-turn. */
-  steeringDelivers?: boolean;
 }): JSX.Element {
   const { engines, titles, state, runPaused } = activity;
   const live = state === "live";
@@ -1396,10 +1369,8 @@ function WorkerActivityStatus({
           run with a turn in flight queues steering. */}
       {runPaused ? (
         <span style={{ flex: "0 0 auto" }}>· paused</span>
-      ) : steeringDelivers ? (
-        <span style={{ flex: "0 0 auto" }}>· Cora reads messages now</span>
       ) : steeringQueues ? (
-        <span style={{ flex: "0 0 auto" }}>· steering queues</span>
+        <span style={{ flex: "0 0 auto" }}>· messages queue</span>
       ) : null}
     </span>
   );

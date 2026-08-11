@@ -676,21 +676,34 @@ const MessageTurn = React.memo(function MessageTurn({
   }
 
   if (item.author === "user") {
-    const steering = item.intent === "steer";
-    const hasPersistentStatus = steering || Boolean(item.deliveryState && item.deliveryState !== "acknowledged");
+    // Only a mid-turn message (intent "steer") genuinely WAITS: it queues
+    // behind the running turn and can still be pulled back (Unqueue). An
+    // ordinary "turn" message is also born deliveryState "queued" in the
+    // store, but its own turn starts within moments, so flashing QUEUED on
+    // every fresh send (most visibly the first message of a new chat) would
+    // be noise. A claimed message (backendTurnId) is being delivered now.
+    const queued =
+      item.deliveryState === "queued" && !item.backendTurnId && item.intent === "steer";
+    const hasPersistentStatus =
+      queued ||
+      Boolean(
+        item.deliveryState &&
+          item.deliveryState !== "acknowledged" &&
+          item.deliveryState !== "queued",
+      );
     return (
       <div
-        className={`cora-user-turn${steering ? " cora-user-turn--steering" : ""}`}
+        className={`cora-user-turn${queued ? " cora-user-turn--queued" : ""}`}
         data-message-intent={item.intent ?? "turn"}
         data-delivery-state={item.deliveryState ?? "acknowledged"}
         style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}
       >
         <div
-          className={`cora-message cora-message--user${steering ? " cora-message--steering" : ""}`}
+          className={`cora-message cora-message--user${queued ? " cora-message--queued" : ""}`}
           data-message-author="user"
           style={{
             ...USER_BUBBLE_STYLE,
-            ...(steering ? USER_STEERING_BUBBLE_STYLE : null),
+            ...(queued ? USER_QUEUED_BUBBLE_STYLE : null),
           }}
         >
           <div>{item.text}</div>
@@ -703,21 +716,23 @@ const MessageTurn = React.memo(function MessageTurn({
           <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
             {formatMessageTime(item.at)}
           </time>
-          {steering && (
-            <span style={STEERING_CHIP_STYLE}>
-              {item.deliveryState === "queued"
-                ? "Queued steering"
-                : item.deliveryState === "submitted"
-                  ? "Submitted steering"
-                  : "Steering"}
-            </span>
-          )}
-          {item.deliveryState && item.deliveryState !== "acknowledged" && (
-            <span style={DELIVERY_CHIP_STYLE}>{deliveryStateLabel(item.deliveryState)}</span>
+          {queued ? (
+            <span style={QUEUED_CHIP_STYLE}>Queued</span>
+          ) : (
+            item.deliveryState &&
+            item.deliveryState !== "acknowledged" &&
+            item.deliveryState !== "queued" && (
+              <span style={DELIVERY_CHIP_STYLE}>{deliveryStateLabel(item.deliveryState)}</span>
+            )
           )}
           {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
           <CopyMessageControl text={item.text} />
-          {checkpoint && <UndoControl runId={runId} checkpoint={checkpoint} />}
+          {queued && <SendNowControl runId={runId} />}
+          {queued && <UnqueueControl runId={runId} messageId={item.id} />}
+          {/* Undo is a conversation rewind, meaningful only once the message
+              was actually delivered. While it is still queued, Unqueue is the
+              whole story: nothing has happened yet to undo. */}
+          {checkpoint && !queued && <UndoControl runId={runId} checkpoint={checkpoint} />}
         </div>
       </div>
     );
@@ -1710,6 +1725,15 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         <AssistantLiveTurn item={item} executionTurn={executionTurn} finalAnswer={finalAnswer} />
       );
     }
+    // A settled chat turn keeps its streamed prose and tool rows inline in the
+    // transcript (the Claude Code model) instead of collapsing them behind a
+    // disclosure. Maintenance rows (compaction) and non-chat manager stages
+    // (plan/review) keep the compact disclosure.
+    if (item.maintenance !== "compaction" && toolMetaValue(item, "Mode") === "chat") {
+      return (
+        <AssistantSettledTurn item={item} executionTurn={executionTurn} finalAnswer={finalAnswer} />
+      );
+    }
     return (
       <ManagerActivityDisclosure
         item={item}
@@ -1899,30 +1923,92 @@ function AssistantLiveTurn({
             ) : null}
           </div>
         )}
-        {segments.map((segment) => {
-          if (segment.kind === "text") {
-            return (
-              <div
-                key={segment.id}
-                className="cora-message cora-message--assistant"
-                data-message-author="cora"
-                style={SPARK_BUBBLE_STYLE}
-              >
-                <Markdown text={segment.text} />
-              </div>
-            );
-          }
-          if (segment.kind === "tools") {
-            return <ToolCluster key={segment.id} calls={segment.calls} />;
-          }
-          return (
-            <div key={segment.id} role="alert" style={LIVE_ERROR_STYLE}>
-              {segment.message}
-            </div>
-          );
-        })}
+        <TurnSegments segments={segments} />
       </div>
     </SparkTurn>
+  );
+}
+
+// A settled (completed or failed) chat turn, kept in the transcript the way
+// Claude Code keeps one: the streamed prose and tool rows stay inline under a
+// quiet "Worked for Ns" line instead of collapsing behind a disclosure. The
+// durable final answer renders as its own message right below, so the trailing
+// streamed copy is deduped away exactly as in the live view; completion causes
+// no visual jump and hides nothing.
+function AssistantSettledTurn({
+  item,
+  executionTurn,
+  finalAnswer,
+}: {
+  item: ToolItem;
+  executionTurn?: ExecutionTurn;
+  finalAnswer?: string;
+}) {
+  const sparkCallId = timelineSparkCallId(item);
+  const failed = item.status === "failed";
+  const blocks = executionTurn
+    ? omitDuplicatedFinalAnswer(
+        blocksInTraceWindow(executionTurn.blocks, item.traceWindow),
+        finalAnswer,
+      )
+    : [];
+  const segments = liveTurnSegments(blocks);
+  const actionCount = blocks.filter((block) => block.kind === "tool").length;
+  return (
+    <SparkTurn>
+      <div
+        className={`cora-settled-turn${failed ? " is-failed" : ""}`}
+        data-manager-call-id={sparkCallId}
+        data-turn-status={item.status}
+        style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}
+      >
+        <div style={WORKING_LINE_STYLE}>
+          <StatusDot color={failed ? "var(--danger)" : "var(--muted-2)"} pulse={false} size={5} />
+          <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+          {!failed && actionCount > 0 && (
+            <span style={TOOL_INLINE_DETAIL_STYLE}>
+              {actionCount === 1 ? "1 action" : `${actionCount} actions`}
+            </span>
+          )}
+          {failed && item.detail && (
+            <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
+          )}
+        </div>
+        <TurnSegments segments={segments} />
+      </div>
+    </SparkTurn>
+  );
+}
+
+// The one segment renderer both the live and the settled turn share, so a
+// turn finishing never changes what its prose and tool rows look like.
+function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
+  return (
+    <>
+      {segments.map((segment) => {
+        if (segment.kind === "text") {
+          return (
+            <div
+              key={segment.id}
+              className="cora-message cora-message--assistant"
+              data-message-author="cora"
+              data-execution-kind="text"
+              style={SPARK_BUBBLE_STYLE}
+            >
+              <Markdown text={segment.text} />
+            </div>
+          );
+        }
+        if (segment.kind === "tools") {
+          return <ToolCluster key={segment.id} calls={segment.calls} />;
+        }
+        return (
+          <div key={segment.id} role="alert" data-execution-kind="error" style={LIVE_ERROR_STYLE}>
+            {segment.message}
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -1976,7 +2062,9 @@ function ToolCluster({ calls }: { calls: Array<Extract<ExecutionBlock, { kind: "
         </button>
       )}
       {visible.map((call) => (
-        <LiveToolRow key={call.toolUseId} call={call} />
+        <div key={call.toolUseId} data-execution-kind="tool">
+          <LiveToolRow call={call} />
+        </div>
       ))}
     </div>
   );
@@ -2303,6 +2391,144 @@ function deliveryStateLabel(
   if (state === "submitted") return "Submitted";
   if (state === "cancelled") return "Cancelled";
   return "Acknowledged";
+}
+
+// Force-deliver the queue: interrupt Cora's in-flight response and start a
+// fresh turn that carries every queued message. The unfinished answer is
+// abandoned (workers and the provider session survive), which is why this is
+// an explicit action and never the default.
+function SendNowControl({ runId }: { runId: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hover, setHover] = useState(false);
+
+  const sendNow = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const run = await window.spark.orchestration.deliverQueuedMessagesNow(runId);
+      window.dispatchEvent(new CustomEvent("spark:run-snapshot", { detail: { run } }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <button
+        type="button"
+        onClick={() => void sendNow()}
+        title="Interrupt Cora's current response and deliver the queue now"
+        aria-label="Send queued messages now"
+        disabled={busy}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          appearance: "none",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          height: 20,
+          padding: "0 8px",
+          border: "1px solid transparent",
+          borderRadius: "var(--radius-control, 7px)",
+          background: hover && !busy ? "var(--hover)" : "transparent",
+          color: hover ? "var(--ink-dim)" : "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10.5,
+          fontWeight: 600,
+          cursor: "default",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        <span>Send now</span>
+      </button>
+      {error && (
+        <span style={{ color: "var(--danger)", fontSize: 10.5 }} title={error}>
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// Pull a still-queued message back out of the outbox: cancel it in the store
+// (guarded there against the turn having just claimed it) and return its text
+// to the composer for editing/resending. Appears only while the message's
+// deliveryState is "queued", so it can never un-send delivered text.
+function UnqueueControl({ runId, messageId }: { runId: string; messageId: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hover, setHover] = useState(false);
+
+  const unqueue = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await window.spark.orchestration.cancelQueuedMessage({ runId, messageId });
+      // Same immediate-rerender channel as UndoControl: the queued row
+      // disappears without waiting for the debounced runs refresh.
+      window.dispatchEvent(
+        new CustomEvent("spark:run-snapshot", { detail: { run: result.run } }),
+      );
+      if (result.restoredText) {
+        // Append (no replace): a draft the user is mid-typing must survive.
+        window.dispatchEvent(
+          new CustomEvent("spark:prefill-composer", {
+            detail: { text: result.restoredText },
+          }),
+        );
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <button
+        type="button"
+        onClick={() => void unqueue()}
+        title="Remove from the queue and edit it in the composer"
+        aria-label="Unqueue message"
+        disabled={busy}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          appearance: "none",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          height: 20,
+          padding: "0 8px",
+          border: "1px solid transparent",
+          borderRadius: "var(--radius-control, 7px)",
+          background: hover && !busy ? "var(--hover)" : "transparent",
+          color: hover ? "var(--ink-dim)" : "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10.5,
+          fontWeight: 600,
+          cursor: "default",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        <span>Unqueue</span>
+      </button>
+      {error && (
+        <span style={{ color: "var(--danger)", fontSize: 10.5 }} title={error}>
+          {error}
+        </span>
+      )}
+    </span>
+  );
 }
 
 // A count badge for a message that was sent (or asked) more than once in a
@@ -2838,7 +3064,7 @@ const USER_TIME_STYLE: React.CSSProperties = {
   fontVariantNumeric: "tabular-nums",
 };
 
-const STEERING_CHIP_STYLE: React.CSSProperties = {
+const QUEUED_CHIP_STYLE: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   height: 18,
@@ -2885,7 +3111,7 @@ const USER_BUBBLE_STYLE: React.CSSProperties = {
   boxShadow: "none",
 };
 
-const USER_STEERING_BUBBLE_STYLE: React.CSSProperties = {
+const USER_QUEUED_BUBBLE_STYLE: React.CSSProperties = {
   background: "color-mix(in oklch, var(--warn) 5%, var(--panel-2))",
   borderColor: "color-mix(in oklch, var(--warn) 28%, var(--rule-soft))",
   boxShadow: "inset -3px 0 0 color-mix(in oklch, var(--warn) 62%, transparent), var(--lift-hi)",

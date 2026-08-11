@@ -38,7 +38,12 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
     const assistant = page.locator('[data-message-author="cora"]').last();
     await expect(column).toBeVisible();
     await expect(user).toContainText("Map this project for me", { timeout: 15_000 });
-    await expect(assistant).toContainText("I mapped the project into three layers");
+    // The 16 seeded messages land over IPC while the debounced runs refresh
+    // catches up; give the final assistant bubble the same headroom as the
+    // user bubble above instead of the 5s default.
+    await expect(assistant).toContainText("I mapped the project into three layers", {
+      timeout: 15_000,
+    });
     await expect(assistant.locator("li")).toHaveCount(3);
     const assistantTurn = page.locator(".cora-turn").filter({ has: assistant }).last();
     const assistantCopy = assistantTurn.getByRole("button", { name: "Copy message" });
@@ -160,37 +165,23 @@ test("completed Cora turns retain provider-ordered text and tools without duplic
     await selectCoraTab(page);
     await selectChatFromHistory(page, "Ordered execution", runId);
 
+    // The settled chat turn keeps its streamed prose and tool rows INLINE in
+    // the transcript (no disclosure to open): text and tools stay visible in
+    // provider order, and the trailing streamed copy of the final answer is
+    // deduped against the durable message below.
     const worked = page.getByText(/Worked for 4\s*s/);
     await expect(worked).toBeVisible({ timeout: 15_000 });
-    await clickAttached(worked);
-    const manager = page.locator('[data-manager-call-id="spark-ordered"]');
-    await expect(manager).toHaveAttribute("data-open", "true");
-    const trace = page.getByTestId("execution-trace-spark-ordered");
-    await expect(trace).toBeVisible();
-    await expect(trace).toContainText("I’ll inspect the package metadata first.");
-    await expect(trace).toContainText("The entry point is clear; now I’ll inspect the runtime.");
-    await expect(trace.getByText("The durable final answer.")).toHaveCount(0);
-    await expect(page.locator('[data-message-author="cora"]')).toContainText("The durable final answer.");
-    expect(await trace.locator("[data-execution-kind]").evaluateAll((nodes) =>
+    const manager = page.locator('.cora-settled-turn[data-manager-call-id="spark-ordered"]');
+    await expect(manager).toBeVisible();
+    await expect(manager).toContainText("I’ll inspect the package metadata first.");
+    await expect(manager).toContainText("The entry point is clear; now I’ll inspect the runtime.");
+    await expect(manager.getByText("The durable final answer.")).toHaveCount(0);
+    await expect(page.locator('[data-message-author="cora"]').last()).toContainText(
+      "The durable final answer.",
+    );
+    expect(await manager.locator("[data-execution-kind]").evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute("data-execution-kind")),
     )).toEqual(["text", "tool", "text", "tool"]);
-    const workFoldSurface = await manager.evaluate((node) => {
-      const wrapper = getComputedStyle(node);
-      const body = getComputedStyle(node.querySelector(".cora-manager-disclosure__body")!);
-      const button = node.querySelector("button")!.getBoundingClientRect();
-      return {
-        background: wrapper.backgroundColor,
-        borderTop: wrapper.borderTopWidth,
-        borderLeft: wrapper.borderLeftWidth,
-        bodyRule: body.borderLeftWidth,
-        buttonHeight: button.height,
-      };
-    });
-    expect(workFoldSurface.background).toBe("rgba(0, 0, 0, 0)");
-    expect(workFoldSurface.borderTop).toBe("0px");
-    expect(workFoldSurface.borderLeft).toBe("0px");
-    expect(workFoldSurface.bodyRule).toBe("1px");
-    expect(workFoldSurface.buttonHeight).toBeLessThanOrEqual(28);
   } finally {
     await app?.close();
   }
@@ -328,10 +319,10 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
     const normal = page.locator('[data-message-intent="turn"]').last();
     const steering = page.locator('[data-message-intent="steer"]').last();
     await expect(normal).toContainText("Normal user turn");
-    await expect(steering).toContainText("Queued steering");
+    await expect(steering).toContainText("Queued");
     await expect(steering).toContainText("Steering queued while Cora works");
     await expect(page.locator('[data-message-author="cora"]').last()).toContainText("Cora answer");
-    await expect(page.getByRole("button", { name: "Queue steering" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Queue", exact: true })).toBeVisible();
     const stop = page.getByRole("button", { name: "Stop run" });
     await expect(stop).toBeVisible();
     await stop.click();
@@ -501,7 +492,7 @@ test("a rejected Codex launch fails once, stays failed, and never adopts a forei
     const failureReason = stillFailed.sparkCalls[0].error ?? "";
     expect(failureReason).toContain("Codex app server exited");
     const failedTurn = page.locator(
-      `.cora-manager-disclosure.is-failed[data-manager-call-id="${stillFailed.sparkCalls[0].id}"]`,
+      `.cora-settled-turn.is-failed[data-manager-call-id="${stillFailed.sparkCalls[0].id}"]`,
     );
     await expect(failedTurn).toBeVisible({ timeout: 15_000 });
     await expect(failedTurn).toContainText("Turn failed");
@@ -615,16 +606,15 @@ test("Claude manager uses stream-json and preserves streamed text/tool order", a
     await selectCoraTab(page);
     await selectChatFromHistory(page, "Map the fixture.", runId);
     const sparkCallId = (await readRun(fixture.userDataDir, runId) as any).sparkCalls[0].id;
-    const manager = page.locator(`[data-manager-call-id="${sparkCallId}"]`);
-    await expect(manager).toHaveAttribute("data-has-execution", "true", { timeout: 15_000 });
-    const trace = page.getByTestId(`execution-trace-${sparkCallId}`);
-    if ((await manager.getAttribute("data-open")) !== "true") {
-      await manager.locator(":scope > button").click();
-    }
-    await expect(trace).toContainText("Reading metadata.");
-    await expect(trace).toContainText("I found the entry point.");
-    await expect(page.locator('[data-message-author="cora"]')).toContainText("Here is the final streamed answer.");
-    await expect.poll(() => trace.locator("[data-execution-kind]").evaluateAll(
+    // Settled chat turns keep their streamed prose and tool rows inline.
+    const manager = page.locator(`.cora-settled-turn[data-manager-call-id="${sparkCallId}"]`);
+    await expect(manager).toBeVisible({ timeout: 15_000 });
+    await expect(manager).toContainText("Reading metadata.");
+    await expect(manager).toContainText("I found the entry point.");
+    await expect(page.locator('[data-message-author="cora"]').last()).toContainText(
+      "Here is the final streamed answer.",
+    );
+    await expect.poll(() => manager.locator("[data-execution-kind]").evaluateAll(
       (nodes) => nodes.map((node) => node.getAttribute("data-execution-kind")),
     )).toEqual(["text", "tool", "text"]);
   } finally {
@@ -707,15 +697,12 @@ test("Codex manager uses app-server deltas and preserves streamed text/tool orde
     await selectCoraTab(page);
     await selectChatFromHistory(page, "Map the fixture.", runId);
     const sparkCallId = (await readRun(fixture.userDataDir, runId) as any).sparkCalls[0].id;
-    const manager = page.locator(`[data-manager-call-id="${sparkCallId}"]`);
-    await expect(manager).toHaveAttribute("data-has-execution", "true", { timeout: 15_000 });
-    const trace = page.getByTestId(`execution-trace-${sparkCallId}`);
-    if ((await manager.getAttribute("data-open")) !== "true") {
-      await manager.locator(":scope > button").click();
-    }
-    await expect(trace).toContainText("Reading metadata.");
-    expect(await trace.locator("[data-execution-kind]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-execution-kind")))).toEqual(["text", "tool"]);
-    await expect(page.locator('[data-message-author="cora"]')).toContainText("Here is the final Codex answer.");
+    // Settled chat turns keep their streamed prose and tool rows inline.
+    const manager = page.locator(`.cora-settled-turn[data-manager-call-id="${sparkCallId}"]`);
+    await expect(manager).toBeVisible({ timeout: 15_000 });
+    await expect(manager).toContainText("Reading metadata.");
+    expect(await manager.locator("[data-execution-kind]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-execution-kind")))).toEqual(["text", "tool"]);
+    await expect(page.locator('[data-message-author="cora"]').last()).toContainText("Here is the final Codex answer.");
   } finally {
     await app?.close();
   }

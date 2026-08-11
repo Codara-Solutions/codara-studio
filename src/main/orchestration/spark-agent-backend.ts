@@ -428,12 +428,10 @@ function renderMessageAttachments(message: HumanRunMessage): string[] {
 }
 
 /**
- * Render ordered user input the way a manager turn receives it. Exported
- * because it is the ONE formatting seam for user text reaching the manager:
- * prepareManagerTurn renders turn-start input through buildManagerTurnPrompt,
- * and the parked wait_for_workers path (run-store's mid-turn steering
- * delivery) renders the same shape into the wait response, so the model sees
- * identical [Queued steering]/[User turn] section labels either way.
+ * Render ordered user input the way a manager turn receives it. This is the
+ * ONE formatting seam for user text reaching the manager: prepareManagerTurn
+ * renders every turn-start input (fresh sends and messages queued during the
+ * previous turn) through buildManagerTurnPrompt with these section labels.
  */
 export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
   if (messages.length === 0) {
@@ -453,7 +451,7 @@ export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
       // that numbered section rather than in one merged list at the end.
       const attachments = renderMessageAttachments(message);
       return [
-        `${index + 1}. [${message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued steering" : "User turn"}]`,
+        `${index + 1}. [${message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued message" : "User turn"}]`,
         message.message.trim(),
         ...(attachments.length === 0 ? [] : ["", ...attachments]),
         "",
