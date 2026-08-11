@@ -68,7 +68,6 @@ import {
   forcePauseRun,
   getRun,
   getRunBoard,
-  listRecentRunsForRetryRepair,
   listRuns,
   onRunDeleted,
   resumeManagerTurnRecovery,
@@ -86,7 +85,7 @@ import { nativeCliAccounts } from "../orchestration/native-cli-accounts";
 import { BOARD_MAX_CARDS } from "../orchestration/board-store";
 import { ensureCodexProjectTrust } from "../orchestration/codex-trust";
 import { resolveNewNativeClaudeProfile } from "../orchestration/native-claude-profile-runtime";
-import { subscribeToEvents } from "../orchestration/event-log";
+import { runsRoot, subscribeToEvents } from "../orchestration/event-log";
 import {
   getJob,
   listJobs,
@@ -131,6 +130,7 @@ import {
   KeyedSerialQueue,
   selectRemoteConversationRuns,
 } from "./cora-policy";
+import { repairCoraRetryFromRunWindow } from "./cora-retry-repair";
 import { CoraSendReceiptIndex } from "./cora-send-receipts";
 import { normalizeCoraMessage } from "./cora-message-policy";
 import { remoteCoraRunContext } from "./cora-run-context";
@@ -1627,15 +1627,21 @@ async function sendCoraMessageForRemote(input: {
       existing = await requireOwnedRun(workspace.id, input.runId);
       retry = findRemoteCoraRetry([existing], receiptInput);
     } else if (!retry) {
-      // A legacy new-conversation retry has no run id. Inspect at most the
-      // newest retained run bodies once, then persist the repaired O(1) route.
-      const repair = await listRecentRunsForRetryRepair();
-      retry = findRemoteCoraRetry(repair.runs, receiptInput);
+      // A legacy or crash-window new-conversation retry has no run id. Inspect
+      // the run files WRITTEN inside the repair window once, then persist the
+      // repaired O(1) route. Old retained runs fall outside that window instead
+      // of consuming the read ceiling, so a workspace that has simply
+      // accumulated history can no longer refuse a first send.
+      const repair = await repairCoraRetryFromRunWindow(receiptInput, {
+        runsRoot: runsRoot(),
+        loadRun: getRun,
+      });
+      retry = repair.run;
       if (!retry && repair.truncated) {
-        // Starting a second run would be unsafe because an older legacy
-        // delivery may sit beyond the explicit repair bound. Retention keeps
-        // normal workspaces below this boundary; ask for a retry after it has
-        // reconciled rather than guessing.
+        // Only reachable when the window ITSELF overflowed the read ceiling,
+        // i.e. an older delivery inside the crash window may sit beyond the
+        // explicit repair bound. Starting a second run would be a guess; ask
+        // for a retry once the window has drained instead.
         throw new Error(
           "Could not safely reconcile this Cora retry key within the retained run window. Please retry.",
         );

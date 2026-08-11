@@ -162,6 +162,16 @@ async function main() {
     ),
     "remote-access-cora-send-receipts-test.cjs",
   );
+  const coraRetryRepair = await bundle(
+    path.join(
+      ROOT,
+      "src",
+      "main",
+      "remote-access",
+      "cora-retry-repair.ts",
+    ),
+    "remote-access-cora-retry-repair-test.cjs",
+  );
   const coraMessagePolicy = await bundle(
     path.join(
       ROOT,
@@ -823,6 +833,10 @@ async function main() {
     path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
     "utf8",
   );
+  const coraRetryRepairSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "remote-access", "cora-retry-repair.ts"),
+    "utf8",
+  );
   const rpcSource = fs.readFileSync(
     path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
     "utf8",
@@ -1259,14 +1273,24 @@ async function main() {
     "production serializes and persistently indexes Cora retry keys without scanning every run",
     productionSource.includes("coraRunMutations.run") &&
       productionSource.includes("receipts.resolve(receiptInput, getRun)") &&
-      productionSource.includes("listRecentRunsForRetryRepair()") &&
+      productionSource.includes(
+        "repairCoraRetryFromRunWindow(receiptInput, {",
+      ) &&
       productionSource.includes("receipts.record(receiptInput, run.id)") &&
       productionSource.includes("if (!retry && repair.truncated)") &&
-      runStoreSource.includes("const RUN_RETRY_REPAIR_READ_LIMIT = 64") &&
-      runStoreSource.includes("candidates.length > recent.length") &&
       !productionSource.includes(
         "findRemoteCoraRetry(await listRuns(workspace.id)",
       ),
+  );
+  check(
+    "the Cora retry repair scan is bounded by a recency window, not by retained history",
+    coraRetryRepairSource.includes("export const CORA_RETRY_REPAIR_WINDOW_MS") &&
+      coraRetryRepairSource.includes("entry.mtimeMs as number) >= cutoff") &&
+      // The cap and the ordering are applied to the WINDOWED list, so retained
+      // history can neither fill the scan nor raise `truncated`.
+      coraRetryRepairSource.includes("windowed.slice(0, readLimit)") &&
+      coraRetryRepairSource.includes("truncated: windowed.length > readLimit") &&
+      !productionSource.includes("listRecentRunsForRetryRepair"),
   );
   check(
     "run retention and explicit deletion remove compact Cora send routes",
@@ -2612,6 +2636,406 @@ async function main() {
           .listRecordsForTest()
           .every((record) => record.clientMessageId !== input.clientMessageId),
         afterCorruptRepair.listRecordsForTest(),
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  /* ---- Cora retry repair window ---------------------------------------- */
+
+  {
+    const HOUR = 60 * 60 * 1_000;
+    const DAY = 24 * HOUR;
+    const now = 1_800_000_000_000;
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-cora-retry-repair-"),
+    );
+    const runsRoot = path.join(directory, "runs");
+    const receiptsRoot = path.join(directory, "remote");
+    fs.mkdirSync(runsRoot, { recursive: true });
+
+    // Mirrors run-store's on-disk shape closely enough for the repair scan:
+    // <runsRoot>/<runId>/run.json written with JSON.stringify.
+    const writeRunFixture = (id, fields) => {
+      const runDirectory = path.join(runsRoot, id);
+      fs.mkdirSync(runDirectory, { recursive: true });
+      const createdAt = new Date(fields.createdMs ?? now).toISOString();
+      const run = {
+        id,
+        workspaceId: fields.workspaceId ?? "ws1",
+        createdAt,
+        humanMessages: fields.clientMessageId
+          ? [
+              {
+                id: `${id}-message-1`,
+                runId: id,
+                clientMessageId: fields.clientMessageId,
+                author: "user",
+                kind: "note",
+                message: fields.message ?? "Build the feature",
+                createdAt,
+              },
+            ]
+          : [],
+      };
+      const file = path.join(runDirectory, "run.json");
+      fs.writeFileSync(file, JSON.stringify(run), "utf8");
+      const touched = (fields.mtimeMs ?? fields.createdMs ?? now) / 1_000;
+      fs.utimesSync(file, touched, touched);
+      return run;
+    };
+
+    let runReads = 0;
+    const loadRun = async (runId) => {
+      try {
+        const raw = fs.readFileSync(
+          path.join(runsRoot, runId, "run.json"),
+          "utf8",
+        );
+        runReads += 1;
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    };
+
+    let created = 0;
+    // The real new-conversation send sequence from production.ts
+    // sendCoraMessageForRemote: indexed receipt first, bounded repair scan
+    // second, run creation last, receipt committed before replying.
+    const deliver = async (receipts, input, options = {}) => {
+      const receiptInput = {
+        workspaceId: "ws1",
+        message: input.message,
+        clientMessageId: input.clientMessageId,
+      };
+      let retry = (await receipts.resolve(receiptInput, loadRun)) ?? undefined;
+      if (!retry) {
+        const repair = await coraRetryRepair.repairCoraRetryFromRunWindow(
+          receiptInput,
+          {
+            runsRoot,
+            loadRun,
+            now: () => options.now ?? now,
+            ...(options.windowMs !== undefined
+              ? { windowMs: options.windowMs }
+              : {}),
+            ...(options.readLimit !== undefined
+              ? { readLimit: options.readLimit }
+              : {}),
+          },
+        );
+        retry = repair.run;
+        if (!retry && repair.truncated) {
+          throw new Error(
+            "Could not safely reconcile this Cora retry key within the retained run window. Please retry.",
+          );
+        }
+      }
+      if (retry) {
+        await receipts.record(receiptInput, retry.id);
+        return { run: retry, created: false };
+      }
+      created += 1;
+      const run = writeRunFixture(`run-created-${created}`, {
+        clientMessageId: input.clientMessageId,
+        message: input.message,
+        createdMs: options.now ?? now,
+      });
+      await receipts.record(receiptInput, run.id);
+      return { run, created: true };
+    };
+
+    try {
+      // A busy machine: far more retained runs than the old unwindowed read
+      // cap of 64, all of them long settled.
+      for (let index = 0; index < 80; index += 1) {
+        writeRunFixture(`run-old-${index}`, {
+          clientMessageId: `old-key-${index}`,
+          message: `old request ${index}`,
+          createdMs: now - 30 * DAY + index * 1_000,
+        });
+      }
+      const oldEntries = fs.readdirSync(runsRoot).map((name) => ({
+        name,
+        mtimeMs: fs.statSync(path.join(runsRoot, name, "run.json")).mtimeMs,
+      }));
+      check(
+        "the retry repair fixture reproduces the runs listing that used to throw",
+        oldEntries.length > 64 &&
+          coraRetryRepair.selectCoraRetryRepairCandidates(oldEntries, {
+            now,
+            windowMs: 0,
+            readLimit: 64,
+          }).names.length === 0,
+        oldEntries.length,
+      );
+
+      const receipts = await coraSendReceipts.CoraSendReceiptIndex.open({
+        rootDir: receiptsRoot,
+        now: () => now,
+      });
+
+      runReads = 0;
+      const firstSend = await deliver(receipts, {
+        message: "Ship the first phone message",
+        clientMessageId: "phone-first-send",
+      });
+      check(
+        "a first new-conversation send succeeds with far more than 64 retained runs",
+        firstSend.created === true && created === 1 && runReads === 0,
+        { created, runReads },
+      );
+
+      const repairOverOldRuns =
+        await coraRetryRepair.repairCoraRetryFromRunWindow(
+          {
+            workspaceId: "ws1",
+            message: "Ship the first phone message",
+            clientMessageId: "phone-unseen-key",
+          },
+          { runsRoot, loadRun, now: () => now },
+        );
+      check(
+        "old retained runs no longer truncate the repair scan",
+        repairOverOldRuns.truncated === false &&
+          repairOverOldRuns.run === undefined,
+        repairOverOldRuns,
+      );
+
+      // Crash window: the run was committed, the host died before the receipt
+      // write, and the phone retries the same key after the restart.
+      const crashed = writeRunFixture("run-crash-window", {
+        clientMessageId: "phone-crash-window",
+        message: "Recovered request",
+        createdMs: now - 5 * 60 * 1_000,
+      });
+      const restarted = await coraSendReceipts.CoraSendReceiptIndex.open({
+        rootDir: receiptsRoot,
+        now: () => now,
+      });
+      const createdBeforeRecovery = created;
+      runReads = 0;
+      const recovery = await deliver(restarted, {
+        message: "Recovered request",
+        clientMessageId: "phone-crash-window",
+      });
+      check(
+        "a crash-window retry still reconciles to its run instead of duplicating it",
+        recovery.created === false &&
+          recovery.run.id === crashed.id &&
+          created === createdBeforeRecovery &&
+          runReads === 1,
+        { recovery: recovery.run.id, created, runReads },
+      );
+
+      runReads = 0;
+      const reReconciled = await deliver(restarted, {
+        message: "Recovered request",
+        clientMessageId: "phone-crash-window",
+      });
+      check(
+        "the repaired route is persisted, so the next retry costs one run read",
+        reReconciled.created === false &&
+          reReconciled.run.id === crashed.id &&
+          runReads === 1 &&
+          created === createdBeforeRecovery,
+        { runReads, created },
+      );
+
+      // A run whose body predates the window but was written inside it stays a
+      // candidate: mtime >= createdAt, so the filter cannot drop a live run.
+      writeRunFixture("run-old-body-recent-write", {
+        clientMessageId: "phone-old-body",
+        message: "Long-lived conversation",
+        createdMs: now - 20 * DAY,
+        mtimeMs: now - 2 * HOUR,
+      });
+      const oldBody = await coraRetryRepair.repairCoraRetryFromRunWindow(
+        {
+          workspaceId: "ws1",
+          message: "Long-lived conversation",
+          clientMessageId: "phone-old-body",
+        },
+        { runsRoot, loadRun, now: () => now },
+      );
+      check(
+        "a long-lived run written inside the window is still reconciled",
+        oldBody.run?.id === "run-old-body-recent-write" &&
+          oldBody.truncated === false,
+        oldBody.run?.id,
+      );
+
+      runReads = 0;
+      const createdBeforeFresh = created;
+      const fresh = await deliver(receipts, {
+        message: "A genuinely new conversation",
+        clientMessageId: "phone-genuinely-new",
+      });
+      const freshRepeat = await deliver(receipts, {
+        message: "A genuinely new conversation",
+        clientMessageId: "phone-genuinely-new",
+      });
+      check(
+        "a genuine fresh send with many old runs creates exactly one run",
+        fresh.created === true &&
+          freshRepeat.created === false &&
+          freshRepeat.run.id === fresh.run.id &&
+          created === createdBeforeFresh + 1,
+        { created, fresh: fresh.run.id, repeat: freshRepeat.run.id },
+      );
+
+      // The safety property survives: refusal is now keyed on the WINDOW
+      // overflowing the read ceiling, never on how much history is retained.
+      let ambiguous = null;
+      try {
+        await deliver(
+          receipts,
+          {
+            message: "Another new conversation",
+            clientMessageId: "phone-window-overflow",
+          },
+          { windowMs: 90 * DAY, readLimit: 2 },
+        );
+      } catch (error) {
+        ambiguous = error;
+      }
+      check(
+        "an overflowing repair window still refuses instead of guessing a second run",
+        /Could not safely reconcile/i.test(ambiguous?.message ?? ""),
+        ambiguous?.message,
+      );
+
+      runReads = 0;
+      const scanCost = await coraRetryRepair.repairCoraRetryFromRunWindow(
+        {
+          workspaceId: "ws1",
+          message: "Recovered request",
+          clientMessageId: "phone-crash-window",
+        },
+        { runsRoot, loadRun, now: () => now, windowMs: 365 * DAY },
+      );
+      check(
+        "the repair scan only parses run bodies whose bytes carry the retry key",
+        scanCost.run?.id === "run-crash-window" &&
+          scanCost.scanned > 64 &&
+          scanCost.inspected === 1 &&
+          runReads === 1,
+        { scanned: scanCost.scanned, inspected: scanCost.inspected, runReads },
+      );
+
+      const escaped = await coraRetryRepair.repairCoraRetryFromRunWindow(
+        {
+          workspaceId: "ws1",
+          message: 'quoted "key" request',
+          clientMessageId: 'phone-"quoted"-key',
+        },
+        {
+          runsRoot,
+          loadRun,
+          now: () => now,
+          windowMs: 365 * DAY,
+        },
+      );
+      check(
+        "a retry key needing JSON escapes finds nothing rather than matching wrongly",
+        escaped.run === undefined && escaped.truncated === false,
+        escaped,
+      );
+      writeRunFixture("run-escaped-key", {
+        clientMessageId: 'phone-"quoted"-key',
+        message: 'quoted "key" request',
+        createdMs: now - 10 * 60 * 1_000,
+      });
+      const escapedFound = await coraRetryRepair.repairCoraRetryFromRunWindow(
+        {
+          workspaceId: "ws1",
+          message: 'quoted "key" request',
+          clientMessageId: 'phone-"quoted"-key',
+        },
+        { runsRoot, loadRun, now: () => now },
+      );
+      check(
+        "a retry key needing JSON escapes still reconciles to its durable run",
+        escapedFound.run?.id === "run-escaped-key",
+        escapedFound.run?.id,
+      );
+
+      // A retry key that collides with unrelated run text is adjudicated by
+      // parsing, and the parse budget fails closed rather than guessing.
+      for (let index = 0; index < 3; index += 1) {
+        writeRunFixture(`run-collides-${index}`, {
+          clientMessageId: `collision-neighbour-${index}`,
+          // The colliding key appears as ordinary message text, not as an id.
+          message: "phone-collision-key",
+          createdMs: now - 30 * 60 * 1_000,
+        });
+      }
+      const collided = await coraRetryRepair.repairCoraRetryFromRunWindow(
+        {
+          workspaceId: "ws1",
+          message: "Yet another new conversation",
+          clientMessageId: "phone-collision-key",
+        },
+        { runsRoot, loadRun, now: () => now, parseLimit: 2 },
+      );
+      check(
+        "a retry key colliding with unrelated run text fails closed at the parse budget",
+        collided.run === undefined &&
+          collided.inspected === 2 &&
+          collided.truncated === true,
+        collided,
+      );
+      const collidedWithBudget =
+        await coraRetryRepair.repairCoraRetryFromRunWindow(
+          {
+            workspaceId: "ws1",
+            message: "Yet another new conversation",
+            clientMessageId: "phone-collision-key",
+          },
+          { runsRoot, loadRun, now: () => now },
+        );
+      check(
+        "the default parse budget adjudicates a colliding key instead of refusing",
+        collidedWithBudget.run === undefined &&
+          collidedWithBudget.inspected === 3 &&
+          collidedWithBudget.truncated === false,
+        collidedWithBudget,
+      );
+
+      const foreign = await coraRetryRepair.repairCoraRetryFromRunWindow(
+        {
+          workspaceId: "ws-other",
+          message: "Recovered request",
+          clientMessageId: "phone-crash-window",
+        },
+        { runsRoot, loadRun, now: () => now },
+      );
+      check(
+        "a repair scan never reconciles a key into another workspace's run",
+        foreign.run === undefined,
+        foreign.run?.id,
+      );
+
+      const missingRoot = await coraRetryRepair.repairCoraRetryFromRunWindow(
+        {
+          workspaceId: "ws1",
+          message: "first ever",
+          clientMessageId: "phone-no-runs-yet",
+        },
+        {
+          runsRoot: path.join(directory, "runs-that-do-not-exist"),
+          loadRun,
+          now: () => now,
+        },
+      );
+      check(
+        "a machine with no runs directory repairs to a clean first send",
+        missingRoot.run === undefined &&
+          missingRoot.truncated === false &&
+          missingRoot.scanned === 0,
+        missingRoot,
       );
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
