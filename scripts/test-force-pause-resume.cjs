@@ -100,6 +100,13 @@ export async function disposeManagerSessions(runId) {
 // Account resolution is the only other thing a manager turn touches before the
 // backend call, and a throwaway CODARA_HOME_DIR has no connected accounts.
 const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount() {
+  // Account resolution is the last thing a manager turn does BEFORE it owns a
+  // SparkCall, so a throw here escapes askManagerBackend's whole failure policy
+  // — the shape the resume path has to survive. The harness arms it per case.
+  if ((globalThis.__coraAccountFailures ?? 0) > 0) {
+    globalThis.__coraAccountFailures -= 1;
+    throw new Error("stub: no connected Pi account for this provider");
+  }
   // Shape-checked downstream: the frozen profile id must be a lowercase UUIDv4.
   return {
     accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10",
@@ -154,6 +161,17 @@ function check(name, cond, detail) {
   if (!cond) failures += 1;
   console.log(`${cond ? "PASS" : "FAIL"} ${name}${cond || detail === undefined ? "" : ` - ${detail}`}`);
 }
+
+// A harness that stops early must never look like a pass. If main() drops a
+// promise that nothing ever resolves, node drains its loop and exits 0 with no
+// output at all; this turns that into a loud failure.
+let completed = false;
+process.on("exit", (code) => {
+  if (!completed && code === 0) {
+    console.log("FAIL the harness exited before finishing its checks");
+    process.exitCode = 1;
+  }
+});
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cora-force-pause-resume-"));
 const WS = "ws-force-pause-test";
@@ -284,6 +302,23 @@ function readEvents(runId) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Poll until a condition holds (scheduled drivers hand off through
+// setTimeout(0) and a commit or two). Returns the final verdict rather than
+// throwing, so a regression surfaces as a FAIL instead of a hung harness.
+async function waitFor(condition, ms = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    if (condition()) return true;
+    await sleep(25);
+  }
+  return Boolean(condition());
+}
+
+const RESUME_NOTE_HEADER = "[Cora resume — worker attempts interrupted by the pause]";
+const isResumeNote = (message) => message.message.startsWith(RESUME_NOTE_HEADER);
+const findResumeNote = (run) => run.humanMessages.find(isResumeNote);
+const resumeNotes = (run) => run.humanMessages.filter(isResumeNote);
+
 // A manager turn that blocks on a human question: it settles the run without
 // spawning a worker (nothing here can spawn a real PTY) and without cascading
 // into another turn.
@@ -319,18 +354,43 @@ globalThis.__coraManagerStub = async (input) => {
   return behavior ? behavior(calls) : askUserResult();
 };
 
+// A promise the harness can open by hand, so a scenario can park a manager turn
+// mid-flight and inspect the run while it is genuinely "running".
+function gate() {
+  let open;
+  const opened = new Promise((resolve) => {
+    open = resolve;
+  });
+  return { opened, open: () => open() };
+}
+
+// Never await a gate bare: if the regression under test is "no manager turn is
+// dispatched", the gate is never opened, node's event loop drains and the
+// process exits 0 having printed NOTHING — a silent pass. Every wait is bounded
+// and reports its verdict so the missing turn surfaces as a FAIL.
+function gateOpened(g, ms = 3000) {
+  return Promise.race([g.opened.then(() => true), sleep(ms).then(() => false)]);
+}
+
 /**
  * The post-condition from the design doc: after a resume, a run that says
  * "running" must have SOMETHING driving it — an in-flight manager call, a
  * scheduled manager turn (observed here as a backend call arriving AFTER
  * resumeRun returned), or a live worker (impossible in this harness: node-pty
  * is stubbed, so the run may never be left depending on one).
+ *
+ * A run that settled (blocked/paused/complete/failed) satisfies it trivially,
+ * which is why `runningInvariantChecks` counts the evaluations that actually
+ * observed a "running" run — the harness asserts at the end that the invariant
+ * was exercised on a live run and not merely on settled ones.
  */
+let runningInvariantChecks = 0;
 function driverInvariant(run, callsAfterResumeReturned) {
   if (run.status !== "running") return { ok: true, why: `settled as ${run.status}` };
+  runningInvariantChecks += 1;
   const inFlightCall = run.sparkCalls.some((call) => call.status === "started" && !call.completedAt);
-  if (inFlightCall) return { ok: true, why: "manager call in flight" };
-  if (callsAfterResumeReturned > 0) return { ok: true, why: "manager turn scheduled" };
+  if (inFlightCall) return { ok: true, why: "running, manager call in flight" };
+  if (callsAfterResumeReturned > 0) return { ok: true, why: "running, manager turn scheduled" };
   return { ok: false, why: "running with no spark call, no scheduled manager turn, no worker" };
 }
 
@@ -349,8 +409,41 @@ async function main() {
   });
 
   // ── 1. a force-paused resume drives the run through a chat turn ──────────
+  // The turn is parked mid-flight so the invariant can be observed on a run
+  // that is genuinely "running" — a settled run satisfies it for free.
   const runId = writeRun(forcePausedRun("run-force-pause-chat"));
-  const resumed = await runStore.resumeRun({ runId });
+  const chatTurnEntered = gate();
+  const releaseChatTurn = gate();
+  managerBehavior.set(runId, async (calls) => {
+    if (calls.length === 1) {
+      chatTurnEntered.open();
+      await releaseChatTurn.opened;
+    }
+    return askUserResult();
+  });
+  const resumePromise = runStore.resumeRun({ runId }).catch((error) => {
+    check("resumeRun does not throw on a force-paused run", false, error?.message);
+    return readRun(runId);
+  });
+  const chatTurnDispatched = await gateOpened(chatTurnEntered);
+  const midFlight = chatTurnDispatched ? readRun(runId) : null;
+  check(
+    "the resumed run is running with its chat turn in flight",
+    Boolean(midFlight) &&
+      midFlight.status === "running" &&
+      midFlight.sparkCalls.some(
+        (call) => call.mode === "chat" && call.status === "started" && !call.completedAt,
+      ),
+    midFlight
+      ? `${midFlight.status} / ${JSON.stringify(midFlight.sparkCalls.map((c) => `${c.mode}:${c.status}`))}`
+      : "no chat turn was dispatched",
+  );
+  const midInvariant = midFlight
+    ? driverInvariant(midFlight, 0)
+    : { ok: false, why: "no chat turn was dispatched" };
+  check(`the driver invariant holds on the live run (${midInvariant.why})`, midInvariant.ok);
+  releaseChatTurn.open();
+  const resumed = await resumePromise;
   const chatCalls = callsFor(runId);
 
   check(
@@ -398,11 +491,12 @@ async function main() {
   );
 
   // The context rides the house pattern for synthetic manager input: one
-  // queued user note, claimed by the turn that consumed it.
-  const resumeNote = persisted.humanMessages.find((message) =>
-    message.message.startsWith("[Cora resume — worker attempts interrupted by the pause]"),
-  );
-  check("the resume note is persisted as manager input", Boolean(resumeNote));
+  // queued user note, claimed by the turn that consumed it. Every assertion
+  // below is guarded on the note EXISTING: without the guard a regression that
+  // stops minting it crashes the harness here and the sections after this one
+  // (the kill race, the source pins) never run at all.
+  const resumeNote = findResumeNote(persisted);
+  check("the resume note is persisted as manager input", Boolean(resumeNote), "no resume note found");
   check(
     "the resume note was claimed by the chat turn",
     Boolean(resumeNote?.backendTurnId) &&
@@ -413,8 +507,8 @@ async function main() {
   );
   check(
     "the resume note is no longer queued once delivered",
-    resumeNote?.deliveryState !== "queued",
-    resumeNote?.deliveryState,
+    Boolean(resumeNote) && resumeNote.deliveryState !== "queued",
+    resumeNote ? resumeNote.deliveryState : "no resume note found",
   );
 
   // It is authored "user" for delivery only. Everything that reads the
@@ -427,7 +521,8 @@ async function main() {
   );
   check(
     "resume notes are not heuristic user messages",
-    userIntent.isHeuristicUserMessage(resumeNote) === false,
+    Boolean(resumeNote) && userIntent.isHeuristicUserMessage(resumeNote) === false,
+    resumeNote ? undefined : "no resume note found",
   );
   check(
     "latestUserRunMessageText skips the resume note",
@@ -456,8 +551,16 @@ async function main() {
   // spark call failed, no worker, nothing scheduled. The resume must still
   // leave a driver behind.
   const deadId = "run-force-pause-dead-turn";
-  managerBehavior.set(deadId, (calls) => {
+  const deadDriverEntered = gate();
+  const releaseDeadDriver = gate();
+  managerBehavior.set(deadId, async (calls) => {
     if (calls.length === 1) throw new Error("stub provider died mid-turn");
+    // Park the scheduled driver so the invariant is observed while the run is
+    // still "running" and that turn is genuinely in flight.
+    if (calls.length === 2) {
+      deadDriverEntered.open();
+      await releaseDeadDriver.opened;
+    }
     return askUserResult();
   });
   writeRun(forcePausedRun(deadId));
@@ -468,19 +571,27 @@ async function main() {
     deadTurnCalls[0]?.mode === "chat",
     deadTurnCalls[0]?.mode,
   );
+  check(
+    "a resume whose chat turn died leaves the run running (the old wedge state)",
+    afterDead.status === "running",
+    afterDead.status,
+  );
   const deadCallsAtReturn = deadTurnCalls.length;
   // The scheduler hands off through setTimeout(0); give it a moment to land.
-  for (let i = 0; i < 40 && callsFor(deadId).length <= deadCallsAtReturn; i += 1) await sleep(50);
+  const deadDriverArrived = await waitFor(() => callsFor(deadId).length > deadCallsAtReturn);
   check(
     "a resume whose chat turn died still schedules a driver",
-    callsFor(deadId).length > deadCallsAtReturn,
+    deadDriverArrived,
     `calls=${callsFor(deadId).length}, status=${afterDead.status}`,
   );
+  const deadMidFlight = readRun(deadId);
   const deadInvariant = driverInvariant(
-    readRun(deadId),
+    deadMidFlight,
     callsFor(deadId).length - deadCallsAtReturn,
   );
   check(`post-resume driver invariant holds after a dead turn (${deadInvariant.why})`, deadInvariant.ok);
+  releaseDeadDriver.open();
+  await waitFor(() => readRun(deadId).status !== "running");
 
   // ── 3. a paused run with no interrupted attempt still resumes cleanly ────
   const bareId = writeRun(
@@ -501,12 +612,7 @@ async function main() {
   const bareCalls = callsFor(bareId);
   check("a paused run with no workers routes to chat too", bareCalls[0]?.mode === "chat", bareCalls[0]?.mode);
   const barePersisted = readRun(bareId);
-  check(
-    "no interrupted attempts means no resume note",
-    !barePersisted.humanMessages.some((message) =>
-      message.message.startsWith("[Cora resume — worker attempts interrupted by the pause]"),
-    ),
-  );
+  check("no interrupted attempts means no resume note", resumeNotes(barePersisted).length === 0);
   const bareCallsAtReturn = bareCalls.length;
   await sleep(200);
   const bareInvariant = driverInvariant(
@@ -554,6 +660,211 @@ async function main() {
     `post-resume driver invariant holds with a live turn (${liveInvariant.why})`,
     liveInvariant.ok,
     afterLiveTurn.status,
+  );
+
+  // ── 3c. a turn that throws BEFORE it owns a SparkCall still leaves a driver ──
+  // askManagerBackend's park/retry/fail policy only covers failures inside a
+  // turn: an unresolvable account (or the untrusted-PR refusal) throws straight
+  // out of it. Unguarded, that escapes resumeRun with "running" already
+  // committed — no driver, and no Resume button left to try again.
+  const throwId = "run-resume-turn-throws";
+  const throwDriverEntered = gate();
+  const releaseThrowDriver = gate();
+  managerBehavior.set(throwId, async (calls) => {
+    if (calls.length === 1) {
+      throwDriverEntered.open();
+      await releaseThrowDriver.opened;
+    }
+    return askUserResult();
+  });
+  writeRun(forcePausedRun(throwId));
+  globalThis.__coraAccountFailures = 1; // exactly the resume's own chat turn
+  let throwEscaped = null;
+  let afterThrow = null;
+  try {
+    afterThrow = await runStore.resumeRun({ runId: throwId });
+  } catch (error) {
+    throwEscaped = error;
+  }
+  globalThis.__coraAccountFailures = 0;
+  check(
+    "a manager turn that throws before its SparkCall does not escape resumeRun",
+    throwEscaped === null,
+    throwEscaped?.message,
+  );
+  check(
+    "the failed resume turn is journalled",
+    readEvents(throwId).some((event) => event.type === "run.resume_chat_turn_failed"),
+    JSON.stringify(readEvents(throwId).map((event) => event.type)),
+  );
+  const throwDriverArrived = await waitFor(() => callsFor(throwId).length > 0);
+  check(
+    "a resume whose turn threw still schedules a driver",
+    throwDriverArrived,
+    `calls=${callsFor(throwId).length}, status=${afterThrow?.status}`,
+  );
+  const throwMidFlight = readRun(throwId);
+  const throwInvariant = driverInvariant(throwMidFlight, callsFor(throwId).length);
+  check(
+    `post-resume driver invariant holds after a thrown turn (${throwInvariant.why})`,
+    throwInvariant.ok,
+  );
+  // The note the throwing turn never claimed is still queued, so the scheduled
+  // driver picks it up instead of the interrupted work being forgotten.
+  check(
+    "the interrupted-attempt context survives to the scheduled driver",
+    (callsFor(throwId)[0]?.prompt ?? "").includes("attempt-msok8193"),
+    (callsFor(throwId)[0]?.prompt ?? "").slice(0, 200),
+  );
+  releaseThrowDriver.open();
+  await waitFor(() => readRun(throwId).status !== "running");
+
+  // ── 3d. Stop → Resume → Stop must not put the note in the user's composer ──
+  const undoId = writeRun(forcePausedRun("run-resume-then-stop"));
+  await runStore.resumeRun({ runId: undoId });
+  const undoPersisted = readRun(undoId);
+  check(
+    "the resume note is on the run before the second Stop",
+    Boolean(findResumeNote(undoPersisted)),
+    "no resume note found",
+  );
+  const undone = await runStore.stopAndUndoPending(undoId);
+  check(
+    "Stop after a resume never restores the synthetic note into the composer",
+    !(undone.restoredText ?? "").includes(RESUME_NOTE_HEADER),
+    JSON.stringify(undone.restoredText),
+  );
+  // Rewinding PAST the note is correct — it is undelivered manager input like
+  // any other pending turn — so the note leaves the transcript with it; only
+  // the composer restore had to learn to skip it.
+  check("Stop after a resume rewinds past the synthetic note", resumeNotes(readRun(undoId)).length === 0);
+  check(
+    "Stop after a resume lands the undo",
+    readRun(undoId).autopilot?.lastAction === "undo",
+    JSON.stringify(readRun(undoId).autopilot),
+  );
+
+  // ── 3e. automation runs keep the signal path (nudgeBoardManager's rule) ────
+  const automationId = writeRun(
+    forcePausedRun("run-automation-paused", {
+      automationId: "automation-1",
+      autopilot: {
+        status: "paused",
+        lastAction: "paused_by_user",
+        stopReason: "Paused by user",
+        pausedAt: PAUSED_AT,
+        updatedAt: PAUSED_AT,
+      },
+    }),
+  );
+  await runStore.resumeRun({ runId: automationId });
+  await sleep(200);
+  // The automation loop owns an automation's drive, and it has no
+  // conversational manager to hand a synthetic note to — so no chat turn and no
+  // note, exactly like nudgeBoardManager refuses to nudge one.
+  check(
+    "an automation run never takes the chat route",
+    callsFor(automationId).length === 0,
+    `calls=${callsFor(automationId).length}`,
+  );
+  check(
+    "an automation run gets no synthetic resume note",
+    resumeNotes(readRun(automationId)).length === 0,
+  );
+
+  // ── 3f. a resume note stranded by a second Stop is superseded, not stacked ──
+  // forcePauseRun re-homes input a live call OWNED; a note that was queued and
+  // never claimed keeps its old epoch, where queuedManagerInputMessages can
+  // never see it again.
+  const strandedId = writeRun(
+    forcePausedRun("run-stranded-resume-note", {
+      conversationEpoch: 2,
+      humanMessages: [
+        {
+          id: "msg-1",
+          runId: "run-stranded-resume-note",
+          author: "user",
+          kind: "note",
+          message: "build the parser",
+          attachments: [],
+          createdAt: PAUSED_AT,
+          deliveryState: "acknowledged",
+          intent: "turn",
+          conversationEpoch: 1,
+        },
+        {
+          id: "msg-stranded-note",
+          runId: "run-stranded-resume-note",
+          author: "user",
+          kind: "note",
+          resumeNote: true,
+          message: `${RESUME_NOTE_HEADER}\nstale list from the previous resume`,
+          intent: "turn",
+          deliveryState: "queued",
+          conversationEpoch: 1,
+          createdAt: PAUSED_AT,
+        },
+      ],
+      sparkCalls: [
+        {
+          id: "spark-interrupted",
+          runId: "run-stranded-resume-note",
+          mode: "chat",
+          model: "stub-model",
+          status: "failed",
+          error: "Manager turn interrupted by force pause.",
+          conversationEpoch: 2,
+          createdAt: PAUSED_AT,
+          completedAt: PAUSED_AT,
+        },
+      ],
+    }),
+  );
+  await runStore.resumeRun({ runId: strandedId });
+  const strandedPersisted = readRun(strandedId);
+  const strandedNotes = resumeNotes(strandedPersisted);
+  check(
+    "the stranded note is superseded rather than left queued forever",
+    strandedNotes.find((note) => note.id === "msg-stranded-note")?.deliveryState === "cancelled",
+    strandedNotes.find((note) => note.id === "msg-stranded-note")?.deliveryState,
+  );
+  const freshNote = strandedNotes.find((note) => note.id !== "msg-stranded-note");
+  check(
+    "a fresh, deliverable note is written in the current epoch",
+    Boolean(freshNote) && (freshNote.conversationEpoch ?? 0) === 2,
+    JSON.stringify({ found: Boolean(freshNote), epoch: freshNote?.conversationEpoch }),
+  );
+  check(
+    "the fresh note carries the CURRENT interrupted attempt, not the stale text",
+    Boolean(freshNote?.message.includes("attempt-msok8193")),
+  );
+  check("exactly one resume note is ever live", strandedNotes.length === 2, `notes=${strandedNotes.length}`);
+
+  // ...but a note still queued in the CURRENT epoch is live input: a second
+  // resume must not stack another one on top of it.
+  const liveNoteId = writeRun(
+    forcePausedRun("run-live-resume-note", {
+      humanMessages: [
+        {
+          id: "msg-live-note",
+          runId: "run-live-resume-note",
+          author: "user",
+          kind: "note",
+          resumeNote: true,
+          message: `${RESUME_NOTE_HEADER}\nalready queued for the next turn`,
+          intent: "turn",
+          deliveryState: "queued",
+          conversationEpoch: 1,
+          createdAt: PAUSED_AT,
+        },
+      ],
+    }),
+  );
+  await runStore.resumeRun({ runId: liveNoteId });
+  check(
+    "a resume note still queued in this conversation is not duplicated",
+    resumeNotes(readRun(liveNoteId)).length === 1,
+    `notes=${resumeNotes(readRun(liveNoteId)).length}`,
   );
 
   // ── 4. the kill race: a worker that dies inside a force pause is cancelled ──
@@ -740,6 +1051,17 @@ async function main() {
       /\} finally \{\n\s*closeForcePauseWindow\(run\.id\);/.test(forcePauseBody),
   );
 
+  // A settled run satisfies the driver invariant for free, so the invariant is
+  // only worth anything if some of its evaluations saw a LIVE run. Pin that the
+  // harness exercised it that way (chat turn in flight, scheduled driver in
+  // flight, thrown turn's driver in flight).
+  check(
+    "the driver invariant was exercised on running runs, not only settled ones",
+    runningInvariantChecks >= 3,
+    `running evaluations=${runningInvariantChecks}`,
+  );
+
+  completed = true;
   console.log(failures === 0 ? "\nAll force-pause resume checks passed." : `\n${failures} check(s) failed.`);
   process.exit(failures === 0 ? 0 : 1);
 }

@@ -174,7 +174,10 @@ import {
   runsRoot,
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
-import { reconcileAcceptedVerifierOnlySteps } from "./step-lifecycle";
+import {
+  reconcileAcceptedVerifierOnlySteps,
+  rehomeSettledStepFeedbackRetry,
+} from "./step-lifecycle";
 import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
@@ -10008,15 +10011,32 @@ function composeResumeInterruptedNote(rows: ResumeInterruptedAttempt[]): string 
   ].join("\n");
 }
 
-/** True once this resume already queued its note in the current conversation. */
-function hasQueuedResumeInterruptedNote(run: RunState): boolean {
-  const epoch = conversationEpoch(run);
-  return run.humanMessages.some(
-    (message) =>
-      message.deliveryState === "queued" &&
-      (message.conversationEpoch ?? 0) === epoch &&
-      message.message.startsWith(RESUME_INTERRUPTED_NOTE_HEADER),
-  );
+/**
+ * Settle the resume notes already on the run, and report whether one of them is
+ * still deliverable.
+ *
+ * A note queued in the CURRENT epoch is live — the next manager turn consumes
+ * it (queuedManagerInputMessages) — so this resume must not stack a second one.
+ * A note the epoch moved past is a different animal: a force pause that lands
+ * between the resume commit and the turn start bumps the conversation epoch
+ * without re-homing an UNCLAIMED note (forcePauseRun only re-homes input a live
+ * call owned), and queuedManagerInputMessages never looks outside the current
+ * epoch. That note can no longer be delivered, so it must neither block a fresh
+ * one nor sit "queued" forever: cancel it, which is exactly what that delivery
+ * state means, and let this resume write the current list of interrupted work.
+ */
+function settleResumeInterruptedNotes(draft: RunState): boolean {
+  const epoch = conversationEpoch(draft);
+  let deliverable = false;
+  for (const message of draft.humanMessages) {
+    if (message.resumeNote !== true || message.deliveryState !== "queued") continue;
+    if ((message.conversationEpoch ?? 0) === epoch) {
+      deliverable = true;
+      continue;
+    }
+    message.deliveryState = "cancelled";
+  }
+  return deliverable;
 }
 
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
@@ -10058,13 +10078,22 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // last spark call failed, no workers, no autopilot cycle). So ANY paused
   // resume that finds no worker in flight goes through the manager chat turn:
   // it is the one driver that can relaunch the interrupted work, and it owns
-  // the retry bookkeeping. Direct (loom) runs keep the signal path — their
-  // manager calls are deliberately suppressed, so a chat turn drives nothing —
-  // and a run paused with a manager turn STILL in flight (the soft pauseRun
-  // path, which never kills the turn) already has its driver; a second
-  // concurrent turn would race the first one's decision.
+  // the retry bookkeeping.
+  //
+  // Three shapes keep the old signal path, matching nudgeBoardManager's
+  // eligibility rules for the same synthetic-note-plus-chat-turn move:
+  //   - direct (loom) runs: their manager calls are deliberately suppressed, so
+  //     a chat turn drives nothing;
+  //   - automation runs: an automation drives itself from its schedule and has
+  //     no conversational manager to hand a note to;
+  //   - a run paused with a manager turn STILL in flight (the soft pauseRun
+  //     path never kills the turn): it already has its driver, and a second
+  //     concurrent turn would race the first one's decision.
   const pausedWithNoWorkers =
-    run.status === "paused" && run.executionMode !== "direct" && !activeManagerCall(run);
+    run.status === "paused" &&
+    run.executionMode !== "direct" &&
+    !run.automationId &&
+    !activeManagerCall(run);
   // Sticky for the fallback below: a resume that already spent its chat turn
   // must still leave a driver behind if that turn neither settled the run nor
   // spawned work (a failed/suppressed manager call returns null here).
@@ -10094,7 +10123,8 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         // Recomputed off the authoritative draft: the cached run this call read
         // may be a mutation or two old by the time the commit runs.
         const interrupted = interruptedAttemptsForResume(draft);
-        if (interrupted.length > 0 && !hasQueuedResumeInterruptedNote(draft)) {
+        const noteAlreadyDeliverable = settleResumeInterruptedNotes(draft);
+        if (interrupted.length > 0 && !noteAlreadyDeliverable) {
           draft.humanMessages.push({
             id: makeId("msg"),
             runId: draft.id,
@@ -10126,7 +10156,30 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         draft.updatedAt = timestamp;
       },
     });
-    const chatDecision = await askManagerForChat(driving, resumeInput.cwd);
+    // askManagerBackend's own failure policy (park / retry / fail) only covers
+    // what happens INSIDE a turn. Everything before the turn exists throws
+    // straight out: the untrusted-pull-request backend refusal, an account that
+    // will not resolve or freeze, a turn that went stale during startup. Left
+    // unguarded, that throw escapes resumeRun with the commit above already
+    // applied — "running", no driver, and no Resume button to try again, which
+    // is the exact wedge this function is being fixed for. Catch it, journal it,
+    // and fall through: routedToChat is already set, so the tail below still
+    // schedules a driver (and that turn surfaces the same failure through
+    // markAutopilotCycleFailed, where the UI can see it).
+    let chatDecision: RunState | null = null;
+    try {
+      chatDecision = await askManagerForChat(driving, resumeInput.cwd);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[run-store] resume chat turn for ${driving.id} could not start: ${detail}`);
+      await appendEvent({
+        workspaceId: driving.workspaceId,
+        runId: driving.id,
+        type: "run.resume_chat_turn_failed",
+        message: `Cora's resume chat turn could not start: ${detail}`,
+        payload: { route: "chat", error: detail },
+      });
+    }
     if (chatDecision) {
       if (
         chatDecision.status === "paused" ||
@@ -14094,9 +14147,15 @@ export async function stopAndUndoPending(
   // Stop rewinds from the earliest pending turn, so return every removed user
   // message in FIFO order. Returning only the newest silently discarded older
   // queued steering when the composer was restored.
+  //
+  // Synthetic notes are authored "user" for delivery only (board nudge,
+  // pause-resume note). Rewinding past them is right — they are undelivered
+  // manager input like anything else here — but restoring them into the
+  // composer would hand the user a wall of attempt ids or tool names to
+  // re-send as if they had typed it.
   const restoredMessages = run.humanMessages
     .slice(rollbackIndex)
-    .filter((message) => message.author === "user")
+    .filter((message) => message.author === "user" && !message.boardNote && !message.resumeNote)
     .map((message) => message.message.trim())
     .filter(Boolean);
   const result = await queueConversationRewind(run.id, {
@@ -15202,7 +15261,24 @@ async function maybeQueueVerifierFeedbackRetry({
     target = scored[0]?.candidate ?? (candidates.length === 1 ? candidates[0] : undefined);
   }
   if (!target) return null;
-  const retriesUsed = countWorkerAttempts(run, target.id);
+  // A settled step is history. When the corrective target sits in a step that
+  // already finished, reopening it would show running workers under a step the
+  // user watched complete (run-msojtvqk-qjklvo: step 1 back to "1 running,
+  // attempt 2" beside a running step 3). Instead the rework re-homes: a
+  // follow-up copy of the target is minted in the CURRENT step and the attempt
+  // lands there, leaving the completed step's tasks, attempts and counters
+  // exactly as they were.
+  const targetStep = target.stepId
+    ? run.steps.find((item) => item.id === target.stepId)
+    : undefined;
+  const reHomesToCurrentStep = Boolean(targetStep && isTerminalStepStatus(targetStep.status));
+  // The attempt cap has to hold across the re-homing, or every round would mint
+  // a fresh task with zero attempts and the corrective loop would never end.
+  // Only the re-homing branch pays for the lineage walk; the in-place retry
+  // keeps counting exactly as it always has.
+  const retriesUsed = reHomesToCurrentStep
+    ? countFollowUpLineageAttempts(run, target)
+    : countWorkerAttempts(run, target.id);
   if (retriesUsed >= MAX_WORKER_ATTEMPTS) return null;
   // "Fast" means at most one corrective rework in code, not just in prose.
   // Count FEEDBACK-driven requeues specifically — countWorkerAttempts also
@@ -15252,33 +15328,36 @@ async function maybeQueueVerifierFeedbackRetry({
   ].join("\n");
 
   const targetId = target.id;
+  // Pre-minted so the ids exist for the event payload; only the re-homing
+  // branch actually spends them, and an unused id costs nothing.
+  const followUpTaskId = makeId("task");
+  const followUpStepId = makeId("step");
+  const payload: Record<string, unknown> = {
+    targetTaskId: targetId,
+    verifierAttemptId: attempt.id,
+    correctivePrompt,
+    retriesUsed,
+  };
   return commitRunChange(run, {
     type: "autopilot.verifier_feedback_retry",
     stepId: target.stepId,
     workerTaskId: targetId,
-    message: `Re-queuing ${target.title} with verifier corrective feedback (attempt ${retriesUsed + 1}/${MAX_WORKER_ATTEMPTS})`,
-    payload: {
-      targetTaskId: targetId,
-      verifierAttemptId: attempt.id,
-      correctivePrompt,
-      retriesUsed,
-    },
+    message: reHomesToCurrentStep
+      ? `Re-homing ${target.title} to the current step with verifier corrective feedback (attempt ${retriesUsed + 1}/${MAX_WORKER_ATTEMPTS})`
+      : `Re-queuing ${target.title} with verifier corrective feedback (attempt ${retriesUsed + 1}/${MAX_WORKER_ATTEMPTS})`,
+    payload,
     mutate: (draft, timestamp) => {
       const targetTask = draft.workerTasks.find((t) => t.id === targetId);
       if (!targetTask) return false;
+      // The rework brief. It lands on whichever task is about to run it - the
+      // target itself in place, or its follow-up copy in the current step.
       // De-dupe: don't stack an identical feedback block across repeated
       // retries. Guard on both the header and the corrective text already being
       // present in the description.
-      const alreadyHasBlock =
-        targetTask.description.includes(VERIFIER_FEEDBACK_HEADER) &&
-        targetTask.description.includes(correctivePrompt);
-      if (!alreadyHasBlock) {
-        const trimmed = targetTask.description.replace(/\s+$/, "");
-        targetTask.description = `${trimmed}\n\n${feedbackBlock}`;
-      }
-      targetTask.status = "retry_queued";
-      targetTask.verifierFeedbackRounds = (targetTask.verifierFeedbackRounds ?? 0) + 1;
-      targetTask.updatedAt = timestamp;
+      const withFeedback = (description: string): string =>
+        description.includes(VERIFIER_FEEDBACK_HEADER) && description.includes(correctivePrompt)
+          ? description
+          : `${description.replace(/\s+$/, "")}\n\n${feedbackBlock}`;
       // The verifier successfully completed its job even though the code did
       // not pass. Terminalize that verifier so a live CLI manager waiting on
       // codara_wait_for_workers can receive the verdict while the corrective
@@ -15295,13 +15374,41 @@ async function maybeQueueVerifierFeedbackRetry({
       // failed its job. Close a now-settled verifier-only step before reopening
       // the implementation step, otherwise the graph permanently shows the
       // old verification step as REVIEWING while later steps execute.
+      // It also has to run BEFORE the re-homing below picks a destination, so a
+      // verifier-only step that just settled is never mistaken for the current
+      // step.
       reconcileAcceptedVerifierOnlySteps(draft, timestamp);
-      // Re-open the target's step so pickAutopilotTasks will relaunch it.
+      // Settled step? Then it is history: run the rework as a follow-up copy of
+      // the target in the CURRENT step (a fresh one when every step settled)
+      // and leave the completed step's tasks, attempts and counters untouched.
+      // Returns null when the target's step is still live, which is the signal
+      // to retry in place exactly as before.
+      const rehomed = rehomeSettledStepFeedbackRetry(draft, {
+        targetTaskId: targetTask.id,
+        description: withFeedback(targetTask.description),
+        followUpTaskId,
+        followUpStepId,
+        timestamp,
+      });
+      if (rehomed) {
+        payload.reHomedToStepId = rehomed.stepId;
+        payload.followUpTaskId = rehomed.taskId;
+        payload.reHomedFromStepId = targetTask.stepId;
+        payload.createdStepForFollowUp = rehomed.createdStep;
+        draft.updatedAt = timestamp;
+        return;
+      }
+      targetTask.description = withFeedback(targetTask.description);
+      targetTask.status = "retry_queued";
+      targetTask.verifierFeedbackRounds = (targetTask.verifierFeedbackRounds ?? 0) + 1;
+      targetTask.updatedAt = timestamp;
+      // Re-open the target's step so pickAutopilotTasks will relaunch it. Only
+      // a `reviewing` step can need this now; a settled one re-homed above.
       const step = targetTask.stepId
         ? draft.steps.find((s) => s.id === targetTask.stepId)
         : undefined;
       if (step) {
-        if (isTerminalStepStatus(step.status) || step.status === "reviewing") {
+        if (step.status === "reviewing") {
           step.status = "queued";
         }
         if (!step.workerTaskIds.includes(targetTask.id)) {
@@ -16272,6 +16379,27 @@ const MAX_WORKER_ATTEMPTS = 3;
 
 function countWorkerAttempts(run: RunState, taskId: string): number {
   return run.workerAttempts.filter((attempt) => attempt.workerTaskId === taskId).length;
+}
+
+/**
+ * Attempts spent on one continuous line of work, following `followUpOfTaskId`
+ * back through every task that continues an earlier one. A corrective rework
+ * whose step already settled is re-homed onto a fresh follow-up task, so per-
+ * task counting would restart the attempt budget on every round and the loop
+ * would never hit MAX_WORKER_ATTEMPTS. The walk is bounded by a seen-set, so a
+ * corrupted run whose links form a cycle terminates instead of hanging.
+ */
+function countFollowUpLineageAttempts(run: RunState, task: WorkerTask): number {
+  const seen = new Set<string>();
+  let total = 0;
+  let cursor: WorkerTask | undefined = task;
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    total += countWorkerAttempts(run, cursor.id);
+    const previousId: string | undefined = cursor.followUpOfTaskId;
+    cursor = previousId ? run.workerTasks.find((item) => item.id === previousId) : undefined;
+  }
+  return total;
 }
 
 // Pure selector with the downgrade reason exposed. pickAutopilotTasks wraps this
