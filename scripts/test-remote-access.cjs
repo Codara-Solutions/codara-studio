@@ -600,6 +600,7 @@ async function main() {
           attempt("active-1", "running", {
             model: "claude-opus-5",
             runtimeState: "working",
+            runtimeActivity: "  Read src/main/remote-access/rpc.ts  ",
             startedAt: "2026-07-30T08:01:00.000Z",
           }),
           attempt("settled-1", "succeeded"),
@@ -689,6 +690,7 @@ async function main() {
             agent.runtime === "claude" &&
             agent.model === "claude-opus-5" &&
             agent.runtimeState === "working" &&
+            agent.runtimeActivity === "Read src/main/remote-access/rpc.ts" &&
             agent.automated !== true,
         ) &&
         projection.agents.some(
@@ -1107,6 +1109,13 @@ async function main() {
       /\{\s*runtimeState:\s*truncateUtf8\(attempt\.runtimeState,\s*200\)\s*\}/s.test(
         productionSource,
       ),
+  );
+  check(
+    "remote worker rows carry a trimmed, bounded live activity readout",
+    /\{\s*runtimeActivity:\s*truncateUtf8\(attempt\.runtimeActivity\.trim\(\),\s*120\)\s*\}/s.test(
+      productionSource,
+    ) &&
+      rpcSource.includes("runtimeActivity?: string;"),
   );
   {
     const liveRunProjection = productionSource.slice(
@@ -3284,6 +3293,7 @@ async function main() {
   {
     const calls = [];
     let coraHistoryTitle = "Remote work";
+    let coraWorkerActivity = "Read src/main/index.ts";
     let sharedTerminal = null;
     const sharedTerminals = [];
     let sharedWorkerTerminal = null;
@@ -3738,6 +3748,18 @@ async function main() {
               kind: "note",
               message: "hello",
               createdAt: "2026-01-01T00:01:00.000Z",
+            },
+          ],
+          workers: [
+            {
+              id: "attempt-1",
+              title: "Inspect the renderer",
+              runtime: "claude",
+              status: "running",
+              runtimeState: "working",
+              ...(coraWorkerActivity
+                ? { runtimeActivity: coraWorkerActivity }
+                : {}),
             },
           ],
         };
@@ -4983,6 +5005,41 @@ async function main() {
         ex.outbox.at(-1)?.result?.cursor === "cursor-current",
       { call: calls.at(-1), response: ex.outbox.at(-1) },
     );
+    // runtimeActivity is rewritten in memory on every tool call without any
+    // saveRun or event. Because the revision hashes the full bounded DTO, that
+    // rewrite has to move the digest or the phone's conditional poll would sit
+    // on notModified forever and never show live activity.
+    coraWorkerActivity = "Edit src/main/remote-access/rpc.ts";
+    exReq(815, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: runRevision,
+    });
+    await flush();
+    const activityRevision = ex.outbox.at(-1)?.result?.revision;
+    check(
+      "cora.get revision moves when only a worker's runtimeActivity changed",
+      ex.outbox.at(-1)?.result?.notModified === undefined &&
+        typeof activityRevision === "string" &&
+        activityRevision !== runRevision &&
+        ex.outbox.at(-1)?.result?.run?.workers?.[0]?.runtimeActivity ===
+          "Edit src/main/remote-access/rpc.ts" &&
+        ex.outbox.at(-1)?.result?.run?.workers?.[0]?.runtimeState === "working",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(816, "cora.get", {
+      workspaceId: "ws1",
+      runId: "run-1",
+      ifRevision: activityRevision,
+    });
+    await flush();
+    check(
+      "cora.get revision is stable across two identical run snapshots",
+      ex.outbox.at(-1)?.result?.notModified === true &&
+        ex.outbox.at(-1)?.result?.revision === activityRevision,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    coraWorkerActivity = "Read src/main/index.ts";
     exReq(811, "cora.get", {
       workspaceId: "ws1",
       runId: "run-1",

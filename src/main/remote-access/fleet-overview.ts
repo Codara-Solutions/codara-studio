@@ -142,6 +142,9 @@ export function projectRemoteFleetOverview(
         : {}),
       status: attempt.status,
       ...(attempt.runtimeState ? { runtimeState: attempt.runtimeState } : {}),
+      ...(attempt.runtimeActivity?.trim()
+        ? { runtimeActivity: attempt.runtimeActivity.trim() }
+        : {}),
       ...(attempt.startedAt ? { startedAt: attempt.startedAt } : {}),
       ...(run.automationId
         ? {

@@ -217,6 +217,56 @@ async function main() {
       contract.CORA_RUN_JSON_MAX_BYTES,
   );
 
+  // Live activity is the most volatile worker detail and the least useful once
+  // it is stale, so byte pressure has to spend it before the agent's lifecycle
+  // state. Every worker here is running, which keeps the settled-worker sweep
+  // out of the way and isolates the optional-field drop order.
+  const activityBase = {
+    ...hostileBase(),
+    workers: Array.from({ length: 4 }, (_, index) => ({
+      ...hostileWorker(index),
+      status: "running",
+      title: "worker",
+      model: "m",
+      effort: "high",
+      runtimeState: "s".repeat(200),
+      runtimeActivity: "a".repeat(120),
+    })),
+  };
+  delete activityBase.lastMessage;
+  delete activityBase.blockedQuestion;
+  delete activityBase.steps;
+  const activityFullBytes = contract.jsonUtf8Bytes(activityBase);
+  assert.equal(activityFullBytes, 5_484);
+  const activityCount = (run) =>
+    run.workers.filter((worker) => worker.runtimeActivity !== undefined).length;
+  const stateCount = (run) =>
+    run.workers.filter((worker) => worker.runtimeState !== undefined).length;
+
+  // Light pressure: the newest activity lines go and every agent still reports
+  // the lifecycle state the phone renders its status pill from.
+  const lightlyPruned = projector.pruneRemoteCoraRunBase(
+    activityBase,
+    activityFullBytes - 200,
+  );
+  assert.equal(lightlyPruned.workers.length, 4);
+  assert.equal(activityCount(lightlyPruned), 2);
+  assert.equal(stateCount(lightlyPruned), 4);
+
+  // Enough pressure to spend every activity line, and not one byte of
+  // runtimeState is touched until they are all gone.
+  const activityPruned = projector.pruneRemoteCoraRunBase(
+    activityBase,
+    activityFullBytes - 400,
+  );
+  assert.equal(activityPruned.workers.length, 4);
+  assert.equal(activityCount(activityPruned), 0);
+  assert.equal(stateCount(activityPruned), 4);
+  assert.equal(activityPruned.truncation.workerDetailsOmitted, true);
+  assert.ok(
+    contract.jsonUtf8Bytes(activityPruned) <= activityFullBytes - 400,
+  );
+
   // Defense in depth at the final RPC result boundary. A hostile injected
   // service can duplicate one enormous message id into both delta boundaries;
   // the result builder must choose the smaller bounded full projection.

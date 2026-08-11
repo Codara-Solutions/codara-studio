@@ -126,6 +126,7 @@ export interface RemoteFleetAgentOverview {
   model?: string;
   status: RemoteCoraWorkerStatus;
   runtimeState?: string;
+  runtimeActivity?: string;
   startedAt?: string;
   automated?: true;
   automationId?: string;
@@ -400,6 +401,10 @@ export interface RemoteCoraWorker {
   // Latest agent state for the attempt (working / blocked / done / ...).
   // Free-form on the wire so a new desktop state needs no phone update.
   runtimeState?: string;
+  // One-line "what is it doing right now" readout (the tool call the worker
+  // just started). Display-only, rewritten constantly, and the first worker
+  // detail dropped under byte pressure.
+  runtimeActivity?: string;
 }
 
 // The one question currently blocking a run. cora.send to a blocked run

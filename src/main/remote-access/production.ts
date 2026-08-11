@@ -1898,6 +1898,12 @@ function toRemoteRunWorkers(run: RunState): {
       ...(typeof attempt.runtimeState === "string" && attempt.runtimeState
         ? { runtimeState: truncateUtf8(attempt.runtimeState, 200) }
         : {}),
+      // Live tool-call readout. It is already capped at 120 chars where it is
+      // written, so this only guards a legacy or hostile attempt record.
+      ...(typeof attempt.runtimeActivity === "string" &&
+      attempt.runtimeActivity.trim()
+        ? { runtimeActivity: truncateUtf8(attempt.runtimeActivity.trim(), 120) }
+        : {}),
     };
   };
   const active = run.workerAttempts.filter((attempt) =>

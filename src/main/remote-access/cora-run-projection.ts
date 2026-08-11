@@ -151,6 +151,9 @@ export function pruneRemoteCoraRunBase(
 
   // Remove descriptive worker details before identities or lifecycle state.
   const optionalWorkerFields = [
+    // The live activity readout is the most volatile and least durable detail,
+    // so it goes before the agent's lifecycle state.
+    "runtimeActivity",
     "runtimeState",
     "finishedAt",
     "startedAt",
