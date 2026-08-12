@@ -1057,7 +1057,7 @@ function WorkspaceFolder({
         ) : (
           <span style={{ width: 14 }} />
         )}
-        <FolderGlyph color="var(--muted)" open={!collapsed} />
+        <FolderGlyph color={group ? accent : "var(--muted)"} open={!collapsed} />
         {editing ? (
           <input
             ref={inputRef}
