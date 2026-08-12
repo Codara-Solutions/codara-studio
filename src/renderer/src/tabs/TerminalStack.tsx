@@ -9,6 +9,13 @@ import type {
   WorkerSessionRuntime,
 } from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
+import DockedPaneChrome from "./DockedPaneChrome";
+import { dockLeaf, isDockLeaf } from "./dock";
+import {
+  DOCK_CHROME_Z,
+  clearDockPlacementsForHost,
+  publishDockPlacements,
+} from "./dockGeometry";
 import {
   findLeaf,
   insertLeafAtLeaf,
@@ -36,6 +43,14 @@ import {
   peekTerminalPaneDrag,
   peekTerminalPaneDragState,
   subscribeTerminalPaneDrag,
+  TAB_DOCK_DRAG_MIME,
+  endTabDockDrag,
+  parseTabDockDrag,
+  peekTabDockDrag,
+  peekTabDockDragState,
+  subscribeTabDockDrag,
+  updateTabDockDragPosition,
+  type TabDockDragState,
   updateTerminalPaneDragPosition,
   type TerminalPaneDragPoint,
   type TerminalPaneDragPayload,
@@ -103,6 +118,26 @@ interface Props {
     },
   ) => void;
   onClosePane: (tabId: TabId, paneId: string) => void;
+  // Open a browser preview as a docked cell beside the given pane.
+  onAddBrowserPane: (
+    tabId: TabId,
+    target: { paneId: string; direction: TerminalSplit["direction"] } | null,
+  ) => void;
+  // A tab pill was dropped into this tab's grid at the given edge intent.
+  onDockTabDrop: (
+    tabId: TabId,
+    hostTabId: TabId,
+    target: {
+      paneId: string;
+      direction: TerminalSplit["direction"];
+      position: "before" | "after";
+      mode: "split" | "line";
+    },
+  ) => void;
+  // Return a docked tab to the strip (content survives).
+  onUndockTab: (tabId: TabId) => void;
+  // Close a docked tab outright — the destructive counterpart to undocking.
+  onCloseDockedTab: (tabId: TabId) => void;
   // Toggle the named pane between zoom (full tab area) and normal (its
   // position in the BSP split). The state lives on the TerminalTab so it
   // survives tab switches; the consumer flips `zoomedPaneId` on/off.
@@ -149,6 +184,8 @@ type Bundle = {
   onSplitRight: () => void;
   onSplitDown: () => void;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
+  // Open a browser preview docked beside this pane, rather than as a tab.
+  onAddBrowserPane: () => void;
   onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onClose: () => void;
   onToggleZoom: () => void;
@@ -181,6 +218,10 @@ function TerminalStack({
   onOpenWorkerSessionPicker,
   onMovePane,
   onClosePane,
+  onAddBrowserPane,
+  onDockTabDrop,
+  onUndockTab,
+  onCloseDockedTab,
   onTabZoomToggle,
   onPaneCwd,
   onPaneActivity,
@@ -214,6 +255,10 @@ function TerminalStack({
   const openWorkerSessionPickerRef = useRef(onOpenWorkerSessionPicker);
   const moveRef = useRef(onMovePane);
   const closeRef = useRef(onClosePane);
+  const addBrowserRef = useRef(onAddBrowserPane);
+  const dockDropRef = useRef(onDockTabDrop);
+  const undockRef = useRef(onUndockTab);
+  const closeDockedRef = useRef(onCloseDockedTab);
   const zoomToggleRef = useRef(onTabZoomToggle);
   const cwdRef = useRef(onPaneCwd);
   const activityRef = useRef(onPaneActivity);
@@ -236,6 +281,10 @@ function TerminalStack({
     openWorkerSessionPickerRef.current = onOpenWorkerSessionPicker;
     moveRef.current = onMovePane;
     closeRef.current = onClosePane;
+    addBrowserRef.current = onAddBrowserPane;
+    dockDropRef.current = onDockTabDrop;
+    undockRef.current = onUndockTab;
+    closeDockedRef.current = onCloseDockedTab;
     zoomToggleRef.current = onTabZoomToggle;
     cwdRef.current = onPaneCwd;
     activityRef.current = onPaneActivity;
@@ -248,7 +297,29 @@ function TerminalStack({
     resumeUnavailableRef.current = onPaneResumeUnavailable;
     resumeFallbackRef.current = onPaneResumeFallback;
     bootResumeConsumedRef.current = onPaneBootResumeConsumed;
-  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onOpenWorkerSessionPicker, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
+  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onOpenWorkerSessionPicker, onMovePane, onClosePane, onAddBrowserPane, onDockTabDrop, onUndockTab, onCloseDockedTab, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
+
+  // Stable identities for the dock chrome: TerminalTabPane is memoized, and a
+  // fresh callback identity here would re-render every tab (and with it every
+  // xterm-hosting subtree) on any App render.
+  const handleDockTabDrop = useCallback(
+    (
+      droppedTabId: TabId,
+      hostTabId: TabId,
+      target: {
+        paneId: string;
+        direction: TerminalSplit["direction"];
+        position: "before" | "after";
+        mode: "split" | "line";
+      },
+    ) => dockDropRef.current(droppedTabId, hostTabId, target),
+    [],
+  );
+  const handleUndockTab = useCallback((dockedTabId: TabId) => undockRef.current(dockedTabId), []);
+  const handleCloseDockedTab = useCallback(
+    (dockedTabId: TabId) => closeDockedRef.current(dockedTabId),
+    [],
+  );
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -322,6 +393,7 @@ function TerminalStack({
           onSplitRight: () => splitRef.current(tabId, paneId, "horizontal"),
           onSplitDown: () => splitRef.current(tabId, paneId, "vertical"),
           onSmartAdd: (autorun, agentSession) => smartAddInTab(tabId, autorun, agentSession),
+          onAddBrowserPane: () => addBrowserRef.current(tabId, smartAddTargetInTab(tabId)),
           onOpenWorkerSessions: (runtime) => {
             const target = smartAddTargetInTab(tabId);
             if (!target) return;
@@ -453,6 +525,7 @@ function TerminalStack({
     [],
   );
 
+
   // Stable container lookup for ResizeHandle drags — reads the live tab root
   // out of the ref map at drag time so a mid-drag re-render can't stale it.
   const getTabRoot = useCallback(
@@ -550,6 +623,9 @@ function TerminalStack({
           getTabRoot={getTabRoot}
           onRatioChange={onPaneRatioChange}
           onPaneDrop={onPaneDrop}
+          onDockTabDrop={handleDockTabDrop}
+          onUndockTab={handleUndockTab}
+          onCloseDockedTab={handleCloseDockedTab}
           onBackToRuns={onBackToRuns}
         />
       ))}
@@ -569,6 +645,18 @@ interface TerminalTabPaneProps {
   setHandle: (paneId: string, h: TerminalPaneHandle | null) => void;
   getTabRoot: (tabId: TabId) => HTMLDivElement | null;
   onRatioChange: (tabId: TabId, path: PanePath, ratio: number) => void;
+  onDockTabDrop: (
+    tabId: TabId,
+    hostTabId: TabId,
+    target: {
+      paneId: string;
+      direction: TerminalSplit["direction"];
+      position: "before" | "after";
+      mode: "split" | "line";
+    },
+  ) => void;
+  onUndockTab: (dockedTabId: TabId) => void;
+  onCloseDockedTab: (dockedTabId: TabId) => void;
   onPaneDrop: (
     payload: TerminalPaneDragPayload,
     targetTabId: TabId,
@@ -598,6 +686,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   getTabRoot,
   onRatioChange,
   onPaneDrop,
+  onDockTabDrop,
+  onUndockTab,
+  onCloseDockedTab,
   onBackToRuns,
 }: TerminalTabPaneProps) {
   const tabRootRef = useRef<HTMLDivElement | null>(null);
@@ -608,6 +699,13 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
     peekTerminalPaneDragState(),
   );
   const drag = dragState?.payload ?? null;
+  // A tab pill being dragged in from the strip. Tracked separately from the
+  // pane drag because the two gestures come from different input models (see
+  // terminalDrag.ts), but they share this tab's hit-testing and reflow preview.
+  const [tabDragState, setTabDragState] = useState<TabDockDragState | null>(() =>
+    peekTabDockDragState(),
+  );
+  const tabDrag = tabDragState?.payload ?? null;
   const ghostPos = dragState ? dragGhostPosition(dragState) : null;
   const workerTerminal = tab.scope?.kind === "workers";
   // Worker terminals open in observation mode. Keep this renderer-local: it
@@ -635,6 +733,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   }, [visible, workerTerminal]);
 
   useEffect(() => subscribeTerminalPaneDrag(setDragState), []);
+  useEffect(() => subscribeTabDockDrag(setTabDragState), []);
 
   const setOwnTabRoot = useCallback(
     (el: HTMLDivElement | null) => {
@@ -655,9 +754,19 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   const baseLayout = useMemo(() => layoutTree(tab.root), [tab.root]);
 
   const updateDropIntentAtPoint = useCallback(
-    (pointLike: { clientX: number; clientY: number }): DropIntent | null => {
+    (
+      pointLike: { clientX: number; clientY: number },
+      options?: { inboundTab?: boolean },
+    ): DropIntent | null => {
       const root = tabRootRef.current;
-      const dragPayload = peekTerminalPaneDrag();
+      // Either gesture can be live. An inbound tab has no leaf of its own in
+      // this tree, so it hit-tests under a sentinel id that matches nothing —
+      // which also means the self-drop suppression simply never fires for it.
+      const dragPayload: TerminalPaneDragPayload | null =
+        peekTerminalPaneDrag() ??
+        (peekTabDockDrag() || options?.inboundTab
+          ? { tabId: "", paneId: TAB_DOCK_PREVIEW_PANE_ID }
+          : null);
       const point = terminalDragPointFromClient(pointLike);
       if (!root || !dragPayload || !point) {
         dropIntentRef.current = null;
@@ -732,11 +841,12 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
 
   // Full post-drop tree when hovering a drop target — drives live reflow + slot.
   const dropPreviewRoot = useMemo(() => {
-    if (!drag || !dropIntent) return null;
-    const moving =
-      findLeaf(tab.root, drag.paneId) ??
-      ({ kind: "leaf", paneId: drag.paneId } satisfies TerminalLeaf);
-    const base = drag.tabId === tab.id ? layoutRoot : tab.root;
+    if ((!drag && !tabDrag) || !dropIntent) return null;
+    const moving: TerminalLeaf = tabDrag
+      ? dockLeaf(TAB_DOCK_PREVIEW_PANE_ID, tabDrag.tabId, tabDrag.tabKind)
+      : (findLeaf(tab.root, drag!.paneId) ??
+        ({ kind: "leaf", paneId: drag!.paneId } satisfies TerminalLeaf));
+    const base = drag && drag.tabId === tab.id ? layoutRoot : tab.root;
     if (!base) return null;
     const next = insertLeafAtLeaf(
       base,
@@ -747,7 +857,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       { rebalanceLine: dropIntent.mode === "line" },
     );
     return next === base ? null : next;
-  }, [drag, dropIntent, tab.root, tab.id, layoutRoot]);
+  }, [drag, tabDrag, dropIntent, tab.root, tab.id, layoutRoot]);
 
   const displayRoot = dropPreviewRoot ?? layoutRoot;
 
@@ -758,20 +868,26 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       return { flowLeaves: ls, flowHandles: hs, dropSlotRect: null };
     }
     layoutPanes(displayRoot, [], FULL_RECT, ls, hs);
+    const movingPaneId = tabDrag ? TAB_DOCK_PREVIEW_PANE_ID : drag?.paneId;
     const slot =
-      drag && dropPreviewRoot
-        ? (ls.find((box) => box.leaf.paneId === drag.paneId)?.rect ?? null)
+      movingPaneId && dropPreviewRoot
+        ? (ls.find((box) => box.leaf.paneId === movingPaneId)?.rect ?? null)
         : null;
     return { flowLeaves: ls, flowHandles: hs, dropSlotRect: slot };
-  }, [displayRoot, drag, dropPreviewRoot]);
+  }, [displayRoot, drag, tabDrag, dropPreviewRoot]);
 
   const resizeIntersections = useMemo(
     () => buildResizeIntersections(flowHandles),
     [flowHandles],
   );
 
+  // Tracks whether the last publish had any cells, so a tab that never docks
+  // anything skips the publish call entirely.
+  const hadDockCells = useRef(false);
+
   const hideDraggedPane = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
-  const layoutAnimating = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
+  const layoutAnimating =
+    (!!drag && (drag.tabId === tab.id || !!dropPreviewRoot)) || (!!tabDrag && !!dropPreviewRoot);
 
   // Zoom is honored only when the named pane actually exists in this tab's
   // current tree. If the zoomed leaf was closed (which clears the id) we
@@ -804,6 +920,40 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   // tree-order keeps every pane's React key/position stable across the drag.
   const renderLeaves = baseLayout.leaves;
 
+  // Hand every docked cell's rect to the Stack that owns its content. This
+  // runs on every render (no dep array): TerminalTabPane is memoized per tab,
+  // so it only re-renders when THIS tab's layout, drag or visibility actually
+  // changed — exactly the moments a docked rect can move. The publish itself
+  // writes CSS strings straight to the registered elements, so a ratio drag
+  // costs style writes rather than renders in the other stacks.
+  useLayoutEffect(() => {
+    const cells = renderLeaves.filter((box) => isDockLeaf(box.leaf));
+    if (cells.length === 0 && !hadDockCells.current) return;
+    hadDockCells.current = cells.length > 0;
+    publishDockPlacements(
+      tab.id,
+      cells.map(({ leaf }) => {
+        const parked = hideDraggedPane && !!drag && drag.tabId === tab.id && drag.paneId === leaf.paneId;
+        const isZoomed = zoomedPaneId === leaf.paneId;
+        const rect = isZoomed ? FULL_RECT : (flowRectById.get(leaf.paneId) ?? null);
+        return {
+          tabId: (leaf.content as { type: "tab"; tabId: TabId }).tabId,
+          hostTabId: tab.id,
+          leafId: leaf.paneId,
+          rect: parked ? null : rect,
+          shown: visible && !parked && !!rect && (zoomedPaneId === null || isZoomed),
+        };
+      }),
+    );
+  });
+
+  useEffect(
+    () => () => {
+      clearDockPlacementsForHost(tab.id);
+    },
+    [tab.id],
+  );
+
   // Size the off-screen park slot for the dragged pane to its LAST rendered
   // pixel box, not a hard-coded 480x320. A mismatched box forces the live PTY
   // to refit to a tiny ~60x16 grid on drag-start and back on drop — two
@@ -825,14 +975,35 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   })();
 
   return (
+    <>
     <div
       ref={setOwnTabRoot}
       aria-hidden={!visible}
       className="spark-terminal-tab"
       onDragOver={(event) => {
+        if (acceptsTabDock(event)) {
+          // Accept on the MIME alone. The module-level channel only enriches
+          // the live preview; requiring it here would make the grid refuse a
+          // drop whose dragstart this renderer never observed.
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          updateTabDockDragPosition({ clientX: event.clientX, clientY: event.clientY });
+          updateDropIntentAtPoint(event, { inboundTab: true });
+          return;
+        }
         if (!acceptsTerminalPane(event)) return;
         event.preventDefault();
         updateTerminalDragPositionFromPoint(event);
+      }}
+      onDrop={(event) => {
+        const payload = parseTabDockDrag(event.dataTransfer);
+        if (!payload) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const intent = updateDropIntentAtPoint(event, { inboundTab: true });
+        setDropIntent(null);
+        endTabDockDrag();
+        if (intent) onDockTabDrop(payload.tabId, tab.id, intent);
       }}
       onDragLeave={(event) => {
         if (
@@ -860,6 +1031,37 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
         const workerChip = visibleWorkerChip(leaf.worker);
         const isZoomed = zoomedPaneId === leaf.paneId;
         const isHiddenByZoom = zoomedPaneId !== null && !isZoomed;
+        // Dock cell: the content itself is mounted by its own Stack and merely
+        // positioned at this rect (dockGeometry), so all the grid renders here
+        // is the card well behind it. Deliberately carries neither
+        // data-terminal-pane-id nor .spark-terminal-pane — pane counts in the
+        // shortcut handlers and the e2e suite must keep meaning "terminals".
+        if (isDockLeaf(leaf)) {
+          const dockRect = isZoomed ? FULL_RECT : (flowRectById.get(leaf.paneId) ?? FULL_RECT);
+          return (
+            <div
+              key={leaf.paneId}
+              data-dock-cell-id={leaf.paneId}
+              data-dock-tab-id={leaf.content.tabId}
+              className="spark-dock-cell"
+              onMouseDown={bundle.onActivate}
+              onFocusCapture={bundle.onActivate}
+              style={{
+                position: "absolute",
+                ...paneFrameStyle(dockRect),
+                display: isHiddenByZoom ? "none" : undefined,
+                background: "var(--bg)",
+                borderRadius: "var(--terminal-pane-radius)",
+                boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
+                zIndex: isActive ? 5 : 1,
+                transition:
+                  layoutAnimating && !reducedMotion
+                    ? "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out)"
+                    : undefined,
+              }}
+            />
+          );
+        }
         // This leaf is the one being dragged within THIS tab and the layout is
         // currently hiding it (siblings reflowed into its slot, or a drop
         // preview is showing). Instead of unmounting it into a separate
@@ -1048,6 +1250,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
                 cwd={leaf.cwd}
                 onSmartAdd={bundle.onSmartAdd}
+                onAddBrowserPane={bundle.onAddBrowserPane}
                 onOpenWorkerSessions={bundle.onOpenWorkerSessions}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
@@ -1073,33 +1276,107 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           }}
         />
       ) : null}
-      {dropSlotRect ? (
-        <PaneDropSlot rect={dropSlotRect} reducedMotion={reducedMotion} />
-      ) : null}
-      {drag && ghostPos && visible ? (
-        <TerminalDragGhost x={ghostPos.x} y={ghostPos.y} />
-      ) : null}
-      {zoomedPaneId === null
-        ? flowHandles.map((handle) => (
-            <ResizeHandle
-              key={`h:${handle.path.join("/") || "root"}`}
-              handle={handle}
-              getContainer={() => getTabRoot(tab.id)}
-              onRatioChange={(ratio) => onRatioChange(tab.id, handle.path, ratio)}
+      </div>
+      {/* Chrome layer. Docked content is painted by its own Stack ABOVE this
+          tab (it has to be — the tab paints an opaque panel background), so
+          anything the user must still be able to grab has to sit above the
+          content in turn: resize handles straddle cell edges by ~5px and would
+          otherwise land under a docked webview. inset:0 like the tab itself, so
+          every rect below keeps resolving percentages against an identical box
+          (the tab's padding does not shrink that box — abspos children resolve
+          against the padding box, which includes it). pointer-events:none
+          except on the interactive children. */}
+      <div
+        className="spark-terminal-chrome"
+        aria-hidden={!visible}
+        style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: DOCK_CHROME_Z,
+          pointerEvents: "none",
+          visibility: visible ? "visible" : "hidden",
+        }}
+      >
+        {/* One drop surface for the whole tab rather than a handler per pane.
+            It only exists while a tab pill is in flight, and it is what makes
+            the drop work over a DOCKED cell at all: that area is covered by
+            another Stack's content (a <webview> swallows drag events outright),
+            so the grid has to own a layer above it. */}
+        {tabDrag ? (
+          <div
+            data-dock-drop-shield
+            style={{ position: "absolute", inset: 0, pointerEvents: "auto", background: "transparent" }}
+            onDragOver={(event) => {
+              if (!Array.from(event.dataTransfer.types).includes(TAB_DOCK_DRAG_MIME)) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              updateTabDockDragPosition({ clientX: event.clientX, clientY: event.clientY });
+              updateDropIntentAtPoint(event, { inboundTab: true });
+            }}
+            onDragLeave={(event) => {
+              if (
+                event.relatedTarget instanceof Node &&
+                event.currentTarget.contains(event.relatedTarget)
+              ) {
+                return;
+              }
+              setDropIntent(null);
+            }}
+            onDrop={(event) => {
+              const payload = parseTabDockDrag(event.dataTransfer);
+              if (!payload) return;
+              event.preventDefault();
+              event.stopPropagation();
+              const intent = updateDropIntentAtPoint(event, { inboundTab: true });
+              setDropIntent(null);
+              endTabDockDrag();
+              if (intent) onDockTabDrop(payload.tabId, tab.id, intent);
+            }}
+          />
+        ) : null}
+        {dropSlotRect ? (
+          <PaneDropSlot rect={dropSlotRect} reducedMotion={reducedMotion} />
+        ) : null}
+        {drag && ghostPos && visible ? (
+          <TerminalDragGhost x={ghostPos.x} y={ghostPos.y} />
+        ) : null}
+        {zoomedPaneId === null
+          ? flowHandles.map((handle) => (
+              <ResizeHandle
+                key={`h:${handle.path.join("/") || "root"}`}
+                handle={handle}
+                getContainer={() => getTabRoot(tab.id)}
+                onRatioChange={(ratio) => onRatioChange(tab.id, handle.path, ratio)}
+              />
+            ))
+          : null}
+        {zoomedPaneId === null
+          ? resizeIntersections.map((intersection) => (
+              <ResizeIntersectionGrip
+                key={intersection.key}
+                intersection={intersection}
+                getContainer={() => getTabRoot(tab.id)}
+                onRatioChange={(path, ratio) => onRatioChange(tab.id, path, ratio)}
+              />
+            ))
+          : null}
+        {renderLeaves.map(({ leaf }) =>
+          isDockLeaf(leaf) && (zoomedPaneId === null || zoomedPaneId === leaf.paneId) ? (
+            <DockedPaneChrome
+              key={`dock:${leaf.paneId}`}
+              rect={zoomedPaneId === leaf.paneId ? FULL_RECT : flowRectById.get(leaf.paneId) ?? FULL_RECT}
+              kind={leaf.content.tabKind}
+              hostTabId={tab.id}
+              leafId={leaf.paneId}
+              isZoomed={zoomedPaneId === leaf.paneId}
+              onUndock={() => onUndockTab(leaf.content.tabId)}
+              onToggleZoom={() => getBundle(tab.id, leaf.paneId).onToggleZoom()}
+              onClose={() => onCloseDockedTab(leaf.content.tabId)}
             />
-          ))
-        : null}
-      {zoomedPaneId === null
-        ? resizeIntersections.map((intersection) => (
-            <ResizeIntersectionGrip
-              key={intersection.key}
-              intersection={intersection}
-              getContainer={() => getTabRoot(tab.id)}
-              onRatioChange={(path, ratio) => onRatioChange(tab.id, path, ratio)}
-            />
-          ))
-        : null}
-    </div>
+          ) : null,
+        )}
+      </div>
+    </>
   );
 });
 
@@ -1216,6 +1493,10 @@ const INTERSECTION_GRIP = 14;
 // Referenced as a CSS var in calc() below; the numeric fallback keeps the
 // resize-snap math correct if the token is ever unresolved.
 const PANE_GAP = "var(--terminal-pane-gap, 3px)";
+// Stands in for a tab pill being dragged in from the strip: it has no cell in
+// this tree yet, so the reflow preview inserts a leaf under this id and the
+// dashed drop slot follows it. Never persisted.
+const TAB_DOCK_PREVIEW_PANE_ID = "__tab-dock-preview__";
 const LINE_DROP_EDGE_PX = 12;
 const RESIZE_SNAP_STEP = 1 / 24;
 const RESIZE_SNAP_PX = 8;
@@ -1378,6 +1659,10 @@ function leafCellClientRect(container: DOMRect, rect: FracRect): DOMRect {
     rect.width * container.width,
     rect.height * container.height,
   );
+}
+
+function acceptsTabDock(event: React.DragEvent): boolean {
+  return Array.from(event.dataTransfer.types).includes(TAB_DOCK_DRAG_MIME);
 }
 
 function acceptsTerminalPane(event: React.DragEvent): boolean {
@@ -1948,6 +2233,7 @@ interface PaneToolbarProps {
   // listing to this workspace. Undefined until the shell reports a cwd.
   cwd?: string;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
+  onAddBrowserPane: () => void;
   onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
@@ -1961,6 +2247,7 @@ function PaneToolbar({
   dragPayload,
   cwd,
   onSmartAdd,
+  onAddBrowserPane,
   onOpenWorkerSessions,
   onSplitRight,
   onSplitDown,
@@ -2140,6 +2427,7 @@ function PaneToolbar({
           onPick={(kind) => {
             setOpenMenu(null);
             if (kind === "shell") onSmartAdd();
+            else if (kind === "browser") onAddBrowserPane();
             else onOpenWorkerSessions(kind);
           }}
         />,
@@ -2165,7 +2453,7 @@ function PaneToolbar({
   );
 }
 
-function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
+export function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
   const [dragging, setDragging] = useState(false);
   const pointerIdRef = useRef<number | null>(null);
 
@@ -2228,7 +2516,7 @@ function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
   );
 }
 
-type AddPaneKind = "shell" | "claude" | "codex";
+type AddPaneKind = "shell" | "claude" | "codex" | "browser";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
 // default smart-add behavior (split the most spacious leaf); the two worker
@@ -2268,6 +2556,13 @@ const AddPaneMenu = React.forwardRef<
       command: CODEX_LAUNCH_COMMAND,
       accent: "codex",
       glyph: <RuntimeGlyph letter="X" />,
+    },
+    {
+      kind: "browser",
+      title: "Browser pane",
+      hint: "preview",
+      accent: "shell",
+      glyph: <RuntimeGlyph letter="B" />,
     },
   ];
 

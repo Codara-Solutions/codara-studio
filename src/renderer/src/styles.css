@@ -4028,3 +4028,25 @@ a { color: inherit; }
     display: none;
   }
 }
+
+/* Docked panes: a preview/editor/chat tab borrowing a cell in a terminal
+   tab's split grid. The content itself is painted by its own Stack (it can
+   never be re-parented into the grid — a <webview> reloads if you move it),
+   so the grid only owns the well behind it and the chrome above it. */
+.spark-dock-cell {
+  overflow: hidden;
+}
+
+.spark-dock-chrome__label {
+  opacity: 0.45;
+}
+
+.spark-dock-chrome__btn {
+  opacity: 0.5;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.spark-dock-chrome__btn:hover,
+.spark-dock-chrome__btn:focus-visible {
+  opacity: 1;
+}

@@ -1,8 +1,16 @@
-import React, { useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useMemo, useRef, useSyncExternalStore } from "react";
 import type { RunState, Workspace } from "@shared/types";
 import OrchestrationSidebar from "../components/OrchestrationSidebar";
 import type { ChatTab, Tab, TabId } from "./types";
 import type { CoraView } from "../components/chat/cora-view";
+import type { DockRef } from "./dock";
+import {
+  DOCK_CONTENT_Z,
+  getDockVersion,
+  peekDockPlacementSnapshot,
+  registerDockElement,
+  subscribeDockChanges,
+} from "./dockGeometry";
 
 interface Props {
   tabs: Tab[];
@@ -13,6 +21,9 @@ interface Props {
   // entering workspace's id with the leaving workspace's tabs.
   tabsWorkspaceId: string | null;
   validWorkspaceIds: ReadonlySet<string>;
+  // A chat docked into a terminal tab's split grid is positioned by that grid
+  // instead of filling the workbench (see dockGeometry.ts).
+  dockIndex: ReadonlyMap<TabId, DockRef>;
   runs: RunState[];
   runsWorkspaceId: string | null;
   activeRunId: string | null;
@@ -34,6 +45,7 @@ function ChatStack({
   workspace,
   tabsWorkspaceId,
   validWorkspaceIds,
+  dockIndex,
   runs,
   runsWorkspaceId,
   activeRunId,
@@ -48,6 +60,20 @@ function ChatStack({
     [tabs],
   );
   const noop = useCallback(() => undefined, []);
+  // Re-render when a docked cell's shown-state flips (one subscription for the
+  // whole stack — hooks can't be called per entry below).
+  useSyncExternalStore(subscribeDockChanges, getDockVersion, getDockVersion);
+
+  // Stable per-tab callback refs so registering doesn't re-run every render.
+  const dockRefs = useRef(new Map<TabId, (el: HTMLDivElement | null) => void>());
+  const getDockRef = (id: TabId) => {
+    let ref = dockRefs.current.get(id);
+    if (!ref) {
+      ref = (el: HTMLDivElement | null) => registerDockElement(id, el);
+      dockRefs.current.set(id, ref);
+    }
+    return ref;
+  };
 
   type RetainedChat = {
     workspace: Workspace;
@@ -59,10 +85,14 @@ function ChatStack({
   // conversation DOM, scroll position, composer state, and controller state
   // while an editor/terminal or another workspace is in front. Only one panel
   // per workspace is retained because chat tabs share the same run store.
+  // Keyed `workspaceId::tabId`: a workspace may need TWO surfaces alive at
+  // once — the chat filling the workbench and a different chat docked inside a
+  // terminal tab's grid. Without that, docking a chat and then selecting
+  // another one would leave the docked cell showing nothing.
   const retainedByWorkspaceRef = useRef<Map<string, RetainedChat>>(new Map());
   const retained = retainedByWorkspaceRef.current;
-  for (const workspaceId of Array.from(retained.keys())) {
-    if (!validWorkspaceIds.has(workspaceId)) retained.delete(workspaceId);
+  for (const key of Array.from(retained.keys())) {
+    if (!validWorkspaceIds.has(retained.get(key)!.workspace.id)) retained.delete(key);
   }
 
   // Skip retention on the one flip render where `tabs` still belongs to the
@@ -70,18 +100,31 @@ function ChatStack({
   // retained entry at a tab id from another workspace (mirrors the
   // runsWorkspaceId ownership gate below).
   if (workspace && tabsWorkspaceId === workspace.id) {
-    const previous = retained.get(workspace.id);
-    const selectedTab =
-      chatTabs.find((tab) => tab.id === activeId) ??
-      chatTabs.find((tab) => tab.id === previous?.tab.id) ??
-      chatTabs[0];
-    if (!selectedTab) {
-      retained.delete(workspace.id);
-    } else {
-      const ownsRunPayload = runsWorkspaceId === workspace.id;
-      retained.set(workspace.id, {
+    const keyFor = (tabId: TabId) => `${workspace.id}::${tabId}`;
+    const ownedKeys = Array.from(retained.keys()).filter(
+      (key) => retained.get(key)!.workspace.id === workspace.id,
+    );
+    const previousTabId = ownedKeys.length > 0 ? retained.get(ownedKeys[0])!.tab.id : null;
+    const activeChat = chatTabs.find((tab) => tab.id === activeId);
+    const dockedChat = chatTabs.find((tab) => dockIndex.has(tab.id));
+    const wanted: ChatTab[] = [];
+    if (activeChat) wanted.push(activeChat);
+    if (dockedChat && dockedChat.id !== activeChat?.id) wanted.push(dockedChat);
+    if (wanted.length === 0) {
+      const fallback =
+        chatTabs.find((tab) => tab.id === previousTabId) ?? chatTabs[0];
+      if (fallback) wanted.push(fallback);
+    }
+    const keep = new Set(wanted.map((tab) => keyFor(tab.id)));
+    for (const key of ownedKeys) {
+      if (!keep.has(key)) retained.delete(key);
+    }
+    const ownsRunPayload = runsWorkspaceId === workspace.id;
+    for (const tab of wanted) {
+      const previous = retained.get(keyFor(tab.id));
+      retained.set(keyFor(tab.id), {
         workspace,
-        tab: selectedTab,
+        tab,
         runs: ownsRunPayload ? runs : (previous?.runs ?? []),
         activeRunId: ownsRunPayload ? activeRunId : (previous?.activeRunId ?? null),
       });
@@ -91,11 +134,18 @@ function ChatStack({
   if (retained.size === 0) return null;
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      {Array.from(retained.entries()).map(([workspaceId, entry]) => {
-        const visible = workspace?.id === workspaceId && activeId === entry.tab.id;
+      {Array.from(retained.entries()).map(([key, entry]) => {
+        const workspaceId = entry.workspace.id;
+        const docked = dockIndex.has(entry.tab.id);
+        // A docked chat is on screen whenever its host terminal tab is.
+        const visible = docked
+          ? (peekDockPlacementSnapshot(entry.tab.id)?.shown ?? false)
+          : workspace?.id === workspaceId && activeId === entry.tab.id;
         return (
           <div
-            key={workspaceId}
+            key={key}
+            ref={getDockRef(entry.tab.id)}
+            data-dock-content-id={docked ? entry.tab.id : undefined}
             aria-hidden={!visible}
             style={{
               position: "absolute",
@@ -104,6 +154,15 @@ function ChatStack({
               flexDirection: "column",
               visibility: visible ? "visible" : "hidden",
               pointerEvents: visible ? "auto" : "none",
+              ...(docked
+                ? {
+                    zIndex: DOCK_CONTENT_Z,
+                    visibility: "hidden" as const,
+                    pointerEvents: "none" as const,
+                    overflow: "hidden",
+                    borderRadius: "var(--terminal-pane-radius)",
+                  }
+                : null),
             }}
           >
             <OrchestrationSidebar

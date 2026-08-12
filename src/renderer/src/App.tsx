@@ -45,6 +45,7 @@ import ChatStack from "./tabs/ChatStack";
 import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
+import { buildDockIndex, canDockTab, isDockLeaf } from "./tabs/dock";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import { setCloseAgentTerminalFn, setCreateAgentTerminalFn } from "./components/Terminal/terminalRegistry";
@@ -189,7 +190,9 @@ function runHasWorkbench(run: RunState): boolean {
 
 function collectTerminalPaneIds(node: PaneNode, ids: Set<string>): void {
   if (node.kind === "leaf") {
-    ids.add(node.paneId);
+    // Dock cells borrow the grid's geometry for another tab's content; their
+    // id was never a PTY session.
+    if (!isDockLeaf(node)) ids.add(node.paneId);
     return;
   }
   collectTerminalPaneIds(node.a, ids);
@@ -5026,6 +5029,8 @@ const Workspace = React.memo(function Workspace({
     splitTerminalPane,
     moveTerminalPane,
     closeTerminalPane,
+    dockTabInTerminal,
+    undockTab,
     toggleTerminalPaneZoom,
     openEditorTab,
     registerDispose,
@@ -5092,9 +5097,26 @@ const Workspace = React.memo(function Workspace({
   // Tabs the top strip renders: chat + workspace-level tabs only. Run-owned
   // tabs (workers, Runs, run-tagged previews) are surfaced inside the chat
   // panel's inner tab strip instead.
+  // tabId -> the terminal cell lending it geometry. Derived from the pane
+  // trees (the only source of truth), so a docked tab can never drift out of
+  // sync with the grid it lives in.
+  const dockIndex = useMemo(() => buildDockIndex(visibleTabs), [visibleTabs]);
+
+  // A docked tab has no pill: it is visible inside its host's grid, and a
+  // second entry point would let the user "select" it into a full-window view
+  // that hides the very grid it is sitting in.
+  // The one chat (if any) currently docked into a terminal grid. Its backend
+  // terminal layer follows the cell instead of the workbench.
+  const dockedChatTabId = useMemo(() => {
+    for (const tab of visibleTabs) {
+      if (tab.kind === "chat" && dockIndex.has(tab.id)) return tab.id;
+    }
+    return null;
+  }, [visibleTabs, dockIndex]);
+
   const topStripTabs = useMemo(
-    () => visibleTabs.filter(isTopStripTab),
-    [visibleTabs],
+    () => visibleTabs.filter((tab) => isTopStripTab(tab) && !dockIndex.has(tab.id)),
+    [visibleTabs, dockIndex],
   );
 
   // Lifted from ChatPanel so the hoisted inner tab strip can drive the chat /
@@ -5381,6 +5403,67 @@ const Workspace = React.memo(function Workspace({
     (tabId: string, paneId: string) => toggleTerminalPaneZoom(tabId, paneId),
     [toggleTerminalPaneZoom],
   );
+  // "+ → Browser pane": create the preview and dock it into the same grid in
+  // one batch. The empty URL is the same starting point the top-strip picker
+  // uses (tabs.newPreviewTab("")), so the pane opens on the address bar.
+  const handleAddBrowserPane = useCallback(
+    (
+      hostTabId: string,
+      target: { paneId: string; direction: "horizontal" | "vertical" } | null,
+    ) => {
+      const previewId = tabs.newPreviewTab("", { focus: false });
+      dockTabInTerminal(
+        previewId,
+        hostTabId,
+        target ? { ...target, position: "after", mode: "split" } : undefined,
+      );
+    },
+    [tabs, dockTabInTerminal],
+  );
+  const handleDockTabDrop = useCallback(
+    (
+      dockedTabId: string,
+      hostTabId: string,
+      target: {
+        paneId: string;
+        direction: "horizontal" | "vertical";
+        position: "before" | "after";
+        mode: "split" | "line";
+      },
+    ) => {
+      dockTabInTerminal(dockedTabId, hostTabId, target);
+    },
+    [dockTabInTerminal],
+  );
+  // Menu route into the grid: no drag, dock into the named host with the
+  // grid's own largest-cell placement.
+  const handleOpenInSplit = useCallback(
+    (dockedTabId: string, hostTabId: string) => {
+      dockTabInTerminal(dockedTabId, hostTabId);
+    },
+    [dockTabInTerminal],
+  );
+  const handleUndockTab = useCallback(
+    (dockedTabId: string) => undockTab(dockedTabId, { focus: true }),
+    [undockTab],
+  );
+  // The × on a dock cell closes the TAB (same meaning it has everywhere else);
+  // undocking is the separate, non-destructive control beside it.
+  const handleCloseDockedTab = useCallback(
+    (dockedTabId: string) => closeTab(dockedTabId),
+    [closeTab],
+  );
+
+  // Safety net for dock cells whose tab disappeared without going through
+  // closeTab — a chat tab dropped by syncChatTabsToRuns when its run is
+  // archived, say. Only runs when a reference is genuinely dangling.
+  useEffect(() => {
+    for (const [dockedTabId] of dockIndex) {
+      if (visibleTabs.some((tab) => tab.id === dockedTabId)) continue;
+      if (tabs.tabs.some((tab) => tab.id === dockedTabId)) continue;
+      undockTab(dockedTabId);
+    }
+  }, [dockIndex, visibleTabs, tabs.tabs, undockTab]);
   // A restored pane's `--resume` probe found no transcript on disk (pruned, or
   // the session id went stale). Clear the dead pointer so the pane stops trying
   // to resume it AND so a future launch in this pane can capture a fresh session
@@ -5456,6 +5539,7 @@ const Workspace = React.memo(function Workspace({
         onTerminalPaneDrop={onTerminalPaneDrop}
         onReorderTab={onReorderTab}
         onPinEditorTab={onPinEditorTab}
+        onDockTab={handleOpenInSplit}
         pickerHints={pickerHints}
         closeOnMiddleClick={closeTabsOnMiddleClick}
       />
@@ -5482,6 +5566,7 @@ const Workspace = React.memo(function Workspace({
         <ChatStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}
+          dockIndex={dockIndex}
           workspace={workspace}
           tabsWorkspaceId={tabs.tabsWorkspaceId}
           validWorkspaceIds={validWorkspaceIds}
@@ -5507,6 +5592,7 @@ const Workspace = React.memo(function Workspace({
           runs={runs}
           activeRunId={activeRunId}
           activeChatTabId={activeChatTabId}
+          dockedChatTabId={dockedChatTabId}
           effectiveActiveId={effectiveActiveId}
           chatView={chatView}
           terminalScrollbackLineLimit={terminalScrollbackLineLimit}
@@ -5517,6 +5603,7 @@ const Workspace = React.memo(function Workspace({
             <EditorStack
               tabs={visibleTabs}
               activeId={effectiveActiveId}
+              dockIndex={dockIndex}
               onDirtyChange={handleEditorDirty}
               onClose={handleTabClose}
               onSaved={onFileSaved}
@@ -5571,6 +5658,10 @@ const Workspace = React.memo(function Workspace({
                 onSplitPane={isActive ? handleSplitPane : noopTerminalCb}
                 onMovePane={isActive ? handleMovePane : noopTerminalCb}
                 onClosePane={isActive ? handleClosePane : noopTerminalCb}
+                onAddBrowserPane={isActive ? handleAddBrowserPane : noopTerminalCb}
+                onDockTabDrop={isActive ? handleDockTabDrop : noopTerminalCb}
+                onUndockTab={isActive ? handleUndockTab : noopTerminalCb}
+                onCloseDockedTab={isActive ? handleCloseDockedTab : noopTerminalCb}
                 onTabZoomToggle={isActive ? handlePaneZoomToggle : noopTerminalCb}
                 onPaneCwd={isActive ? onPaneCwd : noopTerminalCb}
                 onPaneActivity={isActive ? onPaneActivity : noopTerminalCb}
@@ -5597,6 +5688,7 @@ const Workspace = React.memo(function Workspace({
         <PreviewStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}
+          dockIndex={dockIndex}
           onUrlChange={onPreviewUrlChange}
         />
         {visibleTabs.some((tab) => tab.kind === "runs") && (

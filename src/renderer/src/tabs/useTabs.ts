@@ -24,6 +24,7 @@ import type {
   AutomationsTab,
   ChatTab,
   DiffTab,
+  DockableTabKind,
   EditorTab,
   PaneNode,
   PreviewTab,
@@ -38,6 +39,15 @@ import type {
   WhiteboardTab,
 } from "./types";
 import { isRunOwnedTab } from "./types";
+import {
+  DOCKABLE_KINDS,
+  buildDockIndex,
+  canDockTab,
+  collectDockLeaves,
+  collectTerminalLeaves,
+  dockLeaf,
+  isDockLeaf,
+} from "./dock";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
 // a plain React hook (no zustand dependency) since the rest of Codara uses
@@ -70,7 +80,9 @@ const DRAFT_CHAT_PREFIX = "draft:";
 // Cold hydration reads whatever the last persist kept: pointers are
 // re-validated, and sessions that were active at quit derive a one-shot boot
 // resume marker.
-const TAB_VERSION = 6;
+// v7 added TerminalLeaf.content (dock cells). An absent `content` already
+// means "terminal", so v6 blobs are structurally valid v7.
+const TAB_VERSION = 7;
 const MAX_TERMINAL_SCROLLBACK_CHARS = 40_000;
 
 interface PersistedShape {
@@ -231,16 +243,78 @@ function defaultTabs(cwd?: string): Tab[] {
   return [createDraftChatTab(), createTerminalTab(cwd)];
 }
 
+// Version chain rather than an equality check: bumping TAB_VERSION without one
+// silently discards every user's saved layout on first launch. Each step is
+// responsible for making the previous shape valid at the next version.
+// Exported for tests (scripts/test-dock-layout.cjs).
+export function migratePersisted(parsed: PersistedShape | null): PersistedShape | null {
+  if (!parsed || !Array.isArray(parsed.tabs)) return null;
+  let version = parsed.v;
+  // 6 -> 7: dock cells are additive; nothing to rewrite.
+  if (version === 6) version = 7;
+  if (version !== TAB_VERSION) return null;
+  return { ...parsed, v: version };
+}
+
+// A dock leaf points at another tab by id. Drop references that can't resolve,
+// so a partial or hand-edited blob can never leave an invisible cell holding
+// grid space. Exported for tests (scripts/test-dock-layout.cjs).
+export function validateDockLeaves(tabs: Tab[]): Tab[] {
+  const known = new Set(tabs.map((t) => t.id));
+  const claimed = new Set<TabId>();
+  const out: Tab[] = [];
+  for (const tab of tabs) {
+    if (tab.kind !== "terminal") {
+      out.push(tab);
+      continue;
+    }
+    let root: PaneNode | null = tab.root;
+    for (const dockCell of collectDockLeaves(tab.root)) {
+      const { tabId, tabKind } = dockCell.content;
+      const resolvable =
+        isSafePersistedString(tabId, 256) &&
+        DOCKABLE_KINDS.has(tabKind) &&
+        // First occurrence wins: one tab can only occupy one cell.
+        !claimed.has(tabId) &&
+        // Chat tabs are stripped above and re-derived from the run store a
+        // beat later (syncChatTabsToRuns mints them with id === runId), so a
+        // chat reference is held pending rather than pruned on sight. App's
+        // reconcile effect clears it if that run never comes back.
+        (known.has(tabId) || tabKind === "chat");
+      if (resolvable) {
+        claimed.add(tabId);
+        continue;
+      }
+      root = root === null ? null : removeLeaf(root, dockCell.paneId);
+      if (root === null) break;
+    }
+    if (root === null) continue;
+    if (root === tab.root) {
+      out.push(tab);
+      continue;
+    }
+    // Pruning can orphan the ids the tab points at.
+    const leaves = collectLeaves(root);
+    const activePaneId = leaves.some((l) => l.paneId === tab.activePaneId)
+      ? tab.activePaneId
+      : leaves[0].paneId;
+    const zoomedPaneId =
+      tab.zoomedPaneId && leaves.some((l) => l.paneId === tab.zoomedPaneId)
+        ? tab.zoomedPaneId
+        : null;
+    out.push({ ...tab, root, activePaneId, zoomedPaneId });
+  }
+  return out;
+}
+
 function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number): PersistedShape | null {
   const key = storageKey(workspaceId);
   if (!key) return null;
   try {
     const raw = window.localStorage.getItem(key);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as PersistedShape;
-    if (!parsed || parsed.v !== TAB_VERSION || !Array.isArray(parsed.tabs)) {
-      return null;
-    }
+    const parsed = migratePersisted(JSON.parse(raw) as PersistedShape);
+    if (!parsed) return null;
     // Terminal processes are session-local. Preserve tabs, splits, and cwd, but
     // never replay output or resume an agent after a full app relaunch.
     // Workspace switches within this app run use the live in-memory layouts and
@@ -285,6 +359,7 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
             : tab,
         ),
     );
+    parsed.tabs = validateDockLeaves(parsed.tabs);
     for (const tab of parsed.tabs) {
       if (tab.kind === "terminal") cleanupTransientTerminalState(tab.root);
       if (tab.kind === "runs" && (tab.title === "Runs" || tab.title === "Ops")) tab.title = "Runs";
@@ -519,9 +594,49 @@ function releaseTerminalPanePty(leaf: TerminalLeaf | null | undefined, paneId: s
   void window.spark.pty.dispose(paneId).catch(() => undefined);
 }
 
+// After a cell is pruned from a tab's tree, the tab may still point at it.
+// Re-aims activePaneId at the next surviving cell and clears a zoom held by
+// the removed one.
+// Drop the cell holding `dockedTabId` from every terminal tab, collapsing any
+// host left with nothing. Hosts that collapse held no terminal cells, so there
+// is never a PTY to reap here.
+function pruneDockCellsFor(tabs: Tab[], dockedTabId: TabId): Tab[] {
+  const out: Tab[] = [];
+  for (const tab of tabs) {
+    if (tab.kind !== "terminal") {
+      out.push(tab);
+      continue;
+    }
+    const cell = collectDockLeaves(tab.root).find((l) => l.content.tabId === dockedTabId);
+    if (!cell) {
+      out.push(tab);
+      continue;
+    }
+    const root = removeLeaf(tab.root, cell.paneId);
+    if (root === null) continue;
+    out.push(repairTerminalTabPointers(tab, root, cell.paneId));
+  }
+  return out;
+}
+
+function repairTerminalTabPointers(
+  tab: TerminalTab,
+  root: PaneNode,
+  removedPaneId: string,
+): TerminalTab {
+  const leaves = collectLeaves(root);
+  const activePaneId =
+    tab.activePaneId === removedPaneId || !leaves.some((l) => l.paneId === tab.activePaneId)
+      ? (nextLeafAfter(root, removedPaneId)?.paneId ?? leaves[0]?.paneId ?? tab.activePaneId)
+      : tab.activePaneId;
+  const zoomedPaneId = tab.zoomedPaneId === removedPaneId ? null : tab.zoomedPaneId;
+  return { ...tab, root, activePaneId, zoomedPaneId };
+}
+
 function disposeTerminalTabPanes(tab: Tab): void {
   if (tab.kind !== "terminal") return;
-  for (const pane of collectLeaves(tab.root)) {
+  // Terminal cells only — a dock cell's id was never a PTY.
+  for (const pane of collectTerminalLeaves(tab.root)) {
     releaseTerminalPanePty(pane, pane.paneId);
   }
 }
@@ -709,6 +824,20 @@ export interface UseTabsApi {
     options?: { focus?: boolean; activate?: boolean },
   ) => TabId;
   detachTerminalPaneToNewTab: (tabId: TabId, paneId: string) => TabId | null;
+  // Give a preview/editor/chat tab a cell inside a terminal tab's split grid.
+  // Returns false when rejected (not dockable, unknown host, a second chat).
+  dockTabInTerminal: (
+    tabId: TabId,
+    hostTabId: TabId,
+    target?: {
+      paneId: string;
+      direction: TerminalSplit["direction"];
+      position: "before" | "after";
+      mode: "split" | "line";
+    },
+  ) => boolean;
+  // Send a docked tab back to the strip, keeping its content alive.
+  undockTab: (tabId: TabId, options?: { focus?: boolean }) => boolean;
   moveTerminalPane: (
     sourceTabId: TabId,
     paneId: string,
@@ -1212,7 +1341,24 @@ export function useTabs(
     }
   }, []);
 
+  // The single choke point for "focus this tab". A docked tab has no pill and
+  // filling the workbench with it would hide the grid it lives in, so focusing
+  // one reveals its host tab and makes its cell the active pane instead. Every
+  // programmatic reveal (openEditorTab's dedupe, file-tree clicks, run
+  // selection) inherits that for free.
   const setActiveTab = useCallback((id: TabId) => {
+    const ref = buildDockIndex(tabsRef.current).get(id);
+    if (ref) {
+      setTabs((curr) =>
+        curr.map((t) =>
+          t.id === ref.hostTabId && t.kind === "terminal" && t.activePaneId !== ref.leafId
+            ? { ...t, activePaneId: ref.leafId }
+            : t,
+        ),
+      );
+      setActiveId((current) => (current === ref.hostTabId ? current : ref.hostTabId));
+      return;
+    }
     setActiveId((current) => (current === id ? current : id));
   }, []);
 
@@ -1233,7 +1379,14 @@ export function useTabs(
         // worker/runs/pane closures elsewhere are intentional UX for those
         // run-owned surfaces; the user-driven generic close honors the user.
         disposeTerminalTabPanes(curr[idx]);
-        const next = curr.filter((t) => t.id !== id);
+        // Closing a docked tab must also drop the cell lending it geometry, or
+        // the grid keeps an empty hole. (Closing a HOST needs nothing: its
+        // cells vanish with it and the tabs they referenced return to the
+        // strip on their own, since the tree is the only reference.)
+        const next = pruneDockCellsFor(
+          curr.filter((t) => t.id !== id),
+          id,
+        );
         setActiveId((active) => {
           if (active !== id) return active;
           // Prefer the tab to the left, fall back to the first, else null
@@ -1636,6 +1789,13 @@ export function useTabs(
         (t): t is TerminalTab => t.id === tabId && t.kind === "terminal",
       );
       if (!currentSource) return null;
+      // Dragging a dock cell out to the strip means "undock" — the tab already
+      // exists, so it goes back to being a pill rather than spawning a shell.
+      const dragged = findLeaf(currentSource.root, paneId);
+      if (dragged && isDockLeaf(dragged)) {
+        undockTab(dragged.content.tabId, { focus: true });
+        return null;
+      }
       const currentLeaves = collectLeaves(currentSource.root);
       if (currentLeaves.length <= 1 || !currentLeaves.some((item) => item.paneId === paneId)) {
         return null;
@@ -1785,7 +1945,12 @@ export function useTabs(
           if (!target) return t;
           const fresh = makeId("pane");
           newPaneId = fresh;
-          const newLeaf = leaf(fresh, target.cwd, autorun);
+          // Splitting off a dock cell has no shell directory to inherit — fall
+          // back to a sibling terminal's cwd rather than dropping to root.
+          const inheritedCwd = isDockLeaf(target)
+            ? collectTerminalLeaves(t.root).find((l) => l.cwd)?.cwd
+            : target.cwd;
+          const newLeaf = leaf(fresh, inheritedCwd, autorun);
           if (agentSession) newLeaf.agentSession = agentSession;
           const root = splitAtLeaf(
             t.root,
@@ -1805,8 +1970,146 @@ export function useTabs(
     [],
   );
 
+  // Lend a tab's content a cell in a terminal tab's split grid. The tab keeps
+  // living in the tabs array and stays mounted by its own Stack — only its rect
+  // comes from here (see dockGeometry.ts). Returns false when the dock was
+  // rejected, so callers can leave the drag/menu state untouched.
+  const dockTabInTerminal = useCallback(
+    (
+      tabId: TabId,
+      hostTabId: TabId,
+      target?: {
+        paneId: string;
+        direction: TerminalSplit["direction"];
+        position: "before" | "after";
+        mode: "split" | "line";
+      },
+    ): boolean => {
+      if (tabId === hostTabId) return false;
+      let docked = false;
+      // Every guard reads `curr`, not a pre-update snapshot: callers routinely
+      // create a tab and dock it in the same batch (the "+ → Browser pane"
+      // menu does), and that tab does not exist yet in tabsRef.
+      setTabs((curr) => {
+        const tab = curr.find((t) => t.id === tabId);
+        const host = curr.find(
+          (t): t is TerminalTab => t.id === hostTabId && t.kind === "terminal",
+        );
+        if (!tab || !host || !canDockTab(tab)) return curr;
+        // One docked chat per workspace: ChatStack retains a single chat panel
+        // per workspace, and `suspendGlobalEvents` assumes at most one chat
+        // surface is on screen.
+        if (tab.kind === "chat") {
+          for (const [dockedId] of buildDockIndex(curr)) {
+            if (dockedId === tabId) continue;
+            if (curr.find((t) => t.id === dockedId)?.kind === "chat") return curr;
+          }
+        }
+        const cell = dockLeaf(makeId("dock"), tabId, tab.kind as DockableTabKind);
+        const existing = buildDockIndex(curr).get(tabId);
+        // Dropping a cell onto itself is a no-op, not a move.
+        if (existing && target && existing.leafId === target.paneId) return curr;
+
+        // Re-docking moves the cell rather than duplicating it.
+        let working = curr;
+        if (existing) {
+          const stripped: Tab[] = [];
+          for (const t of curr) {
+            if (t.id !== existing.hostTabId || t.kind !== "terminal") {
+              stripped.push(t);
+              continue;
+            }
+            const root = removeLeaf(t.root, existing.leafId);
+            if (root === null) {
+              // The old host held nothing else. If it is also the destination
+              // there is no longer anything to position against.
+              if (t.id === hostTabId) return curr;
+              continue;
+            }
+            stripped.push(repairTerminalTabPointers(t, root, existing.leafId));
+          }
+          working = stripped;
+        }
+
+        const destination = working.find(
+          (t): t is TerminalTab => t.id === hostTabId && t.kind === "terminal",
+        );
+        if (!destination) return curr;
+        const root =
+          target && findLeaf(destination.root, target.paneId)
+            ? insertLeafAtLeaf(
+                destination.root,
+                target.paneId,
+                target.direction,
+                cell,
+                target.position,
+                { rebalanceLine: target.mode === "line" },
+              )
+            : (() => {
+                const add = smartAddTarget(destination.root, 1600, 900);
+                return add ? splitAtLeaf(destination.root, add.paneId, add.direction, cell) : null;
+              })();
+        if (!root || root === destination.root) return curr;
+        docked = true;
+        // Reveal the grid the content just moved into. Same in-updater
+        // setActiveId pattern the pane close/reseed paths already use.
+        setActiveId(hostTabId);
+        return normalizeTerminalTitles(
+          working.map((t) =>
+            t.id === hostTabId && t.kind === "terminal"
+              ? { ...t, root, activePaneId: cell.paneId, zoomedPaneId: null }
+              : t,
+          ),
+        );
+      });
+      return docked;
+    },
+    [],
+  );
+
+  // Return a docked tab to the strip. The content is never destroyed — this is
+  // the non-destructive counterpart to closing the tab outright.
+  const undockTab = useCallback((tabId: TabId, options?: { focus?: boolean }): boolean => {
+    const ref = buildDockIndex(tabsRef.current).get(tabId);
+    if (!ref) return false;
+    setTabs((curr) => {
+      const next: Tab[] = [];
+      let hostDropped = false;
+      for (const t of curr) {
+        if (t.id !== ref.hostTabId || t.kind !== "terminal") {
+          next.push(t);
+          continue;
+        }
+        const root = removeLeaf(t.root, ref.leafId);
+        if (root === null) {
+          // The cell was the host's only content — the host goes with it.
+          hostDropped = true;
+          continue;
+        }
+        next.push(repairTerminalTabPointers(t, root, ref.leafId));
+      }
+      if (hostDropped) {
+        setActiveId((active) => (active === ref.hostTabId ? tabId : active));
+      }
+      return normalizeTerminalTitles(next);
+    });
+    if (options?.focus) setActiveId(tabId);
+    return true;
+  }, []);
+
   const closeTerminalPane = useCallback(
     (tabId: TabId, paneId: string) => {
+      // A dock cell has no PTY and its content outlives the grid: Ctrl+W on one
+      // returns the tab to the strip instead of destroying it. The destructive
+      // variant is the × on the cell's chrome, which closes the tab itself.
+      const hostTab = tabsRef.current.find(
+        (t): t is TerminalTab => t.id === tabId && t.kind === "terminal",
+      );
+      const targetLeaf = hostTab ? findLeaf(hostTab.root, paneId) : null;
+      if (targetLeaf && isDockLeaf(targetLeaf)) {
+        undockTab(targetLeaf.content.tabId, { focus: false });
+        return;
+      }
       // Best-effort PTY teardown so a programmatic close (split with one
       // child) reaps the conpty even if the React tree is still in the middle
       // of unmounting. Live spark workers are only detached — see
@@ -3065,6 +3368,8 @@ export function useTabs(
       addBalancedPaneToTab,
       ensureWorkerTerminalTab,
       detachTerminalPaneToNewTab,
+      dockTabInTerminal,
+      undockTab,
       moveTerminalPane,
       splitTerminalPane,
       closeTerminalPane,

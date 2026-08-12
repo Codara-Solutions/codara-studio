@@ -1,6 +1,14 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import EditorPane from "../components/EditorPane";
 import type { EditorTab, Tab, TabId } from "./types";
+import type { DockRef } from "./dock";
+import {
+  DOCK_CONTENT_Z,
+  getDockVersion,
+  peekDockPlacementSnapshot,
+  registerDockElement,
+  subscribeDockChanges,
+} from "./dockGeometry";
 
 // EditorStack mounts every editor tab in the workspace at once and toggles
 // `visibility: hidden` on the inactive ones. Mounting all editors keeps
@@ -14,6 +22,11 @@ import type { EditorTab, Tab, TabId } from "./types";
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
+  // Editors docked into a terminal tab's split grid are positioned by that
+  // grid rather than filling the workbench (see dockGeometry.ts). The
+  // CodeMirror instance never moves in the DOM, so its scroll/cursor/undo
+  // state survives docking.
+  dockIndex: ReadonlyMap<TabId, DockRef>;
   onDirtyChange: (id: TabId, dirty: boolean) => void;
   onClose: (id: TabId) => void;
   // Fired after every successful save (manual or autosave). App uses it to
@@ -25,7 +38,10 @@ interface Props {
 // React.memo: with the useTabs API object now memoized, EditorStack's props
 // only change when the tab list / active id / callbacks genuinely change,
 // so an unrelated App re-render no longer walks this whole stack.
-function EditorStack({ tabs, activeId, onDirtyChange, onClose, onSaved }: Props) {
+function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSaved }: Props) {
+  // One subscription for the whole stack — hooks cannot be called per tab in
+  // the map below. Fires only when a docked cell's shown-state changes.
+  useSyncExternalStore(subscribeDockChanges, getDockVersion, getDockVersion);
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates — and so the GC effect below (keyed on
   // `editors`) only fires when the editor set actually changes.
@@ -66,6 +82,18 @@ function EditorStack({ tabs, activeId, onDirtyChange, onClose, onSaved }: Props)
     return b;
   };
 
+  // Stable per-tab callback refs: an inline arrow would re-register (and
+  // re-apply geometry) on every render.
+  const dockRefs = useRef(new Map<TabId, (el: HTMLDivElement | null) => void>());
+  const getDockRef = (id: TabId) => {
+    let ref = dockRefs.current.get(id);
+    if (!ref) {
+      ref = (el: HTMLDivElement | null) => registerDockElement(id, el);
+      dockRefs.current.set(id, ref);
+    }
+    return ref;
+  };
+
   // Drop entries for closed tabs to bound the cache.
   useEffect(() => {
     const live = new Set(editors.map((t) => t.id));
@@ -81,11 +109,19 @@ function EditorStack({ tabs, activeId, onDirtyChange, onClose, onSaved }: Props)
     // active inner wrapper re-enables pointer-events:auto for its own panes.
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       {editors.map((t) => {
-        const visible = t.id === activeId;
+        const docked = dockIndex.has(t.id);
+        // A docked editor shows whenever its host terminal tab is on screen —
+        // it is no longer the active tab itself.
+        const visible = docked
+          ? (peekDockPlacementSnapshot(t.id)?.shown ?? false)
+          : t.id === activeId;
         const bundle = getBundle(t.id);
         return (
           <div
             key={t.id}
+            ref={getDockRef(t.id)}
+            // Marks the element the grid positions (see PreviewStack).
+            data-dock-content-id={docked ? t.id : undefined}
             aria-hidden={!visible}
             style={{
               position: "absolute",
@@ -94,6 +130,17 @@ function EditorStack({ tabs, activeId, onDirtyChange, onClose, onSaved }: Props)
               flexDirection: "column",
               visibility: visible ? "visible" : "hidden",
               pointerEvents: visible ? "auto" : "none",
+              ...(docked
+                ? {
+                    // Placeholder box only: the registry overwrites the frame
+                    // imperatively as soon as the host publishes its layout.
+                    zIndex: DOCK_CONTENT_Z,
+                    visibility: "hidden" as const,
+                    pointerEvents: "none" as const,
+                    overflow: "hidden",
+                    borderRadius: "var(--terminal-pane-radius)",
+                  }
+                : null),
             }}
           >
             <EditorPane

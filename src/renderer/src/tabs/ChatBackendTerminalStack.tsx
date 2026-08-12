@@ -1,9 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { RunState, RunStatus } from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import { TerminalPane } from "../components/Terminal/TerminalPane";
 import { BACKEND_TERMINAL_SHELL } from "../components/chat/ChatPanel";
 import { PANEL_HEADER_H } from "../panels/usePanelLayout";
+import {
+  getDockVersion,
+  peekDockPlacementSnapshot,
+  registerDockElement,
+  subscribeDockChanges,
+} from "./dockGeometry";
 import type { CoraView } from "../components/chat/cora-view";
 
 // App-level persistent host for the Cora chat backend terminals (the read-only
@@ -75,6 +88,11 @@ interface Props {
   // has the Terminal sub-view selected — on a worker/Runs/preview/editor tab the
   // relevant stack paints instead and this layer stays hidden (but mounted).
   activeChatTabId: string | null;
+  // Set when a chat tab is docked into a terminal tab's grid. Its backend
+  // terminal has to follow the cell instead of the workbench, and it shows
+  // whenever that cell is on screen — a docked chat is never `activeChatTabId`
+  // (docked tabs are filtered out of the top strip).
+  dockedChatTabId: string | null;
   effectiveActiveId: string | null;
   chatView: CoraView;
   terminalScrollbackLineLimit: number;
@@ -88,6 +106,7 @@ function ChatBackendTerminalStack({
   runs,
   activeRunId,
   activeChatTabId,
+  dockedChatTabId,
   effectiveActiveId,
   chatView,
   terminalScrollbackLineLimit,
@@ -137,10 +156,13 @@ function ChatBackendTerminalStack({
   // tab with the Terminal sub-view active. chatView can read "terminal" while a
   // worker tab is focused (it's remembered per active run); the tab-identity
   // check keeps this layer from painting over the worker/editor stacks.
+  useSyncExternalStore(subscribeDockChanges, getDockVersion, getDockVersion);
+  const dockedShown = dockedChatTabId
+    ? (peekDockPlacementSnapshot(dockedChatTabId)?.shown ?? false)
+    : false;
   const showActive =
-    effectiveActiveId != null &&
-    effectiveActiveId === activeChatTabId &&
-    chatView === "terminal";
+    chatView === "terminal" &&
+    ((effectiveActiveId != null && effectiveActiveId === activeChatTabId) || dockedShown);
   const visibleSessionId = useMemo(() => {
     if (!showActive || !activeRunId) return null;
     for (const [sessionId, runId] of warmSessions) {
@@ -188,10 +210,26 @@ function ChatBackendTerminalStack({
     });
   }, []);
 
+  // Stable per-tab ref so registering doesn't re-run on every render.
+  const dockRefs = useRef(new Map<string, (el: HTMLDivElement | null) => void>());
+  const getDockRef = (id: string) => {
+    let ref = dockRefs.current.get(id);
+    if (!ref) {
+      ref = (el: HTMLDivElement | null) =>
+        registerDockElement(id, el, { insetTop: PANEL_HEADER_H });
+      dockRefs.current.set(id, ref);
+    }
+    return ref;
+  };
+
   if (warmSessions.size === 0) return null;
 
   return (
     <div
+      // When the owning chat is docked, the grid drives this layer's frame —
+      // inset by the same header band, so the terminal keeps sitting under
+      // "Cora" inside the cell.
+      ref={dockedChatTabId ? getDockRef(dockedChatTabId) : undefined}
       style={{
         position: "absolute",
         // Sit below the "Cora" SectionHeader (fixed PANEL_HEADER_H band) so it
