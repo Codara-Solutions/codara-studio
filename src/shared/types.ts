@@ -506,6 +506,11 @@ export interface Workspace {
   remote?: {
     hostId: string;
   };
+  // Local folders outside `cwd` attached to this workspace's Explorer as
+  // additional root nodes, in display order. Always local absolute paths
+  // (never ssh://), even when the workspace itself is remote — the folder
+  // picker is always the local OS dialog.
+  extraFolders?: string[];
 }
 
 export interface WorkspaceGroup {
@@ -1430,6 +1435,10 @@ export interface WorkerSessionSummary {
   nativeCodexProfileId?: string;
   sessionId: string;
   title: string;
+  // First real user question, set when `title` is Claude Code's generated
+  // ai-title (the picker shows it as a dim second line). Null when the title
+  // already IS the first question, or none was found.
+  preview: string | null;
   cwd: string;
   cwdExists: boolean;
   updatedAt: string;

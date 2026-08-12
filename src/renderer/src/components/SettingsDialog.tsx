@@ -1117,7 +1117,7 @@ function GeneralSettings({
                 hint="Surface tint strength — lower is clearer"
                 // Floor at 10%: veil 0 + blur 0 leaves menus as border-only
                 // outlines over live content, which reads as a rendering bug.
-                min={10}
+                floor={10}
                 value={preferences.glassVeil ?? 100}
                 onChange={(v) => void setPreference("glassVeil", v)}
               />
@@ -4875,13 +4875,18 @@ function ModelPresetCard({
 function GlassSliderRow({
   label,
   hint,
-  min = 0,
+  floor = 0,
   value,
   onChange,
 }: {
   label: string;
   hint: string;
-  min?: number;
+  /**
+   * Minimum stored value. Enforced by clamping onChange, NOT by shrinking the
+   * slider's min — every row shares the same 0–200 track so equal values line
+   * up thumb-for-thumb regardless of floor.
+   */
+  floor?: number;
   value: number;
   onChange: (next: number) => void;
 }) {
@@ -4918,18 +4923,20 @@ function GlassSliderRow({
       <input
         aria-label={`${label} — ${hint}`}
         type="range"
-        min={min}
+        min={0}
         max={200}
         step={5}
         value={draftValue}
         onPointerDown={() => {
           dragging.current = true;
         }}
-        onChange={(event) => setDraftValue(Number(event.currentTarget.value))}
-        onPointerUp={(event) => commit(Number(event.currentTarget.value))}
-        onPointerCancel={(event) => commit(Number(event.currentTarget.value))}
-        onBlur={(event) => commit(Number(event.currentTarget.value))}
-        onKeyUp={(event) => commit(Number(event.currentTarget.value))}
+        onChange={(event) =>
+          setDraftValue(Math.max(floor, Number(event.currentTarget.value)))
+        }
+        onPointerUp={(event) => commit(Math.max(floor, Number(event.currentTarget.value)))}
+        onPointerCancel={(event) => commit(Math.max(floor, Number(event.currentTarget.value)))}
+        onBlur={(event) => commit(Math.max(floor, Number(event.currentTarget.value)))}
+        onKeyUp={(event) => commit(Math.max(floor, Number(event.currentTarget.value)))}
         style={{ width: "100%", accentColor: "var(--accent)" }}
       />
       <span

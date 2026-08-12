@@ -1022,7 +1022,7 @@ app.whenReady().then(async () => {
   try {
     const state = await loadState();
     const roots = state.workspaces
-      .map((w) => w.cwd)
+      .flatMap((w) => [w.cwd, ...(w.extraFolders ?? [])])
       .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
     setSeededRoots(roots);
   } catch (err) {

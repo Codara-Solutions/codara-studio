@@ -623,8 +623,11 @@ const api = {
     // drop them onto the desktop or another app. Fire-and-forget: the main
     // process owns the drag session via webContents.startDrag.
     startDrag: (paths: string[]): void => ipcRenderer.send("fs:startDrag", paths),
-    setWatchRoot: (root: string | null): Promise<void> =>
-      ipcRenderer.invoke("fs:setWatchRoot", root),
+    // Watch roots are additive: a window watches its workspace root plus any
+    // external Explorer folders, each armed/removed independently.
+    addWatchRoot: (root: string): Promise<void> => ipcRenderer.invoke("fs:addWatchRoot", root),
+    removeWatchRoot: (root: string): Promise<void> =>
+      ipcRenderer.invoke("fs:removeWatchRoot", root),
     revealInOS: (path: string): Promise<void> => ipcRenderer.invoke("fs:revealInOS", path),
     onChanged: (handler: FsChangeHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: FsChangeEvent) => handler(event);

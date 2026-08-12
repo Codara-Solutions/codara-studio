@@ -771,7 +771,11 @@ function SessionRow({
         disabled={disabled}
         onFocus={onHover}
         onClick={onOpen}
-        title={`Resume ${session.title}`}
+        title={
+          session.preview
+            ? `Resume ${session.title}\n${session.preview}`
+            : `Resume ${session.title}`
+        }
         aria-label={`Resume ${session.title}`}
         style={{
           appearance: "none",
@@ -811,12 +815,16 @@ function SessionRow({
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
               color: error ? "var(--danger)" : "var(--muted)",
-              fontFamily: error ? "var(--font-sans)" : "var(--font-mono)",
+              fontFamily:
+                error || session.preview ? "var(--font-sans)" : "var(--font-mono)",
               fontSize: error ? 9.5 : 10,
               lineHeight: 1.4,
             }}
           >
-            {error ?? `${relativeTime(session.updatedAt)} · ${shortSessionId(session.sessionId)}`}
+            {error ??
+              `${relativeTime(session.updatedAt)} · ${
+                session.preview ?? shortSessionId(session.sessionId)
+              }`}
           </span>
         </span>
         <span

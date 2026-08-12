@@ -40,6 +40,42 @@ const SECTION_LABELS: Record<PanelSectionKey, string> = {
   explorer: "Explorer",
 };
 
+// User-dragged heights for external Explorer folder trees, keyed by folder
+// path. Renderer-local presentation state (like tab layouts in localStorage),
+// deliberately not part of AppState.
+const EXTERNAL_HEIGHTS_KEY = "spark.explorer.externalFolderHeights";
+// One row plus the tree's vertical padding — the smallest useful tree.
+const EXTERNAL_TREE_MIN_H = 34;
+// Dragging an external tree taller stops here so the primary workspace tree
+// always keeps a usable strip of the section.
+const EXTERNAL_TREE_RESERVED_H = 140;
+
+function readExternalFolderHeights(): Record<string, number> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(EXTERNAL_HEIGHTS_KEY) ?? "{}") as Record<
+      string,
+      unknown
+    >;
+    const out: Record<string, number> = {};
+    for (const [path, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) out[path] = value;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+// Escape a string for use inside a quoted CSS attribute selector (Windows
+// paths are full of backslashes, which CSS treats as escapes).
+function cssAttrValue(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+function folderBasename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
 interface RailProps {
   side: PanelSide;
   sections: PanelSectionKey[];
@@ -102,6 +138,10 @@ interface RailProps {
   activeDiffTarget: { path: string; staged: boolean } | null;
   // Explorer context-menu "Open Changes" for a changed file (absolute path).
   onOpenDiffForPath: (absolutePath: string) => void;
+  // Attach a local folder outside the workspace cwd as an extra Explorer root
+  // (OS folder picker), and detach one (reference removal only, never disk).
+  onAddExternalFolder: () => void;
+  onRemoveExternalFolder: (workspaceId: string, folderPath: string) => void;
 }
 
 // Memoized: App hoists every prop to a stable reference (the `workspaces`
@@ -216,6 +256,16 @@ function WorkspaceRail(props: RailProps) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const splitAtDragStart = useRef(split);
   const bodyHeightAtDragStart = useRef(1);
+
+  // External-folder tree heights, dragged via the divider above each attached
+  // folder. State drives layout live during the drag; the ref mirror lets the
+  // drag-end handler persist the latest values without a stale closure.
+  const [externalHeights, setExternalHeights] = useState<Record<string, number>>(
+    readExternalFolderHeights,
+  );
+  const externalHeightsRef = useRef(externalHeights);
+  externalHeightsRef.current = externalHeights;
+  const externalDragStart = useRef({ startH: 0, maxH: 0 });
 
   const accent = props.activeWorkspace?.color || "var(--accent)";
   const workspaceGroupIds = new Set(props.workspaceGroups.map((group) => group.id));
@@ -712,8 +762,9 @@ function WorkspaceRail(props: RailProps) {
           />
         );
       case "explorer": {
-        const cwd = props.activeWorkspace?.cwd ?? null;
-        if (!cwd) {
+        const ws = props.activeWorkspace;
+        const cwd = ws?.cwd ?? null;
+        if (!cwd || !ws) {
           return (
             <>
               <SectionHeader
@@ -731,24 +782,103 @@ function WorkspaceRail(props: RailProps) {
           );
         }
         return (
-          <FileTree
-            // Remount on workspace switch so Virtuoso scroll/cache state and any
-            // half-applied in-place tree mutation are fully reset; the reload
-            // effect already resets internal state, this just guarantees no
-            // stale scroll or partial mutation survives a fast switch.
-            key={cwd}
-            cwd={cwd}
-            activePath={props.activePath}
-            onOpenFile={props.onOpenFileEntry}
-            onDeleteFile={props.onDeleteFile}
-            onRenameFile={props.onRenameFile}
-            onRunPlan={props.onRunPlan}
-            gitStatus={props.git.status}
-            onOpenChanges={props.onOpenDiffForPath}
-            collapsed={collapsed.explorer}
-            onToggleCollapse={() => onToggleSection("explorer")}
-            headerDrag={headerDrag("explorer")}
-          />
+          <>
+            <FileTree
+              // Remount on workspace switch so Virtuoso scroll/cache state and any
+              // half-applied in-place tree mutation are fully reset; the reload
+              // effect already resets internal state, this just guarantees no
+              // stale scroll or partial mutation survives a fast switch.
+              key={cwd}
+              cwd={cwd}
+              activePath={props.activePath}
+              onOpenFile={props.onOpenFileEntry}
+              onDeleteFile={props.onDeleteFile}
+              onRenameFile={props.onRenameFile}
+              onRunPlan={props.onRunPlan}
+              gitStatus={props.git.status}
+              onOpenChanges={props.onOpenDiffForPath}
+              collapsed={collapsed.explorer}
+              onToggleCollapse={() => onToggleSection("explorer")}
+              headerDrag={headerDrag("explorer")}
+              onAddExternalFolder={props.onAddExternalFolder}
+            />
+            {/* External folders attached to this workspace: each is its own
+                single-root tree stacked under the primary one, sharing the
+                Explorer section's collapse state. No gitStatus — decorations
+                would resolve against the wrong repo root. The divider above
+                each tree drags its height; the choice persists per folder. */}
+            {(ws.extraFolders ?? []).map((folder) => (
+              <React.Fragment key={folder}>
+                {!collapsed.explorer && (
+                  <ResizeHandle
+                    orientation="row"
+                    accent={accent}
+                    ariaLabel={`Resize ${folderBasename(folder)} folder tree`}
+                    onResizeStart={() => {
+                      // No stored height yet means the tree is auto-sized —
+                      // snapshot its rendered height so the drag starts from
+                      // what the user sees instead of jumping.
+                      const el = document.querySelector<HTMLElement>(
+                        `[data-external-tree="${cssAttrValue(folder)}"]`,
+                      );
+                      externalDragStart.current = {
+                        startH:
+                          externalHeightsRef.current[folder] ??
+                          el?.getBoundingClientRect().height ??
+                          120,
+                        maxH:
+                          (el?.parentElement?.clientHeight ?? 600) - EXTERNAL_TREE_RESERVED_H,
+                      };
+                    }}
+                    onResize={(delta) => {
+                      // The handle sits above the tree, so dragging down
+                      // shrinks it. Clamp between one row and "leave the
+                      // primary tree usable".
+                      const { startH, maxH } = externalDragStart.current;
+                      const next = Math.round(
+                        Math.min(
+                          Math.max(startH - delta, EXTERNAL_TREE_MIN_H),
+                          Math.max(maxH, EXTERNAL_TREE_MIN_H),
+                        ),
+                      );
+                      if (externalHeightsRef.current[folder] === next) return;
+                      // Update the ref eagerly, not just via the render
+                      // mirror: pointerup can fire before React re-renders,
+                      // and the drag-end persist must see the final height.
+                      externalHeightsRef.current = {
+                        ...externalHeightsRef.current,
+                        [folder]: next,
+                      };
+                      setExternalHeights(externalHeightsRef.current);
+                    }}
+                    onResizeEnd={() => {
+                      try {
+                        localStorage.setItem(
+                          EXTERNAL_HEIGHTS_KEY,
+                          JSON.stringify(externalHeightsRef.current),
+                        );
+                      } catch {
+                        /* persistence is best-effort */
+                      }
+                    }}
+                  />
+                )}
+                <FileTree
+                  cwd={folder}
+                  variant="external"
+                  activePath={props.activePath}
+                  onOpenFile={props.onOpenFileEntry}
+                  onDeleteFile={props.onDeleteFile}
+                  onRenameFile={props.onRenameFile}
+                  onRunPlan={props.onRunPlan}
+                  collapsed={collapsed.explorer}
+                  onToggleCollapse={() => onToggleSection("explorer")}
+                  onRemoveExternalFolder={() => props.onRemoveExternalFolder(ws.id, folder)}
+                  heightPx={externalHeights[folder] ?? null}
+                />
+              </React.Fragment>
+            ))}
+          </>
         );
       }
     }

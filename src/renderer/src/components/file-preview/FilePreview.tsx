@@ -6,6 +6,7 @@ import { isRemotePath } from "@shared/remote";
 // Heavy pdf.js / docx-preview chunks stay out of the eager bundle — same
 // pattern as the lazy mermaid renderer in markdown-preview/MermaidBlock.tsx.
 const PdfPreview = lazy(() => import("./PdfPreview"));
+const HtmlPreview = lazy(() => import("./HtmlPreview"));
 const DocxPreview = lazy(() => import("./DocxPreview"));
 const WhiteboardFilePreview = lazy(() => import("./WhiteboardFilePreview"));
 
@@ -92,7 +93,9 @@ export default function FilePreview({
     refreshStat();
     // Remote files have no file:// form — load their bytes over IPC into a
     // blob URL straight away instead of waiting for the <img> to error.
-    if (isRemotePath(path)) activateBlobFallback();
+    // HTML is exempt: its previewer shows a not-supported notice for remote
+    // paths (a webview guest can't resolve the page's linked assets anyway).
+    if (isRemotePath(path) && kind !== "html") activateBlobFallback();
     // fs:changed only fires for create/delete/rename (content writes are
     // filtered main-side), so this catches deletion/replacement of the
     // previewed file; the mtime doubles as the <img> cache-buster.
@@ -101,7 +104,7 @@ export default function FilePreview({
       cancelled = true;
       off();
     };
-  }, [path, activateBlobFallback]);
+  }, [path, kind, activateBlobFallback]);
 
   useEffect(() => {
     return () => {
@@ -151,6 +154,22 @@ export default function FilePreview({
           </div>
           This file no longer exists on disk.
         </div>
+      </div>
+    );
+  }
+
+  if (kind === "html") {
+    return (
+      <div style={{ ...hostStyle, overflow: "hidden" }}>
+        <Suspense
+          fallback={
+            <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>
+              Loading HTML preview…
+            </div>
+          }
+        >
+          <HtmlPreview path={path} mtimeMs={stat?.mtimeMs ?? 0} />
+        </Suspense>
       </div>
     );
   }

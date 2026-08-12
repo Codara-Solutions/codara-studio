@@ -23,6 +23,7 @@ import {
 } from "./orchestration/codex-home";
 import { extractSessionUuid } from "./orchestration/codex-sessions";
 import { codexProvider } from "./providers/codex";
+import { clampTitle, findClaudeAiTitle, parseClaudeHead } from "./session-titles";
 
 const TRANSCRIPT_HEAD_BYTES = 256 * 1024;
 const SESSION_SCAN_CONCURRENCY = 16;
@@ -97,14 +98,18 @@ async function safeClaudeSessionIdsFromHistory(
 async function safeClaudeTranscriptStatAndHead(
   path: string,
   stateDir?: string | null,
-): Promise<{ mtimeMs: number; head: string }> {
+): Promise<{ mtimeMs: number; size: number; head: string }> {
   await assertSafeClaudeStoragePath(claudeConfigDir(stateDir), path, {
     includeLeaf: true,
     requireLeaf: true,
     leafType: "file",
   });
   const stat = await fs.lstat(path);
-  return { mtimeMs: Number(stat.mtimeMs), head: await readHead(path) };
+  return {
+    mtimeMs: Number(stat.mtimeMs),
+    size: Number(stat.size),
+    head: await readHead(path),
+  };
 }
 
 function textFromContent(content: unknown): string | null {
@@ -139,41 +144,26 @@ export function parseClaudeSessionHead(text: string): {
   cwd: string | null;
   startedAtMs: number | null;
   title: string | null;
+  aiTitle: string | null;
   hasUser: boolean;
   isSidechain: boolean;
 } {
-  let hasUser = false;
-  let isSidechain = false;
-  let cwd: string | null = null;
-  let startedAtMs: number | null = null;
-  let title: string | null = null;
-  for (const record of recordsFromHead(text)) {
-    if (record.isSidechain === true) isSidechain = true;
-    if (
-      record.type !== "user" ||
-      record.isMeta === true ||
-      record.isSidechain === true
-    ) {
-      continue;
-    }
-    if (!cwd && typeof record.cwd === "string") cwd = record.cwd;
-    if (startedAtMs === null && typeof record.timestamp === "string") {
-      const parsed = Date.parse(record.timestamp);
-      if (Number.isFinite(parsed)) startedAtMs = parsed;
-    }
-    const message = isRecord(record.message) ? record.message : null;
-    const candidate = sessionTitle(textFromContent(message?.content));
-    if (candidate) {
-      hasUser = true;
-      title ??= candidate;
-    }
-  }
+  const head = parseClaudeHead(text);
+  // A sidechain record marks a subagent transcript: it is not resumable, so
+  // it must not surface in the picker (mirrors the pre-refactor strictness).
   return {
-    cwd,
-    startedAtMs,
-    title: isSidechain ? null : title,
-    hasUser: hasUser && !isSidechain,
-    isSidechain,
+    cwd: head.cwd,
+    startedAtMs: head.startedAtMs,
+    title:
+      head.sawSidechain || head.firstUserText === null
+        ? null
+        : clampTitle(head.firstUserText, TITLE_LIMIT),
+    aiTitle: head.aiTitle === null ? null : clampTitle(head.aiTitle, TITLE_LIMIT),
+    // Stricter than the shared parser's hasUser: a transcript whose user
+    // records are all tooling noise (slash-command envelopes, caveat banners)
+    // is not resumable conversation, so require a surviving user text.
+    hasUser: head.firstUserText !== null && !head.sawSidechain,
+    isSidechain: head.sawSidechain,
   };
 }
 
@@ -280,16 +270,25 @@ async function listClaudeSessions(
 
   return mapLimited(paths, async (path) => {
     try {
-      const { mtimeMs, head } = await safeClaudeTranscriptStatAndHead(
+      const { mtimeMs, size, head } = await safeClaudeTranscriptStatAndHead(
         path,
         stateDir,
       );
-      const preview = parseClaudeSessionHead(head);
-      if (!preview.hasUser) return null;
+      const parsed = parseClaudeSessionHead(head);
+      if (!parsed.hasUser) return null;
+      // Prefer Claude Code's generated topic label; when the head missed the
+      // record (giant pasted-context lines), fall back to a cached deeper
+      // scan. The first user question then becomes the row's second line.
+      const aiTitle =
+        parsed.aiTitle ??
+        (await findClaudeAiTitle(path, { mtimeMs, size }).then(
+          (found) => (found === null ? null : clampTitle(found, TITLE_LIMIT)),
+        ));
       return {
         runtime: "claude",
         sessionId: basename(path, ".jsonl"),
-        title: preview.title ?? "Untitled session",
+        title: aiTitle ?? parsed.title ?? "Untitled session",
+        preview: aiTitle === null ? null : parsed.title,
         cwd,
         cwdExists: true,
         updatedAt: new Date(mtimeMs).toISOString(),
@@ -335,22 +334,24 @@ async function listCodexSessions(
       const sessionId = extractSessionUuid(path);
       if (!sessionId || !interactiveIds.has(sessionId.toLowerCase())) return null;
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
-      const preview = parseCodexSessionHead(head);
+      const parsed = parseCodexSessionHead(head);
       if (
-        preview.isSubagent ||
-        (preview.source !== null && preview.source !== "cli") ||
-        !preview.cwd ||
-        normalizedPath(preview.cwd) !== targetCwd
+        parsed.isSubagent ||
+        (parsed.source !== null && parsed.source !== "cli") ||
+        !parsed.cwd ||
+        normalizedPath(parsed.cwd) !== targetCwd
       ) {
         return null;
       }
       return {
         runtime: "codex",
         sessionId,
-        title: preview.title ?? "Untitled session",
+        title: parsed.title ?? "Untitled session",
+        // Codex has no ai-title equivalent — the title IS the first question.
+        preview: null,
         cwd,
         cwdExists: true,
-        updatedAt: new Date(Math.max(stat.mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
+        updatedAt: new Date(Math.max(stat.mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {
@@ -424,15 +425,19 @@ async function listAllClaudeSessions(
         path,
         stateDir,
       );
-      const preview = parseClaudeSessionHead(head);
-      if (!preview.hasUser || !preview.cwd || !isAbsolute(preview.cwd)) return null;
+      const parsed = parseClaudeSessionHead(head);
+      if (!parsed.hasUser || !parsed.cwd || !isAbsolute(parsed.cwd)) return null;
+      // Head-only ai-title here: the cross-project sweep touches every
+      // transcript on the machine, so the deeper per-file scan is reserved
+      // for the per-cwd listing the picker uses.
       return {
         runtime: "claude",
         sessionId: basename(path, ".jsonl"),
-        title: preview.title ?? "Untitled session",
-        cwd: preview.cwd,
-        cwdExists: await pathIsDirectory(preview.cwd),
-        updatedAt: new Date(Math.max(mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
+        title: parsed.aiTitle ?? parsed.title ?? "Untitled session",
+        preview: parsed.aiTitle === null ? null : parsed.title,
+        cwd: parsed.cwd,
+        cwdExists: await pathIsDirectory(parsed.cwd),
+        updatedAt: new Date(Math.max(mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {
@@ -478,22 +483,23 @@ async function listAllCodexSessions(
       const sessionId = extractSessionUuid(path);
       if (!sessionId || !interactiveIds.has(sessionId.toLowerCase())) return null;
       const [stat, head] = await Promise.all([fs.stat(path), readHead(path)]);
-      const preview = parseCodexSessionHead(head);
+      const parsed = parseCodexSessionHead(head);
       if (
-        preview.isSubagent ||
-        (preview.source !== null && preview.source !== "cli") ||
-        !preview.cwd ||
-        !isAbsolute(preview.cwd)
+        parsed.isSubagent ||
+        (parsed.source !== null && parsed.source !== "cli") ||
+        !parsed.cwd ||
+        !isAbsolute(parsed.cwd)
       ) {
         return null;
       }
       return {
         runtime: "codex",
         sessionId,
-        title: preview.title ?? "Untitled session",
-        cwd: preview.cwd,
-        cwdExists: await pathIsDirectory(preview.cwd),
-        updatedAt: new Date(Math.max(stat.mtimeMs, preview.startedAtMs ?? 0)).toISOString(),
+        title: parsed.title ?? "Untitled session",
+        preview: null,
+        cwd: parsed.cwd,
+        cwdExists: await pathIsDirectory(parsed.cwd),
+        updatedAt: new Date(Math.max(stat.mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
         transcriptPath: path,
       } satisfies WorkerSessionSummary;
     } catch {

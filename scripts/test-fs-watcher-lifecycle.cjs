@@ -15,7 +15,7 @@ assert.match(source, /async function openRootWatcher[\s\S]*?fsErrorCode\(error\)
 assert.match(source, /rootWatcher = await openRootWatcher\(root\)/);
 assert.match(
   source,
-  /rootWatcher\.on\("error"[\s\S]*?fsErrorCode\(err\) === "EINTR"[\s\S]*?setWatchRoot\(webContents, root\)/,
+  /rootWatcher\.on\("error"[\s\S]*?fsErrorCode\(err\) === "EINTR"[\s\S]*?addWatchRoot\(webContents, root\)/,
 );
 assert.doesNotMatch(source, /console\.warn\("\[fs-watcher\] failed to watch", root, err\)/);
 

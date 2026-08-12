@@ -91,10 +91,17 @@ interface State {
   flushTimer: NodeJS.Timeout | null;
 }
 
-const byContents = new Map<number, State>();
+// One State per (webContents, root) pair: a window watches its active
+// workspace root plus any external Explorer folders attached to it, each with
+// its own independent watcher lifecycle.
+const byContents = new Map<number, Map<string, State>>();
 /** Workspace roots already reported as missing, so N windows re-registering the
  * same stale workspace produce one line rather than N. */
 const missingRootsReported = new Set<string>();
+
+function getState(id: number, root: string): State | undefined {
+  return byContents.get(id)?.get(root);
+}
 
 // Resolve a watcher event into the absolute directory whose contents changed
 // and stage it for the next debounced flush. `base` is the absolute path of
@@ -154,7 +161,7 @@ function startRecursiveWatcher(state: State, webContents: WebContents): Promise<
     if (
       !message ||
       typeof message !== "object" ||
-      byContents.get(webContents.id) !== state ||
+      getState(webContents.id, state.root) !== state ||
       webContents.isDestroyed()
     ) {
       return;
@@ -181,7 +188,7 @@ function startRecursiveWatcher(state: State, webContents: WebContents): Promise<
   worker.on("error", (err) => {
     settleReady();
     state.recursiveReady = null;
-    if (byContents.get(webContents.id) === state) {
+    if (getState(webContents.id, state.root) === state) {
       console.warn("[fs-watcher] recursive worker failed", err);
     }
   });
@@ -204,17 +211,17 @@ function disposeState(state: State): void {
   }
 }
 
-export async function setWatchRoot(
-  webContents: WebContents,
-  root: string | null,
-): Promise<void> {
+export async function addWatchRoot(webContents: WebContents, root: string): Promise<void> {
   const id = webContents.id;
-  const existing = byContents.get(id);
+  // Rebuild-from-scratch idempotency, scoped to this root only: re-arming a
+  // root disposes its previous watchers without touching any other root the
+  // same window is watching (the workspace tree and each external Explorer
+  // folder arm independently).
+  const existing = getState(id, root);
   if (existing) {
     disposeState(existing);
-    byContents.delete(id);
+    byContents.get(id)?.delete(root);
   }
-  if (!root) return;
 
   // A workspace whose folder has been moved or deleted is a normal, expected
   // state — the workspace list outlives the directory. fs.watch would throw
@@ -258,9 +265,9 @@ export async function setWatchRoot(
     return;
   }
   rootWatcher.on("error", (err) => {
-    if (fsErrorCode(err) === "EINTR" && byContents.get(id) === state) {
+    if (fsErrorCode(err) === "EINTR" && getState(id, root) === state) {
       console.warn(`[fs-watcher] watch interrupted for ${root}; retrying`);
-      void setWatchRoot(webContents, root);
+      void addWatchRoot(webContents, root);
       return;
     }
     console.warn(`[fs-watcher] watch error for ${root}: ${fsErrorMessage(err)}`);
@@ -293,9 +300,15 @@ export async function setWatchRoot(
 
   // Register the state synchronously (with the root watcher already armed) so
   // the caller's await resolves once top-level activity is observable, and so a
-  // rapid subsequent setWatchRoot call sees this state to tear it down. The
-  // per-directory recursive watchers are then installed asynchronously below.
-  byContents.set(id, state);
+  // rapid subsequent addWatchRoot call for the same root sees this state to
+  // tear it down. The per-directory recursive watchers are then installed
+  // asynchronously below.
+  let inner = byContents.get(id);
+  if (!inner) {
+    inner = new Map<string, State>();
+    byContents.set(id, inner);
+  }
+  inner.set(root, state);
 
   // Enumerate the root's immediate entries and spin up one recursive watcher
   // per non-ignored top-level directory. This was a synchronous readdirSync +
@@ -311,10 +324,11 @@ export async function setWatchRoot(
     return;
   }
 
-  // Bail if this watcher state was superseded (another setWatchRoot ran, or the
-  // root was cleared) or its webContents was destroyed while we awaited the
-  // readdir — installing watchers now would leak handles onto a dead state.
-  if (byContents.get(id) !== state || webContents.isDestroyed()) return;
+  // Bail if this watcher state was superseded (another addWatchRoot ran for
+  // this root, or the root was removed) or its webContents was destroyed while
+  // we awaited the readdir — installing watchers now would leak handles onto a
+  // dead state.
+  if (getState(id, root) !== state || webContents.isDestroyed()) return;
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -330,16 +344,29 @@ export async function setWatchRoot(
   await startRecursiveWatcher(state, webContents);
 }
 
-export function disposeForWebContents(webContents: WebContents): void {
-  const state = byContents.get(webContents.id);
-  if (!state) return;
+export function removeWatchRoot(webContents: WebContents, root: string): void {
+  const inner = byContents.get(webContents.id);
+  const state = inner?.get(root);
+  if (!inner || !state) return;
   disposeState(state);
+  inner.delete(root);
+  if (inner.size === 0) byContents.delete(webContents.id);
+}
+
+export function disposeForWebContents(webContents: WebContents): void {
+  const inner = byContents.get(webContents.id);
+  if (!inner) return;
+  for (const state of inner.values()) {
+    disposeState(state);
+  }
   byContents.delete(webContents.id);
 }
 
 export function disposeAll(): void {
-  for (const state of byContents.values()) {
-    disposeState(state);
+  for (const inner of byContents.values()) {
+    for (const state of inner.values()) {
+      disposeState(state);
+    }
   }
   byContents.clear();
 }

@@ -1356,13 +1356,14 @@ export default function App() {
     if (!leftPanelVisible) setEditingId(null);
   }, [leftPanelVisible]);
 
-  // Comma-joined sorted list of workspace cwds. Used as a stable dep for the
-  // setAllowedRoots push so we only re-send when the actual cwd set changes
-  // (renaming a workspace's color, for instance, must not re-fire the IPC).
+  // Comma-joined sorted list of workspace cwds plus any attached external
+  // Explorer folders. Used as a stable dep for the setAllowedRoots push so we
+  // only re-send when the actual root set changes (renaming a workspace's
+  // color, for instance, must not re-fire the IPC).
   const workspaceCwdsKey = useMemo(
     () =>
       workspaces
-        .map((w) => w.cwd)
+        .flatMap((w) => [w.cwd, ...(w.extraFolders ?? [])])
         .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0)
         .slice()
         .sort()
@@ -3071,6 +3072,41 @@ export default function App() {
     setEditingId(ws.id);
   }, [workspaces, activeWorkspace, home]);
 
+  // Attach a local folder outside the workspace cwd as an extra Explorer root
+  // (e.g. a OneDrive clients folder). The picker is always the local OS
+  // dialog, so this works for remote workspaces too.
+  const addExternalFolder = useCallback(async () => {
+    if (!activeWorkspace) return;
+    const path = await window.spark.dialog.openDirectory(activeWorkspace.cwd || home);
+    if (!path) return;
+    const current = activeWorkspace.extraFolders ?? [];
+    if (path === activeWorkspace.cwd || current.includes(path)) return;
+    // Same race-avoidance as createWs above: the external FileTree mounts as
+    // soon as state updates and immediately calls fs:list / fs:addWatchRoot,
+    // before the parent setAllowedRoots effect re-fires — push the new root
+    // onto the sandbox allowlist first.
+    const existingRoots = workspaces
+      .flatMap((w) => [w.cwd, ...(w.extraFolders ?? [])])
+      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+    await window.spark.ui?.setAllowedRoots([...existingRoots, path]).catch(() => {
+      /* sandbox push is best-effort; the parent effect re-sends on state change */
+    });
+    updateWs(activeWorkspace.id, { extraFolders: [...current, path] });
+  }, [activeWorkspace, workspaces, home, updateWs]);
+
+  // Detach an external folder from a workspace. Reference removal only —
+  // nothing on disk is touched, and the sandbox allowlist shrinks on the next
+  // natural setAllowedRoots push driven by the state change.
+  const removeExternalFolder = useCallback((workspaceId: string, folderPath: string) => {
+    setWorkspaces((list) =>
+      list.map((w) =>
+        w.id === workspaceId
+          ? { ...w, extraFolders: (w.extraFolders ?? []).filter((f) => f !== folderPath) }
+          : w,
+      ),
+    );
+  }, []);
+
   // SSH remote workspace: the connect dialog resolves a host + POSIX folder,
   // and we mint a workspace whose cwd is the ssh:// virtual path. The main
   // process routes every fs/git/pty/search call on that prefix.
@@ -4513,8 +4549,13 @@ export default function App() {
       "tab.newEditor": handleNewEditorTab,
       "tab.newPreview": handleNewPreviewTab,
       "tab.newWhiteboard": handleNewWhiteboard,
-      "worker.newClaude": () => openShortcutWorkerSessions("claude"),
-      "worker.newCodex": () => openShortcutWorkerSessions("codex"),
+      // Fresh-launch commands bypass the session picker entirely — rebinding
+      // them to the picker broke existing muscle memory (Ctrl+Shift+ñ etc.).
+      // The picker lives on its own `worker.*Sessions` commands.
+      "worker.newClaude": () => handleNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
+      "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
+      "worker.claudeSessions": () => openShortcutWorkerSessions("claude"),
+      "worker.codexSessions": () => openShortcutWorkerSessions("codex"),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
@@ -5393,6 +5434,8 @@ export default function App() {
             onOpenDiffTab={handleOpenDiffTab}
             activeDiffTarget={activeDiffTarget}
             onOpenDiffForPath={handleOpenDiffForPath}
+            onAddExternalFolder={addExternalFolder}
+            onRemoveExternalFolder={removeExternalFolder}
           />
           <ResizeHandle
             orientation="col"
@@ -5530,6 +5573,8 @@ export default function App() {
             onOpenDiffTab={handleOpenDiffTab}
             activeDiffTarget={activeDiffTarget}
             onOpenDiffForPath={handleOpenDiffForPath}
+            onAddExternalFolder={addExternalFolder}
+            onRemoveExternalFolder={removeExternalFolder}
           />
           </div>
         )}
