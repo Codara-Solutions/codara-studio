@@ -744,6 +744,33 @@ a { color: inherit; }
   font-synthesis: style;
 }
 
+/* Preview (unpinned) editor tab: the italic label alone was too easy to miss,
+   so the whole chip signals the transient state — dashed edge, slightly
+   dimmed. Double-clicking the tab or editing the file pins it, and the chip
+   snaps to the solid resting/raised look. */
+.spark-tab[data-preview-editor="true"] {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--ink) 24%, transparent);
+  background: transparent;
+}
+.spark-tab[data-preview-editor="true"]:hover:not(.spark-tab--active) {
+  border-color: color-mix(in oklab, var(--ink) 34%, transparent);
+}
+.spark-tab[data-preview-editor="true"].spark-tab--active {
+  border-style: dashed;
+  border-color: color-mix(in oklch, var(--accent) 55%, transparent);
+  background: color-mix(in oklch, var(--accent) 6%, var(--panel-2));
+}
+
+/* Off-screen slides skip layout/paint entirely; `auto` remembers each slide's
+   real size once rendered, and the 720px estimate (16:9 at the 1280px render
+   width) keeps the scrollbar honest before that. Large decks scroll like a
+   list of boxes instead of one giant paint. */
+.pptx-preview-slide-wrapper {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 720px;
+}
+
 /* Reorder ghost slot: the macOS-style drop preview. A placeholder chip the
    exact size and shape of the tab in flight, sitting in the hole its
    neighbours slid apart to open — the destination is shown as a SLOT the tab

@@ -607,6 +607,17 @@ const api = {
     renameFile: (input: RenameFileInput): Promise<FsEntry> =>
       ipcRenderer.invoke("fs:renameFile", input),
     deleteFile: (path: string): Promise<void> => ipcRenderer.invoke("fs:deleteFile", path),
+    // Undoable delete: moves the entry into the app-owned delete stash and
+    // returns a token undoDelete can restore it with. purgeDeleteStash moves
+    // stashed payloads on to the OS trash once their undo slot is gone.
+    deleteToStash: (
+      path: string,
+    ): Promise<{ token: string; originalPath: string; name: string; isDir: boolean }> =>
+      ipcRenderer.invoke("fs:deleteToStash", path),
+    undoDelete: (input: { token: string; originalPath: string }): Promise<FsEntry> =>
+      ipcRenderer.invoke("fs:undoDelete", input),
+    purgeDeleteStash: (tokens: string[]): Promise<void> =>
+      ipcRenderer.invoke("fs:purgeDeleteStash", tokens),
     createFile: (input: CreateEntryInput): Promise<FsEntry> =>
       ipcRenderer.invoke("fs:createFile", input),
     createFolder: (input: CreateEntryInput): Promise<FsEntry> =>
@@ -622,7 +633,10 @@ const api = {
     // Begin a native OS drag-out of the given workspace paths so the user can
     // drop them onto the desktop or another app. Fire-and-forget: the main
     // process owns the drag session via webContents.startDrag.
-    startDrag: (paths: string[]): void => ipcRenderer.send("fs:startDrag", paths),
+    startDrag: (
+      paths: string[],
+      icon?: { dataUrl: string; scaleFactor?: number },
+    ): void => ipcRenderer.send("fs:startDrag", paths, icon),
     // Watch roots are additive: a window watches its workspace root plus any
     // external Explorer folders, each armed/removed independently.
     addWatchRoot: (root: string): Promise<void> => ipcRenderer.invoke("fs:addWatchRoot", root),

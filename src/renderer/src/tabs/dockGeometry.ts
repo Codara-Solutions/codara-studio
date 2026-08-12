@@ -236,7 +236,16 @@ export function registerDockElement(
     list.push({ el, insetTop });
   }
   elements.set(tabId, list);
-  applyTo({ el, insetTop }, placements.get(tabId));
+  // Apply only when a placement exists. Running the "undocked restore" branch
+  // here would CLEAR the visibility/pointerEvents inline styles React applied
+  // on this very render — and React's style diffing never re-writes a value it
+  // believes is already set, so a freshly-mounted (never-docked) pane would be
+  // left inheriting pointer-events:none from its Stack root: visible but
+  // click-dead until the next visible-flip re-render (tab switch away+back).
+  // The restore branch is only for genuine undocks, where dropPlacement runs
+  // applyToAll on the same render that recomputes those styles from `visible`.
+  const placement = placements.get(tabId);
+  if (placement) applyTo({ el, insetTop }, placement);
 }
 
 export function unregisterDockElement(tabId: TabId, el: HTMLElement): void {

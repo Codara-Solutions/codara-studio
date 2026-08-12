@@ -159,6 +159,19 @@ export default function FilePreview({
     );
   }
 
+  // The document previewers key their (expensive) parse on mtimeMs. Mounting
+  // them before the stat lands would parse once with mtime 0 and then AGAIN
+  // when the real mtime arrives a tick later — for pptx/docx that is a full
+  // OOXML re-parse and re-render of every page. Hold a lightweight placeholder
+  // for the stat round-trip instead; it resolves in milliseconds.
+  if (stat === null && (kind === "html" || kind === "pdf" || kind === "docx" || kind === "pptx")) {
+    return (
+      <div style={hostStyle}>
+        <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>Loading…</div>
+      </div>
+    );
+  }
+
   if (kind === "html") {
     return (
       <div style={{ ...hostStyle, overflow: "hidden" }}>

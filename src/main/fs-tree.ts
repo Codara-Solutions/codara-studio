@@ -1,4 +1,4 @@
-import { shell } from "electron";
+import { app, shell } from "electron";
 import { promises as fs } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative } from "node:path";
 import type { FileListResult, FsEntry, FsFileContent, FsReadResult, FsWriteResult, PlanFile } from "@shared/types";
@@ -271,6 +271,97 @@ export async function deleteFile(path: string): Promise<void> {
   if (isRemotePath(path)) return remoteFs.remoteDelete(path);
   // Allow trashing both files and directories.
   await shell.trashItem(path);
+}
+
+// ── Undoable delete stash ───────────────────────────────────────────────────
+// Explorer deletes are moved into an app-owned stash directory instead of the
+// OS trash so the renderer can offer Ctrl+Z undo (the OS trash has no
+// programmatic restore). A stashed entry is either restored by undo, or moved
+// on to the real OS trash when its undo slot is evicted / on the next app
+// launch — nothing is ever permanently removed without passing through trash.
+
+export interface FsStashedDelete {
+  token: string;
+  originalPath: string;
+  name: string;
+  isDir: boolean;
+}
+
+function deleteStashRoot(): string {
+  return join(app.getPath("userData"), "delete-stash");
+}
+
+let stashSeq = 0;
+
+// Tokens are path segments under the stash root; keep them to a safe alphabet
+// so a hostile token can never traverse outside it.
+const STASH_TOKEN_RE = /^[a-z0-9-]+$/;
+
+function stashDirForToken(token: string): string {
+  if (!STASH_TOKEN_RE.test(token)) throw new Error("Invalid stash token.");
+  return join(deleteStashRoot(), token);
+}
+
+// Rename with a cross-device fallback (fs.rename rejects EXDEV across volumes).
+async function renameOrCopy(src: string, target: string): Promise<void> {
+  try {
+    await fs.rename(src, target);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+    await fs.cp(src, target, { recursive: true, errorOnExist: false, force: false });
+    await fs.rm(src, { recursive: true, force: true });
+  }
+}
+
+export async function deleteToStash(path: string): Promise<FsStashedDelete> {
+  if (isRemotePath(path)) {
+    throw new Error("Remote entries cannot be stashed; use deleteFile.");
+  }
+  const st = await fs.stat(path);
+  const token = `${Date.now().toString(36)}-${(++stashSeq).toString(36)}`;
+  const dir = stashDirForToken(token);
+  await fs.mkdir(dir, { recursive: true });
+  await renameOrCopy(path, join(dir, basename(path)));
+  return { token, originalPath: path, name: basename(path), isDir: st.isDirectory() };
+}
+
+export async function undoDeleteFromStash(token: string, originalPath: string): Promise<FsEntry> {
+  const dir = stashDirForToken(token);
+  const names = await fs.readdir(dir);
+  if (names.length === 0) throw new Error("Nothing left to restore.");
+  const src = join(dir, names[0]);
+  const st = await fs.stat(src);
+  const parent = dirname(originalPath);
+  await fs.mkdir(parent, { recursive: true });
+  // If something reappeared at the original path since the delete, restore
+  // beside it with a " (n)" suffix rather than clobbering or failing.
+  const target = await uniqueDestPath(parent, basename(originalPath));
+  await renameOrCopy(src, target);
+  await fs.rm(dir, { recursive: true, force: true });
+  return makeEntry(target, st.isDirectory());
+}
+
+// Move stashed payloads on to the OS trash and drop their stash dirs. With no
+// tokens given, purges the whole stash (app-startup sweep of leftovers from
+// previous sessions). Best-effort per entry: one failure never blocks the rest.
+export async function purgeDeleteStash(tokens?: string[]): Promise<void> {
+  let targets: string[];
+  try {
+    targets = tokens ?? (await fs.readdir(deleteStashRoot()));
+  } catch {
+    return; // no stash dir yet
+  }
+  for (const token of targets) {
+    if (!STASH_TOKEN_RE.test(token)) continue;
+    const dir = join(deleteStashRoot(), token);
+    try {
+      const names = await fs.readdir(dir);
+      for (const name of names) await shell.trashItem(join(dir, name));
+      await fs.rm(dir, { recursive: true, force: true });
+    } catch {
+      // Leave it for the next sweep.
+    }
+  }
 }
 
 // Copy a set of external paths (files or folders) into `destDir`, the way an

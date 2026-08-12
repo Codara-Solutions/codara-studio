@@ -106,6 +106,26 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
+// Platform-appropriate name for "show this in the OS file manager".
+const REVEAL_IN_OS_LABEL = navigator.platform.startsWith("Mac")
+  ? "Reveal in Finder"
+  : navigator.platform.startsWith("Win")
+    ? "Reveal in File Explorer"
+    : "Reveal in File Manager";
+
+// Undo history for Explorer deletes. Deletes move entries into a main-process
+// stash (not the OS trash) so Ctrl+Z can restore them; a batch evicted off the
+// end of this stack has its stash payload moved on to the real OS trash.
+// Module-level so the history survives the FileTree remount on workspace
+// switch; batches remember their workspace so restores land correctly even
+// when undone from another workspace's tree.
+interface DeleteUndoBatch {
+  cwd: string;
+  items: Array<{ token: string; originalPath: string }>;
+}
+const deleteUndoStack: DeleteUndoBatch[] = [];
+const DELETE_UNDO_LIMIT = 20;
+
 // File extensions Codara can run as a plan via the explorer's right-click
 // "Run plan" action. A plan is just text handed to the manager, so markdown
 // and rendered HTML docs both qualify.
@@ -289,6 +309,15 @@ export default function FileTree({
   // no file drag is hovering the Explorer. Equal to `cwd` for a drop onto empty
   // space (highlights the whole list); a subfolder path highlights that row.
   const [externalDropDir, setExternalDropDir] = useState<string | null>(null);
+  // A drag-drop that would MOVE one or more folders, parked while the user
+  // confirms it (folder moves relocate whole subtrees, so they're easy to do
+  // by accident mid-drag). Confirm runs the held transfer; cancel drops it.
+  const [pendingMove, setPendingMove] = useState<{
+    destDir: string;
+    copySources: string[];
+    moveSources: string[];
+    folderNames: string[];
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
   // Engines offered by the Run plan flyout (Codara always; Claude / Codex when
@@ -363,6 +392,11 @@ export default function FileTree({
       window.setTimeout(() => {
         suppressNextClickRef.current = false;
       }, 0);
+    } else if (marquee && !marquee.additive) {
+      // A plain press on blank space that never became a drag: clear the
+      // selection (Finder behavior). Additive (Ctrl/Cmd) presses keep it.
+      setSelectedFilePaths((prev) => (prev.size > 0 ? new Set<string>() : prev));
+      setSelectionAnchorPath(null);
     }
     marqueeSelectionRef.current = null;
     setSelectionRect(null);
@@ -700,9 +734,17 @@ export default function FileTree({
       const deletedPaths: string[] = [];
       const parentPaths = new Set(uniqueEntries.map((entry) => parentPath(entry.path)));
       setContextMenu(null);
+      // Local deletes go through the undoable stash (Ctrl+Z restores); remote
+      // entries have no local stash and keep the direct delete.
+      const stashed: DeleteUndoBatch["items"] = [];
       try {
         for (const entry of uniqueEntries) {
-          await window.spark.fs.deleteFile(entry.path);
+          if (isRemotePath(entry.path)) {
+            await window.spark.fs.deleteFile(entry.path);
+          } else {
+            const s = await window.spark.fs.deleteToStash(entry.path);
+            stashed.push({ token: s.token, originalPath: s.originalPath });
+          }
           deletedPaths.push(entry.path);
           onDeleteFile?.(entry.path);
         }
@@ -710,6 +752,18 @@ export default function FileTree({
       } catch (err) {
         setError((err as Error).message);
       } finally {
+        if (stashed.length > 0) {
+          deleteUndoStack.push({ cwd, items: stashed });
+          while (deleteUndoStack.length > DELETE_UNDO_LIMIT) {
+            const evicted = deleteUndoStack.shift();
+            if (evicted) {
+              // Off the undo horizon → the payload moves on to the OS trash.
+              void window.spark.fs
+                .purgeDeleteStash(evicted.items.map((i) => i.token))
+                .catch(() => undefined);
+            }
+          }
+        }
         await Promise.allSettled(Array.from(parentPaths).map((path) => refreshDir(path)));
         if (deletedPaths.length > 0) {
           setSelectedFilePaths((prev) => {
@@ -727,8 +781,58 @@ export default function FileTree({
         }
       }
     },
-    [onDeleteFile, refreshDir],
+    [cwd, onDeleteFile, refreshDir],
   );
+
+  // Undo delete (Ctrl+Z) ---------------------------------------------------
+  const undoLastDelete = useCallback(async () => {
+    const batch = deleteUndoStack.pop();
+    if (!batch) return;
+    const restoredPaths: string[] = [];
+    const parents = new Set<string>();
+    for (const item of batch.items) {
+      try {
+        const entry = await window.spark.fs.undoDelete(item);
+        restoredPaths.push(entry.path);
+        parents.add(parentPath(entry.path));
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    }
+    // refreshDir is a no-op for parents outside this tree (a batch restored
+    // into another workspace converges via that workspace's watcher instead).
+    await Promise.allSettled(Array.from(parents).map((p) => refreshDir(p)));
+    if (batch.cwd === cwd && restoredPaths.length > 0) {
+      setSelectedFilePaths(new Set(restoredPaths));
+      setSelectionAnchorPath(restoredPaths[0]);
+    }
+  }, [cwd, refreshDir]);
+
+  // Ctrl/Cmd+Z restores the most recent Explorer delete. Registered by the
+  // primary tree only (one per window) so external-folder trees never race it;
+  // the shared stack still covers their deletes. Editors, terminals, inline
+  // inputs, and the whiteboard keep their own undo — those targets are all
+  // editable or covered by the board guard below.
+  useEffect(() => {
+    if (variant === "external") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() !== "z") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (document.activeElement?.closest(".cora-board-editor")) return;
+      if (deleteUndoStack.length === 0) return;
+      e.preventDefault();
+      void undoLastDelete();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [variant, undoLastDelete]);
 
   // File drag-and-drop onto the Explorer -----------------------------------
   // A drop arrives as real OS File objects whether it came from Finder or from
@@ -835,10 +939,49 @@ export default function FileTree({
       // workspace root are moved; outside sources are copied.
       const insideSources = sourcePaths.filter((p) => isInsideWorkspace(p, cwd));
       const outsideSources = sourcePaths.filter((p) => !isInsideWorkspace(p, cwd));
+      // Moving a FOLDER relocates its whole subtree — hold the drop for an
+      // explicit confirm. (File moves and copies stay immediate; a folder
+      // dropped where it already lives is main-side a no-op, so skip those.)
+      const movedFolders = insideSources.filter((p) => {
+        if (parentPath(p) === destDir || p === destDir) return false;
+        return findEntry(rootRef.current, p)?.entry.isDir ?? false;
+      });
+      if (movedFolders.length > 0) {
+        setPendingMove({
+          destDir,
+          copySources: outsideSources,
+          moveSources: insideSources,
+          folderNames: movedFolders.map((p) => basename(p)),
+        });
+        return;
+      }
       await transferEntriesInto(destDir, outsideSources, insideSources);
     },
     [cwd, transferEntriesInto],
   );
+
+  const confirmPendingMove = useCallback(() => {
+    setPendingMove((pm) => {
+      if (pm) void transferEntriesInto(pm.destDir, pm.copySources, pm.moveSources);
+      return null;
+    });
+  }, [transferEntriesInto]);
+
+  // Enter confirms / Escape cancels the held folder move.
+  useEffect(() => {
+    if (!pendingMove) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        confirmPendingMove();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setPendingMove(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pendingMove, confirmPendingMove]);
 
   // Resolve which directory a pointer position would drop into. Uses the live
   // DOM (every row carries `data-fs-path`; directory rows also carry
@@ -922,7 +1065,15 @@ export default function FileTree({
         ? pruneNestedPaths(Array.from(selected))
         : [path];
     event.preventDefault();
-    window.spark.fs.startDrag(paths);
+    // Draw a drag badge (icon + name + count chip on a shadowed card) so the
+    // grabbed entry reads clearly under the cursor; falls back to the main
+    // process's stock glyph when canvas rendering fails.
+    const badge = renderDragBadge(
+      paths.length > 1 ? `${paths.length} items` : node.entry.name,
+      node.entry.isDir,
+      paths.length,
+    );
+    window.spark.fs.startDrag(paths, badge ?? undefined);
   }, []);
 
   // Explorer file clipboard ---------------------------------------------------
@@ -1091,17 +1242,12 @@ export default function FileTree({
     // its parent), matching the FileMenu Paste destination below.
     pasteAnchorRef.current = { path: entry.path, isDir: entry.isDir };
     // A row already inside the selection keeps the whole selection (the menu
-    // then acts on all of it, folders included). An unselected file becomes
-    // the sole selection; an unselected folder clears it — the folder itself
-    // is the menu target and the paste destination.
+    // then acts on all of it, folders included). An unselected row — file or
+    // folder — becomes the sole selection, so the menu's target is visibly
+    // highlighted while the menu is up.
     if (!selectedFilePathsRef.current.has(entry.path)) {
-      if (entry.isDir) {
-        setSelectedFilePaths(new Set());
-        setSelectionAnchorPath(null);
-      } else {
-        setSelectedFilePaths(new Set([entry.path]));
-        setSelectionAnchorPath(entry.path);
-      }
+      setSelectedFilePaths(new Set([entry.path]));
+      setSelectionAnchorPath(entry.path);
     }
     setBlankMenu(null);
     setContextMenu({ entry, x, y });
@@ -1304,9 +1450,23 @@ export default function FileTree({
     setSelectionAnchorPath(null);
     setPendingCreate({ parentPath: cwd, kind: "dir" });
   }, [cwd]);
-  const refreshWorkspace = useCallback(async () => {
-    await refreshDir(cwd);
-  }, [cwd, refreshDir]);
+
+  // Escape clears the selection (after a marquee or click selection). Menus,
+  // rename/create inputs, and the move confirm all own Escape while open —
+  // their handlers close them and this effect's guards skip the clear. Only
+  // fires while the Explorer holds focus so an editor Esc never reaches it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (renamingPath || pendingCreate || contextMenu || blankMenu || pendingMove) return;
+      const inTree = listViewportRef.current?.contains(document.activeElement) ?? false;
+      if (!inTree) return;
+      setSelectedFilePaths((prev) => (prev.size > 0 ? new Set<string>() : prev));
+      setSelectionAnchorPath(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [renamingPath, pendingCreate, contextMenu, blankMenu, pendingMove]);
 
   // Handle F2 (rename) when a single file is selected, otherwise the active entry.
   useEffect(() => {
@@ -1366,6 +1526,7 @@ export default function FileTree({
       <Row
         node={row.node}
         depth={row.depth}
+        externalRoot={variant === "external" && row.node.entry.path === cwd}
         active={row.node.entry.path === activePath}
         selected={selectedFilePaths.has(row.node.entry.path)}
         dirOpen={Boolean(dirNode?.open)}
@@ -1402,6 +1563,14 @@ export default function FileTree({
         // visible rows (floor keeps error/empty states legible), capped so a
         // large attached folder cannot crush the workspace tree — past either
         // limit the tree scrolls internally.
+        // Attached folders read as a separate linked block: hairline rule on
+        // top plus a whisper of accent wash behind the whole subtree.
+        ...(variant === "external"
+          ? {
+              borderTop: "1px solid var(--rule-soft)",
+              background: "color-mix(in oklch, var(--accent) 2%, transparent)",
+            }
+          : null),
         ...(variant === "external"
           ? collapsed
             ? { flex: "0 0 auto" }
@@ -1446,46 +1615,15 @@ export default function FileTree({
         }
         actions={
           <>
-            <HeaderIconButton title="New file" onClick={() => void newFileAtRoot()}>
-              <NewFileIcon />
-            </HeaderIconButton>
-            <HeaderIconButton title="New folder" onClick={() => void newFolderAtRoot()}>
-              <NewFolderIcon />
-            </HeaderIconButton>
-            <HeaderIconButton
-              title="Refresh Explorer"
-              onClick={async () => {
-                try {
-                  await refreshWorkspace();
-                  setError(null);
-                } catch (err) {
-                  setError((err as Error).message);
-                }
-              }}
-            >
-              <RefreshIcon />
-            </HeaderIconButton>
-            <HeaderIconButton
-              title="Reveal in File Explorer"
-              onClick={async () => {
-                try {
-                  await window.spark.fs.revealInOS(cwd);
-                  setError(null);
-                } catch (err) {
-                  setError((err as Error).message);
-                }
-              }}
-            >
-              <RevealIcon />
-            </HeaderIconButton>
-            {onAddExternalFolder && (
-              <HeaderIconButton
-                title="Add folder to workspace"
-                onClick={() => onAddExternalFolder()}
-              >
-                <AddFolderIcon />
-              </HeaderIconButton>
-            )}
+            {/* One "+" button for everything additive (dropdown: new file /
+                new folder / attach folder). Refresh is gone — the fs watcher
+                keeps the tree live — and Reveal moved into the blank-space
+                right-click menu. */}
+            <NewEntryButton
+              onNewFile={() => void newFileAtRoot()}
+              onNewFolder={() => void newFolderAtRoot()}
+              onAddExternalFolder={onAddExternalFolder}
+            />
           </>
         }
       />
@@ -1766,7 +1904,7 @@ export default function FileTree({
                 }
               : null
           }
-          revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Browser" : "Reveal in OS"}
+          revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Browser" : REVEAL_IN_OS_LABEL}
           onOpenChanges={
             onOpenChanges &&
             contextMenuEntries.length === 1 &&
@@ -1833,13 +1971,30 @@ export default function FileTree({
           style={{
             position: "fixed",
             zIndex: 100,
-            left: Math.max(8, Math.min(blankMenu.x, window.innerWidth - 180)),
-            top: Math.max(8, Math.min(blankMenu.y, window.innerHeight - 60)),
-            width: 172,
+            left: Math.max(8, Math.min(blankMenu.x, window.innerWidth - 196)),
+            top: Math.max(8, Math.min(blankMenu.y, window.innerHeight - 212)),
+            width: 188,
             borderRadius: 8,
             padding: 6,
           }}
         >
+          <MenuButton
+            onClick={() => {
+              setBlankMenu(null);
+              void newFileAtRoot();
+            }}
+          >
+            New File
+          </MenuButton>
+          <MenuButton
+            onClick={() => {
+              setBlankMenu(null);
+              void newFolderAtRoot();
+            }}
+          >
+            New Folder
+          </MenuButton>
+          <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
           <MenuButton
             hint="Ctrl+V"
             onClick={() => {
@@ -1849,6 +2004,109 @@ export default function FileTree({
           >
             Paste
           </MenuButton>
+          <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
+          <MenuButton
+            onClick={() => {
+              setBlankMenu(null);
+              void window.spark.fs
+                .revealInOS(cwd)
+                .catch((err) => setError((err as Error).message));
+            }}
+          >
+            {REVEAL_IN_OS_LABEL}
+          </MenuButton>
+        </div>
+      )}
+      {pendingMove && (
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={() => setPendingMove(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 120,
+            background: "color-mix(in oklab, black 30%, transparent)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            role="alertdialog"
+            aria-label="Confirm folder move"
+            className="spark-glass--strong"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 320,
+              borderRadius: 10,
+              padding: "16px 16px 14px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--ink)" }}>
+              {pendingMove.folderNames.length > 1
+                ? `Move ${pendingMove.folderNames.length} folders?`
+                : "Move folder?"}
+            </span>
+            <span style={{ fontSize: 12, color: "var(--ink-dim)", lineHeight: 1.5 }}>
+              {pendingMove.folderNames.length > 1
+                ? `Move ${pendingMove.folderNames.length} folders (${pendingMove.folderNames
+                    .slice(0, 3)
+                    .join(", ")}${pendingMove.folderNames.length > 3 ? ", …" : ""}) into `
+                : (
+                    <>
+                      Move <strong>{pendingMove.folderNames[0]}</strong> and everything inside it
+                      into{" "}
+                    </>
+                  )}
+              <strong>
+                {pendingMove.destDir === cwd ? basename(cwd) : basename(pendingMove.destDir)}
+              </strong>
+              ?
+            </span>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setPendingMove(null)}
+                style={{
+                  appearance: "none",
+                  border: "1px solid var(--rule-strong)",
+                  background: "transparent",
+                  color: "var(--ink-dim)",
+                  borderRadius: 6,
+                  padding: "5px 12px",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: "default",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={confirmPendingMove}
+                style={{
+                  appearance: "none",
+                  border: "none",
+                  background: "var(--accent)",
+                  color: "var(--on-accent, #fff)",
+                  borderRadius: 6,
+                  padding: "5px 14px",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: "default",
+                }}
+              >
+                Move
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -2117,6 +2375,10 @@ const PlaceholderRow = React.memo(function PlaceholderRow({
 interface RowProps {
   node: Node;
   depth: number;
+  // The root row of an ATTACHED external folder — styled as a linked source
+  // (accent tint + LINKED chip) so it never reads as part of the workspace
+  // tree proper.
+  externalRoot?: boolean;
   active: boolean;
   selected: boolean;
   dirOpen: boolean;
@@ -2152,6 +2414,7 @@ function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
   return !(
     prev.node !== next.node ||
     prev.depth !== next.depth ||
+    prev.externalRoot !== next.externalRoot ||
     prev.active !== next.active ||
     prev.selected !== next.selected ||
     prev.dirOpen !== next.dirOpen ||
@@ -2180,6 +2443,7 @@ function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
 const Row = React.memo(function Row({
   node,
   depth,
+  externalRoot = false,
   active,
   selected,
   dirOpen,
@@ -2208,14 +2472,18 @@ const Row = React.memo(function Row({
         ? "color-mix(in oklab, var(--ink) 9%, transparent)"
         : hover
           ? "color-mix(in oklab, var(--ink) 4%, transparent)"
-          : "transparent";
+          : externalRoot
+            ? "color-mix(in oklch, var(--accent) 6%, transparent)"
+            : "transparent";
   const rowShadow = isDropTarget
     ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 55%, transparent)"
     : selected
       ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 38%, transparent)"
       : active
         ? "inset 0 0 0 1px color-mix(in oklab, var(--ink) 10%, transparent)"
-        : "none";
+        : externalRoot
+          ? "inset 2px 0 0 color-mix(in oklch, var(--accent) 70%, transparent)"
+          : "none";
 
   // Stable wrappers so this row invokes the shared parent handlers with its
   // own node / path. These close over `node`, so they change only when this
@@ -2291,16 +2559,50 @@ const Row = React.memo(function Row({
         <span
           style={{
             ...ROW_LABEL_STYLE,
+            fontWeight: externalRoot ? 600 : ROW_LABEL_STYLE.fontWeight,
             color:
               selected || active
                 ? "var(--ink)"
                 : gitFileStatus
                   ? statusColor(gitFileStatus)
-                  : "var(--ink-dim)",
+                  : externalRoot
+                    ? "var(--ink)"
+                    : "var(--ink-dim)",
           }}
           title={node.entry.path}
         >
           {node.entry.name}
+        </span>
+      )}
+      {externalRoot && !renaming && (
+        <span
+          aria-hidden
+          title="Attached folder (outside the workspace)"
+          style={{
+            flex: "0 0 auto",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 3,
+            padding: "1px 5px",
+            borderRadius: 999,
+            fontFamily: "var(--font-sans)",
+            fontSize: 8,
+            fontWeight: 800,
+            letterSpacing: "0.1em",
+            color: "var(--accent)",
+            background: "color-mix(in oklch, var(--accent) 13%, transparent)",
+            boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--accent) 28%, transparent)",
+          }}
+        >
+          <svg width="8" height="8" viewBox="0 0 12 12" fill="none">
+            <path
+              d="M5 7 L7 5 M4.2 5.4 L5.8 3.8 a1.7 1.7 0 0 1 2.4 2.4 L6.6 7.8 M7.8 6.6 L6.2 8.2 a1.7 1.7 0 0 1 -2.4 -2.4 L5.4 4.2"
+              stroke="currentColor"
+              strokeWidth="1.1"
+              strokeLinecap="round"
+            />
+          </svg>
+          LINKED
         </span>
       )}
       {!renaming && gitFileStatus && (
@@ -2680,6 +2982,133 @@ function parentPath(path: string): string {
   return dirname(path);
 }
 
+// Draw the OS drag image for a row drag: a rounded card with a folder/file
+// glyph, the entry name (or "N items"), a count chip for multi-drags, and a
+// soft drop shadow. Rendered at devicePixelRatio and registered main-side at
+// that scale factor so it stays crisp on retina. Returns null on any canvas
+// failure — the caller then falls back to the stock drag glyph.
+function renderDragBadge(
+  label: string,
+  isDir: boolean,
+  count: number,
+): { dataUrl: string; scaleFactor: number } | null {
+  try {
+    const scale = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    const font = `600 12px ${getComputedStyle(document.body).fontFamily || "system-ui, sans-serif"}`;
+    ctx.font = font;
+    const maxTextW = 180;
+    const textW = Math.min(ctx.measureText(label).width, maxTextW);
+    const showChip = count > 1;
+    const chipLabel = String(count);
+    const chipW = showChip ? Math.max(18, ctx.measureText(chipLabel).width + 12) : 0;
+
+    const padX = 10;
+    const iconW = 16;
+    const gap = 7;
+    const cardH = 30;
+    const cardW = Math.ceil(
+      padX + iconW + gap + textW + (showChip ? gap + chipW : 0) + padX,
+    );
+    // Bleed room around the card so the shadow isn't clipped.
+    const bleed = 14;
+    canvas.width = (cardW + bleed * 2) * scale;
+    canvas.height = (cardH + bleed * 2) * scale;
+    ctx.scale(scale, scale);
+    ctx.translate(bleed, bleed);
+
+    // Card with drop shadow.
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+    ctx.shadowBlur = 12;
+    ctx.shadowOffsetY = 4;
+    ctx.fillStyle = "rgba(34, 37, 51, 0.96)";
+    ctx.beginPath();
+    ctx.roundRect(0, 0, cardW, cardH, 8);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(0.5, 0.5, cardW - 1, cardH - 1, 8);
+    ctx.stroke();
+
+    // Glyph: folder or file outline.
+    ctx.strokeStyle = "rgba(178, 186, 210, 0.95)";
+    ctx.lineWidth = 1.3;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    const gx = padX;
+    const gy = (cardH - 14) / 2;
+    ctx.beginPath();
+    if (isDir) {
+      // Folder: tabbed top edge, rounded body.
+      ctx.roundRect(gx, gy + 2.5, 14, 10.5, 2);
+      ctx.moveTo(gx, gy + 4.5);
+      ctx.lineTo(gx + 0.5, gy + 1.5);
+      ctx.arcTo(gx + 1, gy + 0.5, gx + 2.5, gy + 0.5, 1.5);
+      ctx.lineTo(gx + 5.5, gy + 0.5);
+      ctx.lineTo(gx + 7, gy + 2.5);
+    } else {
+      // Document: page with a folded corner.
+      ctx.moveTo(gx + 2, gy);
+      ctx.lineTo(gx + 8.5, gy);
+      ctx.lineTo(gx + 12, gy + 3.5);
+      ctx.lineTo(gx + 12, gy + 14);
+      ctx.lineTo(gx + 2, gy + 14);
+      ctx.closePath();
+      ctx.moveTo(gx + 8.5, gy);
+      ctx.lineTo(gx + 8.5, gy + 3.5);
+      ctx.lineTo(gx + 12, gy + 3.5);
+    }
+    ctx.stroke();
+
+    // Name.
+    ctx.font = font;
+    ctx.fillStyle = "rgba(233, 236, 246, 0.98)";
+    ctx.textBaseline = "middle";
+    const textX = padX + iconW + gap;
+    if (ctx.measureText(label).width > maxTextW) {
+      let clipped = label;
+      while (clipped.length > 1 && ctx.measureText(`${clipped}…`).width > maxTextW) {
+        clipped = clipped.slice(0, -1);
+      }
+      ctx.fillText(`${clipped}…`, textX, cardH / 2 + 0.5);
+    } else {
+      ctx.fillText(label, textX, cardH / 2 + 0.5);
+    }
+
+    // Count chip.
+    if (showChip) {
+      const chipX = cardW - padX - chipW;
+      const chipH = 16;
+      const chipY = (cardH - chipH) / 2;
+      let accent = "#7c8cff";
+      try {
+        const v = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+        if (v) accent = v;
+      } catch {
+        // Keep the fallback accent.
+      }
+      ctx.fillStyle = accent;
+      ctx.beginPath();
+      ctx.roundRect(chipX, chipY, chipW, chipH, chipH / 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.98)";
+      ctx.font = `700 10px ${getComputedStyle(document.body).fontFamily || "system-ui, sans-serif"}`;
+      const cw = ctx.measureText(chipLabel).width;
+      ctx.fillText(chipLabel, chipX + (chipW - cw) / 2, cardH / 2 + 0.5);
+    }
+
+    return { dataUrl: canvas.toDataURL("image/png"), scaleFactor: scale };
+  } catch {
+    return null;
+  }
+}
+
 // True when `path` is the workspace root itself or sits somewhere beneath it.
 // Slash- and case-normalized like `workspaceRelativePath` (macOS/Windows
 // filesystems are case-insensitive; watcher/OS paths can carry mixed
@@ -2744,36 +3173,75 @@ function HeaderIconButton({
   );
 }
 
+// "+" — the header's single create affordance (opens the New File / New
+// Folder dropdown). Rounded caps at 1.4px so it reads crisply at 15px.
+function PlusIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M8 3.75 V12.25 M3.75 8 H12.25"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function NewFileIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path d="M3 1.5 H8 L11 4.5 V12.5 H3 Z" stroke="currentColor" strokeWidth="1" />
-      <path d="M8 1.5 V4.5 H11" stroke="currentColor" strokeWidth="1" />
-      <path d="M7 7 V11 M5 9 H9" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M3.75 2.75 a1 1 0 0 1 1 -1 H9.25 L12.25 4.75 V13.25 a1 1 0 0 1 -1 1 H4.75 a1 1 0 0 1 -1 -1 Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M9.25 1.75 V4.75 H12.25" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path
+        d="M8 7.5 V11.5 M6 9.5 H10"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
 
 function NewFolderIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path d="M1 4 H5.5 L7 5.5 H13 V12 H1 Z" stroke="currentColor" strokeWidth="1" />
-      <path d="M7 7.5 V10.5 M5.5 9 H8.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M1.75 4 a1 1 0 0 1 1 -1 H5.9 L7.4 4.75 H13.25 a1 1 0 0 1 1 1 V12 a1 1 0 0 1 -1 1 H2.75 a1 1 0 0 1 -1 -1 Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 6.9 V10.9 M6 8.9 H10"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
 
 // Folder with an inward arrow: attach an existing outside folder to the
-// workspace (NewFolderIcon's plus already means "create", RevealIcon's
-// outward arrow means "open elsewhere").
+// workspace (distinct from NewFolderIcon's plus, which means "create").
 function AddFolderIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path d="M1 4 H5.5 L7 5.5 H13 V12 H1 Z" stroke="currentColor" strokeWidth="1" />
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
       <path
-        d="M10.5 7 L7.5 10 M7.5 10 H10 M7.5 10 V7.5"
+        d="M1.75 4 a1 1 0 0 1 1 -1 H5.9 L7.4 4.75 H13.25 a1 1 0 0 1 1 1 V12 a1 1 0 0 1 -1 1 H2.75 a1 1 0 0 1 -1 -1 Z"
         stroke="currentColor"
-        strokeWidth="1"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M10.6 7 L7.6 10 M7.6 10 H10.1 M7.6 10 V7.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -2781,19 +3249,166 @@ function AddFolderIcon() {
   );
 }
 
-function RevealIcon() {
+// Header "+" button plus its dropdown: New File / New Folder / Add Folder to
+// Workspace. The dropdown is a fixed-position panel anchored under the button;
+// it closes on click-away, resize, or Escape (same pattern as the row context
+// menus).
+function NewEntryButton({
+  onNewFile,
+  onNewFolder,
+  onAddExternalFolder,
+}: {
+  onNewFile: () => void;
+  onNewFolder: () => void;
+  onAddExternalFolder?: () => void;
+}) {
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const MENU_WIDTH = 196;
+
+  useEffect(() => {
+    if (!menuPos) return;
+    const close = () => setMenuPos(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuPos]);
+
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path d="M2 4 H5 L6.5 5.5 H12 V11 H2 Z" stroke="currentColor" strokeWidth="1" fill="none" />
-      <path
-        d="M8.5 7.5 L11 7.5 L11 10 M11 7.5 L7.5 11"
-        stroke="currentColor"
-        strokeWidth="1"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
-    </svg>
+    <span
+      ref={anchorRef}
+      style={{ display: "inline-flex" }}
+      // Keep the opening click from reaching the window click-away listener
+      // registered by the effect above: React flushes that effect synchronously
+      // for discrete events, so without this the same click that opens the
+      // menu bubbles on to window and instantly closes it again.
+      onClick={(e) => e.stopPropagation()}
+    >
+      <HeaderIconButton
+        title="New file, folder, or attached folder"
+        onClick={() => {
+          if (menuPos) {
+            setMenuPos(null);
+            return;
+          }
+          const rect = anchorRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          setMenuPos({
+            x: Math.max(8, Math.min(rect.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8)),
+            y: rect.bottom + 4,
+          });
+        }}
+      >
+        <PlusIcon />
+      </HeaderIconButton>
+      {menuPos && (
+        <div
+          className="spark-glass"
+          style={{
+            position: "fixed",
+            zIndex: 100,
+            left: menuPos.x,
+            top: menuPos.y,
+            width: MENU_WIDTH,
+            borderRadius: 8,
+            padding: 6,
+          }}
+        >
+          <NewEntryMenuItem
+            icon={<NewFileIcon />}
+            label="New File"
+            onClick={() => {
+              setMenuPos(null);
+              onNewFile();
+            }}
+          />
+          <NewEntryMenuItem
+            icon={<NewFolderIcon />}
+            label="New Folder"
+            onClick={() => {
+              setMenuPos(null);
+              onNewFolder();
+            }}
+          />
+          {onAddExternalFolder && (
+            <>
+              <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
+              <NewEntryMenuItem
+                icon={<AddFolderIcon />}
+                label="Add Folder to Workspace"
+                onClick={() => {
+                  setMenuPos(null);
+                  onAddExternalFolder();
+                }}
+              />
+            </>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
+// A dropdown row with a leading SVG icon (MenuButton's `icon` slot only takes
+// a text glyph, and these two rows read better with the real pictograms).
+function NewEntryMenuItem({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        appearance: "none",
+        width: "100%",
+        border: "none",
+        background: hovered ? "var(--panel)" : "transparent",
+        color: hovered ? "var(--ink)" : "var(--ink-dim)",
+        borderRadius: 6,
+        padding: "7px 8px",
+        textAlign: "left",
+        fontFamily: "inherit",
+        fontSize: 11,
+        fontWeight: 700,
+        cursor: "default",
+        display: "grid",
+        gridTemplateColumns: "18px minmax(0, 1fr)",
+        alignItems: "center",
+        gap: 8,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: hovered ? "var(--ink)" : "var(--muted)",
+        }}
+      >
+        {icon}
+      </span>
+      <span>{label}</span>
+    </button>
   );
 }
 
@@ -2806,25 +3421,3 @@ function DropIcon() {
   );
 }
 
-function RefreshIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path
-        d="M11.5 5.25 A4.25 4.25 0 0 0 3.55 3.2 L2.25 4.5"
-        stroke="currentColor"
-        strokeWidth="1"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M2.5 8.75 A4.25 4.25 0 0 0 10.45 10.8 L11.75 9.5"
-        stroke="currentColor"
-        strokeWidth="1"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="M2.25 2.25 V4.5 H4.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
-      <path d="M11.75 11.75 V9.5 H9.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
-    </svg>
-  );
-}

@@ -84,8 +84,10 @@ test("external folders render as extra Explorer roots, live-refresh, and detach 
       timeout: 10_000,
     });
 
-    // The primary header now offers "Add folder to workspace".
-    await expect(page.locator('button[title="Add folder to workspace"]')).toBeVisible();
+    // "Add Folder to Workspace" lives inside the header's "+" dropdown.
+    await page.getByTitle("New file, folder, or attached folder").click();
+    await expect(page.getByText("Add Folder to Workspace", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
 
     // The divider above the external tree drags its height. Synthesize the
     // pointer stream (down on the handle, moves on window) because real mouse

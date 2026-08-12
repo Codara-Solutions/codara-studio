@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
@@ -1552,6 +1552,35 @@ export function registerIpc(): void {
     await deleteFile(path);
   });
 
+  // Undoable delete: the entry moves into the app-owned delete stash instead
+  // of the OS trash, so fs:undoDelete can restore it. Evicted/stale stash
+  // entries end up in the OS trash via fs:purgeDeleteStash (and the startup
+  // sweep below), so delete still ultimately means "goes to trash".
+  handle("fs:deleteToStash", async (event, path: string) => {
+    return deleteToStash(path);
+  });
+
+  handle(
+    "fs:undoDelete",
+    async (event, args: { token: string; originalPath: string }) => {
+      if (typeof args?.token !== "string" || typeof args?.originalPath !== "string") {
+        throw new Error("Invalid undo request.");
+      }
+      return undoDeleteFromStash(args.token, args.originalPath);
+    },
+  );
+
+  handle("fs:purgeDeleteStash", async (event, tokens: string[]): Promise<void> => {
+    const list = Array.isArray(tokens)
+      ? tokens.filter((t): t is string => typeof t === "string")
+      : [];
+    await purgeDeleteStash(list);
+  });
+
+  // Leftover stash entries from a previous session (crash, or undo history
+  // that was never consumed) move on to the OS trash at startup.
+  void purgeDeleteStash().catch(() => undefined);
+
   handle("fs:createFile", async (event, args: CreateEntryInput): Promise<FsEntry> => {
     return createFile(args.parentPath, args.name);
   });
@@ -1603,28 +1632,52 @@ export function registerIpc(): void {
   // the user can drop them onto the desktop, another app, etc. Fire-and-forget
   // (`ipcMain.on`) because `webContents.startDrag` returns nothing and must run
   // on the sender's own contents while the drag gesture is live.
-  ipcMain.on("fs:startDrag", (e, paths: unknown) => {
-    // Starts an OS drag of arbitrary paths on behalf of the sender; gate it to
-    // the trusted main frame like the invoke channels.
-    if (!isTrustedOnSender(e, "fs:startDrag")) return;
-    const files = Array.isArray(paths)
-      ? paths.filter((p): p is string => typeof p === "string" && p.length > 0)
-      : typeof paths === "string" && paths.length > 0
-        ? [paths]
-        : [];
-    if (files.length === 0) return;
-    try {
-      e.sender.startDrag({
-        // `file` is the legacy single-path field some platforms still read;
-        // `files` carries the full (possibly multi-) selection.
-        file: files[0],
-        files,
-        icon: getDragIcon(),
-      });
-    } catch (err) {
-      console.warn("[main] fs:startDrag failed:", err);
-    }
-  });
+  ipcMain.on(
+    "fs:startDrag",
+    (e, paths: unknown, icon?: { dataUrl?: unknown; scaleFactor?: unknown }) => {
+      // Starts an OS drag of arbitrary paths on behalf of the sender; gate it to
+      // the trusted main frame like the invoke channels.
+      if (!isTrustedOnSender(e, "fs:startDrag")) return;
+      const files = Array.isArray(paths)
+        ? paths.filter((p): p is string => typeof p === "string" && p.length > 0)
+        : typeof paths === "string" && paths.length > 0
+          ? [paths]
+          : [];
+      if (files.length === 0) return;
+      // Optional renderer-drawn drag badge (name + count chip). Registered at
+      // the renderer's devicePixelRatio so it stays crisp on retina. Falls back
+      // to the built-in glyph on any malformed payload.
+      let dragImage = getDragIcon();
+      if (
+        typeof icon?.dataUrl === "string" &&
+        icon.dataUrl.startsWith("data:image/png;base64,") &&
+        icon.dataUrl.length < 1024 * 1024
+      ) {
+        try {
+          const scale =
+            typeof icon.scaleFactor === "number" && icon.scaleFactor >= 1 && icon.scaleFactor <= 4
+              ? icon.scaleFactor
+              : 1;
+          const img = nativeImage.createEmpty();
+          img.addRepresentation({ scaleFactor: scale, dataURL: icon.dataUrl });
+          if (!img.isEmpty()) dragImage = img;
+        } catch {
+          // Keep the fallback glyph.
+        }
+      }
+      try {
+        e.sender.startDrag({
+          // `file` is the legacy single-path field some platforms still read;
+          // `files` carries the full (possibly multi-) selection.
+          file: files[0],
+          files,
+          icon: dragImage,
+        });
+      } catch (err) {
+        console.warn("[main] fs:startDrag failed:", err);
+      }
+    },
+  );
 
   handle("fs:addWatchRoot", async (e, root: string): Promise<void> => {
     // Remote (ssh://) roots have no local fs.watch — the git panel's 10s poll
