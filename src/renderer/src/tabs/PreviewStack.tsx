@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import BrowserPane, {
   type BrowserPaneHandle,
 } from "../components/Preview/BrowserPane";
@@ -9,6 +9,14 @@ import {
   updatePreviewTabUrl,
 } from "../components/Preview/registry";
 import type { PreviewTab, Tab, TabId } from "./types";
+import type { DockRef } from "./dock";
+import {
+  DOCK_CONTENT_Z,
+  getDockVersion,
+  peekDockPlacementSnapshot,
+  registerDockElement,
+  subscribeDockChanges,
+} from "./dockGeometry";
 
 // PreviewStack hosts preview tabs. Each <BrowserPane> wraps an Electron
 // <webview>, which is a full Chromium renderer process (~40-80MB resident
@@ -30,12 +38,21 @@ import type { PreviewTab, Tab, TabId } from "./types";
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
+  // Previews docked into a terminal tab's split grid are positioned by that
+  // grid instead of filling the workbench — see dockGeometry.ts. The webview
+  // element itself never moves in the DOM, which is the whole point:
+  // re-parenting one reloads its guest.
+  dockIndex: ReadonlyMap<TabId, DockRef>;
   onUrlChange: (id: TabId, url: string) => void;
 }
 
 // React.memo: the useTabs API object is memoized, so PreviewStack only
 // re-renders when the tab list / active id / callback genuinely change.
-function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
+function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
+  // One subscription for the whole stack (hooks can't be called per-tab inside
+  // the map below). Only flips when a docked cell's shown-state changes —
+  // never on a rect write, which goes straight to the element's style.
+  useSyncExternalStore(subscribeDockChanges, getDockVersion, getDockVersion);
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates.
   const previews = useMemo(
@@ -57,6 +74,18 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
       callbacks.current.set(id, cb);
     }
     return cb;
+  };
+
+  // Stable per-tab callback refs: an inline arrow would re-register (and so
+  // re-apply geometry) on every render.
+  const dockRefs = useRef(new Map<TabId, (el: HTMLDivElement | null) => void>());
+  const getDockRef = (id: TabId) => {
+    let ref = dockRefs.current.get(id);
+    if (!ref) {
+      ref = (el: HTMLDivElement | null) => registerDockElement(id, el);
+      dockRefs.current.set(id, ref);
+    }
+    return ref;
   };
 
   const handles = useRef(new Map<TabId, BrowserPaneHandle | null>());
@@ -124,18 +153,42 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
     // active inner wrapper re-enables pointer-events:auto.
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       {previews.map((t) => {
-        const visible = t.id === activeId;
+        const docked = dockIndex.has(t.id);
+        // A docked preview shows whenever its host terminal tab is on screen —
+        // it is no longer the active tab itself.
+        const visible = docked
+          ? (peekDockPlacementSnapshot(t.id)?.shown ?? false)
+          : t.id === activeId;
         return (
           <div
             key={t.id}
+            ref={getDockRef(t.id)}
+            // Marks the element the grid positions, so the docked frame is
+            // addressable without reaching through to the <webview> (which
+            // sits below the address bar and is a smaller box).
+            data-dock-content-id={docked ? t.id : undefined}
             aria-hidden={!visible}
-            style={{
-              position: "absolute",
-              inset: 0,
-              zIndex: visible ? 2 : 1,
-              visibility: visible ? "visible" : "hidden",
-              pointerEvents: visible ? "auto" : "none",
-            }}
+            style={
+              docked
+                ? {
+                    position: "absolute",
+                    // Placeholder box only: the registry overwrites the frame
+                    // imperatively as soon as the host publishes its layout.
+                    inset: 0,
+                    zIndex: DOCK_CONTENT_Z,
+                    visibility: "hidden",
+                    pointerEvents: "none",
+                    overflow: "hidden",
+                    borderRadius: "var(--terminal-pane-radius)",
+                  }
+                : {
+                    position: "absolute",
+                    inset: 0,
+                    zIndex: visible ? 2 : 1,
+                    visibility: visible ? "visible" : "hidden",
+                    pointerEvents: visible ? "auto" : "none",
+                  }
+            }
           >
             <BrowserPane
               ref={(h) => setHandle(t.id, h, t.url, t.runId ?? null)}

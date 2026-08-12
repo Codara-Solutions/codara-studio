@@ -8,6 +8,7 @@ import { isRemotePath } from "@shared/remote";
 const PdfPreview = lazy(() => import("./PdfPreview"));
 const HtmlPreview = lazy(() => import("./HtmlPreview"));
 const DocxPreview = lazy(() => import("./DocxPreview"));
+const PptxPreview = lazy(() => import("./PptxPreview"));
 const WhiteboardFilePreview = lazy(() => import("./WhiteboardFilePreview"));
 
 interface Props {
@@ -273,6 +274,22 @@ export default function FilePreview({
           }
         >
           <DocxPreview path={path} mtimeMs={stat?.mtimeMs ?? 0} />
+        </Suspense>
+      </div>
+    );
+  }
+
+  if (kind === "pptx") {
+    return (
+      <div style={{ ...hostStyle, overflow: "hidden" }}>
+        <Suspense
+          fallback={
+            <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>
+              Loading presentation viewer…
+            </div>
+          }
+        >
+          <PptxPreview path={path} mtimeMs={stat?.mtimeMs ?? 0} />
         </Suspense>
       </div>
     );

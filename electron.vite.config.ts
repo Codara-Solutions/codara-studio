@@ -114,6 +114,17 @@ export default defineConfig({
             // docx-preview (+ its jszip dep) is only imported by the lazily-
             // loaded DocxPreview chunk — same reasoning as pdfjs-vendor.
             if (id.includes("docx-preview") || id.includes("jszip")) return "docx-vendor";
+            // pptx-preview + the echarts stack it renders slide charts with,
+            // only reachable from the lazy PptxPreview chunk. jszip is shared
+            // with docx-vendor rather than duplicated (opening a deck pulls
+            // that chunk too, which is just the zip reader). uuid is
+            // deliberately NOT pinned here: mermaid imports it as well, and
+            // pinning it would drag all of echarts into the mermaid chunk.
+            if (
+              id.includes("pptx-preview") ||
+              /[\\/]node_modules[\\/](echarts|zrender|lodash)[\\/]/.test(id)
+            )
+              return "pptx-vendor";
             return undefined;
           },
         },

@@ -1,12 +1,17 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
+import { canDockTab } from "./dock";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import AutomationsStripButton from "../components/automations/AutomationsStripButton";
 import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { collectLeaves } from "./paneTree";
 import {
+  TAB_DOCK_DRAG_MIME,
   TAB_REORDER_DRAG_MIME,
+  beginTabDockDrag,
+  endTabDockDrag,
+  updateTabDockDragPosition,
   TERMINAL_PANE_DRAG_MIME,
   beginTabReorderDrag,
   endTabReorderDrag,
@@ -71,6 +76,9 @@ interface Props {
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
+  // "Open in split" from a pill's context menu — the keyboard/menu route to
+  // the same thing dragging a pill into the grid does.
+  onDockTab: (tabId: TabId, hostTabId: TabId) => void;
   // Resolved keybinding hints for the "+" picker rows, derived in App from the
   // effective binding table so they reflect the user's actual (possibly
   // rebound) chords and the right platform glyphs. A field is undefined when
@@ -129,6 +137,7 @@ function TabBar({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
+  onDockTab,
   pickerHints,
   closeOnMiddleClick,
   workspaceId,
@@ -763,6 +772,7 @@ function TabBar({
               onRename={onRenameChat}
               onClose={onCloseChat}
               onReorderDragStart={handleReorderDragStart}
+              onContextMenu={onTabContextMenu}
               closeOnMiddleClick={closeOnMiddleClick}
             />
           ) : (
@@ -797,12 +807,23 @@ function TabBar({
       </div>
       {tabMenu && (() => {
         const menuTab = tabs.find((t) => t.id === tabMenu.id);
-        if (!menuTab || menuTab.kind !== "editor") return null;
+        if (!menuTab) return null;
+        const path = menuTab.kind === "editor" ? menuTab.path : null;
+        // "Open in split" needs somewhere to dock INTO: the active terminal
+        // tab, else the most recent one.
+        const host =
+          [...tabs].reverse().find((t) => t.kind === "terminal" && t.id === activeId) ??
+          [...tabs].reverse().find((t) => t.kind === "terminal");
+        const canDock = canDockTab(menuTab) && !!host;
+        if (!path && !canDock) return null;
         return (
           <TabContextMenu
-            path={menuTab.path}
+            path={path}
             x={tabMenu.x}
             y={tabMenu.y}
+            onOpenInSplit={
+              canDock ? () => onDockTab(menuTab.id, host!.id) : undefined
+            }
             onDismiss={() => setTabMenu(null)}
           />
         );
@@ -986,8 +1007,33 @@ const TabItem = React.memo(function TabItem({
       // The strip owns the gesture from here: it stamps the tab-specific MIME
       // (so the terminal-pane drop path ignores this drag) and takes its one
       // geometry measurement while the layout is still untransformed.
-      onDragStart={(event) => onReorderDragStart(tab.id, event)}
-      onDragEnd={clearHoverActivate}
+      onDragStart={(event) => {
+        onReorderDragStart(tab.id, event);
+        // The same gesture doubles as "dock this tab": the strip reads the
+        // reorder MIME, the split grid reads this one. dragover can't call
+        // getData, so the grid tracks the payload through the module-level
+        // channel and only uses the MIME to decide whether to accept a drop.
+        if (canDockTab(tab)) {
+          event.dataTransfer.setData(
+            TAB_DOCK_DRAG_MIME,
+            JSON.stringify({ tabId: tab.id, tabKind: tab.kind, title: tab.title }),
+          );
+          beginTabDockDrag(
+            { tabId: tab.id, tabKind: tab.kind as "preview" | "editor" | "chat", title: tab.title },
+            { clientX: event.clientX, clientY: event.clientY },
+          );
+        }
+      }}
+      onDrag={(event) => {
+        // Native drag events carry the pointer; the grid needs it to hit-test
+        // which cell edge the cursor is over.
+        if (event.clientX === 0 && event.clientY === 0) return;
+        updateTabDockDragPosition({ clientX: event.clientX, clientY: event.clientY });
+      }}
+      onDragEnd={() => {
+        endTabDockDrag();
+        clearHoverActivate();
+      }}
       onDragEnter={(event) => {
         if (!acceptsPaneDrop(event)) return;
         event.preventDefault();
@@ -1049,7 +1095,8 @@ const TabItem = React.memo(function TabItem({
         }
       }}
       onContextMenu={(e) => {
-        if (tab.kind !== "editor") return;
+        // Editors get file actions; any dockable tab gets "Open in split".
+        if (tab.kind !== "editor" && !canDockTab(tab)) return;
         e.preventDefault();
         e.stopPropagation();
         onContextMenu(tab.id, e.clientX, e.clientY);
@@ -1119,6 +1166,7 @@ interface ChatTabItemProps {
   onRename: (id: TabId, title: string) => void;
   onClose: (id: TabId) => void;
   onReorderDragStart: (id: TabId, event: React.DragEvent) => void;
+  onContextMenu: (id: TabId, x: number, y: number) => void;
   closeOnMiddleClick: boolean;
 }
 
@@ -1131,6 +1179,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
   onRename,
   onClose,
   onReorderDragStart,
+  onContextMenu,
   closeOnMiddleClick,
 }: ChatTabItemProps) {
   const [editing, setEditing] = useState(false);
@@ -1184,9 +1233,35 @@ const ChatTabItem = React.memo(function ChatTabItem({
       // Not draggable while renaming: the text selection inside the input has
       // to win over the tab gesture.
       draggable={!editing}
+      onContextMenu={(e) => {
+        if (editing) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(tab.id, e.clientX, e.clientY);
+      }}
       // Reorder drags are hit-tested by the strip (see TabItem) — this row only
-      // starts the gesture and slides when the preview asks it to.
-      onDragStart={(event) => onReorderDragStart(tab.id, event)}
+      // starts the gesture and slides when the preview asks it to. The same
+      // gesture doubles as "dock this tab" for the split grid.
+      onDragStart={(event) => {
+        onReorderDragStart(tab.id, event);
+        if (canDockTab(tab)) {
+          event.dataTransfer.setData(
+            TAB_DOCK_DRAG_MIME,
+            JSON.stringify({ tabId: tab.id, tabKind: tab.kind, title: tab.title }),
+          );
+          beginTabDockDrag(
+            { tabId: tab.id, tabKind: "chat", title: tab.title },
+            { clientX: event.clientX, clientY: event.clientY },
+          );
+        }
+      }}
+      onDrag={(event) => {
+        if (event.clientX === 0 && event.clientY === 0) return;
+        updateTabDockDragPosition({ clientX: event.clientX, clientY: event.clientY });
+      }}
+      onDragEnd={() => {
+        endTabDockDrag();
+      }}
       onClick={(e) => {
         e.stopPropagation();
         if (!editing) onSelect(tab.id);
@@ -1620,11 +1695,13 @@ function TabContextMenu({
   path,
   x,
   y,
+  onOpenInSplit,
   onDismiss,
 }: {
-  path: string;
+  path: string | null;
   x: number;
   y: number;
+  onOpenInSplit?: () => void;
   onDismiss: () => void;
 }) {
   const width = 200;
@@ -1642,20 +1719,34 @@ function TabContextMenu({
         width,
       }}
     >
-      <PickerItem
-        label="Reveal in OS"
-        onClick={() => {
-          onDismiss();
-          void window.spark.fs.revealInOS(path).catch(() => {});
-        }}
-      />
-      <PickerItem
-        label="Copy Path"
-        onClick={() => {
-          onDismiss();
-          void navigator.clipboard.writeText(path).catch(() => {});
-        }}
-      />
+      {onOpenInSplit && (
+        <PickerItem
+          label="Open in split"
+          hint="dock"
+          onClick={() => {
+            onDismiss();
+            onOpenInSplit();
+          }}
+        />
+      )}
+      {path && (
+        <PickerItem
+          label="Reveal in OS"
+          onClick={() => {
+            onDismiss();
+            void window.spark.fs.revealInOS(path).catch(() => {});
+          }}
+        />
+      )}
+      {path && (
+        <PickerItem
+          label="Copy Path"
+          onClick={() => {
+            onDismiss();
+            void navigator.clipboard.writeText(path).catch(() => {});
+          }}
+        />
+      )}
     </div>
   );
 }

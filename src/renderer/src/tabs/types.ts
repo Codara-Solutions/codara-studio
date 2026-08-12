@@ -81,13 +81,34 @@ export type TerminalLeafOrigin = {
   initialRows?: number;
 };
 
+// Tab kinds that may be docked into a terminal tab's split grid. A docked tab
+// keeps living in the `tabs` array and stays mounted by its own Stack — only
+// its RECT comes from the pane tree (see dockGeometry.ts). Moving the content
+// itself into TerminalStack's subtree would re-parent it, which reloads a
+// <webview> guest and throws away editor/chat state.
+export type DockableTabKind = "preview" | "editor" | "chat";
+
+// What a grid cell hosts. `undefined` on a leaf means a terminal, which keeps
+// every pre-dock persisted layout structurally valid.
+export type PaneContent =
+  | { type: "terminal" }
+  | { type: "tab"; tabId: TabId; tabKind: DockableTabKind };
+
 // Each terminal tab owns a recursive tree of panes. A leaf is one PTY-backed
-// pane; a split renders two children separated by a draggable handle. The tab
-// remembers which leaf is "active" so split / close shortcuts know what to
-// operate on, and so per-pane URL detection can highlight the right surface.
+// pane (or, when `content` names a tab, a docked cell lending its rect to
+// another tab's content); a split renders two children separated by a
+// draggable handle. The tab remembers which leaf is "active" so split / close
+// shortcuts know what to operate on, and so per-pane URL detection can
+// highlight the right surface.
 export interface TerminalLeaf {
   kind: "leaf";
+  // Cell identity. For terminal cells this is also the PTY session id; dock
+  // cells use a `dock_*` id that is never handed to the PTY layer. Every
+  // paneTree operation keys off this alone, which is why splitting, moving,
+  // resizing and closing work on dock cells without a generic Pane<T>.
   paneId: string;
+  // Absent === { type: "terminal" }.
+  content?: PaneContent;
   cwd?: string;
   // Runtime-only trusted origin for the live PTY. Keeping ownership on the leaf
   // makes it follow that pane through tab moves and detaches without marking

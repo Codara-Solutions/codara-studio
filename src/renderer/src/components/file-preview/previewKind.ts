@@ -10,6 +10,7 @@ export type PreviewKind =
   | "video"
   | "audio"
   | "docx"
+  | "pptx"
   | "whiteboard"
   | "html";
 
@@ -23,6 +24,9 @@ const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "flac", "m4a", "aac"]);
 // binary .doc/.dot and .rtf are a different format entirely and fall through
 // to the binary-file guard instead.
 const DOCX_EXTS = new Set(["docx", "docm", "dotx", "dotm"]);
+// Same OOXML-only rule for PowerPoint: pptx-preview reads the zip-based
+// formats, so legacy binary .ppt/.pot fall through to the binary-file guard.
+const PPTX_EXTS = new Set(["pptx", "pptm", "ppsx", "ppsm", "potx", "potm"]);
 
 export function previewKindForPath(path: string): PreviewKind | null {
   const name = path.replace(/\\/g, "/").split("/").pop() ?? "";
@@ -39,5 +43,6 @@ export function previewKindForPath(path: string): PreviewKind | null {
   if (VIDEO_EXTS.has(ext)) return "video";
   if (AUDIO_EXTS.has(ext)) return "audio";
   if (DOCX_EXTS.has(ext)) return "docx";
+  if (PPTX_EXTS.has(ext)) return "pptx";
   return null;
 }
