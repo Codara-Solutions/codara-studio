@@ -965,6 +965,21 @@ a { color: inherit; }
   background: var(--bg);
 }
 
+/* Pane-controls pill: revealed on pane hover only. At rest it is fully hidden
+   so it never crowds the prompt's right-aligned segment (p10k prints its
+   timestamp into the exact corner the pill occupies). Focus-within keeps it
+   shown for keyboard users; data-menu-open pins it while the add-pane menu is
+   up (the pointer is over the menu, not the pane). */
+.spark-terminal-pane .spark-pane-toolbar {
+  opacity: 0;
+  transition: opacity var(--motion-fast, 120ms) var(--ease-out, ease-out);
+}
+.spark-terminal-pane:hover .spark-pane-toolbar,
+.spark-terminal-pane .spark-pane-toolbar:focus-within,
+.spark-terminal-pane .spark-pane-toolbar[data-menu-open="true"] {
+  opacity: 1;
+}
+
 .xterm-host {
   position: relative;
   box-sizing: border-box;
@@ -3013,6 +3028,18 @@ a { color: inherit; }
     backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
+  }
+  /* (spark-pane-toolbar visibility lives outside this media block — hover
+     reveal applies with glass on OR off.) */
+  /* Overlays that float on LIVE TERMINAL GLYPHS (the pane-controls pill).
+     Crisp monospace text reads straight through the popover recipe's 3-7px
+     blur — the moment a prompt reaches the top row the pill looks like plain
+     transparency. A much heavier lens + strong veil keeps it frosted no
+     matter what scrolls beneath. */
+  html:not([data-glass="off"]) .spark-glass--over-terminal {
+    background-color: var(--glass-bg-strong);
+    -webkit-backdrop-filter: blur(14px) saturate(var(--glass-saturate));
+    backdrop-filter: blur(14px) saturate(var(--glass-saturate));
   }
   /* Opt-in faint frost, no lens — for one-off large/always-visible surfaces
      where refraction would read as a rendering bug. (The chrome bands

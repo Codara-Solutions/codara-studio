@@ -5,6 +5,18 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { registerPreviewRpcHandler } from "./components/Preview/previewRpc";
 import { registerTerminalRpcHandler } from "./components/Terminal/terminalRpc";
+// Bundled fonts (previously fetched from Google Fonts at runtime, which
+// delayed the first styled paint on a cold cache and dropped the app to
+// system fallbacks when offline). Weights mirror the old css2 request:
+// Inter 400/500/600/700, JetBrains Mono 400/500/700/800.
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/500.css";
+import "@fontsource/jetbrains-mono/700.css";
+import "@fontsource/jetbrains-mono/800.css";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 

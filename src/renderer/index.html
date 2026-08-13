@@ -6,15 +6,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: file:; media-src 'self' blob: file:; connect-src 'self' ws://localhost:* http://localhost:*; script-src 'self'; worker-src 'self' blob:"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: file:; media-src 'self' blob: file:; connect-src 'self' ws://localhost:* http://localhost:*; script-src 'self'; worker-src 'self' blob:"
     />
     <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Inter + JetBrains Mono are bundled via @fontsource imports in
+         main.tsx — no network font fetch, works fully offline. -->
+
     <style>
       html, body { margin: 0; background: oklch(0.10 0.003 85); color-scheme: dark; }
       #spark-boot {

@@ -2287,10 +2287,8 @@ function PaneToolbar({
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
   const [menuOpen, setMenuOpen] = useState(false);
   // Declarative hover state drives the toolbar's rest/hover opacity from one
-  // React-owned source, replacing the imperative e.currentTarget.style.opacity
-  // mutation on mouseenter/leave (which bypassed React and could desync with
-  // the menuOpen state).
-  const [hovered, setHovered] = useState(false);
+  // Pill visibility is CSS-owned (.spark-pane-toolbar hover-reveal); no
+  // React hover state needed here any more.
   const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const plusRef = useRef<HTMLButtonElement | null>(null);
@@ -2360,8 +2358,16 @@ function PaneToolbar({
       ref={wrapRef}
       onMouseDown={stop}
       onPointerDown={stop}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      // The app's liquid-glass material (frosted blur + sheen + edge
+      // highlights, auto-reverting to opaque when glass is off or the OS
+      // prefers reduced transparency). --over-terminal swaps in a heavier
+      // lens: the popover recipe's 3px blur can't frost crisp terminal
+      // glyphs. Visibility is CSS-owned (.spark-pane-toolbar): hidden at
+      // rest, revealed while the pane is hovered / a button holds focus /
+      // the add-pane menu is open — so the pill never crowds a prompt's
+      // right-aligned segment while the user is just reading or typing.
+      className="spark-glass spark-glass--over-terminal spark-pane-toolbar"
+      data-menu-open={menuOpen ? "true" : undefined}
       style={{
         position: "absolute",
         top: 6,
@@ -2370,23 +2376,8 @@ function PaneToolbar({
         gap: 2,
         padding: 2,
         // 8px pill, concentric with the 10px pane card and the 6px chrome
-        // buttons it groups (an earned mild-glass cluster that overlays live
-        // terminal canvas, per the toolbar-cluster reference).
+        // buttons it groups.
         borderRadius: 8,
-        // Subtle pill background so the toolbar reads as a single grouped
-        // affordance instead of three loose buttons floating over the
-        // terminal canvas.
-        background: "color-mix(in oklab, var(--panel) 78%, transparent)",
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
-        border: "1px solid color-mix(in oklab, var(--rule-soft) 70%, transparent)",
-        boxShadow: "var(--lift-hi)",
-        // Single React-owned opacity source: dim at rest, full on hover or
-        // while the add-pane menu is open. (No .spark-fade-in here — its
-        // `both` fill would lock opacity at 1 and defeat the 0.55 rest dim.)
-        opacity: hovered || menuOpen ? 1 : 0.55,
-        transition:
-          "opacity var(--motion-fast, 120ms) var(--ease-out, ease-out)",
         zIndex: 5,
       }}
     >
