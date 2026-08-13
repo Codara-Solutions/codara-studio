@@ -3684,6 +3684,37 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
     );
     if (orphaned.length === 0) continue;
     const orphanedIds = new Set(orphaned.map((call) => call.id));
+    // Token-gauge backfill: an interrupted turn never settled, so the
+    // occupancy the settle path would have folded into the SparkCall
+    // (promptTokens / contextWindowTokens) was lost — and the composer's
+    // context meter re-seeds from exactly those fields, so a restart showed
+    // 0/256.0k after a 36-minute turn. The journal still holds every
+    // chat.usage event; replay the last reading per orphaned call.
+    const gaugeByCallId = new Map<string, { contextTokens: number; contextWindowTokens: number }>();
+    try {
+      for (const event of await listEvents(run.id)) {
+        if (event.type !== "chat.usage" || !event.sparkCallId) continue;
+        if (!orphanedIds.has(event.sparkCallId)) continue;
+        const payload = (event.payload ?? {}) as Record<string, unknown>;
+        const explicit = typeof payload.contextTokens === "number" ? payload.contextTokens : 0;
+        const derived =
+          (typeof payload.inputTokens === "number" ? payload.inputTokens : 0) +
+          (typeof payload.cacheReadTokens === "number" ? payload.cacheReadTokens : 0);
+        const contextTokens = explicit > 0 ? explicit : derived;
+        const contextWindowTokens =
+          typeof payload.contextWindowTokens === "number" && payload.contextWindowTokens > 0
+            ? payload.contextWindowTokens
+            : 0;
+        const prior = gaugeByCallId.get(event.sparkCallId);
+        gaugeByCallId.set(event.sparkCallId, {
+          contextTokens: contextTokens > 0 ? contextTokens : (prior?.contextTokens ?? 0),
+          contextWindowTokens:
+            contextWindowTokens > 0 ? contextWindowTokens : (prior?.contextWindowTokens ?? 0),
+        });
+      }
+    } catch (error) {
+      console.warn(`[run-store] token-gauge backfill skipped for ${run.id}:`, error);
+    }
     const interruptedIds = new Set(
       orphaned
         .filter(
@@ -3802,6 +3833,19 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
           call.status = "failed";
           call.error = MANAGER_TURN_INTERRUPTED_ERROR;
           call.completedAt = timestamp;
+          const gauge = gaugeByCallId.get(call.id);
+          if (gauge) {
+            if (!(typeof call.promptTokens === "number" && call.promptTokens > 0) && gauge.contextTokens > 0) {
+              call.promptTokens = gauge.contextTokens;
+            }
+            if (
+              !(typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0) &&
+              gauge.contextWindowTokens > 0
+            ) {
+              call.contextWindowTokens = gauge.contextWindowTokens;
+              call.contextWindowSource = "known";
+            }
+          }
           changed = true;
         }
         for (const message of draft.humanMessages) {
