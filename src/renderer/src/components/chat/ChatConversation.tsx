@@ -1396,12 +1396,7 @@ function QuestionChoices({
       <div style={ASK_HEAD_STYLE}>
         <span style={ASK_EYEBROW_STYLE}>Choose an option</span>
         <span style={ASK_HINT_STYLE}>
-          {options.map((_, index) => (
-            <span key={index} style={ASK_KBD_STYLE}>
-              {index + 1}
-            </span>
-          ))}
-          <span>or click</span>
+          press 1–{options.length} or click
         </span>
       </div>
       <div style={ASK_OPTION_LIST_STYLE}>
@@ -1431,11 +1426,12 @@ function QuestionChoices({
           rows={1}
           style={ASK_CUSTOM_INPUT_STYLE}
         />
-        <div style={ASK_CUSTOM_ROW_STYLE}>
-          <span style={ASK_CUSTOM_HINT_STYLE}>Enter to send · Shift+Enter for a new line</span>
-          {/* .spark-btn is-primary grants the tactile press settle, accent
-              fill, disabled state, and the global focus-visible ring for free
-              (an inline box-shadow would silently clobber that ring). */}
+        {/* .spark-btn is-primary grants the tactile press settle, accent
+            fill, disabled state, and the global focus-visible ring for free
+            (an inline box-shadow would silently clobber that ring). The
+            button only materializes once there is something to send, so the
+            resting card stays one quiet row. */}
+        {canSend && (
           <button
             type="button"
             className="spark-btn is-primary"
@@ -1444,7 +1440,7 @@ function QuestionChoices({
           >
             Send
           </button>
-        </div>
+        )}
       </div>
       {error && <div style={QUESTION_ERROR_STYLE}>{error}</div>}
     </div>
@@ -1493,29 +1489,15 @@ function QuestionOptionButton({
       onBlur={() => setFocusRing(false)}
       style={{
         ...QUESTION_OPTION_STYLE,
-        borderColor: recommended
-          ? "var(--accent-edge)"
-          : active
-            ? "var(--rule)"
-            : "var(--rule-soft)",
-        background: recommended
-          ? active
-            ? "color-mix(in oklch, var(--accent) 13%, var(--panel))"
-            : "color-mix(in oklch, var(--accent) 9%, var(--panel))"
-          : active
-            ? "color-mix(in oklab, var(--ink) 6%, transparent)"
-            : "color-mix(in oklab, var(--ink) 2%, transparent)",
-        // No hover lift (it nudged every sibling option). Depth comes from a
-        // brighter fill + the --lift-hi top highlight on hover; transform is
-        // reserved for the 0.5px press settle.
+        background: active
+          ? recommended
+            ? "color-mix(in oklch, var(--accent) 10%, transparent)"
+            : "color-mix(in oklab, var(--ink) 6%, transparent)"
+          : "transparent",
+        // Flat rows, no per-option borders: depth is the hover ink tint, and
+        // transform is reserved for the 0.5px press settle.
         transform: pressing ? "translateY(0.5px)" : "none",
-        boxShadow: focusRing
-          ? "var(--focus-ring)"
-          : pressing
-            ? "var(--well)"
-            : active
-              ? "var(--lift-hi)"
-              : "none",
+        boxShadow: focusRing ? "var(--focus-ring)" : "none",
         opacity: disabled ? 0.6 : 1,
       }}
     >
@@ -1528,10 +1510,10 @@ function QuestionOptionButton({
         {index + 1}
       </span>
       <span style={QUESTION_OPTION_BODY_STYLE}>
-        <span style={QUESTION_OPTION_TITLE_STYLE}>
-          <span style={QUESTION_OPTION_LABEL_STYLE}>{option.label}</span>
-          {recommended && <span style={QUESTION_RECOMMENDED_STYLE}>Recommended</span>}
-        </span>
+        <span style={QUESTION_OPTION_LABEL_STYLE}>{option.label}</span>
+        {recommended && (
+          <span aria-label="Recommended" title="Recommended" style={QUESTION_RECOMMENDED_STYLE} />
+        )}
         {showDescription && (
           <span style={QUESTION_OPTION_DESCRIPTION_STYLE}>{description}</span>
         )}
@@ -3279,26 +3261,22 @@ const NEEDS_YOU_DOT_STYLE: React.CSSProperties = {
 };
 
 // ── Ask card ────────────────────────────────────────────────────────────────
-// The open-question UI: a contained card holding a header (eyebrow + keyboard
-// hints), the selectable options, and a custom-answer field. Reads as one
-// deliberate "act here" moment under the Cora question prose.
+// The open-question UI: one quiet bordered surface holding a slim header
+// line, flat option rows, and a single custom-answer row. Depth comes from
+// hover ink tints, not nested borders — the old three-band card read chunky.
 const ASK_CARD_STYLE: React.CSSProperties = {
   marginTop: 4,
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-surface, 10px)",
   overflow: "hidden",
-  background: "color-mix(in oklab, var(--ink) 2.5%, var(--panel))",
-  // Raised band: tint-first depth via the --lift-hi top highlight plus the
-  // soft float shadow, not a hard outline.
-  boxShadow: "var(--lift-hi), var(--shadow-1)",
+  background: "color-mix(in oklab, var(--ink) 2%, transparent)",
 };
 
 const ASK_HEAD_STYLE: React.CSSProperties = {
   display: "flex",
-  alignItems: "center",
+  alignItems: "baseline",
   gap: 8,
-  padding: "9px 12px 8px",
-  borderBottom: "1px solid var(--rule-soft)",
+  padding: "8px 12px 2px",
 };
 
 const ASK_EYEBROW_STYLE: React.CSSProperties = {
@@ -3312,122 +3290,87 @@ const ASK_EYEBROW_STYLE: React.CSSProperties = {
 
 const ASK_HINT_STYLE: React.CSSProperties = {
   marginLeft: "auto",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
   fontSize: 10,
   color: "var(--muted-2)",
 };
 
-const ASK_KBD_STYLE: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  minWidth: 16,
-  height: 16,
-  padding: "0 4px",
-  border: "1px solid var(--rule)",
-  // Keycap on the small-control rung — matches the .spark-kbd softening.
-  borderRadius: 6,
-  background: "var(--panel-3)",
-  color: "var(--ink-dim)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9.5,
-  fontVariantNumeric: "tabular-nums",
-  boxShadow: "var(--lift-hi)",
-};
-
 const ASK_OPTION_LIST_STYLE: React.CSSProperties = {
-  padding: 8,
+  padding: "4px 6px 6px",
   display: "flex",
   flexDirection: "column",
-  gap: 6,
+  gap: 1,
 };
 
 const QUESTION_OPTION_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
   display: "grid",
-  gridTemplateColumns: "26px minmax(0, 1fr) auto",
+  gridTemplateColumns: "18px minmax(0, 1fr) auto",
   alignItems: "center",
-  gap: 12,
-  padding: "9px 11px",
-  border: "1px solid var(--rule-soft)",
-  borderRadius: "var(--radius-surface, 10px)",
+  gap: 9,
+  padding: "6px 8px",
+  border: "none",
+  borderRadius: "var(--radius-control, 7px)",
   color: "var(--ink)",
   textAlign: "left",
   cursor: "default",
   transition:
-    "transform var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+    "transform var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
 
 const QUESTION_OPTION_KEY_STYLE: React.CSSProperties = {
-  width: 26,
-  height: 26,
-  borderRadius: "var(--radius-control, 7px)",
+  width: 18,
+  height: 18,
+  borderRadius: 5,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  border: "1px solid var(--rule)",
-  background: "var(--panel-3)",
-  color: "var(--ink-dim)",
+  background: "color-mix(in oklab, var(--ink) 7%, transparent)",
+  color: "var(--muted)",
   fontFamily: "var(--font-mono)",
-  fontSize: 12,
-  fontWeight: 700,
+  fontSize: 10.5,
+  fontWeight: 600,
   fontVariantNumeric: "tabular-nums",
-  boxShadow: "var(--lift-hi), var(--well)",
 };
 
 const QUESTION_OPTION_KEY_REC_STYLE: React.CSSProperties = {
-  border: "1px solid var(--accent-edge)",
   background: "var(--accent-soft)",
   color: "var(--accent)",
 };
 
+// Single-line body: label, then the recommended star, then the description
+// trailing in muted ink — the row stays one text line and ellipsizes.
 const QUESTION_OPTION_BODY_STYLE: React.CSSProperties = {
   minWidth: 0,
   display: "flex",
-  flexDirection: "column",
-  gap: 2,
-};
-
-const QUESTION_OPTION_TITLE_STYLE: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-};
-
-const QUESTION_OPTION_LABEL_STYLE: React.CSSProperties = {
-  fontSize: 13,
-  fontWeight: 600,
-  color: "var(--ink)",
+  alignItems: "baseline",
+  gap: 7,
   overflow: "hidden",
-  textOverflow: "ellipsis",
   whiteSpace: "nowrap",
 };
 
+const QUESTION_OPTION_LABEL_STYLE: React.CSSProperties = {
+  flex: "0 0 auto",
+  fontSize: 12.5,
+  fontWeight: 600,
+  color: "var(--ink)",
+};
+
+// Recommended marker: a 4px accent dot (with a title tooltip), aligned into
+// the text baseline gap — the uppercase pill was the loudest thing in the row.
 const QUESTION_RECOMMENDED_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
-  display: "inline-flex",
-  alignItems: "center",
-  height: 16,
-  padding: "0 7px",
-  border: "1px solid var(--accent-edge)",
+  width: 4,
+  height: 4,
   borderRadius: 999,
-  color: "var(--accent)",
-  background: "var(--accent-soft)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase",
+  background: "var(--accent)",
+  alignSelf: "center",
 };
 
 const QUESTION_OPTION_DESCRIPTION_STYLE: React.CSSProperties = {
+  flex: "0 1 auto",
   color: "var(--muted)",
-  fontSize: 12,
-  lineHeight: 1.4,
+  fontSize: 11.5,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -3441,43 +3384,34 @@ const QUESTION_OPTION_GO_STYLE: React.CSSProperties = {
     "opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
 };
 
+// Custom answer: a single hairline-separated row. The textarea is borderless
+// and flush; the Send button only appears once there is text, so at rest the
+// row reads as a one-line "Or type your own answer…" affordance.
 const ASK_CUSTOM_STYLE: React.CSSProperties = {
-  padding: "10px 10px 11px",
+  padding: "2px 6px 6px",
   borderTop: "1px solid var(--rule-soft)",
+  marginTop: 2,
   display: "flex",
-  flexDirection: "column",
+  alignItems: "flex-end",
   gap: 8,
 };
 
 const ASK_CUSTOM_INPUT_STYLE: React.CSSProperties = {
-  width: "100%",
+  flex: "1 1 auto",
   boxSizing: "border-box",
   resize: "none",
-  minHeight: 38,
+  minHeight: 30,
   maxHeight: 120,
   overflowY: "auto",
-  border: "1px solid var(--rule-soft)",
-  borderRadius: "var(--radius-surface, 10px)",
-  background: "var(--bg)",
+  border: "none",
+  borderRadius: "var(--radius-control, 7px)",
+  background: "transparent",
   color: "var(--ink)",
   outline: "none",
-  padding: "9px 11px",
+  padding: "8px 8px 6px",
   fontFamily: "var(--font-sans)",
   fontSize: 12.5,
   lineHeight: 1.5,
-  boxShadow: "var(--well)",
-};
-
-const ASK_CUSTOM_ROW_STYLE: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-};
-
-const ASK_CUSTOM_HINT_STYLE: React.CSSProperties = {
-  fontSize: 10.5,
-  color: "var(--muted-2)",
 };
 
 const QUESTION_ERROR_STYLE: React.CSSProperties = {
