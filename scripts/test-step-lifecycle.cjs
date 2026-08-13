@@ -147,6 +147,49 @@ async function main() {
     "feedback-retry",
     "an unscoped manager corrective conservatively reuses the live automatic retry",
   );
+  // run-msq41cuc-atjuuq regression: both sides carried PROSE expectedOutputs
+  // ("Corrected eight-file documentation proposal in /tmp/x") and no
+  // allowedPaths. Treating those sentences as scope paths made the overlap
+  // test fire with strings that can never match, defeating the shared-worktree
+  // fallback — the manager spawned a second corrective alongside the live
+  // automatic retry, two workers editing the same worktree.
+  const proseFeedbackRun = {
+    workerTasks: [
+      {
+        id: "prose-feedback-retry",
+        title: "Remove process report from docs",
+        description: "Original brief\n\n## VERIFIER FEEDBACK\nFix the references.",
+        taskClass: "feature",
+        status: "running",
+        allowedPaths: [],
+        expectedOutputs: [
+          "Updated disposable worktree with exactly eight project documentation files",
+          "Final report carrying reset evidence outside the repository",
+        ],
+      },
+    ],
+  };
+  assert.equal(
+    findLiveVerifierFeedbackRetry(proseFeedbackRun, {
+      title: "Correct reset documentation",
+      taskClass: "feature",
+      expectedOutputs: [
+        "Corrected eight-file documentation proposal in /tmp/pios-doc-reset-msq435or",
+      ],
+    })?.id,
+    "prose-feedback-retry",
+    "prose expectedOutputs must not defeat the shared-worktree fallback",
+  );
+  // Real path-shaped scopes still discriminate: disjoint paths do not reuse.
+  assert.equal(
+    findLiveVerifierFeedbackRetry(feedbackRun, {
+      title: "Unrelated docs work",
+      taskClass: "feature",
+      allowedPaths: ["docs/guide.md"],
+    }),
+    undefined,
+    "genuinely disjoint path scopes stay independent",
+  );
   assert.equal(
     findLiveVerifierFeedbackRetry(feedbackRun, {
       title: "Verify calculator",

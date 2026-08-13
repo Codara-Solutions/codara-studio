@@ -60,9 +60,26 @@ function normalizeScopePath(value: string): string {
     .toLowerCase();
 }
 
+// expectedOutputs regularly carries PROSE ("Corrected eight-file documentation
+// proposal in /tmp/x"), not paths. Feeding prose into the overlap test makes
+// both sides "scoped" with sentences that can never match, which defeats the
+// empty-scope = shared-worktree fallback below — observed as a duplicate
+// corrective wave in run-msq41cuc-atjuuq (auto-requeued retry AND a
+// manager-spawned corrective editing the same worktree concurrently). Keep
+// only values that plausibly ARE paths: rooted ones (absolute, ./, ~, drive
+// letter — spaces allowed, real macOS paths contain them), or whitespace-free
+// relative paths / filenames ("docs/index.md", "README.md").
+function looksLikePath(value: string): boolean {
+  const v = value.trim();
+  if (/^(\/|\.{1,2}\/|~\/|[a-zA-Z]:[\\/])/.test(v)) return true;
+  if (/\s/.test(v)) return false;
+  return /[\\/]/.test(v) || /\.[a-zA-Z0-9]{1,8}$/.test(v);
+}
+
 function scopePaths(scope: RequestedWorkerScope): string[] {
   return [...(scope.allowedPaths ?? []), ...(scope.expectedOutputs ?? [])]
     .filter((value): value is string => typeof value === "string")
+    .filter(looksLikePath)
     .map(normalizeScopePath)
     .filter(Boolean);
 }
