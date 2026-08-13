@@ -1310,7 +1310,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_name_chat",
     description:
-      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY, once the goal for the session is clear, and again if the topic shifts substantially. The title shows in the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
+      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY, once the goal for the session is clear, and again if the topic shifts substantially. The title shows live in the chat panel header and the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
     inputSchema: {
       type: "object",
       required: ["title"],
