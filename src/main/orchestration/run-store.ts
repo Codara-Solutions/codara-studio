@@ -10300,7 +10300,13 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         chatDecision.status === "paused" ||
         chatDecision.status === "blocked" ||
         chatDecision.status === "cancelled" ||
-        chatDecision.status === "complete"
+        chatDecision.status === "complete" ||
+        // "failed" must stay failed. Feeding a just-failed turn into
+        // startAutopilot below revived the run to "running" and, with no
+        // runnable tasks, converted the honest failure (observed: an expired
+        // provider credential) into a misleading "nothing left to run"
+        // question. The failed state carries its own Retry affordance.
+        chatDecision.status === "failed"
       ) {
         return chatDecision;
       }
