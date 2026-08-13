@@ -1420,15 +1420,100 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       scheduleAutopilotReview(run.id, input.cwd);
       return run;
     }
-    const question =
-      run.steps.length > 0 && failedSteps.length > 0 && unfinishedSteps.length === 0
-        ? failedSteps.length === run.steps.length
-          ? "Every step in this plan has failed, so there is nothing left to run. Tell me how you'd like to proceed, retry the work, change the approach, or start over."
-          : `${failedSteps.length} of ${run.steps.length} steps failed and the rest are finished, so there is nothing left to run. Tell me whether to retry the failed work or move on.`
-        : run.steps.length === 0
-          ? "I don't have a plan to run yet. Tell me what you'd like me to do."
-          : "None of the remaining steps has runnable work, they're waiting on something I can't resolve myself. Tell me how you'd like to proceed.";
-    return askHumanQuestion(run.id, question, undefined, {
+    // Build the options NEXT TO the question text: this branch knows exactly
+    // which decision it is asking (retry vs move on vs replan), so it must
+    // supply matching choices itself. Passing undefined would make
+    // postRunQuestion backfill fallbackQuestionOptions, whose generic
+    // "Safe default / Fast path / Thorough path" set is tuned for
+    // implementation-scope questions and reads as a non sequitur here
+    // (observed in run-msq6zj3l-1e2qv8).
+    const allStepsResolved =
+      run.steps.length > 0 && failedSteps.length > 0 && unfinishedSteps.length === 0;
+    let question: string;
+    let options: SparkManagerQuestionOption[] | undefined;
+    if (allStepsResolved && failedSteps.length === run.steps.length) {
+      question =
+        "Every step in this plan has failed, so there is nothing left to run. Tell me how you'd like to proceed, retry the work, change the approach, or start over.";
+      options = [
+        {
+          id: "retry_failed_steps",
+          label: "Retry the work",
+          description: "Run the failed steps again as planned.",
+          answer: "Retry the failed steps.",
+          recommended: true,
+        },
+        {
+          id: "change_approach",
+          label: "Change the approach",
+          description: "Rework the plan based on why the steps failed, then run it.",
+          answer: "Change the approach: revise the plan based on the failures, then run the revised plan.",
+          recommended: false,
+        },
+        {
+          id: "start_over",
+          label: "Start over",
+          description: "Discard this plan and re-plan from my original request.",
+          answer: "Start over: discard the current plan and plan again from my original request.",
+          recommended: false,
+        },
+      ];
+    } else if (allStepsResolved) {
+      question = `${failedSteps.length} of ${run.steps.length} steps failed and the rest are finished, so there is nothing left to run. Tell me whether to retry the failed work or move on.`;
+      options = [
+        {
+          id: "retry_failed_steps",
+          label: failedSteps.length === 1 ? "Retry the failed step" : "Retry the failed steps",
+          description: "Run the failed work again; the finished steps stay as they are.",
+          answer: "Retry the failed work.",
+          recommended: true,
+        },
+        {
+          id: "move_on",
+          label: "Move on without it",
+          description: "Accept the finished work and wrap up despite the failure.",
+          answer: "Move on without the failed work: accept the finished steps and wrap up the run.",
+          recommended: false,
+        },
+        {
+          id: "change_approach",
+          label: "Change the approach",
+          description: "Rework the failed part with a different approach, then run it.",
+          answer: "Change the approach for the failed work: revise it based on why it failed, then run the revision.",
+          recommended: false,
+        },
+      ];
+    } else if (run.steps.length === 0) {
+      // Genuinely open-ended — any canned choice would be made up. Options
+      // stay undefined and the fallback set gives the user quick outs.
+      question = "I don't have a plan to run yet. Tell me what you'd like me to do.";
+    } else {
+      question =
+        "None of the remaining steps has runnable work, they're waiting on something I can't resolve myself. Tell me how you'd like to proceed.";
+      options = [
+        {
+          id: "explain_blockers",
+          label: "Explain the blockers",
+          description: "List what each waiting step is blocked on before deciding.",
+          answer: "Explain exactly what each remaining step is waiting on, then wait for my decision.",
+          recommended: true,
+        },
+        {
+          id: "skip_blocked",
+          label: "Skip what's blocked",
+          description: "Drop the blocked steps and finish with what's done.",
+          answer: "Skip the blocked steps and finish the run with the work that is done.",
+          recommended: false,
+        },
+        {
+          id: "change_approach",
+          label: "Change the approach",
+          description: "Re-plan around the blockers so the work can continue.",
+          answer: "Revise the plan to work around the blockers so the run can continue.",
+          recommended: false,
+        },
+      ];
+    }
+    return askHumanQuestion(run.id, question, options, {
       reason: "No safe runnable task can be inferred from the current plan.",
       managerMode: run.workerAttempts.length > 0 ? "worker_result_review" : "plan_analysis",
     });
