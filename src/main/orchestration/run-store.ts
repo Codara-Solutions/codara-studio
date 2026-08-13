@@ -5700,6 +5700,38 @@ async function askManagerBackend(
             "submitted",
           );
         },
+        onSessionEstablished: async (sessionUuid: string) => {
+          // Persist the provider session id BEFORE the turn settles. The
+          // settle-time write below only runs when requestManagerDecision
+          // returns; a crash mid-turn therefore lost the uuid and the next
+          // launch derived a fresh session id, abandoning the whole
+          // transcript (history + context gauge). Guards mirror the
+          // settle-time write: same epoch, this call still live, and the
+          // session owner unchanged since the turn's pre-launch snapshot.
+          await commitRunChange(run, {
+            type: "run.chat_session_established",
+            message: "Cora chat session id persisted for crash-safe resume",
+            sparkCallId: callId,
+            payload: { sessionUuid },
+            mutate: (draft) => {
+              if (!isManagerTurnCurrent(draft, callId, preparedTurn.conversationEpoch)) return false;
+              if (!draft.sparkCalls.some(
+                (call) => call.id === callId && call.status === "started" && !call.completedAt,
+              )) return false;
+              const ownerUnchanged =
+                (draft.chatBackend ?? "pi") === (frozenRun.chatBackend ?? "pi") &&
+                (chatConfig.backend === "claude"
+                  ? draft.nativeClaudeProfileId === frozenRun.nativeClaudeProfileId
+                  : chatConfig.backend === "codex"
+                    ? draft.nativeCodexProfileId === frozenRun.nativeCodexProfileId
+                    : draft.chatAccountProfileId === frozenRun.chatAccountProfileId);
+              if (!ownerUnchanged) return false;
+              if (draft.chatSessionUuid === sessionUuid) return false;
+              draft.chatSessionUuid = sessionUuid;
+              draft.chatSessionMode = chatConfig.mode;
+            },
+          });
+        },
       },
       onStream,
     );
