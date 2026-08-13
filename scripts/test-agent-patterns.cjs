@@ -80,9 +80,9 @@ check(
   "blocked",
 );
 check(
-  "codex approval prompt",
+  "codex approval prompt is not needs-you",
   ap.classifyTail("codex", "Approve shell command?\n  rm -rf node_modules"),
-  "blocked",
+  null,
 );
 check("idle claude input box is unclassified", ap.classifyTail("claude", "> \n? for shortcuts"), null);
 check("plain shell output is unclassified", ap.classifyTail("claude", "$ ls\nsrc package.json README.md"), null);
@@ -104,7 +104,15 @@ check(
   ap.runtimeFromCommandLine("C:\\Users\\me\\AppData\\npm\\codex.exe resume"),
   "codex",
 );
+check("633;E npx codex", ap.runtimeFromCommandLine("npx @openai/codex"), "codex");
+check("633;E pnpm exec claude", ap.runtimeFromCommandLine("pnpm exec claude --resume"), "claude");
+check("633;E echo claude is not a launch", ap.runtimeFromCommandLine("echo claude"), null);
 check("633;E plain shell command", ap.sniffOsc633CommandRuntime("\x1b]633;E;git status\x07"), null);
+
+check("live sniff Codex working footer without banner", ap.sniffLiveRuntime("Working (0s • esc to interrupt)"), "codex");
+check("live sniff Codex statusline without banner", ap.sniffLiveRuntime("gpt-5.6-sol xhigh fast · ~/src"), "codex");
+check("live sniff Claude mode line", ap.sniffLiveRuntime("⏸ manual mode on"), "claude");
+check("live sniff ignores plain shell", ap.sniffLiveRuntime("$ git status\nnothing to commit"), null);
 
 // ── prompt-back markers ──
 check("OSC 633;A marks prompt", ap.hasPromptMarker("\x1b]633;A\x07"), true);
@@ -205,8 +213,13 @@ check(
   true,
 );
 check(
-  "codex working footer (esc to interrupt) is UI-present",
-  ap.agentUiPresent("codex", "▌ Working (32s • Esc to interrupt)"),
+  "codex idle statusline is UI-present",
+  ap.agentUiPresent("codex", "› Write tests for @filename\ngpt-5.6-sol default · Context 100% left"),
+  true,
+);
+check(
+  "codex working statusline from screenshot is UI-present",
+  ap.agentUiPresent("codex", "Working (0s • esc to interrupt)\ngpt-5.6-sol xhigh fast · ~/Documents/Projects/Codara/hetzner-k8s-codara-platform"),
   true,
 );
 check(
@@ -431,9 +444,9 @@ check(
   "codex",
 );
 check(
-  "codex sandbox dialog is blocked",
+  "codex sandbox dialog is not needs-you",
   ap.classifyTail("codex", "› 1. Set up default sandbox (requires Administrator permissions)\n  2. Use non-admin sandbox\n  3. Quit\n  Press enter to confirm or esc to go back"),
-  "blocked",
+  null,
 );
 
 // ── Claude AskUserQuestion selector (user-reported, v2.1.170 screenshot) ──

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 // Regression for workspace-aware terminal chips. A fake Codex process starts
-// in a working state, then prints a real approval-prompt shape after the user
+// in a working state, then settles to its idle composer after the user
 // switches projects. The main-process terminal notifier still sees the hidden
 // PTY and must update that hidden workspace's retained leaf. Before the fix,
 // App routed the event only through the active workspace's tabs and the chip
@@ -72,7 +72,7 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
       ).__codaraKeptTerminalNode = node;
     });
 
-    // Leave while Codex is working. Its script prints an approval prompt after
+    // Leave while Codex is working. Its script prints an idle composer after
     // three seconds, when this workspace's TerminalStack is mounted but hidden.
     // The xterm DOM node itself must remain the exact same object: keeping only
     // the PTY alive and recreating xterm on return is the unload regression.
@@ -96,7 +96,7 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
     const hiddenChip = page.locator(
       `[data-terminal-pane-id="${paneId}"] [role="status"]`,
     );
-    await expect(hiddenChip).toHaveAttribute("aria-label", "CODEX needs you", {
+    await expect(hiddenChip).toHaveAttribute("aria-label", "CODEX ready", {
       timeout: 15_000,
     });
     await expect(workspaceA).toHaveAttribute("aria-busy", "false");
@@ -107,7 +107,7 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
     await workspaceA.evaluate((row) => {
       (row as HTMLElement).click();
     });
-    await expect(page.getByRole("status", { name: "CODEX needs you" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible();
     expect(
       await page
         .locator(`[data-terminal-pane-id="${paneId}"]:visible .xterm`)
@@ -243,8 +243,8 @@ async function prepareFixture(): Promise<{
         "echo ^>_ OpenAI Codex (v0.144.1)",
         "echo * Working (0s * esc to interrupt)",
         "ping 127.0.0.1 -n 4 >nul",
-        "echo Approve shell command?",
-        "echo   echo hello",
+        "echo ^> Write tests for @filename",
+        "echo gpt-5.6-sol default · Context 100% left",
         "ping 127.0.0.1 -n 30 >nul",
       ].join("\r\n"),
       "utf8",
@@ -267,7 +267,8 @@ async function prepareFixture(): Promise<{
         "printf '>_ OpenAI Codex (v0.144.1)\\r\\n'",
         "printf '• Working (0s • esc to interrupt)\\r\\n'",
         "sleep 3",
-        "printf 'Approve shell command?\\r\\n  echo hello\\r\\n'",
+        "printf '› Write tests for @filename\\r\\n'",
+        "printf 'gpt-5.6-sol default · Context 100% left\\r\\n'",
         "sleep 30",
       ].join("\n"),
       "utf8",

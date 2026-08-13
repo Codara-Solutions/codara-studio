@@ -1,7 +1,8 @@
 # spark-shell-integration (zshrc)
 #
 # Emits OSC 7 (cwd) + OSC 133 A/B/C/D (prompt-start / prompt-end / pre-exec /
-# command-done-with-exit-code) so the host can detect command boundaries and
+# command-done-with-exit-code) + OSC 633;E (escaped command line) so the host
+# can detect command boundaries, identify `claude`/`codex` launches, and
 # track cwd without re-parsing the prompt. `status` is a read-only special in
 # zsh, so we shadow $? into `_spark_ret`.
 
@@ -52,7 +53,21 @@ if [[ -z "$__SPARK_HOOKS_LOADED" ]]; then
     printf '\e]133;A\e\\'
   }
 
+  _spark_osc633_esc() {
+    emulate -L zsh
+    setopt localoptions no_multibyte
+    local LC_ALL=C s="$1" i byte
+    for (( i=1; i<=${#s}; i++ )); do
+      byte="${s[i]}"
+      case "$byte" in
+        [\;\\]|[[:cntrl:]]) printf '\\x%02X' "'$byte" ;;
+        *) printf '%s' "$byte" ;;
+      esac
+    done
+  }
+
   _spark_preexec() {
+    printf '\e]633;E;%s\e\\' "$(_spark_osc633_esc "$1")"
     printf '\e]133;C\e\\'
   }
 

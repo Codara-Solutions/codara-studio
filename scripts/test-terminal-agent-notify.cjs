@@ -141,10 +141,11 @@ async function main() {
       { paneId: "p6", tabId: "t6", tabTitle: "Terminal 6", excluded: false },
       { paneId: "p7", tabId: "t7", tabTitle: "Terminal 7", excluded: false },
       { paneId: "p8", tabId: "t8", tabTitle: "Restored Claude", excluded: false, runtimeHint: "claude" },
+      { paneId: "p9", tabId: "t9", tabTitle: "Late Codex", excluded: false },
     ],
   });
   await sleep(50);
-  check("taps attached for all registered panes", T.taps.size === 8);
+  check("taps attached for all registered panes", T.taps.size === 9);
   check(
     "cold restore replays pre-registration output into working state",
     initialSnapshot.some((state) => state.paneId === "p8" && state.runtime === "claude" && state.state === "working"),
@@ -302,6 +303,22 @@ async function main() {
   feed("p2", "› Write tests for @filename\r\n  gpt-5.5 default · ~\\Documents\\Project\r\n");
   await sleep(4600);
   check("codex boot blip produced no spurious alert", alertCount() === beforeBlip);
+
+  // ── Scenario 7b: Codex live chrome without banner/633;E still arms ──
+  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere", paneId: null };
+  const beforeLateCodex = T.chips.length;
+  feed("p9", "• Working (4s • esc to interrupt)\r\n");
+  check(
+    "late Codex working footer arms without banner or 633;E",
+    T.chips.some((chip) => chip.paneId === "p9" && chip.runtime === "codex" && chip.state === "working"),
+  );
+  const beforeCodexPrompt = alertCount();
+  feed("p9", "Approve shell command?\r\n  echo hello\r\n");
+  check("Codex approval prompt does not emit needs-you", alertCount() === beforeCodexPrompt);
+  check(
+    "Codex approval prompt does not flip the chip to blocked",
+    !T.chips.some((chip) => chip.paneId === "p9" && chip.state === "blocked"),
+  );
 
   // ── Scenario 8: a visible sibling split is not the selected input pane ──
   const beforeSibling = alertCount();

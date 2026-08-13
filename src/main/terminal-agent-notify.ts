@@ -6,6 +6,7 @@ import {
   coercePublicRuntime,
   countTeammateEvents,
   runtimeFromCommandLine,
+  sniffLiveRuntime,
   sniffRuntime,
   stripAnsi,
   unescapeOsc633,
@@ -664,8 +665,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     if (!sniffed) {
       // The ring was just updated above, so its tail is exactly the fresh
       // decoded text plus the bounded overlap (see SNIFF_OVERLAP).
-      const banner = sniffRuntime(w.ring.slice(-(decoded.length + SNIFF_OVERLAP)));
+      const window = w.ring.slice(-(decoded.length + SNIFF_OVERLAP));
+      const banner = sniffRuntime(window);
       if (banner) sniffed = coercePublicRuntime(banner);
+      if (!sniffed) sniffed = sniffLiveRuntime(w.ring.slice(-2048));
     }
     if (sniffed) {
       w.runtime = sniffed;
@@ -779,7 +782,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       if (/working/i.test(status)) {
         enterWorking(w, now);
         chunkAssertedWorking = true;
-      } else if (/waiting/i.test(status)) {
+      } else if (/waiting/i.test(status) && w.runtime === "claude") {
         if (
           w.state !== "blocked" &&
           (w.state === "working" || w.userTurnArmed) &&
@@ -815,7 +818,9 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     }
 
     const problem = detectTerminalProblem(plain, fresh);
-    if (problem) {
+    const applyProblem =
+      problem !== null && !(problem.kind === "blocked" && w.runtime !== "claude");
+    if (applyProblem && problem) {
       const priorState = w.state;
       const shouldAlert =
         priorState !== problem.kind &&
@@ -835,8 +840,8 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // the carry exists to bridge phrases split across chunk boundaries, but
     // a footer merely sitting in it (painted seconds ago) must not keep
     // re-asserting "working" off the back of unrelated idle repaints.
-    const cls = problem ? null : classifyTail(w.runtime, plain, fresh, { preStripped: true });
-    if (cls === "blocked") {
+    const cls = applyProblem ? null : classifyTail(w.runtime, plain, fresh, { preStripped: true });
+    if (cls === "blocked" && w.runtime === "claude") {
       if (w.state !== "blocked") tanLog(`pane=${w.paneId} state -> blocked (was ${w.state})`);
       // Deliberately NOT gated on workedLongEnough: a permission prompt can
       // appear within the first second of a turn, and missing a real
@@ -937,7 +942,8 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   const now = Date.now();
   const kind = /waiting\s*for\s*your\s*input/i.test(message)
     ? ("done" as const)
-    : /approv|permission|review|needs|attention|confirm|waiting|input/i.test(message)
+    : w.runtime === "claude" &&
+        /approv|permission|review|needs|attention|confirm|waiting|input/i.test(message)
       ? ("blocked" as const)
       : ("done" as const);
   // A DONE announcement while background teammates run is held like the

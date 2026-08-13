@@ -178,6 +178,35 @@ export function sniffRuntime(text: string): AgentRuntime | null {
   return null;
 }
 
+const CLAUDE_LIVE_IDENTITY: RegExp[] = [
+  /Claude\s*Code\s*v?\d/,
+  /shift\s*\+?\s*tab\s*to\s*cycle/i,
+  /←\s*for\s*agents|\bfor\s*agents\b/i,
+  /\b(?:manual|auto|plan)\s*mode\s*on\b/i,
+  /\baccept\s*edits\s*on\b/i,
+  /\bbypass\s*permissions\s*on\b/i,
+];
+
+const CODEX_LIVE_IDENTITY: RegExp[] = [
+  /OpenAI\s*Codex/,
+  /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
+  /Context\s+\d+%\s+(?:used|left)/i,
+  /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
+];
+
+export function sniffLiveRuntime(text: string): PublicAgentRuntime | null {
+  const fromBanner = sniffRuntime(text);
+  if (fromBanner) return coercePublicRuntime(fromBanner);
+  const stripped = stripAnsi(text);
+  for (const re of CLAUDE_LIVE_IDENTITY) {
+    if (re.test(stripped)) return "claude";
+  }
+  for (const re of CODEX_LIVE_IDENTITY) {
+    if (re.test(stripped)) return "codex";
+  }
+  return null;
+}
+
 export function sniffOsc633CommandRuntime(text: string): AgentRuntime | null {
   const re = /\x1b\]633;E;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
   let match: RegExpExecArray | null;
@@ -188,15 +217,50 @@ export function sniffOsc633CommandRuntime(text: string): AgentRuntime | null {
   return runtime;
 }
 
+const AGENT_LAUNCH_WRAPPERS = new Set([
+  "npx",
+  "pnpm",
+  "yarn",
+  "bunx",
+  "bun",
+  "deno",
+  "npm",
+]);
+
+function runtimeFromExecutable(exe: string): AgentRuntime | null {
+  const normalized = exe.toLowerCase().replace(/\.exe$/, "");
+  if (!normalized) return null;
+  if (
+    normalized === "claude" ||
+    normalized.endsWith("/claude") ||
+    normalized.endsWith("\\claude")
+  ) {
+    return "claude";
+  }
+  if (
+    normalized === "codex" ||
+    normalized === "@openai/codex" ||
+    normalized.endsWith("/codex") ||
+    normalized.endsWith("\\codex") ||
+    normalized.endsWith("/@openai/codex")
+  ) {
+    return "codex";
+  }
+  return null;
+}
+
 export function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
-  const exe = cmdLine
-    .trim()
-    .split(/\s+/)[0]
-    ?.toLowerCase()
-    .replace(/\.exe$/, "");
-  if (!exe) return null;
-  if (exe === "claude" || exe.endsWith("/claude") || exe.endsWith("\\claude")) return "claude";
-  if (exe === "codex" || exe.endsWith("/codex") || exe.endsWith("\\codex")) return "codex";
+  const tokens = cmdLine.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const direct = runtimeFromExecutable(tokens[0]);
+  if (direct) return direct;
+  const wrapper = tokens[0].toLowerCase().replace(/\.exe$/, "").split(/[/\\]/).pop();
+  if (!wrapper || !AGENT_LAUNCH_WRAPPERS.has(wrapper)) return null;
+  for (const token of tokens.slice(1)) {
+    if (token.startsWith("-")) continue;
+    const wrapped = runtimeFromExecutable(token);
+    if (wrapped) return wrapped;
+  }
   return null;
 }
 
@@ -228,7 +292,8 @@ export function promoteGenericArm(
   if (budget <= 0) return null;
   const fresh = ring.slice(Math.max(0, ringFrom));
   const sniffed = sniffOsc633CommandRuntime(fresh) ?? sniffRuntime(fresh);
-  return sniffed ? coercePublicRuntime(sniffed) : null;
+  if (sniffed) return coercePublicRuntime(sniffed);
+  return sniffLiveRuntime(fresh);
 }
 
 // `advanceGenericArm` — per-chunk bookkeeping. The renderer's ring is a rolling
@@ -327,8 +392,9 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
       /\bGoodbye\b!?/i,
     ],
   },
-  // OpenAI Codex CLI. Lower-case "thinking" / "working" footer lines, and a
-  // "shell command" approval prompt that mirrors Claude's permission flow.
+  // OpenAI Codex CLI. Lower-case "thinking" / "working" footer lines.
+  // Codex has no AskUserQuestion-style MCQ, so it never classifies as
+  // blocked — "needs you" is Claude-only.
   codex: {
     working: [
       /esc\s*to\s*interrupt/i,
@@ -339,19 +405,7 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
       /Generating/i,
       /Streaming/i,
     ],
-    blocked: [
-      /Approve\s*shell\s*command/i,
-      /Approve\s*this\s*(?:edit|patch|command)/i,
-      /Do\s*you\s*want\s*to\s*(?:proceed|continue)/i,
-      // v0.13x dialog chrome (live-captured 2026-06-10): trust / sandbox /
-      // confirm prompts all end with "Press enter to confirm…" and render
-      // their options as a ›-caret numbered menu.
-      /Press\s*enter\s*to\s*(?:confirm|continue)/i,
-      /Do\s*you\s*trust\s*the\s*contents/i,
-      /[❯›]\s*\d+\.\s/,
-      /\[y\/N\]/i,
-      /\(y\/n\)/i,
-    ],
+    blocked: [],
     done: [
       /Session\s*complete\./i,
       /\bExiting\b\./i,
@@ -608,11 +662,13 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
     /Claude\s*Code\s*v?\d/,
   ],
   codex: [
-    /OpenAI\s*Codex\s*\(?v?\d/,
-    /\?\s*for\s*shortcuts/i,
-    /shift\s*\+?\s*tab/i,
-    /ctrl\s*\+?\s*c\s*to\s*(?:quit|exit|interrupt)/i,
+    /OpenAI\s*Codex/,
+    /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
     /esc\s*to\s*interrupt/i,
+    /Context\s+\d+%\s+(?:used|left)/i,
+    /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
+    /\?\s*for\s*shortcuts/i,
+    /ctrl\s*\+?\s*c\s*to\s*(?:quit|exit|interrupt)/i,
   ],
 };
 

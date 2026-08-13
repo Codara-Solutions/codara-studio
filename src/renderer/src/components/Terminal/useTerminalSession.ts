@@ -20,6 +20,8 @@ import {
   coercePublicRuntime,
   hasPromptMarker,
   promoteGenericArm,
+  runtimeFromCommandLine,
+  sniffLiveRuntime,
   sniffOsc633CommandRuntime,
   sniffRuntime,
   stripAnsi,
@@ -1579,6 +1581,8 @@ export function useTerminalSession({
       // a stale footer sitting up in scrollback after a REAL exit (shell prompt
       // now at the bottom) must NOT read as a live agent.
       const liveRuntimeFromTail = (tail: string): PublicAgentRuntime | null => {
+        const live = sniffLiveRuntime(tail);
+        if (live) return live;
         for (const runtime of KNOWN_RUNTIMES) {
           if (agentUiPresent(runtime, tail)) return runtime;
         }
@@ -1624,8 +1628,7 @@ export function useTerminalSession({
             return true;
           }
         }
-        const sniffedRuntime = sniffRuntime(agentTextRing);
-        const publicRuntime = sniffedRuntime ? coercePublicRuntime(sniffedRuntime) : null;
+        const publicRuntime = sniffLiveRuntime(agentTextRing);
         if (publicRuntime) {
           markRecentAgentInput(publicRuntime);
           return true;
@@ -1740,7 +1743,8 @@ export function useTerminalSession({
         }
         lastProcessedTickMs = now;
         const tail = readTerminalTail(t, STATE_TAIL_ROWS);
-        const raw = classifyTail(activeRuntime, tail);
+        let raw = classifyTail(activeRuntime, tail);
+        if (activeRuntime === "codex" && raw === "blocked") raw = null;
 
         // D4 (stale-footer false "working"). Once a turn is confirmed working,
         // a live turn keeps repainting its footer (the ticking elapsed-seconds
@@ -2087,19 +2091,9 @@ export function useTerminalSession({
           // unescaped argv-joined line; we just need the first token to
           // recognise the runtime executable.
           const cmdLine = unescapeOsc633(data.slice(2));
-          const exe = cmdLine
-            .trim()
-            .split(/\s+/)[0]
-            ?.toLowerCase()
-            .replace(/\.exe$/, "");
-          if (exe === "claude" || exe?.endsWith("/claude") || exe?.endsWith("\\claude")) {
-            setAgentRunning("claude");
-          } else if (
-            exe === "codex" ||
-            exe?.endsWith("/codex") ||
-            exe?.endsWith("\\codex")
-          ) {
-            setAgentRunning("codex");
+          const runtime = runtimeFromCommandLine(cmdLine);
+          if (runtime === "claude" || runtime === "codex") {
+            setAgentRunning(runtime);
           }
           return false;
         }
@@ -2122,6 +2116,16 @@ export function useTerminalSession({
       cleanups.push(() => stopStatePoller());
       const osc633Dispose = term.parser.registerOscHandler(633, handleOsc633);
       cleanups.push(() => osc633Dispose.dispose());
+      const presenceTimer = window.setInterval(() => {
+        if (agentPhase !== "idle") return;
+        if (!visibleRef.current || redetectSuppressedAfterExit) return;
+        if (!onAgentStateRef.current) return;
+        const host = termRef.current;
+        if (!host) return;
+        const live = liveRuntimeFromTail(readTerminalTail(host, STATE_TAIL_ROWS));
+        if (live) setAgentRunning(live);
+      }, 1_000);
+      cleanups.push(() => window.clearInterval(presenceTimer));
       // FinalTerm OSC 133;A is the generic "prompt start" marker emitted by
       // spark.ps1 alongside 633;A. Treating it as a second source means a
       // missed or out-of-order 633 sequence doesn't strand the chip in
@@ -2169,7 +2173,8 @@ export function useTerminalSession({
           clearRecentAgentInput();
         }
         if (agentPhase === "idle") {
-          const runtime = sniffOsc633CommandRuntime(agentTextRing) ?? sniffRuntime(agentTextRing);
+          const runtime =
+            sniffOsc633CommandRuntime(agentTextRing) ?? sniffLiveRuntime(agentTextRing);
           if (runtime) {
             setAgentRunning(runtime);
           } else if (chunkText.includes("\x1b[?1049h")) {
