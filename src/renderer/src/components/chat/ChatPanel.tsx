@@ -494,6 +494,27 @@ function HeaderMeta({ run }: { run: RunState }) {
         whiteSpace: "nowrap",
       }}
     >
+      {/* The chat's name — Cora titles the run early via name_chat and may
+          rename it later; run.renamed events re-render this live. Capped so
+          the status/cost/id chips always keep their row space. */}
+      {run.title ? (
+        <span
+          title={run.title}
+          style={{
+            flex: "0 1 auto",
+            minWidth: 0,
+            maxWidth: 200,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: 11,
+            fontWeight: 600,
+            color: "var(--ink)",
+          }}
+        >
+          {run.title}
+        </span>
+      ) : null}
       <StatusMeta run={run} />
       <CostPill run={run} />
       <RunIdChip runId={run.id} />
