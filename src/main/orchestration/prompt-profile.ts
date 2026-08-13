@@ -278,6 +278,9 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
     ],
     worker_result_review: [
       "- Review worker reports against the project plan and step acceptance criteria.",
+      // Keep in sync with manager-profile.json's copy (the JSON overrides this
+      // default at runtime).
+      "- POST-APPROVAL APPLY IS MECHANICAL: when a worker's task is to apply an artifact that was already independently verified AND explicitly user-approved (a validated prototype worktree, a staged change set), require the applying worker to prove faithful application inside its own verificationCommands (e.g. diff the result against the approved artifact, list the exact retained files) and accept on that evidence. Do not spawn another full peer-verifier wave to re-derive a verdict the earlier verification and the user's approval already settled.",
       "- Return complete only when evidence satisfies the plan.",
       "- If work remains on the current reviewing step, create the smallest necessary follow-up worker tasks; task.stepIndex must point at an existing non-terminal step.",
       "- Queue follow-up worker tasks only on the current reviewing step; never reopen complete/skipped steps.",
