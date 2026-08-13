@@ -13812,7 +13812,12 @@ async function performConversationRewind(
   const restoredMessage = target.messageId
     ? original.humanMessages.find((message) => message.id === target.messageId) ?? null
     : original.humanMessages[pointer] ?? null;
-  const restoredText = restoredMessage?.message ?? null;
+  // Synthetic notes (resume/board) are manager input the user never typed —
+  // prefilling the composer with their body would read as gibberish.
+  const restoredText =
+    restoredMessage && !restoredMessage.resumeNote && !restoredMessage.boardNote
+      ? restoredMessage.message
+      : null;
   const cutoff = original.humanMessages[pointer]?.createdAt;
   const priorPendingResume = original.pendingManagerResume;
   const interruptedCall = activeManagerCall(original);
@@ -14070,6 +14075,19 @@ async function performConversationRewind(
           openQuestion.questionContext?.reason ?? "Cora still needs this answer.",
           timestamp,
         );
+      } else if (restoredMessage?.resumeNote) {
+        // Undoing a RESUME returns to the state the resume left: a stopped
+        // run with its Resume affordance back, not a "complete" one. The user
+        // can rewind, adjust, and press Resume again.
+        draft.status = "paused";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "paused",
+          lastAction: "undo",
+          stopReason: "Resume undone by user",
+          pausedAt: timestamp,
+          updatedAt: timestamp,
+        };
       } else {
         draft.status = "complete";
         draft.completedAt = timestamp;
