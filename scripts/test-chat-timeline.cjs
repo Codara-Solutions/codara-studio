@@ -677,24 +677,24 @@ async function main() {
     "Re-issue the work that is still needed (relaunch those tasks, or replace them if the plan changed), then carry on.",
   ].join("\n");
 
-  test("the resume note renders as a system row, never as a user bubble", () => {
+  test("the resume note renders as the user's own Resume bubble (undoable turn)", () => {
     const timeline = T.buildChatTimeline(
       syntheticNoteRun("msg-resume", "resumeNote", RESUME_NOTE_BODY),
     );
+    // The resume is a first-class user turn: id kept as the MESSAGE id so the
+    // user-message checkpoint recorded at resume time attaches the standard
+    // Undo control. The technical note body never leaks into the bubble —
+    // display text is the compact Resume summary.
+    const bubble = timeline.find((item) => item.kind === "message" && item.id === "msg-resume");
+    assert.ok(bubble, "the resume note must render as a chat message");
+    assert.equal(bubble.author, "user");
+    assert.equal(bubble.text, "Resume — hand 2 interrupted attempts back to Cora");
+    assert.equal(bubble.at, at(30));
     assert.equal(
-      timeline.some((item) => item.kind === "message" && item.id === "msg-resume"),
+      timeline.some((item) => item.id === "resume-note:msg-resume"),
       false,
-      "the resume note must never render as a chat message",
+      "the old system row must not render alongside the bubble",
     );
-    const row = timeline.find((item) => item.id === "resume-note:msg-resume");
-    assert.ok(row, "the resume note must render as its own system row");
-    assert.equal(row.kind, "tool");
-    assert.equal(row.activity, "context");
-    assert.equal(row.title, "Run resumed");
-    assert.equal(row.detail, "2 interrupted attempts handed back to Cora");
-    assert.equal(row.tone, "done");
-    assert.equal(row.at, at(30));
-    assert.deepEqual(row.meta, [{ label: "Attempts", value: "2" }]);
     // The real user turn beside it is untouched.
     const user = timeline.find((item) => item.kind === "message" && item.id === "msg-user");
     assert.equal(user.author, "user");
@@ -710,9 +710,24 @@ async function main() {
       "Re-issue the work that is still needed, then carry on.",
     ].join("\n");
     const timeline = T.buildChatTimeline(syntheticNoteRun("msg-capped", "resumeNote", capped));
-    const row = timeline.find((item) => item.id === "resume-note:msg-capped");
-    assert.equal(row.detail, "5 interrupted attempts handed back to Cora");
-    assert.deepEqual(row.meta, [{ label: "Attempts", value: "5" }]);
+    const bubble = timeline.find((item) => item.kind === "message" && item.id === "msg-capped");
+    assert.equal(bubble.text, "Resume — hand 5 interrupted attempts back to Cora");
+  });
+
+  test("a plain resume note (no interrupted attempts) renders as a bare Resume bubble", () => {
+    const timeline = T.buildChatTimeline(
+      syntheticNoteRun(
+        "msg-plain-resume",
+        "resumeNote",
+        "The user resumed this run. Continue from the current durable state of the plan and conversation.",
+      ),
+    );
+    const bubble = timeline.find(
+      (item) => item.kind === "message" && item.id === "msg-plain-resume",
+    );
+    assert.ok(bubble, "the plain resume note must render as a chat message");
+    assert.equal(bubble.author, "user");
+    assert.equal(bubble.text, "Resume");
   });
 
   test("the board note keeps its own system row (the pattern resume notes copy)", () => {

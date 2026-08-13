@@ -353,30 +353,40 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       });
       continue;
     }
-    // Same story as the board note: the synthetic resume note is authored
-    // "user" only so the manager turn consumes it, and its body is a list of
-    // attempt ids. Render it as the system row it is, not as the user asking
-    // for anything.
+    // The synthetic resume note's BODY is manager input (a list of attempt
+    // ids), but the resume itself is a user action the user may want to take
+    // back. Render it as the user's own compact "Resume" bubble — id kept as
+    // the message id so the user-message checkpoint recorded at resume time
+    // attaches the standard Undo control, letting the user rewind to before
+    // the resume.
     if (message.resumeNote) {
       // The note names attempts one per line and tails off into "…and N more"
       // past its cap, so the count is the named rows plus that remainder.
       const namedAttempts = (text.match(/^- (?!…)/gm) ?? []).length;
       const overflowAttempts = Number(/^- …and (\d+) more/m.exec(text)?.[1] ?? 0);
       const attemptCount = namedAttempts + overflowAttempts;
-      items.push({
-        kind: "tool",
-        id: `resume-note:${message.id}`,
-        activity: "context",
-        title: "Run resumed",
-        detail:
+      messageItems.push({
+        kind: "message",
+        id: message.id,
+        author: "user",
+        messageKind: message.kind,
+        text:
           attemptCount === 1
-            ? "1 interrupted attempt handed back to Cora"
-            : `${attemptCount} interrupted attempts handed back to Cora`,
-        status: "completed",
-        tone: "done",
+            ? "Resume — hand 1 interrupted attempt back to Cora"
+            : attemptCount > 1
+              ? `Resume — hand ${attemptCount} interrupted attempts back to Cora`
+              : "Resume",
+        questionOptions: [],
+        answersMessageId: message.answersMessageId,
+        attachments: [],
+        intent: message.intent,
+        deliveryState: message.deliveryState,
+        targetTurnId: message.targetTurnId,
+        backendTurnId: message.backendTurnId,
+        conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,
+        deliveryEpoch: message.conversationEpoch ?? 0,
         at: message.createdAt,
-        meta: attemptCount > 0 ? [{ label: "Attempts", value: String(attemptCount) }] : [],
-        files: [],
+        repeatCount: 1,
       });
       continue;
     }
