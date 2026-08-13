@@ -57,7 +57,7 @@ const FAILURE_PATTERNS: ReadonlyArray<readonly [WorkerFailureKind, RegExp]> = [
   ],
   [
     "auth",
-    /not authenticated|no OAuth access token|OAuth session expired|refresh token|token (?:has )?expired|session expired|invalid api key|missing api key|no api key|api key (?:is )?(?:invalid|missing|expired)|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|forbidden|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)|subscription (?:required|expired)/i,
+    /not authenticated|no OAuth access token|OAuth session expired|invalidated oauth token|oauth token[^.]{0,30}invalid|token (?:was |is )?invalidated|refresh token|token (?:has )?expired|session expired|invalid api key|missing api key|no api key|api key (?:is )?(?:invalid|missing|expired)|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|forbidden|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)|subscription (?:required|expired)/i,
   ],
   [
     "launch",

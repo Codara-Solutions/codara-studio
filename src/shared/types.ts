@@ -2279,7 +2279,10 @@ export type ManagerTurnRecoveryFailureKind =
   | "transport"
   // Cora's own turn cap, not a provider problem: the work and any workers it
   // started are untouched, so the run parks resumable rather than failing.
-  | "timeout";
+  | "timeout"
+  // Expired/revoked provider credential: only the user can re-authenticate,
+  // so the run parks with a sign-in-again prompt instead of failing.
+  | "auth";
 
 /**
  * Durable, user-owned recovery handle for a manager turn that could not reach

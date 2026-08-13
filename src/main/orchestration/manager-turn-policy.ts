@@ -102,7 +102,17 @@ const KEEP_STATE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
  * work against a tree that did not need it. Parking keeps the run resumable
  * and, critically, leaves in-flight workers alone. */
 function parksInsteadOfFailing(kind: WorkerFailureKind | undefined): boolean {
-  return kind === "transport" || kind === "provider" || kind === "rate_limit" || kind === "timeout";
+  // `auth` parks too: a dead credential says nothing about the work or the
+  // workers. Observed live (run-msq6zj3l-1e2qv8): an invalidated OAuth token
+  // failed the turn, and the failure surfaced as a misleading "nothing left
+  // to run" question instead of a sign-in-again prompt.
+  return (
+    kind === "transport" ||
+    kind === "provider" ||
+    kind === "rate_limit" ||
+    kind === "timeout" ||
+    kind === "auth"
+  );
 }
 
 /**
@@ -151,9 +161,11 @@ export function planManagerTurnFailure(input: {
           ? "the manager turn ran out of time, which says nothing about the work or the workers, so the run parks resumable instead of failing"
           : kind === "rate_limit"
             ? "the provider is rate limited; a fast retry cannot clear a quota window, so the run parks for the user"
-            : input.backend === "pi"
-              ? "Pi exhausted its own automatic provider retries, so replaying the entire manager turn would duplicate work"
-              : "transient provider trouble outlived the automatic retries, so the run parks instead of failing",
+            : kind === "auth"
+              ? "the provider credential is invalid or expired; only the user can re-authenticate, so the run parks with the real cause named"
+              : input.backend === "pi"
+                ? "Pi exhausted its own automatic provider retries, so replaying the entire manager turn would duplicate work"
+                : "transient provider trouble outlived the automatic retries, so the run parks instead of failing",
       // One voice everywhere the parked state surfaces: the run header detail,
       // the composer placeholder, and the Retry button all speak this exact
       // sentence pair, naming the control that actually exists.
@@ -162,9 +174,11 @@ export function planManagerTurnFailure(input: {
           ? "Cora's turn ran out of time. Any workers it started kept running — retry the saved turn to pick them back up."
           : kind === "rate_limit"
             ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-            : kind === "transport"
-              ? "Cora lost its connection to the provider. Retry when the connection is stable."
-              : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+            : kind === "auth"
+              ? "Cora's provider credential expired or was revoked. Sign in again in Settings → Accounts, then retry the saved turn."
+              : kind === "transport"
+                ? "Cora lost its connection to the provider. Retry when the connection is stable."
+                : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
       lastAction: input.mode === "chat" ? "chat_turn_parked" : "manager_turn_parked",
     };
   }
