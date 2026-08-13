@@ -104,6 +104,12 @@ export interface ManagerRequestInput {
   conversationEpoch: number;
   /** Called only after the provider/PTY has accepted this exact prompt. */
   onPromptAccepted?: () => void | Promise<void>;
+  /** Called as soon as the backend knows which provider session this turn is
+   *  writing to — before the turn settles. Run-store persists the uuid
+   *  durably here so a crash mid-turn can still resume the same transcript;
+   *  waiting for the final ManagerCallResult loses the id (and with it the
+   *  whole conversation) when the process dies while the turn is in flight. */
+  onSessionEstablished?: (sessionUuid: string) => void | Promise<void>;
   /** Resolved per-chat backend config. The backend uses this to pick its
    *  model/effort and to know whether this is its first call for the chat. */
   chat: ChatBackendConfig;

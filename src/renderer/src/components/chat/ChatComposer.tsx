@@ -483,7 +483,11 @@ export default function ChatComposer({
           ? payload.contextTokens
           : payload.inputTokens;
       const value = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
-      if (value >= 0) setTokensUsed(value);
+      // Zero is never a real occupancy reading — a failed provider request
+      // (e.g. an expired credential) still emits a usage event with all-zero
+      // counts, and accepting it wiped the gauge to 0/256.0k. Compaction is
+      // the only legitimate reset, handled above via run.conversation_compacted.
+      if (value > 0) setTokensUsed(value);
       const rawBudget = payload.contextWindowTokens;
       if (typeof rawBudget === "number" && Number.isFinite(rawBudget) && rawBudget > 0) {
         setReportedContextBudget(rawBudget);

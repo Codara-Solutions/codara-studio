@@ -466,6 +466,14 @@ async function requestPiDecision(
     markPiSessionStartupFailure(startupError);
     throw startupError;
   }
+  // Report the session id the moment it exists, so run-store can persist it
+  // durably BEFORE the turn settles. Best-effort: a persistence hiccup must
+  // not fail an otherwise healthy turn.
+  try {
+    await input.onSessionEstablished?.(session.sessionId);
+  } catch (error) {
+    console.warn(`[pi-backend] failed to persist session id for ${runId}:`, error);
+  }
   try {
     const generation = session.generation;
     // `interrupted` belongs to the preceding turn. Generation/map ownership

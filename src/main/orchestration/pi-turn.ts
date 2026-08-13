@@ -218,17 +218,25 @@ export class PiTurnAccumulator {
         // signal. The later retry event is handled too for forward compatibility.
         this.providerFailure = null;
       }
-      this.onStream?.({
-        kind: "usage",
-        ...this.usage,
-        ...(this.contextTokens > 0 ? { contextTokens: this.contextTokens } : {}),
-        ...(this.contextWindowTokens !== null
-          ? { contextWindowTokens: this.contextWindowTokens }
-          : {}),
-        // The ceiling this session will actually compact at. Only Pi sessions
-        // carry it, which is exactly the set of chats the extension runs in.
-        compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
-      });
+      // An errored request reports all-zero usage; emitting that gauge would
+      // wipe every consumer's context meter to 0. No reading beats a false
+      // zero, so stay quiet until real usage accumulates.
+      if (
+        this.usage.inputTokens + this.usage.outputTokens + this.usage.cacheReadTokens > 0 ||
+        this.contextTokens > 0
+      ) {
+        this.onStream?.({
+          kind: "usage",
+          ...this.usage,
+          ...(this.contextTokens > 0 ? { contextTokens: this.contextTokens } : {}),
+          ...(this.contextWindowTokens !== null
+            ? { contextWindowTokens: this.contextWindowTokens }
+            : {}),
+          // The ceiling this session will actually compact at. Only Pi sessions
+          // carry it, which is exactly the set of chats the extension runs in.
+          compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+        });
+      }
       return;
     }
 
