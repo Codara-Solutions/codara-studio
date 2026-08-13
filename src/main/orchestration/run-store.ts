@@ -10191,6 +10191,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     // guard rejects non-driving states), and the header would keep the parked
     // parked banner through a perfectly healthy resumed turn.
     const interruptedAttempts = interruptedAttemptsForResume(run);
+    // Pre-generated so the checkpoint recorded below (outside the mutate) can
+    // name the exact message this resume created.
+    const resumeMessageId = makeId("msg");
+    let resumeMessagePushed = false;
     const driving = await commitRunChange(run, {
       type: "run.resumed",
       message: parkedChatTurn
@@ -10206,9 +10210,13 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         // may be a mutation or two old by the time the commit runs.
         const interrupted = interruptedAttemptsForResume(draft);
         const noteAlreadyDeliverable = settleResumeInterruptedNotes(draft);
-        if (interrupted.length > 0 && !noteAlreadyDeliverable) {
+        // EVERY chat-route resume writes its note, not only interrupted-attempt
+        // ones: the note is what makes the resume a first-class, undoable user
+        // turn (rendered as the user's "Resume" bubble, checkpointed below so
+        // Undo can rewind to before the resume).
+        if (!noteAlreadyDeliverable) {
           draft.humanMessages.push({
-            id: makeId("msg"),
+            id: resumeMessageId,
             runId: draft.id,
             author: "user",
             kind: "note",
@@ -10216,7 +10224,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
             // to the manager, flagged so no surface or heuristic mistakes it
             // for something the user typed.
             resumeNote: true,
-            message: composeResumeInterruptedNote(interrupted),
+            message:
+              interrupted.length > 0
+                ? composeResumeInterruptedNote(interrupted)
+                : "The user resumed this run. Continue from the current durable state of the plan and conversation.",
             intent: "turn",
             // "queued" (not acknowledged) is what makes the chat turn dispatched
             // below consume this as its input — see queuedManagerInputMessages.
@@ -10224,6 +10235,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
             conversationEpoch: conversationEpoch(draft),
             createdAt: timestamp,
           });
+          resumeMessagePushed = true;
         }
         draft.status = "running";
         draft.verificationRounds = 0;
@@ -10238,6 +10250,27 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         draft.updatedAt = timestamp;
       },
     });
+    // Land the resume checkpoint BEFORE the chat turn is allowed to edit the
+    // workspace — same contract as addRunMessage's user-message checkpoint.
+    // This is what makes the resume undoable: the "Resume" bubble carries the
+    // standard Undo control, and Chat+Code undo restores the resume-time tree.
+    if (resumeMessagePushed && runProjectPolicyMode(driving) === "trusted") {
+      const checkpointCwd = workspaceCwdFromRun(driving);
+      const messagePointer = driving.humanMessages.findIndex(
+        (message) => message.id === resumeMessageId,
+      );
+      if (checkpointCwd && messagePointer >= 0) {
+        await recordCheckpointInBackground({
+          runId: driving.id,
+          cwd: checkpointCwd,
+          kind: "user-message",
+          messageId: resumeMessageId,
+          messagePointer,
+          label: "Resume",
+          conversationEpoch: conversationEpoch(driving),
+        });
+      }
+    }
     // askManagerBackend's own failure policy (park / retry / fail) only covers
     // what happens INSIDE a turn. Everything before the turn exists throws
     // straight out: the untrusted-pull-request backend refusal, an account that
