@@ -104,12 +104,26 @@ export default function ChatConversation({ run }: { run: RunState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [inspectableKey],
   );
+  // Turns that streamed ANY real content (prose or tool work). A failed turn
+  // with content is transcript the user must keep, never a "redundant retry
+  // duplicate" — an interrupted long turn shares frozen inputMessageIds with
+  // its parked retry, and hiding it would wipe the whole conversation view.
+  const contentfulCallIds = useMemo(
+    () => execution.turns.filter((turn) => turn.blocks.length > 0).map((turn) => turn.sparkCallId),
+    [execution.turns],
+  );
+  const contentfulKey = contentfulCallIds.join(" ");
+  const contentfulCalls = useMemo(
+    () => new Set(contentfulCallIds),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contentfulKey],
+  );
   const items = useMemo(
     () =>
       groupCompletedActivity(
         buildChatTimeline(run).filter(
           (item) =>
-            !isRedundantParkedBackendFailure(item, run) &&
+            !isRedundantParkedBackendFailure(item, run, contentfulCalls) &&
             !isSupersededFailedManagerTurn(item, run) &&
             shouldRenderTimelineItem(item, inspectableCalls, execution.hydrated),
         ),
@@ -118,6 +132,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
     [
       execution.hydrated,
       inspectableCalls,
+      contentfulCalls,
       run.humanMessages,
       run.sparkCalls,
       run.workerTasks,
@@ -544,6 +559,7 @@ function shouldRenderTimelineItem(
 function isRedundantParkedBackendFailure(
   item: ChatTimelineItem,
   run: RunState,
+  contentfulCalls: Set<string>,
 ): boolean {
   const recovery = run.managerTurnRecovery;
   if (!recovery) return false;
@@ -558,6 +574,11 @@ function isRedundantParkedBackendFailure(
   ) {
     const itemCallId = timelineSparkCallId(item);
     if (itemCallId === recovery.failedSparkCallId) return false;
+    // A failed turn that streamed real content is a transcript, not one of
+    // the identical quiet-retry rows this filter exists to collapse (an
+    // interrupted long turn shares its frozen inputMessageIds with the
+    // parked retry, and suppressing it hid the whole conversation).
+    if (itemCallId && contentfulCalls.has(itemCallId)) return false;
     const itemCall = run.sparkCalls.find((call) => call.id === itemCallId);
     const failedCall = run.sparkCalls.find(
       (call) => call.id === recovery.failedSparkCallId,
