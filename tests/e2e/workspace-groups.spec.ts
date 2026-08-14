@@ -70,8 +70,8 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
       page.locator('[data-workspace-id="ws-alpha"]'),
     );
     await expect.poll(async () =>
-      page.locator('[data-workspace-rail-drop-index="0"]').evaluate((dropZone) =>
-        Array.from(dropZone.parentElement?.children ?? []).flatMap((element) => {
+      page.locator('[data-rail-list="top"]').evaluate((list) =>
+        Array.from(list.children).flatMap((element) => {
           if (!(element instanceof HTMLElement)) return [];
           if (element.dataset.workspaceId === "ws-alpha") return ["Alpha"];
           if (element.dataset.workspaceId === "ws-beta") return ["Beta"];

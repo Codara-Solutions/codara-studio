@@ -120,7 +120,8 @@
     "test:remote-access-hostile": "node --expose-gc scripts/test-remote-access-hostile.mjs",
     "test:worker-terminal-controls": "node scripts/test-worker-terminal-controls.cjs",
     "test:chat-surface-routing": "node scripts/test-chat-surface-routing.cjs",
-    "test:tab-reorder": "node scripts/test-tab-reorder.cjs"
+    "test:tab-reorder": "node scripts/test-tab-reorder.cjs",
+    "test:workspace-reorder": "node scripts/test-workspace-reorder.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",

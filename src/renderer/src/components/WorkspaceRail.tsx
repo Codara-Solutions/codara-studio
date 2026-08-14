@@ -20,10 +20,23 @@ import {
 } from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
 import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
+import {
+  beforeItemForVerticalPlan,
+  planVerticalReorder,
+  railAutoScrollDelta,
+  type VerticalReorderSlot,
+} from "./workspaceReorder";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
 const WORKSPACE_GROUP_MIME = "application/x-codara-workspace-group";
+// Reorder scopes: the rail is not one list but several. The top level holds
+// unfiled workspaces and folder cards; every expanded folder owns a second,
+// nested list of its members. Each gets its own cached geometry and its own
+// ghost slot, keyed by these ids.
+const RAIL_SCOPE_TOP = "top";
+const RAIL_SCOPE_GROUP_PREFIX = "group:";
+const railScopeForGroup = (groupId: string): string => `${RAIL_SCOPE_GROUP_PREFIX}${groupId}`;
 // Below this width the full tracked uppercase label no longer fits beside the
 // workspace count and the fixed 20px "+" action, so the header swaps in "WS".
 // Derived from the SectionHeader band rather than guessed: 12px row padding
@@ -74,6 +87,27 @@ function cssAttrValue(value: string): string {
 
 function folderBasename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+// Live preview of where a rail drag would land. Derived entirely from
+// planVerticalReorder, so what the rail paints and what the drop commits come
+// from one calculation.
+interface ReorderPreview {
+  /** Which list this preview belongs to: "top", or `group:<folder id>`. */
+  scope: string;
+  draggedId: string;
+  /** Landing index within this list minus the dragged item. */
+  insertIndex: number;
+  /**
+   * False for a "home" drop (releasing here changes nothing): the ghost slot
+   * fades out rather than promising a move the drop will not make.
+   */
+  changed: boolean;
+  /** Content-space box of the ghost slot — the hole the rows slid apart to open. */
+  ghostStart: number;
+  ghostHeight: number;
+  /** translateY px per item id; absent means 0. */
+  offsets: Record<string, number>;
 }
 
 interface RailProps {
@@ -228,13 +262,8 @@ function WorkspaceRail(props: RailProps) {
   // is rendered in the opposite rail; local state is only visual feedback.
   const [wsDragId, setWsDragId] = useState<string | null>(null);
   const wsDragIdRef = useRef<string | null>(null);
-  const [wsDropMarker, setWsDropMarker] = useState<{
-    workspaceId: string;
-    position: "before" | "after";
-  } | null>(null);
   const [groupDragId, setGroupDragId] = useState<string | null>(null);
   const groupDragIdRef = useRef<string | null>(null);
-  const [railDropIndex, setRailDropIndex] = useState<number | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const createBtnRef = useRef<HTMLButtonElement>(null);
@@ -242,6 +271,34 @@ function WorkspaceRail(props: RailProps) {
   // their flip boundary so a menu near the section's end opens upward instead
   // of overhanging the section stacked below (Source Control / Explorer).
   const wsScrollRef = useRef<HTMLDivElement | null>(null);
+  // ── Rail reorder ─────────────────────────────────────────────────────────
+  // The gesture is owned by the LIST, not by the individual rows — the same
+  // shape the tab strip uses. One hit-test against one cached geometry, so
+  // there are no dead pixels in the gaps between rows or in the empty run past
+  // the last one (dropping there used to be a silent cancel), and no per-row
+  // indicator that can get stranded when a fast drag skips a dragleave.
+  //
+  // There are two independent lists ("scopes"): the top level, and each
+  // expanded folder's member list. A workspace can be dragged between them; a
+  // folder only ever reorders within the top level.
+  const memberListRefs = useRef(new Map<string, HTMLDivElement>());
+  // Geometry is measured ONCE per scope per gesture. Re-measuring mid-drag
+  // would read the live transforms of the sliding rows, and moving boundaries
+  // make the insertion index oscillate whenever the pointer rests near a
+  // midpoint. Content coordinates also survive the edge auto-scroll below.
+  const reorderSlotsRef = useRef(new Map<string, VerticalReorderSlot[]>());
+  // Height of the item in flight, captured at dragstart. Only consulted when
+  // it lands in a list it did not come from, which has no slot to measure.
+  const dragHeightRef = useRef(0);
+  const dragPointerRef = useRef<number | null>(null);
+  const dragScopeRef = useRef<string | null>(null);
+  const autoScrollRef = useRef<number | null>(null);
+  // Dimming the source is deferred one frame: doing it synchronously in
+  // dragstart can be caught by the browser's drag-image snapshot, handing the
+  // user a drag image that is already faded.
+  const dragDimFrameRef = useRef<number | null>(null);
+  const [reorderPreview, setReorderPreview] = useState<ReorderPreview | null>(null);
+  const reorderPreviewRef = useRef<ReorderPreview | null>(null);
   const [railCtxMenu, setRailCtxMenu] = useState<{
     x: number;
     y: number;
@@ -367,17 +424,46 @@ function WorkspaceRail(props: RailProps) {
     return null;
   };
 
+  const stopRailAutoScroll = () => {
+    if (autoScrollRef.current === null) return;
+    cancelAnimationFrame(autoScrollRef.current);
+    autoScrollRef.current = null;
+  };
+
+  const clearReorderPreview = () => {
+    reorderPreviewRef.current = null;
+    setReorderPreview((current) => (current === null ? current : null));
+  };
+
+  // Everything a gesture allocates — cached geometry, the auto-scroll frame,
+  // the deferred dim, the preview. Every teardown path runs through here so
+  // none of them can leave half the state behind.
+  const endRailGesture = () => {
+    stopRailAutoScroll();
+    if (dragDimFrameRef.current !== null) cancelAnimationFrame(dragDimFrameRef.current);
+    dragDimFrameRef.current = null;
+    reorderSlotsRef.current.clear();
+    dragPointerRef.current = null;
+    dragScopeRef.current = null;
+    dragHeightRef.current = 0;
+    clearReorderPreview();
+  };
+
   const clearWorkspaceDrag = () => {
     wsDragIdRef.current = null;
     setWsDragId(null);
-    setWsDropMarker(null);
-    setRailDropIndex(null);
+    endRailGesture();
   };
 
   const clearWorkspaceGroupDrag = () => {
     groupDragIdRef.current = null;
     setGroupDragId(null);
-    setRailDropIndex(null);
+    endRailGesture();
+  };
+
+  const clearRailDrag = () => {
+    clearWorkspaceDrag();
+    clearWorkspaceGroupDrag();
   };
 
   // Safety net: dragend is delivered to the drag SOURCE row, and a row that
@@ -387,150 +473,307 @@ function WorkspaceRail(props: RailProps) {
   // at the window so every way a drag can end clears the visual state.
   useEffect(() => {
     if (wsDragId === null && groupDragId === null) return undefined;
-    const end = () => {
-      clearWorkspaceDrag();
-      clearWorkspaceGroupDrag();
-    };
+    const end = () => clearRailDrag();
     window.addEventListener("dragend", end);
     window.addEventListener("drop", end);
+    // A drag that leaves the window entirely (onto another app, or the window
+    // losing focus behind a dialog) fires neither of the above here.
+    window.addEventListener("blur", end);
     return () => {
       window.removeEventListener("dragend", end);
       window.removeEventListener("drop", end);
+      window.removeEventListener("blur", end);
     };
     // The clear helpers only touch stable refs/setters — ids are the gate.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsDragId, groupDragId]);
 
-  const markRailDropAt = (event: React.DragEvent, index: number) => {
-    if (!isWorkspaceDrag(event) && !isWorkspaceGroupDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-    setRailDropIndex(index);
+  // Unmount mid-drag (the section moved to the other rail, the workspace
+  // switched): never leave an animation frame scheduled behind us.
+  useEffect(() => () => {
+    if (autoScrollRef.current !== null) cancelAnimationFrame(autoScrollRef.current);
+    if (dragDimFrameRef.current !== null) cancelAnimationFrame(dragDimFrameRef.current);
+  }, []);
+
+  const listNodeForScope = (scope: string): HTMLElement | null =>
+    scope === RAIL_SCOPE_TOP ? wsScrollRef.current : memberListRefs.current.get(scope) ?? null;
+
+  // Only the top-level list scrolls; member lists ride inside it, so their
+  // content space is just their own box.
+  const scrollTopForScope = (node: HTMLElement, scope: string): number =>
+    scope === RAIL_SCOPE_TOP ? node.scrollTop : 0;
+
+  // Direct children only: a folder card is one item of the TOP list, and the
+  // member rows nested inside it belong to the folder's own list, not this one.
+  const railItemElements = (node: HTMLElement): HTMLElement[] =>
+    Array.from(node.children).filter((child): child is HTMLElement =>
+      child instanceof HTMLElement && Boolean(railItemId(child)));
+
+  const railItemId = (element: HTMLElement): string =>
+    element.dataset.workspaceId || element.dataset.workspaceGroupId || "";
+
+  const measureRailSlots = (scope: string): VerticalReorderSlot[] => {
+    const node = listNodeForScope(scope);
+    if (!node) return [];
+    const listTop = node.getBoundingClientRect().top;
+    const scrollTop = scrollTopForScope(node, scope);
+    // Undo this scope's live preview transforms, so a mid-gesture re-measure
+    // reads layout positions rather than where the rows have slid to.
+    const offsets = reorderPreviewRef.current?.scope === scope
+      ? reorderPreviewRef.current.offsets
+      : undefined;
+    return railItemElements(node).map((element) => {
+      const id = railItemId(element);
+      const rect = element.getBoundingClientRect();
+      const shift = offsets?.[id] ?? 0;
+      return {
+        id,
+        start: rect.top - listTop + scrollTop - shift,
+        end: rect.bottom - listTop + scrollTop - shift,
+      };
+    });
   };
 
-  const dropRailItemAt = (event: React.DragEvent, index: number) => {
-    if (!isWorkspaceDrag(event) && !isWorkspaceGroupDrag(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const beforeItemId = topLevelItemIds[index] ?? null;
-    const workspaceId = draggedWorkspaceId(event);
-    if (workspaceId) {
-      props.onMoveWorkspace(workspaceId, null, null);
-      props.onReorderWorkspaceRailItem(workspaceId, beforeItemId);
-      clearWorkspaceDrag();
+  // Cached geometry, refreshed only when the list's membership changed under
+  // the drag (an agent creating or deleting a workspace mid-gesture).
+  const ensureRailSlots = (scope: string): VerticalReorderSlot[] => {
+    const node = listNodeForScope(scope);
+    const cached = reorderSlotsRef.current.get(scope);
+    if (node && cached) {
+      const live = railItemElements(node).map(railItemId);
+      if (live.length === cached.length && live.every((id, index) => id === cached[index].id)) {
+        return cached;
+      }
+    }
+    const next = measureRailSlots(scope);
+    reorderSlotsRef.current.set(scope, next);
+    return next;
+  };
+
+  // A folder card only reorders among the top-level items — it cannot be
+  // filed inside another folder. A workspace can land in any list.
+  const railDragIdForScope = (scope: string): string | null => {
+    if (groupDragIdRef.current) {
+      return scope === RAIL_SCOPE_TOP ? groupDragIdRef.current : null;
+    }
+    return wsDragIdRef.current;
+  };
+
+  const railPointerY = (node: HTMLElement, scope: string, clientY: number): number =>
+    clientY - node.getBoundingClientRect().top + scrollTopForScope(node, scope);
+
+  const applyRailPlanAt = (scope: string, clientY: number) => {
+    const draggedId = railDragIdForScope(scope);
+    const node = listNodeForScope(scope);
+    if (!draggedId || !node) return;
+    dragPointerRef.current = clientY;
+    dragScopeRef.current = scope;
+    const slots = ensureRailSlots(scope);
+    const plan = planVerticalReorder(
+      slots,
+      draggedId,
+      railPointerY(node, scope, clientY),
+      dragHeightRef.current,
+    );
+    // The dragged item is neither in this list nor measurable — show nothing
+    // rather than guess a destination.
+    if (!plan) return clearReorderPreview();
+    const previous = reorderPreviewRef.current;
+    if (
+      previous &&
+      previous.scope === scope &&
+      previous.draggedId === plan.draggedId &&
+      previous.insertIndex === plan.insertIndex &&
+      previous.changed === plan.changed &&
+      previous.ghostStart === plan.ghostStart
+    ) {
       return;
     }
-    const groupId = draggedWorkspaceGroupId(event);
-    if (groupId) props.onReorderWorkspaceRailItem(groupId, beforeItemId);
-    clearWorkspaceGroupDrag();
+    const offsets: Record<string, number> = {};
+    plan.offsets.forEach((offset, index) => {
+      if (offset !== 0) offsets[slots[index].id] = offset;
+    });
+    const next: ReorderPreview = {
+      scope,
+      draggedId: plan.draggedId,
+      insertIndex: plan.insertIndex,
+      changed: plan.changed,
+      ghostStart: plan.ghostStart,
+      ghostHeight: plan.ghostHeight,
+      offsets,
+    };
+    reorderPreviewRef.current = next;
+    setReorderPreview(next);
   };
 
-  const renderWorkspaceRows = (
-    items: Workspace[],
-    groupId: string | null,
-    topLevel = false,
-  ): React.ReactNode =>
-    items.map((w, index) => (
-      <React.Fragment key={w.id}>
-        {wsDropMarker?.workspaceId === w.id && wsDropMarker.position === "before" && (
-          <RowDropIndicator accent={accent} />
-        )}
-        <WorkspaceRow
-          ws={w}
-          active={w.id === props.activeId}
-          editing={w.id === props.editingId}
-          dragging={wsDragId === w.id}
-          tone={props.toneByWorkspaceId?.[w.id] ?? null}
-          working={props.workingByWorkspaceId?.[w.id] ?? false}
-          missing={missingWorkspaceIds.has(w.id)}
-          folderColorManaged={groupId !== null}
-          menuBoundaryRef={wsScrollRef}
-          onActivate={() => props.onActivate(w.id)}
-          onEdit={() => props.onEdit(w.id)}
-          onChange={(patch) => props.onChange(w.id, patch)}
-          onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
-          onCloseEditor={props.onCloseEditor}
-          onCreateCopyBranch={() => props.onCreateCopyBranch(w.id)}
-          onDelete={() => props.onDelete(w.id)}
-          onRowDragStart={(event) => {
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
-            // text/plain is a compatibility transport for WebDriver/native
-            // drag implementations that discard custom MIME payloads.
-            event.dataTransfer.setData("text/plain", w.id);
-            wsDragIdRef.current = w.id;
-            setWsDragId(w.id);
-          }}
-          onRowDragOver={(event) => {
-            if (topLevel && isWorkspaceGroupDrag(event)) {
-              event.preventDefault();
-              event.stopPropagation();
-              event.dataTransfer.dropEffect = "move";
-              const rect = event.currentTarget.getBoundingClientRect();
-              const targetIndex = topLevelItemIds.indexOf(w.id);
-              setWsDropMarker(null);
-              setRailDropIndex(
-                event.clientY < rect.top + rect.height / 2
-                  ? targetIndex
-                  : targetIndex + 1,
-              );
-              return;
-            }
-            if (!isWorkspaceDrag(event)) return;
-            event.preventDefault();
-            event.stopPropagation();
-            event.dataTransfer.dropEffect = "move";
-            const rect = event.currentTarget.getBoundingClientRect();
-            setWsDropMarker({
-              workspaceId: w.id,
-              position: event.clientY < rect.top + rect.height / 2 ? "before" : "after",
-            });
-          }}
-          onRowDrop={(event) => {
-            if (topLevel && isWorkspaceGroupDrag(event)) {
-              event.preventDefault();
-              event.stopPropagation();
-              const sourceId = draggedWorkspaceGroupId(event);
-              if (sourceId) {
-                const rect = event.currentTarget.getBoundingClientRect();
-                const targetIndex = topLevelItemIds.indexOf(w.id);
-                const beforeItemId = event.clientY < rect.top + rect.height / 2
-                  ? w.id
-                  : topLevelItemIds[targetIndex + 1] ?? null;
-                props.onReorderWorkspaceRailItem(sourceId, beforeItemId);
-              }
-              clearWorkspaceGroupDrag();
-              return;
-            }
-            if (!isWorkspaceDrag(event)) return;
-            event.preventDefault();
-            event.stopPropagation();
-            const sourceId = draggedWorkspaceId(event);
-            if (!sourceId) return clearWorkspaceDrag();
-            const rect = event.currentTarget.getBoundingClientRect();
-            if (topLevel) {
-              const targetIndex = topLevelItemIds.indexOf(w.id);
-              const beforeItemId = event.clientY < rect.top + rect.height / 2
-                ? w.id
-                : topLevelItemIds[targetIndex + 1] ?? null;
-              props.onMoveWorkspace(sourceId, null, null);
-              props.onReorderWorkspaceRailItem(sourceId, beforeItemId);
-              clearWorkspaceDrag();
-              return;
-            }
-            const before = event.clientY < rect.top + rect.height / 2
-              ? w.id
-              : items[index + 1]?.id ?? null;
-            props.onMoveWorkspace(sourceId, groupId, before);
-            clearWorkspaceDrag();
-          }}
-          onRowDragEnd={clearWorkspaceDrag}
-        />
-        {wsDropMarker?.workspaceId === w.id && wsDropMarker.position === "after" && (
-          <RowDropIndicator accent={accent} />
-        )}
-      </React.Fragment>
+  // Edge auto-scroll: without it, a rail taller than its section can only be
+  // reordered inside the visible window — the slot the user wants is
+  // off-screen and unreachable, because HTML5 drag events never scroll a
+  // container themselves. Only the top-level list scrolls, but a drag hovering
+  // inside a folder near the section's edge scrolls it too.
+  const startRailAutoScroll = () => {
+    if (autoScrollRef.current !== null) return;
+    const step = () => {
+      autoScrollRef.current = null;
+      const el = wsScrollRef.current;
+      const scope = dragScopeRef.current;
+      const clientY = dragPointerRef.current;
+      // The gesture ended, or the pointer left the rail (the coordinate is
+      // cleared on dragleave) — stop rather than scroll on a stale position.
+      if (!el || !scope || clientY === null) return;
+      const rect = el.getBoundingClientRect();
+      const delta = railAutoScrollDelta(clientY, rect.top, rect.bottom);
+      if (delta !== 0) {
+        const limit = el.scrollHeight - el.clientHeight;
+        const next = Math.max(0, Math.min(limit, el.scrollTop + delta));
+        if (next !== el.scrollTop) {
+          el.scrollTop = next;
+          // The pointer didn't move but the content under it did, so the
+          // insertion index has to be recomputed against the new scroll.
+          applyRailPlanAt(scope, clientY);
+        }
+      }
+      autoScrollRef.current = requestAnimationFrame(step);
+    };
+    autoScrollRef.current = requestAnimationFrame(step);
+  };
+
+  // Does this scope accept the drag in flight? Group drags are top-level only;
+  // workspace drags go anywhere.
+  const railScopeAccepts = (event: React.DragEvent, scope: string): boolean =>
+    isWorkspaceGroupDrag(event) ? scope === RAIL_SCOPE_TOP : isWorkspaceDrag(event);
+
+  const handleRailDragOver = (event: React.DragEvent, scope: string) => {
+    if (!railScopeAccepts(event, scope)) return;
+    event.preventDefault();
+    // Claim the event for THIS list: the top-level handler must not also plan
+    // a move when the pointer is inside a folder's member list.
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    applyRailPlanAt(scope, event.clientY);
+    startRailAutoScroll();
+  };
+
+  const handleRailDragLeave = (event: React.DragEvent, scope: string) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && event.currentTarget.contains(next)) return;
+    if (reorderPreviewRef.current?.scope !== scope) return;
+    // Left this list: the rows slide home and the ghost fades. Forgetting the
+    // pointer also stops edge auto-scroll chasing a coordinate the user has
+    // abandoned.
+    dragPointerRef.current = null;
+    clearReorderPreview();
+  };
+
+  // A workspace hovering a folder CARD means "file it in here", which has no
+  // slot to point at. Drop whatever preview the top-level list last planned so
+  // the two destinations are never promised at once — but keep tracking the
+  // pointer, so a drag resting on a folder near the section's edge still
+  // scrolls the rail.
+  const handleFolderCardDragOver = (event: React.DragEvent) => {
+    dragPointerRef.current = event.clientY;
+    dragScopeRef.current = RAIL_SCOPE_TOP;
+    clearReorderPreview();
+    startRailAutoScroll();
+  };
+
+  // Resolve the drop from the release position rather than trusting the last
+  // dragover: a fast flick can outrun the dragover stream, and the frame the
+  // user released on is the one they aimed with.
+  const handleRailDrop = (event: React.DragEvent, scope: string) => {
+    if (!railScopeAccepts(event, scope)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const isGroup = isWorkspaceGroupDrag(event);
+    const draggedId = isGroup ? draggedWorkspaceGroupId(event) : draggedWorkspaceId(event);
+    const node = listNodeForScope(scope);
+    // undefined means "no-op": either we could not resolve a plan, or the user
+    // released the item back in its own slot.
+    let beforeItemId: string | null | undefined;
+    if (draggedId && node) {
+      const slots = ensureRailSlots(scope);
+      const plan = planVerticalReorder(
+        slots,
+        draggedId,
+        railPointerY(node, scope, event.clientY),
+        dragHeightRef.current,
+      );
+      if (plan) beforeItemId = beforeItemForVerticalPlan(slots, plan);
+    }
+    // Tear the preview down BEFORE committing, so the new order lands in a
+    // list with no transforms on it and settles instantly instead of animating
+    // backwards out of the preview offsets.
+    clearRailDrag();
+    if (!draggedId || beforeItemId === undefined) return;
+    if (isGroup) {
+      props.onReorderWorkspaceRailItem(draggedId, beforeItemId);
+      return;
+    }
+    if (scope === RAIL_SCOPE_TOP) {
+      // Two writes: unfile it (it may be coming out of a folder), then place
+      // it among the top-level items.
+      props.onMoveWorkspace(draggedId, null, null);
+      props.onReorderWorkspaceRailItem(draggedId, beforeItemId);
+      return;
+    }
+    props.onMoveWorkspace(draggedId, scope.slice(RAIL_SCOPE_GROUP_PREFIX.length), beforeItemId);
+  };
+
+  // One class for both lists: --reordering is what switches the shared slide
+  // duration on, and it is dropped in the same commit that applies the new
+  // order (see styles.css) so the settle is instant.
+  const railListClassName = wsDragId || groupDragId
+    ? "spark-workspace-list spark-workspace-list--reordering"
+    : "spark-workspace-list";
+
+  // Shared tail of every rail dragstart. Callers set their id REF
+  // synchronously (the first dragover needs it); this captures the item's
+  // height — what lets a list the item did not come from open a correctly
+  // sized slot for it — and defers only the dim, which must not be caught by
+  // the browser's drag-image snapshot.
+  const beginRailDrag = (event: React.DragEvent<HTMLElement>, dim: () => void) => {
+    event.dataTransfer.effectAllowed = "move";
+    dragHeightRef.current = event.currentTarget.getBoundingClientRect().height;
+    dragDimFrameRef.current = requestAnimationFrame(() => {
+      dragDimFrameRef.current = null;
+      dim();
+    });
+  };
+
+  // Rows carry no drop logic of their own: the list they sit in owns the whole
+  // gesture (see handleRailDragOver). They only announce the drag and paint
+  // the preview's slide offset.
+  const renderWorkspaceRows = (items: Workspace[], groupId: string | null): React.ReactNode =>
+    items.map((w) => (
+      <WorkspaceRow
+        key={w.id}
+        ws={w}
+        active={w.id === props.activeId}
+        editing={w.id === props.editingId}
+        dragging={wsDragId === w.id}
+        dragOffset={reorderPreview?.offsets[w.id] ?? 0}
+        tone={props.toneByWorkspaceId?.[w.id] ?? null}
+        working={props.workingByWorkspaceId?.[w.id] ?? false}
+        missing={missingWorkspaceIds.has(w.id)}
+        folderColorManaged={groupId !== null}
+        menuBoundaryRef={wsScrollRef}
+        onActivate={() => props.onActivate(w.id)}
+        onEdit={() => props.onEdit(w.id)}
+        onChange={(patch) => props.onChange(w.id, patch)}
+        onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
+        onCloseEditor={props.onCloseEditor}
+        onCreateCopyBranch={() => props.onCreateCopyBranch(w.id)}
+        onDelete={() => props.onDelete(w.id)}
+        onRowDragStart={(event) => {
+          event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
+          // text/plain is a compatibility transport for WebDriver/native drag
+          // implementations that discard custom MIME payloads.
+          event.dataTransfer.setData("text/plain", w.id);
+          wsDragIdRef.current = w.id;
+          beginRailDrag(event, () => setWsDragId(w.id));
+        }}
+        onRowDragEnd={clearWorkspaceDrag}
+      />
     ));
 
   const renderSection = (section: PanelSectionKey): React.ReactNode => {
@@ -595,7 +838,22 @@ function WorkspaceRail(props: RailProps) {
             {!collapsed.workspaces && (
               <div
                 ref={wsScrollRef}
-                style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}
+                className={railListClassName}
+                // Names the reorder scope this list owns, so the scope a drop
+                // resolves against is readable in the DOM.
+                data-rail-list={RAIL_SCOPE_TOP}
+                style={{
+                  flex: 1,
+                  overflow: "auto",
+                  minHeight: 0,
+                  padding: "6px 8px 10px",
+                  // Positioning context for the reorder ghost, which is placed
+                  // in content coordinates and must scroll with the list.
+                  position: "relative",
+                  // Matches the horizontal padding above, so the ghost lines up
+                  // with the rows rather than with the scroller's edges.
+                  ["--ws-list-inset" as string]: "8px",
+                }}
                 onContextMenu={(event) => {
                   // Blank space only — rows and folders keep their "…" menus.
                   if (event.target !== event.currentTarget) return;
@@ -606,28 +864,23 @@ function WorkspaceRail(props: RailProps) {
                     anchor: event.currentTarget,
                   });
                 }}
-                onDragOver={(event) => {
-                  if (!isWorkspaceDrag(event)) return;
-                  if (event.target === event.currentTarget) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    event.dataTransfer.dropEffect = "move";
-                    setWsDropMarker(null);
-                  }
-                }}
-                onDrop={(event) => {
-                  if (!isWorkspaceDrag(event) || event.target !== event.currentTarget) return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const sourceId = draggedWorkspaceId(event);
-                  if (sourceId) props.onMoveWorkspace(sourceId, null, null);
-                  clearWorkspaceDrag();
-                }}
+                // The whole list is the drop target, not the rows: the 4px
+                // gaps between rows, the container's padding and the empty run
+                // past the last item are all valid ground, so there is no
+                // position the user can aim at that silently cancels the drag.
+                onDragEnter={(event) => handleRailDragOver(event, RAIL_SCOPE_TOP)}
+                onDragOver={(event) => handleRailDragOver(event, RAIL_SCOPE_TOP)}
+                onDragLeave={(event) => handleRailDragLeave(event, RAIL_SCOPE_TOP)}
+                onDrop={(event) => handleRailDrop(event, RAIL_SCOPE_TOP)}
               >
+                <RailReorderGhost
+                  preview={reorderPreview?.scope === RAIL_SCOPE_TOP ? reorderPreview : null}
+                  accent={accent}
+                />
                 {workspaces.length === 0 && props.workspaceGroups.length === 0 && (
                   <EmptyState onCreate={onCreate} />
                 )}
-                {topLevelItemIds.map((itemId, itemIndex) => {
+                {topLevelItemIds.map((itemId) => {
                   const workspace = unfiledWorkspaceById.get(itemId);
                   const group = workspaceGroupById.get(itemId);
                   if (!workspace && !group) return null;
@@ -636,15 +889,8 @@ function WorkspaceRail(props: RailProps) {
                     : [];
                   return (
                     <React.Fragment key={itemId}>
-                      <RailItemDropZone
-                        index={itemIndex}
-                        active={railDropIndex === itemIndex}
-                        accent={accent}
-                        onDragOver={(event) => markRailDropAt(event, itemIndex)}
-                        onDrop={(event) => dropRailItemAt(event, itemIndex)}
-                      />
                       {workspace
-                        ? renderWorkspaceRows([workspace], null, true)
+                        ? renderWorkspaceRows([workspace], null)
                         : group ? (
                           <WorkspaceFolder
                             group={group}
@@ -657,32 +903,9 @@ function WorkspaceRail(props: RailProps) {
                             isWorkspaceDrag={isWorkspaceDrag}
                             isWorkspaceGroupDrag={isWorkspaceGroupDrag}
                             onGroupDragStart={(event) => {
-                              event.dataTransfer.effectAllowed = "move";
                               event.dataTransfer.setData(WORKSPACE_GROUP_MIME, group.id);
                               groupDragIdRef.current = group.id;
-                              setGroupDragId(group.id);
-                            }}
-                            onGroupDragOver={(event) => {
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setRailDropIndex(
-                                event.clientY < rect.top + rect.height / 2
-                                  ? itemIndex
-                                  : itemIndex + 1,
-                              );
-                            }}
-                            onGroupDrop={(event) => {
-                              const sourceId = draggedWorkspaceGroupId(event);
-                              if (sourceId) {
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                const insertAt = event.clientY < rect.top + rect.height / 2
-                                  ? itemIndex
-                                  : itemIndex + 1;
-                                props.onReorderWorkspaceRailItem(
-                                  sourceId,
-                                  topLevelItemIds[insertAt] ?? null,
-                                );
-                              }
-                              clearWorkspaceGroupDrag();
+                              beginRailDrag(event, () => setGroupDragId(group.id));
                             }}
                             onGroupDragEnd={clearWorkspaceGroupDrag}
                             onToggle={() => props.onChangeWorkspaceGroup(group.id, { collapsed: !group.collapsed })}
@@ -704,6 +927,26 @@ function WorkspaceRail(props: RailProps) {
                               if (sourceId) props.onMoveWorkspace(sourceId, group.id, null);
                               clearWorkspaceDrag();
                             }}
+                            dragOffset={reorderPreview?.scope === RAIL_SCOPE_TOP
+                              ? reorderPreview.offsets[group.id] ?? 0
+                              : 0}
+                            memberScope={railScopeForGroup(group.id)}
+                            memberPreview={
+                              reorderPreview?.scope === railScopeForGroup(group.id)
+                                ? reorderPreview
+                                : null
+                            }
+                            memberListRef={(node) => {
+                              const scope = railScopeForGroup(group.id);
+                              if (node) memberListRefs.current.set(scope, node);
+                              else memberListRefs.current.delete(scope);
+                            }}
+                            onMemberDragOver={handleRailDragOver}
+                            onMemberDragLeave={handleRailDragLeave}
+                            onMemberDrop={handleRailDrop}
+                            onCardDragOver={handleFolderCardDragOver}
+                            memberListClassName={railListClassName}
+                            railAccent={accent}
                           >
                             {!group.collapsed && renderWorkspaceRows(members, group.id)}
                           </WorkspaceFolder>
@@ -711,15 +954,6 @@ function WorkspaceRail(props: RailProps) {
                     </React.Fragment>
                   );
                 })}
-                {topLevelItemIds.length > 0 && (
-                  <RailItemDropZone
-                    index={topLevelItemIds.length}
-                    active={railDropIndex === topLevelItemIds.length}
-                    accent={accent}
-                    onDragOver={(event) => markRailDropAt(event, topLevelItemIds.length)}
-                    onDrop={(event) => dropRailItemAt(event, topLevelItemIds.length)}
-                  />
-                )}
               </div>
             )}
             {railCtxMenu && (
@@ -994,13 +1228,21 @@ function WorkspaceFolder({
   accent,
   editing = false,
   dragging = false,
+  dragOffset = 0,
+  memberScope,
+  memberPreview = null,
+  memberListRef,
+  memberListClassName = "spark-workspace-list",
+  onMemberDragOver,
+  onMemberDragLeave,
+  onMemberDrop,
+  onCardDragOver,
+  railAccent,
   menuBoundaryRef,
   isWorkspaceDrag,
   isWorkspaceGroupDrag,
   onDropWorkspace,
   onGroupDragStart,
-  onGroupDragOver,
-  onGroupDrop,
   onGroupDragEnd,
   onToggle,
   onRename,
@@ -1016,14 +1258,28 @@ function WorkspaceFolder({
   accent: string;
   editing?: boolean;
   dragging?: boolean;
+  /** translateY px from the top-level reorder preview. */
+  dragOffset?: number;
+  /** Reorder scope id of this folder's member list. */
+  memberScope?: string;
+  /** The live preview when it targets THIS folder's member list. */
+  memberPreview?: ReorderPreview | null;
+  memberListRef?: (node: HTMLDivElement | null) => void;
+  /** Class for the member list — carries the shared reorder-motion variable. */
+  memberListClassName?: string;
+  onMemberDragOver?: (event: React.DragEvent, scope: string) => void;
+  onMemberDragLeave?: (event: React.DragEvent, scope: string) => void;
+  onMemberDrop?: (event: React.DragEvent, scope: string) => void;
+  /** A workspace is hovering the card itself (not the member list). */
+  onCardDragOver?: (event: React.DragEvent) => void;
+  /** Rail accent, for the member list's ghost slot. */
+  railAccent?: string;
   /** Flip boundary for the folder's "…" AnchoredMenu (the workspaces scroll container). */
   menuBoundaryRef?: React.RefObject<HTMLElement | null>;
   isWorkspaceDrag: (event: React.DragEvent) => boolean;
   isWorkspaceGroupDrag: (event: React.DragEvent) => boolean;
   onDropWorkspace: (event: React.DragEvent) => void;
-  onGroupDragStart?: (event: React.DragEvent<Element>) => void;
-  onGroupDragOver?: (event: React.DragEvent<Element>) => void;
-  onGroupDrop?: (event: React.DragEvent<Element>) => void;
+  onGroupDragStart?: (event: React.DragEvent<HTMLElement>) => void;
   onGroupDragEnd?: () => void;
   onToggle?: () => void;
   onRename?: (name: string) => void;
@@ -1094,19 +1350,25 @@ function WorkspaceFolder({
       }
       onGroupDragStart?.(event);
     },
+    // A folder card is ONE item of the top-level list, so a folder-on-folder
+    // reorder belongs to that list, not here: group drags are deliberately let
+    // through to bubble up to it.
+    //
+    // A workspace hovering the card itself (the header band, the padding, the
+    // "drop workspaces here" placeholder) means "file it in this folder" —
+    // claimed here, and shown as a wash on the whole card. Hovering the member
+    // list inside means "put it at this exact position", which that list
+    // claims first and never reaches us.
+    // dragenter is handled identically: it bubbles, so leaving it to the list
+    // outside would let a top-level preview flash for a frame on the way in.
+    onDragEnter: (event: React.DragEvent) => dragHandlers.onDragOver(event),
     onDragOver: (event: React.DragEvent) => {
-      if (isWorkspaceGroupDrag(event)) {
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        onGroupDragOver?.(event);
-        return;
-      }
-      if (!isWorkspaceDrag(event)) return;
+      if (isWorkspaceGroupDrag(event) || !isWorkspaceDrag(event)) return;
       event.preventDefault();
       event.stopPropagation();
       event.dataTransfer.dropEffect = "move";
       setDropActive(true);
+      onCardDragOver?.(event);
     },
     onDragLeave: (event: React.DragEvent) => {
       const next = event.relatedTarget;
@@ -1114,13 +1376,7 @@ function WorkspaceFolder({
       setDropActive(false);
     },
     onDrop: (event: React.DragEvent) => {
-      if (isWorkspaceGroupDrag(event)) {
-        event.preventDefault();
-        event.stopPropagation();
-        onGroupDrop?.(event);
-        return;
-      }
-      if (!isWorkspaceDrag(event)) return;
+      if (isWorkspaceGroupDrag(event) || !isWorkspaceDrag(event)) return;
       event.preventDefault();
       event.stopPropagation();
       setDropActive(false);
@@ -1128,6 +1384,10 @@ function WorkspaceFolder({
     },
     onDragEnd: () => onGroupDragEnd?.(),
   };
+
+  // The card lights up for both ways of landing a workspace here: hovering the
+  // card (append) and hovering the member list (exact slot).
+  const landing = dropActive || memberPreview !== null;
 
   return (
     <section
@@ -1139,18 +1399,23 @@ function WorkspaceFolder({
         marginBottom: 8,
         padding: 4,
         borderRadius: "var(--radius-surface, 10px)",
-        border: dropActive
+        border: landing
           ? `1px solid color-mix(in oklab, ${accent} 54%, var(--rule))`
           : "1px solid color-mix(in oklab, var(--rule) 72%, transparent)",
-        background: dropActive
+        background: landing
           ? `color-mix(in oklab, ${accent} 12%, var(--panel))`
           : "color-mix(in oklab, var(--panel-raised, var(--panel)) 78%, transparent)",
-        boxShadow: dropActive ? `0 0 18px color-mix(in oklab, ${accent} 18%, transparent)` : "var(--lift-hi)",
+        boxShadow: landing ? `0 0 18px color-mix(in oklab, ${accent} 18%, transparent)` : "var(--lift-hi)",
         opacity: dragging ? 0.46 : 1,
+        // Compositor-only slide while a top-level reorder is previewing.
+        ...(dragOffset ? { transform: `translate3d(0, ${dragOffset}px, 0)` } : {}),
         backdropFilter: "blur(18px) saturate(125%)",
         WebkitBackdropFilter: "blur(18px) saturate(125%)",
+        // See the row: --ws-reorder-motion is 0s at rest, so the committed
+        // order settles instantly instead of animating backwards out of the
+        // offsets it was previewing.
         transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--ws-reorder-motion, 0s) var(--ease-out-fast)",
       }}
       {...dragHandlers}
     >
@@ -1391,7 +1656,27 @@ function WorkspaceFolder({
       </div>
       {!collapsed && (
         <div style={{ paddingTop: count > 0 ? 2 : 0 }}>
-          {children}
+          {/* The member list is its own reorder scope: one hit-test, one ghost
+              slot, exactly like the top level. It claims its own drag events so
+              the list outside never plans a move for a pointer that is in here.
+              Rendered even when empty so the ref survives the folder filling up
+              mid-drag; with no rows it has no height, so the card's own
+              "append here" wash is what the user sees. */}
+          <div
+            ref={memberListRef}
+            className={memberListClassName}
+            data-rail-list={memberScope}
+            style={{ position: "relative" }}
+            onDragEnter={(event) => memberScope && onMemberDragOver?.(event, memberScope)}
+            onDragOver={(event) => memberScope && onMemberDragOver?.(event, memberScope)}
+            onDragLeave={(event) => memberScope && onMemberDragLeave?.(event, memberScope)}
+            onDrop={(event) => memberScope && onMemberDrop?.(event, memberScope)}
+          >
+            {count > 0 && (
+              <RailReorderGhost preview={memberPreview} accent={railAccent ?? accent} />
+            )}
+            {children}
+          </div>
           {count === 0 && (
             <div
               style={{
@@ -1413,66 +1698,41 @@ function WorkspaceFolder({
   );
 }
 
-function RowDropIndicator({ accent }: { accent: string }) {
+/**
+ * The macOS-style drop preview: a placeholder the exact size and shape of the
+ * row (or folder card) in flight, sitting in the hole its neighbours slid
+ * apart to open. The destination reads as a SLOT the item drops into, not as a
+ * line between two things — so there is never a choice to make between "after
+ * item N" and "before item N+1" for what is one destination.
+ *
+ * One per list, owned by the list. Kept mounted for the whole gesture and
+ * merely faded out on a home drop, so it glides between destinations instead
+ * of blinking in and out.
+ */
+function RailReorderGhost({
+  preview,
+  accent,
+}: {
+  preview: ReorderPreview | null;
+  accent: string;
+}) {
+  if (!preview) return null;
   return (
     <div
       aria-hidden
+      className={
+        preview.changed
+          ? "spark-workspace-reorder-ghost spark-workspace-reorder-ghost--visible"
+          : "spark-workspace-reorder-ghost"
+      }
       style={{
-        height: 2,
-        // Left inset aligns to the row's text start (9px row padding) so the
-        // insertion line reads as landing in the list's content column.
-        margin: "2px 6px 2px 9px",
-        borderRadius: 999,
-        background: accent,
-        boxShadow: `0 0 8px ${accent}`,
-        pointerEvents: "none",
+        // Whole-pixel so the hairline stays crisp.
+        height: Math.round(preview.ghostHeight),
+        transform: `translate3d(0, ${Math.round(preview.ghostStart)}px, 0)`,
+        borderColor: `color-mix(in oklab, ${accent} 52%, var(--rule))`,
+        background: `color-mix(in oklab, ${accent} 10%, transparent)`,
       }}
     />
-  );
-}
-
-function RailItemDropZone({
-  index,
-  active,
-  accent,
-  onDragOver,
-  onDrop,
-}: {
-  index: number;
-  active: boolean;
-  accent: string;
-  onDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
-  onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
-}) {
-  return (
-    <div
-      aria-hidden
-      data-workspace-rail-drop-index={index}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      style={{
-        height: 8,
-        margin: "-2px 0",
-        position: "relative",
-        zIndex: active ? 12 : 1,
-      }}
-    >
-      {active && (
-        <div
-          style={{
-            position: "absolute",
-            left: 8,
-            right: 8,
-            top: 3,
-            height: 2,
-            borderRadius: 999,
-            background: accent,
-            boxShadow: `0 0 12px ${accent}`,
-            pointerEvents: "none",
-          }}
-        />
-      )}
-    </div>
   );
 }
 
@@ -1626,6 +1886,8 @@ interface RowProps {
   active: boolean;
   editing: boolean;
   dragging: boolean;
+  /** translateY px from the live reorder preview — the row's slide. */
+  dragOffset?: number;
   tone?: ChatStatusTone | null;
   working?: boolean;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
@@ -1642,8 +1904,6 @@ interface RowProps {
   onCreateCopyBranch: () => void;
   onDelete: () => void;
   onRowDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
-  onRowDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
-  onRowDrop: (event: React.DragEvent<HTMLDivElement>) => void;
   onRowDragEnd: () => void;
 }
 
@@ -1652,6 +1912,7 @@ function WorkspaceRow({
   active,
   editing,
   dragging,
+  dragOffset = 0,
   tone,
   working = false,
   missing = false,
@@ -1665,8 +1926,6 @@ function WorkspaceRow({
   onCreateCopyBranch,
   onDelete,
   onRowDragStart,
-  onRowDragOver,
-  onRowDrop,
   onRowDragEnd,
 }: RowProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -1799,8 +2058,6 @@ function WorkspaceRow({
       data-workspace-id={ws.id}
       draggable={!editing}
       onDragStart={onRowDragStart}
-      onDragOver={onRowDragOver}
-      onDrop={onRowDrop}
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
       onMouseEnter={() => setRowHover(true)}
@@ -1827,6 +2084,10 @@ function WorkspaceRow({
         background,
         cursor: "default",
         opacity: dragging ? 0.4 : 1,
+        // Compositor-only slide, so a row opening the landing gap never
+        // reflows the list. The dragged row itself always sits at 0: it stays
+        // put and dims, and the drag image is what follows the cursor.
+        ...(dragOffset ? { transform: `translate3d(0, ${dragOffset}px, 0)` } : {}),
         position: "relative",
         // Border stays 1px in every state — width never changes, so selection
         // never shifts the box by a hair. The active row carries NO hard border
@@ -1842,8 +2103,12 @@ function WorkspaceRow({
         // hover. No left-edge bar, no border+ring+shadow+inset halo.
         boxShadow: active || editing || rowHover ? "var(--lift-hi)" : "none",
         marginBottom: 4,
+        // --ws-reorder-motion is 0s at rest and the reorder curve for the
+        // length of a drag; the list owns it (see styles.css), because an
+        // inline transition is not something a class or a media query could
+        // override.
         transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--ws-reorder-motion, 0s) var(--ease-out-fast)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minWidth: 0 }}>

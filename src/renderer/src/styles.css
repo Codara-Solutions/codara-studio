@@ -832,6 +832,65 @@ a { color: inherit; }
   }
 }
 
+/* Workspace rail reorder ghost: the vertical twin of the tab strip's slot
+   above. A placeholder the exact height of the row or folder card in flight,
+   sitting in the hole its neighbours slid apart to open. Full-bleed across its
+   list, rounded at the surface rung so it reads as the same kind of object as
+   the rows it sits among.
+   Height + y come from the plan (inline, list content space, so it scrolls
+   with the list); the border and wash are tinted inline from the rail accent.
+   Painted first in DOM order, so the sliding rows pass over it. */
+.spark-workspace-reorder-ghost {
+  position: absolute;
+  /* Absolute insets resolve against the PADDING box, but the rows live in the
+     content box — so a list with its own horizontal padding hands its inset
+     down here, or the ghost would sit a padding wider and offset from the rows
+     it is standing in for. */
+  left: var(--ws-list-inset, 0px);
+  right: var(--ws-list-inset, 0px);
+  top: 0;
+  border: 1px dashed var(--rule);
+  border-radius: var(--radius-surface, 10px);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--ws-reorder-motion, var(--motion)) var(--ease-out-fast);
+}
+
+.spark-workspace-reorder-ghost--visible {
+  opacity: 1;
+}
+
+/* Rail rows and folder cards are styled inline (as the whole rail is), so an
+   inline `transition` shorthand is what wins on them — a media query or a
+   modifier class could never override it. The DURATION is therefore handed
+   down as a variable instead: the list owns it, the items read it.
+
+   At rest it is 0s, because transform on a rail item means one thing only —
+   the reorder preview — and a committed order must settle instantly rather
+   than animate backwards out of the offsets it was previewing. The modifier
+   is added for the length of a drag and dropped in the SAME commit that
+   applies the new order, so the slide is live exactly while it is wanted. */
+.spark-workspace-list {
+  --ws-reorder-motion: 0s;
+}
+
+.spark-workspace-list--reordering {
+  --ws-reorder-motion: var(--motion);
+}
+
+.spark-workspace-list--reordering > * {
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Items land in place; the ghost still fades, only its travel is dropped. */
+  .spark-workspace-list--reordering {
+    --ws-reorder-motion: 0s;
+  }
+}
+
 .spark-tab__close {
   appearance: none;
   display: flex;
