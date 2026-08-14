@@ -32,7 +32,7 @@
     "test:codara-complete-application": "node scripts/test-codara-complete-application.cjs",
     "test:cora-memory": "node scripts/test-cora-memory.cjs && node scripts/test-workspace-lessons.cjs",
     "test:completion-tail": "node scripts/test-completion-tail.cjs",
-    "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-backend-session-lifecycle.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-verification.cjs && node scripts/test-pi-admission-cache.mjs && node scripts/test-pi-frontier-evidence.cjs && node scripts/test-pi-frontier-gate.mjs && node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs",
+    "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-backend-session-lifecycle.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-verification.cjs && node scripts/test-pi-admission-cache.mjs && node scripts/test-pi-frontier-evidence.cjs && node scripts/test-pi-frontier-gate.mjs && node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs && node scripts/test-pi-oauth-branding.cjs",
     "test:pi-commit-message": "node scripts/test-pi-commit-message.cjs",
     "test:pi-worker-harness": "node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs",
     "test:pi-frontier-gate": "node scripts/test-pi-frontier-gate.mjs",
@@ -67,7 +67,7 @@
     "package:win": "npm run build && electron-builder --win --x64",
     "package:mac": "npm run build && electron-builder --mac",
     "package:linux": "npm run build && electron-builder --linux",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "electron-builder install-app-deps && node scripts/brand-pi-oauth-page.cjs",
     "test:usage-windows": "node scripts/test-usage-windows.cjs",
     "test:usage-analytics": "node scripts/test-usage-analytics.cjs",
     "test:github-work-queue": "node scripts/test-github-work-queue.cjs",
@@ -121,7 +121,8 @@
     "test:worker-terminal-controls": "node scripts/test-worker-terminal-controls.cjs",
     "test:chat-surface-routing": "node scripts/test-chat-surface-routing.cjs",
     "test:tab-reorder": "node scripts/test-tab-reorder.cjs",
-    "test:workspace-reorder": "node scripts/test-workspace-reorder.cjs"
+    "test:workspace-reorder": "node scripts/test-workspace-reorder.cjs",
+    "test:pi-oauth-branding": "node scripts/test-pi-oauth-branding.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",
