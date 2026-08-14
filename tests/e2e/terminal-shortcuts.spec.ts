@@ -130,26 +130,59 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await expect(claudeSessions).toHaveCount(0);
 
     // The session-picker shortcut is a separate command: it opens the recent
-    // sessions dialog, and "New session" from there launches the same
-    // public command.
-    await app.evaluate(() => {
-      const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
-      state.__coraInjects = [];
+    // sessions dialog, and "New session" from there launches the same public
+    // command.
+    //
+    // It does NOT arrive as an inject, and that is the app being right rather
+    // than wrong: the pane the previous shortcut launched into is now a live
+    // worker, so handleNewWorkerTab refuses to type into it and splits a fresh
+    // pane instead, where the command travels as that pane's startupCommand.
+    // Watch both channels, so this pins the thing that actually matters — the
+    // exact public command with no generated --session-id — wherever the app
+    // decided to put it, and fails loudly if a future change reroutes it.
+    await app.evaluate(({ ipcMain }) => {
+      const state = globalThis as typeof globalThis & { __coraLaunches?: unknown[] };
+      state.__coraLaunches = [];
+      ipcMain.removeHandler("pty:inject");
+      ipcMain.handle("pty:inject", (_event, args: { text?: string }) => {
+        state.__coraLaunches?.push({ via: "inject", command: args?.text });
+      });
+      ipcMain.removeHandler("pty:spawn");
+      ipcMain.handle("pty:spawn", (_event, args: { id?: string; startupCommand?: string }) => {
+        state.__coraLaunches?.push({ via: "spawn", command: args?.startupCommand });
+        // Nothing after this needs a live PTY. Reporting the startup command as
+        // handled keeps the renderer off its "couldn't run it, print the line
+        // manually" fallback, which would otherwise fire on every spawn.
+        return { id: args?.id, pid: 0, startupCommandHandled: true };
+      });
     });
     await page.keyboard.press("Control+Alt+h");
     await expect(claudeSessions).toBeVisible();
     await claudeSessions.getByRole("button", { name: "New session" }).dispatchEvent("click");
+    // Assert the COMMAND, not the channel. Which of the two paths
+    // handleNewWorkerTab takes depends on whether the pane the previous
+    // shortcut launched has finished registering as a worker, and both
+    // outcomes are correct — injecting into a pane that is genuinely still
+    // free, or splitting a fresh one when it is not. What must never vary is
+    // what gets run: the exact public command, with no generated --session-id.
     await expect.poll(
-      async () => app!.evaluate(() => {
-        const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
-        return state.__coraInjects ?? [];
-      }),
+      async () => {
+        const launches = await app!.evaluate(() => {
+          const state = globalThis as typeof globalThis & {
+            __coraLaunches?: { via: string; command?: string }[];
+          };
+          return state.__coraLaunches ?? [];
+        });
+        // Distinct commands, not the raw list. The stubbed spawn above hands
+        // back no real pty, so the renderer can retry it — a duplicate here
+        // would be the stub's doing, not the app's, and pinning the count
+        // would be asserting the harness. Pinning the SET still catches what
+        // matters: anything launching a different command, in particular one
+        // carrying a generated --session-id, adds an entry and fails.
+        return [...new Set(launches.map((launch) => launch.command))];
+      },
       { timeout: 15_000 },
-    ).toEqual([{
-      id: expect.any(String),
-      text: "claude --dangerously-skip-permissions",
-      submit: true,
-    }]);
+    ).toEqual(["claude --dangerously-skip-permissions"]);
   } finally {
     await app?.close();
   }

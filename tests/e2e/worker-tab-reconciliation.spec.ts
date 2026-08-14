@@ -106,9 +106,7 @@ test("a live worker pane returns after the renderer misses its launch event", as
     await page.getByRole("tab", { name: "Cora" }).dispatchEvent("click");
 
     // Runs is the second inner destination; worker terminals are entered from
-    // its graph rather than through a separate Workers destination. This run
-    // never created a whiteboard, so that pill must stay absent — unused
-    // surfaces don't clutter the strip.
+    // its graph rather than through a separate Workers destination.
     const innerTabOrder = await Promise.all(
       [/^Chat$/, /^Runs$/].map(async (name) => {
         const box = await page.getByRole("tab", { name }).boundingBox();
@@ -116,8 +114,20 @@ test("a live worker pane returns after the renderer misses its launch event", as
       }),
     );
     expect(innerTabOrder[0]).toBeLessThan(innerTabOrder[1]);
-    await expect(page.getByRole("tab", { name: "Whiteboard", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "New whiteboard" })).toBeVisible();
+
+    // This run never created a whiteboard, and the pill is still here: since
+    // the strip went icon-only, the Whiteboard pill IS the create affordance —
+    // it replaced the separate "New whiteboard" button that used to appear in
+    // its place. So the rule "unused surfaces don't clutter the strip" is now
+    // kept by COLLAPSING it, not by hiding it.
+    const whiteboard = page.getByRole("tab", { name: "Whiteboard", exact: true });
+    await expect(whiteboard).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "New whiteboard" })).toHaveCount(0);
+    // An inactive icon tab is a bare 24px square — no label, no horizontal
+    // padding. That is the whole reason it can afford to stay visible unused,
+    // so it is worth pinning: a regression that let it render expanded would
+    // cost a labelled slot in every run that never opens a board.
+    expect((await whiteboard.boundingBox())?.width ?? 0).toBeLessThanOrEqual(28);
 
     // A single click on a worker card only selects it — the inspector opens
     // with the worker's detail and the terminal is reached deliberately via
@@ -247,13 +257,33 @@ test("a live worker pane returns after the renderer misses its launch event", as
     // here: main deliberately downgrades a renderer dispose of a still-LIVE
     // attempt to a detach (ipc.ts's isLiveWorkerAttemptPty), so only a genuinely
     // finished attempt can retire the pane and its PTY.
-    // Ctrl+C first: this is a real shell that main pasted the worker prompt
-    // into as comment lines, so it may be sitting on a continuation prompt.
-    await page.evaluate(
-      (attemptId) =>
-        (window as unknown as { spark: any }).spark.pty.write(attemptId, "\u0003exit 1\r"),
-      seeded.attemptId,
-    );
+    // The kill needs care, twice over. The Ctrl+C must travel in its OWN
+    // write: zsh discards the line it was editing when the interrupt lands, so
+    // a command riding the interrupt's chunk can lose its leading bytes into
+    // the aborted line (observed live as `exit 1` reaching the shell as
+    // "xit 1" → command not found). And main's launch driver is still typing
+    // the worker prompt into this shell for seconds after launch (the paste
+    // waits on the pane's first resize), so a single kill can land mid-paste
+    // and be swallowed as pasted text. Retry the interrupt → exit sequence
+    // until the PTY is actually gone — exactly what a user does when a busy
+    // shell eats the first attempt.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async (attemptId) => {
+            const spark = (window as unknown as { spark: any }).spark;
+            const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+            if (!(await spark.pty.exists(attemptId))) return false;
+            void spark.pty.write(attemptId, "\u0003");
+            await wait(250);
+            if (!(await spark.pty.exists(attemptId))) return false;
+            void spark.pty.write(attemptId, "exit 1\r");
+            await wait(500);
+            return spark.pty.exists(attemptId);
+          }, seeded.attemptId),
+        { timeout: 20_000 },
+      )
+      .toBe(false);
     await expect(guard).toBeHidden({ timeout: 20_000 });
     await expect
       .poll(

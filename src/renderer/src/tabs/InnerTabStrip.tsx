@@ -18,11 +18,12 @@ import type { CoraView } from "../components/chat/cora-view";
 // Visibility is decided by the parent: it renders for draft chats too (Chat +
 // Board — a draft's board starts empty and local), and the run-scoped pills join
 // as a draft becomes a real run. Chat and Runs never pop in late as planning
-// or delegation advances. The Whiteboard pill is deliberately conditional: it
-// appears only
-// while a board actually exists for this chat (or the user is creating one),
-// so chats that never use the whiteboard don't carry a dead destination.
-// A quiet "New whiteboard" affordance keeps manual creation reachable.
+// or delegation advances. The Whiteboard pill shows once a board exists for
+// this chat, and also whenever one COULD be created here — since the strip
+// went icon-only the pill is itself the create affordance, which is why the
+// separate "New whiteboard" button it replaced is gone. Unused it costs a bare
+// icon rather than a labelled slot, so it no longer has to hide to stay out of
+// the way.
 
 interface Props {
   // Currently active workspace tab id (effective, after stack-visibility
@@ -40,13 +41,13 @@ interface Props {
   // its deterministic session id is computable). The Terminal pill only
   // appears once this is true so xterm never mounts on a ghost session.
   backendPtyExists: boolean;
-  // True when the active run has a persisted whiteboard. The pill hides when
-  // no board exists so unused surfaces don't clutter the workbench.
+  // True when the active run has a persisted whiteboard, which is what makes
+  // the pill a destination rather than a create affordance.
   whiteboardAvailable: boolean;
   // True when a whiteboard COULD be created here — i.e. the strip belongs to
   // a real run. Draft chats (no run yet) show the strip for the workspace
-  // Board, but the run-scoped whiteboard can't exist for them, so the "New
-  // whiteboard" affordance hides rather than offering a dead surface.
+  // Board, but the run-scoped whiteboard can't exist for them, so the pill
+  // hides entirely rather than offering a dead surface.
   whiteboardCreatable: boolean;
   // True when Cora updated the board while the user was looking elsewhere —
   // renders a small attention dot on the pill until the surface is visited.
