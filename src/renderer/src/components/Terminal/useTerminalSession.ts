@@ -431,6 +431,20 @@ export interface TerminalSessionApi {
   getSelection: () => string | null;
 }
 
+// A modal dialog owns the keyboard for as long as it is open. Reveal-focus
+// must not pull focus out of one: mounting a dialog over a pane can make that
+// pane "visible" again in React's terms, and grabbing focus back would send
+// the user's next arrow/Enter/Escape to the terminal underneath instead of to
+// the dialog they are looking at. Observed with the worker session picker,
+// which focuses itself on mount and then lost focus to the pane behind it.
+//
+// Every dialog in the app marks itself aria-modal, so this needs no registry
+// and no plumbing — and it self-clears, because the attribute goes away with
+// the dialog.
+function modalDialogIsOpen(): boolean {
+  return document.querySelector('[aria-modal="true"]') !== null;
+}
+
 export function useTerminalSession({
   container,
   visible,
@@ -3083,8 +3097,16 @@ export function useTerminalSession({
 
       // Same gate as the reveal effect: mirrors AND input-blocked watch panes
       // never auto-focus — both drop every keystroke, so stealing focus would
-      // silently eat the user's typing.
-      if (visible && !readOnlyRef.current && !inputBlockedRef.current) term.focus();
+      // silently eat the user's typing. Nor does anything auto-focus while a
+      // modal dialog is up, for the same reason from the other direction.
+      if (
+        visible &&
+        !readOnlyRef.current &&
+        !inputBlockedRef.current &&
+        !modalDialogIsOpen()
+      ) {
+        term.focus();
+      }
 
       // One-shot autorun: type the requested command + CR into the PTY once
       // the shell has had a moment to render its first prompt. The 1500ms
@@ -3358,9 +3380,13 @@ export function useTerminalSession({
     });
     // Read-only mirrors and input-blocked watch panes don't grab keyboard
     // focus on reveal: they drop every keystroke, so stealing focus from e.g.
-    // a blocked-worker answer input would silently eat the user's typing.
-    // Click-to-focus (the explicit focus() API) still works for copy/scroll.
-    if (!readOnlyRef.current && !inputBlockedRef.current) termRef.current?.focus();
+    // a blocked-worker answer input would silently eat the user's typing. An
+    // open modal dialog is the same hazard: it focused itself deliberately and
+    // this must not take that back. Click-to-focus (the explicit focus() API)
+    // still works for copy/scroll in every case.
+    if (!readOnlyRef.current && !inputBlockedRef.current && !modalDialogIsOpen()) {
+      termRef.current?.focus();
+    }
     return () => window.cancelAnimationFrame(raf);
   }, [resizeXtermForOwner, visible]);
 
