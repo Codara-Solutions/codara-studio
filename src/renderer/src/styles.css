@@ -1029,9 +1029,17 @@ a { color: inherit; }
    timestamp into the exact corner the pill occupies). Focus-within keeps it
    shown for keyboard users; data-menu-open pins it while the add-pane menu is
    up (the pointer is over the menu, not the pane). */
+/* No fade. A transitioned opacity is compositor-driven, and Chromium cannot
+   composite the --glass-lens reference filter through one — the pill paints
+   flat and the terminal reads straight through it, which is exactly what made
+   this thing look like tinted plastic rather than glass. Toggling opacity
+   without a transition is a plain repaint, which the lens survives. It also
+   puts the pill on the same footing as every other glass surface in the app,
+   which appear instantly for the very same reason (see the `animation: none`
+   note further down). Opacity rather than visibility, so the buttons stay in
+   the tab order for keyboard users. */
 .spark-terminal-pane .spark-pane-toolbar {
   opacity: 0;
-  transition: opacity var(--motion-fast, 120ms) var(--ease-out, ease-out);
 }
 .spark-terminal-pane:hover .spark-pane-toolbar,
 .spark-terminal-pane .spark-pane-toolbar:focus-within,
@@ -3090,16 +3098,6 @@ a { color: inherit; }
   }
   /* (spark-pane-toolbar visibility lives outside this media block — hover
      reveal applies with glass on OR off.) */
-  /* Overlays that float on LIVE TERMINAL GLYPHS (the pane-controls pill).
-     Crisp monospace text reads straight through the popover recipe's 3-7px
-     blur — the moment a prompt reaches the top row the pill looks like plain
-     transparency. A much heavier lens + strong veil keeps it frosted no
-     matter what scrolls beneath. */
-  html:not([data-glass="off"]) .spark-glass--over-terminal {
-    background-color: var(--glass-bg-strong);
-    -webkit-backdrop-filter: blur(14px) saturate(var(--glass-saturate));
-    backdrop-filter: blur(14px) saturate(var(--glass-saturate));
-  }
   /* Opt-in faint frost, no lens — for one-off large/always-visible surfaces
      where refraction would read as a rendering bug. (The chrome bands
      themselves don't use this class; they ride the --chrome-* tokens above,
@@ -3118,8 +3116,12 @@ a { color: inherit; }
      left to refract. */
   html:not([data-glass="off"]) .spark-scrim {
     background: color-mix(in oklab, var(--bg) 32%, transparent);
-    -webkit-backdrop-filter: blur(3px) saturate(1.1);
-    backdrop-filter: blur(3px) saturate(1.1);
+    /* Light on purpose, but still the shared material: scaled by the same
+       Appearance blur slider as everything else, so turning glass down turns
+       the scrim down with it rather than leaving one surface pinned at a
+       hardcoded 3px. */
+    -webkit-backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
+    backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
   }
   /* Settings and Capability Center cover most of the viewport and stay open
      while controls update. Running the three-channel SVG refraction lens over
@@ -3171,6 +3173,15 @@ a { color: inherit; }
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
     background: color-mix(in oklab, var(--bg) 44%, transparent);
+  }
+  /* The Capability Center's footer bar frosts the panel's OWN interior (the
+     surface above is a backdrop root), so it keeps a blur of its own — but it
+     lives in here now. It used to sit outside this gate with hardcoded values,
+     which made it the one surface that stayed frosted after the user switched
+     liquid glass off, and the one the Appearance sliders could not move. */
+  html:not([data-glass="off"]) .agent-capabilities-footer {
+    -webkit-backdrop-filter: blur(calc(10px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
+    backdrop-filter: blur(calc(10px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
   }
   /* .spark-menu belongs in this list too: both surfaces carry their own
      backdrop-filter AND `contain: paint`, each of which is a backdrop root, so
@@ -3267,8 +3278,6 @@ a { color: inherit; }
 }
 .agent-capabilities-footer {
   background: color-mix(in oklab, var(--panel) 52%, transparent);
-  -webkit-backdrop-filter: blur(10px) saturate(1.15);
-  backdrop-filter: blur(10px) saturate(1.15);
 }
 /* The list draws its own outline, so the last child never doubles it up. This
    covers the pager and the empty state as well as a trailing row. */

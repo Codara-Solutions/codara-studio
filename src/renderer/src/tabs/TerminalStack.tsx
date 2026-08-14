@@ -2358,15 +2358,17 @@ function PaneToolbar({
       ref={wrapRef}
       onMouseDown={stop}
       onPointerDown={stop}
-      // The app's liquid-glass material (frosted blur + sheen + edge
-      // highlights, auto-reverting to opaque when glass is off or the OS
-      // prefers reduced transparency). --over-terminal swaps in a heavier
-      // lens: the popover recipe's 3px blur can't frost crisp terminal
-      // glyphs. Visibility is CSS-owned (.spark-pane-toolbar): hidden at
-      // rest, revealed while the pane is hovered / a button holds focus /
-      // the add-pane menu is open — so the pill never crowds a prompt's
+      // The app's liquid-glass material, exactly as every other glass surface
+      // wears it: --strong is the same recipe the menus and dialogs use, so
+      // the Appearance sliders (veil / blur / refraction / chroma) move this
+      // pill along with everything else, and turning glass off reverts it with
+      // the rest. It used to carry a bespoke --over-terminal variant with
+      // hardcoded blur and veil, which those sliders could not reach.
+      // Visibility is CSS-owned (.spark-pane-toolbar): hidden at rest,
+      // revealed while the pane is hovered / a button holds focus / the
+      // add-pane menu is open — so the pill never crowds a prompt's
       // right-aligned segment while the user is just reading or typing.
-      className="spark-glass spark-glass--over-terminal spark-pane-toolbar"
+      className="spark-glass spark-glass--strong spark-pane-toolbar"
       data-menu-open={menuOpen ? "true" : undefined}
       style={{
         position: "absolute",
