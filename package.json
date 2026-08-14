@@ -9,11 +9,14 @@
     "cora": "bin/cora.cjs"
   },
   "scripts": {
+    "icon:dev": "node scripts/stamp-dev-electron-icon.cjs",
+    "predev": "node scripts/stamp-dev-electron-icon.cjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",
     "test:renderer-chunks": "node scripts/test-renderer-chunks.mjs",
     "test:preview-webview": "node scripts/test-browser-pane-webview-liveness.cjs && node scripts/test-preview-navigation.cjs",
+    "prestart": "node scripts/stamp-dev-electron-icon.cjs",
     "start": "electron-vite preview",
     "cora": "node bin/cora.cjs",
     "test:cora-cli": "node scripts/test-cora-cli.cjs",
@@ -67,9 +70,11 @@
     "package:win": "npm run build && electron-builder --win --x64",
     "package:mac": "npm run build && electron-builder --mac",
     "package:linux": "npm run build && electron-builder --linux",
-    "postinstall": "electron-builder install-app-deps && node scripts/brand-pi-oauth-page.cjs",
+    "postinstall": "node scripts/stamp-dev-electron-icon.cjs && electron-builder install-app-deps && node scripts/brand-pi-oauth-page.cjs",
     "test:usage-windows": "node scripts/test-usage-windows.cjs",
     "test:usage-analytics": "node scripts/test-usage-analytics.cjs",
+    "test:github-cli": "node scripts/test-github-cli.cjs",
+    "test:github-surface": "node scripts/test-github-publish.cjs && node scripts/test-github-ready.cjs && node scripts/test-github-merge.cjs",
     "test:github-work-queue": "node scripts/test-github-work-queue.cjs",
     "test:capability-center": "node scripts/test-capability-center-ui.cjs",
     "test:github-pr-import": "node scripts/test-github-pull-request-git.cjs && node scripts/test-github-pull-request-import-journal.cjs && node scripts/test-github-pull-request-workspace.cjs && node scripts/test-untrusted-pr-policy.cjs && node scripts/test-github-pull-request-surface.cjs",
@@ -263,12 +268,14 @@
       ]
     },
     "mac": {
+      "icon": "build/icon.png",
       "target": [
         "dmg"
       ],
       "category": "public.app-category.developer-tools"
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": [
         "AppImage"
       ],
