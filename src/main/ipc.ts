@@ -2596,7 +2596,22 @@ export function registerIpc(): void {
     },
   );
 
+  // A pane's first input can outrun its own pty:spawn: the renderer mounts,
+  // spawns, and focuses in one tick, but main can hold the spawn for seconds
+  // (native-account resolution shells out to the claude/codex CLIs before a
+  // plain shell starts). pty.write/inject silently no-op on an unknown id, so
+  // bytes sent in that window — early keystrokes, or the session picker's
+  // injected launch command landing in a still-booting pane — used to vanish.
+  // Ride out the in-flight spawn instead; a session that never comes up still
+  // drops the bytes after the bound. IPC arrival order is preserved across the
+  // wait: spawnWaiters resolve in registration order, so queued writes land in
+  // the pty in the order they were sent.
+  const awaitPendingSpawn = async (id: string) => {
+    if (!pty.hasSession(id)) await pty.waitForSpawn(id, 10_000);
+  };
+
   handle("pty:write", async (_e, args: { id: string; data: string }) => {
+    await awaitPendingSpawn(args.id);
     pty.write(args.id, args.data);
     // User keystrokes are the notifier's "a fresh turn may start" signal —
     // they re-arm the pane's alert dedup (see noteTerminalUserInput).
@@ -2606,6 +2621,7 @@ export function registerIpc(): void {
   handle(
     "pty:inject",
     async (_e, args: { id: string; text: string; submit?: boolean }) => {
+      await awaitPendingSpawn(args.id);
       pty.inject(args.id, args.text, { submit: args.submit ?? true });
       // Injected prompts (slash commands, drag-drop paths) start turns the
       // same way keystrokes do.
