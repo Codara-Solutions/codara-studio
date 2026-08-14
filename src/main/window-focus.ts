@@ -1,4 +1,5 @@
 import { app, BrowserWindow, type WebContents } from "electron";
+import { E2E_BACKGROUND, revealWindow } from "./e2e-background";
 
 /**
  * Bring Studio back in front of the browser once a sign-in that sent the user
@@ -20,10 +21,8 @@ export function focusStudioWindow(owner?: WebContents | null): void {
       : windows.find((window) => window.isVisible() && !window.isMinimized()) ?? windows[0];
   if (!target) return;
   try {
-    if (target.isMinimized()) target.restore();
-    if (!target.isVisible()) target.show();
-    target.focus();
-    if (process.platform === "darwin") app.focus({ steal: true });
+    revealWindow(target);
+    if (process.platform === "darwin" && !E2E_BACKGROUND) app.focus({ steal: true });
   } catch {
     // A window torn down between the lookup and the call is not worth failing
     // an otherwise completed sign-in over.

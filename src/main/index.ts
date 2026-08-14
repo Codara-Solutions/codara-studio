@@ -47,6 +47,7 @@ import {
   resolveMainWindowAllowlistConfig,
   type NavigationAllowlistConfig,
 } from "./navigation-allowlist";
+import { E2E_BACKGROUND, hideWindowFromDesktop, revealWindow } from "./e2e-background";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -217,10 +218,8 @@ function showMainWindow(): void {
     createWindow();
     return;
   }
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
   if (process.platform === "win32") mainWindow.setSkipTaskbar(false);
-  mainWindow.focus();
+  revealWindow(mainWindow);
 }
 
 // ── Renderer liveness + crash recovery ────────────────────────────────────
@@ -649,7 +648,11 @@ function createWindow(): void {
   registerMainWindow(windowForEvents);
 
   windowForEvents.once("ready-to-show", () => {
-    windowForEvents.show();
+    // Under an e2e run the window renders normally but is invisible to the
+    // person at the machine — see hideWindowFromDesktop for why it is done
+    // that way and not by hiding or moving the window.
+    if (E2E_BACKGROUND) hideWindowFromDesktop(windowForEvents);
+    else windowForEvents.show();
     registerUpdaterAfterFirstPaint(windowForEvents);
   });
 
@@ -880,6 +883,14 @@ app.whenReady().then(async () => {
   // Lost the single-instance lock — another Codara Studio owns it. app.quit()
   // was already called; bail before doing any startup work or opening a window.
   if (!ownsSingleInstanceLock) return;
+
+  // macOS bounces an app into the Dock and activates it on launch even when it
+  // opens no visible window. "accessory" keeps the process out of the Dock and
+  // out of the activation queue entirely, so a test run leaves no trace on the
+  // desktop at all.
+  if (E2E_BACKGROUND && process.platform === "darwin") {
+    app.setActivationPolicy("accessory");
+  }
 
   ensureSparkHomeSync();
   // Refresh only an explicitly installed CLI. This repairs its launcher after

@@ -3,6 +3,7 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { dispatchDrag, type DragAnchor } from "./drag";
 
 // Drag-to-reorder on the top tab strip, driven as a real HTML5 drag through the
 // Electron window. The pure index math is covered by
@@ -58,8 +59,7 @@ test("tabs reorder from anywhere in the strip, including the gaps and the empty 
     // ── Two slots to the right ────────────────────────────────────────────
     // Aim just past the third tab's midpoint: the tab must land AFTER it, not
     // one short of it.
-    const third = await tabBox(page, start[2]);
-    await dragTab(page, start[0], third.x + third.width * 0.75, third.y + third.height / 2);
+    await dragTab(page, start[0], { selector: tabSelector(start[2]), fx: 0.75 });
     await expect
       .poll(() => tabIds(page), { timeout: 5_000 })
       .toEqual([start[1], start[2], start[0], ...start.slice(3)]);
@@ -68,27 +68,24 @@ test("tabs reorder from anywhere in the strip, including the gaps and the empty 
     // The most natural "send it to the end" gesture, and previously a silent
     // cancel: the strip's empty space had no drop target.
     const afterRight = await tabIds(page);
-    const strip = await stripBox(page);
-    const last = await tabBox(page, afterRight[afterRight.length - 1]);
-    await dragTab(
-      page,
-      afterRight[0],
-      Math.min(strip.x + strip.width - 6, last.x + last.width + 40),
-      last.y + last.height / 2,
-    );
+    await dragTab(page, afterRight[0], {
+      selector: tabSelector(afterRight[afterRight.length - 1]),
+      fx: 1,
+      dx: 40,
+      within: ".spark-tabbar-scroll",
+      inset: 6,
+    });
     await expect
       .poll(() => tabIds(page), { timeout: 5_000 })
       .toEqual([...afterRight.slice(1), afterRight[0]]);
 
     // ── The 4px gap between two tabs ──────────────────────────────────────
     const afterEnd = await tabIds(page);
-    const first = await tabBox(page, afterEnd[0]);
-    await dragTab(
-      page,
-      afterEnd[afterEnd.length - 1],
-      first.x + first.width + 2,
-      first.y + first.height / 2,
-    );
+    await dragTab(page, afterEnd[afterEnd.length - 1], {
+      selector: tabSelector(afterEnd[0]),
+      fx: 1,
+      dx: 2,
+    });
     await expect
       .poll(() => tabIds(page), { timeout: 5_000 })
       .toEqual([
@@ -101,8 +98,7 @@ test("tabs reorder from anywhere in the strip, including the gaps and the empty 
     // Anywhere from the left neighbour's midpoint to the right neighbour's
     // midpoint means "stay": no marker, no shuffle.
     const settled = await tabIds(page);
-    const home = await tabBox(page, settled[1]);
-    await dragTab(page, settled[1], home.x + home.width * 0.9, home.y + home.height / 2);
+    await dragTab(page, settled[1], { selector: tabSelector(settled[1]), fx: 0.9 });
     expect(await tabIds(page)).toEqual(settled);
     // And the drag left nothing stuck behind it: no ghost slot, no dimmed
     // source, no residual displacement on any tab.
@@ -124,61 +120,19 @@ function tabIds(page: Page): Promise<string[]> {
   );
 }
 
-async function tabBox(page: Page, id: string) {
-  const box = await page.locator(`.spark-tabbar-scroll [data-tab-id="${id}"]`).boundingBox();
-  if (!box) throw new Error(`tab ${id} has no box`);
-  return box;
+// A drag, dispatched rather than driven with page.mouse — see tests/e2e/drag.ts
+// for why (a native drag needs a frontmost window, which makes a test run steal
+// the desktop and puts the gesture at the mercy of the real pointer). The
+// strip's hit-test reads clientX and the DataTransfer, so it runs on exactly
+// the inputs it would get from a real pointer at that x.
+async function dragTab(page: Page, id: string, to: DragAnchor): Promise<void> {
+  await dispatchDrag(page, tabSelector(id), to);
 }
 
-async function stripBox(page: Page) {
-  const box = await page.locator(".spark-tabbar-scroll").boundingBox();
-  if (!box) throw new Error("tab strip has no box");
-  return box;
-}
-
-// A real drag: press on the tab, cross the drag threshold, travel to the target
-// in steps (so dragover fires along the way, which is what feeds the strip's
-// hit-test), settle, release.
-//
-// Two gates keep this from testing the wrong gesture. Pressing immediately
-// after a click somewhere else (the "+" picker rows that created these tabs)
-// can attribute the mousedown to the previous pointer position, which starts
-// the drag on whichever tab sat there — a wrong-source drag that then reads as
-// a bogus reorder. And the native drag begins asynchronously, so travelling
-// before dragstart lands is a no-op drop. Both are asserted, not slept on.
-async function dragTab(page: Page, id: string, toX: number, toY: number): Promise<void> {
-  const box = await tabBox(page, id);
-  const fromX = box.x + box.width / 2;
-  const fromY = box.y + box.height / 2;
-  await page.mouse.move(fromX - 6, fromY);
-  await page.mouse.move(fromX, fromY);
-  await expect.poll(() => tabUnderPoint(page, fromX, fromY), { timeout: 5_000 }).toBe(id);
-  await page.mouse.down();
-  await page.mouse.move(fromX + 6, fromY, { steps: 3 });
-  await page.mouse.move(fromX + 14, fromY, { steps: 3 });
-  // The strip marks its source the frame after dragstart: this waits for the
-  // drag to actually exist AND pins that it is the tab we aimed at.
-  await expect(page.locator(`.spark-tab--dragging[data-tab-id="${id}"]`)).toHaveCount(1, {
-    timeout: 5_000,
-  });
-  await page.mouse.move(toX, toY, { steps: 16 });
-  await page.mouse.move(toX, toY);
-  await page.waitForTimeout(120);
-  await page.mouse.up();
-  await page.waitForTimeout(120);
-}
-
-// Which tab, if any, actually owns the pixel the press is about to land on.
-function tabUnderPoint(page: Page, x: number, y: number): Promise<string | null> {
-  return page.evaluate(
-    ([px, py]) => {
-      const el = document.elementFromPoint(px as number, py as number);
-      const tab = el?.closest("[data-tab-id]") as HTMLElement | null;
-      return tab?.dataset.tabId ?? null;
-    },
-    [x, y],
-  );
-}
+// Targets are anchors, not coordinates. The strip auto-scrolls from the moment
+// a drag starts, so a point measured beforehand can be pointing at a different
+// tab by the time it is used — see DragAnchor in tests/e2e/drag.ts.
+const tabSelector = (id: string): string => `.spark-tabbar-scroll [data-tab-id="${id}"]`;
 
 async function prepareWorkspace(): Promise<{ userDataDir: string; workspaceDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "codara-tab-reorder-e2e-"));

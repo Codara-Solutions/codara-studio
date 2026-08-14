@@ -5,6 +5,7 @@ import type {
   NotifyEvent,
   TerminalAgentAttentionPayload,
 } from "@shared/types";
+import { revealWindow } from "../e2e-background";
 
 // The four delivery transports for an alert the policy let through, gated by
 // the user's per-channel preferences. Each channel is best-effort: a thrown
@@ -60,9 +61,7 @@ export function focusTarget(target: NavigationTarget): void {
   const win = activeWindow();
   if (!win) return;
   try {
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
+    revealWindow(win);
     win.webContents.send("notify:focus", target);
   } catch (err) {
     console.warn("[notify] focus routing failed:", err);
