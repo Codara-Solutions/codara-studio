@@ -1036,10 +1036,14 @@ function Guidance({
       <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--muted)" }}>
         {status.message}
       </div>
-      {status.kind === "not-installed" && (
+      {(status.kind === "not-installed" || status.kind === "outdated-cli") && (
         <ActionButton
           label="GitHub CLI setup"
-          title="Open the GitHub CLI installation guide"
+          title={
+            status.kind === "outdated-cli"
+              ? "Open the GitHub CLI download page to update `gh`"
+              : "Open the GitHub CLI installation guide"
+          }
           onClick={() => openInSystemBrowser("https://cli.github.com/")}
         />
       )}

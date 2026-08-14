@@ -458,6 +458,8 @@ export type GitHubWorkspaceStatus =
   | {
       kind:
         | "not-installed"
+        /** Installed and authenticated, but too old for a field Codara reads. */
+        | "outdated-cli"
         | "not-authenticated"
         | "not-repository"
         | "unavailable"

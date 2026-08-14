@@ -48,7 +48,34 @@ const UNSAFE_GITHUB_TEXT =
   /[\u0000-\u001f\u007f-\u009f]|\p{Bidi_Control}/u;
 export const GITHUB_ISSUE_LIST_LIMIT = 12;
 export const GITHUB_PULL_REQUEST_LIST_LIMIT = 12;
-const PULL_REQUEST_JSON_FIELDS = [
+/** Minimum `gh` release that accepts `baseRefOid` in `gh pr view --json`. */
+export const GITHUB_CLI_MIN_IMPORT_VERSION = "2.63";
+
+// Exactly the fields `parsePullRequestSummaryRecord` reads. `baseRefOid`,
+// `headRepository` and `headRepositoryOwner` are deliberately absent: only pull
+// request import consumes them, and `gh` rejected `baseRefOid` before 2.63.
+// `gh` validates `--json` field names before it looks for a pull request, so
+// asking for a field this projection discards would fail status reads on every
+// branch — even branches with no pull request — on an older CLI.
+const PULL_REQUEST_SUMMARY_JSON_FIELDS = [
+  "number",
+  "title",
+  "url",
+  "state",
+  "isDraft",
+  "baseRefName",
+  "headRefName",
+  "isCrossRepository",
+  "updatedAt",
+  "reviewDecision",
+  "mergeStateStatus",
+  "headRefOid",
+  "statusCheckRollup",
+].join(",");
+
+// Import pins the exact base and head commits plus the head repository
+// identity, so it keeps the wider set and with it the gh 2.63 floor.
+const PULL_REQUEST_CHECKOUT_JSON_FIELDS = [
   "number",
   "title",
   "url",
@@ -363,7 +390,7 @@ export function createGitHubCliAdapter(
           "pr",
           "view",
           "--json",
-          PULL_REQUEST_JSON_FIELDS,
+          PULL_REQUEST_SUMMARY_JSON_FIELDS,
         ]);
       } catch (cause) {
         if (
@@ -392,7 +419,7 @@ export function createGitHubCliAdapter(
         "--repo",
         repo,
         "--json",
-        PULL_REQUEST_JSON_FIELDS,
+        PULL_REQUEST_SUMMARY_JSON_FIELDS,
       ]);
       const pullRequest = parsePullRequestSummary(stdout, {
         nameWithOwner: repo,
@@ -416,8 +443,23 @@ export function createGitHubCliAdapter(
         "--repo",
         repositorySelector(repository),
         "--json",
-        PULL_REQUEST_JSON_FIELDS,
-      ]);
+        PULL_REQUEST_CHECKOUT_JSON_FIELDS,
+      ]).catch((cause: unknown) => {
+        // Import is the one read that needs a modern `gh`; say so instead of
+        // reflecting the CLI's raw field listing into the import dialog.
+        if (
+          cause instanceof GitHubCliError &&
+          cause.code === "command-failed" &&
+          looksLikeUnsupportedJsonField(cause.message)
+        ) {
+          throw new GitHubCliError(
+            "command-failed",
+            `Importing a pull request needs GitHub CLI ${GITHUB_CLI_MIN_IMPORT_VERSION} or newer. Update \`gh\`, then try again.`,
+            { cause },
+          );
+        }
+        throw cause;
+      });
       return parsePullRequestCheckoutMetadata(
         stdout,
         repository,
@@ -480,7 +522,7 @@ export function createGitHubCliAdapter(
         "--repo",
         repositorySelector(repository),
         "--json",
-        PULL_REQUEST_JSON_FIELDS,
+        PULL_REQUEST_SUMMARY_JSON_FIELDS,
       ]);
       return parsePullRequestSummaries(stdout, repository);
     },
@@ -609,6 +651,8 @@ export async function readGitHubWorkspaceStatus(
         message: "No GitHub repository was found for this workspace. Add a GitHub remote, then refresh.",
       };
     }
+    const outdated = outdatedCliStatus(cause);
+    if (outdated) return outdated;
     return {
       kind: "error",
       message: "GitHub repository status could not be loaded. Try refreshing Source Control.",
@@ -641,11 +685,33 @@ export async function readGitHubWorkspaceStatus(
         message: "GitHub CLI is disconnected. Run `gh auth login`, then refresh.",
       };
     }
+    const outdated = outdatedCliStatus(cause);
+    if (outdated) return outdated;
     return {
       kind: "error",
       message: "Pull request status could not be loaded. Try refreshing Source Control.",
     };
   }
+}
+
+/**
+ * Turns an unknown-field rejection into the one instruction that fixes it. The
+ * CLI's own text lists every field it does support, which is both unbounded and
+ * useless inside a narrow panel, so it never reaches the renderer.
+ */
+function outdatedCliStatus(cause: unknown): GitHubWorkspaceStatus | null {
+  if (
+    !(cause instanceof GitHubCliError) ||
+    cause.code !== "command-failed" ||
+    !looksLikeUnsupportedJsonField(cause.message)
+  ) {
+    return null;
+  }
+  return {
+    kind: "outdated-cli",
+    message:
+      "This GitHub CLI is too old for Codara Studio. Update `gh` to the latest version, then refresh.",
+  };
 }
 
 function parseIssueSummaries(
@@ -1351,6 +1417,16 @@ function looksLikeMissingPullRequest(message: string): boolean {
   return /no pull requests? found|could not find (?:a )?pull request|no pull request (?:is )?associated/i.test(
     message,
   );
+}
+
+/**
+ * `gh` rejects unknown `--json` field names before it runs the query, so an
+ * installed and authenticated CLI that predates a field Codara asks for fails
+ * every read with this text. It is a stale-install signal, not a repository or
+ * credential problem.
+ */
+function looksLikeUnsupportedJsonField(message: string): boolean {
+  return /unknown json field|unsupported json field/i.test(message);
 }
 
 function looksLikeMissingRepository(message: string): boolean {

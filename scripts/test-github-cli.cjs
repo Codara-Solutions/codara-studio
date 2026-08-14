@@ -187,6 +187,19 @@ async function main() {
       assert.equal(calls[0].args[2], "--json");
       assert.equal(calls[0].args.length, 4, "PR lookup uses one fixed JSON field argument");
       assert.doesNotMatch(calls[0].args[3], /body|comments|reviews/);
+      // Status reads request only what this projection parses. `gh` validates
+      // --json names before it looks for a pull request, so an import-only
+      // field here would fail the panel on every branch of an older CLI —
+      // `baseRefOid` needs gh 2.63+ and is discarded by the summary parser.
+      assert.doesNotMatch(calls[0].args[3], /baseRefOid|headRepository/);
+      for (const field of [
+        "mergeStateStatus",
+        "statusCheckRollup",
+        "reviewDecision",
+        "headRefOid",
+      ]) {
+        assert.match(calls[0].args[3], new RegExp(`(^|,)${field}(,|$)`));
+      }
     }
 
     {
@@ -510,6 +523,43 @@ async function main() {
       assert.doesNotMatch(JSON.stringify(status), /ghp_/);
     }
 
+    // An installed, authenticated, but stale `gh` fails with "Unknown JSON
+    // field". That is a CLI-age problem, not a refresh problem, so it gets its
+    // own status instead of the generic error — and the CLI's field dump never
+    // reaches the renderer.
+    {
+      const repository = {
+        owner: "codara",
+        name: "studio",
+        nameWithOwner: "codara/studio",
+        url: "https://github.com/codara/studio",
+        hostname: "github.com",
+        defaultBranch: "main",
+      };
+      const status = await github.readGitHubWorkspaceStatus("/repo", {
+        diagnose: async () => ({ installed: true, authenticated: true }),
+        resolveRepository: async () => repository,
+        getCurrentPullRequest: async () => {
+          throw new github.GitHubCliError(
+            "command-failed",
+            'Unknown JSON field: "baseRefOid" Available fields: additions assignees author baseRefName body changedFiles closed comments commits',
+          );
+        },
+        getIssue: async () => {
+          throw new Error("must not read issue");
+        },
+      });
+      assert.deepEqual(status, {
+        kind: "outdated-cli",
+        message:
+          "This GitHub CLI is too old for Codara Studio. Update `gh` to the latest version, then refresh.",
+      });
+      assert.doesNotMatch(
+        JSON.stringify(status),
+        /baseRefOid|Available fields/,
+      );
+    }
+
     // Mark-ready names one exact repository and pull request in a fixed,
     // non-shell argv vector.
     {
@@ -733,7 +783,36 @@ async function main() {
       ]);
       assert.match(calls[0].args[6], /baseRefOid/);
       assert.match(calls[0].args[6], /headRepositoryOwner/);
+      assert.match(calls[0].args[6], /headRepository(,|$)/);
       assert.doesNotMatch(calls[0].args[6], /body|comments|reviews|files/);
+    }
+
+    // Import is the one read that genuinely needs gh 2.63+, so a stale CLI is
+    // reported as an update instruction rather than a raw field listing.
+    {
+      const repo = {
+        owner: "codara",
+        name: "studio",
+        nameWithOwner: "codara/studio",
+        url: "https://github.com/codara/studio",
+        hostname: "github.com",
+        defaultBranch: "main",
+      };
+      const { adapter } = fakeAdapter(github, [
+        commandFailure(
+          'Unknown JSON field: "baseRefOid" Available fields: additions assignees author baseRefName body',
+        ),
+      ]);
+      await assert.rejects(
+        adapter.getPullRequestForCheckout("/repo", repo, 42),
+        (error) => {
+          assert.equal(error?.name, "GitHubCliError");
+          assert.equal(error.code, "command-failed");
+          assert.match(error.message, /GitHub CLI 2\.63 or newer/);
+          assert.doesNotMatch(error.message, /Available fields|baseRefOid/);
+          return true;
+        },
+      );
     }
 
     {
