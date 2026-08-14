@@ -18,7 +18,7 @@ import type { ChatBackendKind } from "./types";
 /** Codara's default early-compaction trigger, in context tokens. */
 export const DEFAULT_PI_COMPACT_AT_TOKENS = 256_000;
 
-/** Pi 0.82.0 fires its own threshold compaction at contextWindow minus this. */
+/** Pi 0.84.2 fires its own threshold compaction at contextWindow minus this. */
 export const PI_BUILTIN_COMPACT_HEADROOM_TOKENS = 16_384;
 
 /**

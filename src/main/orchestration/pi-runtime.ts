@@ -8,7 +8,7 @@ import type {
 import { resolveCompactAtTokens } from "@shared/context-compaction";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
-export const CODARA_PI_VERSION = "0.82.0";
+export const CODARA_PI_VERSION = "0.84.2";
 /** Vendored Pi extension that registers the provider-native web_search tool.
  * It is a normal dependency of this repo, never the user's own pi packages. */
 export const CODARA_PI_WEB_SEARCH_PACKAGE = "pi-web-search";
@@ -422,7 +422,7 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     resolvePiCompactAtTokens(options.baseEnv ?? process.env),
   );
   // Service-tier policy inputs. The extension's before_provider_request hook
-  // is the only seam Pi 0.82.0 gives us for the request body, and it needs to
+  // is the only seam Pi 0.84.2 gives us for the request body, and it needs to
   // know which provider this process talks to and whether Settings enabled the
   // faster OpenAI tier. Fast mode is stamped only for OpenAI providers: an
   // Anthropic plan never carries the flag at all, which is the first of the

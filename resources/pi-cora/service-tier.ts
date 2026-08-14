@@ -1,6 +1,6 @@
 // Provider service-tier policy for every Cora Pi session (manager and worker).
 //
-// Pi 0.82.0 exposes no CLI flag, env var, or settings key for the OpenAI
+// Pi 0.84.2 exposes no CLI flag, env var, or settings key for the OpenAI
 // service tier, and Codara deliberately stays away from a repo-local
 // .pi/settings.json (untrusted project input). The one seam Codara owns is the
 // bundled extension's `before_provider_request` hook: pi-ai assembles the

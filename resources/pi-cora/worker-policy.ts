@@ -58,7 +58,7 @@ export function isWorkerSafeBridgeTool(
 // casual mutation, not a jail: write can still create or overwrite files, but
 // only inside the containment roots below.
 //
-// Pi 0.82.0's native tools are exactly: bash, edit, find, grep, ls, read,
+// Pi 0.84.2's native tools are exactly: bash, edit, find, grep, ls, read,
 // write. The session also carries extension tools: web_search + url_context
 // (pi-web-search), deep_search (bundled fallback), and the codara_* bridge
 // roster. The fence names below are asserted against that inventory in
