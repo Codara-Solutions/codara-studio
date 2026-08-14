@@ -56,9 +56,9 @@ import {
   getGitLog as readGitLog,
   getGitStatus as readGitStatus,
 } from "../git-ops";
-import { readGitHubWorkspaceStatus } from "../github-cli";
+import { readCachedGitHubWorkspaceStatus } from "../github-cli";
 import {
-  invalidateGitHubWorkQueueCache,
+  invalidateGitHubWorkQueueGlobalCache,
   readGitHubWorkQueue,
 } from "../github-work-queue";
 import { markGitHubPullRequestReady } from "../github-ready";
@@ -1358,11 +1358,15 @@ async function getGitHubStatusForRemote(
   workspaceId: string,
 ): Promise<GitHubWorkspaceStatus> {
   const { root } = await requireLocalWorkspace(workspaceId);
-  return readGitHubWorkspaceStatus(root);
+  // The phone has no explicit refresh for status, so this read is always the
+  // cached one. Codara's own writes (publish, mark ready, merge) drop the
+  // entry, so the only staleness left is a change made outside this app
+  // within the TTL.
+  return readCachedGitHubWorkspaceStatus(root);
 }
 
 async function getGitHubWorkQueueForRemote(input: { refresh: boolean }) {
-  if (input.refresh) invalidateGitHubWorkQueueCache();
+  if (input.refresh) invalidateGitHubWorkQueueGlobalCache();
   return readGitHubWorkQueue();
 }
 

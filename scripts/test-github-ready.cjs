@@ -179,11 +179,18 @@ async function main() {
         current: [pullRequest({ isDraft: false })],
         exact: [],
       });
+      const dropped = [];
       const result = await ready.markGitHubPullRequestReady("/repo", input(), {
         github: h.github,
+        invalidateStatusCache: (cwd) => dropped.push(cwd),
       });
       assert.equal(result.ok, true);
       assert.equal(result.outcome, "already-ready");
+      assert.deepEqual(
+        dropped,
+        ["/repo"],
+        "mark-ready drops this workspace's cached GitHub status",
+      );
       assert.deepEqual(h.calls, ["repo", "current"]);
       assert.deepEqual(
         result.receipts.map(({ phase, status }) => [phase, status]),

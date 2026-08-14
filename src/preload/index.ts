@@ -777,8 +777,14 @@ const api = {
       refresh = false,
     ): Promise<GitHubWorkQueueStatus> =>
       ipcRenderer.invoke("github:workQueue", { sourceWorkspaceId, refresh }),
-    status: (cwd: string): Promise<GitHubWorkspaceStatus> =>
-      ipcRenderer.invoke("github:status", cwd),
+    status: (
+      cwd: string,
+      options: { refresh?: boolean } = {},
+    ): Promise<GitHubWorkspaceStatus> =>
+      ipcRenderer.invoke("github:status", {
+        cwd,
+        refresh: options.refresh === true,
+      }),
     publish: (
       cwd: string,
       input: GitHubPublishInput,

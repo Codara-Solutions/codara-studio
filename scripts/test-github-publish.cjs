@@ -156,13 +156,18 @@ async function main() {
         statuses: [status({ unstaged: [{ path: "kept.txt" }] })],
         pullRequests: [pullRequest(77)],
       });
-      const result = await publish.publishGitHubWorkspace(
-        "/repo",
-        input(),
-        h.dependencies,
-      );
+      const dropped = [];
+      const result = await publish.publishGitHubWorkspace("/repo", input(), {
+        ...h.dependencies,
+        invalidateStatusCache: (cwd) => dropped.push(cwd),
+      });
       assert.equal(result.ok, true);
       assert.equal(result.outcome, "existing");
+      assert.deepEqual(
+        dropped,
+        ["/repo"],
+        "publishing drops this workspace's cached GitHub status",
+      );
       assert.equal(result.pullRequest.number, 77);
       assert.deepEqual(h.calls, ["status", "resolve", "get-pr"]);
       assert.equal(result.committed, false);

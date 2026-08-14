@@ -202,9 +202,18 @@ async function main() {
 
     {
       const h = harness();
-      const result = await merge.mergeGitHubPullRequest("/repo", input(), { github: h.github });
+      const dropped = [];
+      const result = await merge.mergeGitHubPullRequest("/repo", input(), {
+        github: h.github,
+        invalidateStatusCache: (cwd) => dropped.push(cwd),
+      });
       assert.equal(result.ok, true);
       assert.equal(result.outcome, "merged");
+      assert.deepEqual(
+        dropped,
+        ["/repo"],
+        "merging drops this workspace's cached GitHub status",
+      );
       assert.deepEqual(h.calls, [
         "repo",
         "current",

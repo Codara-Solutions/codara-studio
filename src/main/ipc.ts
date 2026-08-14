@@ -1731,7 +1731,12 @@ export function registerIpc(): void {
     return getGitLog(cwd);
   });
 
-  handle("github:status", async (_e, cwd: unknown): Promise<GitHubWorkspaceStatus> => {
+  handle("github:status", async (_e, request: unknown): Promise<GitHubWorkspaceStatus> => {
+    const candidate =
+      request && typeof request === "object" && !Array.isArray(request)
+        ? (request as { cwd?: unknown; refresh?: unknown })
+        : null;
+    const cwd = candidate?.cwd;
     if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
       return {
         kind: "error",
@@ -1744,8 +1749,12 @@ export function registerIpc(): void {
         message: "GitHub status is currently available for local workspaces only.",
       };
     }
-    const { readGitHubWorkspaceStatus } = await getGitHubCli();
-    return readGitHubWorkspaceStatus(cwd);
+    const { readCachedGitHubWorkspaceStatus } = await getGitHubCli();
+    // Only a read the user asked for bypasses the cache; the renderer's
+    // background reads ride it. See GitHubSection.tsx for which is which.
+    return readCachedGitHubWorkspaceStatus(cwd, {
+      refresh: candidate?.refresh === true,
+    });
   });
 
   handle(
@@ -1772,7 +1781,12 @@ export function registerIpc(): void {
         };
       }
       const queue = await import("./github-work-queue");
-      if (candidate.refresh === true) queue.invalidateGitHubWorkQueueCache();
+      // Only this workspace's list is being refreshed, so only its scope is
+      // dropped — clearing every scope made one panel's refresh cost every
+      // other cached workspace (and the phone's aggregate) a full `gh` rescan.
+      if (candidate.refresh === true) {
+        queue.invalidateGitHubWorkQueueCacheForScope(sourceWorkspaceId);
+      }
       return queue.readGitHubWorkQueue(undefined, { sourceWorkspaceId });
     },
   );

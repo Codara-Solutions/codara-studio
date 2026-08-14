@@ -439,12 +439,126 @@ async function main() {
     );
     assert.equal(cached.counters.diagnose, 1, "100 readers share one build");
     assert.deepEqual(simultaneous[0], simultaneous[99]);
-    clock.now += queue.GITHUB_QUEUE_CACHE_TTL_MS - 1;
+    // The unscoped read scans every workspace, so it holds its snapshot for
+    // much longer than the workspace-scoped read a panel makes.
+    clock.now += queue.GITHUB_QUEUE_CACHE_TTL_MS;
     await queue.readGitHubWorkQueue(cached.value);
-    assert.equal(cached.counters.diagnose, 1, "29,999ms is a cache hit");
+    assert.equal(
+      cached.counters.diagnose,
+      1,
+      "the global scope outlives the workspace-scoped TTL",
+    );
+    clock.now +=
+      queue.GITHUB_QUEUE_GLOBAL_CACHE_TTL_MS -
+      queue.GITHUB_QUEUE_CACHE_TTL_MS -
+      1;
+    await queue.readGitHubWorkQueue(cached.value);
+    assert.equal(cached.counters.diagnose, 1, "119,999ms is a global cache hit");
     clock.now += 1;
     await queue.readGitHubWorkQueue(cached.value);
-    assert.equal(cached.counters.diagnose, 2, "30,000ms is a cache miss");
+    assert.equal(cached.counters.diagnose, 2, "120,000ms is a global cache miss");
+
+    // A workspace-scoped read keeps the short TTL: it is one repository, and it
+    // is what the panel in front of the user reads.
+    queue.invalidateGitHubWorkQueueCache();
+    const scopedClock = { now: 3_000_000 };
+    const scopedCache = dependencies({ clock: scopedClock });
+    const scopedSource = { sourceWorkspaceId: "ws-source" };
+    await queue.readGitHubWorkQueue(scopedCache.value, scopedSource);
+    assert.equal(scopedCache.counters.diagnose, 1);
+    scopedClock.now += queue.GITHUB_QUEUE_CACHE_TTL_MS - 1;
+    await queue.readGitHubWorkQueue(scopedCache.value, scopedSource);
+    assert.equal(scopedCache.counters.diagnose, 1, "29,999ms is a cache hit");
+    scopedClock.now += 1;
+    await queue.readGitHubWorkQueue(scopedCache.value, scopedSource);
+    assert.equal(scopedCache.counters.diagnose, 2, "30,000ms is a cache miss");
+
+    // Refreshing one workspace's list must not evict any other scope. This is
+    // what `github:workQueue` does for a refresh, and what a run save does.
+    queue.invalidateGitHubWorkQueueCache();
+    const scopes = dependencies({ clock: { now: 4_000_000 } });
+    await queue.readGitHubWorkQueue(scopes.value, { sourceWorkspaceId: "ws-source" });
+    await queue.readGitHubWorkQueue(scopes.value, { sourceWorkspaceId: "ws-pr" });
+    await queue.readGitHubWorkQueue(scopes.value);
+    assert.equal(scopes.counters.diagnose, 3, "each scope builds once");
+    queue.invalidateGitHubWorkQueueCacheForScope("ws-source");
+    await queue.readGitHubWorkQueue(scopes.value, { sourceWorkspaceId: "ws-pr" });
+    await queue.readGitHubWorkQueue(scopes.value);
+    assert.equal(
+      scopes.counters.diagnose,
+      3,
+      "a scoped invalidation leaves other scopes and the global list cached",
+    );
+    await queue.readGitHubWorkQueue(scopes.value, { sourceWorkspaceId: "ws-source" });
+    assert.equal(scopes.counters.diagnose, 4, "the invalidated scope rebuilds");
+
+    // A run save clears only the run's own workspace scope; the global (phone)
+    // aggregate keeps its snapshot so a working agent cannot force the full
+    // cross-workspace `gh` scan on a loop.
+    queue.invalidateGitHubWorkQueueCacheForWorkspace("ws-pr");
+    await queue.readGitHubWorkQueue(scopes.value);
+    assert.equal(
+      scopes.counters.diagnose,
+      4,
+      "a run save leaves the global aggregate cached",
+    );
+    await queue.readGitHubWorkQueue(scopes.value, { sourceWorkspaceId: "ws-pr" });
+    assert.equal(scopes.counters.diagnose, 5, "the run's own scope rebuilds");
+
+    // The state-save fingerprint decides whether a save can change this
+    // module's answer at all. Everything the queue never reads must leave it
+    // untouched, or an agent run clears the cache continuously.
+    {
+      const base = baseState(repository());
+      const fingerprint = queue.workQueueRelevantFingerprint(base);
+      assert.equal(
+        queue.workQueueRelevantFingerprint({
+          ...base,
+          activeWorkspaceId: "ws-pr",
+        }),
+        fingerprint,
+        "switching the active workspace cannot change the queue",
+      );
+      assert.equal(
+        queue.workQueueRelevantFingerprint({
+          ...base,
+          workspaceGroups: [{ id: "g1", name: "Group", collapsed: false }],
+          workspaces: base.workspaces.map((workspace) => ({
+            ...workspace,
+            color: "#ffffff",
+            groupId: "g1",
+            workers: [{ id: "w1", name: "Worker" }],
+          })),
+        }),
+        fingerprint,
+        "workers, colors and grouping are not queue inputs",
+      );
+      assert.notEqual(
+        queue.workQueueRelevantFingerprint({
+          ...base,
+          workspaces: base.workspaces.map((workspace, index) =>
+            index === 0 ? { ...workspace, cwd: "/moved" } : workspace,
+          ),
+        }),
+        fingerprint,
+        "a workspace path change must clear the cache",
+      );
+      assert.notEqual(
+        queue.workQueueRelevantFingerprint({
+          ...base,
+          workspaces: base.workspaces.map((workspace) =>
+            workspace.copyBranch
+              ? {
+                  ...workspace,
+                  copyBranch: { ...workspace.copyBranch, branch: "other" },
+                }
+              : workspace,
+          ),
+        }),
+        fingerprint,
+        "a worktree branch change must clear the cache",
+      );
+    }
 
     queue.invalidateGitHubWorkQueueCache();
     const manyWorkspaces = Array.from({ length: 25 }, (_, index) => ({

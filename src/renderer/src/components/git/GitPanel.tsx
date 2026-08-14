@@ -151,8 +151,20 @@ export default function GitPanel({
   const unstageAll = useCallback(() => {
     if (cwd) void runAction("unstageAll", () => window.spark.git.unstageAll(cwd));
   }, [cwd, runAction]);
+  // Push is the one action in this panel that changes what GitHub reports for
+  // the branch — a new head commit, and with it the pull request's checks and
+  // merge state. It therefore bumps the GitHub block's own key, exactly as
+  // publish and merge do, so the next status read is loud and bypasses the
+  // main-process cache. The generic `notifyChanged()` in `runAction` cannot
+  // carry that signal: it also fires on every editor save, and reacting to it
+  // per save is the `gh` subprocess storm this panel was fixed to stop.
+  // Bumped after the action settles, success or not — a failed push can still
+  // have reached the remote.
   const handlePush = useCallback(() => {
-    if (cwd) void runAction("push", () => window.spark.git.push(cwd));
+    if (!cwd) return;
+    void runAction("push", () => window.spark.git.push(cwd)).then(() =>
+      setGitHubRefreshNonce((value) => value + 1),
+    );
   }, [cwd, runAction]);
   const handlePull = useCallback(() => {
     if (cwd) void runAction("pull", () => window.spark.git.pull(cwd));

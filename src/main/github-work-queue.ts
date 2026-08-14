@@ -25,6 +25,11 @@ import {
 import { loadState, onStateSaved } from "./storage";
 
 export const GITHUB_QUEUE_CACHE_TTL_MS = 30_000;
+// The unscoped (phone) read scans every workspace — up to 24 `gh repo view`
+// calls plus two list calls per repository — where a workspace-scoped read
+// touches one repository. It is also the less latency-sensitive of the two, so
+// it trades freshness for that fan-out.
+export const GITHUB_QUEUE_GLOBAL_CACHE_TTL_MS = 120_000;
 export const GITHUB_QUEUE_MAX_SOURCE_ROOTS = 24;
 export const GITHUB_QUEUE_MAX_REPOSITORIES = 12;
 export const GITHUB_QUEUE_MAX_WORKSPACE_JOINS = 64;
@@ -88,12 +93,85 @@ export function invalidateGitHubWorkQueueCache(): void {
   inflightByScope.clear();
 }
 
+/**
+ * Drops one scope's cached list. Deleting the in-flight entry is what stops a
+ * read that is already running from writing its now-superseded result back —
+ * the write guard in `readGitHubWorkQueue` requires its own entry to still be
+ * present. No epoch bump, deliberately: bumping is process-wide and would
+ * suppress the cache write of every *other* scope's in-flight read too.
+ */
+export function invalidateGitHubWorkQueueCacheForScope(scopeKey: string): void {
+  cachedSnapshots.delete(scopeKey);
+  inflightByScope.delete(scopeKey);
+}
+
+/**
+ * The phone's own refresh. It reads the unscoped aggregate, so that is the only
+ * snapshot it drops — clearing every scope would make one phone pull-to-refresh
+ * cost each open desktop workspace a full `gh` rebuild.
+ */
+export function invalidateGitHubWorkQueueGlobalCache(): void {
+  invalidateGitHubWorkQueueCacheForScope(GLOBAL_QUEUE_SCOPE);
+}
+
+/**
+ * A run was saved or deleted, which changes only the run link decorating rows
+ * for that workspace.
+ *
+ * The unscoped (phone) snapshot is deliberately left alone. Run saves are
+ * continuous while an agent is working, and clearing the global scope on each
+ * one would make every phone read pay for the full cross-workspace `gh` scan —
+ * the exact cost `GITHUB_QUEUE_GLOBAL_CACHE_TTL_MS` exists to bound. A run link
+ * there can therefore lag by up to that TTL, which is also true of any scope
+ * other than the run's own; the desktop panel the user is actually looking at
+ * is the one that updates immediately.
+ */
+export function invalidateGitHubWorkQueueCacheForWorkspace(
+  workspaceId: string,
+): void {
+  invalidateGitHubWorkQueueCacheForScope(workspaceId);
+}
+
+// The only workspace fields that can change what this module returns: the
+// source-root scan, the scope resolver and the issue/pull-request link matcher
+// read id, name, cwd and the whole `copyBranch` record, and nothing else.
+// `workers` is excluded on purpose — it is rewritten on every pane, session and
+// worker update, and comparing whole state was clearing this cache
+// continuously during an agent run. `activeWorkspaceId` is excluded for the
+// same reason: it changes on every workspace switch and the queue never reads it.
+export function workQueueRelevantFingerprint(state: AppState): string {
+  const relevant = state.workspaces.map((workspace) => ({
+    id: workspace.id,
+    name: workspace.name,
+    cwd: workspace.cwd,
+    copyBranch: workspace.copyBranch ?? null,
+  }));
+  return createHash("sha1").update(JSON.stringify(relevant)).digest("hex");
+}
+
+let lastRelevantFingerprint: string | null = null;
+
 function installInvalidationHooks(): void {
   if (invalidationHooksInstalled) return;
   invalidationHooksInstalled = true;
-  onStateSaved(() => invalidateGitHubWorkQueueCache());
-  onRunSaved(() => invalidateGitHubWorkQueueCache());
-  onRunDeleted(() => invalidateGitHubWorkQueueCache());
+  onStateSaved((state) => {
+    const fingerprint = workQueueRelevantFingerprint(state);
+    if (fingerprint === lastRelevantFingerprint) return;
+    lastRelevantFingerprint = fingerprint;
+    invalidateGitHubWorkQueueCache();
+  });
+  onRunSaved(({ workspaceId }) =>
+    invalidateGitHubWorkQueueCacheForWorkspace(workspaceId),
+  );
+  onRunDeleted(({ workspaceId }) =>
+    invalidateGitHubWorkQueueCacheForWorkspace(workspaceId),
+  );
+}
+
+function cacheTtlForScope(scopeKey: string): number {
+  return scopeKey === GLOBAL_QUEUE_SCOPE
+    ? GITHUB_QUEUE_GLOBAL_CACHE_TTL_MS
+    : GITHUB_QUEUE_CACHE_TTL_MS;
 }
 
 export async function readGitHubWorkQueue(
@@ -125,7 +203,7 @@ export async function readGitHubWorkQueue(
     ) {
       cachedSnapshots.set(scopeKey, {
         status: cloneStatus(status),
-        expiresAt: dependencies.now() + GITHUB_QUEUE_CACHE_TTL_MS,
+        expiresAt: dependencies.now() + cacheTtlForScope(scopeKey),
       });
     }
     return status;

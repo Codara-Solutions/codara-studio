@@ -64,7 +64,11 @@ async function main() {
   const { github, outfile } = await bundle();
   const temp = mkdtempSync(path.join(os.tmpdir(), "codara-github-cli-"));
   try {
+    // `gh auth status` is answered from a process-wide cache, so every case
+    // that exercises diagnose() starts by dropping it — otherwise the first
+    // case's answer would be handed to the second.
     {
+      github.invalidateGitHubCliDiagnosticCache();
       let ran = false;
       const adapter = github.createGitHubCliAdapter({
         resolveBinary: async () => null,
@@ -82,6 +86,7 @@ async function main() {
     }
 
     {
+      github.invalidateGitHubCliDiagnosticCache();
       const { adapter, calls } = fakeAdapter(github, [{ stdout: "", stderr: "" }]);
       assert.deepEqual(await adapter.diagnose(), {
         installed: true,
@@ -95,6 +100,7 @@ async function main() {
     }
 
     {
+      github.invalidateGitHubCliDiagnosticCache();
       const secret = `ghp_${"x".repeat(32)}`;
       const { adapter } = fakeAdapter(github, [
         commandFailure(`not logged in; token ${secret}`),
@@ -104,6 +110,70 @@ async function main() {
       assert.equal(diagnostic.authenticated, false);
       assert.match(diagnostic.hint, /\[redacted\]/);
       assert.doesNotMatch(diagnostic.hint, /ghp_/);
+    }
+
+    // An authenticated answer is reused for its full TTL, across adapter
+    // instances — callers build a fresh adapter at every site, so an
+    // instance-level cache would never be hit.
+    {
+      const clock = { now: 5_000_000 };
+      github.setGitHubCliCacheClock(() => clock.now);
+      try {
+        github.invalidateGitHubCliDiagnosticCache();
+        const first = fakeAdapter(github, [{ stdout: "", stderr: "" }]);
+        const second = fakeAdapter(github, [{ stdout: "", stderr: "" }]);
+        assert.equal((await first.adapter.diagnose()).authenticated, true);
+        assert.equal((await second.adapter.diagnose()).authenticated, true);
+        assert.equal(first.calls.length, 1);
+        assert.equal(
+          second.calls.length,
+          0,
+          "a second adapter reuses the cached auth answer",
+        );
+
+        clock.now += github.GITHUB_CLI_DIAGNOSTIC_TTL_MS - 1;
+        await second.adapter.diagnose();
+        assert.equal(second.calls.length, 0, "still inside the TTL");
+        clock.now += 1;
+        await second.adapter.diagnose();
+        assert.equal(second.calls.length, 1, "the TTL expired");
+
+        // A cold cache with several readers arriving together spawns one `gh`.
+        github.invalidateGitHubCliDiagnosticCache();
+        const burst = fakeAdapter(github, [{ stdout: "", stderr: "" }]);
+        const answers = await Promise.all(
+          Array.from({ length: 20 }, () => burst.adapter.diagnose()),
+        );
+        assert.equal(burst.calls.length, 1, "20 readers share one `gh auth status`");
+        assert.equal(answers[19].authenticated, true);
+
+        // A disconnected CLI expires quickly: the fix is `gh auth login` in a
+        // terminal Codara never sees, so it has to re-ask on its own.
+        github.invalidateGitHubCliDiagnosticCache();
+        const offline = fakeAdapter(github, [
+          commandFailure("not logged in"),
+          { stdout: "", stderr: "" },
+        ]);
+        assert.equal((await offline.adapter.diagnose()).authenticated, false);
+        clock.now += github.GITHUB_CLI_DIAGNOSTIC_FAILURE_TTL_MS - 1;
+        await offline.adapter.diagnose();
+        assert.equal(offline.calls.length, 1, "still inside the failure TTL");
+        clock.now += 1;
+        assert.equal(
+          (await offline.adapter.diagnose()).authenticated,
+          true,
+          "a re-login is picked up once the short failure TTL expires",
+        );
+        assert.equal(offline.calls.length, 2);
+        assert.ok(
+          github.GITHUB_CLI_DIAGNOSTIC_FAILURE_TTL_MS <
+            github.GITHUB_CLI_DIAGNOSTIC_TTL_MS,
+          "a failure must never be cached as long as a success",
+        );
+      } finally {
+        github.setGitHubCliCacheClock(null);
+        github.invalidateGitHubCliDiagnosticCache();
+      }
     }
 
     {
@@ -558,6 +628,93 @@ async function main() {
         JSON.stringify(status),
         /baseRefOid|Available fields/,
       );
+    }
+
+    // The UI-facing status read is cached per workspace and coalesced, so a
+    // burst of callers costs one `gh` subprocess tree rather than four each.
+    {
+      const clock = { now: 9_000_000 };
+      github.setGitHubCliCacheClock(() => clock.now);
+      try {
+        github.invalidateAllGitHubStatusCaches();
+        const repository = {
+          owner: "codara",
+          name: "studio",
+          nameWithOwner: "codara/studio",
+          url: "https://github.com/codara/studio",
+          hostname: "github.com",
+          defaultBranch: "main",
+        };
+        let reads = 0;
+        const adapter = {
+          diagnose: async () => ({ installed: true, authenticated: true }),
+          resolveRepository: async () => {
+            reads += 1;
+            return repository;
+          },
+          getCurrentPullRequest: async () => null,
+          getIssue: async () => {
+            throw new Error("must not read issue");
+          },
+        };
+        const read = (cwd, options = {}) =>
+          github.readCachedGitHubWorkspaceStatus(cwd, { ...options, adapter });
+
+        const first = await read("/repo");
+        assert.equal(first.kind, "ready");
+        assert.equal(reads, 1);
+        await read("/repo");
+        assert.equal(reads, 1, "a second background read is served from cache");
+
+        // Two workspaces never share an entry.
+        await read("/other");
+        assert.equal(reads, 2, "a different workspace builds its own entry");
+
+        // Concurrent background readers collapse onto one in-flight read.
+        github.invalidateAllGitHubStatusCaches();
+        reads = 0;
+        const burst = await Promise.all(
+          Array.from({ length: 20 }, () => read("/repo")),
+        );
+        assert.equal(reads, 1, "20 readers share one status read");
+        assert.equal(burst[19].kind, "ready");
+
+        // The returned object is a copy: a caller mutating it cannot corrupt
+        // what the next reader is handed.
+        const snapshot = await read("/repo");
+        snapshot.repository.nameWithOwner = "tampered/repo";
+        const afterTamper = await read("/repo");
+        assert.equal(afterTamper.repository.nameWithOwner, "codara/studio");
+
+        // A read the user asked for always goes to GitHub, warm cache or not,
+        // and leaves the fresh answer behind for the background readers.
+        reads = 0;
+        await read("/repo", { refresh: true });
+        assert.equal(reads, 1, "a loud read bypasses the cache");
+        await read("/repo");
+        assert.equal(reads, 1, "and repopulates it");
+
+        // Expiry.
+        clock.now += github.GITHUB_STATUS_CACHE_TTL_MS - 1;
+        await read("/repo");
+        assert.equal(reads, 1, "still inside the TTL");
+        clock.now += 1;
+        await read("/repo");
+        assert.equal(reads, 2, "the TTL expired");
+
+        // Invalidating one workspace leaves every other workspace cached —
+        // this is what publish/mark-ready/merge call.
+        await read("/other");
+        reads = 0;
+        github.invalidateGitHubStatusCache("/repo");
+        await read("/other");
+        assert.equal(reads, 0, "an unrelated workspace keeps its entry");
+        await read("/repo");
+        assert.equal(reads, 1, "the invalidated workspace rebuilds");
+      } finally {
+        github.setGitHubCliCacheClock(null);
+        github.invalidateAllGitHubStatusCaches();
+      }
     }
 
     // Mark-ready names one exact repository and pull request in a fixed,

@@ -8,6 +8,7 @@ import type {
 } from "@shared/github";
 import {
   createGitHubCliAdapter,
+  invalidateGitHubStatusCache,
   sanitizeGitHubFailure,
   type GitHubCliAdapter,
 } from "./github-cli";
@@ -19,6 +20,8 @@ const MAX_RECEIPT_LENGTH = 1_000;
 
 export interface GitHubMergeDependencies {
   github?: GitHubCliAdapter;
+  /** Injectable so a test can observe the post-write cache drop. */
+  invalidateStatusCache?: (cwd: string) => void;
 }
 
 /**
@@ -34,6 +37,23 @@ export async function mergeGitHubPullRequest(
   cwd: string,
   rawInput: unknown,
   dependencies: GitHubMergeDependencies = {},
+): Promise<GitHubMergeResult> {
+  const invalidateStatus =
+    dependencies.invalidateStatusCache ?? invalidateGitHubStatusCache;
+  try {
+    return await runMerge(cwd, rawInput, dependencies);
+  } finally {
+    // A merged pull request is the largest possible change to this
+    // workspace's GitHub status. Dropped unconditionally because an
+    // interrupted response can still have merged (see the reconcile path).
+    invalidateStatus(cwd);
+  }
+}
+
+async function runMerge(
+  cwd: string,
+  rawInput: unknown,
+  dependencies: GitHubMergeDependencies,
 ): Promise<GitHubMergeResult> {
   const receipts: GitHubMergeReceipt[] = [];
   const input = normalizeMergeInput(rawInput);

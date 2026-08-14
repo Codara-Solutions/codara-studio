@@ -36,6 +36,20 @@ export const GITHUB_CLI_READ_TIMEOUT_MS = 20_000;
 export const GITHUB_CLI_WRITE_TIMEOUT_MS = 90_000;
 export const GITHUB_CLI_MAX_OUTPUT_BYTES = 1024 * 1024;
 
+// How long an authenticated `gh auth status` answer is trusted. Every workspace
+// status and work-queue read opens with one, and it is a network round trip on
+// top of the subprocess, so re-asking per read dominated the panel's latency.
+export const GITHUB_CLI_DIAGNOSTIC_TTL_MS = 300_000;
+// A missing or disconnected CLI expires far sooner: the fix is `gh auth login`
+// in a terminal Codara never observes, so the only way the panel can notice is
+// to re-ask. One refresh of patience, not five minutes of it.
+export const GITHUB_CLI_DIAGNOSTIC_FAILURE_TTL_MS = 10_000;
+// One workspace-status read is four `gh` subprocesses. The renderer already
+// spaces its own background reads out; this bound exists to absorb bursts —
+// desktop and phone landing together, a remount, focus and the fallback timer
+// firing on the same alt-tab.
+export const GITHUB_STATUS_CACHE_TTL_MS = 20_000;
+
 const MAX_DIAGNOSTIC_TEXT = 1_000;
 const MAX_CWD_LENGTH = 16_384;
 const MAX_REPOSITORY_NAME = 240;
@@ -267,6 +281,76 @@ export function runGitHubCliCommand(
   });
 }
 
+// ── Process-wide read caches ───────────────────────────────────────────────
+// Both caches below live on the module rather than on an adapter instance, and
+// that is deliberate: callers construct a fresh `createGitHubCliAdapter()` at
+// every site (the work queue, publish, merge, mark-ready, issue and pull
+// request workspaces, and this file's own status reader), so an instance-level
+// cache would be a cache of one and would never be hit.
+
+/**
+ * Clock seam for the caches in this module. Production leaves it as
+ * `Date.now`; the .cjs harness replaces it so TTL expiry is assertable without
+ * sleeping. It is deliberately module-level rather than an adapter dependency —
+ * the caches are shared by every adapter, so a per-instance clock would be
+ * ambiguous about which one owns an entry.
+ */
+let cacheClock: () => number = Date.now;
+
+/** Test seam. Pass `null` to restore the real clock. */
+export function setGitHubCliCacheClock(clock: (() => number) | null): void {
+  cacheClock = clock ?? Date.now;
+}
+
+interface DiagnosticCacheEntry {
+  value: GitHubCliDiagnostic;
+  expiresAt: number;
+}
+
+let cachedDiagnostic: DiagnosticCacheEntry | null = null;
+let inflightDiagnostic: Promise<GitHubCliDiagnostic> | null = null;
+
+/**
+ * Drops the cached `gh auth status` answer. Production relies on the two TTLs
+ * instead — Codara never runs `gh auth login` itself, so there is no in-app
+ * event to hang invalidation off. The harness bundles this module once and
+ * drives many adapters through it, so each case calls this to start clean.
+ */
+export function invalidateGitHubCliDiagnosticCache(): void {
+  cachedDiagnostic = null;
+  inflightDiagnostic = null;
+}
+
+async function cachedDiagnose(
+  read: () => Promise<GitHubCliDiagnostic>,
+): Promise<GitHubCliDiagnostic> {
+  const cached = cachedDiagnostic;
+  // Copied on the way out: one entry is handed to every caller, so a caller
+  // that mutated it would rewrite what the rest of the process sees.
+  if (cached && cached.expiresAt > cacheClock()) return { ...cached.value };
+  // A cold cache with several readers arriving together — app boot, or one
+  // alt-tab waking the status panel and the work queue at once — must still
+  // spawn exactly one `gh`.
+  if (inflightDiagnostic) return inflightDiagnostic.then((value) => ({ ...value }));
+  const operation = read().then((value) => {
+    cachedDiagnostic = {
+      value,
+      expiresAt:
+        cacheClock() +
+        (value.installed && value.authenticated
+          ? GITHUB_CLI_DIAGNOSTIC_TTL_MS
+          : GITHUB_CLI_DIAGNOSTIC_FAILURE_TTL_MS),
+    };
+    return value;
+  });
+  inflightDiagnostic = operation;
+  try {
+    return await operation;
+  } finally {
+    if (inflightDiagnostic === operation) inflightDiagnostic = null;
+  }
+}
+
 export function createGitHubCliAdapter(
   dependencies: GitHubCliAdapterDependencies = {},
 ): GitHubCliAdapter {
@@ -332,42 +416,44 @@ export function createGitHubCliAdapter(
   }
 
   return {
-    async diagnose(): Promise<GitHubCliDiagnostic> {
-      const executable = await resolveExecutable("gh");
-      if (!executable) {
-        return {
-          installed: false,
-          authenticated: false,
-          hint: "Install GitHub CLI, then run `gh auth login`.",
-        };
-      }
-      try {
-        await runCommand({
-          executablePath: executable,
-          // With no forced hostname, gh validates the active account surface
-          // instead of incorrectly rejecting machines authenticated only to
-          // GitHub Enterprise.
-          args: ["auth", "status"],
-          timeoutMs: GITHUB_CLI_AUTH_TIMEOUT_MS,
-          maxOutputBytes: GITHUB_CLI_MAX_OUTPUT_BYTES,
-        });
-        return { installed: true, authenticated: true, executablePath: executable };
-      } catch (cause) {
-        const detail = commandFailureText(cause);
-        if (isMissingExecutableFailure(cause)) {
+    diagnose(): Promise<GitHubCliDiagnostic> {
+      return cachedDiagnose(async () => {
+        const executable = await resolveExecutable("gh");
+        if (!executable) {
           return {
             installed: false,
             authenticated: false,
-            hint: "GitHub CLI could not be launched. Reinstall `gh`, then try again.",
+            hint: "Install GitHub CLI, then run `gh auth login`.",
           };
         }
-        return {
-          installed: true,
-          authenticated: false,
-          executablePath: executable,
-          hint: detail || "Run `gh auth login` to connect GitHub.",
-        };
-      }
+        try {
+          await runCommand({
+            executablePath: executable,
+            // With no forced hostname, gh validates the active account surface
+            // instead of incorrectly rejecting machines authenticated only to
+            // GitHub Enterprise.
+            args: ["auth", "status"],
+            timeoutMs: GITHUB_CLI_AUTH_TIMEOUT_MS,
+            maxOutputBytes: GITHUB_CLI_MAX_OUTPUT_BYTES,
+          });
+          return { installed: true, authenticated: true, executablePath: executable };
+        } catch (cause) {
+          const detail = commandFailureText(cause);
+          if (isMissingExecutableFailure(cause)) {
+            return {
+              installed: false,
+              authenticated: false,
+              hint: "GitHub CLI could not be launched. Reinstall `gh`, then try again.",
+            };
+          }
+          return {
+            installed: true,
+            authenticated: false,
+            executablePath: executable,
+            hint: detail || "Run `gh auth login` to connect GitHub.",
+          };
+        }
+      });
     },
 
     async resolveRepository(cwd: string): Promise<GitHubRepositoryIdentity> {
@@ -691,6 +777,97 @@ export async function readGitHubWorkspaceStatus(
       kind: "error",
       message: "Pull request status could not be loaded. Try refreshing Source Control.",
     };
+  }
+}
+
+// ── Workspace-status cache ─────────────────────────────────────────────────
+// `readGitHubWorkspaceStatus` above stays deliberately uncached and adapter-
+// injectable: it is the unit under test, and caching inside it would leak
+// state between cases. Callers that serve a UI go through the wrapper below
+// instead.
+
+interface StatusCacheEntry {
+  status: GitHubWorkspaceStatus;
+  expiresAt: number;
+}
+
+const cachedStatuses = new Map<string, StatusCacheEntry>();
+const inflightStatuses = new Map<string, Promise<GitHubWorkspaceStatus>>();
+// Bumped by every invalidation and every forced read. A read that started
+// under an older epoch has been overtaken and must not write its result back,
+// or a slow background read would clobber the fresh answer a publish just
+// produced. One counter for every cwd is intentionally coarse: it only ever
+// suppresses a cache *write*, never serves a stale value.
+let statusCacheEpoch = 0;
+
+/**
+ * Drops one workspace's cached GitHub status. Called after any operation that
+ * changes what GitHub would report for it — publishing, marking ready, merging.
+ */
+export function invalidateGitHubStatusCache(cwd: string): void {
+  statusCacheEpoch += 1;
+  cachedStatuses.delete(cwd);
+  inflightStatuses.delete(cwd);
+}
+
+/** Drops every cached workspace status. Test seam; production invalidates per cwd. */
+export function invalidateAllGitHubStatusCaches(): void {
+  statusCacheEpoch += 1;
+  cachedStatuses.clear();
+  inflightStatuses.clear();
+}
+
+/**
+ * The UI-facing workspace status read: same answer as
+ * `readGitHubWorkspaceStatus`, but a short TTL and in-flight coalescing so a
+ * burst of callers costs one `gh` subprocess tree instead of four per caller.
+ *
+ * `refresh` is the user's own request — a Refresh click, a branch change, a
+ * read that follows one of this app's own writes. It always goes to GitHub,
+ * bypassing both the cached entry and any read already in flight, and
+ * repopulates the cache on the way out. The renderer decides which reads are
+ * loud; see `GitHubSection.tsx`, whose branch-change effect is what keeps this
+ * cache honest across a `git checkout` typed into a terminal.
+ */
+export async function readCachedGitHubWorkspaceStatus(
+  cwd: string,
+  options: { refresh?: boolean; adapter?: GitHubCliAdapter } = {},
+): Promise<GitHubWorkspaceStatus> {
+  const read = (): Promise<GitHubWorkspaceStatus> =>
+    readGitHubWorkspaceStatus(cwd, options.adapter);
+  if (options.refresh === true) {
+    statusCacheEpoch += 1;
+    const epoch = statusCacheEpoch;
+    const status = await read();
+    if (statusCacheEpoch === epoch) {
+      cachedStatuses.set(cwd, {
+        status,
+        expiresAt: cacheClock() + GITHUB_STATUS_CACHE_TTL_MS,
+      });
+    }
+    return structuredClone(status);
+  }
+
+  const cached = cachedStatuses.get(cwd);
+  if (cached && cached.expiresAt > cacheClock()) return structuredClone(cached.status);
+  const inflight = inflightStatuses.get(cwd);
+  if (inflight) return structuredClone(await inflight);
+
+  const epoch = statusCacheEpoch;
+  const operation = read().then((status) => {
+    if (statusCacheEpoch === epoch) {
+      cachedStatuses.set(cwd, {
+        status,
+        expiresAt: cacheClock() + GITHUB_STATUS_CACHE_TTL_MS,
+      });
+    }
+    return status;
+  });
+  inflightStatuses.set(cwd, operation);
+  try {
+    return structuredClone(await operation);
+  } finally {
+    if (inflightStatuses.get(cwd) === operation) inflightStatuses.delete(cwd);
   }
 }
 

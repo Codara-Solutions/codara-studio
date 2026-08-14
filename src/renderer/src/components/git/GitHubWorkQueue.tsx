@@ -113,8 +113,12 @@ export default function GitHubWorkQueue({
       timer = null;
     };
     // Every automatic read here is silent — the list updates under the user
-    // without the header ever flickering into a loading state.
-    const refreshSilently = (): void => void load({ refresh: true, silent: true });
+    // without the header ever flickering into a loading state. It also does not
+    // ask main to drop its cached list: the throttle below already spaces these
+    // reads further apart than that cache lives, so forcing a rebuild only
+    // discarded a snapshot that was about to be rebuilt anyway. `refresh` stays
+    // reserved for reads the user asked for.
+    const refreshSilently = (): void => void load({ refresh: false, silent: true });
     const start = (): void => {
       if (timer !== null || !shown()) return;
       timer = window.setInterval(() => {

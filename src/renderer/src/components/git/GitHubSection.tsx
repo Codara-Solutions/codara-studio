@@ -112,7 +112,13 @@ export default function GitHubSection({
       const id = ++requestId.current;
       if (!silent) setLoading(true);
       void window.spark.github
-        .status(cwd)
+        // Loud reads bypass the main process's per-workspace status cache, so
+        // a Refresh click, a publish/merge, and — critically — a branch change
+        // always see GitHub as it is now. Branch changes are the reason main
+        // cannot cache on branch identity: `git checkout` typed into a
+        // terminal never reaches an IPC handler, but it does move
+        // `gitStatus.branch`, which makes the read below loud.
+        .status(cwd, { refresh: !silent })
         .then((status) => {
           if (requestId.current !== id) return;
           lastReadAt.current = Date.now();
@@ -158,6 +164,17 @@ export default function GitHubSection({
     }
     const loud = previous.userRefreshKey !== userRefreshKey;
     lastKeys.current = { refreshKey, userRefreshKey };
+    // The git version bumps on every local mutation *and* every editor save,
+    // and each read here is a `gh` subprocess tree — so a silent one shares the
+    // resume path's clock instead of firing per save. Nothing is lost by
+    // waiting: focus, the fallback timer, or the user's own refresh all catch
+    // up, and a branch change is handled loudly by the effect above.
+    if (
+      !loud &&
+      Date.now() - lastReadAt.current < RESUME_REFRESH_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
     loadStatus(!loud);
   }, [loadStatus, refreshKey, userRefreshKey]);
 

@@ -15,6 +15,7 @@ import type {
 import type { GitOpResult, GitStatus } from "@shared/types";
 import {
   createGitHubCliAdapter,
+  invalidateGitHubStatusCache,
   sanitizeGitHubFailure,
   type GitHubCliAdapter,
 } from "./github-cli";
@@ -32,6 +33,8 @@ const MAX_RECEIPT_MESSAGE_LENGTH = 1_000;
 
 export interface GitHubPublishDependencies {
   github?: GitHubCliAdapter;
+  /** Injectable so a test can observe the post-write cache drop. */
+  invalidateStatusCache?: (cwd: string) => void;
   getStatus?: (cwd: string) => Promise<GitStatus>;
   fetch?: (cwd: string) => Promise<GitOpResult>;
   stageAll?: (cwd: string) => Promise<GitOpResult>;
@@ -61,6 +64,25 @@ export async function publishGitHubWorktree(
   cwd: string,
   rawInput: unknown,
   dependencies: GitHubPublishDependencies = {},
+): Promise<GitHubPublishResult> {
+  const invalidateStatus =
+    dependencies.invalidateStatusCache ?? invalidateGitHubStatusCache;
+  try {
+    return await runPublish(cwd, rawInput, dependencies);
+  } finally {
+    // Publishing commits, pushes and opens a pull request, so the cached
+    // GitHub status for this workspace is stale afterwards. A *failed* publish
+    // can also have landed remotely — see the create-recovery path below — so
+    // the drop is unconditional rather than success-only. The desktop panel
+    // re-reads loudly on its own; this is what keeps the phone honest.
+    invalidateStatus(cwd);
+  }
+}
+
+async function runPublish(
+  cwd: string,
+  rawInput: unknown,
+  dependencies: GitHubPublishDependencies,
 ): Promise<GitHubPublishResult> {
   const state: PublishState = {
     receipts: [],

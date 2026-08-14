@@ -8,6 +8,7 @@ import type {
 } from "@shared/github";
 import {
   createGitHubCliAdapter,
+  invalidateGitHubStatusCache,
   sanitizeGitHubFailure,
   type GitHubCliAdapter,
 } from "./github-cli";
@@ -19,6 +20,8 @@ const MAX_RECEIPT_LENGTH = 1_000;
 
 export interface GitHubMarkReadyDependencies {
   github?: GitHubCliAdapter;
+  /** Injectable so a test can observe the post-write cache drop. */
+  invalidateStatusCache?: (cwd: string) => void;
 }
 
 /**
@@ -33,6 +36,24 @@ export async function markGitHubPullRequestReady(
   cwd: string,
   rawInput: unknown,
   dependencies: GitHubMarkReadyDependencies = {},
+): Promise<GitHubMarkReadyResult> {
+  const invalidateStatus =
+    dependencies.invalidateStatusCache ?? invalidateGitHubStatusCache;
+  try {
+    return await runMarkReady(cwd, rawInput, dependencies);
+  } finally {
+    // A draft flipping to ready changes the pull request this workspace's
+    // cached status reports. Dropped unconditionally: a lost response can
+    // still have been applied by GitHub (the reconcile path below exists for
+    // exactly that case).
+    invalidateStatus(cwd);
+  }
+}
+
+async function runMarkReady(
+  cwd: string,
+  rawInput: unknown,
+  dependencies: GitHubMarkReadyDependencies,
 ): Promise<GitHubMarkReadyResult> {
   const receipts: GitHubMarkReadyReceipt[] = [];
   const input = normalizeMarkReadyInput(rawInput);
