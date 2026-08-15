@@ -1164,8 +1164,8 @@ async function main() {
     !/export interface RemoteWorkerSessionInfo \{[^}]*(cwd|transcriptPath)/.test(
       rpcSource,
     ) &&
-      productionSource.includes(
-        "const sessions = await listLocalWorkerSessions(input.runtime, root)",
+      /const sessions = await listLocalWorkerSessions\(\s*input\.runtime,\s*root,/.test(
+        productionSource,
       ) &&
       productionSource.includes("cwd: match.cwd") &&
       productionSource.includes("transcriptPath: match.transcriptPath"),

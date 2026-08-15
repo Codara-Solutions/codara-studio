@@ -2452,12 +2452,28 @@ function toRemoteRun(
   };
 }
 
+// The phone's picker, the delete flow, and createRemoteTerminal's --resume
+// validation must all read the SAME Claude state dir. With a managed Active
+// account the default ~/.claude would offer sessions the create then refuses
+// as "no longer resumable" — a picker full of unresumable entries.
+async function nativeClaudeSessionOptions(
+  runtime: "claude" | "codex",
+): Promise<{ claudeStateDir?: string | null }> {
+  if (runtime !== "claude") return {};
+  const execution = await resolveNewNativeClaudeProfile();
+  return { claudeStateDir: execution.env.CLAUDE_CONFIG_DIR ?? null };
+}
+
 async function listWorkerSessionsForRemote(input: {
   workspaceId: string;
   runtime: "claude" | "codex";
 }): Promise<RemoteWorkerSessionInfo[]> {
   const { root } = await requireLocalWorkspace(input.workspaceId);
-  const sessions = await listLocalWorkerSessions(input.runtime, root);
+  const sessions = await listLocalWorkerSessions(
+    input.runtime,
+    root,
+    await nativeClaudeSessionOptions(input.runtime),
+  );
   return sessions.slice(0, MAX_REMOTE_WORKER_SESSIONS).map((session) => ({
     runtime: session.runtime,
     sessionId: session.sessionId,
@@ -2484,7 +2500,12 @@ async function deleteWorkerSessionForRemote(input: {
   return fileMutations.run(
     JSON.stringify(["workerSession.delete", input.workspaceId, input.runtime]),
     async () => {
-      const sessions = await listLocalWorkerSessions(input.runtime, root);
+      const sessionOptions = await nativeClaudeSessionOptions(input.runtime);
+      const sessions = await listLocalWorkerSessions(
+        input.runtime,
+        root,
+        sessionOptions,
+      );
       const match = sessions.find(
         (session) => session.sessionId === input.sessionId,
       );
@@ -2493,13 +2514,16 @@ async function deleteWorkerSessionForRemote(input: {
           "That session is no longer in this workspace's history.",
         );
       }
-      const result = await deleteLocalWorkerSession({
-        runtime: match.runtime,
-        sessionId: match.sessionId,
-        cwd: match.cwd,
-        transcriptPath: match.transcriptPath,
-        memoryScope: input.memoryScope,
-      });
+      const result = await deleteLocalWorkerSession(
+        {
+          runtime: match.runtime,
+          sessionId: match.sessionId,
+          cwd: match.cwd,
+          transcriptPath: match.transcriptPath,
+          memoryScope: input.memoryScope,
+        },
+        sessionOptions,
+      );
       return {
         deleted: result.deleted,
         memoryDeleted: result.memoryDeleted,

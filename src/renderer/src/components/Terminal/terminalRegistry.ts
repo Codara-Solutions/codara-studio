@@ -65,19 +65,48 @@ type CreateAgentTerminalFn = (
 
 let createAgentTerminalFn: CreateAgentTerminalFn | null = null;
 
+// A bridge create can land while App is between adapter registrations: app
+// boot (main's remote-access listener is up ~1.5s before React mounts), a
+// window reload, or a dev HMR remount. The old instant throw told the caller
+// to "retry in a moment", but neither the phone's terminal.create nor the MCP
+// bridge retries — the spawn failed outright inside a gap that closes by
+// itself. So createAgentTerminal waits boundedly for the adapter instead; the
+// error remains for a renderer that genuinely never comes up.
+const CREATE_FN_REGISTRATION_WAIT_MS = 10_000;
+const createFnWaiters = new Set<(fn: CreateAgentTerminalFn) => void>();
+
 export function setCreateAgentTerminalFn(fn: CreateAgentTerminalFn | null): void {
   createAgentTerminalFn = fn;
+  if (fn) {
+    for (const waiter of [...createFnWaiters]) waiter(fn);
+    createFnWaiters.clear();
+  }
 }
 
 export async function createAgentTerminal(
   input: CreateAgentTerminalInput,
+  registrationWaitMs: number = CREATE_FN_REGISTRATION_WAIT_MS,
 ): Promise<CreateAgentTerminalResult> {
-  if (!createAgentTerminalFn) {
+  let fn = createAgentTerminalFn;
+  if (!fn) {
+    fn = await new Promise<CreateAgentTerminalFn | null>((resolve) => {
+      const waiter = (registered: CreateAgentTerminalFn): void => {
+        clearTimeout(timer);
+        resolve(registered);
+      };
+      const timer = setTimeout(() => {
+        createFnWaiters.delete(waiter);
+        resolve(null);
+      }, registrationWaitMs);
+      createFnWaiters.add(waiter);
+    });
+  }
+  if (!fn) {
     throw new Error(
       "Codara is not ready to create terminal tabs yet (renderer not mounted). Retry in a moment.",
     );
   }
-  return Promise.resolve(createAgentTerminalFn(input));
+  return Promise.resolve(fn(input));
 }
 
 // Close a terminal tab by id. Used by the terminal.create failure path to remove
