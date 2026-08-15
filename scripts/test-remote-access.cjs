@@ -920,6 +920,16 @@ async function main() {
         productionSource,
       ),
   );
+  check(
+    "production turns renderer terminal-inventory pings and PTY exits into one coalesced terminals.changed push",
+    productionSource.includes(
+      "onStudioTerminalInventoryChanged(scheduleTerminalsChangedPush)",
+    ) &&
+      productionSource.includes(
+        "onTerminalsChanged: scheduleTerminalsChangedPush",
+      ) &&
+      productionSource.includes("singleton?.notifyTerminalsChanged()"),
+  );
   {
     const broadcastDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "codara-remote-cora-changed-"),
@@ -973,6 +983,50 @@ async function main() {
       );
     } finally {
       fs.rmSync(broadcastDir, { recursive: true, force: true });
+    }
+  }
+  {
+    const terminalsDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "codara-remote-terminals-changed-"),
+    );
+    try {
+      const service = new remoteAccess.RemoteAccessService({
+        remoteDir: terminalsDir,
+        deviceName: "Terminals Changed Test Studio",
+        appVersion: "test",
+        listWorkspaces: async () => [],
+        createTerminal: async () => {
+          throw new Error("not used");
+        },
+        log: () => {},
+      });
+      let provenPushes = 0;
+      let unprovenPushes = 0;
+      service.sessions.set(
+        "device-1",
+        new Set([
+          {
+            isProven: () => true,
+            pushTerminalsChanged: () => {
+              provenPushes += 1;
+            },
+          },
+          {
+            isProven: () => false,
+            pushTerminalsChanged: () => {
+              unprovenPushes += 1;
+            },
+          },
+        ]),
+      );
+      service.notifyTerminalsChanged();
+      check(
+        "terminal-list invalidation reaches every proven session and no unproven one",
+        provenPushes === 1 && unprovenPushes === 0,
+        { provenPushes, unprovenPushes },
+      );
+    } finally {
+      fs.rmSync(terminalsDir, { recursive: true, force: true });
     }
   }
   {
@@ -5069,6 +5123,32 @@ async function main() {
       extendedServices.createTerminal(request),
     );
     extendedServices.terminalLeases = terminalLeaseStore;
+    // Studio-opened terminals live in a second, desktop-owned store that
+    // terminal.list must merge behind the phone's durable leases. Stateful so
+    // the roster can be flipped mid-test the way opening/closing a Studio tab
+    // would.
+    const studioTerminalDescriptors = [];
+    const studioStoreCalls = [];
+    extendedServices.studioTerminalLeases = {
+      async list(ownerKey) {
+        studioStoreCalls.push(["list", ownerKey]);
+        return studioTerminalDescriptors.map((descriptor) => ({
+          ...descriptor,
+        }));
+      },
+      attach() {
+        throw new Error("not used");
+      },
+      detach() {},
+      detachSubscriber(subscriberId) {
+        studioStoreCalls.push(["detachSubscriber", subscriberId]);
+      },
+      write() {},
+      resize() {},
+      close() {},
+      revokeOwner() {},
+      shutdown() {},
+    };
     extendedServices.workerTerminalControls = workerControlRegistry;
     const ex = makeFakeStream();
     const exSession = new rpc.RpcSession(ex, extendedServices);
@@ -7360,6 +7440,63 @@ async function main() {
         response: ex.outbox.at(-1),
         storeCall: terminalLeaseStore.calls.at(-1),
       },
+    );
+
+    // A terminal the user opens in Studio itself must reach the phone through
+    // the same list, and the roster change must arrive as an unsolicited push
+    // rather than waiting for the phone's next reconnect/foreground poll.
+    studioTerminalDescriptors.push({
+      terminalId: "studio-pane-1",
+      workspaceId: "ws1",
+      kind: "interactive",
+      phase: "live",
+      profile: "shell",
+      desktopTabId: "tab-studio",
+      title: "zsh — codara",
+      cols: 100,
+      rows: 30,
+      createdAt: 1_722_211_200_000,
+      sequence: 0,
+      nextInputSequence: 1,
+      origin: "studio",
+      closeable: false,
+    });
+    const beforeTerminalsChanged = ex.outbox.length;
+    exSession.pushTerminalsChanged();
+    check(
+      "a Studio terminal roster change pushes a content-free terminals.changed hint",
+      ex.outbox.at(-1)?.event === "terminals.changed" &&
+        JSON.stringify(ex.outbox.at(-1)?.payload) === "{}" &&
+        ex.outbox.length === beforeTerminalsChanged + 1,
+      ex.outbox.at(-1),
+    );
+    exReq(1601, "terminal.list", {});
+    await flush();
+    const mergedList = ex.outbox.at(-1)?.result?.terminals;
+    check(
+      "terminal.list merges Studio-opened terminals behind the phone's durable leases",
+      ex.outbox.at(-1)?.id === 1601 &&
+        mergedList?.length === 2 &&
+        mergedList?.[0]?.terminalId === terminalId &&
+        mergedList?.[1]?.terminalId === "studio-pane-1" &&
+        mergedList?.[1]?.origin === "studio" &&
+        mergedList?.[1]?.closeable === false &&
+        studioStoreCalls.some(
+          (call) => call[0] === "list" && call[1] === "trusted-phone-key",
+        ),
+      { response: ex.outbox.at(-1), studioStoreCalls },
+    );
+    // Close the Studio tab again so the later lease-lifecycle checks keep
+    // seeing exactly the phone-owned inventory they were written against.
+    studioTerminalDescriptors.length = 0;
+    exReq(1602, "terminal.list", {});
+    await flush();
+    check(
+      "a closed Studio terminal drops out of terminal.list",
+      ex.outbox.at(-1)?.id === 1602 &&
+        ex.outbox.at(-1)?.result?.terminals?.length === 1 &&
+        ex.outbox.at(-1)?.result?.terminals?.[0]?.terminalId === terminalId,
+      ex.outbox.at(-1),
     );
 
     const beforeLiveData = ex.outbox.length;

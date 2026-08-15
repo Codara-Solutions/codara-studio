@@ -1599,6 +1599,14 @@ export class RpcSession {
     this.pushEvent("workspaces.changed", {});
   }
 
+  // Terminal-list invalidation: something opened, closed, or retitled in
+  // Studio's tab strip. Like workspaces.changed this is a content-free hint —
+  // the phone follows it with an ordinary terminal.list, so nothing sensitive
+  // rides on the unsolicited channel.
+  pushTerminalsChanged(): void {
+    this.pushEvent("terminals.changed", {});
+  }
+
   // Live-mirror of a desktop notification for this phone. Small, unsolicited,
   // and rare, so it needs none of the terminal-output backpressure handling.
   pushPhoneNotification(payload: RemotePhoneNotification): void {

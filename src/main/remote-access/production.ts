@@ -120,7 +120,10 @@ import {
   saveSettings,
   saveState,
 } from "../storage";
-import { requestTerminalOp } from "../terminal-bridge";
+import {
+  onStudioTerminalInventoryChanged,
+  requestTerminalOp,
+} from "../terminal-bridge";
 import {
   deleteWorkerSession as deleteLocalWorkerSession,
   listWorkerSessions as listLocalWorkerSessions,
@@ -227,6 +230,7 @@ import { projectRemoteSubscriptionProfiles } from "./subscription-profile-projec
 
 let singleton: RemoteAccessService | null = null;
 let stateSavedSubscriptionInstalled = false;
+let terminalInventorySubscriptionInstalled = false;
 let coraSendReceiptCleanupInstalled = false;
 let coraSendReceiptIndexPromise: Promise<CoraSendReceiptIndex> | null = null;
 let workspaceMutation: Promise<void> = Promise.resolve();
@@ -343,7 +347,9 @@ export function getRemoteAccessService(): RemoteAccessService {
       registerNotifications: registerNotificationsForRemote,
       beginImageUpload: beginImageUploadForRemote,
       attachWorkerTerminal: attachRemoteWorkerTerminal,
-      studioTerminalLeases: new StudioTerminalShareStore(),
+      studioTerminalLeases: new StudioTerminalShareStore({
+        onTerminalsChanged: scheduleTerminalsChangedPush,
+      }),
       createTerminal: createRemoteTerminal,
       log: (line) => logMain("remote-access", line),
     });
@@ -351,6 +357,10 @@ export function getRemoteAccessService(): RemoteAccessService {
   if (!stateSavedSubscriptionInstalled) {
     stateSavedSubscriptionInstalled = true;
     onStateSaved(() => singleton?.notifyWorkspacesChanged());
+  }
+  if (!terminalInventorySubscriptionInstalled) {
+    terminalInventorySubscriptionInstalled = true;
+    onStudioTerminalInventoryChanged(scheduleTerminalsChangedPush);
   }
   if (!coraSendReceiptCleanupInstalled) {
     coraSendReceiptCleanupInstalled = true;
@@ -360,6 +370,24 @@ export function getRemoteAccessService(): RemoteAccessService {
   }
   startPhoneNotificationBridge(singleton);
   return singleton;
+}
+
+// Trailing window for terminal-list invalidations, mirroring the Cora changed
+// coalescer: the renderer pings on every shareable-inventory change (a closed
+// split fires once per pane) and each phone answers a push with a full
+// terminal.list, so a burst must collapse into one broadcast. The delay also
+// gives a freshly minted pane time to spawn its PTY — the share store skips
+// panes with no live PTY, and a list taken in that gap would miss the terminal
+// until the next hint.
+const TERMINALS_CHANGED_COALESCE_MS = 500;
+let terminalsChangedTimer: NodeJS.Timeout | null = null;
+function scheduleTerminalsChangedPush(): void {
+  if (terminalsChangedTimer) return;
+  terminalsChangedTimer = setTimeout(() => {
+    terminalsChangedTimer = null;
+    singleton?.notifyTerminalsChanged();
+  }, TERMINALS_CHANGED_COALESCE_MS);
+  terminalsChangedTimer.unref?.();
 }
 
 function getCoraSendReceiptIndex(): Promise<CoraSendReceiptIndex> {

@@ -4291,8 +4291,20 @@ export default function App() {
       { workspaceId: string | null; tabId: string; paneId: string }
     >(),
   );
+  // Fingerprint of the last shareable-terminal inventory reported to main, so
+  // the effect below (which re-runs on every tab-state change) only pings the
+  // terminal bridge when a pane a phone could see actually appeared,
+  // disappeared, or was retitled.
+  const sharedTerminalFingerprintRef = useRef<string | null>(null);
   useEffect(() => {
-    setListShareableStudioTerminalsFn(() => {
+    const listShareableTerminals = (): Array<{
+      paneId: string;
+      tabId: string;
+      workspaceId: string;
+      title?: string;
+      cwd?: string;
+      profile: "shell" | "claude" | "codex";
+    }> => {
       const layouts: Array<{ workspaceId: string; tabs: Tab[] }> = [];
       if (tabs.tabsWorkspaceId && validWorkspaceIds.has(tabs.tabsWorkspaceId)) {
         layouts.push({ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs });
@@ -4327,7 +4339,27 @@ export default function App() {
         }
       }
       return shared;
-    });
+    };
+    setListShareableStudioTerminalsFn(listShareableTerminals);
+    // Push-notify main when the phone-visible inventory changes. Main owns
+    // debouncing and fan-out; this stays a bare ping so a burst of tab
+    // operations costs a string compare per commit, nothing more.
+    const fingerprint = JSON.stringify(
+      listShareableTerminals().map((entry) => [
+        entry.paneId,
+        entry.tabId,
+        entry.workspaceId,
+        entry.title ?? null,
+        entry.profile,
+      ]),
+    );
+    if (fingerprint !== sharedTerminalFingerprintRef.current) {
+      sharedTerminalFingerprintRef.current = fingerprint;
+      // Optional-called: in dev the renderer can be hot-updated ahead of its
+      // preload, and throwing here unmounts App — which unregisters every
+      // bridge adapter and kills phone/MCP terminal creation with it.
+      window.spark?.terminalBridge?.notifyInventoryChanged?.();
+    }
     setCreateAgentTerminalFn((input) => {
       if (input.workspaceId && !validWorkspaceIds.has(input.workspaceId)) {
         throw new Error(

@@ -329,6 +329,17 @@ export class RemoteAccessService {
     }
   }
 
+  // Same contract as broadcastCoraChanged: a content-free list-invalidation
+  // hint for every session that completed hello and proved liveness. The phone
+  // answers with terminal.list, which re-authorizes everything it returns.
+  notifyTerminalsChanged(): void {
+    for (const sessions of this.sessions.values()) {
+      for (const session of sessions) {
+        if (session.isProven()) session.pushTerminalsChanged();
+      }
+    }
+  }
+
   // Journal activity is only an invalidation hint. Broadcast the same tiny
   // metadata envelope to every session that completed hello; an authenticated
   // stream that has not proved liveness must not receive unsolicited state.

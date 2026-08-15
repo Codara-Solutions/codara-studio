@@ -46,6 +46,14 @@ interface SharedStudioTerminal {
   offExit: () => void;
 }
 
+export interface StudioTerminalShareOptions {
+  // A tracked PTY dying is the one inventory change the renderer's tab state
+  // may never report (an `exit`ed shell can leave its pane on screen), so the
+  // store surfaces it here and the service turns it into a terminals.changed
+  // push. Attached subscribers still get their sequenced onExit regardless.
+  onTerminalsChanged?: () => void;
+}
+
 /**
  * Read/write mirrors for terminals the user opened in Studio itself. The PTY
  * stays desktop-owned: detach and close only remove a phone subscriber, and a
@@ -53,6 +61,8 @@ interface SharedStudioTerminal {
  */
 export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
   private readonly records = new Map<string, SharedStudioTerminal>();
+
+  constructor(private readonly options: StudioTerminalShareOptions = {}) {}
 
   async createInteractive(
     _ownerKey: string,
@@ -292,6 +302,7 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
       callbacks.onExit({ terminalId: record.descriptor.terminalId, sequence });
     }
     if (record.subscribers.size === 0) this.removeRecord(record);
+    this.options.onTerminalsChanged?.();
   }
 
   private requireRecord(terminalId: string): SharedStudioTerminal {

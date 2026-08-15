@@ -54,6 +54,7 @@ interface BridgeResponse {
 
 const REQUEST_CHANNEL = "terminal-bridge:request";
 const RESPONSE_CHANNEL = "terminal-bridge:response";
+const INVENTORY_CHANNEL = "terminal-bridge:inventory-changed";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 interface PendingEntry {
@@ -63,6 +64,14 @@ interface PendingEntry {
 }
 
 const pending = new Map<string, PendingEntry>();
+// Tab/pane state lives in the renderer, so main cannot see a Studio terminal
+// open, close, or retitle on its own. The renderer sends a bare content-free
+// ping whenever its shareable inventory changes; interested main-side services
+// (remote access pushes a terminal-list invalidation to paired phones) register
+// here. The ping deliberately carries no payload — the authoritative inventory
+// is always re-read through the "list" op, so a spoofed or stale ping can at
+// worst trigger one redundant read.
+const inventoryListeners = new Set<() => void>();
 let listenerRegistered = false;
 
 export function registerTerminalBridge(): void {
@@ -85,6 +94,23 @@ export function registerTerminalBridge(): void {
       entry.reject(new Error(payload.error || "terminal op failed"));
     }
   });
+  ipcMain.on(INVENTORY_CHANNEL, (event) => {
+    if (!isTrustedOnSender(event, INVENTORY_CHANNEL)) return;
+    for (const listener of inventoryListeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.error("[terminal-bridge] inventory listener failed:", err);
+      }
+    }
+  });
+}
+
+export function onStudioTerminalInventoryChanged(
+  listener: () => void,
+): () => void {
+  inventoryListeners.add(listener);
+  return () => inventoryListeners.delete(listener);
 }
 
 export async function requestTerminalOp<T = unknown>(

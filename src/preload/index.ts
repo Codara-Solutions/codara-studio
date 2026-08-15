@@ -1382,6 +1382,12 @@ const api = {
     sendResponse: (response: { reqId: string; ok: boolean; result?: unknown; error?: string }): void => {
       ipcRenderer.send("terminal-bridge:response", response);
     },
+    // Content-free ping from App.tsx whenever the set of shareable Studio
+    // terminals changes (opened, closed, retitled). Main relays it to the
+    // remote-access service so paired phones can re-list without polling.
+    notifyInventoryChanged: (): void => {
+      ipcRenderer.send("terminal-bridge:inventory-changed");
+    },
   },
   updater: {
     // Subscribe to electron-updater lifecycle events. The returned function
