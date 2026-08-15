@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
+import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 
 interface Props {
   path: string;
@@ -78,21 +79,8 @@ export default function DocxPreview({ path, mtimeMs }: Props) {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div
-        style={{
-          flex: "0 0 32px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          gap: 6,
-          padding: "0 10px",
-          background: "var(--panel)",
-          borderBottom: "1px solid var(--rule-soft)",
-          color: "var(--muted)",
-          fontSize: 11,
-        }}
-      >
-        {loading && <span style={{ marginRight: "auto" }}>Loading document…</span>}
+      <DockablePaneBar>
+        {loading && <span style={{ marginRight: "auto", whiteSpace: "nowrap" }}>Loading document…</span>}
         <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomOut} title="Zoom out">
           −
         </button>
@@ -118,7 +106,7 @@ export default function DocxPreview({ path, mtimeMs }: Props) {
         >
           100%
         </button>
-      </div>
+      </DockablePaneBar>
       <div
         ref={scrollRef}
         style={{
@@ -149,4 +137,8 @@ const zoomBtnStyle: React.CSSProperties = {
   padding: 0,
   fontSize: 13,
   lineHeight: 1,
+  flex: "0 0 auto",
+  // Docked, these live in the chrome band's pointer-none slot; each control
+  // re-enables the pointer for itself.
+  pointerEvents: "auto",
 };

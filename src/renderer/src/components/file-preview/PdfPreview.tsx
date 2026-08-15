@@ -7,6 +7,7 @@ import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 // Vite bundles the worker as a same-origin asset, so `script-src 'self'`
 // (which worker-src falls back to) covers it — no CDN, no CSP exception.
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
+import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -95,21 +96,8 @@ export default function PdfPreview({ path, mtimeMs }: Props) {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div
-        style={{
-          flex: "0 0 32px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          gap: 6,
-          padding: "0 10px",
-          background: "var(--panel)",
-          borderBottom: "1px solid var(--rule-soft)",
-          color: "var(--muted)",
-          fontSize: 11,
-        }}
-      >
-        <span style={{ fontFamily: "var(--font-mono)", marginRight: "auto" }}>
+      <DockablePaneBar>
+        <span style={{ fontFamily: "var(--font-mono)", marginRight: "auto", whiteSpace: "nowrap" }}>
           {doc.numPages} page{doc.numPages === 1 ? "" : "s"}
         </span>
         <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomOut} title="Zoom out">
@@ -137,7 +125,7 @@ export default function PdfPreview({ path, mtimeMs }: Props) {
         >
           Fit
         </button>
-      </div>
+      </DockablePaneBar>
       <div
         ref={containerRef}
         style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "16px 24px", display: "grid", gap: 16 }}
@@ -156,6 +144,10 @@ const zoomBtnStyle: React.CSSProperties = {
   padding: 0,
   fontSize: 13,
   lineHeight: 1,
+  flex: "0 0 auto",
+  // Docked, these live in the chrome band's pointer-none slot; each control
+  // re-enables the pointer for itself.
+  pointerEvents: "auto",
 };
 
 // One page: a fixed-size placeholder that swaps in a rendered canvas when

@@ -170,7 +170,8 @@ function ChatStack({
                     visibility: "hidden" as const,
                     pointerEvents: "none" as const,
                     overflow: "hidden",
-                    borderRadius: "var(--terminal-pane-radius)",
+                    // Top corners belong to the DockedPaneChrome band above.
+                    borderRadius: "0 0 var(--terminal-pane-radius) var(--terminal-pane-radius)",
                   }
                 : null),
             }}

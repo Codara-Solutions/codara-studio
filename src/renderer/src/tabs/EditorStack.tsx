@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import EditorPane from "../components/EditorPane";
 import type { EditorTab, Tab, TabId } from "./types";
 import type { DockRef } from "./dock";
+import { DockSlotTabIdContext } from "./dockChromeSlot";
 import {
   DOCK_CONTENT_Z,
   getDockVersion,
@@ -138,18 +139,24 @@ function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSave
                     visibility: "hidden" as const,
                     pointerEvents: "none" as const,
                     overflow: "hidden",
-                    borderRadius: "var(--terminal-pane-radius)",
+                    // Top corners belong to the DockedPaneChrome band above.
+                    borderRadius: "0 0 var(--terminal-pane-radius) var(--terminal-pane-radius)",
                   }
                 : null),
             }}
           >
-            <EditorPane
-              file={t.entry}
-              onDirtyChange={bundle.onDirty}
-              onSaved={bundle.onSaved}
-              onClose={bundle.onClose}
-              active={visible}
-            />
+            {/* Names the chrome-band toolbar slot this pane's toolbars portal
+                into when docked (registered only while a DockedPaneChrome for
+                this tab exists — undocked, toolbars render inline). */}
+            <DockSlotTabIdContext.Provider value={t.id}>
+              <EditorPane
+                file={t.entry}
+                onDirtyChange={bundle.onDirty}
+                onSaved={bundle.onSaved}
+                onClose={bundle.onClose}
+                active={visible}
+              />
+            </DockSlotTabIdContext.Provider>
           </div>
         );
       })}

@@ -10,6 +10,11 @@ import { pathToFileURL } from "node:url";
 // mounted in its own Stack and only borrows a rect from the grid — because
 // re-parenting an Electron <webview> tears down and reloads the guest.
 
+// Height of the header band the grid reserves at the top of every docked cell
+// (label + undock/zoom/close). Keep in sync with DOCK_CHROME_H in
+// src/renderer/src/tabs/dockGeometry.ts.
+const DOCK_CHROME_H = 26;
+
 async function launch(): Promise<{
   app: ElectronApplication;
   page: Page;
@@ -31,6 +36,9 @@ async function launch(): Promise<{
   );
   // Text file for the editor-docking case.
   await writeFile(join(workspaceDir, "notes.txt"), "docked editor fixture\n", "utf8");
+  // Markdown file for the merged-toolbar case: its Preview/Edit toggle must
+  // portal into the dock chrome band instead of stacking a second bar.
+  await writeFile(join(workspaceDir, "guide.md"), "# Dock Band Fixture\n\nhello band\n", "utf8");
   await writeFile(
     join(userDataDir, "spark-state.json"),
     JSON.stringify(
@@ -116,10 +124,11 @@ test("a browser preview docks beside a terminal without reloading its guest", as
     await expect(page.locator("webview")).toHaveCount(1);
 
     // Geometry: the frame the grid drives (owned by PreviewStack, in a
-    // different subtree) must land exactly on the cell the grid laid out.
-    // This is the assertion that pins dockGeometry's frame math to
-    // paneFrameStyle's. The <webview> itself is deliberately smaller —
-    // BrowserPane puts an address bar above it.
+    // different subtree) must land exactly on the cell the grid laid out,
+    // minus the DOCK_CHROME_H header band reserved at the cell's top. This is
+    // the assertion that pins dockGeometry's frame math to paneFrameStyle's.
+    // The <webview> itself is deliberately smaller — BrowserPane puts an
+    // address bar above it.
     const frame = page.locator("[data-dock-content-id]");
     await expect
       .poll(
@@ -129,9 +138,9 @@ test("a browser preview docks beside a terminal without reloading its guest", as
           if (!cellBox || !frameBox) return null;
           return (
             Math.abs(cellBox.x - frameBox.x) < 3 &&
-            Math.abs(cellBox.y - frameBox.y) < 3 &&
+            Math.abs(cellBox.y + DOCK_CHROME_H - frameBox.y) < 3 &&
             Math.abs(cellBox.width - frameBox.width) < 3 &&
-            Math.abs(cellBox.height - frameBox.height) < 3
+            Math.abs(cellBox.height - DOCK_CHROME_H - frameBox.height) < 3
           );
         },
         { timeout: 10_000 },
@@ -287,6 +296,49 @@ test("an editor docks from the pill context menu and keeps its editing state", a
     await expect(page.locator(".cm-content")).toContainText("docked editor fixture", {
       timeout: 10_000,
     });
+  } finally {
+    await app.close();
+  }
+});
+
+test("a docked editor's toolbar merges into the chrome band", async () => {
+  test.setTimeout(120_000);
+  const { app, page, workspaceDir } = await launch();
+  try {
+    await openTerminalTab(page);
+
+    const filePath = join(workspaceDir, "guide.md");
+    const fileRow = page.locator(`[data-fs-path="${filePath.replace(/\\/g, "\\\\")}"]`);
+    await expect(fileRow).toBeVisible({ timeout: 20_000 });
+    await fileRow.dispatchEvent("click");
+    const editorPill = page.getByRole("tab", { name: /guide\.md/i }).first();
+    await expect(editorPill).toBeVisible({ timeout: 15_000 });
+
+    const pillBox = (await editorPill.boundingBox())!;
+    await editorPill.dispatchEvent("contextmenu", {
+      clientX: Math.round(pillBox.x + pillBox.width / 2),
+      clientY: Math.round(pillBox.y + pillBox.height / 2),
+    });
+    await page.getByText("Open in split", { exact: true }).dispatchEvent("click");
+    await expect(page.locator("[data-dock-cell-id]")).toHaveCount(1, { timeout: 15_000 });
+
+    // ONE bar: the markdown Preview/Edit toggle portals into the chrome band
+    // (dockChromeSlot.tsx) rather than rendering a second row inside the
+    // content frame below it.
+    const band = page.locator(".spark-dock-chrome");
+    const toggle = band.getByRole("group", { name: "Markdown view mode" });
+    await expect(toggle).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.locator("[data-dock-content-id]").getByRole("group", { name: "Markdown view mode" }),
+    ).toHaveCount(0);
+
+    // A REAL click (not dispatchEvent): the band's dead space is pointer-none
+    // with controls re-enabling themselves, and Playwright's actionability
+    // hit-test is what proves that chain — a covered control would fail here.
+    await toggle.getByRole("button", { name: "Preview" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Dock Band Fixture" }),
+    ).toBeVisible({ timeout: 10_000 });
   } finally {
     await app.close();
   }

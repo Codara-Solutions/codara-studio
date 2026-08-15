@@ -39,6 +39,7 @@ import {
 import { usePreferences } from "../preferences/usePreferences";
 const MarkdownPreview = lazy(() => import("./markdown-preview/MarkdownPreview"));
 import FilePreview from "./file-preview/FilePreview";
+import { DockablePaneBar } from "../tabs/dockChromeSlot";
 import { previewKindForPath } from "./file-preview/previewKind";
 
 // Path-based detection used to decide whether to expose the "Preview" toggle
@@ -506,11 +507,6 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           boxShadow: "var(--lift-hi)",
         }}
       >
-        {doc.status === "ready" && (
-          <span style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
-            {formatBytes(doc.size)}
-          </span>
-        )}
         {preferences.vimMode && doc.status === "ready" && (
           <span
             style={{
@@ -689,19 +685,7 @@ function MarkdownToolbar({
   onSetMode: (next: ViewMode) => void;
 }) {
   return (
-    <div
-      style={{
-        flex: "0 0 32px",
-        height: 32,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "flex-end",
-        gap: 8,
-        padding: "0 10px",
-        background: "var(--panel)",
-        borderBottom: "1px solid var(--rule-soft)",
-      }}
-    >
+    <DockablePaneBar style={{ gap: 8 }}>
       <button
         type="button"
         onClick={onCopy}
@@ -731,7 +715,7 @@ function MarkdownToolbar({
           Edit
         </SegmentedButton>
       </div>
-    </div>
+    </DockablePaneBar>
   );
 }
 
@@ -776,6 +760,10 @@ const toolbarIconButton: React.CSSProperties = {
   borderRadius: 5,
   cursor: "default",
   padding: 0,
+  flex: "0 0 auto",
+  // Docked, this lives in the chrome band's pointer-none slot; each control
+  // re-enables the pointer for itself.
+  pointerEvents: "auto",
   transition:
     "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
 };
@@ -790,6 +778,9 @@ const segmentedGroup: React.CSSProperties = {
   borderRadius: 6,
   gap: 2,
   boxShadow: "var(--well)",
+  flex: "0 0 auto",
+  // See toolbarIconButton: interactive in the chrome band's pointer-none slot.
+  pointerEvents: "auto",
 };
 
 const segmentedButtonBase: React.CSSProperties = {

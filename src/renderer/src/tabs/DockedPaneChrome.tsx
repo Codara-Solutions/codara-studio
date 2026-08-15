@@ -1,5 +1,7 @@
-import type { DockableTabKind } from "./types";
-import type { FracRect } from "./dockGeometry";
+import { useMemo } from "react";
+import type { DockableTabKind, TabId } from "./types";
+import { DOCK_CHROME_H, type FracRect } from "./dockGeometry";
+import { registerDockChromeSlot, unregisterDockChromeSlot } from "./dockChromeSlot";
 import { CloseIcon, ZoomPaneIcon } from "../components/icons";
 import { PaneDragHandle } from "./TerminalStack";
 
@@ -10,6 +12,8 @@ interface Props {
   // moves — the docked tab rides along with it.
   hostTabId: string;
   leafId: string;
+  // The docked TAB, which keys the toolbar slot its content portals into.
+  contentTabId: TabId;
   isZoomed: boolean;
   onUndock: () => void;
   onToggleZoom: () => void;
@@ -26,22 +30,41 @@ function pct(fraction: number): string {
   return `${fraction * 100}%`;
 }
 
-// Controls for a docked cell. Lives in the grid's chrome layer rather than
+// Header band for a docked cell. Lives in the grid's chrome layer rather than
 // inside the content, because the content belongs to another Stack (and, for a
 // preview, is a <webview> that would swallow these clicks entirely).
 //
-// Mirrors PaneToolbar's visual language: a quiet pill in the cell's top-right
-// that only asserts itself on hover.
+// The band owns real space: dockGeometry's frameStyle() starts the content
+// DOCK_CHROME_H below the cell top, so these controls can never sit on top of
+// a toolbar the content draws itself (pptx/pdf zoom rows, the browser address
+// bar, the chat header) — floating them transparently over the content is what
+// produced the double-exposed header this replaced.
 export default function DockedPaneChrome({
   rect,
   kind,
   hostTabId,
   leafId,
+  contentTabId,
   isZoomed,
   onUndock,
   onToggleZoom,
   onClose,
 }: Props) {
+  // Stable callback ref that remembers its element, so unmounting can
+  // element-check the unregister (a cell that moved hosts must not clear the
+  // slot its replacement band already registered).
+  const slotRef = useMemo(() => {
+    let mounted: HTMLElement | null = null;
+    return (el: HTMLElement | null) => {
+      if (el) {
+        mounted = el;
+        registerDockChromeSlot(contentTabId, el);
+      } else if (mounted) {
+        unregisterDockChromeSlot(contentTabId, mounted);
+        mounted = null;
+      }
+    };
+  }, [contentTabId]);
   return (
     <div
       className="spark-dock-chrome"
@@ -50,14 +73,21 @@ export default function DockedPaneChrome({
         left: `calc(${pct(rect.left)} + var(--terminal-pane-gap, 3px))`,
         top: `calc(${pct(rect.top)} + var(--terminal-pane-gap, 3px))`,
         width: `calc(${pct(rect.width)} - 2 * var(--terminal-pane-gap, 3px))`,
-        // Only the strip along the cell's top edge is interactive; the rest of
-        // the cell must stay clickable by the content underneath.
-        height: 26,
+        height: DOCK_CHROME_H,
         display: "flex",
         alignItems: "center",
         justifyContent: "flex-end",
         gap: 4,
         padding: "0 6px",
+        // Reads as the cell's header: same surface as the content's own
+        // toolbars, top corners matching the cell well it caps.
+        background: "var(--panel)",
+        borderBottom: "1px solid var(--rule-soft)",
+        borderRadius: "var(--terminal-pane-radius) var(--terminal-pane-radius) 0 0",
+        // Container stays click-through even though nothing sits under it now:
+        // ResizeHandles render earlier in the same chrome layer, and a band
+        // with pointer-events:auto would eat the handle straddling the cell's
+        // top edge. Only the controls themselves take the pointer.
         pointerEvents: "none",
         zIndex: 1,
       }}
@@ -71,10 +101,33 @@ export default function DockedPaneChrome({
       </span>
       <span
         className="spark-eyebrow spark-dock-chrome__label"
-        style={{ marginRight: "auto", pointerEvents: "none", fontSize: 10 }}
+        style={{ pointerEvents: "none", fontSize: 10 }}
       >
         {KIND_LABEL[kind]}
       </span>
+      {/* Toolbar slot: docked content portals its own controls here (see
+          dockChromeSlot.tsx), merging what used to be a second stacked bar
+          into this one. Flex:1 doubles as the spacer that keeps the dock
+          buttons right-aligned when the content has no toolbar. Dead space
+          stays pointer-none so clicks fall through to the cell; portaled
+          controls re-enable pointer events on themselves. */}
+      <span
+        ref={slotRef}
+        data-dock-toolbar-slot={contentTabId}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          alignSelf: "stretch",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          margin: "0 2px",
+          overflow: "hidden",
+          pointerEvents: "none",
+          color: "var(--muted)",
+          fontSize: 11,
+        }}
+      />
       <button
         type="button"
         className="spark-btn spark-dock-chrome__btn"

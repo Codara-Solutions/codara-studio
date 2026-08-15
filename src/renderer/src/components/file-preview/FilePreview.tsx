@@ -21,12 +21,6 @@ interface Props {
   onWhiteboardSaved?: (path: string) => void;
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
 // Subtle checkerboard so transparent images/SVGs read against something.
 const CHECKER_BG: React.CSSProperties = {
   backgroundImage:
@@ -204,7 +198,10 @@ export default function FilePreview({
     );
   }
 
-  const caption = (
+  // Images only (the size readout that used to sit beside it is gone — not
+  // information anyone acts on). Null until the image reports its natural
+  // size, so no empty strip flashes while loading.
+  const caption = dimensions ? (
     <div
       style={{
         flex: "0 0 24px",
@@ -220,14 +217,11 @@ export default function FilePreview({
         background: "var(--panel)",
       }}
     >
-      {dimensions && (
-        <span>
-          {dimensions.w} × {dimensions.h}
-        </span>
-      )}
-      {stat && <span>{formatBytes(stat.size)}</span>}
+      <span>
+        {dimensions.w} × {dimensions.h}
+      </span>
     </div>
-  );
+  ) : null;
 
   if (kind === "image" || kind === "svg") {
     return (

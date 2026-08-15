@@ -179,7 +179,8 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
                     visibility: "hidden",
                     pointerEvents: "none",
                     overflow: "hidden",
-                    borderRadius: "var(--terminal-pane-radius)",
+                    // Top corners belong to the DockedPaneChrome band above.
+                    borderRadius: "0 0 var(--terminal-pane-radius) var(--terminal-pane-radius)",
                   }
                 : {
                     position: "absolute",

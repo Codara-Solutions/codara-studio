@@ -47,6 +47,14 @@ interface ReactSnapshot {
 
 const GAP = "var(--terminal-pane-gap, 3px)";
 
+// Height of the DockedPaneChrome header band the grid reserves at the top of
+// every docked cell. frameStyle() subtracts it, so docked content can never
+// slide under the chrome — it used to float transparently over the content,
+// which collided with anything that draws its own top toolbar (the pptx/pdf
+// zoom rows, the browser address bar, the chat header). Mirrored by
+// tests/e2e/dock-panes.spec.ts.
+export const DOCK_CHROME_H = 26;
+
 // Content z-index. Sits above `.spark-terminal-tab` (2), which paints an opaque
 // panel background over the whole tab, and below the grid's chrome layer (4),
 // which must stay clickable over a docked webview.
@@ -68,9 +76,9 @@ function pct(fraction: number): string {
   return `${fraction * 100}%`;
 }
 
-// Byte-for-byte the same frame TerminalStack's paneFrameStyle() gives a
-// terminal pane, so a docked cell and a terminal cell of the same fractional
-// rect land on the same pixels.
+// The frame TerminalStack's paneFrameStyle() gives a terminal pane, minus the
+// DOCK_CHROME_H band at the top: the chrome header owns that strip, and the
+// content starts flush below it.
 //
 // No correction is needed for `.spark-terminal-tab`'s `padding:
 // var(--terminal-pane-pad)`: an absolutely positioned child resolves
@@ -78,15 +86,15 @@ function pct(fraction: number): string {
 // that padding (only a border would shrink it, and there is none). The grid's
 // own cells and this frame therefore share an identical 0..100% space, even
 // though the two elements sit in different Stacks. Measured in
-// tests/e2e/dock-panes.spec.ts, which asserts the two boxes to within 3px.
+// tests/e2e/dock-panes.spec.ts, which asserts the two boxes to within 3px
+// (with the chrome band folded in).
 function frameStyle(rect: FracRect, insetTop: number): Record<string, string> {
+  const drop = DOCK_CHROME_H + insetTop;
   return {
     left: `calc(${pct(rect.left)} + ${GAP})`,
-    top: `calc(${pct(rect.top)} + ${GAP}${insetTop > 0 ? ` + ${insetTop}px` : ""})`,
+    top: `calc(${pct(rect.top)} + ${GAP} + ${drop}px)`,
     width: `calc(${pct(rect.width)} - 2 * ${GAP})`,
-    height: `calc(${pct(rect.height)} - 2 * ${GAP}${
-      insetTop > 0 ? ` - ${insetTop}px` : ""
-    })`,
+    height: `calc(${pct(rect.height)} - 2 * ${GAP} - ${drop}px)`,
   };
 }
 

@@ -1400,6 +1400,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               kind={leaf.content.tabKind}
               hostTabId={tab.id}
               leafId={leaf.paneId}
+              contentTabId={leaf.content.tabId}
               isZoomed={zoomedPaneId === leaf.paneId}
               onUndock={() => onUndockTab(leaf.content.tabId)}
               onToggleZoom={() => getBundle(tab.id, leaf.paneId).onToggleZoom()}

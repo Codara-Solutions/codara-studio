@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { init } from "pptx-preview";
+import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 
 interface Props {
   path: string;
@@ -136,21 +137,8 @@ export default function PptxPreview({ path, mtimeMs }: Props) {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div
-        style={{
-          flex: "0 0 32px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          gap: 6,
-          padding: "0 10px",
-          background: "var(--panel)",
-          borderBottom: "1px solid var(--rule-soft)",
-          color: "var(--muted)",
-          fontSize: 11,
-        }}
-      >
-        <span style={{ marginRight: "auto" }}>
+      <DockablePaneBar>
+        <span style={{ marginRight: "auto", whiteSpace: "nowrap" }}>
           {loading ? "Loading presentation…" : slideCount > 0 ? `${slideCount} slides` : ""}
         </span>
         <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomOut} title="Zoom out">
@@ -178,7 +166,7 @@ export default function PptxPreview({ path, mtimeMs }: Props) {
         >
           Fit
         </button>
-      </div>
+      </DockablePaneBar>
       <div
         ref={scrollRef}
         onPointerEnter={recoverCharts}
@@ -204,4 +192,8 @@ const zoomBtnStyle: React.CSSProperties = {
   padding: 0,
   fontSize: 13,
   lineHeight: 1,
+  flex: "0 0 auto",
+  // Docked, these live in the chrome band's pointer-none slot; each control
+  // re-enables the pointer for itself.
+  pointerEvents: "auto",
 };
