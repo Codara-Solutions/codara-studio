@@ -6606,6 +6606,29 @@ const Workspace = React.memo(function Workspace({
     (id: TabId) => setActiveTab(id),
     [setActiveTab],
   );
+  // A docked chat's own sub-navigation, rendered INSIDE its cell by ChatStack.
+  //
+  // The workbench-level strip keys off the active tab, and a docked chat is
+  // never the active tab (its host terminal is) — so docking a chat silently
+  // stripped it of Chat / Kanban / Runs / Terminal and left the conversation
+  // as the only reachable surface. The strip belongs to the chat, so when the
+  // chat moves into a cell it moves with it.
+  //
+  // These handlers deliberately drop the setActiveTab half of their
+  // workbench-level twins: selecting a docked tab would "activate" a tab that
+  // has no workbench slot, blanking the center while the cell keeps painting.
+  // Flipping the view is the whole job here. Runs / preview pills still route
+  // through handleInnerSelectTab — those are real tabs of their own.
+  const handleDockedChatClick = useCallback(() => changeChatView("chat"), [changeChatView]);
+  const handleDockedTerminalClick = useCallback(
+    () => changeChatView("terminal"),
+    [changeChatView],
+  );
+  const handleDockedWhiteboardClick = useCallback(
+    () => changeChatView("whiteboard"),
+    [changeChatView],
+  );
+  const handleDockedBoardClick = useCallback(() => changeChatView("board"), [changeChatView]);
   // Returns whether a pane was actually focused, so callers with their own
   // notice surface (the board's card button) can explain a miss — a finished
   // worker's pane does not survive an app restart. The Runs Inspector ignores
@@ -6885,6 +6908,26 @@ const Workspace = React.memo(function Workspace({
           tabs={visibleTabs}
           activeId={effectiveActiveId}
           dockIndex={dockIndex}
+          dockedStrip={
+            dockedChatTabId ? (
+              <InnerTabStrip
+                activeId={dockedChatTabId}
+                activeChatTabId={dockedChatTabId}
+                chatView={chatView}
+                backendPtyExists={backendPtyExists}
+                whiteboardAvailable={whiteboardAvailable}
+                whiteboardCreatable={Boolean(activeRunForStrip)}
+                whiteboardAttention={whiteboardAttention}
+                runsTab={runOwnedTabs.runs}
+                previews={runOwnedTabs.previews}
+                onChatClick={handleDockedChatClick}
+                onTerminalClick={handleDockedTerminalClick}
+                onWhiteboardClick={handleDockedWhiteboardClick}
+                onBoardClick={handleDockedBoardClick}
+                onSelectTab={handleInnerSelectTab}
+              />
+            ) : null
+          }
           workspace={workspace}
           tabsWorkspaceId={tabs.tabsWorkspaceId}
           validWorkspaceIds={validWorkspaceIds}

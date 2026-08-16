@@ -12,6 +12,7 @@ import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
 import DockedPaneChrome from "./DockedPaneChrome";
 import { dockLeaf, isDockLeaf } from "./dock";
 import {
+  DOCK_CHROME_H,
   DOCK_CHROME_Z,
   clearDockPlacementsForHost,
   publishDockPlacements,
@@ -1053,6 +1054,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
         const workerChip = visibleWorkerChip(leaf.worker);
         const isZoomed = zoomedPaneId === leaf.paneId;
         const isHiddenByZoom = zoomedPaneId !== null && !isZoomed;
+        // Labelled once this tab is a real split: see the paddingTop note on
+        // the pane below. Worker panes carry WorkerPaneHeader instead.
+        const labelled = renderLeaves.length > 1 && !workerTerminal && !leaf.worker;
         // Dock cell: the content itself is mounted by its own Stack and merely
         // positioned at this rect (dockGeometry), so all the grid renders here
         // is the card well behind it. Deliberately carries neither
@@ -1175,6 +1179,14 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             className="spark-terminal-pane"
             style={{
               position: "absolute",
+              // Title band, on the same terms as a docked cell's. A grid whose
+              // other cells announce themselves ("Chat", "Automations") while the
+              // shells stay anonymous reads as half-finished, so once a tab holds
+              // more than one cell every cell is labelled. A tab with a single
+              // full-bleed terminal keeps the bare surface — there is nothing to
+              // tell it apart FROM. Worker panes are excluded: their own header
+              // already names the agent running in them.
+              paddingTop: labelled ? DOCK_CHROME_H : undefined,
               // Worker panes stack a header row above the terminal; the
               // header is flex-static and TerminalPane (flex:1, minHeight:0)
               // absorbs the rest, so xterm reflows normally on resize. The
@@ -1217,6 +1229,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           >
             {!placeOffScreen && isActive ? <PaneFocusRing /> : null}
             {!placeOffScreen && isZoomed ? <PaneZoomedRing /> : null}
+            {labelled ? <PaneKindLabel label="Terminal" /> : null}
             {workerTerminal && leaf.worker ? (
               <WorkerPaneHeader
                 worker={leaf.worker}
@@ -1849,6 +1862,30 @@ function PaneZoomedRing() {
 // every edge — including splits against a sibling — stays visible. Two cues
 // only — an accent border plus one soft accent glow — instead of the former
 // border + 1px ring + inset-wash stack, keeping the active-pane mark precise.
+// The quiet name in a cell's title band. Mirrors DockedPaneChrome's label
+// exactly (same classes, same position) so a shell and a docked surface in the
+// same grid read as two of the same thing rather than two different designs.
+function PaneKindLabel({ label }: { label: string }) {
+  return (
+    <span
+      className="spark-eyebrow spark-dock-chrome__label"
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 10,
+        height: DOCK_CHROME_H,
+        display: "inline-flex",
+        alignItems: "center",
+        fontSize: 10,
+        pointerEvents: "none",
+        zIndex: 1,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 function PaneFocusRing() {
   return (
     <div

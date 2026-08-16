@@ -325,6 +325,20 @@ test("a chat docks into the grid and keeps its surface on screen", async () => {
     await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
     await expect(page.locator('[data-dock-cell-id][data-dock-tab-id]')).toHaveCount(1);
 
+    // The chat keeps its OWN sub-navigation in the cell. The workbench-level
+    // strip keys off the active tab, which a docked chat never is, so docking
+    // used to strip Chat / Kanban / Runs / Terminal off it and leave the
+    // conversation as the only reachable surface.
+    const strip = page.locator('[data-dock-content-id] [role="tablist"]').first();
+    await expect(strip).toBeVisible({ timeout: 15_000 });
+    await expect(strip.getByText("Chat", { exact: true })).toBeVisible();
+
+    // ...and the shell beside it says what it is. A grid where the docked cell
+    // announces itself and the terminal stays anonymous reads as unfinished.
+    await expect(
+      page.locator(".spark-terminal-pane:visible").getByText("Terminal", { exact: true }),
+    ).toBeVisible();
+
     // The chat composer is really rendered inside that cell.
     const composer = page.locator(".spark-chat-composer, textarea").first();
     await expect(composer).toBeVisible({ timeout: 15_000 });
@@ -444,7 +458,11 @@ test("a whiteboard splits like every other workspace surface", async () => {
     const cell = page.locator("[data-dock-cell-id]");
     await expect(cell).toHaveCount(1, { timeout: 15_000 });
     await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
-    await expect(page.locator(".spark-dock-chrome__label")).toHaveText("Whiteboard");
+    // Scoped to the cell's chrome: terminal panes share the label class now
+    // (that is the point — one visual language for every cell in the grid).
+    await expect(page.locator(".spark-dock-chrome .spark-dock-chrome__label")).toHaveText(
+      "Whiteboard",
+    );
 
     // The canvas is live inside the cell, not an empty husk.
     const board = page.getByTestId("cora-whiteboard-file-editor");
