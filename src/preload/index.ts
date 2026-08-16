@@ -160,6 +160,7 @@ import type {
 } from "@shared/types";
 
 type PtyDataHandler = (data: Uint8Array | string) => void;
+type PtyReplayHandler = (info: { bytes: number }) => void;
 type PtyExitHandler = (info: PtyExitInfo) => void;
 type HostResumeHandler = (info: {
   reason: "resume" | "unlock-screen";
@@ -1007,6 +1008,18 @@ const api = {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
+    // Replay marker: main fires this right before pushing N bytes of REPLAYED
+    // history down the data channel (raw-tail reattach frame, post-sleep
+    // backlog drain). Subscribe alongside onData and count the announced bytes
+    // off the next chunks to tell history from live output — the URL sniffer
+    // must not read a dev-server banner from last week as a server that just
+    // started. See announceReplay in src/main/pty-manager.ts.
+    onReplay: (id: string, handler: PtyReplayHandler): (() => void) => {
+      const channel = `pty:replay:${id}`;
+      const listener = (_e: Electron.IpcRendererEvent, info: { bytes: number }) => handler(info);
+      ipcRenderer.on(channel, listener);
+      return () => ipcRenderer.off(channel, listener);
+    },
     onExit: (id: string, handler: PtyExitHandler): (() => void) => {
       const channel = `pty:exit:${id}`;
       const listener = (_e: Electron.IpcRendererEvent, info: PtyExitInfo) => handler(info);
@@ -1342,6 +1355,13 @@ const api = {
   // cora-preview MCP bridge: main forwards preview-tool requests here, the
   // renderer dispatches against the picked preview tab and sends a response
   // back through ipcRenderer.send. One listener per renderer process.
+  preview: {
+    // True only when something is accepting connections on the URL's loopback
+    // port right now. Gates auto-opening a preview tab for a sniffed dev-server
+    // URL so replayed terminal history can't spawn a tab onto a dead port.
+    probeLocalServer: (url: string): Promise<boolean> =>
+      ipcRenderer.invoke("preview:probeLocalServer", { url }),
+  },
   previewBridge: {
     onRequest: (
       handler: (req: { reqId: string; op: string; params: Record<string, unknown> }) => void,

@@ -89,7 +89,7 @@ interface Props {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
-  onDetectedLocalUrl?: (url: string) => void;
+  onDetectedLocalUrl?: (url: string, meta?: { replayed?: boolean }) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
   onActivity?: () => void;
   onUserInput?: () => void;

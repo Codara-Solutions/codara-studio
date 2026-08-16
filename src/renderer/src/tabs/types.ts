@@ -86,7 +86,20 @@ export type TerminalLeafOrigin = {
 // its RECT comes from the pane tree (see dockGeometry.ts). Moving the content
 // itself into TerminalStack's subtree would re-parent it, which reloads a
 // <webview> guest and throws away editor/chat state.
-export type DockableTabKind = "preview" | "editor" | "chat";
+//
+// Every workspace-level surface is here: if a tab can fill the workbench, it
+// can take half of it instead. The two exclusions are structural rather than
+// arbitrary — a terminal tab IS the grid (its panes already move between tabs
+// by drag), and run-owned tabs live in the chat panel's inner strip, so
+// canDockTab() screens those out on top of this list.
+export type DockableTabKind =
+  | "preview"
+  | "editor"
+  | "chat"
+  | "diff"
+  | "whiteboard"
+  | "usage"
+  | "automations";
 
 // What a grid cell hosts. `undefined` on a leaf means a terminal, which keeps
 // every pre-dock persisted layout structurally valid.

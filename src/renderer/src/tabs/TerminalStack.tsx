@@ -76,7 +76,7 @@ import {
 // do this — it changes the React component *type* at a tree position
 // whenever a leaf becomes a split, which unmounts the pane.
 //
-// `onDetectedUrl` carries (tabId, paneId, url) so App.tsx can suppress repeat
+// `onDetectedUrl` carries (tabId, paneId, url, meta) so App.tsx can suppress repeat
 // preview-tab spawns per pane (a chatty dev server shouldn't open ten
 // previews if the user happens to scroll its log).
 
@@ -106,7 +106,12 @@ interface Props {
   workspaceVisible?: boolean;
   shell: ShellInfo | null;
   scrollbackLineLimit: number;
-  onDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
+  onDetectedUrl: (
+    tabId: TabId,
+    paneId: string,
+    url: string,
+    meta?: { replayed?: boolean },
+  ) => void;
   onSparkOpen: (input: SparkOpenInput) => void;
   onPaneExit: (tabId: TabId, paneId: string, info: PtyExitInfo) => void;
   onActivatePane: (tabId: TabId, paneId: string) => void;
@@ -193,7 +198,7 @@ interface Props {
 // destroy + respawn its xterm + PTY). Hoisted to module scope so the
 // extracted TerminalTabPane child below can reference the type.
 type Bundle = {
-  onDetectedUrl: (url: string) => void;
+  onDetectedUrl: (url: string, meta?: { replayed?: boolean }) => void;
   onSparkOpen: (input: SparkOpenInput) => void;
   onExit: (info: PtyExitInfo) => void;
   onActivate: () => void;
@@ -402,7 +407,8 @@ function TerminalStack({
       let b = bundles.current.get(key);
       if (!b) {
         b = {
-          onDetectedUrl: (url: string) => detectedRef.current(tabId, paneId, url),
+          onDetectedUrl: (url: string, meta?: { replayed?: boolean }) =>
+            detectedRef.current(tabId, paneId, url, meta),
           onSparkOpen: (input: SparkOpenInput) => sparkOpenRef.current(input),
           onExit: (info) => exitRef.current(tabId, paneId, info),
           onActivate: () => activateRef.current(tabId, paneId),

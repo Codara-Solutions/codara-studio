@@ -88,8 +88,15 @@ async function main() {
     });
   }
   const { migratePersisted, validateDockLeaves } = require(useTabsOut);
-  const { buildDockIndex, collectTerminalLeaves, collectDockLeaves, isDockLeaf, canDockTab } =
-    require(dockOut);
+  const {
+    buildDockIndex,
+    collectTerminalLeaves,
+    collectDockLeaves,
+    isDockLeaf,
+    canDockTab,
+    planOpenInSplit,
+    DOCKABLE_KINDS,
+  } = require(dockOut);
 
   // --- migration -----------------------------------------------------------
   const v6 = {
@@ -189,6 +196,73 @@ async function main() {
     "run-owned previews are not dockable",
     !canDockTab({ ...previewTab("prev1"), runId: "run-1" }),
   );
+
+  // --- "Open in split" host resolution ------------------------------------
+  // The rule: pair the tab you picked with the surface you are LOOKING AT.
+  // Every case below was a way the old lookup ("the active tab if it happens
+  // to be a terminal, else the last terminal tab in the strip") put the cell
+  // somewhere the user was not.
+  const chat = (id) => ({ id, kind: "chat", title: "Cora" });
+  const editor = (id) => ({ id, kind: "editor", title: "notes.txt", path: "/w/notes.txt", entry: {} });
+  const workerTab = (id) => terminalTab(id, leaf("wp1"), { scope: { kind: "workers", runId: "run-1" } });
+
+  const grid = terminalTab("t1", leaf("p1"));
+  check(
+    "the grid on screen takes the cell",
+    JSON.stringify(planOpenInSplit([grid, previewTab("prev1")], "t1", "prev1")) ===
+      JSON.stringify({ kind: "dock", hostTabId: "t1" }),
+  );
+  check(
+    "two non-terminal surfaces pair in a new container",
+    JSON.stringify(planOpenInSplit([chat("c1"), editor("e1"), grid], "c1", "e1")) ===
+      JSON.stringify({ kind: "container", partnerTabId: "c1" }),
+  );
+  check(
+    "splitting the tab you are already on falls back to the grid you were last in",
+    JSON.stringify(planOpenInSplit([grid, terminalTab("t2", leaf("p2")), editor("e1")], "e1", "e1", "t1")) ===
+      JSON.stringify({ kind: "dock", hostTabId: "t1" }),
+  );
+  check(
+    "without a remembered grid the fallback is the last one in the strip",
+    JSON.stringify(planOpenInSplit([grid, terminalTab("t2", leaf("p2")), editor("e1")], "e1", "e1")) ===
+      JSON.stringify({ kind: "dock", hostTabId: "t2" }),
+  );
+  check(
+    "a hidden worker grid is never the host",
+    JSON.stringify(planOpenInSplit([workerTab("w1"), editor("e1")], "e1", "e1")) ===
+      JSON.stringify({ kind: "new-terminal" }),
+  );
+  check(
+    "a workspace with no grid at all still splits (against a fresh shell)",
+    JSON.stringify(planOpenInSplit([editor("e1")], "e1", "e1")) ===
+      JSON.stringify({ kind: "new-terminal" }),
+  );
+  check(
+    "a run-owned surface on screen is not a partner",
+    JSON.stringify(
+      planOpenInSplit([{ id: "r1", kind: "runs", title: "Runs", runId: "run-1" }, grid, editor("e1")], "r1", "e1"),
+    ) === JSON.stringify({ kind: "dock", hostTabId: "t1" }),
+  );
+  check(
+    "a partner already docked is left in its grid",
+    JSON.stringify(
+      planOpenInSplit(
+        [terminalTab("t1", split(leaf("p1"), dockCell("d1", "c1", "chat"))), chat("c1"), editor("e1")],
+        "c1",
+        "e1",
+      ),
+    ) === JSON.stringify({ kind: "dock", hostTabId: "t1" }),
+  );
+  check("an undockable tab has no plan", planOpenInSplit([grid], "t1", "t1") === null);
+
+  // --- every workspace surface can be split --------------------------------
+  // The complement of this set is deliberate: terminal tabs ARE the grid, and
+  // run-owned kinds live in the chat panel's inner strip (canDockTab screens
+  // those out separately).
+  for (const kind of ["preview", "editor", "chat", "diff", "whiteboard", "usage", "automations"]) {
+    check(`${kind} tabs are dockable`, DOCKABLE_KINDS.has(kind));
+  }
+  check("terminal tabs stay undockable", !DOCKABLE_KINDS.has("terminal"));
 
   if (failures > 0) {
     console.error(`\n${failures} dock-layout check(s) failed`);

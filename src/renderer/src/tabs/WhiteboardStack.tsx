@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import WhiteboardFilePreview, {
   deleteWhiteboardDraft,
 } from "../components/file-preview/WhiteboardFilePreview";
+import DockedSurface from "./DockedSurface";
+import type { DockRef } from "./dock";
 import type { Tab, TabId, WhiteboardTab } from "./types";
 
 // WhiteboardStack hosts untitled "+ New whiteboard" drafts. Same mount-always
@@ -17,6 +19,10 @@ import type { Tab, TabId, WhiteboardTab } from "./types";
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
+  // A board docked into a terminal tab's split grid is positioned by that grid
+  // rather than filling the workbench (see dockGeometry.ts). The canvas never
+  // moves in the DOM, so zoom/selection/undo survive docking.
+  dockIndex: ReadonlyMap<TabId, DockRef>;
   // Active workspace directory — save-dialog default location.
   workspacePath: string | null;
   // Close-time cleanup hook from useTabs; used to drop a draft's board when
@@ -29,6 +35,7 @@ interface Props {
 function WhiteboardStack({
   tabs,
   activeId,
+  dockIndex,
   workspacePath,
   registerDispose,
   onSavedAs,
@@ -77,21 +84,14 @@ function WhiteboardStack({
     // absorb clicks meant for whichever stack is paint-order below it. The
     // active inner wrapper re-enables pointer-events:auto.
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      {boards.map((t) => {
-        const visible = t.id === activeId;
-        return (
-          <div
-            key={t.id}
-            aria-hidden={!visible}
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              flexDirection: "column",
-              visibility: visible ? "visible" : "hidden",
-              pointerEvents: visible ? "auto" : "none",
-            }}
-          >
+      {boards.map((t) => (
+        <DockedSurface
+          key={t.id}
+          tabId={t.id}
+          docked={dockIndex.has(t.id)}
+          active={t.id === activeId}
+        >
+          {() => (
             <WhiteboardFilePreview
               path={null}
               draftId={t.id}
@@ -99,9 +99,9 @@ function WhiteboardStack({
               onSavedAs={getSavedAs(t.id)}
               onSaved={handleSaved}
             />
-          </div>
-        );
-      })}
+          )}
+        </DockedSurface>
+      ))}
     </div>
   );
 }

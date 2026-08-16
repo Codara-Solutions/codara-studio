@@ -57,6 +57,7 @@ import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
+import { isLoopbackPreviewServerUp } from "./preview-navigation";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { remoteStreamGrep } from "./remote/remote-search";
@@ -2673,6 +2674,15 @@ export function registerIpc(): void {
   // attach) instead of resuming a backlog that would double-deliver tail bytes.
   handle("pty:detach", async (_e, args: { id: string }) => {
     pty.detach(args.id);
+  });
+
+  // Is a local dev server actually listening at this URL? The renderer asks
+  // before auto-opening a preview tab for a URL it sniffed on a terminal, so a
+  // banner line that arrives as replayed history (or one a resumed agent CLI
+  // reprints from an old transcript) can't spawn a tab onto a dead port.
+  handle("preview:probeLocalServer", async (_e, args: { url: string }): Promise<boolean> => {
+    if (!args || typeof args.url !== "string" || !args.url.trim()) return false;
+    return isLoopbackPreviewServerUp(args.url);
   });
 
   // ── Agent session restore (manual Claude/Codex terminal panes) ──────────

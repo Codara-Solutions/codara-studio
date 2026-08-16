@@ -3734,7 +3734,7 @@ export default function App() {
   const lastOpenedUrlByTerminalRef = useRef<Map<string, string>>(new Map());
 
   const handleDetectedUrl = useCallback(
-    (tabId: string, paneId: string, url: string) => {
+    (tabId: string, paneId: string, url: string, meta?: { replayed?: boolean }) => {
       setDetectedUrl(tabId, paneId, url);
       // Re-broadcast so other listeners (status bar, agent bridge) can
       // react without coupling directly to the terminal stack.
@@ -3752,6 +3752,15 @@ export default function App() {
         return;
       }
       if (port === null || !AUTO_PREVIEW_PORTS.has(port)) return;
+
+      // Replayed history is not an event. Main re-sends a pane's buffered
+      // output verbatim down the live data channel after a lock/sleep (and as
+      // the raw-tail frame on reattach), so a `Local: http://localhost:3000`
+      // line a dev server printed before the laptop slept arrives again on
+      // wake looking exactly like a server that just came up. The chip above
+      // still updates — the URL is real and clickable — but a replay must
+      // never spawn a tab on its own. Genuinely-live output is unaffected.
+      if (meta?.replayed === true) return;
 
       // Part C — auto-open is opt-in. When the user hasn't enabled it, stop
       // here: the detected-URL chip above already ran (setDetectedUrl +
@@ -3779,7 +3788,6 @@ export default function App() {
       // servers each get their own auto-preview.
       const last = lastOpenedUrlByTerminalRef.current.get(paneId);
       if (last && sameOrigin(last, url)) return;
-      lastOpenedUrlByTerminalRef.current.set(paneId, url);
 
       // If a preview tab already shows the same origin, do nothing — it's
       // already in the strip. A passive stdout sniff must never reassign the
@@ -3788,7 +3796,13 @@ export default function App() {
       const existing = tabs.tabs.find(
         (t) => t.kind === "preview" && sameOrigin(t.url, url),
       );
-      if (existing) return;
+      if (existing) {
+        // Still counts as handled for this pane: closing that preview is a
+        // deliberate "I don't want this", and the next line the same dev server
+        // prints must not undo it.
+        lastOpenedUrlByTerminalRef.current.set(paneId, url);
+        return;
+      }
       // Inherit the worker's runId so the chat panel can render this preview
       // inside its inner tab strip; URLs detected on a plain (non-worker)
       // terminal stay top-level by leaving runId undefined. (Worker panes are
@@ -3798,9 +3812,37 @@ export default function App() {
         sourceTab?.kind === "terminal" && sourceTab.scope?.kind === "workers"
           ? sourceTab.scope.runId
           : null;
-      // focus:false — an auto-detected preview opens in the background so it
-      // doesn't steal the active tab from a chat the user is working in.
-      newPreviewTab(url, { runId: ownerRunId, focus: false });
+
+      // Last gate: is anything actually listening there? The replay guard above
+      // covers history main re-sent, but not history a process reprints as its
+      // own fresh output — a resumed `claude --resume` replaying a transcript
+      // that quotes a dev-server URL is indistinguishable from a live banner at
+      // the byte level. A blank tab pointed at a dead port is the exact symptom
+      // either way, so probe the port (main retries briefly, so a server that
+      // printed its banner a moment ago still passes) and only then mint a tab.
+      void window.spark.preview
+        .probeLocalServer(url)
+        .then((reachable) => {
+          if (!reachable) return;
+          // Re-run both dedupes against post-await state: the probe takes up to
+          // a second, in which the user (or another pane) may have opened this
+          // origin. Suppression is recorded only where a tab exists — a probe
+          // that came back dead leaves the pane free to auto-open later, when
+          // the server the user is about to start actually answers.
+          const alreadyOpen = tabsRef.current.tabs.some(
+            (t) => t.kind === "preview" && sameOrigin(t.url, url),
+          );
+          const prior = lastOpenedUrlByTerminalRef.current.get(paneId);
+          if (alreadyOpen || (prior && sameOrigin(prior, url))) {
+            lastOpenedUrlByTerminalRef.current.set(paneId, url);
+            return;
+          }
+          lastOpenedUrlByTerminalRef.current.set(paneId, url);
+          // focus:false — an auto-detected preview opens in the background so it
+          // doesn't steal the active tab from a chat the user is working in.
+          newPreviewTab(url, { runId: ownerRunId, focus: false });
+        })
+        .catch(() => undefined);
     },
     // tabs.tabs is real data read above (worker-pane and existing-preview
     // checks), so it stays a dep; the method references are stable.
@@ -5995,7 +6037,12 @@ interface WorkspaceProps {
     run: RunState,
     options?: { select?: boolean; focusRuns?: boolean },
   ) => void;
-  onDetectedUrl: (tabId: string, paneId: string, url: string) => void;
+  onDetectedUrl: (
+    tabId: string,
+    paneId: string,
+    url: string,
+    meta?: { replayed?: boolean },
+  ) => void;
   onSparkOpenFile: (path: string) => void;
   // Shared git state for the diff tabs (see useSharedGitStatus in App).
   gitStatus: GitStatus | null;
@@ -6112,6 +6159,7 @@ const Workspace = React.memo(function Workspace({
     splitTerminalPane,
     moveTerminalPane,
     closeTerminalPane,
+    openTabInSplit,
     dockTabInTerminal,
     undockTab,
     toggleTerminalPaneZoom,
@@ -6699,13 +6747,14 @@ const Workspace = React.memo(function Workspace({
     },
     [dockTabInTerminal],
   );
-  // Menu route into the grid: no drag, dock into the named host with the
-  // grid's own largest-cell placement.
+  // Menu route into the grid: no drag, so useTabs resolves the host (the grid
+  // on screen, else a container minted around the surface the user is looking
+  // at) and places the cell itself.
   const handleOpenInSplit = useCallback(
-    (dockedTabId: string, hostTabId: string) => {
-      dockTabInTerminal(dockedTabId, hostTabId);
+    (dockedTabId: string) => {
+      openTabInSplit(dockedTabId);
     },
-    [dockTabInTerminal],
+    [openTabInSplit],
   );
   const handleUndockTab = useCallback(
     (dockedTabId: string) => undockTab(dockedTabId, { focus: true }),
@@ -6802,7 +6851,7 @@ const Workspace = React.memo(function Workspace({
         onTerminalPaneDrop={onTerminalPaneDrop}
         onReorderTab={onReorderTab}
         onPinEditorTab={onPinEditorTab}
-        onDockTab={handleOpenInSplit}
+        onOpenInSplit={handleOpenInSplit}
         pickerHints={pickerHints}
         closeOnMiddleClick={closeTabsOnMiddleClick}
         workspaceId={workspace?.id ?? null}
@@ -6885,6 +6934,7 @@ const Workspace = React.memo(function Workspace({
         <DiffStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}
+          dockIndex={dockIndex}
           cwd={workspace?.cwd ?? null}
           status={gitStatus}
           gitVersion={gitVersion}
@@ -6982,6 +7032,7 @@ const Workspace = React.memo(function Workspace({
             <AutomationsStack
               tabs={visibleTabs}
               activeId={effectiveActiveId}
+              dockIndex={dockIndex}
               workspace={workspace}
               terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               onOpenRunChat={handleOpenBoardCardRunInChat}
@@ -6990,7 +7041,11 @@ const Workspace = React.memo(function Workspace({
         )}
         {visibleTabs.some((tab) => tab.kind === "usage") && (
           <Suspense fallback={null}>
-            <UsageStack tabs={visibleTabs} activeId={effectiveActiveId} />
+            <UsageStack
+              tabs={visibleTabs}
+              activeId={effectiveActiveId}
+              dockIndex={dockIndex}
+            />
           </Suspense>
         )}
         {visibleTabs.some((tab) => tab.kind === "whiteboard") && (
@@ -6998,6 +7053,7 @@ const Workspace = React.memo(function Workspace({
             <WhiteboardStack
               tabs={visibleTabs}
               activeId={effectiveActiveId}
+              dockIndex={dockIndex}
               workspacePath={workspace?.cwd ?? null}
               registerDispose={registerDispose}
               onSavedAs={handleWhiteboardSavedAs}

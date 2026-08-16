@@ -74,6 +74,13 @@ interface Session {
   // taps (the agent-TUI sniffer) and the writer writes/exit waiters.
   webContents: WebContents | null;
   dataChannel: string;
+  // Out-of-band "the next N bytes on dataChannel are HISTORY, not live output"
+  // marker. Replayed bytes (the raw-tail reattach frame, the post-sleep backlog
+  // drain) deliberately travel the live data channel so the renderer's onData
+  // listener applies them in arrival order — but the renderer also runs
+  // heuristics on that stream (the dev-server URL sniffer), and those must not
+  // treat hours-old output as something that just happened. See announceReplay.
+  replayChannel: string;
   exitChannel: string;
   pendingChunks: Buffer[];
   pendingBytes: number;
@@ -262,6 +269,30 @@ function tailSnapshot(s: Session): Buffer | null {
     s.tail.slice(s.tailHead).filter((c): c is Buffer => c !== null),
     s.tailBytes,
   );
+}
+
+// Tell the renderer that the NEXT `byteLength` bytes on this session's data
+// channel are replayed history (a reattach frame or a post-sleep backlog),
+// not output the child just produced. Sent immediately before the replay
+// itself; Electron delivers a single sender's messages to a webContents in
+// send order, so the marker always lands first and the renderer can attribute
+// exactly that many bytes to the replay.
+//
+// Why this exists: the renderer sniffs the byte stream for dev-server URLs and
+// (when the user opted in) auto-opens a preview tab for one. Without the
+// marker, a `Local: http://localhost:3000` line that a dev server printed
+// hours before the laptop slept re-arrives verbatim on wake and reads exactly
+// like a server that just came up — so Studio opens a preview onto a port
+// nothing is listening on any more.
+function announceReplay(s: Session, byteLength: number): void {
+  if (byteLength <= 0) return;
+  if (!s.webContents || s.webContents.isDestroyed()) return;
+  try {
+    s.webContents.send(s.replayChannel, { bytes: byteLength });
+  } catch {
+    /* webContents may die between the guard and the send; the replay below
+       is still correct, it just isn't tagged. */
+  }
 }
 // Per-session cap for bytes held while the renderer is detached (workspace
 // switched away or the host is locked/asleep). 16 MB covers long tool output
@@ -641,6 +672,7 @@ async function spawnWithSessionLock(
       const snapshot = tailSnapshot(existing);
       if (snapshot) {
         try {
+          announceReplay(existing, snapshot.byteLength);
           opts.webContents.send(existing.dataChannel, snapshot);
         } catch {
           /* webContents may have been destroyed before we got here; OK */
@@ -924,6 +956,7 @@ async function doSpawnRemote(
     pty: handle,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
     dataChannel: `pty:data:${opts.id}`,
+    replayChannel: `pty:replay:${opts.id}`,
     exitChannel: `pty:exit:${opts.id}`,
     pendingChunks: [],
     pendingBytes: 0,
@@ -1302,6 +1335,7 @@ function doSpawn(
     pty,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
     dataChannel: `pty:data:${opts.id}`,
+    replayChannel: `pty:replay:${opts.id}`,
     exitChannel: `pty:exit:${opts.id}`,
     pendingChunks: [],
     pendingBytes: 0,
@@ -1647,6 +1681,7 @@ export function resume(id: string): void {
       s.detachedBacklog.length === 1
         ? s.detachedBacklog[0]
         : Buffer.concat(s.detachedBacklog, total);
+    announceReplay(s, merged.byteLength);
     s.webContents.send(
       s.dataChannel,
       new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength),

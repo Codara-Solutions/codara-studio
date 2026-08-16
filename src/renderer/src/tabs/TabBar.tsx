@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
-import { canDockTab } from "./dock";
+import { buildDockIndex, canDockTab } from "./dock";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import AutomationsStripButton from "../components/automations/AutomationsStripButton";
@@ -77,8 +77,10 @@ interface Props {
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
   // "Open in split" from a pill's context menu — the keyboard/menu route to
-  // the same thing dragging a pill into the grid does.
-  onDockTab: (tabId: TabId, hostTabId: TabId) => void;
+  // the same thing dragging a pill into the grid does. The host is resolved
+  // downstream (useTabs.openTabInSplit): the strip knows which tab was picked,
+  // not which grid should take it.
+  onOpenInSplit: (tabId: TabId) => void;
   // Resolved keybinding hints for the "+" picker rows, derived in App from the
   // effective binding table so they reflect the user's actual (possibly
   // rebound) chords and the right platform glyphs. A field is undefined when
@@ -137,7 +139,7 @@ function TabBar({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
-  onDockTab,
+  onOpenInSplit,
   pickerHints,
   closeOnMiddleClick,
   workspaceId,
@@ -809,21 +811,23 @@ function TabBar({
         const menuTab = tabs.find((t) => t.id === tabMenu.id);
         if (!menuTab) return null;
         const path = menuTab.kind === "editor" ? menuTab.path : null;
-        // "Open in split" needs somewhere to dock INTO: the active terminal
-        // tab, else the most recent one.
-        const host =
-          [...tabs].reverse().find((t) => t.kind === "terminal" && t.id === activeId) ??
-          [...tabs].reverse().find((t) => t.kind === "terminal");
-        const canDock = canDockTab(menuTab) && !!host;
+        // No host lookup here: openTabInSplit finds (or mints) the grid. The
+        // only thing the strip still decides is whether the entry is offered
+        // at all — a second chat can't be docked while one already is, and an
+        // item that silently does nothing is worse than no item.
+        const chatDockTaken =
+          menuTab.kind === "chat" &&
+          [...buildDockIndex(tabs).keys()].some(
+            (id) => id !== menuTab.id && tabs.find((t) => t.id === id)?.kind === "chat",
+          );
+        const canDock = canDockTab(menuTab) && !chatDockTaken;
         if (!path && !canDock) return null;
         return (
           <TabContextMenu
             path={path}
             x={tabMenu.x}
             y={tabMenu.y}
-            onOpenInSplit={
-              canDock ? () => onDockTab(menuTab.id, host!.id) : undefined
-            }
+            onOpenInSplit={canDock ? () => onOpenInSplit(menuTab.id) : undefined}
             onDismiss={() => setTabMenu(null)}
           />
         );

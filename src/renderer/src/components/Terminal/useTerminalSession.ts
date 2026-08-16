@@ -35,6 +35,7 @@ import { formatPaneExitLine } from "@shared/pane-format";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
+import { createReplayTracker } from "./replayTracker";
 import {
   registerCwdHandler,
   registerPromptTracker,
@@ -361,7 +362,13 @@ interface Options {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
-  onDetectedLocalUrl?: (url: string) => void;
+  // A dev-server-style local URL appeared on this pane's byte stream.
+  // `meta.replayed` is true when the bytes carrying it were history main
+  // re-sent (post-sleep backlog drain, raw-tail reattach frame) rather than
+  // fresh child output — the difference between "a server just started" and
+  // "a server started before the laptop slept", which callers that act on the
+  // URL (auto-opening a preview tab) must not confuse.
+  onDetectedLocalUrl?: (url: string, meta?: { replayed?: boolean }) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
   // Fires on every PTY data chunk (input or output activity). Used by the
   // orchestration claim logic to decide whether a pane is "doing nothing"
@@ -2358,6 +2365,15 @@ export function useTerminalSession({
         }
       };
 
+      // Replayed history main is about to re-send on the live data channel
+      // (reattach frame, post-sleep backlog). Only the URL sniffer consults
+      // this — replayed bytes must still reach xterm exactly like live ones.
+      const replayTracker = createReplayTracker();
+      const offReplay =
+        window.spark.pty.onReplay?.(sessionId, ({ bytes }) => {
+          replayTracker.announce(bytes);
+        }) ?? (() => undefined);
+
       const offData = window.spark.pty.onData(sessionId, (data) => {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
@@ -2366,6 +2382,12 @@ export function useTerminalSession({
           data instanceof Uint8Array
             ? data
             : new TextEncoder().encode(String(data));
+
+        // Attribute this chunk to the announced replay before anything
+        // downstream reads the flag — including the hidden-pane early returns,
+        // which must still consume the bytes or the replay would leak its
+        // "history" marking onto the live output that follows.
+        const isReplayedChunk = replayTracker.consume(bytes.length);
 
         // Keep the agent lifecycle sniffer running even while the pane is
         // hidden. Some hosts defer hidden xterm writes, so byte-level detection
@@ -2433,7 +2455,12 @@ export function useTerminalSession({
             const url = stripTrailingPunct(matches[matches.length - 1]);
             if (url && url !== detectedRef.current) {
               detectedRef.current = url;
-              onDetectedRef.current(url);
+              // `replayed` tells the owner this URL was scraped out of history
+              // main just re-sent (post-sleep backlog, reattach frame), not out
+              // of something the child printed just now. The URL is still real —
+              // it still earns the click-to-open chip — but it is not evidence
+              // that a server came up, so nothing may auto-open from it.
+              onDetectedRef.current(url, { replayed: isReplayedChunk });
             }
           }
         }
@@ -2611,7 +2638,7 @@ export function useTerminalSession({
           void respawnWithResume();
         }, 400);
       });
-      cleanups.push(offData, offExit);
+      cleanups.push(offData, offReplay, offExit);
 
       const inputDisposable = term.onData((data) => {
         // Read-only / mirror panes must not forward keystrokes — the

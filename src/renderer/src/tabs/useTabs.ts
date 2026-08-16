@@ -43,6 +43,7 @@ import type {
 import { isRunOwnedTab } from "./types";
 import { createManualAgentLaunchWorker } from "./terminalAgentState";
 import { moveTabInList } from "./tabReorder";
+import { resolveBootActiveTabId } from "./bootSelection";
 import { runtimeFromAgentSessionLaunchCommand } from "../workers/launch-commands";
 import {
   DOCKABLE_KINDS,
@@ -52,6 +53,7 @@ import {
   collectTerminalLeaves,
   dockLeaf,
   isDockLeaf,
+  planOpenInSplit,
 } from "./dock";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
@@ -169,17 +171,29 @@ function buildWeightedPaneLine(
   };
 }
 
-function terminalTitleForIndex(index: number): string {
-  return index === 0 ? "terminals" : `terminals ${index + 1}`;
+// A terminal tab holding no shells at all is a SPLIT CONTAINER: the grid
+// exists only to lay two docked surfaces (a chat next to an editor, say) side
+// by side. Calling that "terminals" in the strip would be a lie, so the two
+// families are numbered separately — and a container that later gains a shell
+// keeps whatever unique title it already has rather than churning.
+const TERMINAL_TITLE_BASE = "terminals";
+const SPLIT_TITLE_BASE = "split";
+
+function terminalTitleBaseFor(tab: TerminalTab): string {
+  return collectTerminalLeaves(tab.root).length > 0 ? TERMINAL_TITLE_BASE : SPLIT_TITLE_BASE;
+}
+
+function terminalTitleForIndex(index: number, base = TERMINAL_TITLE_BASE): string {
+  return index === 0 ? base : `${base} ${index + 1}`;
 }
 
 function terminalTitleKey(title: string): string {
   return title.trim().toLowerCase();
 }
 
-function reserveNextTerminalTitle(used: Set<string>): string {
+function reserveNextTerminalTitle(used: Set<string>, base = TERMINAL_TITLE_BASE): string {
   for (let index = 0; ; index += 1) {
-    const title = terminalTitleForIndex(index);
+    const title = terminalTitleForIndex(index, base);
     const key = terminalTitleKey(title);
     if (!used.has(key)) {
       used.add(key);
@@ -199,7 +213,7 @@ function normalizeTerminalTitles(tabs: Tab[]): Tab[] {
       used.add(key);
       return tab;
     }
-    const title = reserveNextTerminalTitle(used);
+    const title = reserveNextTerminalTitle(used, terminalTitleBaseFor(tab));
     changed = true;
     return { ...tab, title };
   });
@@ -233,6 +247,21 @@ function createTerminalTab(cwd?: string, autorun?: string, title = "terminals"):
     title,
     root,
     activePaneId: paneId,
+  };
+}
+
+// A terminal tab that starts with no shell — just a cell holding `partner`.
+// "Open in split" mints one when the two surfaces the user wants side by side
+// are both non-terminal: the split grid lives on terminal tabs, so pairing a
+// chat with an editor needs a grid, but emphatically not a spare shell in it.
+function createSplitContainerTab(partnerTabId: TabId, partnerKind: DockableTabKind): TerminalTab {
+  const cell = dockLeaf(makeId("dock"), partnerTabId, partnerKind);
+  return {
+    id: makeId("term"),
+    kind: "terminal",
+    title: SPLIT_TITLE_BASE,
+    root: cell,
+    activePaneId: cell.paneId,
   };
 }
 
@@ -802,18 +831,10 @@ function initialTabsStateFromPersisted(loaded: PersistedShape): InitialTabsState
   // closedChatRunIds, and an intentionally empty workspace stays empty. Only a
   // genuine FIRST RUN — loadPersisted returned null (nothing persisted, or a
   // stale-version blob) — gets the defaultTabs seed (draft chat + terminal).
-  let activeId =
-    loaded.activeId && loaded.tabs.some((t) => t.id === loaded.activeId)
-      ? loaded.activeId
-      : loaded.tabs[0]?.id ?? null;
-  // Never boot onto a restored preview: its dev server is almost certainly
-  // dead after a restart, and landing there hides the chat composer (the
-  // center routes everything through one active id). Prefer the chat tab so
-  // the app always opens on something the user can act in.
-  const resolved = activeId ? loaded.tabs.find((t) => t.id === activeId) : null;
-  if (resolved?.kind === "preview") {
-    activeId = loaded.tabs.find((t) => t.kind === "chat")?.id ?? activeId;
-  }
+  // Honor the persisted selection when it survived hydration, never land on a
+  // restored preview (dead dev server → blank page hiding the composer). See
+  // resolveBootActiveTabId for why the chat tab can't be the fallback here.
+  const activeId = resolveBootActiveTabId(loaded.tabs, loaded.activeId);
   return {
     tabs: loaded.tabs,
     activeId,
@@ -1046,7 +1067,13 @@ export interface UseTabsApi {
     options?: { focus?: boolean; activate?: boolean },
   ) => TabId;
   detachTerminalPaneToNewTab: (tabId: TabId, paneId: string) => TabId | null;
-  // Give a preview/editor/chat tab a cell inside a terminal tab's split grid.
+  // "Open in split": put a tab beside whatever surface is on screen, whatever
+  // the two of them are. Resolves the host itself (see planOpenInSplit) —
+  // minting a split container, or a shell to pair with, when the workspace has
+  // no grid to dock into. Returns false only when the tab cannot be docked at
+  // all (not dockable, or a second chat while one is already docked).
+  openTabInSplit: (tabId: TabId) => boolean;
+  // Give a dockable tab a cell inside a terminal tab's split grid.
   // Returns false when rejected (not dockable, unknown host, a second chat).
   dockTabInTerminal: (
     tabId: TabId,
@@ -2332,6 +2359,72 @@ export function useTabs(
       return docked;
     },
     [],
+  );
+
+  // The terminal tab the user was in most recently. "Open in split" falls back
+  // to it when there is no partner on screen ("split the tab I right-clicked,
+  // which is also the one I'm looking at"), because "the grid I was just in"
+  // is a far better guess than "the last terminal tab in strip order" — the
+  // rule that used to send a docked tab into whichever grid happened to sit
+  // rightmost, hidden worker grids included.
+  const lastTerminalTabIdRef = useRef<TabId | null>(null);
+  useEffect(() => {
+    const active = tabsRef.current.find((t) => t.id === activeId);
+    if (active?.kind === "terminal" && !isRunOwnedTab(active)) {
+      lastTerminalTabIdRef.current = active.id;
+    }
+  }, [activeId]);
+
+  // "Open in split" — see planOpenInSplit for the rule this implements.
+  const openTabInSplit = useCallback(
+    (tabId: TabId): boolean => {
+      const tabs = tabsRef.current;
+      const plan = planOpenInSplit(
+        tabs,
+        activeIdRef.current,
+        tabId,
+        lastTerminalTabIdRef.current,
+      );
+      if (!plan) return false;
+      if (plan.kind === "dock") return dockTabInTerminal(tabId, plan.hostTabId);
+
+      // Both remaining plans need a host that does not exist yet. Mint it, then
+      // dock into it in the same batch — dockTabInTerminal resolves the host
+      // from the updater's `curr`, so it sees a tab this render has not
+      // committed yet (the "+ → Browser pane" path relies on the same thing).
+      let hostId: TabId;
+      if (plan.kind === "container") {
+        const partner = tabs.find((t) => t.id === plan.partnerTabId);
+        if (!partner || !canDockTab(partner)) return false;
+        const container = createSplitContainerTab(partner.id, partner.kind as DockableTabKind);
+        hostId = container.id;
+        // Placed where the partner sat, so the split appears where the user was
+        // already looking instead of jumping to the end of the strip.
+        setTabs((curr) => {
+          const at = curr.findIndex((t) => t.id === partner.id);
+          const next = [...curr];
+          next.splice(at < 0 ? next.length : at, 0, container);
+          return normalizeTerminalTitles(next);
+        });
+      } else {
+        const shell = createTerminalTab(defaultCwdRef.current);
+        hostId = shell.id;
+        setTabs((curr) => normalizeTerminalTitles([...curr, shell]));
+      }
+      const docked = dockTabInTerminal(tabId, hostId);
+      if (!docked) {
+        // Nothing landed in the host we just minted — drop it rather than leave
+        // an empty container (or an unasked-for shell) behind.
+        setTabs((curr) => {
+          const host = curr.find((t) => t.id === hostId);
+          if (!host || host.kind !== "terminal") return curr;
+          if (collectLeaves(host.root).length > 1) return curr;
+          return curr.filter((t) => t.id !== hostId);
+        });
+      }
+      return docked;
+    },
+    [dockTabInTerminal],
   );
 
   // Return a docked tab to the strip. The content is never destroyed — this is
@@ -3698,6 +3791,7 @@ export function useTabs(
       addBalancedPaneToTab,
       ensureWorkerTerminalTab,
       detachTerminalPaneToNewTab,
+      openTabInSplit,
       dockTabInTerminal,
       undockTab,
       moveTerminalPane,

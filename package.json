@@ -14,6 +14,7 @@
     "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",
     "test:renderer-chunks": "node scripts/test-renderer-chunks.mjs",
     "test:preview-webview": "node scripts/test-browser-pane-webview-liveness.cjs && node scripts/test-preview-navigation.cjs",
+    "test:preview-auto-open": "node scripts/test-preview-auto-open.cjs",
     "start": "electron-vite preview",
     "cora": "node bin/cora.cjs",
     "test:cora-cli": "node scripts/test-cora-cli.cjs",

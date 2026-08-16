@@ -54,6 +54,22 @@ function canConnect(target: LoopbackPreviewTarget): Promise<boolean> {
  * External/file/data URLs pass through; only local development servers are
  * probed, with a short startup grace period.
  */
+/**
+ * Is a local dev server actually listening behind this URL right now?
+ *
+ * Same probe as waitForLoopbackPreviewServer (including its short startup
+ * grace period, so a server that printed its banner milliseconds ago still
+ * passes), exposed for callers that must DECIDE rather than navigate — today
+ * the auto-open-preview path, which would otherwise spawn a tab onto a dead
+ * port whenever replayed terminal history mentions one. Non-loopback URLs are
+ * unprobeable from here and are reported unreachable: this answers "is a local
+ * server up", not "is this URL good".
+ */
+export async function isLoopbackPreviewServerUp(rawUrl: string): Promise<boolean> {
+  if (!loopbackPreviewTarget(rawUrl)) return false;
+  return waitForLoopbackPreviewServer(rawUrl);
+}
+
 export async function waitForLoopbackPreviewServer(rawUrl: string): Promise<boolean> {
   const target = loopbackPreviewTarget(rawUrl);
   if (!target) return true;

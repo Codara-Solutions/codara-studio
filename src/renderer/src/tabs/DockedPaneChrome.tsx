@@ -20,6 +20,10 @@ const KIND_LABEL: Record<DockableTabKind, string> = {
   preview: "Browser",
   editor: "Editor",
   chat: "Chat",
+  diff: "Diff",
+  whiteboard: "Whiteboard",
+  usage: "Usage",
+  automations: "Automations",
 };
 
 function pct(fraction: number): string {
