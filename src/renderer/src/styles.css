@@ -1318,7 +1318,11 @@ a { color: inherit; }
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* `safe` matters once the chat is half a split: plain centering pushes
+     overflow past BOTH edges of a scroll container, so the hero and the first
+     starter were cut off at the top with no way to scroll up to them. Safe
+     centering falls back to flex-start exactly when it no longer fits. */
+  justify-content: safe center;
   gap: 13px;
   padding: 30px 24px;
   text-align: center;
@@ -1344,7 +1348,12 @@ a { color: inherit; }
 .cora-welcome__project {
   display: flex;
   align-items: center;
-  max-width: 520px;
+  /* `100%` is the load-bearing half: .cora-welcome centers its children, so
+     they are sized fit-content and a long cwd pushed this pill past the
+     surface — which is what made the whole welcome scroll sideways (and clip
+     its own text) the moment the chat was docked into a split rather than
+     filling the workbench. */
+  max-width: min(520px, 100%);
   min-width: 0;
   gap: 7px;
   padding: 5px 9px;
@@ -1376,7 +1385,10 @@ a { color: inherit; }
 }
 .cora-welcome__starters {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* auto-fit rather than a fixed pair: the chat is as often half a split as it
+     is a whole tab, and a viewport media query cannot see that. Cards drop to
+     one column when two no longer fit the surface, at any window size. */
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
   gap: 8px;
   width: min(620px, 100%);
   margin-top: 3px;
@@ -1502,8 +1514,11 @@ a { color: inherit; }
   color: var(--ink);
 }
 .cora-welcome__automations-sub {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 10.5px;
+  text-overflow: ellipsis;
 }
 .cora-welcome__automations-action {
   flex: 0 0 auto;
@@ -1521,12 +1536,6 @@ a { color: inherit; }
 .cora-welcome__automations:hover .cora-welcome__automations-arrow {
   color: var(--accent);
   transform: translateX(1px);
-}
-
-@media (max-width: 780px) {
-  .cora-welcome { justify-content: flex-start; padding-top: 24px; }
-  .cora-welcome__starters { grid-template-columns: 1fr; }
-  .cora-welcome__project-path { display: none; }
 }
 
 /* ── Automations ── the live machine ─────────────────────────────────────── */

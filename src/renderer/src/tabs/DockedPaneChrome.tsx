@@ -1,5 +1,5 @@
 import type { DockableTabKind } from "./types";
-import type { FracRect } from "./dockGeometry";
+import { DOCK_CHROME_H, type FracRect } from "./dockGeometry";
 import { CloseIcon, ZoomPaneIcon } from "../components/icons";
 import { PaneDragHandle } from "./TerminalStack";
 
@@ -54,9 +54,11 @@ export default function DockedPaneChrome({
         left: `calc(${pct(rect.left)} + var(--terminal-pane-gap, 3px))`,
         top: `calc(${pct(rect.top)} + var(--terminal-pane-gap, 3px))`,
         width: `calc(${pct(rect.width)} - 2 * var(--terminal-pane-gap, 3px))`,
-        // Only the strip along the cell's top edge is interactive; the rest of
-        // the cell must stay clickable by the content underneath.
-        height: 26,
+        // The strip along the cell's top edge. dockGeometry reserves exactly
+        // this height, so nothing is painted underneath it — but the row stays
+        // pointer-transparent except for its controls, so a click on the band
+        // still reaches the cell (which focuses the pane).
+        height: DOCK_CHROME_H,
         display: "flex",
         alignItems: "center",
         justifyContent: "flex-end",

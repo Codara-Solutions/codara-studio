@@ -116,10 +116,12 @@ test("a browser preview docks beside a terminal without reloading its guest", as
     await expect(page.locator("webview")).toHaveCount(1);
 
     // Geometry: the frame the grid drives (owned by PreviewStack, in a
-    // different subtree) must land exactly on the cell the grid laid out.
-    // This is the assertion that pins dockGeometry's frame math to
-    // paneFrameStyle's. The <webview> itself is deliberately smaller —
-    // BrowserPane puts an address bar above it.
+    // different subtree) must land exactly on the cell the grid laid out,
+    // minus the title strip the cell reserves for its own controls. This is
+    // the assertion that pins dockGeometry's frame math to paneFrameStyle's.
+    // The <webview> itself is deliberately smaller — BrowserPane puts an
+    // address bar above it.
+    const CHROME_H = 26; // DOCK_CHROME_H in src/renderer/src/tabs/dockGeometry.ts
     const frame = page.locator("[data-dock-content-id]");
     await expect
       .poll(
@@ -129,14 +131,23 @@ test("a browser preview docks beside a terminal without reloading its guest", as
           if (!cellBox || !frameBox) return null;
           return (
             Math.abs(cellBox.x - frameBox.x) < 3 &&
-            Math.abs(cellBox.y - frameBox.y) < 3 &&
+            Math.abs(cellBox.y + CHROME_H - frameBox.y) < 3 &&
             Math.abs(cellBox.width - frameBox.width) < 3 &&
-            Math.abs(cellBox.height - frameBox.height) < 3
+            Math.abs(cellBox.height - CHROME_H - frameBox.height) < 3
           );
         },
         { timeout: 10_000 },
       )
       .toBe(true);
+
+    // The content starts BELOW the cell's controls rather than under them.
+    // Overlaid, the two headers drew through each other: the cell's undock /
+    // zoom / close row landed on the top-right controls every dockable surface
+    // already has (an address bar, the chat's ✦ CORA header, a file row).
+    const controls = page.locator('button[title="Undock to tab"]').first();
+    const controlsBox = (await controls.boundingBox())!;
+    const contentBox = (await frame.boundingBox())!;
+    expect(contentBox.y).toBeGreaterThanOrEqual(controlsBox.y + controlsBox.height - 4);
 
     // ...and the guest really is inside that cell.
     const cellBox0 = (await cell.boundingBox())!;
@@ -321,6 +332,38 @@ test("a chat docks into the grid and keeps its surface on screen", async () => {
     const composerBox = (await composer.boundingBox())!;
     expect(composerBox.x).toBeGreaterThanOrEqual(cellBox.x - 2);
     expect(composerBox.x + composerBox.width).toBeLessThanOrEqual(cellBox.x + cellBox.width + 2);
+
+    // ...and it LAYS OUT for the half-width surface it is now in. The welcome
+    // reflowed on the window's width alone, so a docked chat in a wide window
+    // kept a two-column card grid and a full-length cwd: the surface scrolled
+    // sideways and sliced its own text. Nothing inside may overflow the
+    // horizontal axis (deliberate ellipses live on leaf spans, which have no
+    // scrollable box of their own).
+    const overflowing = await page.evaluate(() => {
+      const root = document.querySelector(".cora-welcome") as HTMLElement | null;
+      if (!root) return ["no welcome surface"];
+      const out: string[] = [];
+      const walk = (el: HTMLElement) => {
+        if (el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1 && el.children.length > 0) {
+          out.push(`${el.tagName}.${String(el.className).slice(0, 40)}`);
+        }
+        for (const child of Array.from(el.children)) walk(child as HTMLElement);
+      };
+      walk(root);
+      return out;
+    });
+    expect(overflowing).toEqual([]);
+
+    // Safe centering: the top of the welcome must be reachable, not clipped
+    // above the scroll container's origin.
+    const heroTop = await page.evaluate(() => {
+      const root = document.querySelector(".cora-welcome") as HTMLElement | null;
+      const hero = root?.firstElementChild as HTMLElement | null;
+      if (!root || !hero) return null;
+      return hero.getBoundingClientRect().top - root.getBoundingClientRect().top;
+    });
+    expect(heroTop).not.toBeNull();
+    expect(heroTop!).toBeGreaterThanOrEqual(0);
   } finally {
     await app.close();
   }

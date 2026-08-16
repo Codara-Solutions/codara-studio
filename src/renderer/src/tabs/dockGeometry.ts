@@ -47,6 +47,16 @@ interface ReactSnapshot {
 
 const GAP = "var(--terminal-pane-gap, 3px)";
 
+// Height of the title strip DockedPaneChrome paints along a docked cell's top
+// edge. The content frame starts BELOW it rather than under it: every dockable
+// surface has a header of its own (the chat's ✦ CORA bar, a browser's address
+// bar, an editor's file row), all of them with controls in the top-right —
+// exactly where the cell's own undock/zoom/close buttons sit. Overlaying the
+// two drew the labels through each other and stacked two ✕ buttons on the same
+// pixels. A reserved band is also what makes the cell draggable by its title,
+// the way a docked pane is expected to behave.
+export const DOCK_CHROME_H = 26;
+
 // Content z-index. Sits above `.spark-terminal-tab` (2), which paints an opaque
 // panel background over the whole tab, and below the grid's chrome layer (4),
 // which must stay clickable over a docked webview.
@@ -80,13 +90,15 @@ function pct(fraction: number): string {
 // though the two elements sit in different Stacks. Measured in
 // tests/e2e/dock-panes.spec.ts, which asserts the two boxes to within 3px.
 function frameStyle(rect: FracRect, insetTop: number): Record<string, string> {
+  // The chrome band is reserved for every docked surface; `insetTop` is the
+  // caller's own extra offset on top of it (the chat's backend-terminal layer
+  // starts below the chat panel header).
+  const offset = DOCK_CHROME_H + insetTop;
   return {
     left: `calc(${pct(rect.left)} + ${GAP})`,
-    top: `calc(${pct(rect.top)} + ${GAP}${insetTop > 0 ? ` + ${insetTop}px` : ""})`,
+    top: `calc(${pct(rect.top)} + ${GAP} + ${offset}px)`,
     width: `calc(${pct(rect.width)} - 2 * ${GAP})`,
-    height: `calc(${pct(rect.height)} - 2 * ${GAP}${
-      insetTop > 0 ? ` - ${insetTop}px` : ""
-    })`,
+    height: `calc(${pct(rect.height)} - 2 * ${GAP} - ${offset}px)`,
   };
 }
 
