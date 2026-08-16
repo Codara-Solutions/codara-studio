@@ -71,8 +71,10 @@ interface OAuthAuth {
   }): Promise<OAuthCredential>;
   /** Exchange the refresh token for a fresh credential. Network call; throws on
    * failure. Pi's own runtime calls this under the auth-store lock, and so must
-   * we — see refreshPiSubscriptionCredential. */
-  refresh?(credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredential>;
+   * we — see refreshPiSubscriptionCredential. The signal is deliberately NOT
+   * optional here: Anthropic's module feeds it straight to AbortSignal.any,
+   * which rejects undefined, so the type keeps that mistake from returning. */
+  refresh?(credential: OAuthCredential, signal: AbortSignal): Promise<OAuthCredential>;
 }
 
 interface AuthStorageInstance {
@@ -132,6 +134,9 @@ const PROVIDER_META: Record<
     exportName: "anthropicOAuth",
   },
 };
+
+/** Ceiling for a background token refresh. Pi's own resolver uses 15s. */
+const REFRESH_TIMEOUT_MS = 15_000;
 
 const activeFlows = new Map<string, ActiveFlow>();
 const oauthLoginGate = new PiOAuthLoginGate();
@@ -740,7 +745,12 @@ export async function refreshPiSubscriptionProfileCredential(
       return undefined;
     }
     if (!nonEmptyString(credential.refresh)) return undefined;
-    const next = await oauth.refresh!(credential);
+    // The signal is REQUIRED, not optional. Pi's Anthropic module combines it
+    // with its own deadline through AbortSignal.any([signal, ...]), which
+    // throws ERR_INVALID_ARG_TYPE on undefined before it ever reaches the
+    // network — so omitting it failed every Claude refresh, which then read as
+    // "session expired" and locked the account out of routing entirely.
+    const next = await oauth.refresh!(credential, AbortSignal.timeout(REFRESH_TIMEOUT_MS));
     access = nonEmptyString(next.access) ? next.access : null;
     return next;
   });

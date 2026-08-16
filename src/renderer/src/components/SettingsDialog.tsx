@@ -2394,7 +2394,11 @@ function AccountsSettings() {
             cora: {
               profileId: profile.id,
               connected: profile.connected,
-              expired: profile.expired,
+              // Claude access tokens last about an hour and are renewed
+              // silently from the refresh token, so a lapsed one is the normal
+              // resting state between sessions, not a broken sign-in. Only a
+              // credential with no way back needs the user to reconnect.
+              expired: profile.expired && !profile.canRefresh,
               active: profile.isDefault,
               busy: accountMutationId === profile.id,
               ...(profile.error ? { error: profile.error } : {}),
