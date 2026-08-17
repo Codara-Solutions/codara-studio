@@ -16,7 +16,7 @@ const http = require("node:http");
 
 const SERVER = path.join(__dirname, "..", "resources", "codara-studio-mcp", "server.js");
 
-// A throwaway spark-home with a valid-looking handshake file (unused by
+// A throwaway codara-home with a valid-looking handshake file (unused by
 // tools/list, but keeps the server from complaining if a call slips through).
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "codara-studio-mcp-"));
 fs.writeFileSync(

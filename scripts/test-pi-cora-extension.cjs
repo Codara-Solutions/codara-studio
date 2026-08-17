@@ -46,7 +46,6 @@ const auto = extension.buildCoraPiSystemPrompt("auto");
 const execute = extension.buildCoraPiSystemPrompt("execute");
 const automation = extension.buildCoraPiSystemPrompt("automation");
 const deep = extension.buildCoraPiSystemPrompt("execute", "deep");
-const frontier = extension.buildCoraPiSystemPrompt("execute", "frontier");
 
 assert.match(talk, /This is Talk mode/);
 assert.match(talk, /do not claim that workers were spawned/);
@@ -63,15 +62,13 @@ assert.match(automation, /Do not spawn coding workers/);
 assert.doesNotMatch(automation, /Call codara_complete/);
 assert.match(deep, /Deep execution policy/);
 assert.match(deep, /actively seek a counterexample/);
-assert.match(frontier, /Frontier execution policy/);
-assert.match(frontier, /content-addressed\s+exact-state artifact/);
-assert.match(frontier, /falsify every changed\s+hunk/);
 assert.match(execute, /codara_whiteboard_update/);
 const studioToolNames = new Set(studioBridge.listTools().map((tool) => tool.name));
 assert.equal(studioToolNames.has("codara_whiteboard_get"), true);
 assert.equal(studioToolNames.has("codara_whiteboard_update"), true);
 assert.equal(policies.normalizeCoraExecutionPolicy("deep"), "deep");
-assert.equal(policies.normalizeCoraExecutionPolicy("frontier"), "frontier");
+// Retired frontier policy values migrate to deep on read.
+assert.equal(policies.normalizeCoraExecutionPolicy("frontier"), "deep");
 assert.equal(policies.normalizeCoraExecutionPolicy("invalid"), "fast");
 // The picker is gone: the policy is derived in main from taskComplexity, so
 // the shared module keeps normalization only.
@@ -83,7 +80,7 @@ assert.equal(policies.CORA_EXECUTION_POLICIES, undefined);
 // it must reach every orchestrating mode and must NOT leak into Talk.
 assert.match(auto, /Task complexity contract/);
 assert.match(execute, /Task complexity contract/);
-assert.match(execute, /Set taskComplexity on codara_spawn_workers/);
+assert.match(execute, /Set taskComplexity on the first codara_spawn_workers/);
 assert.match(execute, /do not bid for budget/);
 assert.doesNotMatch(talk, /Task complexity contract/);
 assert.doesNotMatch(automation, /Task complexity contract/);
@@ -439,39 +436,29 @@ const noInput = {};
   // The chat capacity the meter renders.
   const capacity = shared.chatContextCapacityTokens;
   assert.equal(
-    capacity({ contextWindowTokens: 400_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 400_000 }),
     256_000,
     "a gpt-5 Pi chat reads against 256k, not its 400k window",
   );
   assert.equal(
-    capacity({ contextWindowTokens: 1_000_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 1_000_000 }),
     256_000,
     "a 1M-window Pi chat reads against 256k",
   );
   assert.equal(
-    capacity({ contextWindowTokens: 400_000, backend: "codex" }),
-    400_000,
-    "a codex CLI chat keeps its own window: the extension does not run there",
-  );
-  assert.equal(
-    capacity({ contextWindowTokens: 1_000_000, backend: "claude" }),
-    1_000_000,
-    "a claude CLI chat keeps its own window",
-  );
-  assert.equal(
-    capacity({ contextWindowTokens: 1_000_000, backend: "pi", compactAtTokens: 120_000 }),
+    capacity({ contextWindowTokens: 1_000_000, compactAtTokens: 120_000 }),
     120_000,
     "a stamped override drives the meter",
   );
   // A window smaller than the cap can never reach it, so it shows its own
   // (smaller) effective ceiling rather than a 256k promise it cannot keep.
   assert.equal(
-    capacity({ contextWindowTokens: 128_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 128_000 }),
     128_000 - shared.PI_BUILTIN_COMPACT_HEADROOM_TOKENS,
     "a sub-threshold window reports Pi's own earlier trigger",
   );
   assert.equal(
-    capacity({ contextWindowTokens: 8_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 8_000 }),
     8_000,
     "a window below even the headroom never exceeds itself",
   );

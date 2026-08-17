@@ -20,7 +20,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const ENTRY = path.join(ROOT, "src", "main", "hook-installer.ts");
-const SHIPPED_SCRIPT = path.join(ROOT, "resources", "claude-hooks", "spark-hook.py");
+const SHIPPED_SCRIPT = path.join(ROOT, "resources", "claude-hooks", "codara-hook.py");
 const VERBOSE = process.argv.includes("--verbose");
 
 function readIfExists(file) {
@@ -115,13 +115,13 @@ async function buildBundle(appPath, name) {
   return outfile;
 }
 
-// Re-require the bundle so module-level state (the settings path, spark-home's
+// Re-require the bundle so module-level state (the settings path, codara-home's
 // memoised home) is recomputed from the environment we want for this case.
-function loadInstaller({ home = TEMP_HOME, sparkHome = null, bundle = BUNDLE } = {}) {
+function loadInstaller({ home = TEMP_HOME, codaraHome = null, bundle = BUNDLE } = {}) {
   process.env.HOME = home;
   process.env.USERPROFILE = home;
-  if (sparkHome === null) delete process.env.CODARA_HOME_DIR;
-  else process.env.CODARA_HOME_DIR = sparkHome;
+  if (codaraHome === null) delete process.env.CODARA_HOME_DIR;
+  else process.env.CODARA_HOME_DIR = codaraHome;
   // require.cache is keyed by the realpath (os.tmpdir() is a symlink on
   // macOS), so busting it with the raw path silently keeps the old module and
   // its memoised spark home.
@@ -134,14 +134,14 @@ function readSettings(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-// Every spark-hook command in the file, flattened.
+// Every Codara hook command in the file (current or pre-rename name), flattened.
 function sparkCommands(settings) {
   const out = [];
   for (const [event, entries] of Object.entries((settings && settings.hooks) || {})) {
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
       for (const cmd of (entry && entry.hooks) || []) {
-        if (typeof cmd.command === "string" && cmd.command.includes("spark-hook.py")) {
+        if (typeof cmd.command === "string" && /(?:codara|spark)-hook\.py/.test(cmd.command)) {
           out.push({ event, command: cmd.command });
         }
       }
@@ -151,7 +151,7 @@ function sparkCommands(settings) {
 }
 
 function scriptPathOf(command) {
-  const match = command.match(/"([^"]*spark-hook\.py)"/);
+  const match = command.match(/"([^"]*(?:codara|spark)-hook\.py)"/);
   return match ? match[1] : null;
 }
 
@@ -189,7 +189,7 @@ function writeSettings(file, value) {
 
 function fakeAppDir(prefix) {
   const dir = scratch(prefix);
-  const script = path.join(dir, "resources", "claude-hooks", "spark-hook.py");
+  const script = path.join(dir, "resources", "claude-hooks", "codara-hook.py");
   fs.mkdirSync(path.dirname(script), { recursive: true });
   fs.copyFileSync(SHIPPED_SCRIPT, script);
   return { dir, script };
@@ -205,7 +205,7 @@ async function main() {
   // -------------------------------------------------------------------
   {
     const app = fakeAppDir("app");
-    const stableScript = path.join(scratch("codara-home"), "claude-hooks", "spark-hook.py");
+    const stableScript = path.join(scratch("codara-home"), "claude-hooks", "codara-hook.py");
     const settingsPath = path.join(scratch("claude"), ".claude", "settings.json");
 
     await installClaudeHooks({
@@ -305,7 +305,7 @@ async function main() {
   // -------------------------------------------------------------------
   {
     const app = fakeAppDir("app-heal");
-    const stableScript = path.join(scratch("codara-home"), "claude-hooks", "spark-hook.py");
+    const stableScript = path.join(scratch("codara-home"), "claude-hooks", "codara-hook.py");
     const dead = path.join(TMP, "deleted-worktree", "resources", "claude-hooks", "spark-hook.py");
     const settingsPath = writeSettings(
       path.join(scratch("claude"), ".claude", "settings.json"),
@@ -323,6 +323,53 @@ async function main() {
       "an installable boot removes every dead hook entry",
       commands.length === 8 && !commands.some((c) => c.command.includes(dead)),
       `${commands.length} commands, dead present: ${commands.some((c) => c.command.includes(dead))}`,
+    );
+  }
+
+  // -------------------------------------------------------------------
+  // 3b. The rename migration. A machine that installed before the
+  //     spark-hook.py -> codara-hook.py rename has LIVE old-name entries in
+  //     settings and an old-name durable copy on disk. One install must
+  //     replace every entry with the new name and delete the old copy.
+  // -------------------------------------------------------------------
+  {
+    const app = fakeAppDir("app-rename");
+    const home = scratch("codara-home");
+    const stableDir = path.join(home, "claude-hooks");
+    const stableScript = path.join(stableDir, "codara-hook.py");
+    const legacyScript = path.join(stableDir, "spark-hook.py");
+    fs.mkdirSync(stableDir, { recursive: true });
+    fs.copyFileSync(SHIPPED_SCRIPT, legacyScript);
+
+    const migrating = loadInstaller({ home: TEMP_HOME, codaraHome: home });
+    const settingsPath = writeSettings(
+      path.join(scratch("claude"), ".claude", "settings.json"),
+      poisonedSettings(legacyScript),
+    );
+    await migrating.installClaudeHooks({
+      settingsPath,
+      sourceScriptPath: app.script,
+      stableScriptPath: stableScript,
+    });
+
+    const commands = sparkCommands(readSettings(settingsPath));
+    check(
+      "live pre-rename entries are replaced by codara-hook.py entries",
+      commands.length === 8 && commands.every((c) => scriptPathOf(c.command) === stableScript),
+      commands.length ? commands[0].command : "no commands",
+    );
+    check(
+      "no entry still references the pre-rename script name",
+      !commands.some((c) => c.command.includes("spark-hook.py")),
+    );
+    check(
+      "the pre-rename durable copy is deleted after migration",
+      !fs.existsSync(legacyScript),
+    );
+    check(
+      "the renamed durable copy exists and matches the shipped script",
+      fs.existsSync(stableScript) &&
+        fs.readFileSync(stableScript, "utf8") === fs.readFileSync(SHIPPED_SCRIPT, "utf8"),
     );
   }
 
@@ -374,7 +421,7 @@ async function main() {
   // -------------------------------------------------------------------
   {
     const worktree = path.join(DURABLE_ROOT, "fake-worktree");
-    const script = path.join(worktree, "resources", "claude-hooks", "spark-hook.py");
+    const script = path.join(worktree, "resources", "claude-hooks", "codara-hook.py");
     fs.mkdirSync(path.dirname(script), { recursive: true });
     fs.copyFileSync(SHIPPED_SCRIPT, script);
     fs.writeFileSync(
@@ -448,22 +495,22 @@ async function main() {
     check(
       "the durable copy lives under the Codara home",
       (await plain.__test.resolveStableScriptPath()) ===
-        path.join(durableHome, ".Codara", "claude-hooks", "spark-hook.py"),
+        path.join(durableHome, ".Codara", "claude-hooks", "codara-hook.py"),
       String(await plain.__test.resolveStableScriptPath()),
     );
 
     // An isolated e2e / sandbox run overrides the home to a throwaway
     // directory. Copying there and writing THAT path into the user's real
     // settings would recreate the incident, so we fall back to $HOME/.Codara.
-    const overridden = loadInstaller({ home: durableHome, sparkHome: scratch("throwaway-home") });
+    const overridden = loadInstaller({ home: durableHome, codaraHome: scratch("throwaway-home") });
     check(
       "a throwaway home override falls back to the default home",
       (await overridden.__test.resolveStableScriptPath()) ===
-        path.join(durableHome, ".Codara", "claude-hooks", "spark-hook.py"),
+        path.join(durableHome, ".Codara", "claude-hooks", "codara-hook.py"),
       String(await overridden.__test.resolveStableScriptPath()),
     );
 
-    const nowhere = loadInstaller({ home: TEMP_HOME, sparkHome: scratch("throwaway-home") });
+    const nowhere = loadInstaller({ home: TEMP_HOME, codaraHome: scratch("throwaway-home") });
     check(
       "no durable destination yields no path at all",
       (await nowhere.__test.resolveStableScriptPath()) === null,
@@ -475,11 +522,11 @@ async function main() {
   // 7. The incident, reproduced through production path resolution. Only the
   //    settings file is injected: the script source comes from Electron's
   //    reported app root (here, a throwaway worktree) and the destination
-  //    from the real spark-home logic.
+  //    from the real codara-home logic.
   // -------------------------------------------------------------------
   {
     const worktree = scratch("verification-worktree");
-    const script = path.join(worktree, "resources", "claude-hooks", "spark-hook.py");
+    const script = path.join(worktree, "resources", "claude-hooks", "codara-hook.py");
     fs.mkdirSync(path.dirname(script), { recursive: true });
     fs.copyFileSync(SHIPPED_SCRIPT, script);
     fs.writeFileSync(
@@ -539,7 +586,7 @@ async function main() {
   {
     const fresh = loadInstaller();
     const app = fakeAppDir("app-idempotent");
-    const stableScript = path.join(scratch("codara-home"), "claude-hooks", "spark-hook.py");
+    const stableScript = path.join(scratch("codara-home"), "claude-hooks", "codara-hook.py");
     const settingsPath = path.join(scratch("claude"), ".claude", "settings.json");
     const opts = {
       settingsPath,
@@ -729,7 +776,7 @@ async function main() {
       check(
         "a home managed as a git worktree still gets a durable copy",
         (await mod.__test.resolveStableScriptPath()) ===
-          path.join(home, ".Codara", "claude-hooks", "spark-hook.py"),
+          path.join(home, ".Codara", "claude-hooks", "codara-hook.py"),
         String(await mod.__test.resolveStableScriptPath()),
       );
     }
@@ -738,7 +785,7 @@ async function main() {
     // against Claude's cwd, which differs per session, and prune refuses to
     // touch relative paths so it could never be healed.
     {
-      const mod = loadInstaller({ home: path.join(DURABLE_ROOT, "rel-home"), sparkHome: ".codara-dev" });
+      const mod = loadInstaller({ home: path.join(DURABLE_ROOT, "rel-home"), codaraHome: ".codara-dev" });
       const resolved = await mod.__test.resolveStableScriptPath();
       check(
         "a relative home override yields an absolute path",
@@ -808,7 +855,7 @@ async function main() {
     // hooks deleted by the rescue path (WSL, synced dotfiles).
     {
       const windowsish = String.raw`C:\Users\me\.Codara\claude-hooks\spark-hook.py`;
-      const { removed } = await fresh.__test.pruneDeadSparkEntries({
+      const { removed } = await fresh.__test.pruneDeadCodaraEntries({
         PreToolUse: [{ hooks: [{ type: "command", command: `"python" "${windowsish}" PreToolUse` }] }],
       });
       check(
@@ -832,7 +879,7 @@ async function main() {
     // the launcher's isfile() is false, so it must not count as installed.
     {
       const app = fakeAppDir("app-dir-clash");
-      const stableScript = path.join(scratch("codara-home"), "claude-hooks", "spark-hook.py");
+      const stableScript = path.join(scratch("codara-home"), "claude-hooks", "codara-hook.py");
       fs.mkdirSync(stableScript, { recursive: true });
       // Pre-created because refusing to install leaves no file to read.
       const settingsPath = writeSettings(path.join(scratch("claude"), ".claude", "settings.json"), {});
@@ -862,7 +909,7 @@ async function main() {
         fresh.__test.extractHookScriptPath(command) === live,
         String(fresh.__test.extractHookScriptPath(command)),
       );
-      const { removed } = await fresh.__test.pruneDeadSparkEntries({
+      const { removed } = await fresh.__test.pruneDeadCodaraEntries({
         PreToolUse: [{ hooks: [{ type: "command", command }] }],
       });
       check("a live hook with an escaped path is not pruned", removed.length === 0, removed.join(", "));

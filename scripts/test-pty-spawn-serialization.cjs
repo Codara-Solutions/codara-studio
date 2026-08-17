@@ -172,7 +172,7 @@ function stubPlugin() {
     "./env-sanitize": "export function sanitizeNestedAgentEnv() {}",
     "./path-reconstruction": "export function injectEnrichedPath() {}",
     "./hook-rpc": "export function getHookRpcEnvSafe() { return null; }",
-    "./spark-home": "export function sparkHome() { return '/tmp/codara-pty-test'; }",
+    "./codara-home": "export function codaraHome() { return '/tmp/codara-pty-test'; }",
     "./orchestration/native-codex-profile-runtime": `
       export function resolveNewNativeCodexProfile() {
         return Promise.resolve(globalThis.__codaraPtySpawnHarness.resolveProfile());

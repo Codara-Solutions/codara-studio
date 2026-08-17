@@ -181,7 +181,7 @@ async function seedConversation(
         workspaceName,
         cwd,
         title,
-        ...(chatModel ? { chatBackend: "codex", chatModel } : {}),
+        ...(chatModel ? { chatBackend: "pi", chatModel } : {}),
       });
       await spark.orchestration.addRunMessage({
         runId: run.id,

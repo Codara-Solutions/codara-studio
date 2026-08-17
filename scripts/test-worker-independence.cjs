@@ -183,12 +183,13 @@ check("the completion gate is wired, and only after the verifier gate", () => {
   );
 });
 
-check("every complexity tier tells the manager artifacts are deliverables", () => {
-  const protocol = read("src/main/orchestration/manager-protocol.ts");
-  const policy = protocol.match(/WORKER_ARTIFACT_PRESERVATION_POLICY/g) ?? [];
-  // One declaration + one reference per tier (trivial / standard / complex).
-  assert.equal(policy.length, 4, "the preservation policy must reach all three tiers");
-  assert.match(protocol, /handoff\[\]` or `expectedOutputs` are DELIVERABLES/);
+check("the live manager prompt tells the manager artifacts are deliverables", () => {
+  // The policy lives in resources/pi-cora/prompt.ts (the live system prompt)
+  // since the dead structured-decision protocol was deleted.
+  const prompt = read("resources/pi-cora/prompt.ts");
+  assert.match(prompt, /Deliverables are sacred/);
+  assert.match(prompt, /never delete, move, or\s+clean them up/);
+  assert.match(prompt, /the written report IS what the user asked\s+for/);
 });
 
 // ── 2) Enforceable independence ───────────────────────────────────────────

@@ -64,8 +64,8 @@ function msg(id, author, text, createdAt, extra = {}) {
 
 async function main() {
   const backend = await bundle(
-    "spark-agent-backend",
-    path.join(ROOT, "src", "main", "orchestration", "spark-agent-backend.ts"),
+    "agent-backend",
+    path.join(ROOT, "src", "main", "orchestration", "agent-backend.ts"),
   );
   const run = {
     id: "run-1",
@@ -153,18 +153,6 @@ async function main() {
   check("unknown model falls back to 128k", unknown === 128_000, String(unknown));
   check("unknown: 103k/128k triggers", 103_000 / unknown >= RATIO);
 
-  // Finding 1: the trigger's Claude fallback must mirror the composer's 1M
-  // normalization, not the 200k per-model default.
-  const policy = await bundle("chat-policy", path.join(SHARED_DIR, "chat-policy.ts"));
-  const claudeWindow =
-    policy.effectiveChatOneMillionContext("claude") && "claude" === "claude"
-      ? 1_000_000
-      : cw.contextWindowForModel("claude-opus-5").tokens;
-  check("claude effective window is 1M", claudeWindow === 1_000_000, String(claudeWindow));
-  check("claude: 161k/1M does NOT trigger", 161_000 / claudeWindow < RATIO);
-  check("claude: 810k/1M triggers", 810_000 / claudeWindow >= RATIO);
-  check("pi/codex stay non-1M", policy.effectiveChatOneMillionContext("pi") === false && policy.effectiveChatOneMillionContext("codex") === false);
-
   // A Pi chat never reaches its model window: Codara's bundled extension
   // compacts it at ~256k first, so both the trigger and the composer meter
   // measure against that cap. Without this the trigger would wait for 80% of
@@ -180,7 +168,7 @@ async function main() {
     compaction.DEFAULT_PI_COMPACT_AT_TOKENS === 256_000,
     String(compaction.DEFAULT_PI_COMPACT_AT_TOKENS),
   );
-  const piGpt = capacity({ contextWindowTokens: gpt, backend: "pi" });
+  const piGpt = capacity({ contextWindowTokens: gpt });
   check("pi chat on a 400k model reads against 256k", piGpt === 256_000, String(piGpt));
   check("pi: 205k/256k triggers", 205_000 / piGpt >= RATIO);
   check("pi: 200k/256k does not trigger", 200_000 / piGpt < RATIO);
@@ -190,18 +178,9 @@ async function main() {
     "the ratio trigger precedes the extension's compaction",
     RATIO * piGpt < compaction.DEFAULT_PI_COMPACT_AT_TOKENS,
   );
-  // CLI-backed chats keep their own window: the extension does not run there.
-  check(
-    "claude CLI chat keeps its 1M window",
-    capacity({ contextWindowTokens: claudeWindow, backend: "claude" }) === 1_000_000,
-  );
-  check(
-    "codex CLI chat keeps its 400k window",
-    capacity({ contextWindowTokens: gpt, backend: "codex" }) === 400_000,
-  );
   // A model whose window is under the threshold shows its own smaller ceiling
   // rather than a 256k promise the session can never reach.
-  const piSmall = capacity({ contextWindowTokens: unknown, backend: "pi" });
+  const piSmall = capacity({ contextWindowTokens: unknown });
   check(
     "pi chat on a 128k model reports Pi's own earlier trigger",
     piSmall === unknown - compaction.PI_BUILTIN_COMPACT_HEADROOM_TOKENS,

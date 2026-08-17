@@ -19,7 +19,7 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "codara-board-test-"));
 const userData = path.join(home, "userdata");
 fs.mkdirSync(path.join(userData, "pasted-images"), { recursive: true });
 
-// spark-home.ts imports electron for its legacy-userData migration leg, which
+// codara-home.ts imports electron for its legacy-userData migration leg, which
 // this test never reaches, and board-store uses app.getPath("userData") for
 // the pasted-images containment root. Stub the module so the bundle runs under
 // plain node with a real temp userData dir.

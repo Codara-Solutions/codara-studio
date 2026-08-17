@@ -239,8 +239,9 @@ async function main() {
         account?.status === "configured" &&
         account?.isDefault === true &&
         account?.remainingPercent === null &&
+        Array.isArray(account?.windows) &&
         Object.keys(account ?? {}).sort().join(",") ===
-          "id,isDefault,label,provider,remainingPercent,status",
+          "id,isDefault,label,provider,remainingPercent,status,windows",
       serializedAccounts.slice(0, 240),
     );
     check(
@@ -389,6 +390,10 @@ async function main() {
       JSON.stringify(automationResume).slice(0, 240),
     );
 
+    // A turn parked by the retired codex manager backend cannot be replayed
+    // on Pi: normalizeRun migrates the run to Pi and DROPS the foreign
+    // recovery on read, so resume reports no recovery instead of pretending
+    // the parked turn is claimable. The run itself stays paused and unmutated.
     const nativeRunId = "run-resume-native";
     fabricateRun(nativeRunId, parkedManagerTurn(nativeRunId, {
       chatBackend: "codex",
@@ -406,14 +411,13 @@ async function main() {
       fs.readFileSync(path.join(HOME, "runs", nativeRunId, "run.json"), "utf8"),
     );
     check(
-      "chat.resume rejects a Pi profile for a native manager turn before mutation",
+      "chat.resume drops a retired-backend parked turn instead of resuming it",
       nativeResume.result?.runId === nativeRunId &&
-        nativeResume.result?.recoveryId === "recovery-resume-native" &&
-        nativeResume.result?.outcome === "account-incompatible" &&
-        /incompatible/i.test(nativeResume.result?.reason ?? "") &&
+        nativeResume.result?.recoveryId === null &&
+        nativeResume.result?.outcome === "stale" &&
+        /No current parked/i.test(nativeResume.result?.reason ?? "") &&
         nativeOnDisk.status === "paused" &&
-        nativeOnDisk.chatAccountProfileId === undefined &&
-        nativeOnDisk.managerTurnRecovery?.state === "parked",
+        nativeOnDisk.chatAccountProfileId === undefined,
       JSON.stringify(nativeResume).slice(0, 240),
     );
 

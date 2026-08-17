@@ -175,9 +175,13 @@ async function main() {
   );
   const piPromptSrc = fs.readFileSync(PI_PROMPT_TS, "utf8");
   check("pi Cora prompt carries a taskClass contract", piPromptSrc.includes("Worker taskClass contract:"));
+  // The contract rides the shared `orchestrating` assembly that both auto and
+  // execute modes join (talk and automation never touch it).
   check(
     "pi Cora prompt is wired into auto and execute modes",
-    (piPromptSrc.match(/\$\{WORKER_TASK_CLASS_CONTRACT\}/g) || []).length === 2,
+    /const orchestrating = \[[\s\S]*?WORKER_TASK_CLASS_CONTRACT/.test(piPromptSrc) &&
+      piPromptSrc.includes('mode === "auto"') &&
+      /orchestrating\.slice/.test(piPromptSrc),
   );
 
   console.log(`\nAll ${pass} spawn-batch-guard checks passed.`);

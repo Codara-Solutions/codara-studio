@@ -32,7 +32,6 @@ test("autopilot runs from a selected markdown plan", async () => {
         // nothing external spawns and nothing completes until the test
         // writes the report.
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
-        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         // Worker panes must stay open until the test writes their report;
         // shell-integration injection can crash zsh startup in the Playwright
         // env ("Worker pane closed before final report", exit 1 within ~1s).
@@ -563,7 +562,6 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
         SPARK_HOME_DIR: userDataDir,
         SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
-        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });

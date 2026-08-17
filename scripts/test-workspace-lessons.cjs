@@ -33,13 +33,13 @@ function check(name, condition, detail) {
 const harness = {
   name: "workspace-lessons-harness",
   setup(build) {
-    // spark-home pulls in electron; the modules only need a home directory.
-    build.onResolve({ filter: /\/spark-home$/ }, () => ({
-      path: "spark-home-stub",
+    // codara-home pulls in electron; the modules only need a home directory.
+    build.onResolve({ filter: /\/codara-home$/ }, () => ({
+      path: "codara-home-stub",
       namespace: "stub",
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-      contents: `export const sparkHome = () => ${JSON.stringify(TMP_HOME)};`,
+      contents: `export const codaraHome = () => ${JSON.stringify(TMP_HOME)};`,
       loader: "js",
     }));
   },

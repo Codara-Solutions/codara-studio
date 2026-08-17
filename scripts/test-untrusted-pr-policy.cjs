@@ -175,10 +175,10 @@ async function main() {
       /projectPolicyMode: runProjectPolicyMode\(run\)/,
       "Pi workers must inherit the persisted trust mode",
     );
-    assert.match(
-      runStore,
-      /\(untrustedPullRequest \|\|\s*process\.env\.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1"\)/,
-      "the legacy native-worker escape hatch cannot override PR isolation",
+    assert.equal(
+      runStore.includes("SPARK_E2E_LEGACY_WORKER_HARNESS"),
+      false,
+      "the legacy native-worker escape hatch was deleted and must not return",
     );
     assert.match(
       runStore,

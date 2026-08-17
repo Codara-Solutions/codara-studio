@@ -410,29 +410,10 @@ async function main() {
       `untrusted PR launch must include ${flag}`,
     );
   }
-  assert.throws(
-    () =>
-      runtime.buildPiManagerLaunchPlan({
-        runtime: fakeRuntime,
-        provider: "openai-codex",
-        configDir: "/config",
-        sessionDir: "/sessions",
-        sessionId: "session-pr-frontier",
-        runId: "run-pr-frontier",
-        mode: "execute",
-        executionPolicy: "frontier",
-        cwd: "/workspace/pr-frontier",
-        bridgePath: "/bridge/server.js",
-        extensionPaths: ["/extensions/cora.ts"],
-        projectPolicyMode: "untrusted-pull-request",
-      }),
-    /Frontier verification cannot run/,
-  );
-
   const codexPlan = runtime.buildPiManagerLaunchPlan({
     runtime: fakeRuntime,
     provider: "openai-codex",
-    executionPolicy: "frontier",
+    executionPolicy: "deep",
     configDir: "/config",
     sessionDir: "/sessions",
     sessionId: "session-456",
@@ -441,23 +422,28 @@ async function main() {
     cwd: "/workspace",
     bridgePath: "/bridge/server.js",
     extensionPaths: ["/extensions/cora.ts"],
-    frontierManifestPath: "/config/frontier/run-456.json",
-    frontierManifestSha256: "a".repeat(64),
-    frontierAdmissionArtifactPath: "/config/frontier/run-456.admission.json",
-    frontierAdmissionArtifactSha256: "b".repeat(64),
   });
   assert.equal(codexPlan.model, "gpt-5.6-sol");
   assert.equal(codexPlan.env.SPARK_MCP_MODE, "execute");
   assert.equal(codexPlan.env.CODARA_PI_CHAT_MODE, "execute");
-  assert.equal(codexPlan.executionPolicy, "frontier");
-  assert.equal(codexPlan.env.CODARA_PI_EXECUTION_POLICY, "frontier");
-  assert.equal(codexPlan.env.CODARA_PI_FRONTIER_MANIFEST, path.resolve("/config/frontier/run-456.json"));
-  assert.equal(codexPlan.env.CODARA_PI_FRONTIER_MANIFEST_SHA256, "a".repeat(64));
-  assert.equal(codexPlan.env.CODARA_PI_FRONTIER_ADMISSION_ARTIFACT, path.resolve("/config/frontier/run-456.admission.json"));
-  assert.equal(codexPlan.env.CODARA_PI_FRONTIER_ADMISSION_ARTIFACT_SHA256, "b".repeat(64));
-  assert.equal(codexPlan.frontierManifestPath, path.resolve("/config/frontier/run-456.json"));
-  assert.equal(codexPlan.frontierManifestSha256, "a".repeat(64));
-  assert.equal(codexPlan.frontierAdmissionArtifactSha256, "b".repeat(64));
+  assert.equal(codexPlan.executionPolicy, "deep");
+  assert.equal(codexPlan.env.CODARA_PI_EXECUTION_POLICY, "deep");
+  // Retired frontier policy values fall back to fast at the launch boundary.
+  const legacyFrontierPlan = runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "openai-codex",
+    executionPolicy: "frontier",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-457",
+    runId: "run-457",
+    mode: "execute",
+    cwd: "/workspace",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+  });
+  assert.equal(legacyFrontierPlan.executionPolicy, "fast");
+  assert.equal(legacyFrontierPlan.env.CODARA_PI_FRONTIER_MANIFEST, undefined);
   assert.equal(codexPlan.args.includes(runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT), false);
 
   const mcpPlan = runtime.buildPiManagerLaunchPlan({
@@ -507,23 +493,6 @@ async function main() {
     provider: "openai-codex",
     model: "claude-fable-5",
   }), /not compatible/);
-  assert.throws(() => runtime.buildPiManagerLaunchPlan({
-    ...codexPlan,
-    runtime: fakeRuntime,
-    configDir: "/config",
-    sessionDir: "/sessions",
-    runId: "run-incomplete-cache",
-    mode: "execute",
-    cwd: "/workspace",
-    bridgePath: "/bridge/server.js",
-    extensionPaths: ["/extensions/cora.ts"],
-    provider: "openai-codex",
-    frontierManifestPath: "/config/frontier/run-incomplete-cache.json",
-    frontierManifestSha256: "a".repeat(64),
-    frontierAdmissionArtifactPath: "/config/frontier/incomplete.json",
-    frontierAdmissionArtifactSha256: undefined,
-  }), /complete content-addressed pair/);
-
   await withTempDirectory(async (directory) => {
     process.env.CODARA_HOME_DIR = directory;
     const plans = await loadElectronLaunchPlans(directory);
