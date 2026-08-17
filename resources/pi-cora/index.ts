@@ -64,7 +64,7 @@ function activeMode(value = process.env.CODARA_PI_CHAT_MODE ?? process.env.SPARK
 function activeExecutionPolicy(
   value = process.env.CODARA_PI_EXECUTION_POLICY,
 ): CoraPiExecutionPolicy {
-  if (value === "deep" || value === "frontier") return value;
+  if (value === "deep") return value;
   return "fast";
 }
 

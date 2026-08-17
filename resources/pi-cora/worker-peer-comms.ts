@@ -514,9 +514,8 @@ export function registerWorkerPeerComms(pi: ExtensionAPI, ctx: PeerCommsContext)
 
   // Inbox nudge: delivery is poll-based, so a worker that never chooses to
   // read the mailbox never sees peer traffic. Every few tool calls, append a
-  // one-line unread note to the current tool result (same result-append
-  // pattern as frontier-gate's tool_result hook). Mailbox reads reset the
-  // cadence.
+  // one-line unread note to the current tool result (result-append via the
+  // tool_result hook). Mailbox reads reset the cadence.
   let toolResultsSinceInboxRead = 0;
   pi.on("tool_result", async (event) => {
     if (PEER_READ_TOOLS.has(event.toolName)) {
