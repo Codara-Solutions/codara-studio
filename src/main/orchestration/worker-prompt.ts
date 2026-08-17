@@ -258,27 +258,18 @@ export function shouldProvisionWorkerMailbox(
   return managerInboxIsRead(run);
 }
 
-// Mirror of run-store's usePiWorkerHarness gate (kept local to avoid an import
-// cycle; keep the two predicates in sync). Pi-harness workers load
-// resources/pi-cora/worker.ts, which registers the codara-studio bridge tools
-// (preview/terminal/whiteboard-read, plus the automation lifecycle pair for
-// loom workers) in-process, no CLI config file involved. Automation runs use
-// the same harness; only the SPARK_E2E_LEGACY_WORKER_HARNESS escape hatch
-// falls back to the legacy transports.
+// Pi-harness workers load resources/pi-cora/worker.ts, which registers the
+// codara-studio bridge tools (preview/terminal/whiteboard-read, plus the
+// automation lifecycle pair for loom workers) in-process, no CLI config file
+// involved. Automation runs use the same harness.
 function usesPiWorkerHarness(run: RunState, task: WorkerTask): boolean {
-  return (
-    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
-    (task.runtimePreference === "claude" || task.runtimePreference === "codex")
-  );
+  return task.runtimePreference === "claude" || task.runtimePreference === "codex";
 }
 
 // Transport-aware availability of the codara-studio preview/terminal tools.
-// The config-file check only describes CLI transports that resolve MCP servers
-// from user-scope configs; Pi-harness workers register the tools in-process and
-// structured automation workers get the entry at launch, claude via the SDK's
-// mcpServers, codex via a forced config install (structured-worker.ts), so
-// all of them always have the tools. Promising tools a worker
-// does not have, or hiding tools it does, is what makes verifiers hedge.
+// Pi-harness workers register the tools in-process, so they always have
+// them. Promising tools a worker does not have, or hiding tools it does, is
+// what makes verifiers hedge.
 function sparkPreviewToolsAvailable(
   run: RunState,
   task: WorkerTask,
@@ -289,7 +280,7 @@ function sparkPreviewToolsAvailable(
   // Structured automation workers always get the tools regardless of config
   // files: claude via the SDK's injected mcpServers entry, codex because
   // runCodexWorker force-installs the codara-studio entry and launches with
-  // SPARK_MCP_MODE=worker (structured-worker.ts).
+  // SPARK_MCP_MODE=worker.
   if (
     run.executionMode === "direct" &&
     Boolean(run.automationId) &&
@@ -487,12 +478,12 @@ function renderPeerCommsGuidance(
 }
 
 // Mirror of run-store's runHasMcpManager (kept local to avoid an import cycle;
-// see that function's comment for WHY the manager is only reachable in CLI/Pi
-// execute/auto-manager runs). Keep the two predicates in sync.
+// see that function's comment for WHY the manager is only reachable in
+// auto-manager runs). Keep the two predicates in sync.
 function managerInboxIsRead(run: RunState): boolean {
   return (
     run.executionMode !== "direct" &&
-    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
+    run.chatBackend === "pi" &&
     effectiveChatMode(run.chatMode) === "auto"
   );
 }
