@@ -24,7 +24,6 @@ const MIGRATED_ENTRIES = [
   "spark-preferences.json",
   "notifications.json",
   "scheduler.json",
-  "run-queue.json",
   "runs",
   "memory",
   "prompts",
@@ -39,11 +38,11 @@ let homeDirCached: string | null = null;
 // callers that must land on a DURABLE per-user path (the Claude hook script
 // copy, see hook-installer.ts) need somewhere to fall back to when the
 // override points at a throwaway directory.
-export function defaultSparkHome(): string {
+export function defaultCodaraHome(): string {
   return path.join(os.homedir(), DEFAULT_DIR_NAME);
 }
 
-export function sparkHome(): string {
+export function codaraHome(): string {
   if (homeDirCached !== null) return homeDirCached;
   const override =
     process.env.CODARA_HOME_DIR ??
@@ -51,12 +50,12 @@ export function sparkHome(): string {
     process.env.SPARK_USER_DATA_DIR;
   homeDirCached = override && override.trim()
     ? override
-    : defaultSparkHome();
+    : defaultCodaraHome();
   return homeDirCached;
 }
 
-export function ensureSparkHomeSync(): void {
-  const dir = sparkHome();
+export function ensureCodaraHomeSync(): void {
+  const dir = codaraHome();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") {
     // The home contains the loopback bearer token and other per-user state.

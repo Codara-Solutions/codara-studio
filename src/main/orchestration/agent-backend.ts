@@ -1,33 +1,17 @@
 // Cora manager backend abstraction.
 //
-// One TypeScript interface per "manager" the chat composer can target. Every
-// implementation drives an agent CLI, Cora has no hosted-API manager, so a
-// backend is always a local process the user is already licensed for:
-//
-//   - Pi           (src/main/orchestration/pi-backend.ts)
-//       The bundled, subscription-only Cora harness and the default backend
-//       for a new chat.
-//
-//   - Claude Code  (src/main/orchestration/claude-backend.ts)
-//       Runs Anthropic's Claude Agent SDK and turns its partial-message deltas,
-//       tool boundaries, and final result into ChatStreamEvents. Provider
-//       sessions persist and resume by UUID without opening or driving an
-//       interactive TUI.
-//
-//   - Codex        (src/main/orchestration/codex-backend.ts)
-//       Runs `codex app-server` over JSON-RPC stdio. The supported rich-client
-//       protocol supplies token deltas, ordered item/tool lifecycle events,
-//       thread resume, usage, interruption, and turn completion directly.
+// One TypeScript interface per "manager" the chat composer can target. Pi
+// (src/main/orchestration/pi-backend.ts) — the bundled, subscription-only
+// Cora harness — is the only implementation left: the Claude Code and Codex
+// manager backends were retired in 2026-08. The interface survives because
+// run-store's dispatch is written against it, not against pi-backend.
 //
 // The dispatch lives in run-store.ts: when the manager pipeline is about to
 // fire, it picks the backend from `run.chatBackend` (defaulting to Pi
 // for legacy / unset chats) and calls one of the methods below.
 
-import { dirname, isAbsolute, join, relative } from "node:path";
 import type {
   AgentEffortLevel,
-  AppSettings,
-  AgentRuntimeDiagnostic,
   ChatBackendKind,
   ChatMode,
   CoraExecutionPolicy,
@@ -40,11 +24,7 @@ import type {
   SparkManagerDecision,
   SparkManagerWorkerReportContext,
 } from "./manager-protocol";
-import {
-  effectiveChatFastMode,
-  effectiveChatMode,
-  effectiveChatOneMillionContext,
-} from "@shared/chat-policy";
+import { effectiveChatMode } from "@shared/chat-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
 
 /**
@@ -61,41 +41,28 @@ export interface ChatBackendConfig {
   effort: AgentEffortLevel;
   /** Opaque Pi profile pin resolved from the run for this frozen turn. */
   accountProfileId?: string;
-  /** Concrete native Codex CLI profile pin resolved from the run. */
-  nativeCodexProfileId?: string;
-  /** Concrete native Claude CLI profile pin resolved from the run. */
-  nativeClaudeProfileId?: string;
-  /** Per-chat Pi execution depth. Non-Pi backends always resolve to Fast. */
+  /** Per-chat Pi execution depth. */
   executionPolicy: CoraExecutionPolicy;
   /** Provider-side session UUID, when this chat already has one. Empty on
    *  the first call; the backend populates it onto the RunState on first
    *  spawn so subsequent calls can resume. */
   sessionUuid?: string;
   /** Which mode the persisted `sessionUuid` was spawned under. Set in lockstep
-   *  with sessionUuid. Backends compare this to `mode` and force a fresh
-   *  session on mismatch — the persisted UUID's JSONL transcript contains
-   *  assistant replies from the OLD mode's persona, and CC/Codex anchor on
-   *  that when they resume. */
+   *  with sessionUuid. The backend compares this to `mode` and forces a fresh
+   *  session on mismatch — the persisted UUID's transcript contains assistant
+   *  replies from the OLD mode's persona, and the model anchors on that when
+   *  it resumes. */
   sessionMode?: ChatMode;
-  /** Fast-mode toggle. Codex-only; Claude Code ignores it. */
-  fastMode: boolean;
-  /** 1M-context toggle. Claude Code is normalized to true. */
-  oneMillionContext: boolean;
 }
 
 /**
  * Inputs the manager pipeline hands to a backend's `requestManagerDecision`.
- * Mirrors manager-protocol's `buildManagerRequest` inputs so the dispatch is a
- * 1:1 structural translation, not a redesign.
  */
 export interface ManagerRequestInput {
   run: RunState;
   cwd: string;
   mode: ManagerMode;
   workerReports?: SparkManagerWorkerReportContext[];
-  availableRuntimes?: AgentRuntimeDiagnostic[];
-  agentSyncContext?: string;
-  settings: AppSettings;
   /** Ordered immutable user input bundled by run-store before backend startup. */
   prompt: string;
   /** Durable message ownership mirrored onto the SparkCall. */
@@ -296,7 +263,7 @@ export function shouldIncludeCanonicalReplay(
  * The backend contract. Each implementation lives in its own file under
  * src/main/orchestration/ and is registered in `backend-registry.ts`.
  */
-export interface SparkAgentBackend {
+export interface AgentBackend {
   kind: ChatBackendKind;
   /** Display name shown in the composer chip dropdown. */
   displayName: string;
@@ -335,50 +302,29 @@ export interface SparkAgentBackend {
 
 /**
  * Resolve effective backend config for a chat. Pulls values off the RunState
- * with backend-aware fallbacks applied. Run-store calls this once per
- * manager turn so every backend sees a fully-populated config.
+ * with fallbacks applied. Run-store calls this once per manager turn so the
+ * backend sees a fully-populated config.
  *
  * Defaults:
- *   - backend: Pi (the bundled, subscription-only Cora harness)
- *   - model:   backend-specific default (Pi/Codex=GPT-5.6 Sol,
- *              Claude=opus-4-8)
+ *   - backend: Pi (the bundled, subscription-only Cora harness — the only one)
+ *   - model:   GPT-5.6 Sol, the Codex runtime's default
  *   - mode:    auto for every chat except an Automations loom (effectiveChatMode)
- *   - effort:  high for Pi, medium for explicitly selected legacy backends
+ *   - effort:  high
  *
  * This is the single authoritative mode seam: an unset chatMode (explorer "Run
  * plan", `cora start` with no mode) and a legacy talk/plan/execute stamp both
  * dispatch as Auto from here.
  */
-export function resolveChatBackendConfig(
-  run: RunState,
-  openAiFastMode?: boolean,
-): ChatBackendConfig {
-  const backend: ChatBackendKind = run.chatBackend ?? "pi";
-  const mode: ChatMode = effectiveChatMode(run.chatMode);
-  const effort: AgentEffortLevel = run.chatEffort ?? (backend === "pi" ? "high" : "medium");
-  // Pi and Codex both drive the Codex runtime, so they share its default model.
-  const model =
-    run.chatModel?.trim() ||
-    (backend === "claude" ? "claude-opus-5" : DEFAULT_CODEX_CHAT_MODEL);
+export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
   return {
-    backend,
-    model,
-    mode,
-    effort,
+    backend: run.chatBackend ?? "pi",
+    model: run.chatModel?.trim() || DEFAULT_CODEX_CHAT_MODEL,
+    mode: effectiveChatMode(run.chatMode),
+    effort: run.chatEffort ?? "high",
     accountProfileId: run.chatAccountProfileId,
-    nativeCodexProfileId: run.nativeCodexProfileId,
-    nativeClaudeProfileId: run.nativeClaudeProfileId,
     executionPolicy: effectiveRunExecutionPolicy(run),
     sessionUuid: run.chatSessionUuid,
     sessionMode: run.chatSessionMode,
-    // Fast mode is one global setting, not a per-chat one: the composer's
-    // flash button writes it, and the whole chatFastMode write path that the
-    // old per-chat pill used is gone. run.chatFastMode is
-    // deliberately NOT consulted here even as a fallback, so a legacy run.json
-    // that still carries `true` cannot resurrect fast mode from stale data.
-    // Callers that know the setting pass it; anyone else gets off.
-    fastMode: effectiveChatFastMode(backend, openAiFastMode === true),
-    oneMillionContext: effectiveChatOneMillionContext(backend),
   };
 }
 
@@ -484,7 +430,10 @@ export function buildManagerTurnPrompt(
 ): string {
   return appendSubscriptionHeadroom(
     appendCoraMemory(
-      buildManagerTurnInput(run, inputMessages, opts),
+      appendPriorRuns(
+        buildManagerTurnInput(run, inputMessages, opts),
+        opts?.priorRuns,
+      ),
       opts?.coraMemory,
     ),
     opts?.subscriptionHeadroom,
@@ -513,6 +462,15 @@ export interface ManagerTurnPromptOptions {
    */
   coraMemory?: string | null;
   /**
+   * Rendered outcome-conditioned prior-run section (run-memory.ts
+   * formatPriorRunsSection), or null when the workspace has no usable history
+   * or this is not a turn that plans (the caller injects it on the first
+   * manager turn of a run and on canonical replay only). Same contract as
+   * coraMemory: the caller reads the ledger; this module stays a pure prompt
+   * builder.
+   */
+  priorRuns?: string | null;
+  /**
    * Rendered subscription-headroom section (subscription-headroom.ts), or null
    * when no provider reported usable quota data. Same contract as
    * coraMemory: the caller reads it (the usage cache lives Electron-side)
@@ -531,6 +489,18 @@ export interface ManagerTurnPromptOptions {
  * only the first turn carries it), so most turns append nothing. The rendered
  * text carries its own section markers ([END CORA MEMORY ...]).
  */
+/**
+ * Outcome-conditioned prior runs: what similar past runs in this workspace
+ * verified, what failed, and what to avoid repeating. This is the read half of
+ * the self-improvement loop whose write half is run-memory's recordRunMemory
+ * at completion. Rides the dynamic tail for the same cache reasons as the
+ * memory below, and only planning turns carry it.
+ */
+function appendPriorRuns(prompt: string, priorRuns: string | null | undefined): string {
+  if (!priorRuns || !priorRuns.trim()) return prompt;
+  return [prompt, "", priorRuns.trim()].join("\n");
+}
+
 function appendCoraMemory(prompt: string, memory: string | null | undefined): string {
   if (!memory || !memory.trim()) return prompt;
   return [prompt, "", memory.trim()].join("\n");
@@ -671,170 +641,6 @@ export function assembleManagerPrompt(input: {
     dynamic: input.turnPrompt,
     text: `${stablePrefix}\n${MANAGER_PROMPT_DYNAMIC_MARKER}\n${input.turnPrompt}`,
   };
-}
-
-const runManagerGuidance = new Map<string, { key: string; guidance: string }>();
-// Bounded so a long-lived app with many chats cannot hold every prompt file it
-// ever pinned. Eviction is least-recently-USED (each hit reinserts), so the
-// entry that gets dropped belongs to a run that is not taking turns; an evicted
-// run simply re-reads on its next turn, which is the pre-pin behavior.
-const RUN_MANAGER_GUIDANCE_LIMIT = 64;
-
-/**
- * Read a run's manager guidance ONCE per run instead of once per turn.
- *
- * Those bytes are the cacheable prefix of every turn in the run, so re-reading
- * them mid-conversation is the one way this file could split a live prompt
- * cache: a dev editing resources/orchestration/*.md, or an installer swapping
- * the bundle under a running app, would change the prefix between turn N and
- * turn N+1 and throw away every cached token. Pinning per run also drops one
- * disk read per manager turn. A new run reads the file again, so an edit still
- * takes effect without restarting the app.
- *
- * `cacheKey` identifies which guidance was pinned (mode + resolved path), so a
- * mode flip, which already forces a fresh provider session, re-reads.
- */
-export async function loadRunManagerGuidance(
-  runId: string,
-  cacheKey: string,
-  read: () => Promise<string>,
-): Promise<string> {
-  const cached = runManagerGuidance.get(runId);
-  if (cached && cached.key === cacheKey) {
-    runManagerGuidance.delete(runId);
-    runManagerGuidance.set(runId, cached);
-    return cached.guidance;
-  }
-  const guidance = await read();
-  runManagerGuidance.set(runId, { key: cacheKey, guidance });
-  while (runManagerGuidance.size > RUN_MANAGER_GUIDANCE_LIMIT) {
-    const oldest = runManagerGuidance.keys().next();
-    if (oldest.done) break;
-    runManagerGuidance.delete(oldest.value);
-  }
-  return guidance;
-}
-
-/** Drop a run's pinned guidance when its chat session is torn down. */
-export function forgetRunManagerGuidance(runId: string): void {
-  runManagerGuidance.delete(runId);
-}
-
-/** @deprecated Manager turns must use the frozen `ManagerRequestInput.prompt`. */
-export function latestUserPromptFromRun(run: RunState): string {
-  for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
-    const message = run.humanMessages[i];
-    if (message.author !== "user") continue;
-    if (message.kind !== "note" && message.kind !== "answer") continue;
-    if (message.message?.trim()) return message.message;
-  }
-  return "";
-}
-
-// The active plan for a run: the one referenced by planId, else the most recent
-// plan still marked active.
-function activePlanForRun(run: RunState) {
-  const byId = run.planId ? run.plans.find((plan) => plan.id === run.planId) : undefined;
-  if (byId) return byId;
-  for (let i = run.plans.length - 1; i >= 0; i -= 1) {
-    if (run.plans[i].status === "active") return run.plans[i];
-  }
-  return undefined;
-}
-
-// The latest Codara-authored "Run complete." completion summary (the worker-
-// authored DONE card), which already lives on the run as a spark/decision.
-function latestCompletionSummary(run: RunState): HumanRunMessage | undefined {
-  for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
-    const message = run.humanMessages[i];
-    if (
-      message.author === "spark" &&
-      message.kind === "decision" &&
-      message.message.trim().startsWith("Run complete.")
-    ) {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-/**
- * True when this run ran a Plan-mode Best-of-N council. That work (the candidate
- * planners + the synthesis judge) happens in their own worker terminals, OUTSIDE
- * the chat CLI session — so when the user later flips the SAME chat to Talk or
- * Execute, that session never "saw" it and can't remember what was planned. This
- * is the one case that warrants injecting run context; a normal Execute chat
- * spawned its own workers and already has them in its transcript.
- */
-export function runDidPlanCouncil(run: RunState): boolean {
-  return run.workerTasks.some((task) => task.councilRole !== undefined);
-}
-
-// Turn an absolute file path into a CLI `@`-mention relative to cwd when the
-// file lives under cwd (forward slashes for the agent's path parser); otherwise
-// fall back to an `@`-mention of the absolute path. Lets the agent pull the file
-// in on demand instead of us pasting its whole contents.
-function fileMention(cwd: string | undefined, absPath: string): string {
-  if (cwd) {
-    const rel = relative(cwd, absPath);
-    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
-      return `@${rel.replace(/\\/g, "/")}`;
-    }
-  }
-  return `@${absPath.replace(/\\/g, "/")}`;
-}
-
-/**
- * A compact, read-only snapshot of what a Plan-council run produced, for
- * injection ahead of the user's prompt into a CLI chat session — ONCE, the first
- * time the chat leaves Plan mode (see the backends' contextInjectedRuns guard).
- *
- * The chat session only ever sees its own transcript; the council's workers and
- * the synthesized plan live outside it. Without this, Talk "what did we just
- * do?" guesses and Execute "run the plan" doesn't know the plan exists. We
- * surface: completed steps, the latest Codara completion summary (the worker-
- * authored DONE card), and the plan/PRD as `@`-mentions — NOT their full text,
- * so the paste stays small and the agent reads the files on demand.
- *
- * Returns "" when there's nothing useful to add.
- */
-export function buildSparkRunContextBlock(run: RunState, cwd?: string): string {
-  const sections: string[] = [];
-
-  const doneSteps = run.steps.filter(
-    (step) => step.status === "complete" || step.status === "completed_unverified",
-  );
-  if (doneSteps.length > 0) {
-    const titles = doneSteps.slice(-6).map((step) => `- ${step.title}`);
-    sections.push(`Completed steps:\n${titles.join("\n")}`);
-  }
-
-  const summary = latestCompletionSummary(run);
-  if (summary) {
-    sections.push(`Latest run summary (Codara's record of what the workers did):\n${summary.message.trim()}`);
-  }
-
-  const plan = activePlanForRun(run);
-  if (plan?.sourceFile) {
-    const planMention = fileMention(cwd, plan.sourceFile);
-    const prdMention = fileMention(cwd, join(dirname(plan.sourceFile), "PRD.md"));
-    sections.push(
-      `Active plan${plan.title ? ` — ${plan.title}` : ""}: ${planMention}\n` +
-        `Product requirements: ${prdMention}\n` +
-        `(These files hold the full plan — read them rather than asking me to repeat their contents. ` +
-        `When the user says "run the plan", this is the plan to execute.)`,
-    );
-  }
-
-  if (sections.length === 0) return "";
-
-  return [
-    "[SPARK CONTEXT — Codara's record of this run's worker activity and plan, for your awareness. This is NOT a new instruction from the user; use it to answer accurately and to know what has already been done.]",
-    "",
-    sections.join("\n\n"),
-    "",
-    "[END SPARK CONTEXT]",
-  ].join("\n");
 }
 
 /** Re-exported for callers that want to type their HumanRunMessage walks. */

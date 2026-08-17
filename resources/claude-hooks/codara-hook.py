@@ -5,21 +5,24 @@ Claude Code invokes this script for each configured hook event (SessionStart,
 PreToolUse, PostToolUse, UserPromptSubmit, Stop, Notification, PreCompact, ...).
 The CLI pipes a single line of JSON to stdin describing the event; we read
 that, wrap it with the hook name (passed as argv[1]), an ISO-8601 timestamp,
-and the Spark pane id (from $SPARK_PANE_ID), then write the wrapper as one
-JSON object to <spark-home>/hooks/<uuid>.json so the Spark main process can
-pick it up via fs.watch.
+and the Codara pane id (from $SPARK_PANE_ID, the pty env contract shared with
+hook-rpc.ts), then write the wrapper as one JSON object to
+<codara-home>/hooks/<uuid>.json so the Codara main process can pick it up via
+fs.watch (hook-watcher.ts).
 
 Design constraints:
-- Python 3.6+ only, no third-party deps (Claude users may not have pip
-  packages installed).
+- Python 3.8+ only (from __future__ import annotations), no third-party deps
+  (Claude users may not have pip packages installed).
 - Robust to malformed input: if stdin can't be parsed as JSON we still write
-  the wrapper (with payload=null and a parse_error field) so Spark sees the
-  event landed. We NEVER fail the hook — Claude would surface that as a red
-  banner to the user.
+  the wrapper (with payload=null and a parse_error field) so Codara sees the
+  event landed. We NEVER fail the hook — a non-zero exit from a PreToolUse
+  hook is Claude's "deny this tool call" signal, so failure here would block
+  the user's session.
 - Atomic-ish writes: write to a tmp sibling then rename so the watcher never
   sees a half-written file.
-- Resolve SPARK_HOME_DIR / SPARK_USER_DATA_DIR override variables exactly
-  like src/main/spark-home.ts does; otherwise fall back to ~/.SparkAgent.
+- Resolve CODARA_HOME_DIR / SPARK_HOME_DIR / SPARK_USER_DATA_DIR override
+  variables exactly like src/main/spark-home.ts does; otherwise fall back
+  through the legacy home directory names.
 """
 from __future__ import annotations
 
@@ -30,7 +33,7 @@ import uuid
 from datetime import datetime, timezone
 
 
-def _spark_home() -> str:
+def _codara_home() -> str:
     """Mirror the resolution logic in src/main/spark-home.ts."""
     override = os.environ.get("CODARA_HOME_DIR") or os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
     if override and override.strip():
@@ -43,14 +46,17 @@ def _spark_home() -> str:
 
 
 def _hooks_dir() -> str:
-    return os.path.join(_spark_home(), "hooks")
+    return os.path.join(_codara_home(), "hooks")
 
 
 def _iso_now() -> str:
     # ISO 8601 with timezone; matches the new Date().toISOString() format used
-    # everywhere else in Spark so the events sort cleanly with other logs.
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
-        f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
+    # everywhere else in Codara so the events sort cleanly with other logs.
+    # One clock read: deriving seconds and milliseconds from two separate
+    # now() calls could pair second N with the milliseconds of second N+1
+    # whenever the calls straddle a rollover.
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 def _hook_name() -> str:
@@ -111,7 +117,7 @@ def _atomic_write(target: str, data: str) -> None:
 # (`tool_response`) and entire prompts in UserPromptSubmit — a single big file
 # read produces a 600KB+ hook file that the watcher must read only to discard
 # (its hard cap is 256 KiB), and even sub-cap blobs bloat every run's event
-# log. Spark only ever consumes small fields (session ids, tool names, short
+# log. Codara only ever consumes small fields (session ids, tool names, short
 # previews), so we clamp at the source: long strings get truncated in place,
 # and if the payload is still over budget the bulkiest top-level fields are
 # replaced with a preview stub. `payloadTrimmed` tells the inspector.
@@ -149,14 +155,19 @@ def _trim_payload(payload):
         return None, False
     clamped, trimmed = _clamp_strings(payload, _STRING_CAP)
     try:
-        if len(json.dumps(clamped, ensure_ascii=False)) <= _PAYLOAD_BUDGET:
-            return clamped, trimmed
+        total = len(json.dumps(clamped, ensure_ascii=False))
     except Exception:
         return None, True
+    if total <= _PAYLOAD_BUDGET:
+        return clamped, trimmed
     if not isinstance(clamped, dict):
         preview = json.dumps(clamped, ensure_ascii=False)[:_FIELD_PREVIEW]
         return {"trimmed": True, "preview": preview}, True
-    # Replace the bulkiest fields with preview stubs until we fit.
+    # Replace the bulkiest fields with preview stubs until we fit. Track the
+    # running total decrementally rather than re-serializing the whole payload
+    # per replaced field: the stub is strictly smaller than what it replaces,
+    # so the estimate only ever overstates the final size and the loop can
+    # never stop early on an undersized guess.
     sized = []
     for key, item in clamped.items():
         try:
@@ -166,10 +177,12 @@ def _trim_payload(payload):
     sized.sort(reverse=True)
     out = dict(clamped)
     for size, key in sized:
-        if len(json.dumps(out, ensure_ascii=False)) <= _PAYLOAD_BUDGET:
+        if total <= _PAYLOAD_BUDGET:
             break
-        preview = json.dumps(out[key], ensure_ascii=False)[:_FIELD_PREVIEW]
-        out[key] = {"trimmed": True, "originalBytes": size, "preview": preview}
+        stub = {"trimmed": True, "originalBytes": size,
+                "preview": json.dumps(out[key], ensure_ascii=False)[:_FIELD_PREVIEW]}
+        out[key] = stub
+        total += len(json.dumps(stub, ensure_ascii=False)) - size
     return out, True
 
 
@@ -198,7 +211,7 @@ def main() -> int:
         # Last resort: print to stderr so Claude's hook debug surface shows
         # something. Never fail the hook (exit 0) — a non-zero exit can block
         # the agent.
-        sys.stderr.write(f"spark-hook: write failed: {err.__class__.__name__}: {err}\n")
+        sys.stderr.write(f"codara-hook: write failed: {err.__class__.__name__}: {err}\n")
 
     return 0
 
