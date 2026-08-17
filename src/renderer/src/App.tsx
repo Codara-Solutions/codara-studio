@@ -75,6 +75,8 @@ import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
+import { emitLocalToast } from "./notifications/local-toast";
+import { resolveAgentChordTarget } from "./tabs/agentChordTarget";
 import type { ActiveNotificationView } from "./notifications/viewed";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
@@ -4617,6 +4619,74 @@ export default function App() {
         if (!active || active.kind !== "terminal") return;
         tabs.toggleTerminalPaneZoom(active.id, active.activePaneId);
       },
+      // Model / effort chords. A chat routes to the composer's own pill
+      // handlers (identical to clicking them); a live CLI pane gets `/model`
+      // typed at its REPL, which opens Claude Code's / Codex's own picker.
+      "agent.cycleModel": () => {
+        const target = resolveAgentChordTarget(visibleWorkbenchTabs, activeVisibleTabId);
+        if (target.kind === "chat") {
+          window.dispatchEvent(new CustomEvent("spark:cycle-model"));
+          return;
+        }
+        if (target.kind === "terminal") {
+          // Bracketed paste + submit, the same path autorun uses, so the CLI
+          // receives it exactly as if the user had typed it.
+          void window.spark.pty.inject(target.paneId, "/model", { submit: true });
+          return;
+        }
+        emitLocalToast(
+          "Nothing to switch models on",
+          "Open a Cora chat, or focus a terminal pane running Claude or Codex.",
+          "warning",
+        );
+      },
+      "agent.cycleEffort": () => {
+        const target = resolveAgentChordTarget(visibleWorkbenchTabs, activeVisibleTabId);
+        if (target.kind === "chat") {
+          window.dispatchEvent(new CustomEvent("spark:cycle-effort"));
+          return;
+        }
+        if (target.kind === "terminal") {
+          // Claude Code has a real mid-session command for this: `/effort`
+          // ("Set effort level for model usage"), which with no argument opens
+          // its own picker. `--effort` is ALSO a spawn-time flag — that is what
+          // the chat backend respawns for — but a live pane needs no respawn,
+          // it just needs the command typed at it, exactly like `/model`.
+          //
+          // Codex has no effort command of its own; its TUI changes reasoning
+          // depth inside the model picker, so send that and say why, rather
+          // than silently opening a menu the user didn't ask for.
+          if (target.runtime === "codex") {
+            void window.spark.pty.inject(target.paneId, "/model", { submit: true });
+            emitLocalToast(
+              "Opened Codex's model picker",
+              "Codex sets reasoning effort there rather than in a command of its own.",
+            );
+            return;
+          }
+          void window.spark.pty.inject(target.paneId, "/effort", { submit: true });
+          return;
+        }
+        emitLocalToast(
+          "Nothing to set the effort on",
+          "Open a Cora chat, or focus a terminal pane running Claude or Codex.",
+          "warning",
+        );
+      },
+      // Both pickers are chat-only: a terminal's equivalent is the CLI's own
+      // `/model` TUI, which agent.cycleModel already opens.
+      "agent.openModelPicker": () => {
+        tabs.openChatTab({ runId: activeRunIdRef.current, focus: true });
+        window.requestAnimationFrame(() => {
+          window.dispatchEvent(new CustomEvent("spark:open-model-picker"));
+        });
+      },
+      "agent.openEffortPicker": () => {
+        tabs.openChatTab({ runId: activeRunIdRef.current, focus: true });
+        window.requestAnimationFrame(() => {
+          window.dispatchEvent(new CustomEvent("spark:open-thinking-picker"));
+        });
+      },
       "markdown.togglePreview": () => {
         // Filter at dispatch time so the chord stays a no-op on terminal,
         // chat, and non-MD editor tabs. EditorPane re-checks `active` so the
@@ -4662,6 +4732,18 @@ export default function App() {
       if (
         (id === "terminal.splitRight" || id === "terminal.splitDown") &&
         visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId)?.kind !== "terminal"
+      ) {
+        return true;
+      }
+      // Ctrl+M is ASCII CR and Ctrl+N is readline's next-history, so these
+      // chords must not be swallowed over a PLAIN shell. Inside a pane whose
+      // CLI agent is live they are captured on purpose — that is the whole
+      // point of the binding — and they act on chat tabs everywhere else.
+      if (
+        (id === "agent.cycleModel" || id === "agent.cycleEffort") &&
+        resolveAgentChordTarget(visibleWorkbenchTabs, activeVisibleTabId).kind === "none" &&
+        event.target instanceof Element &&
+        event.target.closest(".xterm") !== null
       ) {
         return true;
       }

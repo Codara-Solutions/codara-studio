@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { NotifyEvent, ResolvedRunQuestion } from "@shared/types";
+import type {
+  InAppNotificationTone,
+  NotifyEvent,
+  ResolvedRunQuestion,
+} from "@shared/types";
 import { accentVar, kindMeta, type NotifyGlyph } from "../notifications/kinds";
 import type { NavigateTo } from "../notifications/routing";
 import {
@@ -32,6 +36,17 @@ const AUTO_DISMISS_MS = 3_000;
 const MAX_VISIBLE = 5;
 
 type Toast = NotifyEvent;
+
+// Renderer-local toasts (see the `spark:local-toast` listener below) are
+// tagged by their sourceKey. They never came from the notify pipeline, so
+// they have no center entry to acknowledge and no target to navigate to.
+const LOCAL_SOURCE_PREFIX = "local:";
+
+function isLocalToast(toast: Toast): boolean {
+  return toast.sourceKey.startsWith(LOCAL_SOURCE_PREFIX);
+}
+
+let localToastSeq = 0;
 
 export interface ToastHostProps {
   // Routes a clicked card to its target (run chat / terminal pane / loom).
@@ -104,9 +119,62 @@ export default function ToastHost({
     return () => off();
   }, [acknowledge]);
 
+  // Renderer-local feedback (keyboard shortcuts confirming a model / effort
+  // change, or explaining why a chord can't act here). Deliberately NOT routed
+  // through the main-process notify pipeline: that path suppresses anything
+  // whose target is already on screen, which is precisely the case every time
+  // the user presses one of these chords. There is no center entry behind a
+  // local toast — it is transient, non-clickable, and auto-dismisses on the
+  // shared timer like every other card.
   useEffect(() => {
-    const matchingVisible = toastsRef.current.filter((toast) =>
-      isNotificationTargetViewed(toast.target, activeView),
+    const handler = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          title?: unknown;
+          body?: unknown;
+          tone?: unknown;
+        }>
+      ).detail;
+      const title = typeof detail?.title === "string" ? detail.title : "";
+      if (!title) return;
+      const tone: InAppNotificationTone =
+        detail?.tone === "warning" || detail?.tone === "danger"
+          ? detail.tone
+          : "success";
+      localToastSeq += 1;
+      const id = `${LOCAL_SOURCE_PREFIX}${localToastSeq}`;
+      setToasts((current) => {
+        const next = [
+          ...current,
+          {
+            id,
+            // Only the glyph is read off `kind` (a neutral bell here); the
+            // title/body below are always supplied, so the kind's own label
+            // never surfaces.
+            kind: "app.update-ready",
+            sourceKey: id,
+            title,
+            body: typeof detail?.body === "string" ? detail.body : "",
+            tone,
+            // Unused for local toasts — nothing in this component plays audio;
+            // the sound policy lives on the notify pipeline these bypass.
+            soundKind: "done",
+            // Never matches a real run, so the viewed-suppression sweep below
+            // leaves local toasts alone.
+            target: { type: "run", runId: id },
+            createdAt: new Date().toISOString(),
+          } satisfies Toast,
+        ];
+        return next.length > MAX_VISIBLE ? next.slice(next.length - MAX_VISIBLE) : next;
+      });
+    };
+    window.addEventListener("spark:local-toast", handler);
+    return () => window.removeEventListener("spark:local-toast", handler);
+  }, []);
+
+  useEffect(() => {
+    const matchingVisible = toastsRef.current.filter(
+      (toast) => !isLocalToast(toast) && isNotificationTargetViewed(toast.target, activeView),
     );
     if (matchingVisible.length > 0) {
       const matchingIds = new Set(matchingVisible.map((toast) => toast.id));
@@ -273,7 +341,9 @@ function ToastCard({
     title: toast.title || `Cora — ${meta.label.toLowerCase()}`,
   };
 
-  const clickable = Boolean(navigateTo);
+  // A local toast has no real navigation target (and no center entry), so it
+  // renders as a plain, non-interactive card.
+  const clickable = Boolean(navigateTo) && !isLocalToast(toast);
 
   return (
     <div

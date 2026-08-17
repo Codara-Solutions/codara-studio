@@ -45,9 +45,20 @@ export type CommandId =
   | "worker.newCodex"
   | "worker.claudeSessions"
   | "worker.codexSessions"
+  | "agent.cycleModel"
+  | "agent.cycleEffort"
+  | "agent.openModelPicker"
+  | "agent.openEffortPicker"
   | "markdown.togglePreview";
 
-export type CommandGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal" | "Workers";
+export type CommandGroup =
+  | "General"
+  | "Navigation"
+  | "View"
+  | "Tabs"
+  | "Terminal"
+  | "Workers"
+  | "Agent";
 
 export type Command = {
   id: CommandId;
@@ -72,6 +83,7 @@ export const COMMAND_GROUPS: CommandGroup[] = [
   "Tabs",
   "Terminal",
   "Workers",
+  "Agent",
 ];
 
 export const COMMANDS: Command[] = [
@@ -253,8 +265,10 @@ export const COMMANDS: Command[] = [
     id: "chat.new",
     label: "New chat",
     group: "Tabs",
-    // Mod+N opens a fresh chat tab (the top "+" picker advertises ⌘N).
-    defaultChords: [mod("n")],
+    // Mod+Alt+N opens a fresh chat tab. It vacated the bare Mod+N so the
+    // agent.cycleEffort chord could take it; the "+" picker's hint is derived
+    // from the live binding table, so it follows this default automatically.
+    defaultChords: [mod("n", { alt: true })],
   },
   {
     id: "tab.newTerminal",
@@ -346,6 +360,42 @@ export const COMMANDS: Command[] = [
     label: "Open Codex worker sessions…",
     group: "Workers",
     defaultChords: [],
+  },
+  // Model / reasoning-effort chords. They act on whatever the active tab is:
+  // a Cora chat gets the same treatment as clicking its composer pills, while
+  // a terminal pane hosting a live Claude/Codex CLI gets the matching slash
+  // command typed into its REPL, opening the CLI's own picker — `/model`, and
+  // `/effort` for Claude Code (Codex has no effort command; its model picker
+  // carries reasoning depth, so the effort chord opens that and says so).
+  {
+    id: "agent.cycleModel",
+    label: "Cycle model",
+    group: "Agent",
+    // Mod+M — no other default in this table uses "m". Known macOS caveat:
+    // Electron's stock application menu binds Cmd+M to Minimize (the app never
+    // installs its own menu template), so on macOS this may need rebinding.
+    defaultChords: [mod("m")],
+  },
+  {
+    id: "agent.cycleEffort",
+    label: "Cycle thinking effort",
+    group: "Agent",
+    // Mod+N, taken over from chat.new (now Mod+Alt+N).
+    defaultChords: [mod("n")],
+  },
+  {
+    id: "agent.openModelPicker",
+    label: "Open model picker",
+    group: "Agent",
+    // Mod+Shift+M — opens the composer's model dropdown for arrow-key picking
+    // rather than cycling blind.
+    defaultChords: [mod("m", { shift: true })],
+  },
+  {
+    id: "agent.openEffortPicker",
+    label: "Open thinking effort picker",
+    group: "Agent",
+    defaultChords: [mod("n", { shift: true })],
   },
   {
     // Mirrors VS Code's "Markdown: Open Preview" (Cmd/Ctrl+Shift+V). Only the

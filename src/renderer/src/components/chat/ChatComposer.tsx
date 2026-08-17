@@ -5,6 +5,7 @@ import type {
   ChatBackendKind,
   ChatMode,
   FsEntry,
+  PiCatalogModel,
   RunState,
   SparkEvent,
   UpdateChatBackendInput,
@@ -34,12 +35,15 @@ import {
   DEFAULT_CHAT_EFFORT,
   DEFAULT_CHAT_MODE,
   DEFAULT_CHAT_MODEL,
+  EFFORT_LABELS,
   buildVisibleGroups,
+  composeModelId,
   defaultChatModel,
   clampEffort,
   decomposeModelId,
   effortsFor,
   findOptionInCatalog,
+  nextEffort as nextEffortInLadder,
   type ChatModelOption,
 } from "./composer/types";
 import {
@@ -47,6 +51,7 @@ import {
   chatBackendMutationScope,
   chatBackendMutationScopeMatchesRun,
 } from "./chat-backend-mutation-barrier";
+import { emitLocalToast } from "../../notifications/local-toast";
 
 // Per-chat selector bag forwarded from the draft composer chip into the
 // new-chat creation call so the chip's choice survives draft→live. Once a run
@@ -208,6 +213,11 @@ export default function ChatComposer({
   // Anchor for the portalled @-mention panel (see AnchoredMenu).
   const composerShellRef = useRef<HTMLDivElement>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  // Keyboard "open this dropdown" signals for the two selector pills. A
+  // counter, not a boolean: pressing the chord again while the menu is already
+  // open must still register.
+  const [modelPickerSignal, setModelPickerSignal] = useState(0);
+  const [thinkingPickerSignal, setThinkingPickerSignal] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pastingImages, setPastingImages] = useState(false);
@@ -227,6 +237,24 @@ export default function ChatComposer({
   // model so the bar doesn't open on a model the user can't see in the
   // dropdown (e.g. a CLI default when that runtime isn't installed).
   const draftDefaultsResolved = useRef(Boolean(restoredDraft || run));
+  // Set once the user has deliberately picked a model or effort, so the
+  // in-flight default resolution above can't land afterwards and undo it.
+  const selectorsChosenRef = useRef(false);
+  // Latest Pi catalog snapshot, for the model-cycling chord. Held as a ref and
+  // refreshed in the background: the chord must resolve the next model
+  // synchronously, and this IPC can sit pending when Pi is unreachable.
+  const piCatalogRef = useRef<PiCatalogModel[]>([]);
+  const refreshPiCatalog = useCallback(async (): Promise<void> => {
+    try {
+      const models = await window.spark.piSubscriptions.catalog();
+      if (Array.isArray(models)) piCatalogRef.current = models;
+    } catch {
+      /* keep the last snapshot; the curated rows always remain available */
+    }
+  }, []);
+  useEffect(() => {
+    void refreshPiCatalog();
+  }, [refreshPiCatalog]);
   const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(
     run?.chat1mContext ?? restoredDraft?.oneMillionContext ?? false,
   );
@@ -346,6 +374,11 @@ export default function ChatComposer({
       .then((diagnostics) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
+        // A pick that landed while this was in flight outranks the default.
+        // The chords make that ordinary: opening a chat and immediately
+        // pressing Ctrl+M used to look like a dead key, because this late
+        // resolution overwrote the choice a moment after it was made.
+        if (selectorsChosenRef.current) return;
         const groups = buildVisibleGroups({});
         // Not groups[0].models[0]: that would open a new chat on the premium
         // tier whenever premium happens to lead the first group.
@@ -951,6 +984,10 @@ export default function ChatComposer({
     chat1mContext?: boolean;
   }) => {
     setError(null);
+    // Every caller is a deliberate user action (a pill click or one of the
+    // agent.* chords), so from here on the draft-default resolver must not
+    // overwrite the selection.
+    selectorsChosenRef.current = true;
     const mutationScope = run_ ? chatBackendMutationScope(run_) : null;
     const pendingDesired = mutationScope
       ? chatBackendMutationBarriers.current(mutationScope)?.desired
@@ -1036,6 +1073,75 @@ export default function ChatComposer({
   const onPickEffort = (effort: AgentEffortLevel) => {
     applyChatBackendChange({ chatEffort: effort });
   };
+
+  // Keyboard chords for the two selector pills (App broadcasts these; see the
+  // agent.* commands). They deliberately route through the same onPick*
+  // handlers the dropdowns use, so a chord and a click are indistinguishable
+  // downstream — draft-only state before the first send, updateChatBackend
+  // once a run exists, and the same inline error banner when it is refused.
+  //
+  // The listeners read through a ref rather than depending on the handlers
+  // directly: onPickModel/onPickEffort are rebuilt every render, and this
+  // component re-renders on every draft keystroke, so a direct dependency
+  // would re-subscribe both window listeners on each one.
+  const cycleSelectorsRef = useRef({ model: () => {}, effort: () => {} });
+  cycleSelectorsRef.current = {
+    model: () => {
+      // Cycles over exactly what the dropdown would show, computed from the
+      // catalog snapshot we already hold. Deliberately NOT awaiting a fresh
+      // catalog(): that IPC can stay pending (Pi unreachable, cold main-process
+      // cache), which turned the chord into a dead key. The menu has the same
+      // contract — it paints the curated rows immediately and folds the live
+      // catalog in whenever it lands.
+      const models = buildVisibleGroups({ piCatalog: piCatalogRef.current }).flatMap(
+        (group) => group.models,
+      );
+      if (models.length === 0) return;
+      const currentId = composeModelId(activeChatModelId, activeOneMillionContext);
+      const index = models.findIndex(
+        (model) => model.backend === activeChatBackend && model.id === currentId,
+      );
+      // index === -1 (the active model has dropped out of the visible list)
+      // falls through to the first row, matching how the draft default is
+      // resolved elsewhere.
+      const next = models[(index + 1) % models.length];
+      if (!next) return;
+      onPickModel(next);
+      emitLocalToast("Model changed", next.label);
+      // Warm the snapshot for the next press, without blocking this one.
+      void refreshPiCatalog();
+    },
+    effort: () => {
+      if (availableEfforts.length === 0) return;
+      // Cycles within the ACTIVE MODEL's ladder (availableEfforts), so a chord
+      // can never land on a level the model doesn't offer.
+      const next = nextEffortInLadder(visibleEffort, availableEfforts);
+      onPickEffort(next);
+      emitLocalToast("Thinking effort changed", EFFORT_LABELS[next] ?? next);
+    },
+  };
+
+  useEffect(() => {
+    if (suspendGlobalEvents) return;
+    const onCycleModel = () => cycleSelectorsRef.current.model();
+    const onCycleEffort = () => cycleSelectorsRef.current.effort();
+    // The open-picker chords are forwarded as counters to the pills rather
+    // than listened for inside them: background chat tabs stay mounted, so a
+    // listener down there would have every hidden tab's menu race the visible
+    // one. This effect is the visibility gate.
+    const onOpenModel = () => setModelPickerSignal((value) => value + 1);
+    const onOpenThinking = () => setThinkingPickerSignal((value) => value + 1);
+    window.addEventListener("spark:cycle-model", onCycleModel);
+    window.addEventListener("spark:cycle-effort", onCycleEffort);
+    window.addEventListener("spark:open-model-picker", onOpenModel);
+    window.addEventListener("spark:open-thinking-picker", onOpenThinking);
+    return () => {
+      window.removeEventListener("spark:cycle-model", onCycleModel);
+      window.removeEventListener("spark:cycle-effort", onCycleEffort);
+      window.removeEventListener("spark:open-model-picker", onOpenModel);
+      window.removeEventListener("spark:open-thinking-picker", onOpenThinking);
+    };
+  }, [suspendGlobalEvents]);
 
   // 1M context used to be a standalone pill; it now lives as virtual rows
   // in the model dropdown ("Opus 4.8 1M" etc.), so onPickModel writes
@@ -1213,11 +1319,13 @@ export default function ChatComposer({
               activeModelId={activeChatModelId}
               activeOneMillion={activeOneMillionContext}
               onPick={onPickModel}
+              openSignal={modelPickerSignal}
             />
             <ThinkingControl
               effort={visibleEffort}
               availableEfforts={availableEfforts}
               onCycle={onPickEffort}
+              openSignal={thinkingPickerSignal}
             />
             {fastModeAvailable && (
               <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />

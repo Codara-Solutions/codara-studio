@@ -14,6 +14,8 @@ interface Props {
   activeModelId: string;
   activeOneMillion: boolean;
   onPick: (model: ChatModelOption) => void;
+  /** Bumped by the composer to open this menu from the keyboard. */
+  openSignal?: number;
 }
 
 // The model pill + grouped dropdown menu. Reads agents.runtimes() to decide
@@ -25,6 +27,7 @@ export default function ModelPicker({
   activeModelId,
   activeOneMillion,
   onPick,
+  openSignal = 0,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [piCatalog, setPiCatalog] = useState<PiCatalogModel[]>([]);
@@ -42,6 +45,17 @@ export default function ModelPicker({
     if (!open) return;
     void window.spark.piSubscriptions.catalog().then((models) => setPiCatalog(models ?? []));
   }, [open]);
+
+  // The agent.openModelPicker chord opens this menu for arrow-key selection.
+  // It arrives as a counter from the composer rather than a window event of our
+  // own: background chat tabs stay MOUNTED, so a listener here would have every
+  // hidden tab's picker race the visible one through AnchoredMenu's single-open
+  // registry. The composer is the layer that knows whether it is the visible
+  // chat. 0 is the initial value and never opens anything.
+  useEffect(() => {
+    if (!openSignal) return;
+    setOpen(true);
+  }, [openSignal]);
 
   // Dismissal lives in AnchoredMenu now, it owns the portal, so it is the only
   // thing that can tell "outside" from "inside" once the menu is no longer a

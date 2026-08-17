@@ -405,10 +405,17 @@ export const claudeBackend: SparkAgentBackend = {
         input.chat.sessionUuid = resumeUuid ?? input.chat.sessionUuid;
       }
       if (chat && chat.spawnEffort !== input.chat.effort) {
-        // Effort chip changed mid-chat. `claude --effort` is a spawn-time flag
-        // with no scriptable slash-command equivalent, so respawn with the new
-        // effort and resume via -r to keep the conversation. Mirrors the mode
-        // flip above; runs only when the mode block didn't already respawn.
+        // Effort chip changed mid-chat. `claude --effort` is a spawn-time flag,
+        // so respawn with the new effort and resume via -r to keep the
+        // conversation. Mirrors the mode flip above; runs only when the mode
+        // block didn't already respawn.
+        //
+        // Claude Code does ship an interactive `/effort` command (that is what
+        // the terminal-pane chord types at a live REPL, see App.tsx), but this
+        // session is driven over stream-json rather than a TTY, and nothing
+        // here has verified the command lands on that transport. Respawn+resume
+        // is the proven path; switching to an injected command would need that
+        // check first.
         emit({
           kind: "system_note",
           message: `Changed Claude Code effort from ${chat.spawnEffort} to ${input.chat.effort}.`,

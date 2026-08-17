@@ -96,6 +96,7 @@
     "test:manager-playbooks": "node scripts/test-manager-playbooks.cjs",
     "test:chat-timeline": "node scripts/test-chat-timeline.cjs",
     "test:composer-fast-mode": "node scripts/test-composer-fast-mode.cjs",
+    "test:model-effort-shortcuts": "node scripts/test-model-effort-shortcuts.cjs",
     "test:codex-worker-fast-mode": "node scripts/test-codex-worker-fast-mode.cjs",
     "test:worker-independence": "node scripts/test-worker-independence.cjs",
     "test:peer-comms-opt-in": "node scripts/test-peer-comms-opt-in.cjs",

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentEffortLevel } from "@shared/types";
 import {
   EFFORT_LABELS,
@@ -11,6 +11,8 @@ interface Props {
   effort: AgentEffortLevel;
   availableEfforts: AgentEffortLevel[];
   onCycle: (next: AgentEffortLevel) => void;
+  /** Bumped by the composer to open this menu from the keyboard. */
+  openSignal?: number;
 }
 
 const EFFORT_DESCRIPTIONS: Record<AgentEffortLevel, string> = {
@@ -25,9 +27,23 @@ const EFFORT_DESCRIPTIONS: Record<AgentEffortLevel, string> = {
 // Explicit effort picker. A cycle-only control hid available levels (especially
 // the new GPT-5.6 Max setting) and made changing from Low to Max require several
 // blind clicks. The bars still provide the glanceable depth cue.
-export default function ThinkingControl({ effort, availableEfforts, onCycle }: Props) {
+export default function ThinkingControl({
+  effort,
+  availableEfforts,
+  onCycle,
+  openSignal = 0,
+}: Props) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+
+  // The agent.openEffortPicker chord opens this menu for arrow-key selection;
+  // the composer bumps the counter (see the note in ModelPicker for why this is
+  // a prop rather than a window listener). Declared before the early return
+  // below so the hook order stays stable when a model offers no effort ladder.
+  useEffect(() => {
+    if (!openSignal) return;
+    setOpen(true);
+  }, [openSignal]);
 
   if (availableEfforts.length === 0) return null;
   const label = EFFORT_LABELS[effort] ?? effort;

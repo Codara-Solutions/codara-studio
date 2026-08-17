@@ -227,6 +227,23 @@ export default function AnchoredMenu({
     };
   }, [open]);
 
+  // Move focus into a listbox when it opens, so a menu opened from the
+  // keyboard has somewhere for the arrows to start and screen readers announce
+  // the current row. Scoped to menus that actually render option rows: the
+  // @-mention popover is anchored to the composer and keeps its selection in
+  // the TEXTAREA (the user is still typing a path), so stealing focus there
+  // would break it — it renders no [role="option"], and this no-ops.
+  useEffect(() => {
+    if (!open) return;
+    const raf = window.requestAnimationFrame(() => {
+      const menu = menuRef.current;
+      if (!menu) return;
+      const selected = menu.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+      (selected ?? menu.querySelector<HTMLElement>('[role="option"]'))?.focus();
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
@@ -239,8 +256,42 @@ export default function AnchoredMenu({
       if (menuRef.current?.contains(target)) return;
       onClose();
     };
+    // Escape closes; the arrows walk the option rows. Roving focus (rather
+    // than an aria-activedescendant index) keeps this generic: every consumer
+    // already renders its rows as real <button role="option"> elements, so
+    // Enter/Space activation comes free and no menu has to hand its selection
+    // model over to this component. Keyboard-opened menus (the agent.open*
+    // chords) would otherwise dead-end with focus left on the trigger.
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      const menu = menuRef.current;
+      if (!menu) return;
+      const options = Array.from(
+        menu.querySelectorAll<HTMLElement>('[role="option"]:not([disabled])'),
+      );
+      if (options.length === 0) return;
+      event.preventDefault();
+      const current = document.activeElement as HTMLElement | null;
+      // -1 means focus is still outside the list (on the trigger, or on the
+      // composer that opened the menu): step in from whichever end the key
+      // implies rather than wrapping off an imaginary position.
+      const index = current ? options.indexOf(current) : -1;
+      const last = options.length - 1;
+      const nextIndex =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? last
+            : index === -1
+              ? (event.key === "ArrowDown" ? 0 : last)
+              : event.key === "ArrowDown"
+                ? (index + 1) % options.length
+                : (index - 1 + options.length) % options.length;
+      options[nextIndex]?.focus();
     };
     // A fixed panel anchored to a trigger that scrolled away is worse than no
     // panel, so a scroll that MOVES THE ANCHOR closes the menu. The test is
