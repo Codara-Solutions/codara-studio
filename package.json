@@ -6,19 +6,18 @@
   "author": "Etienne",
   "private": true,
   "bin": {
-    "cora": "bin/cora.cjs"
+    "cora": "cli/cora.cjs"
   },
   "scripts": {
     "dev": "electron-vite dev",
+    "cora": "node cli/cora.cjs",
+    "test:cora-cli": "node scripts/test-cora-cli.cjs",
     "build": "electron-vite build",
     "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",
     "test:renderer-chunks": "node scripts/test-renderer-chunks.mjs",
     "test:preview-webview": "node scripts/test-browser-pane-webview-liveness.cjs && node scripts/test-preview-navigation.cjs",
     "test:preview-auto-open": "node scripts/test-preview-auto-open.cjs",
     "start": "electron-vite preview",
-    "cora": "node bin/cora.cjs",
-    "test:cora-cli": "node scripts/test-cora-cli.cjs",
-    "test:cora-agent-cli": "node scripts/test-cora-agent-cli.cjs",
     "test:step-lifecycle": "node scripts/test-step-lifecycle.cjs",
     "test:followup-rehoming": "node scripts/test-followup-rehoming.cjs",
     "test:spawn-batch-guard": "node scripts/test-spawn-batch-guard.cjs",
@@ -33,11 +32,10 @@
     "test:codara-complete-application": "node scripts/test-codara-complete-application.cjs",
     "test:cora-memory": "node scripts/test-cora-memory.cjs && node scripts/test-workspace-lessons.cjs",
     "test:completion-tail": "node scripts/test-completion-tail.cjs",
-    "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-backend-session-lifecycle.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-verification.cjs && node scripts/test-pi-admission-cache.mjs && node scripts/test-pi-frontier-evidence.cjs && node scripts/test-pi-frontier-gate.mjs && node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs && node scripts/test-pi-oauth-branding.cjs && node scripts/test-pi-subscription-refresh.cjs",
+    "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-backend-session-lifecycle.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs && node scripts/test-pi-oauth-branding.cjs && node scripts/test-pi-subscription-refresh.cjs",
     "test:pi-subscription-refresh": "node scripts/test-pi-subscription-refresh.cjs",
     "test:pi-commit-message": "node scripts/test-pi-commit-message.cjs",
     "test:pi-worker-harness": "node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs",
-    "test:pi-frontier-gate": "node scripts/test-pi-frontier-gate.mjs",
     "test:pi-rpc": "node scripts/test-pi-rpc-client.cjs",
     "test:pi-turn": "node scripts/test-pi-turn.cjs && node scripts/test-pi-cora-extension.cjs",
     "test:pi-account-router": "node scripts/test-pi-account-router.cjs && node scripts/test-pi-usage-applicability.cjs && node scripts/test-pi-account-execution.cjs && node scripts/test-pi-subscription-usage-profiles.cjs",
@@ -47,20 +45,11 @@
     "test:repeat-guard": "node scripts/test-repeat-guard.cjs",
     "smoke:pi-live": "node scripts/smoke-pi-live.cjs",
     "smoke:pi-worker-live": "node scripts/smoke-pi-worker-live.cjs",
-    "smoke:pi-frontier-live": "node scripts/smoke-pi-frontier-live.cjs",
-    "smoke:pi-frontier-admission-live": "node scripts/smoke-pi-frontier-live.cjs",
-    "smoke:pi-frontier-blocker-live": "node scripts/smoke-pi-frontier-blocker-live.cjs",
-    "smoke:pi-frontier-contract-revision-live": "node scripts/smoke-pi-frontier-contract-revision-live.cjs",
     "profile:pi-subagent-lifecycle": "node scripts/profile-pi-subagent-lifecycle.cjs",
     "inspect-run": "node scripts/inspect-run.cjs",
     "test:worktrees": "node scripts/test-worktrees.cjs",
     "test:workspace-colors": "node scripts/test-workspace-colors.cjs",
     "test:worktree-delete-dialog": "node scripts/test-worktree-delete-dialog.cjs",
-    "eval:v2:noop": "node evals-v2/run-benchmark.cjs --adapter noop --repetitions 1",
-    "eval:v2:peer": "node evals-v2/run-benchmark.cjs --variants spark_sequential,spark_hybrid_parallel --tasks peer-mailbox-analytics-contract --repetitions 1",
-    "eval:v2:test-plan": "node evals-v2/run-benchmark.cjs --variants spark_sequential,spark_hybrid_parallel --tasks single-file-calculator-ui --repetitions 1",
-    "eval:v2:judge": "node evals-v2/lib/judge.cjs",
-    "eval:v2:scorecard": "node evals-v2/lib/scorecard.cjs",
     "test:e2e": "npm run build && playwright test",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
@@ -93,7 +82,6 @@
     "test:manager-playbooks": "node scripts/test-manager-playbooks.cjs",
     "test:chat-timeline": "node scripts/test-chat-timeline.cjs",
     "test:composer-fast-mode": "node scripts/test-composer-fast-mode.cjs",
-    "test:codex-worker-fast-mode": "node scripts/test-codex-worker-fast-mode.cjs",
     "test:worker-independence": "node scripts/test-worker-independence.cjs",
     "test:peer-comms-opt-in": "node scripts/test-peer-comms-opt-in.cjs",
     "test:verifier-scoping": "node scripts/test-verifier-scoping.cjs",
@@ -126,7 +114,8 @@
     "test:chat-surface-routing": "node scripts/test-chat-surface-routing.cjs",
     "test:tab-reorder": "node scripts/test-tab-reorder.cjs",
     "test:workspace-reorder": "node scripts/test-workspace-reorder.cjs",
-    "test:pi-oauth-branding": "node scripts/test-pi-oauth-branding.cjs"
+    "test:pi-oauth-branding": "node scripts/test-pi-oauth-branding.cjs",
+    "test:all": "node scripts/run-all-tests.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",
@@ -249,12 +238,8 @@
         "to": "pi-cora"
       },
       {
-        "from": "resources/sounds",
-        "to": "sounds"
-      },
-      {
-        "from": "bin/cora.cjs",
-        "to": "cora-cli/cora.cjs"
+        "from": "cli",
+        "to": "cora-cli"
       }
     ],
     "directories": {

@@ -51,10 +51,11 @@ the display in one call, not seven).
 
 ## The `cora` CLI
 
-`bin/cora.cjs` is a zero-dependency terminal remote for the running app — the
+`cli/cora.cjs` is a zero-dependency terminal remote for the running app — the
 fastest way to poke a new feature without a Playwright harness. It discovers
 the app exactly like the MCP servers do (reads `~/.Codara/agent-socket.json`,
-speaks bearer-authed JSON-RPC to the loopback socket).
+speaks bearer-authed JSON-RPC to the loopback socket). See `cli/README.md`
+for the command surface, the live dashboard, and the harness benchmark.
 
 ```sh
 npm link                 # once — gives you a global `cora`
