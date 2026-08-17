@@ -183,16 +183,20 @@ for (const task of TASKS) {
     `${task.name} is well-formed`,
   );
 
+  // Staged tasks are graded in their FINAL state: every stage's files (the
+  // evolved test.js) are on disk by the time grading runs.
+  const stageFiles = Object.assign({}, ...(task.stages ?? []).map((stage) => stage.files ?? {}));
+
   // The unsolved seed must FAIL — a benchmark that grades the seed as done
   // would score Cora for doing nothing.
-  const seeded = seedDir(task);
+  const seeded = seedDir(task, stageFiles);
   const seedChecks = gradeChecks(task, seeded, idealMetrics);
   assert.ok(seedChecks.some((check) => !check.pass), `${task.name}: checks fail on the unsolved seed`);
   fs.rmSync(seeded, { recursive: true, force: true });
 
   // The reference solution must pass EVERYTHING, hidden groups included — the
   // benchmark must never be unwinnable.
-  const solved = seedDir(task, task.reference);
+  const solved = seedDir(task, { ...stageFiles, ...task.reference });
   const solvedChecks = gradeChecks(task, solved, idealMetrics);
   const failed = solvedChecks.filter((check) => !check.pass);
   assert.equal(failed.length, 0, `${task.name}: reference passes all checks (failed: ${failed.map((f) => `${f.name} ${f.detail ?? ""}`).join("; ")})`);

@@ -48,7 +48,15 @@ grades a 0-100 score:
   tasks must NOT spawn worker armies (effort calibration).
 - penalties for questions, crashed workers, and outliving the bench cap.
 
-Tasks are tiered (trivial 5m cap / standard 10m / hard 15m) and split
+**Staged (checkpoint) tasks** evolve their spec mid-run: after the run
+settles, the bench overwrites test.js with the next stage's contract and
+sends the follow-up prompt into the SAME conversation (for `--agent claude`,
+via `--continue`). The final state is graded against all stages plus a slop
+gate (size and duplication caps) — this probes whether quality survives
+iterating on your own code, the regime where a single long context degrades.
+
+Tasks are tiered (trivial 5m cap / standard 10m / hard 15m / project 30m)
+and split
 **train/holdout**: iterate prompts against train, confirm on holdout so
 prompts don't overfit the tasks. Every task ships a reference solution the
 offline self-test grades to prove the hidden checks are satisfiable.

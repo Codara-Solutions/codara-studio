@@ -12,6 +12,11 @@
 //             Frozen constants: never recalibrate them, or scores stop being
 //             comparable across Cora versions.
 //   files     seeded into a throwaway git workspace before the run.
+//   stages    optional checkpoints: after the run settles, each stage's files
+//             overwrite the workspace (an evolved test.js) and its prompt is
+//             sent as a follow-up into the SAME conversation. This measures
+//             whether quality survives iterating on your own code — the
+//             regime where single long contexts degrade (SlopCodeBench).
 //   prompt    what the user asks Cora. Prompts SAY that the full documented
 //             contract is graded, so thoroughness is rewarded fairly.
 //   hidden    extra test groups run only at grading time. They test STATED
@@ -809,6 +814,247 @@ function renderTable(rows) {
   ].join("\\n");
 }
 module.exports = { renderTable };
+`,
+    },
+  },
+
+  {
+    name: "checkpoint-tracker",
+    brief: "evolving spec over three checkpoints; measures whether quality survives iteration",
+    tier: "project",
+    split: "train",
+    par: { wallS: 540, tokensK: 160 },
+    files: {
+      "track.js": `"use strict";
+// A tiny task tracker. createTracker() returns an independent tracker:
+//   add(title) -> numeric id, starting at 1 and incrementing
+//   list() -> one line per item, insertion order: "id [ ] title", with
+//             [x] once done. Empty tracker -> "".
+//   done(id) -> true, or false when no item has that id
+// TODO: implement and export createTracker.
+module.exports = {};
+`,
+      "test.js": `"use strict";
+const assert = require("node:assert/strict");
+const { createTracker } = require("./track.js");
+const t = createTracker();
+assert.equal(t.list(), "");
+assert.equal(t.add("write spec"), 1);
+assert.equal(t.add("review spec"), 2);
+assert.equal(t.done(1), true);
+assert.equal(t.done(99), false);
+assert.equal(t.list(), "1 [x] write spec\\n2 [ ] review spec");
+console.log("ok");
+`,
+    },
+    prompt:
+      "track.js documents a small task tracker; implement the TODO so `node test.js` passes. Do not change " +
+      "test.js. The full documented contract is graded, not just test.js. This tracker will grow over two " +
+      "follow-up requests in this same conversation: code structure is graded at the end (small, factored, " +
+      "no duplicated logic), so build it to be extended.",
+    stages: [
+      {
+        prompt:
+          'The tracker grows (test.js has been updated; do not change it): (1) add(title, priority) accepts ' +
+          '"low"|"normal"|"high", defaults to "normal", and throws on any other value. (2) list() shows a ' +
+          '" (high)" or " (low)" suffix after the title; normal items stay bare. (3) list({ status }) filters ' +
+          'by "open", "done", or "all" (the default), and throws on an unknown status. (4) stats() returns ' +
+          "{ open, done, byPriority: { low, normal, high } }. Everything from the first request must keep " +
+          "working. The full documented contract is graded, and so is the final code structure: keep track.js " +
+          "small and factored — one more request follows.",
+        files: {
+          "test.js": `"use strict";
+const assert = require("node:assert/strict");
+const { createTracker } = require("./track.js");
+const t = createTracker();
+assert.equal(t.add("a"), 1);
+assert.equal(t.add("b", "high"), 2);
+assert.equal(t.add("c", "low"), 3);
+assert.equal(t.done(1), true);
+assert.equal(t.list(), "1 [x] a\\n2 [ ] b (high)\\n3 [ ] c (low)");
+assert.equal(t.list({ status: "open" }), "2 [ ] b (high)\\n3 [ ] c (low)");
+assert.equal(t.list({ status: "done" }), "1 [x] a");
+assert.deepEqual(t.stats(), { open: 2, done: 1, byPriority: { low: 1, normal: 1, high: 1 } });
+console.log("ok");
+`,
+        },
+      },
+      {
+        prompt:
+          "Final round (test.js updated again; do not change it): (1) listData(options) mirrors list() exactly " +
+          "— same items, same order, same filters — as plain data objects { id, title, done, priority }; " +
+          "mutating what it returns must not affect the tracker. (2) remove(id) deletes an item, returns false " +
+          "for unknown ids, and removed ids are NEVER reused by add. (3) stats() and list() must stay " +
+          "consistent with listData() after any mix of add/done/remove. The whole documented contract from all " +
+          "three requests is graded, plus structure: track.js under 200 lines with no duplicated logic.",
+        files: {
+          "test.js": `"use strict";
+const assert = require("node:assert/strict");
+const { createTracker } = require("./track.js");
+const t = createTracker();
+t.add("a");
+t.add("b", "high");
+t.add("c", "low");
+t.done(1);
+assert.deepEqual(t.listData(), [
+  { id: 1, title: "a", done: true, priority: "normal" },
+  { id: 2, title: "b", done: false, priority: "high" },
+  { id: 3, title: "c", done: false, priority: "low" },
+]);
+assert.equal(t.remove(2), true);
+assert.equal(t.remove(2), false);
+assert.equal(t.add("d"), 4);
+assert.equal(t.list(), "1 [x] a\\n3 [ ] c (low)\\n4 [ ] d");
+assert.deepEqual(t.listData({ status: "open" }).map((x) => x.id), [3, 4]);
+assert.deepEqual(t.stats(), { open: 2, done: 1, byPriority: { low: 1, normal: 2, high: 0 } });
+console.log("ok");
+`,
+        },
+      },
+    ],
+    hidden: [
+      {
+        name: "state stays consistent through add/done/remove churn",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { createTracker } = require("./track.js");
+const t = createTracker();
+for (let i = 1; i <= 6; i += 1) t.add("task " + i, i % 3 === 0 ? "high" : "normal");
+t.done(2);
+t.done(5);
+t.remove(3);
+t.remove(1);
+assert.equal(t.add("late"), 7);
+const data = t.listData();
+assert.deepEqual(data.map((x) => x.id), [2, 4, 5, 6, 7]);
+const stats = t.stats();
+assert.equal(stats.open + stats.done, data.length);
+assert.equal(stats.done, data.filter((x) => x.done).length);
+assert.equal(stats.byPriority.low + stats.byPriority.normal + stats.byPriority.high, data.length);
+const lines = t.list().split("\\n");
+assert.equal(lines.length, data.length);
+data.forEach((item, i) => assert.ok(lines[i].startsWith(item.id + " ")));
+console.log("ok");`,
+      },
+      {
+        name: "documented errors and defaults hold",
+        weight: 2,
+        source: `const assert = require("node:assert/strict");
+const { createTracker } = require("./track.js");
+const t = createTracker();
+assert.throws(() => t.add("x", "urgent"));
+t.add("x");
+assert.equal(t.listData()[0].priority, "normal");
+assert.throws(() => t.list({ status: "someday" }));
+assert.equal(t.done(42), false);
+assert.equal(t.remove(42), false);
+assert.equal(t.list({ status: "all" }), "1 [ ] x");
+const empty = createTracker();
+assert.equal(empty.list(), "");
+assert.deepEqual(empty.listData(), []);
+assert.deepEqual(empty.stats(), { open: 0, done: 0, byPriority: { low: 0, normal: 0, high: 0 } });
+console.log("ok");`,
+      },
+      {
+        name: "machine output is detached and trackers are independent",
+        weight: 2,
+        source: `const assert = require("node:assert/strict");
+const { createTracker } = require("./track.js");
+const t = createTracker();
+t.add("a");
+t.add("b", "high");
+const snapshot = t.listData();
+snapshot[0].title = "hacked";
+snapshot.pop();
+assert.equal(t.list(), "1 [ ] a\\n2 [ ] b (high)");
+assert.deepEqual(t.listData()[0], { id: 1, title: "a", done: false, priority: "normal" });
+const u = createTracker();
+assert.equal(u.add("first"), 1);
+assert.equal(t.listData().length, 2);
+console.log("ok");`,
+      },
+    ],
+    extraChecks(dir) {
+      // The slop gate (SlopCodeBench-style): iterating on your own code must
+      // not erode it. Verbosity = raw growth; duplication = the dominant slop
+      // signal. The reference stays under a quarter of both caps.
+      const source = readFile(dir, "track.js") ?? "";
+      const lines = source.split("\n");
+      const counts = new Map();
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (line.length < 30) continue;
+        counts.set(line, (counts.get(line) ?? 0) + 1);
+      }
+      const duplicated = [...counts.entries()].filter(([, n]) => n >= 4).map(([line]) => line.slice(0, 40));
+      return [
+        {
+          name: "slop: track.js stays under 200 lines",
+          pass: lines.length > 0 && lines.length <= 200,
+          weight: 2,
+          detail: lines.length > 200 ? `${lines.length} lines` : "",
+        },
+        {
+          name: "slop: no line duplicated 4+ times",
+          pass: duplicated.length === 0,
+          weight: 2,
+          detail: duplicated.join(" | "),
+        },
+      ];
+    },
+    reference: {
+      "track.js": `"use strict";
+const PRIORITIES = ["low", "normal", "high"];
+const STATUSES = ["open", "done", "all"];
+
+function createTracker() {
+  const items = [];
+  let nextId = 1;
+
+  const byStatus = (status = "all") => {
+    if (!STATUSES.includes(status)) throw new Error("unknown status: " + status);
+    return items.filter((it) => status === "all" || (status === "done") === it.done);
+  };
+  const find = (id) => items.findIndex((it) => it.id === id);
+
+  return {
+    add(title, priority = "normal") {
+      if (!PRIORITIES.includes(priority)) throw new Error("unknown priority: " + priority);
+      items.push({ id: nextId, title, done: false, priority });
+      return nextId++;
+    },
+    done(id) {
+      const index = find(id);
+      if (index === -1) return false;
+      items[index].done = true;
+      return true;
+    },
+    remove(id) {
+      const index = find(id);
+      if (index === -1) return false;
+      items.splice(index, 1);
+      return true;
+    },
+    listData(options = {}) {
+      return byStatus(options.status).map((it) => ({ ...it }));
+    },
+    list(options = {}) {
+      return byStatus(options.status)
+        .map((it) => {
+          const suffix = it.priority === "normal" ? "" : " (" + it.priority + ")";
+          return it.id + " [" + (it.done ? "x" : " ") + "] " + it.title + suffix;
+        })
+        .join("\\n");
+    },
+    stats() {
+      const byPriority = { low: 0, normal: 0, high: 0 };
+      for (const it of items) byPriority[it.priority] += 1;
+      return { open: byStatus("open").length, done: byStatus("done").length, byPriority };
+    },
+  };
+}
+
+module.exports = { createTracker };
 `,
     },
   },

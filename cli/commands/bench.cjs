@@ -213,7 +213,22 @@ async function runTask(flags, task) {
   const runId = started.run.id;
   const poller = startGreenPoller(dir, task, startedAt);
 
-  const outcome = await driveToCompletion(flags, runId, startedAt + capMs);
+  let outcome = await driveToCompletion(flags, runId, startedAt + capMs);
+  let questionsAsked = outcome.questionsAsked;
+  // Checkpoint stages: evolve the workspace and continue the SAME conversation.
+  // A user message into a settled run revives it (run-store transitions it
+  // back to planning), so chat.send is the whole mechanism.
+  for (const stage of task.stages ?? []) {
+    if (outcome.status !== "complete") break;
+    for (const [file, content] of Object.entries(stage.files ?? {})) {
+      fs.writeFileSync(path.join(dir, file), content);
+    }
+    poller.state.greenAtMs = null; // green now means THIS stage's contract
+    await rpc(flags, "chat.send", { runId, content: stage.prompt });
+    outcome = await driveToCompletion(flags, runId, startedAt + capMs);
+    questionsAsked += outcome.questionsAsked;
+  }
+  outcome.questionsAsked = questionsAsked;
   poller.stop();
   const wallMs = Date.now() - startedAt;
   // A run that outlived the bench window keeps its workers alive against a
@@ -255,7 +270,7 @@ async function runTask(flags, task) {
  * (`claude -p`) as a single-agent reference competitor. Model and effort are
  * pinned to Cora's standard tier (claude-opus-5, high) so the difference
  * measured is the HARNESS, not the model. */
-function runClaudeCli(dir, prompt, capMs) {
+function runClaudeCli(dir, prompt, capMs, extraArgs = []) {
   return new Promise((resolve) => {
     execFile(
       "claude",
@@ -265,6 +280,7 @@ function runClaudeCli(dir, prompt, capMs) {
         "--effort", "high",
         "--output-format", "json",
         "--dangerously-skip-permissions",
+        ...extraArgs,
       ],
       { cwd: dir, timeout: capMs, killSignal: "SIGKILL", maxBuffer: 16 * 1024 * 1024 },
       (err, stdout) => {
@@ -284,18 +300,32 @@ async function runClaudeTask(flags, task) {
   const startedAt = Date.now();
   process.stdout.write(`${c.cyan("▸")} ${c.bold(task.name.padEnd(20))} ${c.dim(task.tier.padEnd(9))}`);
   const poller = startGreenPoller(dir, task, startedAt);
-  const cli = await runClaudeCli(dir, task.prompt, capMs);
+  let cli = await runClaudeCli(dir, task.prompt, capMs);
+  let turns = cli.parsed?.num_turns ?? 0;
+  let tokens = (cli.parsed?.usage?.input_tokens ?? 0) + (cli.parsed?.usage?.output_tokens ?? 0);
+  // Checkpoint stages: --continue resumes the same session in the same
+  // workspace, so the soloist carries its whole context forward — exactly the
+  // regime the checkpoint task probes.
+  for (const stage of task.stages ?? []) {
+    if (cli.timedOut || cli.error || Date.now() >= startedAt + capMs) break;
+    for (const [file, content] of Object.entries(stage.files ?? {})) {
+      fs.writeFileSync(path.join(dir, file), content);
+    }
+    poller.state.greenAtMs = null; // green now means THIS stage's contract
+    cli = await runClaudeCli(dir, stage.prompt, startedAt + capMs - Date.now(), ["--continue"]);
+    turns += cli.parsed?.num_turns ?? 0;
+    tokens += (cli.parsed?.usage?.input_tokens ?? 0) + (cli.parsed?.usage?.output_tokens ?? 0);
+  }
   poller.stop();
   const wallMs = Date.now() - startedAt;
   let greenAtMs = poller.state.greenAtMs;
   if (greenAtMs === null && (await probeGreen(dir, task))) greenAtMs = wallMs;
 
-  const usage = cli.parsed?.usage ?? {};
   const metrics = {
-    turns: cli.parsed?.num_turns ?? 0,
+    turns,
     workers: 1,
     maxConcurrent: 1,
-    tokens: (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+    tokens,
     postGreenTokens: null,
     churn: 0,
     models: ["claude-opus-5"],
@@ -358,7 +388,7 @@ async function bench(args, flags) {
     for (const task of TASKS) {
       console.log(
         `${c.cyan(task.name.padEnd(20))} ${task.tier.padEnd(9)} ${task.split.padEnd(8)} ` +
-          `${task.parallel ? c.violet("parallel ") : "         "}${task.brief}`,
+          `${task.parallel ? c.violet("parallel ") : task.stages ? c.violet("staged   ") : "         "}${task.brief}`,
       );
     }
     return;
