@@ -30,7 +30,6 @@ import type {
   GitHubWorkQueueItem,
 } from "@shared/github";
 import { makeId } from "@shared/ids";
-import { backendPtySessionId } from "@shared/backend-pty";
 import {
   applyWorkspaceGroupShades,
   ensureWorkspaceGroupColors,
@@ -55,7 +54,6 @@ import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
 import { boardBackend } from "./components/board/board-backend";
 import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
-import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
 import { buildDockIndex, canDockTab, isDockLeaf } from "./tabs/dock";
@@ -6321,59 +6319,6 @@ const Workspace = React.memo(function Workspace({
     () => (activeRunId ? runs.find((run) => run.id === activeRunId) ?? null : null),
     [runs, activeRunId],
   );
-  const backendSessionId = activeRunForStrip
-    ? backendPtySessionId(activeRunForStrip.id, activeRunForStrip.chatBackend)
-    : null;
-  // backendPtySessionId is a deterministic string derived from the run id
-  // and backend, so it goes truthy the moment a Claude/Codex run exists —
-  // *before* the backend has actually spawned the CLI PTY. If we showed the
-  // Terminal pill on that signal alone, clicking it would mount xterm on a
-  // ghost session and the user sees a black canvas. Poll the real existence
-  // bit so the pill (and downstream TerminalPane mount) only fire when
-  // there's a PTY to attach to.
-  const [backendPtyExists, setBackendPtyExists] = useState(false);
-  useEffect(() => {
-    if (!backendSessionId) {
-      setBackendPtyExists(false);
-      return;
-    }
-    let disposed = false;
-    const check = async () => {
-      try {
-        const exists = await window.spark.pty.exists(backendSessionId);
-        if (!disposed) setBackendPtyExists(exists);
-      } catch {
-        if (!disposed) setBackendPtyExists(false);
-      }
-    };
-    void check();
-    // Nothing observes the pill while the window is hidden, so skip the tick
-    // rather than spend an IPC round-trip per second on a state nobody reads.
-    // Refocus re-checks immediately so the view can't render against a stale
-    // existence bit.
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
-      void check();
-    }, 1000);
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") void check();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [backendSessionId]);
-  // Escape a dead Terminal view: if the backend PTY is gone (or never
-  // existed) while chatView is "terminal", the chat panel renders neither the
-  // terminal nor the composer. Fall back to the chat view so the composer is
-  // always reachable.
-  useEffect(() => {
-    if (chatView === "terminal" && (!backendSessionId || !backendPtyExists)) {
-      setChatView("chat");
-    }
-  }, [chatView, backendSessionId, backendPtyExists]);
   // Same escape for the Whiteboard view: it is run-scoped, so on a draft chat
   // (no run) it would render the welcome state with the composer hidden. The
   // strip hides the whiteboard affordances on drafts (whiteboardCreatable),
@@ -6423,10 +6368,6 @@ const Workspace = React.memo(function Workspace({
       (chatView === "board" || isDraftChatTabId(activeTabForStrip.id)));
   const handleInnerChatClick = useCallback(() => {
     changeChatView("chat");
-    if (activeChatTabId) setActiveTab(activeChatTabId);
-  }, [activeChatTabId, setActiveTab, changeChatView]);
-  const handleInnerTerminalClick = useCallback(() => {
-    changeChatView("terminal");
     if (activeChatTabId) setActiveTab(activeChatTabId);
   }, [activeChatTabId, setActiveTab, changeChatView]);
   const handleBackToRuns = useCallback(() => {
@@ -6533,7 +6474,6 @@ const Workspace = React.memo(function Workspace({
         chatBackend: chip?.backend,
         chatModel: chip?.model,
         chatEffort: chip?.effort,
-        chat1mContext: chip?.oneMillionContext,
       });
       await api.update({
         runId: run.id,
@@ -6620,10 +6560,6 @@ const Workspace = React.memo(function Workspace({
   // Flipping the view is the whole job here. Runs / preview pills still route
   // through handleInnerSelectTab — those are real tabs of their own.
   const handleDockedChatClick = useCallback(() => changeChatView("chat"), [changeChatView]);
-  const handleDockedTerminalClick = useCallback(
-    () => changeChatView("terminal"),
-    [changeChatView],
-  );
   const handleDockedWhiteboardClick = useCallback(
     () => changeChatView("whiteboard"),
     [changeChatView],
@@ -6884,14 +6820,12 @@ const Workspace = React.memo(function Workspace({
           activeId={effectiveActiveId}
           activeChatTabId={activeChatTabId}
           chatView={chatView}
-          backendPtyExists={backendPtyExists}
           whiteboardAvailable={whiteboardAvailable}
           whiteboardCreatable={Boolean(activeRunForStrip)}
           whiteboardAttention={whiteboardAttention}
           runsTab={runOwnedTabs.runs}
           previews={runOwnedTabs.previews}
           onChatClick={handleInnerChatClick}
-          onTerminalClick={handleInnerTerminalClick}
           onWhiteboardClick={handleInnerWhiteboardClick}
           onBoardClick={handleInnerBoardClick}
           onSelectTab={handleInnerSelectTab}
@@ -6914,14 +6848,12 @@ const Workspace = React.memo(function Workspace({
                 activeId={dockedChatTabId}
                 activeChatTabId={dockedChatTabId}
                 chatView={chatView}
-                backendPtyExists={backendPtyExists}
                 whiteboardAvailable={whiteboardAvailable}
                 whiteboardCreatable={Boolean(activeRunForStrip)}
                 whiteboardAttention={whiteboardAttention}
                 runsTab={runOwnedTabs.runs}
                 previews={runOwnedTabs.previews}
                 onChatClick={handleDockedChatClick}
-                onTerminalClick={handleDockedTerminalClick}
                 onWhiteboardClick={handleDockedWhiteboardClick}
                 onBoardClick={handleDockedBoardClick}
                 onSelectTab={handleInnerSelectTab}
@@ -6942,25 +6874,6 @@ const Workspace = React.memo(function Workspace({
           onCreateBoardRun={handleCreateBoardRun}
           onSelectRun={onSelectRun}
           onRunSnapshot={onRunSnapshot}
-        />
-        {/* Persistent host for the chat backend terminals. Rendered here — a
-            sibling of ChatStack that App never unmounts — so a chat's live Ink
-            TUI xterm survives ChatStack tearing down the chat panel on any tab
-            or sub-view switch. This is what stops the backend Terminal view from
-            going blank after a few minutes of streaming; ChatStack/ChatPanel
-            deliberately no longer mount the pane inline (see ChatPanel's
-            usingHoistedChatView gate). Sits just above ChatStack and below the
-            other stacks, and hides itself unless the user is on the owning
-            chat's Terminal sub-view, so it never covers another tab. */}
-        <ChatBackendTerminalStack
-          runs={runs}
-          activeRunId={activeRunId}
-          activeChatTabId={activeChatTabId}
-          dockedChatTabId={dockedChatTabId}
-          effectiveActiveId={effectiveActiveId}
-          chatView={chatView}
-          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
-          workspaceCwd={workspace?.cwd ?? null}
         />
         {visibleTabs.some((tab) => tab.kind === "editor") && (
           <Suspense fallback={null}>

@@ -325,8 +325,6 @@ export type Tab =
   | WhiteboardTab
   | DiffTab;
 
-export type TabKind = Tab["kind"];
-
 // True when a tab represents content owned by an orchestration run (worker
 // terminal, Runs canvas, orchestration-spawned preview). These render inside
 // the chat panel's inner tab strip instead of the top tab bar — which also

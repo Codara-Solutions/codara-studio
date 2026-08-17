@@ -12,18 +12,14 @@ import AnchoredMenu from "./AnchoredMenu";
 interface Props {
   activeBackend: ChatBackendKind;
   activeModelId: string;
-  activeOneMillion: boolean;
   onPick: (model: ChatModelOption) => void;
 }
 
-// The model pill + grouped dropdown menu. Reads agents.runtimes() to decide
-// what to show: Pi always, plus each CLI runtime that is installed and not
-// disabled in settings. Claude rows are 1M-only, so selecting one sets
-// chat1mContext=true.
+// The model pill + grouped dropdown menu. Every row is a Pi model, split into
+// vendor groups; the live Pi catalog merges under the curated rows.
 export default function ModelPicker({
   activeBackend,
   activeModelId,
-  activeOneMillion,
   onPick,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -51,12 +47,11 @@ export default function ModelPicker({
   // Both groups are always pushed, so an empty menu means every group came
   // back with no rows (no Pi subscription connected).
   const hasModels = groups.some((group) => group.models.length > 0);
-  const activeCompoundId = composeModelId(activeModelId, activeOneMillion);
-  // Claude/Codex labels come from the static catalog immediately. Waiting for
-  // runtime diagnostics made the pill first paint a raw/default id and then
-  // replace it with the friendly saved-model label a moment later.
+  const activeCompoundId = composeModelId(activeModelId, false);
+  // Static-catalog labels resolve immediately; the dynamic groups cover the
+  // rest, and a model outside both still paints its raw id.
   const activeLabel =
-    findOptionInCatalog(activeBackend, activeModelId, activeOneMillion)?.label ??
+    findOptionInCatalog(activeBackend, activeModelId, false)?.label ??
     labelFor(groups, activeBackend, activeCompoundId, activeModelId);
 
   const select = (model: ChatModelOption) => {
@@ -127,10 +122,7 @@ export default function ModelPicker({
                   className={`composer-model-row is-compact${active ? " is-active" : ""}`}
                   onClick={() => select(model)}
                 >
-                  {/* The name, and nothing else. No tier cards, no blurb, no
-                      1M tag, the label already ends in "1M" where it applies.
-                      `isOneMillion` still drives chat1mContext on pick; it is
-                      only the visual tag that is gone. */}
+                  {/* The name, and nothing else. No tier cards, no blurb. */}
                   <span className="composer-model-row-label">{model.label}</span>
                 </button>
               );

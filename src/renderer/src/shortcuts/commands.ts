@@ -359,9 +359,3 @@ export const COMMANDS: Command[] = [
 ];
 
 const COMMAND_BY_ID = new Map<CommandId, Command>(COMMANDS.map((c) => [c.id, c]));
-
-export function getCommand(id: CommandId): Command | undefined {
-  return COMMAND_BY_ID.get(id);
-}
-
-export const COMMAND_IDS: CommandId[] = COMMANDS.map((c) => c.id);

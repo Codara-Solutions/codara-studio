@@ -164,8 +164,7 @@ export default function OrchestrationSidebar({
           (chatConfig.backend !== undefined ||
             chatConfig.model !== undefined ||
             chatConfig.mode !== undefined ||
-            chatConfig.effort !== undefined ||
-            chatConfig.oneMillionContext !== undefined),
+            chatConfig.effort !== undefined),
       );
       // A board-minted run that never had a conversation is reused for the
       // first send instead of minting a sibling chat: the welcome the user is
@@ -185,7 +184,6 @@ export default function OrchestrationSidebar({
           chatModel: chatConfig?.model,
           chatMode: chatConfig?.mode,
           chatEffort: chatConfig?.effort,
-          chat1mContext: chatConfig?.oneMillionContext,
         });
         runId = created.id;
       }

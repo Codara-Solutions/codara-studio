@@ -136,7 +136,7 @@ const autoResumeAttempts = new Map<string, number[]>();
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
 
-// Persistent diagnostic trail for restore decisions (<sparkHome>/logs/main.log
+// Persistent diagnostic trail for restore decisions (<codaraHome>/logs/main.log
 // via main). "Some panes resume, some don't" is undebuggable from memory alone.
 function logRestore(line: string): void {
   try {
@@ -340,8 +340,8 @@ interface Options {
   initialExternalCols?: number;
   initialExternalRows?: number;
   // Raw-tail reattach mode. Opt-in, default off — used by the hosts that attach
-  // an xterm onto a live Ink TUI (Claude/Codex): ChatPanel's backend terminal,
-  // ChatBackendTerminalStack, and the automation Workers panes. Such a TUI
+  // an xterm onto a live Ink TUI (Claude/Codex): the automation Workers panes.
+  // Such a TUI
   // repaints with cursor-relative sequences assuming its own prior frame is on
   // screen. In this mode every re-attach is made to behave exactly like the
   // known-good FIRST attach: on unmount we call pty.detach (not pty.pause) so

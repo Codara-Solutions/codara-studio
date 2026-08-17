@@ -13,7 +13,7 @@ export type AgentSessionRuntime = "claude" | "codex";
 // makes the transcript path deterministic (~/.claude/projects/<enc-cwd>/<id>.jsonl)
 // and lets a pane record its resume pointer synchronously at launch — no fragile
 // post-hoc "newest .jsonl by mtime" discovery, which mis-binds when several Claude
-// sessions share one cwd. Mirrors the chat backend (claude-backend.ts:828-833).
+// sessions share one cwd.
 // Codex has no `--session-id`, so it keeps the bare command + disk discovery.
 export function buildClaudeLaunch(): { command: string; sessionId: string } {
   const sessionId = crypto.randomUUID();

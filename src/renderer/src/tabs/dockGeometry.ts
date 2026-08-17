@@ -260,28 +260,6 @@ export function registerDockElement(
   if (placement) applyTo({ el, insetTop }, placement);
 }
 
-export function unregisterDockElement(tabId: TabId, el: HTMLElement): void {
-  const list = elements.get(tabId);
-  if (!list) return;
-  const next = list.filter((reg) => reg.el !== el);
-  if (next.length === 0) elements.delete(tabId);
-  else elements.set(tabId, next);
-}
-
-export function subscribeDockPlacement(tabId: TabId, cb: () => void): () => void {
-  const subs = subscribers.get(tabId) ?? new Set<() => void>();
-  subs.add(cb);
-  subscribers.set(tabId, subs);
-  return () => {
-    subs.delete(cb);
-    if (subs.size === 0) subscribers.delete(tabId);
-  };
-}
-
 export function peekDockPlacementSnapshot(tabId: TabId): ReactSnapshot | null {
   return snapshots.get(tabId) ?? null;
-}
-
-export function peekDockPlacement(tabId: TabId): DockPlacement | null {
-  return placements.get(tabId) ?? null;
 }

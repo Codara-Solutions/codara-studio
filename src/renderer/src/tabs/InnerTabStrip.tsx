@@ -4,7 +4,7 @@ import type { CoraView } from "../components/chat/cora-view";
 
 // The strip below the top TabBar that gives every real Cora run a stable
 // workbench: Chat | Runs | Board, plus the optional surfaces that exist for
-// this run — the backend Terminal, the Whiteboard, and agent-opened previews.
+// this run — the Whiteboard and agent-opened previews.
 // Board is per-chat (each run owns its kanban; a draft chat shows an empty
 // one whose first card mints the run), and its pill is unconditional — the
 // surface always exists.
@@ -30,17 +30,12 @@ interface Props {
   // filtering). The strip uses it to decide which pill is highlighted.
   activeId: TabId | null;
   // The singleton chat tab id for the active workspace (today there is only
-  // one chat tab — v2 will key it per run). Clicking Chat / Terminal pills
+  // one chat tab — v2 will key it per run). Clicking the Chat pill
   // activates this tab and flips the chat view mode.
   activeChatTabId: TabId | null;
-  // The chat view mode inside the chat panel — "chat" shows the conversation,
-  // "terminal" shows the backend Claude/Codex PTY. Lifted from ChatPanel so
+  // The chat view mode inside the chat panel. Lifted from ChatPanel so
   // the strip can drive it without ChatPanel keeping a duplicate state.
   chatView: CoraView;
-  // True when the active run's backend PTY is actually alive (not just when
-  // its deterministic session id is computable). The Terminal pill only
-  // appears once this is true so xterm never mounts on a ghost session.
-  backendPtyExists: boolean;
   // True when the active run has a persisted whiteboard, which is what makes
   // the pill a destination rather than a create affordance.
   whiteboardAvailable: boolean;
@@ -55,7 +50,6 @@ interface Props {
   runsTab: RunsTab | null;
   previews: PreviewTab[];
   onChatClick: () => void;
-  onTerminalClick: () => void;
   onWhiteboardClick: () => void;
   // Flips the chat panel to this chat's Cora Board sub-view (chatView
   // "board"). Sits next to Runs — cards and their workers are one workflow.
@@ -67,20 +61,17 @@ export default function InnerTabStrip({
   activeId,
   activeChatTabId,
   chatView,
-  backendPtyExists,
   whiteboardAvailable,
   whiteboardCreatable,
   whiteboardAttention,
   runsTab,
   previews,
   onChatClick,
-  onTerminalClick,
   onWhiteboardClick,
   onBoardClick,
   onSelectTab,
 }: Props) {
   const chatActive = activeId === activeChatTabId && chatView === "chat";
-  const terminalActive = activeId === activeChatTabId && chatView === "terminal";
   const runsActive = runsTab !== null && activeId === runsTab.id;
   const boardActive = activeId === activeChatTabId && chatView === "board";
   const whiteboardActive = activeId === activeChatTabId && chatView === "whiteboard";
@@ -119,14 +110,6 @@ export default function InnerTabStrip({
         title="This chat's Cora Board: queue cards and this chat's Cora works through them"
         icon={<KanbanGlyph />}
       />
-      {backendPtyExists && (
-        <Pill
-          label="Terminal"
-          active={terminalActive}
-          onClick={onTerminalClick}
-          title="Live xterm attached to the backend Claude/Codex PTY for this chat. Read-only."
-        />
-      )}
       {(showWhiteboardPill || whiteboardCreatable) && (
         <IconTab
           label="Whiteboard"

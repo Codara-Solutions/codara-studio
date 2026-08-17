@@ -52,10 +52,6 @@ export function collectDockLeaves(root: PaneNode): DockLeaf[] {
   return collectLeaves(root).filter(isDockLeaf);
 }
 
-export function dockLeafFor(root: PaneNode, tabId: TabId): DockLeaf | null {
-  return collectDockLeaves(root).find((l) => l.content.tabId === tabId) ?? null;
-}
-
 // tabId -> where it is docked. First occurrence wins so a corrupted layout that
 // docks one tab twice resolves deterministically instead of flickering between
 // two host cells.

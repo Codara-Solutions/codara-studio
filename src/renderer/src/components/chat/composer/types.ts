@@ -4,7 +4,6 @@ import type {
   ChatMode,
   PiCatalogModel,
 } from "@shared/types";
-import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
 
 // Per-model option used in the model picker. Each row is either a "real" id
 // the backend understands directly (e.g. "claude-opus-5", "gpt-5.6-sol") or a
@@ -57,46 +56,8 @@ export const ALL_EFFORTS: AgentEffortLevel[] = [
   "max",
 ];
 
-// Curated rows. PI_MODELS seeds the picker and is merged with whatever the live
-// catalog reports. CLAUDE_MODELS / CODEX_MODELS are no longer rendered as
-// groups (Cora is Pi-only) but are still read by findOptionInCatalog, so a run
-// persisted on a CLI backend keeps a friendly label instead of a raw id.
-const CLAUDE_MODELS: ChatModelOption[] = [
-  {
-    // Kept in step with WORKER_DEFAULT_CLAUDE_MODEL. When this row named an
-    // older Opus than the one the live catalog serves, keepCurrentGeneration
-    // replaced it a moment after the menu opened, so the row visibly changed
-    // from "Opus 4.8 1M" to "Opus 5" under the cursor.
-    id: "claude-opus-5:1m",
-    label: "Opus 5 1M",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-    isOneMillion: true,
-  },
-  {
-    id: "claude-sonnet-5:1m",
-    label: "Sonnet 5 1M",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-    isOneMillion: true,
-  },
-  {
-    // Fable is always available, but it comes last: a fresh chat must default
-    // to Opus (the first row), never drift onto the premium tier by accident.
-    id: "claude-fable-5",
-    label: "Fable 5",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  },
-];
-
-const CODEX_MODELS: ChatModelOption[] = CODEX_MODEL_CATALOG.map((model) => ({
-  id: model.id,
-  label: model.label,
-  backend: "codex",
-  effortLevels: [...model.effortLevels],
-}));
-
+// Curated rows. PI_MODELS seeds the picker and is merged with whatever the
+// live catalog reports.
 const PI_MODELS: ChatModelOption[] = [
   {
     id: "gpt-5.6-sol",
@@ -504,37 +465,6 @@ export function composeModelId(baseId: string, oneMillion: boolean): string {
   return oneMillion ? `${baseId}${ONEM_SUFFIX}` : baseId;
 }
 
-// Find the dropdown option that matches the current (backend, model, 1M)
-// triple. Returns null when no row matches (e.g. an older run pinned a model
-// the provider has since retired out of the live catalog).
-export function findChatModel(
-  backend: ChatBackendKind,
-  modelId: string,
-  oneMillion: boolean,
-  groups: ChatBackendGroup[],
-): ChatModelOption | null {
-  const compoundId = composeModelId(modelId, oneMillion);
-  for (const group of groups) {
-    if (group.backend !== backend) continue;
-    const hit = group.models.find((m) => m.id === compoundId);
-    if (hit) return hit;
-  }
-  return null;
-}
-
-// Pick a sensible fallback option when the current selection isn't in the
-// visible groups (e.g. the user disabled the runtime in settings). Prefers
-// the same backend; falls back to the first group's first model.
-export function fallbackChatModel(
-  backend: ChatBackendKind,
-  groups: ChatBackendGroup[],
-): ChatModelOption | null {
-  const same = groups.find((g) => g.backend === backend);
-  if (same && same.models.length > 0) return same.models[0];
-  if (groups.length > 0 && groups[0].models.length > 0) return groups[0].models[0];
-  return null;
-}
-
 /** Rows the picker must never auto-select on the user's behalf. */
 function isPremiumTier(option: ChatModelOption): boolean {
   return modelRankFor(option.id) === TIER_RANK.premium;
@@ -570,26 +500,16 @@ export function effortsFor(option: ChatModelOption | null): AgentEffortLevel[] {
   return ALL_EFFORTS;
 }
 
-// Find a model in the STATIC catalog (Claude/Codex/Pi), ignoring availability.
-// Used by the composer to derive effort levels for the current selection
-// without needing the diagnostics IPC — effort lists never depend on whether
-// the runtime is installed. A model discovered from the live catalog has no
-// curated row, so this returns null for it; the caller should treat that as
-// "use ALL_EFFORTS".
+// Find a model in the STATIC catalog, ignoring availability. Used by the
+// composer to derive effort levels for the current selection. A model
+// discovered from the live catalog has no curated row, so this returns null
+// for it; the caller should treat that as "use ALL_EFFORTS".
 export function findOptionInCatalog(
   backend: ChatBackendKind,
   modelId: string,
   oneMillion: boolean,
 ): ChatModelOption | null {
+  if (backend !== "pi") return null;
   const compoundId = composeModelId(modelId, oneMillion);
-  if (backend === "claude") {
-    return CLAUDE_MODELS.find((m) => m.id === compoundId) ?? null;
-  }
-  if (backend === "codex") {
-    return CODEX_MODELS.find((m) => m.id === compoundId) ?? null;
-  }
-  if (backend === "pi") {
-    return PI_MODELS.find((m) => m.id === compoundId) ?? null;
-  }
-  return null;
+  return PI_MODELS.find((m) => m.id === compoundId) ?? null;
 }

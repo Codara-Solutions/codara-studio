@@ -449,52 +449,6 @@ function ConversationMinimap({
   );
 }
 
-// Deliberately not mounted in the conversation. The manifest is the worker's
-// report to Cora, internal review machinery rather than something the reader
-// asked for, so the chat stream stays prose plus quiet activity rows. Exported
-// rather than deleted: the manifest data is untouched and a technical surface
-// can mount this as-is. The Runs inspector already renders the same manifest
-// under "Result evidence".
-export function ResultManifestCard({ manifest }: { manifest: NonNullable<RunState["resultManifest"]> }) {
-  const cwd = manifest.workspace.cwd?.replace(/[\\/]+$/, "");
-  const absolute = (path: string) =>
-    !cwd || /^(?:[A-Za-z]:[\\/]|\/)/.test(path) ? path : `${cwd}/${path}`;
-  const passed = manifest.checks.filter((check) => check.result === "passed").length;
-  return (
-    <section style={RESULT_CARD_STYLE} aria-label="Run result">
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ color: "var(--ok)", fontWeight: 800 }}>✓</span>
-        <strong style={{ color: "var(--ink)", fontSize: 13 }}>Evidence-backed result</strong>
-        <span style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 10 }}>
-          {passed}/{manifest.checks.length} checks passed
-        </span>
-      </div>
-      <div style={{ color: "var(--ink-dim)", fontSize: 12.5, lineHeight: 1.5 }}>{manifest.summary}</div>
-      {manifest.workspaceDelta.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          {manifest.workspaceDelta.slice(0, 8).map((file) => {
-            const path = absolute(file.path);
-            return (
-              <div key={file.path} style={RESULT_FILE_ROW_STYLE}>
-                <span style={{ flex: "1 1 180px", minWidth: 0, color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.path}</span>
-                <span style={{ color: file.provenance === "verified" ? "var(--ok)" : "var(--muted)", fontSize: 9, textTransform: "uppercase" }}>{file.provenance}</span>
-                <ResultAction label="Open" onClick={() => window.dispatchEvent(new CustomEvent("spark:open-file", { detail: { path } }))} />
-                {manifest.workspace.mode === "git" && <ResultAction label="Diff" onClick={() => window.dispatchEvent(new CustomEvent("spark:open-diff", { detail: { path } }))} />}
-                <ResultAction label="Reveal" onClick={() => void window.spark.fs.revealInOS(path)} />
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {(manifest.risks.length > 0 || manifest.followups.length > 0) && (
-        <div style={{ color: "var(--warn)", fontSize: 11.5 }}>
-          {[...manifest.risks, ...manifest.followups].slice(0, 3).join(" · ")}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function ResultAction({ label, onClick }: { label: string; onClick: () => void }) {
   return <button type="button" onClick={onClick} style={RESULT_ACTION_STYLE}>{label}</button>;
 }
