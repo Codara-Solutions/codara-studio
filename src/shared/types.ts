@@ -1500,11 +1500,6 @@ export interface AgentRuntimeCapabilities {
   defaultContextWindowSize: number;
 }
 
-export type AgentRuntimeCapability = keyof Omit<
-  AgentRuntimeCapabilities,
-  "defaultContextWindowSize"
->;
-
 export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
@@ -1870,34 +1865,6 @@ export type GitCommitMessageResult =
   | { ok: true; message: string }
   | { ok: false; error: string };
 
-export interface GitSmartMergeContext {
-  fetchedAt: string;
-  repositoryRoot: string;
-  branch?: string;
-  upstream?: string;
-  detached: boolean;
-  head: string;
-  ahead: number;
-  behind: number;
-  stagedCount: number;
-  unstagedCount: number;
-  hasConflicts: boolean;
-  hasWorkingChanges: boolean;
-  workingFiles: string[];
-  localCommitFiles: string[];
-  remoteChangedFiles: string[];
-  overlappingFiles: string[];
-  statusShort: string;
-  localOnlyCommits: string;
-  remoteOnlyCommits: string;
-  mergeBase?: string;
-  recommendedStrategy: string;
-}
-
-export type GitSmartMergeResult =
-  | { ok: true; context: GitSmartMergeContext }
-  | { ok: false; error: string };
-
 // ── Branches ──────────────────────────────────────────────────────────────────
 
 export interface GitBranch {
@@ -2109,20 +2076,20 @@ export interface RunAssumption {
 }
 
 // Which Cora manager backend drives this chat's manager decisions and (in Talk
-// mode) chat replies. Every member runs a real agent process on the user's own
-// subscription auth, never a metered API key: "pi" is the pinned Pi runtime
-// (driven over RPC, no terminal), while "claude"/"codex" spawn a real `claude`
-// or `codex` process under node-pty and drive it for the chat surface. "pi" is
-// the default, when the chat-level field is unset on a RunState, callers treat
-// it as "pi", and a persisted legacy "openrouter" value (from when Cora could
-// be routed through an OpenRouter API key) migrates to "pi" on read.
-export type ChatBackendKind = "claude" | "codex" | "pi";
+// mode) chat replies. Pi — the pinned runtime driven over RPC on the user's
+// own subscription auth, never a metered API key — is the only member left:
+// the "claude"/"codex" manager backends (which spawned a real CLI under
+// node-pty) were retired in 2026-08, and persisted runs stamped with them
+// migrate to "pi" on read exactly like the even older "openrouter" value
+// (from when Cora could be routed through an OpenRouter API key). When the
+// chat-level field is unset on a RunState, callers treat it as "pi".
+export type ChatBackendKind = "pi";
 
 // Cora's Pi execution depth is a first-class, per-chat policy rather than a
 // model alias. Fast minimizes coordination overhead; Deep adds explicit
-// contract mapping and falsification; Frontier uses the strongest bounded
-// evidence contract and is the only route eligible for audited-state reuse.
-export type CoraExecutionPolicy = "fast" | "deep" | "frontier";
+// contract mapping and falsification. (A third "frontier" tier was removed
+// in 2026-08; persisted values migrate to "deep" on read.)
+export type CoraExecutionPolicy = "fast" | "deep";
 
 // Manager behaviour mode chosen per chat:
 //   auto    — Cora routes each message herself: answer directly, spawn workers,
@@ -2474,23 +2441,21 @@ export interface RunState {
   verificationRounds?: number;
   /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
-   * treated as "pi" by the dispatch layer. A run persisted with the retired
-   * "openrouter" backend is rewritten to "pi" by normalizeRun on read (its
-   * chatModel is dropped with it, that slug meant nothing to any surviving
-   * backend), so pre-feature chats keep working.
+   * treated as "pi" by the dispatch layer. A run persisted with a retired
+   * backend ("openrouter", "claude", "codex") is rewritten to "pi" by
+   * normalizeRun on read (its chatModel and session UUID are dropped with it;
+   * those meant nothing to the surviving backend), so old chats keep working.
    */
   chatBackend?: ChatBackendKind;
   /**
-   * Model id passed to the chosen backend, in that backend's own naming: for
-   * Pi a runtime-catalog model id; for Claude one of "claude-opus-5" /
-   * "claude-sonnet-5"; for Codex one of the GPT-5.6 Sol/Terra/Luna model ids.
-   * When undefined the backend picks its registered default.
+   * Pi runtime-catalog model id. When undefined the backend picks its
+   * registered default.
    */
   chatModel?: string;
   /** Execute = Codara spawns workers; Talk = pure conversational backend chat. */
   chatMode?: ChatMode;
-  /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
-   * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
+  /** Reasoning-effort level forwarded to the backend. Undefined leaves it at
+   * the backend default. */
   chatEffort?: AgentEffortLevel;
   /**
    * Opaque Pi account-profile UUID this run was pinned to at launch, resolved
@@ -2519,9 +2484,9 @@ export interface RunState {
   nativeClaudeProfileId?: string;
   /** Pinned Pi orchestration depth. NOT user-selectable: the effective policy
    * is derived from taskComplexity by effectiveRunExecutionPolicy in main.
-   * This field survives for pre-picker runs and for non-UI callers (frontier
-   * smoke scripts, automations) that pin a policy deliberately. Undefined
-   * migrates to Fast. Non-Pi backends persist it but ignore it. */
+   * This field survives for pre-picker runs and for non-UI callers
+   * (automations) that pin a policy deliberately. Undefined migrates to
+   * Fast; retired "frontier" values migrate to Deep. */
   coraExecutionPolicy?: CoraExecutionPolicy;
   /**
    * Provider-side session UUID for the CC/Codex CLI backing this chat. Stored
@@ -2549,8 +2514,9 @@ export interface RunState {
    */
   chatFastMode?: boolean;
   /**
-   * 1M-context toggle. Claude Code is normalized to true. Codex and Pi
-   * normalize it to false because they do not use this toggle.
+   * LEGACY, READ-ONLY. The retired Claude Code manager backend's 1M-context
+   * toggle. Nothing writes or reads it any more; declared so an existing
+   * run.json that carries it still parses.
    */
   chat1mContext?: boolean;
   /**
@@ -2831,10 +2797,7 @@ export interface UndoToCheckpointInput {
   scope: "chat" | "chat+code";
 }
 
-// IPC payload for the composer's backend/model/mode/effort selector chip.
-// Feature flags are normalized by backend: Claude Code always uses 1M context,
-// and fast mode is Codex-only. Sending `chatBackend` flips the backend; the
-// dispatch layer in run-store starts a fresh CLI session next message.
+// IPC payload for the composer's model/mode/effort selector chip.
 export interface UpdateChatBackendInput {
   runId: string;
   chatBackend?: ChatBackendKind;
@@ -2842,7 +2805,6 @@ export interface UpdateChatBackendInput {
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
   coraExecutionPolicy?: CoraExecutionPolicy;
-  chat1mContext?: boolean;
 }
 
 export interface UndoToCheckpointResult {
@@ -2851,40 +2813,6 @@ export interface UndoToCheckpointResult {
    * can prefill the composer with it. Null when the checkpoint was a run-start
    * baseline (no associated user message). */
   restoredText: string | null;
-}
-
-export interface RunWorkerGroupStats {
-  id: string;
-  stepId?: string;
-  title: string;
-  workerTaskIds: string[];
-  attemptIds: string[];
-  runtimes: WorkerRuntime[];
-  startedAt?: string;
-  finishedAt?: string;
-  durationSeconds: number;
-  totalWorkerRuntimeSeconds: number;
-  verifierCount: number;
-  outcome: "idle" | "running" | "succeeded" | "failed" | "mixed";
-}
-
-export interface RunStats {
-  runId: string;
-  workspaceId: string;
-  status: RunStatus;
-  startedAt?: string;
-  finishedAt?: string;
-  durationSeconds: number;
-  retryCount: number;
-  workerCount: number;
-  attemptCount: number;
-  managerCallCount: number;
-  humanInterventions: number;
-  timeToFirstWorkerSeconds: number | null;
-  totalWorkerRuntimeSeconds: number;
-  estimatedCriticalPathSeconds: number;
-  parallelEfficiency: number;
-  workerGroups: RunWorkerGroupStats[];
 }
 
 export type AutopilotStatus = "idle" | "running" | "paused" | "blocked" | "complete" | "failed" | "cancelled";
@@ -3720,17 +3648,6 @@ export interface SparkCall {
 
 export type SparkManagerMode = "plan_analysis" | "chat" | "step_planning" | "worker_result_review";
 
-export interface ContextPacket {
-  id: string;
-  runId: string;
-  decisionType: SparkCall["mode"];
-  included: Array<{ label: string; reason: string; tokenEstimate?: number }>;
-  excluded: Array<{ label: string; reason: string }>;
-  tokenBudget: number;
-  tokenEstimate: number;
-  createdAt: string;
-}
-
 export interface SparkEvent {
   id: string;
   timestamp: string;
@@ -3767,7 +3684,6 @@ export interface CreateRunInput {
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
   coraExecutionPolicy?: CoraExecutionPolicy;
-  chat1mContext?: boolean;
   // Looms v2: stamp automation ownership + direct execution at creation so
   // the renderer can suppress tabs synchronously from the very first event.
   automationId?: string;
@@ -4141,7 +4057,7 @@ export interface StartAutopilotInput {
 // ── Daemon split scaffold ───────────────────────────────────────────────────
 // Cross-boundary handshake descriptor for the detached orchestration daemon
 // (docs/daemon-split-PLAN.md). The daemon host writes this JSON to
-// sparkHome()/<handshake file> on startup — the same loopback-HTTP + bearer
+// codaraHome()/<handshake file> on startup — the same loopback-HTTP + bearer
 // pattern agent-socket.ts uses (see writeHandshakeFile there); out-of-process
 // clients (and, in a later phase, the renderer) read it to discover the
 // 127.0.0.1 RPC endpoint and per-launch token. Shape mirrors the agent-socket
@@ -4280,55 +4196,6 @@ export interface SearchSummary {
 
 export interface StartSearchResponse {
   searchId: string;
-}
-
-// ── Overnight queue + scheduler ─────────────────────────────────────────────
-// Shared shapes for the overnight RunQueue (run-queue.ts) and the cron-style
-// scheduler registry (scheduler.ts), both living in src/main/orchestration and
-// driving the existing startAutopilot(input: StartAutopilotInput) from
-// run-store.ts. SCAFFOLD per docs/overnight-queue-PLAN.md: queue persistence is
-// a single JSON file and cron firing is stubbed (see the modules' TODOs); these
-// types are the stable contract the main process, IPC/preload bridge, and the
-// renderer Queue panel all share. Timestamps are ISO strings, matching RunState.
-
-// Lifecycle of a single queued run. Mirrors the manager run lifecycle but is
-// owned by the queue: an item is `queued` until the scheduler claims it,
-// `running` while its underlying autopilot run is live, then terminal as
-// `done` / `failed` / `cancelled`.
-export type QueuedRunStatus = "queued" | "running" | "done" | "failed" | "cancelled";
-
-// One entry in the overnight queue. `input` is the exact StartAutopilotInput
-// that will be handed to startAutopilot when this item is dequeued; `runId` is
-// filled in once the run is actually created so the panel can link to it.
-export interface QueuedRun {
-  id: string;
-  title: string;
-  status: QueuedRunStatus;
-  input: StartAutopilotInput;
-  // Set once the queue starts the run via startAutopilot. Absent while queued.
-  runId?: string;
-  // Populated when status is `failed` with the failure reason.
-  error?: string;
-  enqueuedAt: string; // ISO timestamp
-  startedAt?: string; // ISO timestamp; set when status flips to `running`
-  finishedAt?: string; // ISO timestamp; set on a terminal status
-}
-
-// Payload the renderer sends to enqueue a run. Title is optional — the queue
-// derives one from the input (e.g. plan title) when omitted.
-export interface EnqueueRunInput {
-  title?: string;
-  input: StartAutopilotInput;
-}
-
-// Snapshot of the whole queue. A single queue instance for now (`id`), with a
-// `concurrency` cap on simultaneously-running items and a `running` flag for
-// whether the queue is actively draining. SCAFFOLD: persisted as one JSON file.
-export interface RunQueueState {
-  id: string;
-  concurrency: number;
-  running: boolean;
-  items: QueuedRun[];
 }
 
 // Automations ─────────────────────────────────────────────────────────────────
@@ -4592,20 +4459,12 @@ export interface AutomationWorkerInfo {
    *  leaves them undefined, which renders identically to today). */
   nodeId?: string;
   nodeLabel?: string;
-  /** Transport running this worker: "pi-rpc" (the bundled Pi harness, the
-   *  only production path) or the legacy structured transports kept for the
-   *  e2e escape hatch (SPARK_E2E_LEGACY_WORKER_HARNESS). */
+  /** Transport running this worker: always "pi-rpc" (the bundled Pi
+   *  harness); retired legacy transport values may survive in old logs. */
   transport?: "pi-rpc" | "agent-sdk" | "app-server";
   /** Ordered human-readable activity and raw provider event logs. */
   stdoutLogPath?: string;
   rawLogPath?: string;
-}
-
-/** SparkEvent "automation.worker" payload (broadcast-only, not journaled —
- *  same pattern as "automation.iteration"). */
-export interface AutomationWorkerEventPayload {
-  phase: "spawned" | "blocked" | "unblocked" | "exited";
-  worker: AutomationWorkerInfo;
 }
 
 /** run-store.startDirectWorkerRun input — first iteration / isolate mode. */
@@ -4767,10 +4626,6 @@ export interface AutomationState {
   pendingAgentSignal?: AgentLoopSignal;
 }
 
-// A scheduled job is idle between firings and running while its enqueued run is
-// in flight. (Superseded by AutomationState.status; kept for back-compat.)
-export type ScheduledJobStatus = "idle" | "running";
-
 // An "automation" / loom. ScheduledJob's field set is a strict superset of the
 // legacy shape — loop/prompt/state/history are backfilled by normalizeJob.
 export interface ScheduledJob {
@@ -4843,13 +4698,6 @@ export interface AutomationDetail {
 
 // Broadcast-only live ping (rides SparkEvent; not journaled — same pattern as
 // "automation.updated"). Lets the Hub do fine-grained per-iteration refreshes.
-export interface AutomationIterationEventPayload {
-  automationId: string;
-  iteration: number;
-  runId?: string;
-  status: AutomationStatus;
-}
-
 // Engine constants (exported so the test harness + UI can reference them).
 export const DEFAULT_AGENT_MAX_ITERATIONS = 20;
 export const AUTOMATION_HISTORY_CAP = 50;

@@ -93,30 +93,6 @@ export function renderAgentSyncPromptLines(input: {
   return lines;
 }
 
-export function renderAgentSyncManagerContext(input: {
-  cwd: string;
-  settings: Pick<AppSettings, "agentMcpSyncEnabled" | "agentSkillSyncEnabled" | "agentDisabledMcpIds" | "agentDisabledSkillIds">;
-}): string {
-  const lines: string[] = [];
-  if (input.settings.agentMcpSyncEnabled) {
-    const mcpSources = filterSourcesForSessions(discoverMcpSources(input.cwd), input.settings.agentDisabledMcpIds);
-    if (mcpSources.length > 0) {
-      lines.push("MCP servers:", ...formatSources(mcpSources));
-    }
-  }
-  if (input.settings.agentSkillSyncEnabled) {
-    const skillSources = filterSourcesForSessions(discoverSkillSources(input.cwd), input.settings.agentDisabledSkillIds);
-    if (skillSources.length > 0) {
-      lines.push("Skills:", ...formatSources(skillSources));
-    }
-  }
-  if (lines.length === 0) return "No synced MCP servers or skills discovered.";
-  return [
-    "Use these compact capability names to decide when a worker prompt should explicitly say to use a named MCP server or skill. Do not paste configs/docs into task descriptions.",
-    ...lines,
-  ].join("\n");
-}
-
 export function listAgentAssets(input: {
   cwd?: string | null;
   settings: Pick<

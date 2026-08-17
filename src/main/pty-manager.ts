@@ -16,7 +16,7 @@ import { isRemotePath, parseRemotePath } from "@shared/remote";
 import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { getConnection, shQuote } from "./remote/connections";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
@@ -197,8 +197,8 @@ const sessionSpawnLocks = new Map<string, Promise<void>>();
 // When a PTY is killed while a renderer's webContents is bound to its
 // sessionId — and a fresh PTY spawns at the same id within a short window —
 // preserve the renderer binding across the gap so the xterm in the UI follows
-// the new process instead of going silent. The mode-flip respawn flow in
-// claude-backend kills + respawns at the same sessionId ~150ms apart; without
+// the new process instead of going silent. A kill + respawn at the same
+// sessionId ~150ms apart is a real flow; without
 // this stash the new PTY would be created with webContents:null (headless
 // cli-session passes null) and the renderer's Terminal tab would stay
 // attached to a dead pid forever. 10-second TTL means a delayed respawn (e.g.
@@ -1220,7 +1220,7 @@ function doSpawn(
   // Keep hook scripts and MCP children agreeing with the app about where the
   // home dir lives (hooks fall back to ~/.Codara when unset; an app running
   // under any override would otherwise write markers the app never sees).
-  if (!env.SPARK_HOME_DIR) env.SPARK_HOME_DIR = sparkHome();
+  if (!env.SPARK_HOME_DIR) env.SPARK_HOME_DIR = codaraHome();
 
   // Agent-socket handshake. Every pty we spawn — user panes and worker panes
   // alike — gets SPARK_AGENT_SOCKET + SPARK_AGENT_TOKEN so any sub-agent CLI
@@ -2331,7 +2331,7 @@ function killNow(id: string): void {
   // through enqueueData → sessions.get(id) → land in the next same-id session.
   s.disposed = true;
   // Stash the renderer-attached webContents so a fast respawn at the same id
-  // (mode-flip in claude-backend) can re-bind it; otherwise the xterm tab in
+  // can re-bind it; otherwise the xterm tab in
   // the UI silently goes deaf to the new process.
   stashWebContents(id, s);
   // Capture the exact slave tty and its root-descendant identities while the

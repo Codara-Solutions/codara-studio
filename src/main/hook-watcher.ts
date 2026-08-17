@@ -1,5 +1,5 @@
 // Hook watcher — the consumer half of the "CLI hook ingestion" big-bet.
-// Watches <spark-home>/hooks/ for JSON files dropped by `spark-hook.py`,
+// Watches <spark-home>/hooks/ for JSON files dropped by `codara-hook.py`,
 // reads each file, routes the event to run-store, then moves the file to
 // <spark-home>/hooks/processed/ so we don't reprocess it on app restart.
 //
@@ -29,7 +29,7 @@ import { join } from "node:path";
 
 import { recordSessionStart } from "./agent-session-registry";
 import { nativeClaudeProfileId } from "./pty-manager";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 
 type RunStoreModule = typeof import("./orchestration/run-store");
 
@@ -54,7 +54,7 @@ const READ_RETRY_BASE_MS = 60;
 // Cap on the bytes we'll read from a single hook file. Real hook payloads
 // (PreToolUse for a large tool input) can be a few KB; 256 KiB is the cap
 // from above which we treat the file as hostile/corrupt and drop it.
-// spark-hook.py trims payloads at the source (96KB budget), so anything this
+// codara-hook.py trims payloads at the source (96KB budget), so anything this
 // large predates the trim or bypassed the writer.
 const MAX_HOOK_FILE_BYTES = 256 * 1024;
 
@@ -202,7 +202,7 @@ interface HookFileEnvelope {
 export async function startHookWatcher(): Promise<void> {
   if (active) return;
 
-  const hooksDir = join(sparkHome(), HOOKS_SUBDIR);
+  const hooksDir = join(codaraHome(), HOOKS_SUBDIR);
   const processedDir = join(hooksDir, PROCESSED_SUBDIR);
 
   const state: WatcherState = {

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { writeFileAtomic } from "../fs-atomic";
 import type {
   RunState,
@@ -53,7 +53,7 @@ const STOPWORDS = new Set<string>([
 ]);
 
 function memoryRoot(): string {
-  return join(sparkHome(), "memory");
+  return join(codaraHome(), "memory");
 }
 
 // Strip path separators and other unsafe characters so a workspaceId can never
@@ -224,8 +224,10 @@ function renderRecordEntry(record: WorkspaceRunMemoryRecord): string {
 }
 
 /**
- * Synchronous reader + formatter folded into the manager's plan_analysis user
- * message. Loads the workspace ledger, excludes the current run, ranks the rest
+ * Synchronous reader + formatter folded into the dynamic tail of the run's
+ * FIRST manager turn (run-store's prepareManagerTurn -> agent-backend's
+ * appendPriorRuns), so the manager plans with the workspace's outcome history
+ * in view. Loads the workspace ledger, excludes the current run, ranks the rest
  * by similarity to the current plan's fingerprint (Jaccard over planKeywords ∪
  * touchedGlobs, tie-broken by newer completedAt), takes the top few, and renders
  * a compact, budget-bounded block. Returns null when there is no usable prior

@@ -37,7 +37,7 @@ import {
   startAutopilot,
 } from "./orchestration/run-store";
 import { loadPreferences } from "./preferences-store";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { loadState, updateState } from "./storage";
 
 export interface GitHubIssueWorkspaceDependencies {
@@ -92,7 +92,7 @@ function productionDependencies(): GitHubIssueWorkspaceDependencies {
     loadPreferences,
     listRuns,
     startAutopilot,
-    worktreesRoot: (repoCwd) => managedWorktreesRoot(sparkHome(), repoCwd),
+    worktreesRoot: (repoCwd) => managedWorktreesRoot(codaraHome(), repoCwd),
     publishState: (state) => {
       setAllowedRoots(state.workspaces.map((workspace) => workspace.cwd));
       for (const window of BrowserWindow.getAllWindows()) {

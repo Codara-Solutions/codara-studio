@@ -4,14 +4,14 @@
 // scrolls away — so when the app "dies after sleep" or a session restore
 // silently downgrades, there is no evidence trail to debug from. Events worth
 // keeping (suspend/resume, renderer recovery, boot watchdog, restore decisions)
-// go through logMain() and land in <sparkHome>/logs/main.log with timestamps.
+// go through logMain() and land in <codaraHome>/logs/main.log with timestamps.
 //
 // Deliberately minimal: fire-and-forget, append-only, serialized through one
 // promise chain, size-capped with a single .1 rotation. Never throws.
 
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 
 const MAX_LOG_BYTES = 1_000_000;
 
@@ -19,7 +19,7 @@ let chain: Promise<void> = Promise.resolve();
 let dirEnsured = false;
 
 function logPath(): string {
-  return join(sparkHome(), "logs", "main.log");
+  return join(codaraHome(), "logs", "main.log");
 }
 
 export function logMain(category: string, message: string): void {
@@ -30,7 +30,7 @@ export function logMain(category: string, message: string): void {
     .then(async () => {
       const path = logPath();
       if (!dirEnsured) {
-        await fs.mkdir(join(sparkHome(), "logs"), { recursive: true });
+        await fs.mkdir(join(codaraHome(), "logs"), { recursive: true });
         dirEnsured = true;
       }
       try {
@@ -44,9 +44,4 @@ export function logMain(category: string, message: string): void {
       await fs.appendFile(path, line, "utf8");
     })
     .catch(() => undefined);
-}
-
-/** Await pending writes (quit path); bounded by the caller's own timeout. */
-export function flushMainLog(): Promise<void> {
-  return chain;
 }

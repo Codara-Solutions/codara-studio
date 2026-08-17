@@ -35,7 +35,6 @@ export const PANE_ACCENT = "\x1b[38;2;74;222;208m";
 // Tool labels: a soft slate rather than pure white, so the marker glyph and
 // the label read as one quiet unit next to the dim detail line under them.
 export const PANE_LABEL = "\x1b[38;2;203;213;225m";
-export const PANE_RESET = RESET;
 
 const style = (open: string) => (text: string): string => (text ? `${open}${text}${RESET}` : "");
 

@@ -177,13 +177,6 @@ export const CLAUDE_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
 export const CLAUDE_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
   CLAUDE_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
 );
-export const CODEX_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
-  CODEX_CLI_SHARED_STATE.filter((entry) => entry.kind === "dir").map((entry) => entry.name),
-);
-export const CODEX_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
-  CODEX_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
-);
-
 export interface EnsureSharedCliStateInput {
   /** A Codara-managed account directory (CLAUDE_CONFIG_DIR / CODEX_HOME). */
   managedDir: string;

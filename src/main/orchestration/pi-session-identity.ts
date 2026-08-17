@@ -19,7 +19,6 @@ export interface PiBackendSessionIdentity {
   executionPolicy: CoraExecutionPolicy;
   projectPolicyMode: ProjectPolicyMode;
   sessionId: string;
-  contractPromptSha256: string | null;
   /** Effective fast mode for THIS process: the composer's toggle reaches the
    *  runtime only as launch-time env (CODARA_PI_FAST_MODE), so it must be part
    *  of the reuse key or a flip would silently never apply. Always false for
@@ -42,7 +41,6 @@ export function piBackendSessionIdentityMatches(
     left.executionPolicy === right.executionPolicy &&
     left.projectPolicyMode === right.projectPolicyMode &&
     left.sessionId === right.sessionId &&
-    left.contractPromptSha256 === right.contractPromptSha256 &&
     left.fastMode === right.fastMode
   );
 }

@@ -44,8 +44,6 @@ export const CLAUDE_CLI_SEEDED_CONFIG_KEYS = [
   "lastOnboardingVersion",
 ] as const;
 export const CLAUDE_CLI_CONFIG_FILE = ".claude.json";
-export const CLAUDE_CLI_SETTINGS_FILE = "settings.json";
-
 /** Refuse to parse an implausibly large personal config rather than stall. */
 const PERSONAL_CONFIG_MAX_BYTES = 32 * 1024 * 1024;
 const ONBOARDING_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;

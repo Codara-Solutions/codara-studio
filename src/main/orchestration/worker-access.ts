@@ -1,84 +1,11 @@
 // Per-worker tool-access presets and parallel-wave collaboration decoration for
 // loom graph workers (LoomWorkerNode.access / blockedTools / collab). Kept as a
-// dependency-free module so buildLaunchCommandLine (run-store) and the wave
-// launcher can share the exact mapping the test harness exercises in isolation.
+// dependency-free module so run-store and the wave launcher can share the
+// exact mapping the test harness exercises in isolation.
 import { join } from "node:path";
 
 /** Tool-access preset. Absent/"full" = today's behavior (no fence). */
 export type WorkerAccessPreset = "full" | "edits" | "readonly";
-
-// Claude built-ins each preset hard-denies. "edits" keeps file edits but removes
-// the shell + web; "readonly" removes every EXISTING-file mutation (Edit/
-// MultiEdit/NotebookEdit) plus shell + web, leaving Read/Glob/Grep. Write is
-// deliberately NOT denied under readonly: the worker must Write its own
-// final-report.json (which lives OUTSIDE the workspace under ~/.Codara/runs),
-// and the claude CLI's --disallowedTools ignores parenthesized path scoping
-// (e.g. `Write(**)` denies nothing — probe-verified), so there is no way to
-// allow the report write while blocking workspace writes. readonly therefore
-// denies the edit tools, shell, and web — but Write stays available, and Write
-// can CREATE OR OVERWRITE any file. It is a guardrail against casual mutation,
-// not a jail. blockedTools are merged on top of either list.
-const CLAUDE_EDITS_DISALLOWED = ["Bash", "WebSearch", "WebFetch"];
-const CLAUDE_READONLY_DISALLOWED = ["Edit", "MultiEdit", "NotebookEdit", "Bash", "WebSearch", "WebFetch"];
-
-/** The full Claude `--disallowedTools` set for a preset, with the node's extra
- *  blockedTools merged in (trimmed, de-duped, order-stable: preset first). An
- *  empty result means the flag is omitted entirely (full access, no blocks). */
-export function claudeDisallowedTools(
-  access: WorkerAccessPreset | undefined,
-  blockedTools?: string[],
-): string[] {
-  const base =
-    access === "edits"
-      ? CLAUDE_EDITS_DISALLOWED
-      : access === "readonly"
-        ? CLAUDE_READONLY_DISALLOWED
-        : [];
-  const merged = [...base];
-  for (const raw of blockedTools ?? []) {
-    const tool = raw.trim();
-    if (tool && !merged.includes(tool)) merged.push(tool);
-  }
-  return merged;
-}
-
-/** Explicit feature override for one native Codex worker launch. */
-export function codexFastModeArgs(fastMode?: boolean): [string, string] {
-  return [fastMode === true ? "--enable" : "--disable", "fast_mode"];
-}
-
-export interface CodexAccessFlags {
-  /** Sandbox mode to pass to `--sandbox`; undefined keeps the `--yolo` default. */
-  sandboxMode?: "read-only" | "workspace-write";
-  /** True when `-a never` must be added (worker terminals are watch-only, so an
-   *  approval prompt would hang the run). Only the new edits/readonly presets set
-   *  it — the legacy full/sandboxDir path keeps its existing approval behavior. */
-  approvalsNever: boolean;
-}
-
-/** Resolve codex sandbox + approval flags for a preset. Callers must skip the
- *  codex config shield whenever `sandboxMode` is set (Seatbelt cannot nest), and
- *  must make the worker's report dir (and, for chat, the mail dir) writable via
- *  `--add-dir` — codex's sandbox confines writes to the workspace, but the
- *  final-report.json lives outside it. `hasSandboxDir` only decides the
- *  full/absent case (its legacy `--sandbox workspace-write`). */
-export function codexAccessFlags(
-  access: WorkerAccessPreset | undefined,
-  hasSandboxDir: boolean,
-): CodexAccessFlags {
-  // codex's read-only sandbox blocks ALL writes, including the worker's
-  // final-report.json (outside the workspace; --add-dir cannot lift a read-only
-  // sandbox), so a readonly codex worker could never report success. The editor
-  // and validateWorkerAccessFields forbid authoring it, and graphFromFlow flips
-  // a persisted one to edits; this is the launch-time backstop — treat readonly
-  // as edits (workspace-write) so a stale bad spec still produces a live run
-  // rather than a guaranteed-dead one.
-  if (access === "readonly" || access === "edits") {
-    return { sandboxMode: "workspace-write", approvalsNever: true };
-  }
-  // full / absent: preserve the pre-feature behavior exactly.
-  return { sandboxMode: hasSandboxDir ? "workspace-write" : undefined, approvalsNever: false };
-}
 
 const WORKER_ACCESS_PRESETS = new Set(["full", "edits", "readonly"]);
 

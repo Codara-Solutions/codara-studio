@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { promises as fsp } from "node:fs";
 import { isRemotePath } from "@shared/remote";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 
 // Read-path allowlist for fs:* IPC handlers. Defence-in-depth only — if the
 // renderer is compromised, this stops a hostile script from reading arbitrary
@@ -89,13 +89,13 @@ function staticAllowed(): string[] {
     // in remote/ (identity.json is the computer's private key; see
     // src/main/remote-access/). Neither the home root nor remote/ may EVER
     // be allowlisted here.
-    path.join(sparkHome(), "memory"),
+    path.join(codaraHome(), "memory"),
     // Run artifacts (worker stdout/raw logs, prompts, final reports under
     // runs/<runId>/...) are rendered by the automations live feed, the Runs
     // inspector, and the worker peek panes via fs:readTextTail/fs:readText.
     // Scoped to the runs subdirectory for the same reason memory is: the
     // sensitive siblings (pi-agent/auth.json, remote/) stay sealed.
-    path.join(sparkHome(), "runs"),
+    path.join(codaraHome(), "runs"),
     app.getPath("userData"),
     app.getPath("temp"),
   ].map((p) => path.resolve(p));
@@ -132,7 +132,7 @@ export function assertAllowedReadPath(target: string): void {
 
 let runsRootCache: string | null = null;
 function runsRoot(): string {
-  runsRootCache ??= path.resolve(path.join(sparkHome(), "runs"));
+  runsRootCache ??= path.resolve(path.join(codaraHome(), "runs"));
   return runsRootCache;
 }
 

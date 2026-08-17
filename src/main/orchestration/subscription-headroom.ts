@@ -23,6 +23,7 @@ import type {
   PiUsageOverview,
   PiUsageProfile,
   PiUsageProvider,
+  PiUsageWindow,
 } from "@shared/types";
 
 import { rosterModelFor } from "./worker-model-hint";
@@ -81,6 +82,15 @@ export interface ProviderHeadroom {
   tightestWindowLabel: string | null;
   /** Pre-formatted countdown to that window's reset ("2h 10m"), if known. */
   tightestWindowResetsIn: string | null;
+  /**
+   * The premium model's own clock (Anthropic's Fable 7-day window), separate
+   * from the general windows above. Null when the provider reports no
+   * model-scoped premium window. The general headroomPercent deliberately
+   * excludes it: it constrains only claude-fable-5 assignments.
+   */
+  premiumHeadroomPercent: number | null;
+  premiumWindowLabel: string | null;
+  premiumWindowResetsIn: string | null;
 }
 
 export type SubscriptionHeadroomSummary = Record<HeadroomRuntime, ProviderHeadroom>;
@@ -102,7 +112,18 @@ function emptyHeadroom(runtime: HeadroomRuntime, limitReached: boolean): Provide
     limitReached,
     tightestWindowLabel: null,
     tightestWindowResetsIn: null,
+    premiumHeadroomPercent: null,
+    premiumWindowLabel: null,
+    premiumWindowResetsIn: null,
   };
+}
+
+/** The roster's premium model rides its own provider window (Fable 7-day). */
+function isPremiumModelWindow(window: PiUsageWindow): boolean {
+  if (window.scope?.kind !== "model") return false;
+  const id = (window.scope.modelId ?? "").toLowerCase();
+  const label = (window.scope.modelLabel ?? "").toLowerCase();
+  return id.includes("fable") || label.includes("fable");
 }
 
 function providerHeadroom(
@@ -122,7 +143,15 @@ function providerHeadroom(
       (!window.scope || window.scope.kind === "general") &&
       Number.isFinite(window.remainingPercent),
   );
-  if (windows.length === 0) return emptyHeadroom(runtime, limitReached);
+  const premium = (entry.windows ?? []).find(
+    (window) => isPremiumModelWindow(window) && Number.isFinite(window.remainingPercent),
+  );
+  const premiumFields = {
+    premiumHeadroomPercent: premium?.remainingPercent ?? null,
+    premiumWindowLabel: premium?.label ?? null,
+    premiumWindowResetsIn: premium?.resetsIn ?? null,
+  };
+  if (windows.length === 0) return { ...emptyHeadroom(runtime, limitReached), ...premiumFields };
   let tightest = windows[0];
   for (const window of windows) {
     if (window.remainingPercent < tightest.remainingPercent) tightest = window;
@@ -135,6 +164,7 @@ function providerHeadroom(
     limitReached,
     tightestWindowLabel: tightest.label,
     tightestWindowResetsIn: tightest.resetsIn ?? null,
+    ...premiumFields,
   };
 }
 
@@ -364,6 +394,22 @@ export function describeHeadroomForPrompt(
   const usable = [summary.claude, summary.codex].filter(hasUsableSignal);
   if (usable.length === 0) return null;
   const lines = [`Subscription headroom: ${usable.map(describeProvider).join(" · ")}.`];
+  // The premium model's own clock. Stated separately because it constrains
+  // only claude-fable-5 assignments, never the standard-tier roster.
+  const premium = summary.claude?.premiumHeadroomPercent;
+  if (premium !== null && premium !== undefined) {
+    const reset = summary.claude.premiumWindowResetsIn
+      ? `, resets in ${summary.claude.premiumWindowResetsIn}`
+      : "";
+    lines.push(
+      `Premium model clock: claude-fable-5 has its own ${summary.claude.premiumWindowLabel ?? "7-day"} window, ${premium}% left${reset}.` +
+        (premium <= TIGHT_HEADROOM_PERCENT
+          ? " It is nearly exhausted: assign claude-fable-5 only where a standard-tier attempt already failed, and say so when you downgrade."
+          : premium <= COMFORTABLE_HEADROOM_PERCENT
+            ? " Spend it deliberately: reserve claude-fable-5 for the genuinely subtle slices."
+            : ""),
+    );
+  }
   const preferred = preferredRuntimeForHeadroom(summary);
   if (preferred) {
     const constrained = otherRuntime(preferred);

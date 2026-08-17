@@ -15,7 +15,7 @@
 //
 // Kept dependency-injected (no electron / spark-home imports) so
 // scripts/test-session-registry.cjs can bundle and exercise it in plain node.
-// index.ts wires the real sparkHome dir, logMain, and the renderer broadcast.
+// index.ts wires the real codaraHome dir, logMain, and the renderer broadcast.
 
 import { promises as fs } from "node:fs";
 import { join } from "node:path";

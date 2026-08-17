@@ -39,10 +39,6 @@ const PROBE_TIMEOUT_MS = 3000;
 // the same set of nonexistent paths. `clearResolverCache()` flushes both.
 const cache = new Map<string, string | null>();
 
-export function clearResolverCache(): void {
-  cache.clear();
-}
-
 // On Windows, `where <name>` can return several matches for one CLI — npm, for
 // instance, installs BOTH an extensionless Unix `sh` shim and a `<name>.cmd`
 // batch shim side by side (this is exactly how `codex` lands). Not all of these

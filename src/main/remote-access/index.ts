@@ -6,7 +6,7 @@
 // The service takes every environment dependency (directories, workspace
 // listing, terminal creation) through RemoteAccessDeps, so the unit tests
 // and the e2e harness run the REAL lifecycle in plain Node. Production
-// wiring over sparkHome/storage/pty-manager lives in ./production, which is
+// wiring over codaraHome/storage/pty-manager lives in ./production, which is
 // the only module here allowed to import the rest of the main process.
 
 import type {

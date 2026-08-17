@@ -47,13 +47,4 @@ export function getProvider(id: AgentRuntimeKind): CliProvider {
   return provider;
 }
 
-/**
- * Same as `getProvider` but returns null instead of throwing. Use for
- * defensive code paths (settings migrations, manager decisions parsed
- * from untrusted JSON, etc.).
- */
-export function tryGetProvider(id: string): CliProvider | null {
-  return listProviders().find((p) => p.id === id) ?? null;
-}
-
 export type { CliProvider, SpawnOpts, ResumeOpts } from "./types";

@@ -30,7 +30,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { getEnrichedEnv } from "../path-reconstruction";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { CODARA_PI_PACKAGE, CODARA_PI_VERSION, resolvePinnedPiRuntime } from "./pi-runtime";
 
 const INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -43,7 +43,7 @@ export interface PiRuntimeInstallProgress {
 
 /** $CODARA_HOME/pi-runtime — the writable root this module owns end to end. */
 export function managedPiRuntimeRoot(): string {
-  return join(sparkHome(), "pi-runtime");
+  return join(codaraHome(), "pi-runtime");
 }
 
 /** The node_modules dir resolveCodaraPiRuntime() searches for a managed build. */

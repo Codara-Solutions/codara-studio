@@ -89,10 +89,6 @@ export interface PiManagerLaunchOptions {
    * it by absolute path because a packaged extension cannot resolve bare
    * specifiers from inside app.asar. */
   mcpSdkDir?: string;
-  frontierManifestPath?: string;
-  frontierManifestSha256?: string;
-  frontierAdmissionArtifactPath?: string;
-  frontierAdmissionArtifactSha256?: string;
   processExecutable?: string;
   model?: string;
   thinking?: PiThinkingLevel;
@@ -130,9 +126,6 @@ export interface PiManagerLaunchPlan {
   sessionId: string;
   executionPolicy: CoraExecutionPolicy;
   projectPolicyMode: ProjectPolicyMode;
-  frontierManifestPath: string | null;
-  frontierManifestSha256: string | null;
-  frontierAdmissionArtifactSha256: string | null;
   /** Set only when a roster was handed over, so the caller can delete the file
    * when the session ends. */
   mcpConfigPath: string | null;
@@ -331,33 +324,13 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   validateProviderModel(options.provider, model);
   const thinking = options.thinking ?? "high";
   const executionPolicy: CoraExecutionPolicy =
-    options.executionPolicy === "deep" || options.executionPolicy === "frontier"
-      ? options.executionPolicy
-      : "fast";
+    options.executionPolicy === "deep" ? "deep" : "fast";
   const projectPolicyMode: ProjectPolicyMode =
     options.projectPolicyMode === "untrusted-pull-request"
       ? "untrusted-pull-request"
       : "trusted";
-  if (
-    projectPolicyMode === "untrusted-pull-request" &&
-    executionPolicy === "frontier"
-  ) {
-    throw new Error(
-      "Frontier verification cannot run against an untrusted pull-request checkout.",
-    );
-  }
   const extensionPaths = options.extensionPaths.map((value) => resolve(value));
   if (extensionPaths.length === 0) throw new Error("Cora's Pi backend requires a bundled extension");
-  const frontierGateEnabled = executionPolicy === "frontier" && options.mode === "execute";
-  if (frontierGateEnabled) {
-    if (!options.frontierManifestPath || !/^[a-f0-9]{64}$/.test(options.frontierManifestSha256 ?? "")) {
-      throw new Error("Cora's Pi Frontier route requires a content-addressed verification manifest");
-    }
-    if (Boolean(options.frontierAdmissionArtifactPath) !== Boolean(options.frontierAdmissionArtifactSha256) ||
-      (options.frontierAdmissionArtifactSha256 && !/^[a-f0-9]{64}$/.test(options.frontierAdmissionArtifactSha256))) {
-      throw new Error("Cora's Pi Frontier admission artifact must be a complete content-addressed pair");
-    }
-  }
 
   const args = [
     options.runtime.entrypoint,
@@ -440,14 +413,6 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     env.CODARA_PI_MCP_CONFIG = resolve(options.mcpConfigPath!);
     env.CODARA_PI_MCP_SDK_DIR = resolve(options.mcpSdkDir!);
   }
-  if (frontierGateEnabled) {
-    env.CODARA_PI_FRONTIER_MANIFEST = resolve(options.frontierManifestPath!);
-    env.CODARA_PI_FRONTIER_MANIFEST_SHA256 = options.frontierManifestSha256!;
-    if (options.frontierAdmissionArtifactPath) {
-      env.CODARA_PI_FRONTIER_ADMISSION_ARTIFACT = resolve(options.frontierAdmissionArtifactPath);
-      env.CODARA_PI_FRONTIER_ADMISSION_ARTIFACT_SHA256 = options.frontierAdmissionArtifactSha256!;
-    }
-  }
   if (options.codaraHomeDir) env.CODARA_HOME_DIR = resolve(options.codaraHomeDir);
 
   return {
@@ -464,11 +429,6 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     sessionId: options.sessionId,
     executionPolicy,
     projectPolicyMode,
-    frontierManifestPath: frontierGateEnabled ? resolve(options.frontierManifestPath!) : null,
-    frontierManifestSha256: frontierGateEnabled ? options.frontierManifestSha256! : null,
-    frontierAdmissionArtifactSha256: frontierGateEnabled
-      ? options.frontierAdmissionArtifactSha256 ?? null
-      : null,
     mcpConfigPath: mcpEnabled ? resolve(options.mcpConfigPath!) : null,
   };
 }

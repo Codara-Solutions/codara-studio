@@ -221,9 +221,3 @@ export function defaultCodexCliProfileLeases(): CodexCliProfileLeaseRegistry {
   defaultLeases ??= new CodexCliProfileLeaseRegistry();
   return defaultLeases;
 }
-
-export function isPersonalCodexCliProfile(
-  profileId: CodexCliProfileId,
-): profileId is typeof CODEX_CLI_PERSONAL_PROFILE_ID {
-  return profileId === CODEX_CLI_PERSONAL_PROFILE_ID;
-}

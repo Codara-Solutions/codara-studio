@@ -11,8 +11,8 @@
 // architect) are layered on TOP of that roster only when a backend spawns the
 // server with SPARK_MCP_MODE=execute|automation — Claude via a per-run
 // --mcp-config, Codex via a `-c mcp_servers."codara-studio".env.SPARK_MCP_MODE`
-// override — and structured automation workers get SPARK_MCP_MODE=worker (the
-// studio surface plus the loop-lifecycle pair, structured-worker.ts). The
+// override — and automation workers get SPARK_MCP_MODE=worker (the
+// studio surface plus the loop-lifecycle pair). The
 // single server and all its rosters live in server.js itself.
 //
 // Design mirrors hook-installer.ts:
@@ -46,7 +46,7 @@ import { resolveBinary } from "./binary-resolver";
 import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 
 // The merged built-in server. Was two servers (cora-preview + cora-orchestrator)
 // before v5 — both are cleaned up as legacy on launch.
@@ -239,17 +239,7 @@ function buildServerEnv(): Record<string, string> {
   // always write it so the entry is explicit and self-describing. No
   // SPARK_MCP_MODE here: the global entry exposes the studio (preview +
   // terminal) roster; execute/automation rosters are opted in per-run.
-  return { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: sparkHome() };
-}
-
-// Install (or refresh) the codara-studio entry and remove any old Codara-
-// managed entries from previous versions.
-export async function installPlaywrightMcp(
-  options: CodexMcpHomeOptions = {},
-): Promise<void> {
-  // Keep the old function name so existing callers stay compatible — the
-  // wrapper just delegates. New code should call installSparkPreviewMcp.
-  await installSparkPreviewMcp(options);
+  return { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: codaraHome() };
 }
 
 export async function installSparkPreviewMcp(
@@ -296,31 +286,7 @@ export async function installSparkPreviewMcpAtBoot(): Promise<void> {
   ]);
 }
 
-// Per-runtime entry points used by the Capability Center's explicit install
-// buttons. `createIfMissing` lets a deliberate user action create the config
-// file/dir when the runtime CLI is present but hasn't written one yet — the
-// boot-time auto-installer never passes this (design rule #3: stay conservative).
-export async function installSparkPreviewMcpForClaude(createIfMissing = false): Promise<void> {
-  await installForClaude(createIfMissing);
-}
-
 export async function installSparkPreviewMcpForCodex(
-  createIfMissing = false,
-  options: CodexMcpHomeOptions = {},
-): Promise<void> {
-  await installForCodex(createIfMissing, undefined, options.codexHome);
-}
-
-// Back-compat aliases: the Execute/Automation backends call these lazily before
-// spawning a manager CLI to make sure the (now unified) codara-studio entry
-// exists. Execute/Automation rosters are opted in per-run — Claude via its
-// per-run --mcp-config, Codex via a `-c` env override — but the global entry
-// still has to exist so the CLI can spawn the server at all.
-export async function installOrchestratorMcpForCC(createIfMissing = false): Promise<void> {
-  await installForClaude(createIfMissing);
-}
-
-export async function installOrchestratorMcpForCodex(
   createIfMissing = false,
   options: CodexMcpHomeOptions = {},
 ): Promise<void> {
@@ -443,7 +409,7 @@ function matchesCurrent(value: unknown): boolean {
   if (!env || env.ELECTRON_RUN_AS_NODE !== "1") return false;
   // A stale SPARK_HOME_DIR (user relaunched Codara under a different home) must
   // force a rewrite so the MCP child dials the right handshake file.
-  if (env.SPARK_HOME_DIR !== sparkHome()) return false;
+  if (env.SPARK_HOME_DIR !== codaraHome()) return false;
   return true;
 }
 
@@ -727,7 +693,7 @@ function renderCodexBlock(): string {
     "",
     `[mcp_servers."${SERVER_NAME}".env]`,
     `ELECTRON_RUN_AS_NODE = "1"`,
-    `SPARK_HOME_DIR = ${tomlString(sparkHome())}`,
+    `SPARK_HOME_DIR = ${tomlString(codaraHome())}`,
     CODEX_BLOCK_END,
   ].join("\n");
 }
@@ -755,16 +721,6 @@ export function isSparkPreviewMcpAvailable(input: {
     if (existsSync(codexTarget.codexHome)) return true;
   }
   return detectUserSparkEntry(input.cwd, input.codexHome);
-}
-
-// Back-compat shim — orchestration code still imports this name. Will be
-// renamed in a follow-up.
-export function isPlaywrightMcpAvailable(input: {
-  cwd: string | null;
-  autoInstallEnabled: boolean;
-  codexHome?: string | null;
-}): boolean {
-  return isSparkPreviewMcpAvailable(input);
 }
 
 function detectUserSparkEntry(

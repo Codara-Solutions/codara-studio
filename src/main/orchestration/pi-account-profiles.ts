@@ -809,10 +809,3 @@ export class PiAccountProfileRegistry {
     });
   }
 }
-
-export function createPiAccountProfileRegistry(
-  rootDir: string,
-  options: PiAccountProfileRegistryOptions = {},
-): PiAccountProfileRegistry {
-  return new PiAccountProfileRegistry(rootDir, options);
-}

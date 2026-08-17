@@ -38,13 +38,9 @@
 //     (transcript read/write + `-r` resume live there).
 //   * Escape hatch: set SPARK_NO_CONFIG_SHIELD=1 to disable entirely.
 //
-// This module is used two ways:
-//   * Workers are launched by typing a command string into a shell, so callers
-//     take `buildClaudeShieldPrefix()` / `buildCodexShieldPrefix()` and splice
-//     the `sandbox-exec -p '…' ` prefix in front of the `claude`/`codex` word.
-//   * The manager backends spawn the CLI as a process (argv, no shell), so they
-//     call `buildClaudeSandboxArgv()` / `buildCodexSandboxArgv()` to rewrite the
-//     executable to `/usr/bin/sandbox-exec` with the profile as a leading arg.
+// Workers are launched by typing a command string into a shell, so callers
+// take `buildClaudeShieldPrefix()` / `buildCodexShieldPrefix()` and splice
+// the `sandbox-exec -p '…' ` prefix in front of the `claude`/`codex` word.
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -111,7 +107,7 @@ function buildDenyReadProfile(subpaths: string[], literals: string[]): string {
 // --settings flag it escalates to a blocking "Settings file could not be
 // read" dialog — either way a headless pty session hangs and the manager
 // exits code=1. The user's settings.json is also where Cora's OWN
-// spark-hook.py hooks are installed (worker state chips depend on them), so
+// codara-hook.py hooks are installed (worker state chips depend on them), so
 // hiding it would break the app's telemetry too. The policy/agents leak the
 // shield exists for lives in CLAUDE.md + agents/, which stay denied.
 function claudeProfile(): string {
@@ -168,32 +164,6 @@ export function buildClaudeShieldPrefix(): string | null {
 export function buildCodexShieldPrefix(): string | null {
   if (!isConfigShieldActive()) return null;
   return `${SANDBOX_EXEC_PATH} -p ${singleQuoteForShell(codexProfile())} `;
-}
-
-/**
- * Rewrite an (exe, args) argv pair to run under the Claude config shield. Used
- * by the manager backend, which spawns the CLI as a process (no shell), so the
- * profile goes in as a raw argv element — no quoting. Returns the argv unchanged
- * when the shield is inactive.
- */
-export function buildClaudeSandboxArgv(
-  exe: string,
-  args: string[],
-): { exe: string; args: string[] } {
-  if (!isConfigShieldActive()) return { exe, args };
-  return { exe: SANDBOX_EXEC_PATH, args: ["-p", claudeProfile(), exe, ...args] };
-}
-
-/**
- * Rewrite an (exe, args) argv pair to run under the Codex config shield. See
- * buildClaudeSandboxArgv.
- */
-export function buildCodexSandboxArgv(
-  exe: string,
-  args: string[],
-): { exe: string; args: string[] } {
-  if (!isConfigShieldActive()) return { exe, args };
-  return { exe: SANDBOX_EXEC_PATH, args: ["-p", codexProfile(), exe, ...args] };
 }
 
 // One-line startup log so live verification ("is the shield on?") doesn't need

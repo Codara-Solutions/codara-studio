@@ -1,7 +1,6 @@
 import { app } from "electron";
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ChatMode,
@@ -14,7 +13,7 @@ import {
   mintAgentSocketCapability,
   revokeAgentSocketCapability,
 } from "../agent-socket-capabilities";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { loadSettings } from "../storage";
 import { managedPiRuntimeNodeModules } from "./pi-runtime-install";
 import { writeFileAtomic } from "../fs-atomic";
@@ -24,21 +23,6 @@ import {
   type PiMcpAudience,
   type PiMcpServerConfig,
 } from "./pi-mcp-config";
-import {
-  admissionArtifactSha256,
-  artifactFromPiFrontierAdmission,
-  createPiFrontierAdmissionEntryFromEvidence,
-  emptyPiFrontierAdmissionCache,
-  parsePiFrontierAdmissionCache,
-  recallPiFrontierAdmission,
-  upsertPiFrontierAdmission,
-  type PiFrontierAdmissionCache,
-} from "./pi-admission-cache";
-import {
-  discoverPiFrontierVerification,
-  verificationManifestSha256,
-  type PiFrontierVerificationManifest,
-} from "./pi-verification";
 import {
   buildPiManagerLaunchPlan,
   inspectPiSubscriptionAuth,
@@ -64,12 +48,7 @@ export interface CodaraPiPaths {
   bridgePath: string;
   extensionPath: string;
   workerExtensionPath: string;
-  frontierExtensionPath: string;
-  frontierManifestDir: string;
-  frontierAdmissionCachePath: string;
   mcpConfigDir: string;
-  managedAgentDir: string;
-  managedAgentSources: string[];
 }
 
 export interface CreateCodaraPiLaunchOptions {
@@ -83,7 +62,6 @@ export interface CreateCodaraPiLaunchOptions {
   model?: string;
   thinking?: PiThinkingLevel;
   sessionName?: string;
-  contractPrompt?: string;
   projectPolicyMode?: ProjectPolicyMode;
   /** Explicit profile pin; undefined asks the central resolver for its default. */
   accountProfileId?: string;
@@ -107,29 +85,18 @@ function codaraPiBridgePath(): string {
   return smokeOverride;
 }
 
-export function codaraPiPaths(configDir = join(sparkHome(), "pi-agent")): CodaraPiPaths {
+export function codaraPiPaths(configDir = join(codaraHome(), "pi-agent")): CodaraPiPaths {
   return {
     configDir,
     authFile: join(configDir, "auth.json"),
     // Authentication and mutable account caches are private to a profile, but
     // transcript continuity belongs to the Codara run. Switching accounts
     // restarts the Pi process against the same canonical session directory.
-    sessionDir: join(sparkHome(), "pi-agent", "sessions"),
+    sessionDir: join(codaraHome(), "pi-agent", "sessions"),
     bridgePath: codaraPiBridgePath(),
     extensionPath: resolveBundledResourcePath("pi-cora", "index.ts"),
     workerExtensionPath: resolveBundledResourcePath("pi-cora", "worker.ts"),
-    frontierExtensionPath: resolveBundledResourcePath("pi-cora", "frontier-gate.ts"),
-    frontierManifestDir: join(configDir, "frontier", "manifests"),
-    frontierAdmissionCachePath: join(configDir, "frontier", "admission-cache.json"),
     mcpConfigDir: join(configDir, "mcp"),
-    managedAgentDir: join(configDir, "agents"),
-    managedAgentSources: [
-      resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-contract-tracer.md"),
-      resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-contract-auditor.md"),
-      resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-diff-auditor.md"),
-      resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-family-auditor.md"),
-      resolveBundledResourcePath("pi-cora", "agents", "codara-frontier-integration-auditor.md"),
-    ],
   };
 }
 
@@ -338,13 +305,6 @@ export async function resolveCodaraPiWebSearchExtension(): Promise<string | null
   return resolvePiWebSearchExtension(roots);
 }
 
-export async function inspectCodaraPiAuth(
-  provider: PiSubscriptionProvider,
-): Promise<PiSubscriptionAuthStatus> {
-  const paths = codaraPiPaths();
-  return inspectPiSubscriptionAuth(paths.authFile, provider);
-}
-
 export async function createCodaraPiLaunchPlan(
   options: CreateCodaraPiLaunchOptions,
 ): Promise<PiManagerLaunchPlan> {
@@ -360,14 +320,9 @@ export async function createCodaraPiLaunchPlan(
   const paths = codaraPiPaths(account.configDir);
   const untrustedPullRequest =
     options.projectPolicyMode === "untrusted-pull-request";
-  const frontierEnabled =
-    !untrustedPullRequest &&
-    options.mode === "execute" &&
-    options.executionPolicy === "frontier";
-  const [runtime, auth, frontierManifest, webSearchExtensionPath, mcp] = await Promise.all([
+  const [runtime, auth, webSearchExtensionPath, mcp] = await Promise.all([
     resolveCodaraPiRuntime(),
     inspectPiSubscriptionAuth(paths.authFile, options.provider),
-    frontierEnabled ? discoverPiFrontierVerification(options.cwd, options.contractPrompt) : Promise.resolve(null),
     resolveCodaraPiWebSearchExtension(),
     untrustedPullRequest
       ? Promise.resolve(null)
@@ -384,45 +339,7 @@ export async function createCodaraPiLaunchPlan(
   await Promise.all([
     mkdir(paths.configDir, { recursive: true, mode: 0o700 }),
     mkdir(paths.sessionDir, { recursive: true, mode: 0o700 }),
-    ...(frontierEnabled
-      ? [
-          mkdir(paths.frontierManifestDir, { recursive: true, mode: 0o700 }),
-          mkdir(paths.managedAgentDir, { recursive: true, mode: 0o700 }),
-        ]
-      : []),
   ]);
-  let frontierManifestPath: string | undefined;
-  let frontierManifestSha256: string | undefined;
-  let frontierAdmissionArtifactPath: string | undefined;
-  let frontierAdmissionArtifactSha256: string | undefined;
-  if (frontierManifest) {
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(options.runId)) {
-      throw new Error("Codara run id cannot be used as a Frontier manifest filename");
-    }
-    frontierManifestPath = join(paths.frontierManifestDir, `${options.runId}.json`);
-    frontierManifestSha256 = verificationManifestSha256(frontierManifest);
-    await writeFileAtomic(frontierManifestPath, JSON.stringify(frontierManifest));
-    if (process.platform !== "win32") await chmod(frontierManifestPath, 0o600);
-    await Promise.all(paths.managedAgentSources.map(async (sourcePath) => {
-      const target = join(paths.managedAgentDir, basename(sourcePath));
-      await writeFileAtomic(target, await readFile(sourcePath, "utf8"));
-      if (process.platform !== "win32") await chmod(target, 0o600);
-    }));
-    try {
-      const cache = parsePiFrontierAdmissionCache(JSON.parse(await readFile(paths.frontierAdmissionCachePath, "utf8")));
-      const entry = recallPiFrontierAdmission(cache, frontierManifest);
-      if (entry) {
-        const artifact = artifactFromPiFrontierAdmission(entry);
-        frontierAdmissionArtifactPath = join(paths.frontierManifestDir, `${options.runId}.admission.json`);
-        frontierAdmissionArtifactSha256 = admissionArtifactSha256(artifact);
-        await writeFileAtomic(frontierAdmissionArtifactPath, JSON.stringify(artifact));
-        if (process.platform !== "win32") await chmod(frontierAdmissionArtifactPath, 0o600);
-      }
-    } catch {
-      // Missing, corrupt, or stale caches are strict misses. Frontier continues
-      // with a fresh managed audit and never trusts a partially parsed entry.
-    }
-  }
   const plan = buildPiManagerLaunchPlan({
     runtime,
     provider: options.provider,
@@ -439,30 +356,20 @@ export async function createCodaraPiLaunchPlan(
     cwd: options.cwd,
     bridgePath: paths.bridgePath,
     extensionPaths: [
-      ...(frontierEnabled
-        ? [
-            paths.extensionPath,
-            join(runtime.packageRoot, "examples", "extensions", "subagent", "index.ts"),
-            paths.frontierExtensionPath,
-          ]
-        : [paths.extensionPath]),
+      paths.extensionPath,
       // Web search is optional: an absent package simply leaves the roster
       // unchanged rather than handing Pi a path it cannot load.
       ...(!untrustedPullRequest && webSearchExtensionPath
         ? [webSearchExtensionPath]
         : []),
     ],
-    frontierManifestPath,
-    frontierManifestSha256,
-    frontierAdmissionArtifactPath,
-    frontierAdmissionArtifactSha256,
     mcpConfigPath: mcp?.mcpConfigPath,
     mcpSdkDir: mcp?.mcpSdkDir,
     model: options.model,
     thinking: options.thinking ?? "high",
     sessionName: options.sessionName,
     projectPolicyMode: options.projectPolicyMode,
-    codaraHomeDir: sparkHome(),
+    codaraHomeDir: codaraHome(),
     processExecutable: electronAsNodeInterpreter(),
   });
   return untrustedPullRequest
@@ -608,7 +515,7 @@ export async function createCodaraPiWorkerLaunchPlan(
       model: options.model,
       thinking: options.thinking ?? "high",
       sessionName: options.sessionName,
-      codaraHomeDir: sparkHome(),
+      codaraHomeDir: codaraHome(),
       processExecutable: electronAsNodeInterpreter(),
     });
     // Frozen contract with resources/pi-cora/worker.ts: parallel-batch workers
@@ -664,99 +571,4 @@ export async function createCodaraPiWorkerLaunchPlan(
     });
     throw error;
   }
-}
-
-export interface PiFrontierCachePromotionResult {
-  promoted: boolean;
-  reason: string;
-  cacheEntryId?: string;
-}
-
-export interface PiFrontierRevisionArchive {
-  directory: string;
-  files: number;
-}
-
-/** Preserve the complete content-addressed gate transcript before a revised
- * contract reuses the run's live manifest basename. */
-export async function archiveCodaraPiFrontierRevision(
-  plan: PiManagerLaunchPlan,
-  revision: number,
-): Promise<PiFrontierRevisionArchive | null> {
-  if (!plan.frontierManifestPath) return null;
-  if (!Number.isSafeInteger(revision) || revision < 1 || revision > 1_000) {
-    throw new Error("Frontier contract revision number is outside 1-1000");
-  }
-  const sourceDirectory = dirname(plan.frontierManifestPath);
-  const manifestName = basename(plan.frontierManifestPath);
-  const stem = manifestName.endsWith(".json") ? manifestName.slice(0, -5) : manifestName;
-  const archiveDirectory = join(sourceDirectory, `${stem}.revision-${revision}`);
-  await mkdir(archiveDirectory, { recursive: false, mode: 0o700 });
-  const entries = await readdir(sourceDirectory, { withFileTypes: true });
-  const sources = entries.filter((entry) => entry.isFile() &&
-    (entry.name === manifestName || entry.name.startsWith(`${stem}.`)) &&
-    !entry.name.includes(".revision-"));
-  for (const entry of sources) {
-    const target = join(archiveDirectory, entry.name);
-    await copyFile(join(sourceDirectory, entry.name), target);
-    if (process.platform !== "win32") await chmod(target, 0o600);
-  }
-  return { directory: archiveDirectory, files: sources.length };
-}
-
-let frontierCachePromotionQueue = Promise.resolve();
-
-async function promoteCodaraPiFrontierAdmissionNow(
-  plan: PiManagerLaunchPlan,
-): Promise<PiFrontierCachePromotionResult> {
-  if (!plan.frontierManifestPath || !plan.frontierManifestSha256) {
-    return { promoted: false, reason: "not a Frontier launch" };
-  }
-  const manifestBytes = await readFile(plan.frontierManifestPath).catch(() => null);
-  if (!manifestBytes || createHash("sha256").update(manifestBytes).digest("hex") !== plan.frontierManifestSha256) {
-    return { promoted: false, reason: "manifest is missing or changed" };
-  }
-  let manifest: PiFrontierVerificationManifest;
-  try {
-    manifest = JSON.parse(manifestBytes.toString("utf8")) as PiFrontierVerificationManifest;
-  } catch {
-    return { promoted: false, reason: "manifest JSON is invalid" };
-  }
-  const evidencePath = plan.frontierManifestPath.replace(/\.json$/i, ".evidence.json");
-  let evidence: unknown;
-  try { evidence = JSON.parse(await readFile(evidencePath, "utf8")); }
-  catch { return { promoted: false, reason: "Frontier evidence is missing or invalid" }; }
-  const runId = plan.env.SPARK_RUN_ID;
-  let entry;
-  try {
-    if (typeof runId !== "string") throw new Error("Frontier run id is missing");
-    entry = createPiFrontierAdmissionEntryFromEvidence({
-      manifest,
-      manifestSha256: plan.frontierManifestSha256,
-      runId,
-      evidence,
-    });
-  } catch (error) {
-    return { promoted: false, reason: error instanceof Error ? error.message : String(error) };
-  }
-  const paths = codaraPiPaths();
-  let cache: PiFrontierAdmissionCache = emptyPiFrontierAdmissionCache();
-  try {
-    cache = parsePiFrontierAdmissionCache(JSON.parse(await readFile(paths.frontierAdmissionCachePath, "utf8")));
-  } catch {
-    // A newly validated entry can safely replace a missing or corrupt store.
-  }
-  const updated = upsertPiFrontierAdmission(cache, entry);
-  await mkdir(dirname(paths.frontierAdmissionCachePath), { recursive: true, mode: 0o700 });
-  await writeFileAtomic(paths.frontierAdmissionCachePath, JSON.stringify(updated));
-  if (process.platform !== "win32") await chmod(paths.frontierAdmissionCachePath, 0o600);
-  return { promoted: true, reason: "fresh managed admission stored", cacheEntryId: entry.cacheEntryId };
-}
-
-export function promoteCodaraPiFrontierAdmission(
-  plan: PiManagerLaunchPlan,
-): Promise<PiFrontierCachePromotionResult> {
-  const work = frontierCachePromotionQueue.then(() => promoteCodaraPiFrontierAdmissionNow(plan));
-  frontierCachePromotionQueue = work.then(() => undefined, () => undefined);
-  return work;
 }

@@ -40,7 +40,7 @@ import {
   listRuns,
   startAutopilot,
 } from "./orchestration/run-store";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { loadState, updateState } from "./storage";
 
 export interface GitHubPullRequestWorkspaceDependencies {
@@ -114,7 +114,7 @@ function productionDependencies(): GitHubPullRequestWorkspaceDependencies {
     createRunWithReservedId,
     startAutopilot,
     worktreesRoot: (repoCwd) =>
-      managedWorktreesRoot(sparkHome(), repoCwd),
+      managedWorktreesRoot(codaraHome(), repoCwd),
     publishState: (state) => {
       setAllowedRoots(state.workspaces.map((workspace) => workspace.cwd));
       for (const window of BrowserWindow.getAllWindows()) {

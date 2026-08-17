@@ -68,13 +68,6 @@ export const CODEX_MODEL_BY_TIER: Record<AgentModelTier, CodexModelId> = {
   cheap: "gpt-5.6-luna",
 };
 
-export function codexModelForTier(tier: AgentModelTier): CodexModelCatalogEntry {
-  return (
-    CODEX_MODEL_CATALOG.find((model) => model.id === CODEX_MODEL_BY_TIER[tier]) ??
-    CODEX_MODEL_CATALOG[0]
-  );
-}
-
 // Long-lived Cora sessions and persisted looms can retain model ids from the
 // prompt/catalog they were created with. Normalize known OpenAI predecessors at
 // launch/edit boundaries so an old session cannot keep pinning a deprecated

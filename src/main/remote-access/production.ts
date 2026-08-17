@@ -1,5 +1,5 @@
 // Production wiring for Remote Access: builds the RemoteAccessService's
-// dependencies from the real main process (sparkHome, storage, pty-manager,
+// dependencies from the real main process (codaraHome, storage, pty-manager,
 // shells) and owns the process-wide singleton. This is the only module in
 // remote-access/ allowed to import the rest of the main process; everything
 // else stays plain Node so tests and the e2e harness can run it directly.
@@ -86,7 +86,6 @@ import {
 } from "../orchestration/run-store";
 import { inspectPiAccountProfileAuthStore } from "../orchestration/pi-account-auth-store";
 import { inspectPiModelCatalog } from "../orchestration/pi-model-catalog";
-import { PiAccountProfileRegistry } from "../orchestration/pi-account-profiles";
 import { inspectCachedPiSubscriptionUsageProfiles } from "../orchestration/pi-subscription-usage";
 import { nativeCliAccounts } from "../orchestration/native-cli-accounts";
 import { BOARD_MAX_CARDS } from "../orchestration/board-store";
@@ -112,7 +111,7 @@ import {
 } from "./phone-notify";
 import { getPreferenceCached, getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import {
   loadSettings,
   loadState,
@@ -240,7 +239,6 @@ let workspaceMutation: Promise<void> = Promise.resolve();
 const coraRunMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
 let lastRemoteImagePruneAt = 0;
-let accountProfileRegistry: PiAccountProfileRegistry | null = null;
 
 // DTO budgets deliberately leave generous headroom under the 1 MiB frame
 // ceiling for JSON escaping and the response envelope.
@@ -290,7 +288,7 @@ const NATIVE_CLI_PROFILE_ID_PATTERN =
 export function getRemoteAccessService(): RemoteAccessService {
   if (!singleton) {
     singleton = new RemoteAccessService({
-      remoteDir: join(sparkHome(), "remote"),
+      remoteDir: join(codaraHome(), "remote"),
       deviceName: hostname(),
       appVersion: app.getVersion(),
       listWorkspaces: listWorkspacesForRemote,
@@ -392,7 +390,7 @@ function scheduleTerminalsChangedPush(): void {
 
 function getCoraSendReceiptIndex(): Promise<CoraSendReceiptIndex> {
   coraSendReceiptIndexPromise ??= CoraSendReceiptIndex.open({
-    rootDir: join(sparkHome(), "remote"),
+    rootDir: join(codaraHome(), "remote"),
     log: (line) => logMain("remote-access", line),
   });
   return coraSendReceiptIndexPromise;
@@ -443,16 +441,6 @@ async function getFleetOverviewForRemote(): Promise<RemoteFleetOverviewProjectio
     listJobs(),
   ]);
   return projectRemoteFleetOverview(workspaces, runs, automations);
-}
-
-function getAccountProfileRegistry(): PiAccountProfileRegistry {
-  // Metadata sits beside Pi's app-owned configuration, never in the remote
-  // directory or a phone-readable auth store. The registry itself rejects
-  // token-shaped/unknown fields and exposes only opaque ids + labels.
-  accountProfileRegistry ??= new PiAccountProfileRegistry(
-    join(sparkHome(), "pi-agent"),
-  );
-  return accountProfileRegistry;
 }
 
 async function listSubscriptionProfilesForRemote(): Promise<
@@ -571,17 +559,21 @@ async function resumeCoraRunForRemote(input: {
           reason: "Automation runs are resumed from Automations.",
         };
       }
+      // The wire type still admits "native-cli" so an older phone build can
+      // ask; Studio retired the claude/codex manager backends, so the only
+      // answer left for that selection is incompatible.
+      if (input.account && input.account.kind !== "subscription") {
+        return {
+          outcome: "account-incompatible",
+          recoveryId: input.recoveryId,
+          reason: "Direct-CLI accounts can no longer resume a Cora manager turn; pick a subscription account.",
+        };
+      }
       const account = input.account
-        ? input.account.kind === "subscription"
-          ? {
-              kind: "subscription" as const,
-              profileId: input.account.profileId,
-            }
-          : {
-              kind: "native-cli" as const,
-              backend: input.account.runtime,
-              profileId: input.account.profileId,
-            }
+        ? {
+            kind: "subscription" as const,
+            profileId: input.account.profileId,
+          }
         : undefined;
       const result = await resumeManagerTurnRecovery({
         runId: run.id,
@@ -2347,22 +2339,7 @@ function toRemoteRun(
     ACCOUNT_PROFILE_ID_PATTERN.test(run.chatAccountProfileId)
       ? run.chatAccountProfileId
       : undefined;
-  const backend =
-    run.chatBackend === "claude" || run.chatBackend === "codex"
-      ? run.chatBackend
-      : run.chatBackend === "pi" || run.chatBackend === undefined
-        ? "pi"
-        : undefined;
-  const nativeAccountProfileId =
-    backend === "claude" &&
-    typeof run.nativeClaudeProfileId === "string" &&
-    NATIVE_CLI_PROFILE_ID_PATTERN.test(run.nativeClaudeProfileId)
-      ? run.nativeClaudeProfileId
-      : backend === "codex" &&
-          typeof run.nativeCodexProfileId === "string" &&
-          NATIVE_CLI_PROFILE_ID_PATTERN.test(run.nativeCodexProfileId)
-        ? run.nativeCodexProfileId
-        : undefined;
+  const backend = "pi" as const;
   const recoverySummary = remoteCoraRecoverySummary(run);
   const failedRecoveryAccount = run.managerTurnRecovery?.failedAccountProfileId;
   const recovery =
@@ -2421,9 +2398,8 @@ function toRemoteRun(
   return {
     ...summary,
     messages,
-    ...(backend ? { backend } : {}),
-    ...(backend === "pi" && accountProfileId ? { accountProfileId } : {}),
-    ...(nativeAccountProfileId ? { nativeAccountProfileId } : {}),
+    backend,
+    ...(accountProfileId ? { accountProfileId } : {}),
     ...(recovery ? { recovery } : {}),
     ...(workers.length > 0 ? { workers } : {}),
     ...(isRemoteCoraIdentity(run.currentStepId)
@@ -3088,7 +3064,7 @@ const MAX_HANDLED_PHONE_NOTIFY_EVENT_IDS = 4_096;
 
 function getPhoneNotifyStore(): PhoneNotificationStore {
   phoneNotifyStore ??= new PhoneNotificationStore(
-    join(sparkHome(), "remote"),
+    join(codaraHome(), "remote"),
     (line) => logMain("remote-access", line),
   );
   return phoneNotifyStore;

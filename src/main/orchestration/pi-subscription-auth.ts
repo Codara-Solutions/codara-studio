@@ -322,9 +322,6 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
   };
 }
 
-/** Stable sanitized read for Settings/IPC. Credentials and auth paths never leave main. */
-export const inspectPiSubscriptionProfiles = inspectPiSubscriptions;
-
 /**
  * Install the pinned Pi runtime for a Settings window, streaming npm's
  * progress back to that window and finishing with a fresh overview so the
@@ -783,18 +780,6 @@ export async function deletePiSubscriptionProfile(
   invalidatePiModelCatalogCache();
   broadcastSubscriptionsChanged(profile.provider);
   return inspectPiSubscriptions();
-}
-
-/** Compatibility delete: remove the provider default profile. */
-export async function disconnectPiSubscription(rawProvider: unknown): Promise<PiSubscriptionOverview> {
-  const provider = providerFrom(rawProvider);
-  const inspection = await inspectPiAccountProfileAuthStore();
-  const defaultId = inspection.snapshot.defaults[provider];
-  const profile =
-    inspection.snapshot.profiles.find((entry) => entry.id === defaultId) ??
-    inspection.snapshot.profiles.find((entry) => entry.provider === provider);
-  if (!profile) return inspectPiSubscriptions();
-  return deletePiSubscriptionProfile(profile.id);
 }
 
 export { renamePiAccountProfile, setDefaultPiAccountProfile };

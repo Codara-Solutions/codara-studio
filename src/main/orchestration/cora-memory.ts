@@ -2,7 +2,7 @@ import { existsSync, readFileSync, renameSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { writeFileAtomic } from "../fs-atomic";
 
 // Cora memory v2: curated semantic guidance, two markdown tiers.
@@ -133,7 +133,7 @@ interface MemoryFile {
 // ── paths and state ─────────────────────────────────────────────────────────
 
 function memoryRoot(): string {
-  return join(sparkHome(), "memory");
+  return join(codaraHome(), "memory");
 }
 
 // Strip path separators and other unsafe characters so a workspaceId can never
@@ -208,7 +208,7 @@ function tierEnabled(state: MemoryState, scope: MemoryScope, workspaceId: string
 // unreadable state file degrades to the raw workspaceId.
 function resolveWorkspaceMeta(workspaceId: string): { name: string; cwd: string } {
   try {
-    const raw = JSON.parse(readFileSync(join(sparkHome(), "spark-state.json"), "utf8")) as {
+    const raw = JSON.parse(readFileSync(join(codaraHome(), "spark-state.json"), "utf8")) as {
       workspaces?: Array<{ id?: unknown; name?: unknown; cwd?: unknown }>;
     };
     const match = raw.workspaces?.find((entry) => entry?.id === workspaceId);
@@ -527,7 +527,7 @@ function ensureMigrated(): Promise<void> {
  * malformed ledger is renamed away without import rather than retried forever.
  */
 async function migrateLegacyLessons(): Promise<void> {
-  const legacyPath = join(sparkHome(), "lessons.json");
+  const legacyPath = join(codaraHome(), "lessons.json");
   try {
     if (!existsSync(legacyPath)) return;
     let parsed: unknown = null;
@@ -677,7 +677,7 @@ function renderMemorySections(workspaceId: string, now: number): string | null {
 // bytes change (a write landed, the user edited a file, a toggle flipped) or
 // when the caller forces it (canonical replay after a rewind rebuilds the CLI
 // session, which lost the earlier injection). Same bounded LRU shape as
-// loadRunManagerGuidance in spark-agent-backend.ts. Each entry keeps the hash
+// loadRunManagerGuidance in agent-backend.ts. Each entry keeps the hash
 // recorded before it (one level), so a turn whose prompt was never accepted by
 // the provider can be rolled back and the retry injects again.
 interface RunMemoryInjection {

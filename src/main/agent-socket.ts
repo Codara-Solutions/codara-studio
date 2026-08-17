@@ -5,7 +5,7 @@ import { promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
 import { waitForLoopbackPreviewServer } from "./preview-navigation";
@@ -282,7 +282,7 @@ export async function stopAgentSocket(): Promise<void> {
 }
 
 function handshakeFilePath(): string {
-  return join(sparkHome(), HANDSHAKE_FILE);
+  return join(codaraHome(), HANDSHAKE_FILE);
 }
 
 async function writeHandshakeFile(input: { url: string; token: string }): Promise<void> {
@@ -1007,7 +1007,9 @@ async function handleChatAppend(
   }
 }
 
-const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["claude", "codex", "pi"]);
+// Pi is the only manager backend; an explicit legacy "claude"/"codex" is
+// rejected loudly rather than silently coerced.
+const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["pi"]);
 // Auto is the only chat mode a user-facing chat can be started in. Rejecting an
 // old `--mode plan` loudly beats silently coercing it to something else.
 const CLI_CHAT_MODES = new Set<ChatMode>(["auto"]);
@@ -1118,7 +1120,7 @@ async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {
   return matches.length === 1 ? matches[0] : null;
 }
 
-// Public headless Cora lifecycle used by bin/cora.cjs. Unlike orchestrator.*,
+// Public headless Cora lifecycle used by cli/cora.cjs. Unlike orchestrator.*,
 // these methods represent the human at the top of a chat: create starts a real
 // managed run, send appends a user turn (or answers the current question), and
 // wait blocks without consuming manager tokens until the run needs attention.
@@ -1221,9 +1223,17 @@ async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
       import("./remote-access/subscription-profile-projection"),
     ]);
     const inspection = await inspectPiAccountProfileAuthStore();
-    const projected = projectRemoteSubscriptionProfiles(
-      inspection,
-      inspectCachedPiSubscriptionUsageProfiles(),
+    const cachedUsage = inspectCachedPiSubscriptionUsageProfiles();
+    const projected = projectRemoteSubscriptionProfiles(inspection, cachedUsage);
+    const windowsByProfile = new Map(
+      cachedUsage.map((usage) => [
+        usage.profileId,
+        (usage.windows ?? []).map((window) => ({
+          label: window.label,
+          remainingPercent: window.remainingPercent,
+          resetsIn: window.resetsIn ?? null,
+        })),
+      ]),
     );
     return successResponse(id, {
       accounts: projected.map((profile) => ({
@@ -1233,6 +1243,10 @@ async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
         status: profile.status,
         isDefault: profile.isDefault,
         remainingPercent: profile.usage?.remainingPercent ?? null,
+        // Every quota clock the provider reported (Anthropic has three:
+        // 5-hour, 7-day, and the Fable-specific 7-day), so clients can show
+        // more than the collapsed number above.
+        windows: windowsByProfile.get(profile.id) ?? [],
       })),
     });
   } catch (err) {
@@ -1530,7 +1544,7 @@ async function handleChatResume(
   }
 }
 
-// ── app.* - dev/test surface for the `cora` CLI (bin/cora.cjs) ──────────────
+// ── app.* - dev/test surface for the `cora` CLI (cli/cora.cjs) ──────────────
 //
 // These drive the APP ITSELF (main window pixels, renderer JS, preferences,
 // the notify pipeline) rather than a preview tab, so a feature can be
@@ -1570,7 +1584,7 @@ function handleAppInfo(id: JsonRpcId): JsonRpcResponse {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
-    homeDir: sparkHome(),
+    homeDir: codaraHome(),
     uptimeSec: Math.round(process.uptime()),
     windows: BrowserWindow.getAllWindows()
       .filter((w) => !w.webContents.isDestroyed())
@@ -1939,10 +1953,10 @@ function countVerifierRoundsForScope(
 
 // Verifier rounds allowed per implementation scope, derived from the run's
 // execution policy (itself derived from the manager's complexity call): fast
-// gets a single independent verification, deep two, frontier three.
+// gets a single independent verification, deep two.
 function verifierRoundCapForRun(run: RunState): number {
   const policy = effectiveRunExecutionPolicy(run);
-  const base = policy === "frontier" ? 3 : policy === "deep" ? 2 : 1;
+  const base = policy === "deep" ? 2 : 1;
   return run.taskComplexity === "complex" ? Math.max(base, 2) : base;
 }
 

@@ -51,7 +51,7 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
   }
 }
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
@@ -227,12 +227,6 @@ async function getRunStore(): Promise<typeof import("./orchestration/run-store")
   return runStoreMod;
 }
 
-let runQueueMod: typeof import("./orchestration/run-queue") | undefined;
-async function getRunQueue(): Promise<typeof import("./orchestration/run-queue")> {
-  runQueueMod ??= await import("./orchestration/run-queue");
-  return runQueueMod;
-}
-
 let schedulerMod: typeof import("./orchestration/scheduler") | undefined;
 async function getScheduler(): Promise<typeof import("./orchestration/scheduler")> {
   schedulerMod ??= await import("./orchestration/scheduler");
@@ -325,7 +319,6 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
-  EnqueueRunInput,
   FileListResult,
   FsEntry,
   FsFileContent,
@@ -340,10 +333,8 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
-  GitSmartMergeResult,
   GitStashList,
   GitStatus,
-  InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   RunBoard,
@@ -359,7 +350,6 @@ import type {
   ExportCoraWhiteboardFileInput,
   ExportFileDialogInput,
   ImportedCoraWhiteboardFile,
-  PauseRunInput,
   NativeCliAccountCancelLoginInput,
   NativeCliAccountCreateInput,
   NativeCliAccountDeleteResult,
@@ -381,13 +371,9 @@ import type {
   PreferencesChange,
   PrepareWorkerTaskInput,
   NotificationCenterEntry,
-  QueuedRun,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
-  PlanFile,
-  RunArtifactPaths,
-  RunQueueState,
   RunState,
   RuntimeState,
   ScheduledJob,
@@ -405,8 +391,6 @@ import type {
   UndoToCheckpointResult,
   UpdateRunStatusInput,
   UpdateScheduledJobInput,
-  UpdateStepInput,
-  UpdateWorkerTaskInput,
   DeleteWorkerSessionInput,
   DeleteWorkerSessionResult,
   WorkerSessionRuntime,
@@ -828,19 +812,6 @@ export function registerIpc(): void {
 
   handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
     return saveSettings(settings);
-  });
-
-  handle("cora-cli:status", async () => {
-    const { inspectCoraCliInstall } = await import("./cora-cli-install");
-    return inspectCoraCliInstall();
-  });
-  handle("cora-cli:install", async () => {
-    const { installCoraCli } = await import("./cora-cli-install");
-    return installCoraCli();
-  });
-  handle("cora-cli:uninstall", async () => {
-    const { uninstallCoraCli } = await import("./cora-cli-install");
-    return uninstallCoraCli();
   });
 
   handle(
@@ -1286,21 +1257,6 @@ export function registerIpc(): void {
     return result.filePaths[0];
   });
 
-  handle("dialog:openImages", async (e, defaultPath?: string): Promise<string[]> => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const result = await dialog.showOpenDialog(win!, {
-      properties: ["openFile", "multiSelections"],
-      defaultPath: defaultPath || app.getPath("pictures") || app.getPath("home"),
-      filters: [
-        {
-          name: "Images",
-          extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
-        },
-      ],
-    });
-    if (result.canceled) return [];
-    return result.filePaths;
-  });
 
   handle("dialog:openSshKey", async (e): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -1510,10 +1466,6 @@ export function registerIpc(): void {
     },
   );
 
-  handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
-    await assertAllowedReadPathResolved(root);
-    return listMarkdownFiles(root);
-  });
 
   handle(
     "fs:statFile",
@@ -1937,11 +1889,6 @@ export function registerIpc(): void {
     return fetchRemote(cwd);
   });
 
-  handle("git:prepareSmartMerge", async (_e, cwd: string): Promise<GitSmartMergeResult> => {
-    const { prepareSmartMerge } = await getGitOps();
-    return prepareSmartMerge(cwd);
-  });
-
   handle("git:undoLastCommit", async (_e, cwd: string): Promise<GitOpResult> => {
     const { undoLastCommit } = await getGitOps();
     return undoLastCommit(cwd);
@@ -2039,7 +1986,7 @@ export function registerIpc(): void {
         createCheckoutWorktree,
         managedWorktreesRoot,
       } = await getGitWorktrees();
-      const worktreesRoot = managedWorktreesRoot(sparkHome(), input.repoCwd);
+      const worktreesRoot = managedWorktreesRoot(codaraHome(), input.repoCwd);
       const result = input.checkoutBranch
         ? await createCheckoutWorktree({
             repoCwd: input.repoCwd,
@@ -2207,15 +2154,7 @@ export function registerIpc(): void {
     return listEvents(runId);
   });
 
-  handle("orchestration:getArtifactPaths", async (_e, runId: string): Promise<RunArtifactPaths> => {
-    const { getRunArtifactPaths } = await getRunStore();
-    return getRunArtifactPaths(runId);
-  });
 
-  handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
-    const { appendTestEvent } = await getRunStore();
-    return appendTestEvent(args.runId, args.message);
-  });
 
   handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
     assertLocalWorkspace(input.cwd, "Automations and autopilot");
@@ -2223,15 +2162,7 @@ export function registerIpc(): void {
     return startAutopilot(input);
   });
 
-  handle("orchestration:pauseRun", async (_e, input: PauseRunInput): Promise<RunState> => {
-    const { pauseRun } = await getRunStore();
-    return pauseRun(input);
-  });
 
-  handle("orchestration:pauseRunAfterCurrentWorkers", async (_e, input: PauseRunInput): Promise<RunState> => {
-    const { pauseRunAfterCurrentWorkers } = await getRunStore();
-    return pauseRunAfterCurrentWorkers(input);
-  });
 
   handle("orchestration:forcePauseRun", async (_e, runId: string): Promise<RunState> => {
     const { forcePauseRun } = await getRunStore();
@@ -2288,18 +2219,6 @@ export function registerIpc(): void {
     },
   );
 
-  handle(
-    "orchestration:interruptRunWithMessage",
-    async (_e, input: InterruptRunWithMessageInput): Promise<RunState> => {
-      const { interruptRunWithMessage } = await getRunStore();
-      return interruptRunWithMessage(input);
-    },
-  );
-
-  handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
-    const { updateRunStatus } = await getRunStore();
-    return updateRunStatus(input);
-  });
 
   handle("orchestration:markRunSeen", async (_e, input: MarkRunSeenInput): Promise<RunState> => {
     const { markRunSeen } = await getRunStore();
@@ -2332,20 +2251,12 @@ export function registerIpc(): void {
     return createStep(input);
   });
 
-  handle("orchestration:updateStep", async (_e, input: UpdateStepInput): Promise<RunState> => {
-    const { updateStep } = await getRunStore();
-    return updateStep(input);
-  });
 
   handle("orchestration:createWorkerTask", async (_e, input: CreateWorkerTaskInput): Promise<RunState> => {
     const { createWorkerTask } = await getRunStore();
     return createWorkerTask(input);
   });
 
-  handle("orchestration:updateWorkerTask", async (_e, input: UpdateWorkerTaskInput): Promise<RunState> => {
-    const { updateWorkerTask } = await getRunStore();
-    return updateWorkerTask(input);
-  });
 
   handle("orchestration:prepareWorkerTask", async (_e, input: PrepareWorkerTaskInput) => {
     const { prepareWorkerTask } = await getRunStore();
@@ -2370,46 +2281,6 @@ export function registerIpc(): void {
   handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
     const { deleteRun } = await getRunStore();
     await deleteRun(runId);
-  });
-
-  // ── Overnight queue ─────────────────────────────────────────────────────
-  // Thin IPC over the run-queue module (src/main/orchestration/run-queue.ts).
-  // The queue persists its own JSON state and drains pending runs through
-  // run-store's startAutopilot; these channels just expose CRUD + a manual
-  // burn-down trigger so the renderer Queue panel can enqueue/list. run-queue.ts
-  // imports RunQueueState/QueuedRun/EnqueueRunInput from @shared/types, so these
-  // handlers return its values directly — the shapes are the IPC contract.
-  handle("queue:list", async (): Promise<RunQueueState> => {
-    const { loadQueue } = await getRunQueue();
-    return loadQueue();
-  });
-
-  handle("queue:enqueue", async (_e, input: EnqueueRunInput): Promise<QueuedRun> => {
-    const { enqueue, burnDown } = await getRunQueue();
-    const queued = await enqueue(input);
-    // Fire-and-forget: kick the drain so a free slot starts this run without
-    // making the renderer wait on autopilot. Errors are logged, not surfaced.
-    void burnDown().catch((err: unknown) =>
-      console.error("[queue] burnDown after enqueue failed", err),
-    );
-    return queued;
-  });
-
-  handle("queue:dequeue", async (_e, id: string): Promise<RunQueueState> => {
-    const { dequeue } = await getRunQueue();
-    return dequeue(id);
-  });
-
-  handle("queue:setConcurrency", async (_e, n: number): Promise<RunQueueState> => {
-    const { setConcurrency } = await getRunQueue();
-    return setConcurrency(n);
-  });
-
-  // burnDown() drains in place and resolves with the post-drain queue snapshot,
-  // which is exactly what the renderer wants back from this channel.
-  handle("queue:burnDown", async (): Promise<RunQueueState> => {
-    const { burnDown } = await getRunQueue();
-    return burnDown();
   });
 
   // ── Cora Board ──────────────────────────────────────────────────────────
@@ -2648,8 +2519,8 @@ export function registerIpc(): void {
 
   // Probe for an existing session. Used by ChatPanel's backend-terminal tab
   // to decide whether to mount a TerminalPane (which would try to spawn —
-  // and fail with ENOENT — if the session hasn't been spawned yet by the
-  // headless cli-session). Cheap: just a Map.has() check.
+  // and fail with ENOENT — if the session hasn't been spawned yet in main).
+  // Cheap: just a Map.has() check.
   handle("pty:exists", async (_e, args: { id: string }) => {
     return pty.exists(args.id);
   });
@@ -2880,7 +2751,7 @@ export function registerIpc(): void {
 
   // Persistent trail of restore decisions (fire-and-forget from the renderer).
   // "Some panes resume, some don't" is undebuggable without knowing what each
-  // pane decided at boot — this lands every decision in <sparkHome>/logs/main.log.
+  // pane decided at boot — this lands every decision in <codaraHome>/logs/main.log.
   ipcMain.on("agentSession:logRestore", (e, line: string) => {
     if (!isTrustedOnSender(e, "agentSession:logRestore")) return;
     if (typeof line === "string" && line.length < 2048) logMain("restore", line);
@@ -3115,12 +2986,6 @@ export function registerIpc(): void {
   // Hide the window to the system tray (close-to-tray) without quitting. On
   // win32 we also drop the taskbar button so the hidden window doesn't linger
   // there — mirrors the close-to-tray path in main's window `close` handler.
-  handle("window:hide-to-tray", async (e): Promise<void> => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (!win) return;
-    win.hide();
-    if (process.platform === "win32") win.setSkipTaskbar(true);
-  });
 
   handle(
     "window:setTitleBarTheme",
@@ -3288,37 +3153,6 @@ export function registerIpc(): void {
     // only the trusted renderer may answer, never a webview guest process.
     if (!isTrustedOnSender(e, "remote:authPromptAnswer")) return;
     answerAuthPrompt(answer);
-  });
-  handle(
-    "remote:detectAgents",
-    async (_e, hostIdOrPath: string): Promise<RemoteAgentAvailability> =>
-      detectRemoteAgents(hostIdOrPath),
-  );
-
-  // SSH key management for the SSH manager's Keys tab. Confined to ~/.ssh by
-  // the module itself; the renderer never passes paths for list/generate/delete.
-  handle("sshKeys:list", async (): Promise<SshKeyInfo[]> => listSshKeys());
-  handle(
-    "sshKeys:generate",
-    async (
-      _e,
-      opts: { name: string; passphrase?: string; comment?: string },
-    ): Promise<SshKeyInfo> => generateSshKey(opts),
-  );
-  handle(
-    "sshKeys:import",
-    async (_e, sourcePath: string): Promise<SshKeyImportResult> => importSshKey(sourcePath),
-  );
-  handle("sshKeys:delete", async (_e, name: string): Promise<void> => deleteSshKey(name));
-
-  // ── Remote Access (phone pairing + listener) ───────────────────────────
-  // Settings' "Remote access" section. Distinct from the remote:* channels
-  // above, which are the SSH remote-workspace feature. The renderer only
-  // ever sees status, device summaries, the pairing state, and the QR
-  // payload string; key material and pairing secret internals stay in main.
-  handle("remoteAccess:getStatus", async (event): Promise<RemoteAccessStatus> => {
-    const service = await getRemoteAccess();
-    return service.getStatus();
   });
   handle(
     "remoteAccess:setEnabled",

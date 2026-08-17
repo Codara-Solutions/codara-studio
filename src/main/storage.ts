@@ -12,7 +12,7 @@ import {
   type WorkspaceGroup,
 } from "@shared/types";
 import { isRemotePath } from "@shared/remote";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
 
@@ -51,11 +51,11 @@ let settingsWriting: Promise<void> = Promise.resolve();
 const stateSavedListeners = new Set<(state: AppState) => void>();
 
 function statePath(): string {
-  return join(sparkHome(), STATE_FILE);
+  return join(codaraHome(), STATE_FILE);
 }
 
 function settingsPath(): string {
-  return join(sparkHome(), SETTINGS_FILE);
+  return join(codaraHome(), SETTINGS_FILE);
 }
 
 async function readFromDisk(): Promise<AppState> {
@@ -393,27 +393,6 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
   });
   await write;
   return settingsCache;
-}
-
-// In-memory settings override seam for the headless eval entry point. Loads
-// the on-disk settings, applies a partial override, and pins the result in the
-// module cache so every subsequent `loadSettings()` returns the merged value
-// WITHOUT touching spark-settings.json on disk. Returns the merged settings
-// object for callers that want to inspect what they pinned.
-//
-// Only for values that genuinely live in spark-settings.json. A variant's
-// manager backend/model/effort do NOT come through here, they are passed to
-// startAutopilot as the run's chat* fields (they were mirrored onto
-// openRouterModel back when the manager ran on the OpenRouter API; that
-// setting now only feeds the editor's inline AI). No
-// caller today, kept as the headless override hook.
-export async function applyInMemorySettingsOverride(
-  partial: Partial<AppSettings>,
-): Promise<AppSettings> {
-  const live = await readSettingsFromDisk();
-  const merged = normalizeSettings({ ...live, ...partial });
-  settingsCache = merged;
-  return merged;
 }
 
 export async function flush(): Promise<void> {

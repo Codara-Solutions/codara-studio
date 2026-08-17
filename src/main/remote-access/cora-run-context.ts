@@ -8,7 +8,6 @@
  * byte-contract test bundles this module and runs the real table instead.
  */
 
-import { effectiveChatOneMillionContext } from "@shared/chat-policy";
 import {
   chatContextCapacityTokens,
   resolveCompactAtTokens,
@@ -88,9 +87,6 @@ export function remoteCoraRunContext(
     }
   }
   if (usedTokens === undefined || !call) return undefined;
-  // Same normalization the dispatch layer applies: a run written before the
-  // field existed is a Pi chat.
-  const chatBackend: ChatBackendKind = run.chatBackend ?? "pi";
   const budgetTokens = chatContextCapacityTokens({
     // The window the SAME turn reported, so numerator and denominator always
     // describe one request. Only when it reported none does the model's
@@ -99,11 +95,7 @@ export function remoteCoraRunContext(
       typeof call.contextWindowTokens === "number" &&
       call.contextWindowTokens > 0
         ? call.contextWindowTokens
-        : effectiveChatOneMillionContext(chatBackend) &&
-            chatBackend === "claude"
-          ? 1_000_000
-          : contextWindowForModel(call.model).tokens,
-    backend: chatBackend,
+        : contextWindowForModel(call.model).tokens,
     compactAtTokens: resolveCompactAtTokens(
       process.env.CODARA_PI_COMPACT_AT_TOKENS,
     ),

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { SparkEvent } from "@shared/types";
 import { FANOUT_EVENT } from "@shared/types";
 import { makeId } from "@shared/ids";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 
 const RUNS_DIR = "runs";
 const EVENTS_FILE = "events.jsonl";
@@ -26,7 +26,7 @@ export interface AppendEventInput {
 }
 
 export function runsRoot(): string {
-  return join(sparkHome(), RUNS_DIR);
+  return join(codaraHome(), RUNS_DIR);
 }
 
 export function runDir(runId: string): string {
