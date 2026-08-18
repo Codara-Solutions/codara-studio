@@ -244,6 +244,10 @@ async function runTask(flags, task) {
   const greenAtIso = greenAtMs === null ? null : new Date(startedAt + greenAtMs).toISOString();
   const metrics = await runMetrics(flags, runId, greenAtIso, outcome.status);
   const checks = gradeChecks(task, dir, metrics);
+  // Cancel unconditionally before deleting the workspace: a settled run can
+  // still revive itself (a late verifier verdict queues a manager turn) and
+  // spawn workers against a directory that no longer exists.
+  await rpcRaw(flags, "chat.cancel", { runId, reason: "bench graded" }).catch(() => null);
   if (!flags.keep) fs.rmSync(dir, { recursive: true, force: true });
 
   const result = {
@@ -554,4 +558,7 @@ async function bench(args, flags) {
   console.log(c.dim(`history: ${path.relative(process.cwd(), historyFile())}`));
 }
 
-module.exports = { bench, gradeChecks };
+// probeGreen/driveToCompletion/runMetrics/appendHistory are exported so a
+// killed bench process's live run can be ADOPTED by a small driver instead of
+// cancelled and re-paid for (see docs in cli/README.md).
+module.exports = { bench, gradeChecks, probeGreen, driveToCompletion, runMetrics, appendHistory };
