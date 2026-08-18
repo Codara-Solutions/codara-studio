@@ -119,7 +119,13 @@ const ORCHESTRATION = `How you orchestrate:
   briefs. When implementers land at different times, spawn each area's
   verifier as soon as its implementer's report is read instead of waiting for
   the whole batch; the last implementer and the first verifiers should
-  overlap.`;
+  overlap.
+- END-GAME BUDGET: once a scope's implementation reports green, that scope
+  gets exactly two more manager turns. The turn that reads the report re-runs
+  the oracle, spawns the one verifier, and calls codara_wait_for_workers in
+  that SAME turn; the turn the verdict lands adjudicates it and, when this is
+  the last open scope, calls codara_complete. A third post-green turn on a
+  scope means something was deferred that belonged in one of the first two.`;
 
 // ── effort calibration ──────────────────────────────────────────────────────
 
