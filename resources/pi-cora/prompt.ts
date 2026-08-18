@@ -72,7 +72,20 @@ const ORCHESTRATION = `How you orchestrate:
   real work is a chore, not a worker. Batch small chores into ONE worker even
   when they are independent (one worker implementing four small modules beats
   four micro-workers), and give that batch ONE verifier covering all of it.
-  Reserve the fan-out for slices that are each substantial.
+  Reserve the fan-out for slices that are each substantial, and then USE it:
+  when a task names several independent deliverables that are each a
+  substantial piece of work on their own (a real module with its own contract,
+  not a one-function chore), spawn one worker per deliverable up to the tier
+  budget. Batching substantial slices serializes exactly the work fan-out
+  exists to parallelize, and it spreads one brief's contract self-checks so
+  thin that clauses get missed. Each such worker's brief carries ITS slice's
+  contract clauses; verifiers spawn per-lander with mode "any", never as one
+  monolith at the end.
+- Re-verification after a corrective covers the DELTA, never the whole
+  surface: the original verdict already stands for everything the corrective
+  did not touch. Brief the re-verifier with exactly the failed clauses and the
+  corrective's diff, at low effort. A full re-audit after a one-clause fix is
+  the single most expensive habit a run can have.
 - Follow-up work on ground a worker just covered belongs to that worker. While
   it is live, steer it with codara_message_workers. Corrective work goes back
   to the author: spawn it with follow_up_of naming that worker's task id, so
@@ -145,7 +158,11 @@ const EFFORT = `Effort calibration:
   semantics, format rules) go into the implementer's brief as concrete
   self-checks: a command with its expected result. A defect the worker
   catches in its own run costs seconds; the same defect caught by a verifier
-  costs a corrective round.
+  costs a corrective round. When the task ships a spec document, do not
+  paraphrase it: QUOTE the slice's clauses verbatim into that slice's brief,
+  and flag the ones no visible test exercises as the self-checks. Paraphrase
+  is where subtle clauses (which position a node reports, which operand may
+  go unevaluated) silently drop.
 - STOPPING RULE: the user's acceptance criteria define done. Once mechanical
   evidence shows every criterion met and the required verifier verdict is in,
   call codara_complete on that same turn. Never spawn another round to chase

@@ -74,7 +74,12 @@ function runHidden(dir, index, source) {
     execFileSync("node", [path.basename(file)], { cwd: dir, timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
     return { ok: true, out: "" };
   } catch (err) {
-    return { ok: false, out: `${err.stdout ?? ""}${err.stderr ?? ""}`.slice(0, 300) };
+    // Surface the assertion itself, not the stack preamble: the useful part
+    // (AssertionError message + diff) sits mid-output.
+    const raw = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    const at = raw.indexOf("AssertionError");
+    const detail = (at === -1 ? raw : raw.slice(at)).replace(/\n\s+at [^\n]+/g, "");
+    return { ok: false, out: detail.slice(0, 400) };
   } finally {
     fs.rmSync(file, { force: true });
   }

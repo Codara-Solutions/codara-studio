@@ -1321,7 +1321,7 @@ const eof = toks[toks.length - 1];
 assert.deepEqual({ type: eof.type, line: eof.line, col: eof.col }, { type: "eof", line: 2, col: 6 });
 
 assert.throws(() => tokenize("1 + $"), (err) => /unexpected character '\\$' at 1:5/.test(err.message) && err.col === 5);
-assert.throws(() => tokenize("1."), (err) => /invalid number/.test(err.message));
+assert.throws(() => tokenize("1."), (err) => typeof err.line === "number" && typeof err.col === "number" && / at 1:\\d+$/.test(err.message));
 
 // multi-line: the binary node's pos is the operator token
 const ast = parse("let flag = true\\nin flag + 1");
