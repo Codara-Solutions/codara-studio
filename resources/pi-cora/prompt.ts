@@ -106,6 +106,14 @@ const ORCHESTRATION = `How you orchestrate:
   same as holding exit codes. Every files-changing implementation still needs
   its verifier verdict; make that verifier cheap and tightly scoped rather
   than hoping to skip it.
+- DECLARED VERIFICATION is the default. When you spawn an implementation
+  worker, attach its verifier brief in the spawn call's "verifier" field: the
+  harness auto-spawns that read-only cross-provider verifier the moment the
+  worker's report is accepted, with no turn from you, and your wait on the
+  worker also waits for the verifier and returns its verdict. Write the brief
+  then and there: quote the slice's contract clauses verbatim, list the
+  commands with expected results. A scope with a declared verifier never gets
+  a second, hand-spawned one.
 - One verifier round, several verifiers. When the surface to verify decomposes
   into independent areas EACH holding substantial work, spawn 2-4 verifiers
   in ONE batch, each with an explicit disjoint scope, so wall-clock becomes
@@ -128,17 +136,18 @@ const ORCHESTRATION = `How you orchestrate:
   never names (zero capacities, adversarial clocks, out-of-range magnitudes)
   is noise: record it as a note in your report and complete anyway when the
   stated criteria hold.
-- No dead air between stages. While implementers run, pre-draft the verifier
-  briefs. When implementers land at different times, spawn each area's
-  verifier as soon as its implementer's report is read instead of waiting for
-  the whole batch; the last implementer and the first verifiers should
-  overlap.
-- END-GAME BUDGET: once a scope's implementation reports green, that scope
-  gets exactly two more manager turns. The turn that reads the report re-runs
-  the oracle, spawns the one verifier, and calls codara_wait_for_workers in
-  that SAME turn; the turn the verdict lands adjudicates it and, when this is
-  the last open scope, calls codara_complete. A third post-green turn on a
-  scope means something was deferred that belonged in one of the first two.`;
+- No dead air between stages. Declared verification makes the overlap
+  automatic: each verifier launches the moment its implementer lands, while
+  siblings still run. Only a scope WITHOUT a declared verifier needs you to
+  spawn its verifier the turn you read its report.
+- END-GAME BUDGET: with declared verification the end-game is ONE manager
+  turn. Your wait returns with reports AND verdicts; that wake adjudicates
+  them and calls codara_complete (or spawns the one corrective). A scope
+  without a declared verifier gets exactly two more turns: the turn that
+  reads the report re-runs the oracle, spawns the one verifier, and calls
+  codara_wait_for_workers in that SAME turn; the turn the verdict lands
+  adjudicates and completes. Any turn beyond these budgets means something
+  was deferred that belonged in an earlier one.`;
 
 // ── effort calibration ──────────────────────────────────────────────────────
 
@@ -146,11 +155,12 @@ const EFFORT = `Effort calibration:
 - Match spend to problem size. Wall-clock and tokens are budgets the user
   feels: a small fix delivered in two minutes beats the same fix wrapped in
   ceremony at ten.
-- Trivial work (one module, one clear mechanical oracle) is a three-move run:
-  spawn ONE fast implementer with the oracle in its brief; the turn it lands,
-  re-run the oracle yourself and spawn ONE tightly scoped low-effort verifier;
-  complete the turn its verdict lands. No plan gate, no board or whiteboard
-  updates, nothing speculative.
+- Trivial work (one module, one clear mechanical oracle) is a TWO-move run:
+  spawn ONE fast implementer with the oracle in its brief AND its verifier
+  brief attached in the spawn call's "verifier" field, then wait; the harness
+  runs the verifier for you, so the turn your wait returns holds both report
+  and verdict - adjudicate and complete in that same turn. No plan gate, no
+  board or whiteboard updates, nothing speculative.
 - Hard problems earn patience, and the patience is spent BEFORE the evidence
   is green: read the whole contract, plan the verification, hunt the
   counterexample during implementation, not after acceptance.

@@ -12278,6 +12278,8 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     collabMailDirHint: input.collabMailDirHint,
     followUpOfTaskId: input.followUpOfTaskId,
     resumeSessionId: input.resumeSessionId,
+    verifierBrief: input.verifierBrief,
+    autoVerifierForTaskId: input.autoVerifierForTaskId,
     createdAt: now,
     updatedAt: now,
   };
@@ -14310,7 +14312,115 @@ async function reviewWorkerReportArtifact({
     },
   });
 
+  if (decision.decision === "accept") {
+    const withAutoVerifier = await maybeSpawnDeclaredVerifier({
+      run: latest,
+      task: reviewedTask,
+      attempt,
+      report,
+    });
+    if (withAutoVerifier) return withAutoVerifier;
+  }
+
   return latest;
+}
+
+// Mechanical end-game, spawn half: the manager attached a verifier brief when
+// it spawned this implementation worker. The moment the worker's report is
+// accepted, launch that verifier directly - no manager turn in between. The
+// manager stays blocked in codara_wait_for_workers, which follows the
+// autoVerifierForTaskId link, so its one wait returns with the verdict in
+// hand and the whole end-game costs a single adjudication turn.
+const MAX_AUTO_VERIFIERS_PER_TASK = 2;
+
+async function maybeSpawnDeclaredVerifier({
+  run,
+  task,
+  attempt,
+  report,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+}): Promise<RunState | null> {
+  const brief = task.verifierBrief?.trim();
+  if (!brief) return null;
+  if (task.taskClass === "verifier") return null;
+  // A report that changed no files needs no fresh verdict (the freshness
+  // invariant does not demand one), so don't spend a verifier on it.
+  if (report.filesChanged.length === 0) return null;
+  // Re-verification after a corrective is legitimate (the invariant demands a
+  // NEWER verdict), but a defect loop must not mint verifiers forever.
+  const priorAutoVerifiers = run.workerTasks.filter(
+    (candidate) => candidate.autoVerifierForTaskId === task.id,
+  );
+  if (priorAutoVerifiers.length >= MAX_AUTO_VERIFIERS_PER_TASK) return null;
+  // Never race a verifier against a live sibling verifier for the same task.
+  if (
+    priorAutoVerifiers.some(
+      (candidate) => !["accepted", "failed", "cancelled", "blocked"].includes(candidate.status),
+    )
+  ) {
+    return null;
+  }
+  if (isTerminalRunStatus(run.status)) return null;
+  const cwd = workspaceCwdFromRun(run);
+  if (!cwd) return null;
+
+  const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  const stepId = step && !isImmutableStepStatus(step.status) ? step.id : undefined;
+  // Independent re-derivation wants the other provider's eyes (cross-engine
+  // verification is the product); fall back to the implementer's own runtime
+  // when it isn't a claude/codex pair.
+  const runtimePreference: WorkerRuntime =
+    task.runtimePreference === "claude"
+      ? "codex"
+      : task.runtimePreference === "codex"
+        ? "claude"
+        : task.runtimePreference;
+  const changed = report.filesChanged.slice(0, 20).join(", ");
+  const rerun = priorAutoVerifiers.length > 0;
+  const description = [
+    brief,
+    "",
+    `The implementation worker ("${task.title}") reported complete${rerun ? " after a corrective round" : ""}. ` +
+      `Changed files: ${changed || "(none listed)"}.`,
+    rerun
+      ? "This is a re-verification: cover the corrective's delta against the checklist above, not the whole surface."
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  let next = await createWorkerTask({
+    runId: run.id,
+    stepId,
+    title: `Verify: ${task.title}`.slice(0, 120),
+    description,
+    runtimePreference,
+    effortHint: "low",
+    allowedPaths: task.allowedPaths,
+    forbiddenPaths: task.forbiddenPaths,
+    taskClass: "verifier",
+    createdBy: "spark",
+    autoVerifierForTaskId: task.id,
+  });
+  const created = next.workerTasks[next.workerTasks.length - 1];
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId,
+    workerTaskId: created.id,
+    attemptId: attempt.id,
+    type: "autopilot.declared_verifier_spawned",
+    message: `Auto-spawned declared verifier for "${task.title}" (no manager turn)`,
+    payload: { implementationTaskId: task.id, verifierTaskId: created.id, rerun },
+  });
+  const envelope = await prepareWorkerTask({ runId: run.id, workerTaskId: created.id, cwd });
+  scheduleAutopilotCycles(run.id, [envelope.attemptId]);
+  next = await requireRun(run.id);
+  return next;
 }
 
 function canCompleteStepImmediatelyAfterLocalReview(

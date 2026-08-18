@@ -3229,6 +3229,19 @@ export interface WorkerTask {
    */
   verifierFeedbackRounds?: number;
   /**
+   * Declared-at-spawn verification: the manager attached this verifier brief
+   * when it spawned the implementation worker. The harness auto-spawns a
+   * verifier task with this brief the moment the worker's report is accepted,
+   * without waking the manager (mechanical end-game).
+   */
+  verifierBrief?: string;
+  /**
+   * Set on auto-spawned verifier tasks: the implementation task whose
+   * verifierBrief created this verifier. wait_for_workers follows this link so
+   * a manager waiting on the implementation also waits on its verifier.
+   */
+  autoVerifierForTaskId?: string;
+  /**
    * Looms v2.5: which graph node (LoomNodeDef.id) this task executes within a
    * loom pass. Stamped by run-store's node launcher; undefined on managed runs
    * and on pre-graph direct runs. For a degenerate single-node loom this is the
@@ -3978,6 +3991,9 @@ export interface CreateWorkerTaskInput {
   // execute-mode spawn handler after its session-reuse gate passed.
   followUpOfTaskId?: string;
   resumeSessionId?: string;
+  // Declared-at-spawn verification; thread onto the created WorkerTask.
+  verifierBrief?: string;
+  autoVerifierForTaskId?: string;
 }
 
 export interface UpdateWorkerTaskInput {

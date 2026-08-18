@@ -1183,6 +1183,11 @@ const EXECUTE_TOOLS = [
                 description:
                   "Optional worker_task_id of an ACCEPTED worker from this run. Use it for follow-up or corrective work on files that finished worker just covered: Codara resumes that worker's runtime session (same runtime and model, prior context intact) so the new prompt lands as its next turn instead of paying a cold start. Only honored while the finished attempt's context usage is low; otherwise Codara spawns cold and the result note says why. Never allowed on taskClass verifier; verification must start fresh.",
               },
+              verifier: {
+                type: "string",
+                description:
+                  "Declared-at-spawn verification (STRONGLY preferred over spawning verifier workers yourself). A checklist brief for this worker's verifier: the moment the worker's report is accepted, Codara auto-spawns a read-only cross-provider verifier with this brief - no manager turn in between - and your codara_wait_for_workers on this worker also waits for that verifier and returns its verdict. Write it like a verifier brief: quote the contract clauses to check verbatim, list the commands to run with expected results. When you attach this, do NOT also spawn a separate verifier for the same scope. Ignored on taskClass verifier and when the worker changes no files.",
+              },
               peers: {
                 type: "boolean",
                 description:

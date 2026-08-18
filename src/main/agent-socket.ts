@@ -1869,6 +1869,10 @@ interface OrchestratorWorkerInput {
    *  Gated by evaluateWorkerSessionReuse; falls back to a cold spawn with an
    *  explanatory note when the gate fails. Never valid on a verifier. */
   follow_up_of?: string;
+  /** Declared-at-spawn verification: a checklist brief for the verifier the
+   *  harness auto-spawns the moment this worker's report is accepted, with no
+   *  manager turn in between. Ignored on verifier-class workers. */
+  verifier?: string;
 }
 
 // Map a requested model onto its counterpart on the OTHER provider, for a
@@ -2557,6 +2561,12 @@ async function handleOrchestratorSpawnWorkers(
       // minting a fresh one. Stamped only when the reuse gate passed above.
       followUpOfTaskId: resumePlan?.sourceTask.id,
       resumeSessionId: resumePlan?.sessionId,
+      // Declared-at-spawn verification: the accept path auto-spawns a
+      // verifier with this brief, so the manager's one wait covers both.
+      verifierBrief:
+        w.taskClass !== "verifier" && typeof w.verifier === "string" && w.verifier.trim()
+          ? w.verifier.trim().slice(0, 8000)
+          : undefined,
       createdBy: "spark",
     });
     // The just-created task is the LAST entry on updated.workerTasks.
@@ -3130,9 +3140,25 @@ async function handleOrchestratorWaitForWorkers(
     final_report_path: string | null;
     final_report: unknown;
     is_terminal: boolean;
-  }[]> =>
-    Promise.all(workerTaskIds.map(async (wtid) => {
-      const task = resolveLatestReplacement(run, wtid);
+  }[]> => {
+    const requested = workerTaskIds.map((wtid) => ({
+      wtid,
+      task: resolveLatestReplacement(run, wtid),
+    }));
+    // Declared-at-spawn verification: a wait on an implementation task also
+    // covers the verifier the harness auto-spawned for it, so the manager's
+    // single wait returns with the verdict in hand.
+    const requestedTaskIds = new Set(
+      requested.map((entry) => entry.task?.id).filter((value): value is string => Boolean(value)),
+    );
+    const attachedVerifiers = run.workerTasks
+      .filter(
+        (candidate) =>
+          candidate.autoVerifierForTaskId && requestedTaskIds.has(candidate.autoVerifierForTaskId),
+      )
+      .map((task) => ({ wtid: task.id, task }));
+    const entries = [...requested, ...attachedVerifiers];
+    return Promise.all(entries.map(async ({ wtid, task }) => {
       const lastAttempt = task
         ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === task.id)
         : null;
@@ -3187,9 +3213,23 @@ async function handleOrchestratorWaitForWorkers(
         is_terminal:
           taskStatus !== null &&
           (TERMINAL_WORKER_TASK_STATUSES.has(taskStatus) ||
-            (taskStatus === "needs_review" && task?.runtimePreference === "manual")),
+            (taskStatus === "needs_review" && task?.runtimePreference === "manual")) &&
+          // An accepted implementation whose declared verifier has not been
+          // minted yet is NOT settled: the auto-spawn is imminent, and
+          // returning "all_terminal" in that gap would hand the manager a
+          // wait result missing the verdict its brief paid for. A no-files
+          // report never spawns one, so it stays terminal.
+          !(
+            task != null &&
+            task.taskClass !== "verifier" &&
+            typeof task.verifierBrief === "string" &&
+            task.status === "accepted" &&
+            (report?.filesChanged.length ?? 0) > 0 &&
+            !run.workerTasks.some((candidate) => candidate.autoVerifierForTaskId === task.id)
+          ),
       };
     }));
+  };
   const firstRun = await runStore.getRun(runId);
   if (!firstRun) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   const blocked = rejectIfAutomationRun(firstRun, id, "codara_wait_for_workers");
