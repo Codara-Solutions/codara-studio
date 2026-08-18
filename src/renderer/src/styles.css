@@ -2995,6 +2995,22 @@ a { color: inherit; }
   border: 1px solid var(--rule-soft);
   box-shadow: var(--shadow-2), var(--lift-hi);
 }
+/* Toasts are the same floating material as menus and dialogs — they were the
+   one such surface left on plain blur (`.spark-backdrop-glass`), with no lens,
+   no sheen and no fresnel edge, which read as a flat card sitting right beside
+   the fully-glass "While you were away" digest. The stack lives here rather
+   than inline on the card because the glass recipe IS a box-shadow stack: an
+   inline shadow carrying the status stripe would clobber it. The card passes
+   its tone in through --toast-status instead, so this owns the whole stack. */
+.spark-toast {
+  --toast-status: inset 3px 0 0 var(--accent);
+  border: 1px solid var(--rule);
+  background: var(--notify-surface, var(--panel-2));
+  box-shadow: var(--toast-status), var(--shadow-1);
+}
+.spark-toast[data-lifted="true"] {
+  box-shadow: var(--toast-status), var(--shadow-2);
+}
 @media not (prefers-reduced-transparency: reduce) {
   html:not([data-glass="off"]) {
     /* Toast fill: Toast paints --notify-surface inline, so the translucent
@@ -3029,6 +3045,28 @@ a { color: inherit; }
     background: var(--glass-bg-faint);
     -webkit-backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
+  }
+  html:not([data-glass="off"]) .spark-toast {
+    background-color: var(--glass-bg-strong);
+    background-image: var(--glass-sheen);
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    border-color: var(--glass-border);
+    box-shadow:
+      var(--toast-status),
+      var(--glass-edge-hi),
+      var(--glass-edge-lo),
+      var(--glass-bloom),
+      var(--glass-shadow);
+  }
+  html:not([data-glass="off"]) .spark-toast[data-lifted="true"] {
+    box-shadow:
+      var(--toast-status),
+      var(--glass-edge-hi),
+      var(--glass-edge-lo),
+      var(--glass-bloom),
+      var(--glass-shadow),
+      var(--shadow-2);
   }
   html:not([data-glass="off"]) .spark-backdrop-glass {
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
