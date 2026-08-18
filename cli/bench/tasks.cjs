@@ -1059,6 +1059,665 @@ module.exports = { createTracker };
     },
   },
 
+  {
+    name: "mini-lang",
+    brief: "five interlocking language modules; the wide-parallelism probe",
+    tier: "project",
+    split: "train",
+    parallel: true,
+    expectedParallel: 4,
+    par: { wallS: 720, tokensK: 250 },
+    files: {
+      "README.md": `# mini-lang
+
+A tiny expression language. Five modules under lib/, one shared AST.
+
+## Language
+
+Expressions only. Grammar (precedence low to high; binary ops left-associative):
+
+    expr    := or
+    or      := and ( "||" and )*                        (prec 1)
+    and     := cmp ( "&&" cmp )*                        (prec 2)
+    cmp     := add ( ("=="|"!="|"<"|"<="|">"|">=") add )*   (prec 3)
+    add     := mul ( ("+"|"-") mul )*                   (prec 4)
+    mul     := unary ( ("*"|"/"|"%") unary )*           (prec 5)
+    unary   := ("-"|"!") unary | atom                   (prec 6)
+    atom    := number | "true" | "false" | ident
+             | "(" expr ")"
+             | "let" ident "=" expr "in" expr
+
+Numbers are integers or decimals (\`12\`, \`0.5\`; a dot must be followed by a
+digit). Identifiers are \`[A-Za-z_][A-Za-z0-9_]*\`. \`let\`, \`in\`, \`true\`,
+\`false\` are keywords. Whitespace (space, tab, CR, newline) separates tokens.
+
+## AST (shared contract)
+
+Every node carries \`pos: { line, col }\` — 1-based position of the token that
+starts the node, except \`binary\`, whose pos is the OPERATOR token's position.
+
+    { type: "num",    value: number,             pos }
+    { type: "bool",   value: boolean,            pos }
+    { type: "var",    name: string,              pos }
+    { type: "unary",  op: "-"|"!", expr,         pos }
+    { type: "binary", op, left, right,           pos }   // pos = operator token
+    { type: "let",    name, value, body,         pos }   // pos = "let" keyword
+
+## Errors
+
+Every thrown error is an \`Error\` whose message ends with \` at <line>:<col>\`
+and which carries numeric \`line\` and \`col\` properties.
+
+## Modules
+
+### lib/lexer.js — \`tokenize(src) -> token[]\`
+
+Tokens: \`{ type, value, line, col }\` with type one of \`num\` (value: number),
+\`ident\`, \`kw\` (let/in/true/false), \`op\` (+ - * / % == != < <= > >= && || ! =),
+\`lparen\`, \`rparen\`, and a final \`eof\` token at the position just past the
+input. Two-character operators win over one-character ones. Unknown
+characters throw (\`unexpected character 'X' at l:c\`).
+
+### lib/parser.js — \`parse(src) -> ast\`
+
+Parses per the grammar above (uses the lexer). Trailing input after the
+expression is an error. Messages: \`expected ')' at l:c\`,
+\`expected identifier at l:c\`, \`expected '=' at l:c\`, \`expected 'in' at l:c\`,
+\`unexpected token at l:c\`.
+
+### lib/eval.js — \`evaluate(ast, env = {}) -> number | boolean\`
+
+- \`env\` maps variable names to values; \`let\` binds for its body only and
+  inner bindings shadow outer ones.
+- Unbound variable: \`unbound variable 'x' at l:c\` (the var node's pos).
+- \`&&\` and \`||\` SHORT-CIRCUIT: the right operand is not evaluated (and so
+  cannot fail) when the left operand decides the result. Both operands must
+  be booleans when evaluated.
+- \`==\` / \`!=\` are strict equality on any values.
+- Other binary ops and unary \`-\` require numbers; unary \`!\` requires a
+  boolean. Type errors report the OPERATOR's pos:
+  \`operands of '+' must be numbers at l:c\`,
+  \`operand of '-' must be a number at l:c\`,
+  \`operand of '!' must be a boolean at l:c\`.
+- Division (\`/\`) by zero: \`division by zero at l:c\` (operator pos).
+
+### lib/format.js — \`format(ast) -> string\`
+
+Canonical form: single spaces around binary operators and let keywords
+(\`let x = 1 in x + 2\`), no space after unary operators (\`-x\`, \`!(a && b)\`),
+numbers via \`String(value)\`.
+
+Parentheses are MINIMAL: only where re-parsing would otherwise change the
+tree. Left-associativity means \`(1 - 2) - 3\` prints as \`1 - 2 - 3\` but
+\`1 - (2 - 3)\` keeps its parentheses. A \`let\` used as an operand is
+parenthesized; a \`let\` in a value/body position is not.
+
+LAW (graded): for any valid source \`s\`,
+\`stripPos(parse(format(parse(s))))\` deep-equals \`stripPos(parse(s))\`.
+
+### lib/lint.js — \`lint(ast) -> finding[]\`
+
+Findings \`{ code, name?, line, col }\`, sorted by line, then col, then code.
+
+- \`unused-binding\` — a \`let\` whose variable is never read in its body
+  (pos: the let node). Shadowed-then-unused still counts.
+- \`shadowed-binding\` — a \`let\` whose name rebinds a name already bound by an
+  enclosing let (pos: the INNER let node; also carries \`name\`).
+- \`constant-expr\` — a \`binary\` node whose BOTH operands are literals
+  (\`num\`/\`bool\`) (pos: the binary node). Nested case: only the innermost
+  qualifying node is reported (its parent has a non-literal operand).
+
+All findings carry \`name\` for the binding codes; \`constant-expr\` has no name.
+`,
+      "lib/lexer.js": `"use strict";
+// TODO: implement tokenize(src) -> token[]  (see README.md: token shapes, two-char ops win, unknown chars throw with position)
+module.exports = {};
+`,
+      "lib/parser.js": `"use strict";
+// TODO: implement parse(src) -> ast  (see README.md: grammar, AST shapes, binary pos = operator token, error messages)
+module.exports = {};
+`,
+      "lib/eval.js": `"use strict";
+// TODO: implement evaluate(ast, env = {}) -> number|boolean  (see README.md: let scoping, short-circuit && ||, strict == !=, typed errors at operator pos)
+module.exports = {};
+`,
+      "lib/format.js": `"use strict";
+// TODO: implement format(ast) -> string  (see README.md: canonical spacing, MINIMAL parentheses, round-trip law)
+module.exports = {};
+`,
+      "lib/lint.js": `"use strict";
+// TODO: implement lint(ast) -> finding[]  (see README.md: unused-binding, shadowed-binding, constant-expr innermost-only, sorted line/col/code)
+module.exports = {};
+`,
+      "test.js": `"use strict";
+const assert = require("node:assert/strict");
+const { tokenize } = require("./lib/lexer.js");
+const { parse } = require("./lib/parser.js");
+const { evaluate } = require("./lib/eval.js");
+const { format } = require("./lib/format.js");
+const { lint } = require("./lib/lint.js");
+
+// lexer
+const toks = tokenize("let x = 12 in x <= 3");
+assert.deepEqual(toks.map((t) => t.type), ["kw", "ident", "op", "num", "kw", "ident", "op", "num", "eof"]);
+assert.deepEqual(toks[3], { type: "num", value: 12, line: 1, col: 9 });
+assert.deepEqual(toks[6], { type: "op", value: "<=", line: 1, col: 17 });
+
+// parser
+const ast = parse("1 + 2 * 3");
+assert.equal(ast.type, "binary");
+assert.equal(ast.op, "+");
+assert.equal(ast.right.op, "*");
+assert.deepEqual(ast.pos, { line: 1, col: 3 });
+
+// eval
+assert.equal(evaluate(parse("let x = 2 in x * x + 1")), 5);
+assert.equal(evaluate(parse("1 < 2 && !(3 == 4)")), true);
+assert.equal(evaluate(parse("y + 1"), { y: 41 }), 42);
+
+// format
+assert.equal(format(parse("1+2 * 3")), "1 + 2 * 3");
+assert.equal(format(parse("let x=1 in x")), "let x = 1 in x");
+
+// lint
+const findings = lint(parse("let x = 1 in 2 + 3"));
+assert.deepEqual(findings.map((f) => f.code), ["unused-binding", "constant-expr"]);
+
+console.log("ok");
+`,
+    },
+    prompt:
+      "README.md specifies a tiny expression language and the contracts for five modules (lib/lexer.js, " +
+      "lib/parser.js, lib/eval.js, lib/format.js, lib/lint.js). Implement them so `node test.js` passes. " +
+      "Do not change test.js or README.md. The full documented spec is graded, not just test.js: the " +
+      "formatter round-trip law, exact error messages and positions, short-circuit evaluation, and the " +
+      "linter rules all count.",
+    hidden: [
+      {
+        name: "parser precedence, associativity, and error positions",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { parse } = require("./lib/parser.js");
+const { evaluate } = require("./lib/eval.js");
+
+assert.equal(evaluate(parse("1 - 2 - 3")), -4);
+assert.equal(evaluate(parse("2 * 3 + 4 * 5")), 26);
+assert.equal(evaluate(parse("10 % 4 % 3")), 2);
+assert.equal(evaluate(parse("!(true && false) || false")), true);
+assert.equal(evaluate(parse("1 + 2 < 4 == true")), true);
+assert.equal(evaluate(parse("--3")), 3);
+assert.equal(evaluate(parse("-3 * -4")), 12);
+assert.equal(evaluate(parse("let x = let y = 2 in y + 1 in x * 2")), 6);
+
+assert.throws(() => parse("1 +"), (err) => err.line === 1 && err.col === 4);
+assert.throws(() => parse("(1 + 2"), (err) => /expected '\\)' at 1:7/.test(err.message));
+assert.throws(() => parse("let 1 = 2 in 3"), (err) => /expected identifier at 1:5/.test(err.message));
+assert.throws(() => parse("let x 1 in x"), (err) => /expected '=' at 1:7/.test(err.message));
+assert.throws(() => parse("let x = 1 x"), (err) => /expected 'in' at 1:11/.test(err.message));
+assert.throws(() => parse("1 2"), (err) => /unexpected token at 1:3/.test(err.message));
+console.log("ok");`,
+      },
+      {
+        name: "formatter minimal parens and the round-trip law",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { parse } = require("./lib/parser.js");
+const { format } = require("./lib/format.js");
+
+function stripPos(node) {
+  const out = {};
+  for (const key of Object.keys(node)) {
+    if (key === "pos") continue;
+    const value = node[key];
+    out[key] = value && typeof value === "object" ? stripPos(value) : value;
+  }
+  return out;
+}
+
+assert.equal(format(parse("(1 - 2) - 3")), "1 - 2 - 3");
+assert.equal(format(parse("1 - (2 - 3)")), "1 - (2 - 3)");
+assert.equal(format(parse("(1 + 2) * 3")), "(1 + 2) * 3");
+assert.equal(format(parse("1 / (2 * 3)")), "1 / (2 * 3)");
+assert.equal(format(parse("-(1 + 2)")), "-(1 + 2)");
+assert.equal(format(parse("-1 + 2")), "-1 + 2");
+assert.equal(format(parse("!(a && b)")), "!(a && b)");
+assert.equal(format(parse("(let x = 1 in x) + 2")), "(let x = 1 in x) + 2");
+assert.equal(format(parse("let x = 1 in x + 2")), "let x = 1 in x + 2");
+assert.equal(format(parse("((0.5)) * (x)")), "0.5 * x");
+
+const battery = [
+  "1 - 2 - 3 - 4",
+  "1 - (2 - (3 - 4))",
+  "2 * (3 + 4) % 5",
+  "a && b || c && !d",
+  "a && (b || c)",
+  "-(x % 2) == 1 != true",
+  "let a = 1 + 2 in let b = a * a in b - a",
+  "(let x = 1 in x) * (let y = 2 in y)",
+  "1 <= 2 == 3 >= 4",
+  "--x - -y",
+];
+for (const src of battery) {
+  const once = parse(src);
+  const twice = parse(format(once));
+  assert.deepEqual(stripPos(twice), stripPos(once), "round-trip failed for: " + src + " -> " + format(once));
+}
+console.log("ok");`,
+      },
+      {
+        name: "positions thread lexer -> parser -> eval errors",
+        weight: 2,
+        source: `const assert = require("node:assert/strict");
+const { tokenize } = require("./lib/lexer.js");
+const { parse } = require("./lib/parser.js");
+const { evaluate } = require("./lib/eval.js");
+
+const toks = tokenize("let x = 1\\nin  x");
+const kwIn = toks.find((t) => t.type === "kw" && t.value === "in");
+assert.deepEqual({ line: kwIn.line, col: kwIn.col }, { line: 2, col: 1 });
+const lastVar = toks.filter((t) => t.type === "ident").pop();
+assert.deepEqual({ line: lastVar.line, col: lastVar.col }, { line: 2, col: 5 });
+const eof = toks[toks.length - 1];
+assert.deepEqual({ type: eof.type, line: eof.line, col: eof.col }, { type: "eof", line: 2, col: 6 });
+
+assert.throws(() => tokenize("1 + $"), (err) => /unexpected character '\\$' at 1:5/.test(err.message) && err.col === 5);
+assert.throws(() => tokenize("1."), (err) => /invalid number/.test(err.message));
+
+// multi-line: the binary node's pos is the operator token
+const ast = parse("let flag = true\\nin flag + 1");
+assert.deepEqual(ast.body.pos, { line: 2, col: 9 });
+assert.throws(() => evaluate(ast), (err) => /operands of '\\+' must be numbers at 2:9/.test(err.message) && err.line === 2 && err.col === 9);
+
+assert.throws(() => evaluate(parse("nope")), (err) => /unbound variable 'nope' at 1:1/.test(err.message));
+assert.throws(() => evaluate(parse("1 / (2 - 2)")), (err) => /division by zero at 1:3/.test(err.message));
+assert.throws(() => evaluate(parse("-true")), (err) => /operand of '-' must be a number at 1:1/.test(err.message));
+console.log("ok");`,
+      },
+      {
+        name: "eval: short-circuit, shadowing, strict equality",
+        weight: 2,
+        source: `const assert = require("node:assert/strict");
+const { parse } = require("./lib/parser.js");
+const { evaluate } = require("./lib/eval.js");
+
+// short-circuit: the unevaluated side may contain errors
+assert.equal(evaluate(parse("false && 1 / 0 > 0")), false);
+assert.equal(evaluate(parse("true || nope")), true);
+assert.throws(() => evaluate(parse("true && 1 / 0 > 0")), (err) => /division by zero/.test(err.message));
+
+// shadowing and scope restoration
+assert.equal(evaluate(parse("let x = 1 in let x = x + 1 in x")), 2);
+assert.equal(evaluate(parse("let x = 1 in (let x = 10 in x) + x")), 11);
+assert.equal(evaluate(parse("let x = 5 in let y = let x = 2 in x * x in y + x")), 9);
+
+// strict equality across types; env values flow through
+assert.equal(evaluate(parse("1 == true")), false);
+assert.equal(evaluate(parse("1 != true")), true);
+assert.equal(evaluate(parse("0.5 + 0.25")), 0.75);
+assert.equal(evaluate(parse("a && b"), { a: true, b: false }), false);
+
+// operand type errors on logic ops
+assert.throws(() => evaluate(parse("1 && true")), (err) => /operands of '&&' must be booleans at 1:3/.test(err.message));
+assert.throws(() => evaluate(parse("false || 0")), (err) => /operands of '\\|\\|' must be booleans at 1:7/.test(err.message));
+console.log("ok");`,
+      },
+      {
+        name: "linter: shadowing, unused, innermost constant, order",
+        weight: 2,
+        source: `const assert = require("node:assert/strict");
+const { parse } = require("./lib/parser.js");
+const { lint } = require("./lib/lint.js");
+
+// shadowed AND the outer becomes unused (inner read only)
+const a = lint(parse("let x = 1 in let x = 2 in x"));
+assert.deepEqual(a, [
+  { code: "unused-binding", name: "x", line: 1, col: 1 },
+  { code: "shadowed-binding", name: "x", line: 1, col: 14 },
+]);
+
+// reading through a shadow marks only the inner binding used
+const b = lint(parse("let x = 1 in x + (let x = 2 in x)"));
+assert.deepEqual(b.map((f) => f.code), ["shadowed-binding"]);
+
+// value expression is evaluated in the OUTER scope: x in the value refers to
+// the outer x, so the outer binding is used
+const c = lint(parse("let x = 1 in let x = x + 1 in x"));
+assert.deepEqual(c.map((f) => f.code), ["shadowed-binding"]);
+
+// innermost constant only: 2 * 3 is constant, 1 + (2 * 3) is not reported
+const d = lint(parse("1 + 2 * 3"));
+assert.deepEqual(d, [{ code: "constant-expr", line: 1, col: 7 }]);
+const e = lint(parse("(1 + 2) * 3"));
+assert.deepEqual(e, [{ code: "constant-expr", line: 1, col: 4 }]);
+
+// booleans are literals too; unary operands are walked
+const f = lint(parse("!(true && false)"));
+assert.deepEqual(f, [{ code: "constant-expr", line: 1, col: 8 }]);
+
+// ordering: line, then col
+const g = lint(parse("let a = 1 in\\nlet b = 2 in 3 + 4"));
+assert.deepEqual(g.map((f) => [f.code, f.line, f.col]), [
+  ["unused-binding", 1, 1],
+  ["unused-binding", 2, 1],
+  ["constant-expr", 2, 16],
+]);
+
+// no findings on clean code
+assert.deepEqual(lint(parse("let n = x in n * y")), []);
+console.log("ok");`,
+      },
+    ],
+    reference: {
+      "lib/lexer.js": `"use strict";
+const KEYWORDS = ["let", "in", "true", "false"];
+const TWO_CHAR = ["==", "!=", "<=", ">=", "&&", "||"];
+const ONE_CHAR = "+-*/%<>!=";
+
+function tokenize(src) {
+  const tokens = [];
+  let line = 1;
+  let col = 1;
+  let i = 0;
+  const fail = (msg) => {
+    const err = new Error(msg + " at " + line + ":" + col);
+    err.line = line;
+    err.col = col;
+    throw err;
+  };
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === "\\n") { i += 1; line += 1; col = 1; continue; }
+    if (ch === " " || ch === "\\t" || ch === "\\r") { i += 1; col += 1; continue; }
+    const startLine = line;
+    const startCol = col;
+    const two = src.slice(i, i + 2);
+    if (TWO_CHAR.includes(two)) {
+      tokens.push({ type: "op", value: two, line: startLine, col: startCol });
+      i += 2; col += 2; continue;
+    }
+    if (ch === "(" || ch === ")") {
+      tokens.push({ type: ch === "(" ? "lparen" : "rparen", value: ch, line: startLine, col: startCol });
+      i += 1; col += 1; continue;
+    }
+    if (ONE_CHAR.includes(ch)) {
+      tokens.push({ type: "op", value: ch, line: startLine, col: startCol });
+      i += 1; col += 1; continue;
+    }
+    if (ch >= "0" && ch <= "9") {
+      let j = i;
+      while (j < src.length && src[j] >= "0" && src[j] <= "9") j += 1;
+      if (src[j] === ".") {
+        if (!(src[j + 1] >= "0" && src[j + 1] <= "9")) {
+          col += j + 1 - i;
+          fail("invalid number");
+        }
+        j += 1;
+        while (j < src.length && src[j] >= "0" && src[j] <= "9") j += 1;
+      }
+      tokens.push({ type: "num", value: Number(src.slice(i, j)), line: startLine, col: startCol });
+      col += j - i; i = j; continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let j = i;
+      while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j += 1;
+      const text = src.slice(i, j);
+      tokens.push({ type: KEYWORDS.includes(text) ? "kw" : "ident", value: text, line: startLine, col: startCol });
+      col += j - i; i = j; continue;
+    }
+    fail("unexpected character '" + ch + "'");
+  }
+  tokens.push({ type: "eof", value: null, line, col });
+  return tokens;
+}
+
+module.exports = { tokenize };
+`,
+      "lib/parser.js": `"use strict";
+const { tokenize } = require("./lexer.js");
+
+const BIN_PREC = {
+  "||": 1, "&&": 2,
+  "==": 3, "!=": 3, "<": 3, "<=": 3, ">": 3, ">=": 3,
+  "+": 4, "-": 4, "*": 5, "/": 5, "%": 5,
+};
+
+function parse(src) {
+  const tokens = tokenize(src);
+  let index = 0;
+  const peek = () => tokens[index];
+  const next = () => tokens[index++];
+  const fail = (msg, tok) => {
+    const err = new Error(msg + " at " + tok.line + ":" + tok.col);
+    err.line = tok.line;
+    err.col = tok.col;
+    throw err;
+  };
+
+  function parseExpr(minPrec) {
+    let left = parseUnary();
+    for (;;) {
+      const tok = peek();
+      if (tok.type !== "op" || !(tok.value in BIN_PREC) || BIN_PREC[tok.value] < minPrec) break;
+      next();
+      const right = parseExpr(BIN_PREC[tok.value] + 1);
+      left = { type: "binary", op: tok.value, left, right, pos: { line: tok.line, col: tok.col } };
+    }
+    return left;
+  }
+
+  function parseUnary() {
+    const tok = peek();
+    if (tok.type === "op" && (tok.value === "-" || tok.value === "!")) {
+      next();
+      const expr = parseUnary();
+      return { type: "unary", op: tok.value, expr, pos: { line: tok.line, col: tok.col } };
+    }
+    return parseAtom();
+  }
+
+  function parseAtom() {
+    const tok = next();
+    if (tok.type === "num") return { type: "num", value: tok.value, pos: { line: tok.line, col: tok.col } };
+    if (tok.type === "kw" && (tok.value === "true" || tok.value === "false")) {
+      return { type: "bool", value: tok.value === "true", pos: { line: tok.line, col: tok.col } };
+    }
+    if (tok.type === "ident") return { type: "var", name: tok.value, pos: { line: tok.line, col: tok.col } };
+    if (tok.type === "lparen") {
+      const expr = parseExpr(1);
+      const close = next();
+      if (close.type !== "rparen") fail("expected ')'", close);
+      return expr;
+    }
+    if (tok.type === "kw" && tok.value === "let") {
+      const name = next();
+      if (name.type !== "ident") fail("expected identifier", name);
+      const eq = next();
+      if (!(eq.type === "op" && eq.value === "=")) fail("expected '='", eq);
+      const value = parseExpr(1);
+      const kwIn = next();
+      if (!(kwIn.type === "kw" && kwIn.value === "in")) fail("expected 'in'", kwIn);
+      const body = parseExpr(1);
+      return { type: "let", name: name.value, value, body, pos: { line: tok.line, col: tok.col } };
+    }
+    fail("unexpected token", tok);
+  }
+
+  const expr = parseExpr(1);
+  const end = peek();
+  if (end.type !== "eof") fail("unexpected token", end);
+  return expr;
+}
+
+module.exports = { parse };
+`,
+      "lib/eval.js": `"use strict";
+
+function evaluate(ast, env = {}) {
+  const fail = (msg, node) => {
+    const err = new Error(msg + " at " + node.pos.line + ":" + node.pos.col);
+    err.line = node.pos.line;
+    err.col = node.pos.col;
+    throw err;
+  };
+  switch (ast.type) {
+    case "num":
+    case "bool":
+      return ast.value;
+    case "var":
+      if (!(ast.name in env)) fail("unbound variable '" + ast.name + "'", ast);
+      return env[ast.name];
+    case "unary": {
+      const value = evaluate(ast.expr, env);
+      if (ast.op === "-") {
+        if (typeof value !== "number") fail("operand of '-' must be a number", ast);
+        return -value;
+      }
+      if (typeof value !== "boolean") fail("operand of '!' must be a boolean", ast);
+      return !value;
+    }
+    case "binary": {
+      const op = ast.op;
+      if (op === "&&" || op === "||") {
+        const left = evaluate(ast.left, env);
+        if (typeof left !== "boolean") fail("operands of '" + op + "' must be booleans", ast);
+        if (op === "&&" && !left) return false;
+        if (op === "||" && left) return true;
+        const right = evaluate(ast.right, env);
+        if (typeof right !== "boolean") fail("operands of '" + op + "' must be booleans", ast);
+        return right;
+      }
+      const left = evaluate(ast.left, env);
+      const right = evaluate(ast.right, env);
+      if (op === "==") return left === right;
+      if (op === "!=") return left !== right;
+      if (typeof left !== "number" || typeof right !== "number") {
+        fail("operands of '" + op + "' must be numbers", ast);
+      }
+      switch (op) {
+        case "+": return left + right;
+        case "-": return left - right;
+        case "*": return left * right;
+        case "%": return left % right;
+        case "/":
+          if (right === 0) fail("division by zero", ast);
+          return left / right;
+        case "<": return left < right;
+        case "<=": return left <= right;
+        case ">": return left > right;
+        case ">=": return left >= right;
+      }
+      fail("unexpected token", ast);
+      return undefined;
+    }
+    case "let": {
+      const bound = evaluate(ast.value, env);
+      return evaluate(ast.body, { ...env, [ast.name]: bound });
+    }
+    default:
+      fail("unexpected token", ast);
+      return undefined;
+  }
+}
+
+module.exports = { evaluate };
+`,
+      "lib/format.js": `"use strict";
+
+const BIN_PREC = {
+  "||": 1, "&&": 2,
+  "==": 3, "!=": 3, "<": 3, "<=": 3, ">": 3, ">=": 3,
+  "+": 4, "-": 4, "*": 5, "/": 5, "%": 5,
+};
+const UNARY_PREC = 6;
+
+// min = the lowest precedence this position can hold without parentheses.
+// let has precedence 0: any operand position (min >= 1) wraps it.
+function fmt(node, min) {
+  switch (node.type) {
+    case "num": return String(node.value);
+    case "bool": return String(node.value);
+    case "var": return node.name;
+    case "let": {
+      const text = "let " + node.name + " = " + fmt(node.value, 0) + " in " + fmt(node.body, 0);
+      return min > 0 ? "(" + text + ")" : text;
+    }
+    case "unary": {
+      const text = node.op + fmt(node.expr, UNARY_PREC);
+      return min > UNARY_PREC ? "(" + text + ")" : text;
+    }
+    case "binary": {
+      const prec = BIN_PREC[node.op];
+      const text = fmt(node.left, prec) + " " + node.op + " " + fmt(node.right, prec + 1);
+      return min > prec ? "(" + text + ")" : text;
+    }
+    default:
+      throw new Error("unknown node type: " + node.type);
+  }
+}
+
+function format(ast) {
+  return fmt(ast, 0);
+}
+
+module.exports = { format };
+`,
+      "lib/lint.js": `"use strict";
+
+function isLiteral(node) {
+  return node.type === "num" || node.type === "bool";
+}
+
+function lint(ast) {
+  const findings = [];
+  // scope: linked frames { parent, name, used }
+  function walk(node, scope) {
+    switch (node.type) {
+      case "var": {
+        for (let frame = scope; frame; frame = frame.parent) {
+          if (frame.name === node.name) { frame.used = true; break; }
+        }
+        return;
+      }
+      case "let": {
+        walk(node.value, scope);
+        for (let frame = scope; frame; frame = frame.parent) {
+          if (frame.name === node.name) {
+            findings.push({ code: "shadowed-binding", name: node.name, line: node.pos.line, col: node.pos.col });
+            break;
+          }
+        }
+        const frame = { parent: scope, name: node.name, used: false };
+        walk(node.body, frame);
+        if (!frame.used) {
+          findings.push({ code: "unused-binding", name: node.name, line: node.pos.line, col: node.pos.col });
+        }
+        return;
+      }
+      case "binary": {
+        if (isLiteral(node.left) && isLiteral(node.right)) {
+          findings.push({ code: "constant-expr", line: node.pos.line, col: node.pos.col });
+        }
+        walk(node.left, scope);
+        walk(node.right, scope);
+        return;
+      }
+      case "unary":
+        walk(node.expr, scope);
+        return;
+      default:
+        return;
+    }
+  }
+  walk(ast, null);
+  findings.sort((a, b) => a.line - b.line || a.col - b.col || (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+  return findings;
+}
+
+module.exports = { lint };
+`,
+    },
+  },
+
   // ── holdout ────────────────────────────────────────────────────────────────
   {
     name: "holdout-sort-bug",
