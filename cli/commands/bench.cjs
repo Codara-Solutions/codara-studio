@@ -294,6 +294,9 @@ function runClaudeCli(dir, prompt, capMs, extraArgs = []) {
         "--effort", "high",
         "--output-format", "json",
         "--dangerously-skip-permissions",
+        // Every bench task is self-contained and offline by design; web
+        // tools could only leak solutions (or waste time looking for them).
+        "--disallowedTools", "WebSearch,WebFetch",
         ...extraArgs,
       ],
       { cwd: dir, timeout: capMs, killSignal: "SIGKILL", maxBuffer: 16 * 1024 * 1024 },

@@ -1718,6 +1718,1348 @@ module.exports = { lint };
     },
   },
 
+  {
+    name: "arc-triad",
+    brief: "three original ARC-style puzzles; infer each rule, graded on held-out inputs",
+    tier: "hard",
+    split: "train",
+    parallel: true,
+    expectedParallel: 3,
+    par: { wallS: 480, tokensK: 120 },
+    files: {
+      "README.md": `# arc-triad
+
+Three original grid puzzles in the style of abstraction-and-reasoning
+corpora. Each puzzle has its own hidden transformation rule.
+
+Grids are arrays of rows; cells are integers 0-9; 0 is empty.
+
+For each puzzle N in {p1, p2, p3}:
+
+- \`puzzles/pN.json\` holds \`train\` (input/output pairs that demonstrate the
+  rule) and \`test\` (inputs whose outputs are graded but not shown).
+- Implement \`lib/pN.js\` exporting \`transform(grid) -> grid\`. It must not
+  mutate its input.
+- The rule is simple, deterministic, and total over the given inputs. It is
+  the SAME rule for every pair of its puzzle. Infer it from the train pairs;
+  your transform is graded on how it generalizes to the unseen test inputs,
+  so hardcoding the train outputs scores zero on what matters.
+
+This is an offline reasoning task: these puzzles were authored for this
+workspace and do not exist anywhere else, and web access is not permitted.
+`,
+      "puzzles/p1.json": `{
+ "train": [
+  {
+   "input": [
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     7
+    ],
+    [
+     0,
+     3,
+     3,
+     3,
+     3,
+     0
+    ],
+    [
+     0,
+     3,
+     0,
+     0,
+     3,
+     0
+    ],
+    [
+     0,
+     3,
+     0,
+     0,
+     3,
+     0
+    ],
+    [
+     0,
+     3,
+     3,
+     3,
+     3,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "output": [
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     3,
+     3,
+     3,
+     3,
+     0
+    ],
+    [
+     0,
+     3,
+     7,
+     7,
+     3,
+     0
+    ],
+    [
+     0,
+     3,
+     7,
+     7,
+     3,
+     0
+    ],
+    [
+     0,
+     3,
+     3,
+     3,
+     3,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ]
+  },
+  {
+   "input": [
+    [
+     0,
+     0,
+     2,
+     2,
+     2,
+     2,
+     2
+    ],
+    [
+     0,
+     0,
+     2,
+     0,
+     0,
+     0,
+     2
+    ],
+    [
+     0,
+     0,
+     2,
+     0,
+     0,
+     0,
+     2
+    ],
+    [
+     0,
+     0,
+     2,
+     2,
+     2,
+     2,
+     2
+    ],
+    [
+     4,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "output": [
+    [
+     0,
+     0,
+     2,
+     2,
+     2,
+     2,
+     2
+    ],
+    [
+     0,
+     0,
+     2,
+     4,
+     4,
+     4,
+     2
+    ],
+    [
+     0,
+     0,
+     2,
+     4,
+     4,
+     4,
+     2
+    ],
+    [
+     0,
+     0,
+     2,
+     2,
+     2,
+     2,
+     2
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ]
+  },
+  {
+   "input": [
+    [
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     8,
+     8,
+     8,
+     0
+    ],
+    [
+     0,
+     8,
+     0,
+     8,
+     0
+    ],
+    [
+     0,
+     8,
+     0,
+     8,
+     0
+    ],
+    [
+     0,
+     8,
+     8,
+     8,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     1,
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "output": [
+    [
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     8,
+     8,
+     8,
+     0
+    ],
+    [
+     0,
+     8,
+     1,
+     8,
+     0
+    ],
+    [
+     0,
+     8,
+     1,
+     8,
+     0
+    ],
+    [
+     0,
+     8,
+     8,
+     8,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ]
+  }
+ ],
+ "test": [
+  [
+   [
+    6,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    5,
+    5,
+    5,
+    5,
+    0
+   ],
+   [
+    0,
+    5,
+    0,
+    0,
+    5,
+    0
+   ],
+   [
+    0,
+    5,
+    5,
+    5,
+    5,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  [
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    7,
+    7,
+    7,
+    7,
+    0,
+    0
+   ],
+   [
+    0,
+    7,
+    0,
+    0,
+    7,
+    0,
+    0
+   ],
+   [
+    0,
+    7,
+    0,
+    0,
+    7,
+    0,
+    0
+   ],
+   [
+    0,
+    7,
+    7,
+    7,
+    7,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    9
+   ]
+  ]
+ ]
+}`,
+      "lib/p1.js": `"use strict";
+// TODO: implement transform(grid) -> grid for puzzles/p1.json (see README.md)
+module.exports = {};
+`,
+      "puzzles/p2.json": `{
+ "train": [
+  {
+   "input": [
+    [
+     5,
+     0,
+     0,
+     0,
+     4
+    ],
+    [
+     0,
+     3,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     6,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     8,
+     2
+    ],
+    [
+     1,
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "output": [
+    [
+     5,
+     0,
+     0,
+     0,
+     4
+    ],
+    [
+     0,
+     3,
+     0,
+     3,
+     0
+    ],
+    [
+     0,
+     0,
+     6,
+     0,
+     0
+    ],
+    [
+     2,
+     8,
+     0,
+     8,
+     2
+    ],
+    [
+     1,
+     0,
+     0,
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "input": [
+    [
+     3,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     7,
+     0,
+     0,
+     0,
+     2
+    ],
+    [
+     0,
+     0,
+     4,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     9,
+     0
+    ]
+   ],
+   "output": [
+    [
+     3,
+     0,
+     0,
+     0,
+     0,
+     3
+    ],
+    [
+     2,
+     7,
+     0,
+     0,
+     7,
+     2
+    ],
+    [
+     0,
+     0,
+     4,
+     4,
+     0,
+     0
+    ],
+    [
+     0,
+     9,
+     0,
+     0,
+     9,
+     0
+    ]
+   ]
+  },
+  {
+   "input": [
+    [
+     9,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    [
+     0,
+     5,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     6,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     3,
+     0,
+     0
+    ],
+    [
+     2,
+     0,
+     0,
+     0,
+     0,
+     0,
+     8
+    ]
+   ],
+   "output": [
+    [
+     9,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    [
+     0,
+     5,
+     0,
+     0,
+     0,
+     5,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     6,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     3,
+     0,
+     3,
+     0,
+     0
+    ],
+    [
+     2,
+     0,
+     0,
+     0,
+     0,
+     0,
+     8
+    ]
+   ]
+  }
+ ],
+ "test": [
+  [
+   [
+    4,
+    0,
+    0,
+    0,
+    0,
+    6
+   ],
+   [
+    0,
+    3,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    7,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    5
+   ],
+   [
+    8,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  [
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    3
+   ],
+   [
+    0,
+    2,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    4,
+    5,
+    0
+   ],
+   [
+    7,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ]
+ ]
+}`,
+      "lib/p2.js": `"use strict";
+// TODO: implement transform(grid) -> grid for puzzles/p2.json (see README.md)
+module.exports = {};
+`,
+      "puzzles/p3.json": `{
+ "train": [
+  {
+   "input": [
+    [
+     4,
+     4,
+     0,
+     0,
+     0
+    ],
+    [
+     4,
+     4,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     3,
+     3
+    ],
+    [
+     5,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     5,
+     5,
+     0,
+     0,
+     0
+    ]
+   ],
+   "output": [
+    [
+     1,
+     1,
+     0,
+     0,
+     0
+    ],
+    [
+     1,
+     1,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     2,
+     2
+    ],
+    [
+     5,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     5,
+     5,
+     0,
+     0,
+     0
+    ]
+   ]
+  },
+  {
+   "input": [
+    [
+     0,
+     0,
+     0,
+     6,
+     6,
+     6,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     6,
+     6,
+     6,
+     0
+    ],
+    [
+     8,
+     8,
+     0,
+     0,
+     6,
+     6,
+     0
+    ],
+    [
+     8,
+     8,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     7,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "output": [
+    [
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     0
+    ],
+    [
+     8,
+     8,
+     0,
+     0,
+     1,
+     1,
+     0
+    ],
+    [
+     8,
+     8,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     2,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   ]
+  },
+  {
+   "input": [
+    [
+     3,
+     3,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     3,
+     3,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     3,
+     3,
+     0,
+     0,
+     9,
+     9
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     4,
+     4,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     4,
+     4,
+     4,
+     0,
+     0,
+     0
+    ]
+   ],
+   "output": [
+    [
+     1,
+     1,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     1,
+     1,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     1,
+     1,
+     0,
+     0,
+     2,
+     2
+    ],
+    [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     4,
+     4,
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     4,
+     4,
+     4,
+     0,
+     0,
+     0
+    ]
+   ]
+  }
+ ],
+ "test": [
+  [
+   [
+    0,
+    0,
+    0,
+    0,
+    5,
+    0,
+    0
+   ],
+   [
+    7,
+    7,
+    7,
+    0,
+    5,
+    0,
+    0
+   ],
+   [
+    7,
+    7,
+    7,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    3,
+    3,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    3,
+    3,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  [
+   [
+    6,
+    6,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    6,
+    6,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    6,
+    6,
+    0,
+    0,
+    0
+   ],
+   [
+    0,
+    0,
+    0,
+    8,
+    8,
+    0
+   ],
+   [
+    9,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    9,
+    9,
+    0,
+    0,
+    0,
+    0
+   ]
+  ]
+ ]
+}`,
+      "lib/p3.js": `"use strict";
+// TODO: implement transform(grid) -> grid for puzzles/p3.json (see README.md)
+module.exports = {};
+`,
+      "test.js": `"use strict";
+const assert = require("node:assert/strict");
+{
+  const { transform } = require("./lib/p1.js");
+  const { train } = require("./puzzles/p1.json");
+  for (const [i, pair] of train.entries()) {
+    const copy = JSON.parse(JSON.stringify(pair.input));
+    assert.deepEqual(transform(pair.input), pair.output, "p1 train " + i);
+    assert.deepEqual(pair.input, copy, "p1 must not mutate its input");
+  }
+}
+{
+  const { transform } = require("./lib/p2.js");
+  const { train } = require("./puzzles/p2.json");
+  for (const [i, pair] of train.entries()) {
+    const copy = JSON.parse(JSON.stringify(pair.input));
+    assert.deepEqual(transform(pair.input), pair.output, "p2 train " + i);
+    assert.deepEqual(pair.input, copy, "p2 must not mutate its input");
+  }
+}
+{
+  const { transform } = require("./lib/p3.js");
+  const { train } = require("./puzzles/p3.json");
+  for (const [i, pair] of train.entries()) {
+    const copy = JSON.parse(JSON.stringify(pair.input));
+    assert.deepEqual(transform(pair.input), pair.output, "p3 train " + i);
+    assert.deepEqual(pair.input, copy, "p3 must not mutate its input");
+  }
+}
+console.log("ok");
+`,
+    },
+    prompt:
+      "Three original grid puzzles live in puzzles/ (train pairs plus unseen-graded test inputs); README.md " +
+      "has the rules of the game. Infer each puzzle's transformation rule from its train pairs and implement " +
+      "lib/p1.js, lib/p2.js, lib/p3.js so `node test.js` passes. Do not change test.js, README.md, or the " +
+      "puzzle files. Grading runs your transforms on the held-out test inputs, so the rule itself is what " +
+      "counts, not the train outputs. This is an OFFLINE reasoning task: the puzzles exist only in this " +
+      "workspace, and web search or fetching is not permitted and cannot help.",
+    hidden: [
+      {
+        name: "p1 generalizes to held-out grids",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { transform } = require("./lib/p1.js");
+const { test } = require("./puzzles/p1.json");
+const expected = [[[0,0,0,0,0,0],[0,5,5,5,5,0],[0,5,6,6,5,0],[0,5,5,5,5,0],[0,0,0,0,0,0],[0,0,0,0,0,0]],[[0,0,0,0,0,0,0],[0,7,7,7,7,0,0],[0,7,9,9,7,0,0],[0,7,9,9,7,0,0],[0,7,7,7,7,0,0],[0,0,0,0,0,0,0]]];
+for (const [i, input] of test.entries()) {
+  assert.deepEqual(transform(input), expected[i], "p1 held-out " + i);
+}
+console.log("ok");`,
+      },
+      {
+        name: "p2 generalizes to held-out grids",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { transform } = require("./lib/p2.js");
+const { test } = require("./puzzles/p2.json");
+const expected = [[[4,0,0,0,0,6],[0,3,0,0,3,0],[0,0,7,7,0,0],[5,0,0,0,0,5],[8,0,0,0,0,8]],[[3,0,0,0,0,0,3],[0,2,0,0,0,2,0],[0,5,4,0,4,5,0],[7,0,0,0,0,0,7]]];
+for (const [i, input] of test.entries()) {
+  assert.deepEqual(transform(input), expected[i], "p2 held-out " + i);
+}
+console.log("ok");`,
+      },
+      {
+        name: "p3 generalizes to held-out grids",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { transform } = require("./lib/p3.js");
+const { test } = require("./puzzles/p3.json");
+const expected = [[[0,0,0,0,2,0,0],[1,1,1,0,2,0,0],[1,1,1,0,0,0,0],[0,0,0,0,0,0,0],[0,3,3,0,0,0,0],[0,3,3,0,0,0,0]],[[1,1,0,0,0,0],[1,1,0,0,0,0],[0,1,1,0,0,0],[0,0,0,2,2,0],[9,0,0,0,0,0],[9,9,0,0,0,0]]];
+for (const [i, input] of test.entries()) {
+  assert.deepEqual(transform(input), expected[i], "p3 held-out " + i);
+}
+console.log("ok");`,
+      },
+    ],
+    reference: {
+      "lib/p1.js": `"use strict";
+function transform(grid) {
+  const H = grid.length, W = grid[0].length;
+  const counts = new Map();
+  for (const row of grid) for (const v of row) if (v !== 0) counts.set(v, (counts.get(v) ?? 0) + 1);
+  let frameColor = null, loneColor = null;
+  for (const [color, n] of counts) {
+    if (n === 1) loneColor = color; else frameColor = color;
+  }
+  let top = H, left = W, bottom = -1, right = -1;
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+    if (grid[r][c] === frameColor) {
+      if (r < top) top = r;
+      if (r > bottom) bottom = r;
+      if (c < left) left = c;
+      if (c > right) right = c;
+    }
+  }
+  const out = grid.map((row) => row.slice());
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) if (out[r][c] === loneColor) out[r][c] = 0;
+  for (let r = top + 1; r < bottom; r++) for (let c = left + 1; c < right; c++) out[r][c] = loneColor;
+  return out;
+}
+
+// p2 mirror-fill: empty cells take the value of their left-right mirror cell;
+// occupied cells keep their own value.
+
+module.exports = { transform };
+`,
+      "lib/p2.js": `"use strict";
+function transform(grid) {
+  const W = grid[0].length;
+  return grid.map((row) => row.map((v, c) => (v !== 0 ? v : row[W - 1 - c])));
+}
+
+// p3 size-rank recolor: exactly three 4-connected components of nonzero
+// cells, all different sizes. Largest becomes 1, smallest becomes 2, the
+// middle one keeps its color.
+
+module.exports = { transform };
+`,
+      "lib/p3.js": `"use strict";
+function transform(grid) {
+  const H = grid.length, W = grid[0].length;
+  const seen = grid.map((row) => row.map(() => false));
+  const comps = [];
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+    if (grid[r][c] === 0 || seen[r][c]) continue;
+    const cells = [];
+    const stack = [[r, c]];
+    seen[r][c] = true;
+    while (stack.length) {
+      const [cr, cc] = stack.pop();
+      cells.push([cr, cc]);
+      for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nr = cr + dr, nc = cc + dc;
+        if (nr < 0 || nr >= H || nc < 0 || nc >= W) continue;
+        if (grid[nr][nc] === 0 || seen[nr][nc]) continue;
+        seen[nr][nc] = true;
+        stack.push([nr, nc]);
+      }
+    }
+    comps.push(cells);
+  }
+  comps.sort((a, b) => a.length - b.length);
+  const out = grid.map((row) => row.slice());
+  for (const [r, c] of comps[comps.length - 1]) out[r][c] = 1;
+  for (const [r, c] of comps[0]) out[r][c] = 2;
+  return out;
+}
+
+module.exports = { transform };
+`,
+    },
+  },
+
   // ── holdout ────────────────────────────────────────────────────────────────
   {
     name: "holdout-sort-bug",
