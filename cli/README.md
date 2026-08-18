@@ -20,7 +20,14 @@ node cli/cora.cjs status      # directly
 - `commands/` — one file per command group (sessions, runs, agents/watch,
   board/whiteboard, automations, bench, status).
 - `bench/tasks.cjs` — the harness benchmark suite: tiered tasks with hidden
-  contract checks and reference solutions; `bench/score.cjs` is the scorer.
+  contract checks and reference solutions; `bench/score.cjs` is the scorer;
+  `bench/adopt.cjs` re-attaches to a live bench run whose bench process was
+  killed (resumes green polling, drives remaining checkpoint stages, grades,
+  appends a history row flagged `adopted`).
+
+Housekeeping: `cora ws prune` removes workspaces whose directory no longer
+exists (bench runs register throwaway tmpdirs as real workspaces; the bench
+also prunes its own after grading).
 
 ## The live dashboard
 
@@ -63,8 +70,14 @@ offline self-test grades to prove the hidden checks are satisfiable.
 
 `cora bench list` shows the suite; `--split train|holdout|all` picks the
 split (default train); `--task NAME` runs one; `--repeat N` measures
-reliability (green k/k + score spread); `--keep` keeps workspaces. Each suite
-appends to `cli/bench/history.jsonl`, stamped with a hash of the live prompt
-surfaces, so Cora versions compare across time.
+reliability (green k/k + score spread); `--keep` keeps workspaces;
+`--agent claude` runs the same tasks and grading through headless Claude Code
+(opus-5, effort high) as the single-agent rival harness. After grading, the
+run is cancelled (a settled run can revive on a late verifier verdict) and
+its workspace is deleted and pruned from the app. Each suite appends to
+`cli/bench/history.jsonl`, stamped with a hash of the live prompt surfaces —
+`cora bench history` shows the trajectory, and the summary prints deltas
+against the previous same-split entry plus a vs-rival table when the other
+harness has run the split.
 
 Tests: `npm run test:cora-cli` (offline, no app needed).
