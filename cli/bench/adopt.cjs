@@ -90,6 +90,7 @@ function promptHash() {
     tasks: [row], adopted: true,
   });
   fs.rmSync(dir, { recursive: true, force: true });
+  await rpcRaw(flags, "workspace.prune", { cwds: [dir] }).catch(() => null);
   console.log(JSON.stringify({ score: score.total, parts: score.parts, greenAtMs, wallMs, checks: checks.map((c) => `${c.pass ? "ok" : "FAIL"} ${c.name}`) }, null, 1));
   console.log("HARNESS SCORE " + score.total);
 })();

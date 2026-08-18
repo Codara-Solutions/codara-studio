@@ -47,6 +47,7 @@ ${c.bold("BENCH")}
                                effort high): the single-agent rival harness
   bench list                   show the suite's tasks (tier, split)
   bench history                score trajectory across runs
+  ws prune                     remove workspaces whose directory is gone
 
 ${c.bold("APP")}
   status                       is Codara running? version + activity
@@ -117,6 +118,17 @@ async function main() {
 
     case "bench":
       return require("./commands/bench.cjs").bench(args, flags);
+
+    case "ws": {
+      const { rpc } = require("./lib/rpc.cjs");
+      const { c } = require("./lib/ui.cjs");
+      if (args[0] !== "prune") fail("usage: cora ws prune  (removes workspaces whose directory is gone)");
+      const { removed } = await rpc(flags, "workspace.prune", {});
+      if (removed.length === 0) return console.log(c.dim("nothing to prune"));
+      for (const workspace of removed) console.log(`${c.red("−")} ${workspace.name}  ${c.dim(workspace.cwd)}`);
+      console.log(`pruned ${c.bold(String(removed.length))} workspace${removed.length === 1 ? "" : "s"}`);
+      return;
+    }
 
     case "read": {
       const { rpc } = require("./lib/rpc.cjs");

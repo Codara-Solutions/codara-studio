@@ -543,6 +543,8 @@ async function dispatch(
           );
         }
         return await handleChatResume(params, id);
+      case "workspace.prune":
+        return await handleWorkspacePrune(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
       case "app.info":
@@ -1110,6 +1112,57 @@ async function activateCliWorkspace(workspaceId: string): Promise<void> {
   const next: AppState = { ...state, activeWorkspaceId: workspaceId };
   await saveState(next);
   broadcastStateChanged(next);
+}
+
+/** Remove workspaces whose directory is gone (default), or exactly the given
+ * cwds. CLI-created throwaway workspaces (bench runs, temp checkouts) pile up
+ * in the rail otherwise; this is their cleanup half. */
+async function pruneCliWorkspaces(cwds?: string[]): Promise<{ removed: Workspace[] }> {
+  const state = await loadState();
+  const wanted = (cwds ?? []).map((cwd) => resolve(cwd));
+  const removed: Workspace[] = [];
+  const kept: Workspace[] = [];
+  for (const workspace of state.workspaces) {
+    let drop = false;
+    if (wanted.length > 0) {
+      drop = wanted.includes(resolve(workspace.cwd));
+    } else {
+      const stat = await fsp.stat(workspace.cwd).catch(() => null);
+      drop = !stat?.isDirectory();
+    }
+    (drop ? removed : kept).push(workspace);
+  }
+  if (removed.length === 0) return { removed };
+  const keptIds = new Set(kept.map((workspace) => workspace.id));
+  const next: AppState = {
+    workspaces: kept,
+    workspaceGroups: state.workspaceGroups,
+    workspaceRailOrder: (state.workspaceRailOrder ?? []).filter((id) => keptIds.has(id)),
+    activeWorkspaceId:
+      state.activeWorkspaceId && keptIds.has(state.activeWorkspaceId)
+        ? state.activeWorkspaceId
+        : (kept[0]?.id ?? null),
+  };
+  await saveState(next);
+  setAllowedRoots(next.workspaces.map((item) => item.cwd));
+  broadcastStateChanged(next);
+  return { removed };
+}
+
+async function handleWorkspacePrune(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const raw = params.cwds;
+  const cwds = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : undefined;
+  try {
+    const { removed } = await pruneCliWorkspaces(cwds && cwds.length > 0 ? cwds : undefined);
+    return successResponse(id, {
+      removed: removed.map((workspace) => ({ id: workspace.id, name: workspace.name, cwd: workspace.cwd })),
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
 }
 
 async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {

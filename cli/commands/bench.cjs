@@ -248,7 +248,12 @@ async function runTask(flags, task) {
   // still revive itself (a late verifier verdict queues a manager turn) and
   // spawn workers against a directory that no longer exists.
   await rpcRaw(flags, "chat.cancel", { runId, reason: "bench graded" }).catch(() => null);
-  if (!flags.keep) fs.rmSync(dir, { recursive: true, force: true });
+  if (!flags.keep) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    // chat.create registered the throwaway dir as an app workspace; remove it
+    // from the rail so bench runs don't pile up dead workspaces.
+    await rpcRaw(flags, "workspace.prune", { cwds: [dir] }).catch(() => null);
+  }
 
   const result = {
     checks,
