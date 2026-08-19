@@ -31,3 +31,16 @@ experiments/
 __pycache__/
 logs/
 /spark-agent.*.json
+
+# Chromium/Electron browser profiles are machine-local private state. Codara's
+# real profile lives outside workspaces; these are a final guard against an
+# accidental userData override pointing into a repository.
+**/Network/Cookies
+**/Network/Cookies-journal
+**/Cookies
+**/Cookies-journal
+**/Local Storage/leveldb/
+**/Session Storage/
+**/IndexedDB/*.indexeddb.*/
+**/WebStorage/QuotaManager*
+**/Network Persistent State

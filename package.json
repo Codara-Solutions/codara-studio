@@ -18,7 +18,7 @@
     "build": "electron-vite build",
     "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",
     "test:renderer-chunks": "node scripts/test-renderer-chunks.mjs",
-    "test:preview-webview": "node scripts/test-browser-pane-webview-liveness.cjs && node scripts/test-preview-navigation.cjs",
+    "test:preview-webview": "node scripts/test-browser-pane-webview-liveness.cjs && node scripts/test-preview-navigation.cjs && node scripts/test-browser-storage-boundary.cjs",
     "prestart": "node scripts/stamp-dev-electron-icon.cjs",
     "test:preview-auto-open": "node scripts/test-preview-auto-open.cjs",
     "start": "electron-vite preview",

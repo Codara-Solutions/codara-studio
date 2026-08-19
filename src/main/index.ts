@@ -46,6 +46,7 @@ import {
   type NavigationAllowlistConfig,
 } from "./navigation-allowlist";
 import { E2E_BACKGROUND, hideWindowFromDesktop, revealWindow } from "./e2e-background";
+import { safeUserDataOverride } from "./private-user-data";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -136,8 +137,15 @@ process.on("unhandledRejection", (reason) => {
   console.error("[main] unhandledRejection", reason);
 });
 
-if (process.env.SPARK_USER_DATA_DIR) {
-  app.setPath("userData", process.env.SPARK_USER_DATA_DIR);
+const requestedUserDataDir = process.env.SPARK_USER_DATA_DIR;
+const safeUserDataDir = safeUserDataOverride(requestedUserDataDir);
+if (safeUserDataDir) {
+  app.setPath("userData", safeUserDataDir);
+} else if (requestedUserDataDir?.trim()) {
+  // codaraHome also reads this legacy override. Remove a rejected value so
+  // neither Chromium credentials nor Codara state can be written into Git.
+  delete process.env.SPARK_USER_DATA_DIR;
+  console.error("[privacy] Ignored SPARK_USER_DATA_DIR inside a Git repository.");
 }
 if (process.platform === "win32") {
   // Windows only displays native toasts for an AppUserModelID it can resolve
