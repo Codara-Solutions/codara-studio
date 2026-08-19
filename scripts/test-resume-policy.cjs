@@ -67,6 +67,10 @@ async function main() {
     decideResume({ exists: true, resumable: false }, "claude").kind === "fresh",
   );
   check(
+    "grok stillborn probe heals to a fresh forced-id session",
+    decideResume({ exists: true, resumable: false }, "grok").kind === "fresh",
+  );
+  check(
     "claude missing transcript → fresh",
     decideResume({ exists: false }, "claude").kind === "fresh",
   );

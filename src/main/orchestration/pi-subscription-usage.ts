@@ -34,6 +34,7 @@
 // simply omitted rather than rendered as a confident zero.
 
 import { readFile, stat } from "node:fs/promises";
+import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
 import type {
   PiSubscriptionProvider,
   PiUsageOverview,
@@ -61,8 +62,9 @@ const MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
 const CLAUDE_CODE_USER_AGENT = "claude-code/2.1.0";
 
 const PROVIDER_LABELS: Record<PiSubscriptionProvider, string> = {
-  anthropic: "Claude Pro / Max",
-  "openai-codex": "ChatGPT Plus / Pro",
+  anthropic: familyForSubscription("anthropic").planLabel,
+  "openai-codex": familyForSubscription("openai-codex").planLabel,
+  xai: familyForSubscription("xai").planLabel,
 };
 
 interface StoredCredential {
@@ -619,13 +621,27 @@ async function profileUsage(
     );
   }
   try {
-    return profile.provider === "anthropic"
-      ? await anthropicUsage(profile, checkedAt)
-      : await codexUsage(profile, checkedAt);
+    if (profile.provider === "anthropic") return await anthropicUsage(profile, checkedAt);
+    if (profile.provider === "openai-codex") return await codexUsage(profile, checkedAt);
+    // SuperGrok has no client-readable quota window comparable to Claude/ChatGPT.
+    return {
+      profileId: profile.id,
+      provider: profile.provider,
+      label: profile.label,
+      isDefault: false,
+      status: "ok",
+      windows: [],
+      checkedAt,
+    };
   } catch {
     // Fixed copy only: errors from fs/fetch/runtime loading can contain a local
     // credential path or vendor response detail and must not cross IPC.
-    const providerLabel = profile.provider === "anthropic" ? "Claude" : "ChatGPT";
+    const providerLabel =
+      profile.provider === "anthropic"
+        ? "Claude"
+        : profile.provider === "openai-codex"
+          ? "ChatGPT"
+          : "xAI";
     return profileProblem(
       profile,
       checkedAt,
@@ -778,15 +794,14 @@ export function inspectPiSubscriptionUsage(force = false): Promise<PiUsageOvervi
       return {
         checkedAt,
         profiles,
-        providers: [
-          compatibilityProvider("anthropic", profiles),
-          compatibilityProvider("openai-codex", profiles),
-        ],
+        providers: PI_SUBSCRIPTION_PROVIDERS.map((provider) =>
+          compatibilityProvider(provider, profiles),
+        ),
       };
     } catch {
       // Registry/auth reconciliation failures are local implementation detail.
       // Keep IPC sanitized and make both compatibility rows explicitly degrade.
-      const providers: PiUsageProvider[] = (["anthropic", "openai-codex"] as const).map(
+      const providers: PiUsageProvider[] = PI_SUBSCRIPTION_PROVIDERS.map(
         (provider) => ({
           provider,
           label: PROVIDER_LABELS[provider],

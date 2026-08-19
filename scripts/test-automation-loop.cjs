@@ -2,7 +2,7 @@
 // automation-loop.ts) — the engine behind "Looms": trigger + loop automations,
 // including agent-driven loops. Mirrors scripts/test-automations.cjs: esbuild
 // bundles the REAL scheduler.ts + automation-loop.ts and stubs run-store /
-// event-log / spark-home / fs-atomic so we can drive iterations deterministically
+// event-log / codara-home / fs-atomic so we can drive iterations deterministically
 // and assert the SAFETY properties (caps always win, agent loops escapable,
 // blocked holds, pause/stop work, state persists).
 //
@@ -33,16 +33,16 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(spark-home|fs-atomic|agent-runtimes|pty-manager|notify))$/ },
+      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify))$/ },
       (args) => ({ path: args.path.replace(/^\.\.?\//, ""), namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
         "globalThis.__LOOP ??= { runs: new Map(), subs: new Set(), launches: [], pending: [], seq: 0, runtimes: null };\n";
-      if (args.path === "spark-home") {
+      if (args.path === "codara-home") {
         return {
           contents:
-            "export function sparkHome(){ return process.env.SPARK_HOME_DIR || require('node:os').tmpdir(); }\nexport function ensureSparkHomeSync(){}\n",
+            "export function codaraHome(){ return process.env.SPARK_HOME_DIR || require('node:os').tmpdir(); }\nexport function ensureCodaraHomeSync(){}\n",
           loader: "js",
         };
       }

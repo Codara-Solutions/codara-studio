@@ -1,10 +1,10 @@
+import { AGENT_FAMILIES, familyForModelId } from "@shared/agent-families";
 import type {
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
   PiCatalogModel,
 } from "@shared/types";
-import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
 
 // Per-model option used in the model picker. Each row is either a "real" id
 // the backend understands directly (e.g. "claude-opus-5", "gpt-5.6-sol") or a
@@ -57,46 +57,8 @@ export const ALL_EFFORTS: AgentEffortLevel[] = [
   "max",
 ];
 
-// Curated rows. PI_MODELS seeds the picker and is merged with whatever the live
-// catalog reports. CLAUDE_MODELS / CODEX_MODELS are no longer rendered as
-// groups (Cora is Pi-only) but are still read by findOptionInCatalog, so a run
-// persisted on a CLI backend keeps a friendly label instead of a raw id.
-const CLAUDE_MODELS: ChatModelOption[] = [
-  {
-    // Kept in step with WORKER_DEFAULT_CLAUDE_MODEL. When this row named an
-    // older Opus than the one the live catalog serves, keepCurrentGeneration
-    // replaced it a moment after the menu opened, so the row visibly changed
-    // from "Opus 4.8 1M" to "Opus 5" under the cursor.
-    id: "claude-opus-5:1m",
-    label: "Opus 5 1M",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-    isOneMillion: true,
-  },
-  {
-    id: "claude-sonnet-5:1m",
-    label: "Sonnet 5 1M",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-    isOneMillion: true,
-  },
-  {
-    // Fable is always available, but it comes last: a fresh chat must default
-    // to Opus (the first row), never drift onto the premium tier by accident.
-    id: "claude-fable-5",
-    label: "Fable 5",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  },
-];
-
-const CODEX_MODELS: ChatModelOption[] = CODEX_MODEL_CATALOG.map((model) => ({
-  id: model.id,
-  label: model.label,
-  backend: "codex",
-  effortLevels: [...model.effortLevels],
-}));
-
+// Curated rows. PI_MODELS seeds the picker and is merged with whatever the
+// live catalog reports.
 const PI_MODELS: ChatModelOption[] = [
   {
     id: "gpt-5.6-sol",
@@ -109,6 +71,12 @@ const PI_MODELS: ChatModelOption[] = [
     label: "Claude Fable 5",
     backend: "pi",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    id: "grok-4.5",
+    label: "Grok 4.5",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high"],
   },
 ];
 
@@ -147,6 +115,10 @@ const MODEL_RANK: Array<{ match: RegExp; rank: number }> = [
   { match: /^gpt-5\.6-sol$/i, rank: TIER_RANK.recommended },
   { match: /fable/i, rank: TIER_RANK.premium },
   { match: /opus/i, rank: TIER_RANK.flagship },
+  { match: /^grok-4\.6/i, rank: TIER_RANK.flagship },
+  { match: /^grok-4\.5/i, rank: TIER_RANK.flagship },
+  { match: /^grok-build/i, rank: TIER_RANK.balanced },
+  { match: /^grok-/i, rank: TIER_RANK.balanced },
   { match: /^gpt-5\.6-terra$/i, rank: TIER_RANK.balanced },
   { match: /sonnet/i, rank: TIER_RANK.balanced },
   { match: /^gpt-5\.6-luna$/i, rank: TIER_RANK.fast },
@@ -166,7 +138,7 @@ function withModelRank(option: ChatModelOption): ChatModelOption {
 export const DEFAULT_CHAT_BACKEND: ChatBackendKind = "pi";
 export const DEFAULT_CHAT_MODEL = "gpt-5.6-sol";
 export const DEFAULT_CHAT_MODE: ChatMode = "auto";
-export const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "high";
+export const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "medium";
 
 export const EFFORT_LABELS: Record<AgentEffortLevel, string> = {
   minimal: "Minimal",
@@ -250,40 +222,34 @@ export function buildVisibleGroups({
   // this group is the default chat model — that alone would silently move the
   // default off Sol.
   const piMerged = mergePiModels(PI_MODELS, piCatalog);
-  const isCodexModel = (model: ChatModelOption): boolean =>
-    /^gpt-/i.test(decomposeModelId(model.id).baseId);
-  const codexModels = keepCurrentGeneration(piMerged.filter(isCodexModel), "openai");
-  const claudeModels = keepCurrentGeneration(
-    piMerged.filter((model) => !isCodexModel(model)),
-    "anthropic",
-  );
-  // Split by model family rather than listed flat. The two families were
-  // interleaved by rank, which read as one arbitrary list once the rows lost
-  // their tier badges.
-  //
-  // Codex leads because the default chat model is the first row of the first
-  // group (several call sites read groups[0].models[0]) and Sol is rank 0.
-  // Sorting within each family keeps the premium tier last inside its own
-  // group, so Fable still cannot become the default.
+  const modelsFor = (family: "claude" | "codex" | "grok") =>
+    keepCurrentGeneration(
+      piMerged.filter((model) => familyForModelId(decomposeModelId(model.id).baseId) === family),
+      family === "codex" ? "openai" : family === "claude" ? "anthropic" : "xai",
+    );
+  // Split by model family rather than listed flat. Codex leads because the
+  // default chat model is the first row of the first group and Sol is rank 0.
   groups.push({
     key: "pi-openai",
     backend: "pi",
     section: PI_SECTION,
-    label: "OpenAI",
-    models: sortByRank(codexModels),
+    label: AGENT_FAMILIES.codex.vendorLabel,
+    models: sortByRank(modelsFor("codex")),
   });
   groups.push({
     key: "pi-anthropic",
     backend: "pi",
     section: PI_SECTION,
-    label: "Anthropic",
-    models: sortByRank(claudeModels),
+    label: AGENT_FAMILIES.claude.vendorLabel,
+    models: sortByRank(modelsFor("claude")),
   });
-  // No Claude Code / Codex CLI groups: those ran CORA ITSELF on a local CLI
-  // instead of Pi, which is a manager-harness choice, not a model choice, and
-  // it confused the menu into looking like three ways to pick the same models.
-  // Cora is Pi-only now. This does not touch WORKER runtimes: Cora still spawns
-  // Claude Code and Codex CLI workers, chosen per task via runtimePreference.
+  groups.push({
+    key: "pi-xai",
+    backend: "pi",
+    section: PI_SECTION,
+    label: AGENT_FAMILIES.grok.vendorLabel,
+    models: sortByRank(modelsFor("grok")),
+  });
   return groups;
 }
 
@@ -410,9 +376,10 @@ function codexGeneration(baseId: string): number[] | null {
  */
 function keepCurrentGeneration(
   models: ChatModelOption[],
-  provider: "anthropic" | "openai",
+  provider: "anthropic" | "openai" | "xai",
 ): ChatModelOption[] {
   if (models.length === 0) return models;
+  if (provider === "xai") return models;
 
   if (provider === "openai") {
     let newest: number[] | null = null;
@@ -504,37 +471,6 @@ export function composeModelId(baseId: string, oneMillion: boolean): string {
   return oneMillion ? `${baseId}${ONEM_SUFFIX}` : baseId;
 }
 
-// Find the dropdown option that matches the current (backend, model, 1M)
-// triple. Returns null when no row matches (e.g. an older run pinned a model
-// the provider has since retired out of the live catalog).
-export function findChatModel(
-  backend: ChatBackendKind,
-  modelId: string,
-  oneMillion: boolean,
-  groups: ChatBackendGroup[],
-): ChatModelOption | null {
-  const compoundId = composeModelId(modelId, oneMillion);
-  for (const group of groups) {
-    if (group.backend !== backend) continue;
-    const hit = group.models.find((m) => m.id === compoundId);
-    if (hit) return hit;
-  }
-  return null;
-}
-
-// Pick a sensible fallback option when the current selection isn't in the
-// visible groups (e.g. the user disabled the runtime in settings). Prefers
-// the same backend; falls back to the first group's first model.
-export function fallbackChatModel(
-  backend: ChatBackendKind,
-  groups: ChatBackendGroup[],
-): ChatModelOption | null {
-  const same = groups.find((g) => g.backend === backend);
-  if (same && same.models.length > 0) return same.models[0];
-  if (groups.length > 0 && groups[0].models.length > 0) return groups[0].models[0];
-  return null;
-}
-
 /** Rows the picker must never auto-select on the user's behalf. */
 function isPremiumTier(option: ChatModelOption): boolean {
   return modelRankFor(option.id) === TIER_RANK.premium;
@@ -570,26 +506,16 @@ export function effortsFor(option: ChatModelOption | null): AgentEffortLevel[] {
   return ALL_EFFORTS;
 }
 
-// Find a model in the STATIC catalog (Claude/Codex/Pi), ignoring availability.
-// Used by the composer to derive effort levels for the current selection
-// without needing the diagnostics IPC — effort lists never depend on whether
-// the runtime is installed. A model discovered from the live catalog has no
-// curated row, so this returns null for it; the caller should treat that as
-// "use ALL_EFFORTS".
+// Find a model in the STATIC catalog, ignoring availability. Used by the
+// composer to derive effort levels for the current selection. A model
+// discovered from the live catalog has no curated row, so this returns null
+// for it; the caller should treat that as "use ALL_EFFORTS".
 export function findOptionInCatalog(
   backend: ChatBackendKind,
   modelId: string,
   oneMillion: boolean,
 ): ChatModelOption | null {
+  if (backend !== "pi") return null;
   const compoundId = composeModelId(modelId, oneMillion);
-  if (backend === "claude") {
-    return CLAUDE_MODELS.find((m) => m.id === compoundId) ?? null;
-  }
-  if (backend === "codex") {
-    return CODEX_MODELS.find((m) => m.id === compoundId) ?? null;
-  }
-  if (backend === "pi") {
-    return PI_MODELS.find((m) => m.id === compoundId) ?? null;
-  }
-  return null;
+  return PI_MODELS.find((m) => m.id === compoundId) ?? null;
 }

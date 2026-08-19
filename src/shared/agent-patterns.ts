@@ -35,11 +35,12 @@ export type AgentRuntime =
 // Public runtime tag emitted through onAgentState. Mirrors the two runtimes
 // the rest of the app already knows how to render. The boundary in
 // useTerminalSession coerces every other AgentRuntime down to `null`.
-export type PublicAgentRuntime = "claude" | "codex";
+export type PublicAgentRuntime = "claude" | "codex" | "grok";
 
 export const KNOWN_PUBLIC_RUNTIMES: ReadonlySet<AgentRuntime> = new Set([
   "claude",
   "codex",
+  "grok",
 ]);
 
 export function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime | null {
@@ -82,7 +83,7 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   { runtime: "cline",      pattern: /\bCline\s*v\d|\bcline-cli\b/i },
   { runtime: "copilot",    pattern: /\bGitHub\s*Copilot\s*CLI\b|\bcopilot\s*v\d/i },
   { runtime: "droid",      pattern: /\bDroid\s*CLI\b|\bfactory\.ai\b/i },
-  { runtime: "grok",       pattern: /\bGrok\s*v\d|\bxAI\s*Grok\b/i },
+  { runtime: "grok",       pattern: /\bGrok\s*Build\b|\bGrok\s*v\d|\bxAI\s*Grok\b|\bSpaceXAI\b/i },
   { runtime: "hermes",     pattern: /\bHermes\s*v\d|\bhermes-agent\b/i },
   { runtime: "kimi",       pattern: /\bKimi\s*v\d|\bkimi-code\b/i },
   { runtime: "kiro",       pattern: /\bKiro\s*v\d|\bkiro-cli\b/i },
@@ -194,6 +195,13 @@ const CODEX_LIVE_IDENTITY: RegExp[] = [
   /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
 ];
 
+const GROK_LIVE_IDENTITY: RegExp[] = [
+  /\bGrok\s*Build\b/i,
+  /\bxAI\s*Grok\b/i,
+  /\balways-approve\b/i,
+  /\b\/always-approve\b/i,
+];
+
 export function sniffLiveRuntime(text: string): PublicAgentRuntime | null {
   const fromBanner = sniffRuntime(text);
   if (fromBanner) return coercePublicRuntime(fromBanner);
@@ -203,6 +211,9 @@ export function sniffLiveRuntime(text: string): PublicAgentRuntime | null {
   }
   for (const re of CODEX_LIVE_IDENTITY) {
     if (re.test(stripped)) return "codex";
+  }
+  for (const re of GROK_LIVE_IDENTITY) {
+    if (re.test(stripped)) return "grok";
   }
   return null;
 }
@@ -245,6 +256,14 @@ function runtimeFromExecutable(exe: string): AgentRuntime | null {
     normalized.endsWith("/@openai/codex")
   ) {
     return "codex";
+  }
+  if (
+    normalized === "grok" ||
+    normalized === "xai-grok-pager" ||
+    normalized.endsWith("/grok") ||
+    normalized.endsWith("\\grok")
+  ) {
+    return "grok";
   }
   return null;
 }
@@ -409,6 +428,30 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
     done: [
       /Session\s*complete\./i,
       /\bExiting\b\./i,
+    ],
+  },
+  // Grok Build (SpaceXAI). Conservative until live idle/working frames are
+  // captured: match banner + common cancel/permission chrome, never claim
+  // absence-reset is safe.
+  grok: {
+    working: [
+      /esc\s*to\s*(?:interrupt|cancel)/i,
+      /Responding…/i,
+      /Writing (?:file|edit)/i,
+      /\bRunning:\s+\S/i,
+    ],
+    blocked: [
+      /\bAllow once\b/,
+      /\bReject once\b/,
+      /Enable always-approve mode/,
+      /Always allow:/,
+      /\bAwaiting your input\b/i,
+      /Do\s*you\s*want\s*to\s*(?:proceed|continue|allow)/i,
+    ],
+    done: [
+      /Turn cancelled by user/,
+      /Session\s*(?:ended|complete)\./i,
+      /\bGoodbye\b!?/i,
     ],
   },
 };
@@ -669,6 +712,13 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
     /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
     /\?\s*for\s*shortcuts/i,
     /ctrl\s*\+?\s*c\s*to\s*(?:quit|exit|interrupt)/i,
+  ],
+  grok: [
+    /\bGrok\s*Build\b/i,
+    /\bxAI\s*Grok\b/i,
+    /\balways-approve\b/i,
+    /\?\s*for\s*shortcuts/i,
+    /Shift\s*\+?\s*Tab/,
   ],
 };
 

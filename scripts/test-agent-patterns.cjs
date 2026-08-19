@@ -238,6 +238,27 @@ check(
 // promoted into ABSENCE_RESET_SAFE and this expectation flipped to true.
 check("absenceResetSafe(claude) — verified idle chrome", ap.absenceResetSafe("claude"), true);
 check("absenceResetSafe(codex) — UNVERIFIED, fail-safe off", ap.absenceResetSafe("codex"), false);
+check("absenceResetSafe(grok) — UNVERIFIED, fail-safe off", ap.absenceResetSafe("grok"), false);
+check(
+  "grok banner is UI-present",
+  ap.agentUiPresent("grok", "Grok Build  ·  always-approve  ·  ? for shortcuts"),
+  true,
+);
+check(
+  "grok Responding… chrome is working",
+  ap.classifyTail("grok", "Responding…  esc to cancel"),
+  "working",
+);
+check(
+  "grok Allow once prompt is blocked",
+  ap.classifyTail("grok", "Allow once    Reject once    Enable always-approve mode"),
+  "blocked",
+);
+check(
+  "grok banner is not a working chip by itself",
+  ap.classifyTail("grok", "Grok Build  ·  always-approve"),
+  null,
+);
 
 // ── REAL Claude Code v2.1.170 frames (live pty capture, 2026-06-10) ──
 // The v2.1.17x footer dropped "esc to interrupt" entirely; the reliable

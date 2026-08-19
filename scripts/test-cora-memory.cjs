@@ -51,12 +51,12 @@ async function expectThrow(name, fn, match) {
 const harness = {
   name: "cora-memory-harness",
   setup(build) {
-    build.onResolve({ filter: /\/spark-home$/ }, () => ({
-      path: "spark-home-stub",
+    build.onResolve({ filter: /\/codara-home$/ }, () => ({
+      path: "codara-home-stub",
       namespace: "stub",
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-      contents: `export const sparkHome = () => ${JSON.stringify(TMP_HOME)};`,
+      contents: `export const codaraHome = () => ${JSON.stringify(TMP_HOME)};`,
       loader: "js",
     }));
   },

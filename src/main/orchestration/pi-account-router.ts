@@ -59,12 +59,17 @@ export function sanitizedPiAccountHeadroom(
       kind: "agent",
       modelId,
     });
-    const available = Boolean(
-      auth?.connected &&
-        (!auth.expired || auth.canRefresh) &&
-        usage?.status !== "not_connected" &&
-        usage?.status !== "expired",
-    );
+    // The auth store is authoritative about whether a credential can still be
+    // revived; the usage probe is a best-effort HTTP check that reports
+    // "expired" for a refresh it could not complete itself. Letting that probe
+    // veto a refreshable credential is a deadlock: the account is dropped from
+    // routing, so no session ever launches, so Pi never performs the refresh
+    // that would clear the very state keeping it out. A credential that cannot
+    // refresh still needs a real reconnect, so the probe keeps its veto there.
+    const revivable = Boolean(auth?.connected && (!auth.expired || auth.canRefresh));
+    const usageVetoes =
+      usage?.status === "not_connected" || (usage?.status === "expired" && !auth?.canRefresh);
+    const available = revivable && !usageVetoes;
     return {
       profileId: profile.id,
       available,

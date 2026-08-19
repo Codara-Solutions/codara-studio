@@ -55,7 +55,6 @@ export interface Props {
   // Whether the Automations tab is the active top-level tab (drives the
   // workers poll + activity-stream visibility).
   active: boolean;
-  terminalScrollbackLineLimit: number;
   // Opens a run's ordinary chat surface, used by "Open chat" on an
   // automation's creator run.
   onOpenRunChat?: (runId: string) => void;
@@ -80,7 +79,6 @@ export default function AutomationsPage({
   workspaceName,
   cwd,
   active,
-  terminalScrollbackLineLimit,
   onOpenRunChat,
 }: Props): React.ReactElement {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
@@ -586,7 +584,6 @@ export default function AutomationsPage({
               <WorkersView
                 workers={workspaceWorkers}
                 jobs={jobs}
-                scrollbackLineLimit={terminalScrollbackLineLimit}
                 visible={active && subTab === "workers"}
                 onStopLoom={stopAutomation}
                 onSelectLoom={openDetail}
@@ -728,7 +725,6 @@ export default function AutomationsPage({
                 workers={boardWorkers}
                 initialFocusWorkerId={boardFocusWorkerId}
                 shown={active && boardShowing}
-                scrollbackLineLimit={terminalScrollbackLineLimit}
                 onClose={closeLiveBoard}
                 onOpenWorkersGrid={() => switchSubTab("workers")}
                 onStop={() => stopAutomation(selected.id)}

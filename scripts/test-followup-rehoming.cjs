@@ -211,6 +211,7 @@ function referenceRun(options = {}) {
       resumeSessionId: options.warmSession ? SESSION : undefined,
       followUpOfTaskId: options.warmSession ? "task-warm-source" : undefined,
       verifierFeedbackRounds: options.priorRounds,
+      verifierBrief: "Re-run npm test and verify the documented contract.",
       createdBy: "spark",
       createdAt: T0,
       updatedAt: T0,
@@ -415,6 +416,7 @@ async function main() {
     assert.equal(copy.accessHint, "edits", "the node-derived tool fence travels with the copy");
     assert.deepEqual(copy.blockedToolsHint, ["Bash"]);
     assert.equal(copy.collabMailDirHint, "/runs/run-ref/mail");
+    assert.equal(copy.verifierBrief, original.verifierBrief, "declared verification survives re-homing");
     assert.equal(copy.verifierFeedbackRounds, 1, "the rework round counter advances on the copy");
 
     // Peer semantics: the INTENT flag travels, the outcome flag does not -
@@ -830,6 +832,11 @@ async function main() {
       /rehomeSettledStepFeedbackRetry\(draft, \{/,
       "the retry routes a settled-step target through the re-homing helper",
     );
+    assert.match(
+      retry,
+      /task\.autoVerifierForTaskId[\s\S]{0,300}candidate\.id === task\.autoVerifierForTaskId/,
+      "an automatic verifier targets its implementation by id",
+    );
     assert.ok(
       retry.indexOf("reconcileAcceptedVerifierOnlySteps(draft, timestamp)") <
         retry.indexOf("rehomeSettledStepFeedbackRetry(draft, {"),
@@ -844,6 +851,16 @@ async function main() {
       retry,
       /countFollowUpLineageAttempts\(run, target\)/,
       "the attempt cap counts the whole follow-up lineage when re-homing",
+    );
+    assert.match(
+      runStore,
+      /verifierBrief: task\.verifierBrief,[\s\S]{0,100}autoVerifierForTaskId: task\.autoVerifierForTaskId/,
+      "runtime fallbacks preserve declared-verifier linkage",
+    );
+    assert.match(
+      runStore,
+      /task\.taskClass === "verifier" \|\| !task\.verifierBrief \|\| report\.filesChanged\.length === 0/,
+      "declared-verifier steps stay open only when a file change needs verification",
     );
     // The cap decline is journaled, so an unacted verifier verdict is
     // explicable from events.jsonl instead of looking like a dropped verdict.

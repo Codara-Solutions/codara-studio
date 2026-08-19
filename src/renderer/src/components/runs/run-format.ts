@@ -160,14 +160,6 @@ export function isAutoCollapsibleStepStatus(status: StepState["status"]): boolea
   return status === "complete" || status === "skipped";
 }
 
-// A step is "attention" when it has stalled in a state only the operator can
-// clear. Drives the loud danger treatment on the node and the inspector list.
-export function stepNeedsAttention(status: StepState["status"]): boolean {
-  // completed_unverified is terminal but flagged — it landed without a
-  // cross-provider verifier verdict, so the operator should still see it.
-  return status === "blocked" || status === "failed" || status === "completed_unverified";
-}
-
 // Per-runtime accent — the app-wide engine identity tokens (claude wears
 // coral, codex cyan; see the "Loom silhouettes" section in styles.css), so a
 // worker's runtime reads the same on the run graph, the loom editor, and the
@@ -437,11 +429,6 @@ export function deriveAgentStatus(
   return "queued";
 }
 
-// A worker task that has reached a terminal "did its job" state.
-export function isCompletedTask(task: WorkerTask): boolean {
-  return task.status === "accepted" || task.status === "needs_review";
-}
-
 // The step Codara is currently rendering worker prompts for. The connector
 // glow rides the wire INTO this step — worker execution itself lights the
 // step node, not the wire feeding the next queued step.
@@ -483,12 +470,6 @@ export function stepFileCount(
 }
 
 // ── Time formatting ──────────────────────────────────────────────────────────
-
-export function formatTime(value: string): string {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
 
 export function formatClock(value: string): string {
   const d = new Date(value);

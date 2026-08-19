@@ -274,14 +274,21 @@ async function main() {
     assert.equal(P.isParkedManagerTurnAction(undefined), false);
   });
 
-  test("auth, crashes, and unclassified errors keep the honest failed verdict", () => {
+  test("auth parks for user recovery; crashes and unclassified errors fail", () => {
     for (const error of [
-      // The Pi session-startup auth error. pi-backend now THROWS this before a
-      // turn starts (so run-store degrades to the manual fallback / a parked
-      // question); if it ever surfaces mid-turn instead, it must never be
-      // treated as transient: no retry, no park.
       "Pi provider openai-codex is not authenticated with OAuth",
       "OAuth session expired, please /login",
+    ]) {
+      const plan = P.planManagerTurnFailure({
+        error,
+        runStatus: "running",
+        mode: "chat",
+        transientRetryCount: 0,
+      });
+      assert.equal(plan.action, "park", `expected auth recovery park for ${JSON.stringify(error)}`);
+      assert.equal(plan.kind, "auth");
+    }
+    for (const error of [
       "runtime binary did not start",
       "something inexplicable",
       "",

@@ -249,18 +249,6 @@ export async function remoteCreateFolder(parentRemotePath: string, name: string)
   return { name: clean, path: makeRemotePath(parts.hostId, target), isDir: true };
 }
 
-export async function remotePathExists(remotePath: string): Promise<boolean> {
-  const parts = parseRemotePath(remotePath);
-  if (!parts) return false;
-  try {
-    const conn = await getConnection(parts.hostId);
-    const res = await conn.exec(`test -e ${shQuote(parts.path)}`);
-    return res.code === 0;
-  } catch {
-    return false;
-  }
-}
-
 export async function remoteListFiles(remoteRoot: string): Promise<FileListResult> {
   const parts = parseRemotePath(remoteRoot);
   if (!parts) throw new Error(`Not a remote path: ${remoteRoot}`);

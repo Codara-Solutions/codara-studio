@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { Virtuoso } from "react-virtuoso";
 import type { RunState, SparkCall, SparkEvent } from "@shared/types";
-import { useRunExecutionRecord } from "../lib/useRunExecutionRecord";
+import { useRunEvents } from "../lib/useRunExecutionRecord";
 
 // A renderer-only diagnostic overlay over the active run. Pure presentation —
 // reads the same `RunState` ChatPanel sees, plus the orchestration event log
@@ -8,26 +9,16 @@ import { useRunExecutionRecord } from "../lib/useRunExecutionRecord";
 // the global `session.openInspector` shortcut (Mod+Shift+I) and dismissed
 // with Escape or the close button.
 //
-// Tab roster (one big bet, one small surface each):
-//   - Costs           — per-step + total cost rollup, if the run records
-//                       any cost data on its SparkCall log. Otherwise the
-//                       "enable cost tracking" placeholder, because the
-//                       cost-tracking big bet (G) hasn't shipped.
-//   - Events log      — raw JSONL view of the run's event stream. Each row
-//                       collapses by default; click to expand and read the
-//                       JSON body.
-//   - Context window  — approximate token usage from SparkCall records,
-//                       else a placeholder.
-//   - Tool failures   — filtered event log: anything whose type contains
-//                       "fail", "error", or "blocked".
+// Usage and context read the already-loaded RunState. The potentially large
+// event journal is fetched lazily and rendered virtually only on its two tabs.
 
 type InspectorTab = "costs" | "events" | "context" | "failures";
 
 const TABS: ReadonlyArray<{ id: InspectorTab; label: string }> = [
-  { id: "costs", label: "Costs" },
-  { id: "events", label: "Events log" },
-  { id: "context", label: "Context window" },
-  { id: "failures", label: "Tool failures" },
+  { id: "costs", label: "Usage" },
+  { id: "events", label: "Events" },
+  { id: "context", label: "Context" },
+  { id: "failures", label: "Errors" },
 ];
 
 interface SessionInspectorProps {
@@ -37,7 +28,6 @@ interface SessionInspectorProps {
 
 export default function SessionInspector({ run, onClose }: SessionInspectorProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>("costs");
-  const execution = useRunExecutionRecord(run);
 
   // Esc closes — mirrors SettingsDialog's keyboard handling. Capture is fine
   // here; useGlobalShortcuts itself is also capture-phase but uses stop-
@@ -68,12 +58,12 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
       {/* Scrim is a SIBLING of the dialog, never a filtered wrapper: a
           backdrop-filtered ancestor would form a backdrop root and the
           dialog's own glass would sample only the scrim's flat tint. */}
-      <div className="spark-scrim" style={{ zIndex: 0 }} />
+      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
-        aria-label="Session inspector"
-        className="spark-glass--strong"
+        aria-label="Run details"
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           zIndex: 1,
           width: "min(880px, calc(100vw - 44px))",
@@ -107,21 +97,11 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
           ) : activeTab === "costs" ? (
             <CostsTab run={run} />
           ) : activeTab === "events" ? (
-            <EventsTab
-              events={execution.events}
-              loading={execution.loading}
-              error={execution.error}
-              filter={null}
-            />
+            <EventInspectorTab run={run} filter={null} />
           ) : activeTab === "context" ? (
             <ContextWindowTab run={run} />
           ) : (
-            <EventsTab
-              events={execution.events}
-              loading={execution.loading}
-              error={execution.error}
-              filter="failures"
-            />
+            <EventInspectorTab run={run} filter="failures" />
           )}
         </div>
       </section>
@@ -179,7 +159,7 @@ function Header({
             textTransform: "uppercase",
           }}
         >
-          Session Inspector
+          Run details
         </div>
         {run ? (
           <div
@@ -293,10 +273,8 @@ function CloseButton({ onClick }: { onClick: () => void }) {
 
 // ── Costs tab ───────────────────────────────────────────────────────────────
 
-// Cost-related fields the run-store might surface on its SparkCall log once
-// the cost-tracking big bet lands. None of these exist yet at the time the
-// inspector lands; we detect their absence to swap in the
-// "enable cost tracking in Settings" placeholder.
+// Provider usage is stored per manager call. Older and interrupted runs may
+// predate these fields, so the empty state remains useful.
 type CostBearingCall = SparkCall & {
   costUsd?: number;
   inputTokens?: number;
@@ -323,11 +301,8 @@ function CostsTab({ run }: { run: RunState }) {
   if (callsWithCost.length === 0) {
     return (
       <Placeholder
-        title="No cost data"
-        detail={
-          "Cost tracking isn't recording USD or input/output token splits for this run yet. " +
-          "Enable cost tracking in Settings once the cost-tracking big bet ships."
-        }
+        title="No usage recorded"
+        detail="This run has no provider token or cost data. Older and interrupted runs may not include it."
       />
     );
   }
@@ -382,8 +357,8 @@ function CostsTab({ run }: { run: RunState }) {
   return (
     <div style={{ padding: "16px 20px 20px", overflow: "auto", flex: 1 }}>
       <SectionTitle
-        title="Cost by manager mode"
-        detail="USD plus input / output / cache-read tokens, rolled up per SparkCall mode."
+        title="Manager usage"
+        detail="Cost and token usage grouped by the kind of manager call."
       />
       <div
         role="table"
@@ -510,6 +485,19 @@ function formatInt(value: number): string {
 
 // ── Events tab ──────────────────────────────────────────────────────────────
 
+// The journal can contain thousands of events. Load it only if the user opens
+// an event tab; Costs and Context use RunState and remain instant.
+function EventInspectorTab({
+  run,
+  filter,
+}: {
+  run: RunState;
+  filter: "failures" | null;
+}) {
+  const record = useRunEvents(run);
+  return <EventsTab {...record} filter={filter} />;
+}
+
 function EventsTab({
   events,
   loading,
@@ -556,7 +544,8 @@ function EventsTab({
       style={{
         flex: 1,
         minHeight: 0,
-        overflow: "auto",
+        display: "flex",
+        flexDirection: "column",
         padding: "12px 16px 16px",
         fontFamily: "var(--font-mono)",
         fontSize: 11,
@@ -588,17 +577,20 @@ function EventsTab({
           {rows.length === 1 ? "" : "s"} · click a row to expand
         </span>
       </div>
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 3,
+      <Virtuoso
+        style={{ flex: 1, minHeight: 0 }}
+        totalCount={rows.length}
+        overscan={300}
+        computeItemKey={(index) => rows[index]?.id ?? index}
+        itemContent={(index) => {
+          const event = rows[index];
+          return event ? (
+            <div style={{ paddingBottom: 3 }}>
+              <EventRow event={event} highlight={filter === "failures"} />
+            </div>
+          ) : null;
         }}
-      >
-        {rows.map((event) => (
-          <EventRow key={event.id} event={event} highlight={filter === "failures"} />
-        ))}
-      </div>
+      />
     </div>
   );
 }

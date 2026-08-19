@@ -7,13 +7,14 @@
 // Design rules
 // ------------
 // 1. Idempotent. Our entries are identified by their COMMAND STRING (any
-//    command referencing spark-hook.py is ours) — not just by the
-//    `_sparkManaged: true` / `_sparkVersion` tags we also write. Claude Code
+//    command referencing codara-hook.py — or its pre-rename name
+//    spark-hook.py — is ours), not just by the `_codaraManaged` /
+//    `_codaraVersion` tags we also write. Claude Code
 //    rewrites ~/.claude/settings.json itself (e.g. when the user changes a
 //    setting) and STRIPS unknown keys like our tags; a tag-only identity
 //    check then sees "user hooks" it refuses to touch and appends a fresh
 //    tagged set on every boot — which is exactly how settings files ended up
-//    with N identical spark-hook entries per event. On every call we drop
+//    with N identical hook entries per event. On every call we drop
 //    everything that matches by command-or-tag and re-add exactly one entry
 //    per event (collapsing any accumulated duplicates), leaving genuine user
 //    hooks untouched. Skip the write entirely when the file already contains
@@ -32,7 +33,7 @@
 //    install paths (very common on Windows / macOS) work. Hook name is a
 //    static identifier so it doesn't need quoting.
 // 5. Durable script path. We NEVER point Claude at whatever directory the app
-//    happened to boot from. On install we copy spark-hook.py to a stable
+//    happened to boot from. On install we copy codara-hook.py to a stable
 //    per-user location (<spark-home>/claude-hooks/) and write THAT path.
 //    Rationale, from a real incident: Codara was launched from a throwaway git
 //    worktree, wrote the worktree path into settings, and the worktree was
@@ -42,7 +43,7 @@
 //    hand-edited settings.json. A copy under the user's home survives the app
 //    being moved, upgraded, run from a worktree, or deleted.
 // 6. Self-healing. A user in that state cannot use Claude Code to repair
-//    itself, but Codara still runs. So on every install we drop spark-hook
+//    itself, but Codara still runs. So on every install we drop our hook
 //    entries whose script path no longer exists, INCLUDING when we cannot
 //    install (missing resources, no durable destination). Repairing is
 //    unconditional; installing is not.
@@ -61,14 +62,16 @@ import { homedir, tmpdir } from "node:os";
 
 import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
-import { defaultSparkHome, sparkHome } from "./spark-home";
+import { defaultCodaraHome, codaraHome } from "./codara-home";
 
 const CLAUDE_SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
 
 // Bumping this version forces the installer to re-write our hook entries on
 // the next launch (after dropping the old ones). Use when the script path
 // shape, command shape, or matcher convention changes.
-const SPARK_HOOK_VERSION = "2";
+// "3": the script was renamed spark-hook.py -> codara-hook.py and the tags
+// moved from _sparkManaged/_sparkVersion to _codaraManaged/_codaraVersion.
+const CODARA_HOOK_VERSION = "3";
 
 // The Claude hook events we want to ingest. Order is the order we'll write
 // them into the JSON, which has no semantic meaning to Claude but keeps the
@@ -92,6 +95,9 @@ type HookEventName = (typeof HOOK_EVENTS)[number];
 interface ClaudeHookCommand {
   type: "command";
   command: string;
+  _codaraManaged?: true;
+  _codaraVersion?: string;
+  /** Pre-rename tags; still recognized so old entries strip cleanly. */
   _sparkManaged?: true;
   _sparkVersion?: string;
 }
@@ -99,6 +105,8 @@ interface ClaudeHookCommand {
 interface ClaudeHookEntry {
   matcher?: string;
   hooks: ClaudeHookCommand[];
+  _codaraManaged?: true;
+  _codaraVersion?: string;
   _sparkManaged?: true;
   _sparkVersion?: string;
 }
@@ -112,12 +120,12 @@ interface ClaudeSettings {
   [key: string]: unknown;
 }
 
-// Resolve the absolute path to spark-hook.py in both development and packaged
-// builds through the stable application resource root. This is the SOURCE we
-// copy from, never (except as a last-resort fallback) the path we hand to
-// Claude: it moves with the app.
+// Resolve the absolute path to codara-hook.py in both development and
+// packaged builds through the stable application resource root. This is the
+// SOURCE we copy from, never (except as a last-resort fallback) the path we
+// hand to Claude: it moves with the app.
 function resolveHookScriptPath(): string {
-  return resolveBundledResourcePath("claude-hooks", "spark-hook.py");
+  return resolveBundledResourcePath("claude-hooks", CODARA_HOOK_SCRIPT_FILENAME);
 }
 
 // The directory name we keep our durable copy of the hook script in, under
@@ -133,12 +141,12 @@ const STABLE_HOOK_DIR_NAME = "claude-hooks";
 // itself lives is independent of which home the events land in. Returns null
 // when even that is transient (nothing durable to write, so don't install).
 async function resolveStableScriptPath(): Promise<string | null> {
-  const candidates = [sparkHome(), defaultSparkHome()];
+  const candidates = [codaraHome(), defaultCodaraHome()];
   for (const home of candidates) {
     // resolve() because the home overrides are raw environment strings: a
     // relative one would be written into settings verbatim and then resolved
     // against Claude's cwd, which is a different directory in every session.
-    const candidate = resolve(join(home, STABLE_HOOK_DIR_NAME, SPARK_HOOK_SCRIPT_FILENAME));
+    const candidate = resolve(join(home, STABLE_HOOK_DIR_NAME, CODARA_HOOK_SCRIPT_FILENAME));
     if (!(await isTransientPath(candidate))) return candidate;
   }
   return null;
@@ -256,7 +264,7 @@ async function syncStableHookScript(source: string, destination: string): Promis
     return true;
   } catch (err) {
     console.warn(
-      "[hook-installer] could not copy spark-hook.py to",
+      "[hook-installer] could not copy codara-hook.py to",
       destination,
       ":",
       (err as Error).message,
@@ -303,7 +311,7 @@ async function resolveTargetScriptPath(
     }
   }
   if (!sourceExists) {
-    return { path: null, reason: `spark-hook.py not found at ${sourcePath}` };
+    return { path: null, reason: `codara-hook.py not found at ${sourcePath}` };
   }
   if (await isTransientPath(sourcePath)) {
     return {
@@ -320,10 +328,7 @@ async function resolveTargetScriptPath(
 // We DON'T verify the binary exists here — the failure surface is "the hook
 // command errors when fired" which Claude logs to its own debug surface.
 // Trying to probe at install time would double the startup cost (fork/exec
-// on every launch) for marginal benefit. Exported so the per-run hook config
-// in claude-backend uses the SAME decision — hardcoding `python` there broke
-// every Talk/Execute turn on macOS (Stop hook → "python: command not found"
-// → no turn-done marker → turns only ended on the 90s timeout).
+// on every launch) for marginal benefit.
 export function resolvePythonBinary(): string {
   return process.platform === "win32" ? "python" : "python3";
 }
@@ -403,8 +408,8 @@ function buildHookCommand(python: string, scriptPath: string, hookName: HookEven
     command:
       `${shellQuote(python)} -c ${shellQuote(HOOK_LAUNCHER_CODE)} ` +
       `${shellQuote(scriptPath)} ${hookName}`,
-    _sparkManaged: true,
-    _sparkVersion: SPARK_HOOK_VERSION,
+    _codaraManaged: true,
+    _codaraVersion: CODARA_HOOK_VERSION,
   };
 }
 
@@ -413,8 +418,8 @@ function buildHookEntry(python: string, scriptPath: string, hookName: HookEventN
     // Empty matcher = catch-all. PreToolUse/PostToolUse can be filtered by
     // tool name via matcher; we want everything, so leave it out.
     hooks: [buildHookCommand(python, scriptPath, hookName)],
-    _sparkManaged: true,
-    _sparkVersion: SPARK_HOOK_VERSION,
+    _codaraManaged: true,
+    _codaraVersion: CODARA_HOOK_VERSION,
   };
 }
 
@@ -452,9 +457,11 @@ async function readExistingSettings(
 
 // The basename that identifies our hook command regardless of install
 // location (dev repo, packaged resourcesPath, a moved checkout). Command-
-// string identity survives Claude Code stripping our `_sparkManaged` /
-// `_sparkVersion` tags when IT rewrites the settings file.
-const SPARK_HOOK_SCRIPT_FILENAME = "spark-hook.py";
+// string identity survives Claude Code stripping our `_codaraManaged` /
+// `_codaraVersion` tags when IT rewrites the settings file. The legacy name
+// still matches so entries written before the rename strip and prune cleanly.
+const CODARA_HOOK_SCRIPT_FILENAME = "codara-hook.py";
+const LEGACY_HOOK_SCRIPT_FILENAME = "spark-hook.py";
 
 // Pull the script path back out of a command string so we can tell a live
 // entry from a dead one. Handles both command shapes we have ever emitted
@@ -468,16 +475,17 @@ const SPARK_HOOK_SCRIPT_FILENAME = "spark-hook.py";
 // was written on the other one, which WSL and synced dotfiles both produce.
 function extractHookScriptCandidates(command: string): string[] {
   // A backslash is an escape only in front of a character shellQuote escapes.
-  // Anywhere else it is an ordinary Windows separator: treating `\s` as an
-  // escape pair would swallow the `s` of `\spark-hook.py` and never match a
-  // Windows path at all.
-  const quoted = command.match(/"((?:[^"\\]|\\[\\$`"]|\\(?=[^\\$`"]))*spark-hook\.py)"/);
+  // Anywhere else it is an ordinary Windows separator: treating `\c` as an
+  // escape pair would swallow the `c` of `\codara-hook.py` and never match a
+  // Windows path at all. Both the current and the pre-rename basename match,
+  // so old spark-hook entries stay recognizable for stripping and pruning.
+  const quoted = command.match(/"((?:[^"\\]|\\[\\$`"]|\\(?=[^\\$`"]))*(?:codara|spark)-hook\.py)"/);
   if (quoted) {
     const raw = quoted[1];
     const unescaped = raw.replace(/\\([\\$`"])/g, "$1");
     return unescaped === raw ? [raw] : [raw, unescaped];
   }
-  const bare = command.match(/(\S*spark-hook\.py)/);
+  const bare = command.match(/(\S*(?:codara|spark)-hook\.py)/);
   return bare ? [bare[1]] : [];
 }
 
@@ -496,46 +504,48 @@ function extractHookScriptPath(command: string): string | null {
   return process.platform === "win32" ? candidates[0] : candidates[candidates.length - 1];
 }
 
-// A command is ours when it carries our tag OR its command string references
-// spark-hook.py (tag-stripped survivors from a CC rewrite, and entries
-// written by older Codara builds from a different install path).
-function isSparkHookCommand(cmd: unknown): boolean {
+// A command is ours when it carries our tag (current or pre-rename) OR its
+// command string references codara-hook.py / spark-hook.py (tag-stripped
+// survivors from a CC rewrite, and entries written by older Codara builds
+// from a different install path or under the old name).
+function isCodaraHookCommand(cmd: unknown): boolean {
   if (cmd === null || typeof cmd !== "object") return false;
   const record = cmd as ClaudeHookCommand;
-  if (record._sparkManaged === true) return true;
+  if (record._codaraManaged === true || record._sparkManaged === true) return true;
   return (
     typeof record.command === "string" &&
-    record.command.includes(SPARK_HOOK_SCRIPT_FILENAME)
+    (record.command.includes(CODARA_HOOK_SCRIPT_FILENAME) ||
+      record.command.includes(LEGACY_HOOK_SCRIPT_FILENAME))
   );
 }
 
 // An entry is ours when it's tagged or when it carries at least one of our
 // commands. (An entry the user manually merged one of our commands into is
-// handled command-by-command in stripSparkEntries, not dropped wholesale.)
-function entryHasSparkCommand(entry: unknown): boolean {
+// handled command-by-command in stripCodaraEntries, not dropped wholesale.)
+function entryHasCodaraCommand(entry: unknown): boolean {
   if (entry === null || typeof entry !== "object") return false;
   const record = entry as ClaudeHookEntry;
-  if (record._sparkManaged === true) return true;
-  return Array.isArray(record.hooks) && record.hooks.some((cmd) => isSparkHookCommand(cmd));
+  if (record._codaraManaged === true || record._sparkManaged === true) return true;
+  return Array.isArray(record.hooks) && record.hooks.some((cmd) => isCodaraHookCommand(cmd));
 }
 
 // Strip every entry we previously authored from the hooks map — matched by
 // tag OR by command string, so untagged duplicates left behind by Claude
 // Code's own settings rewrites are collapsed too. Returns a fresh map that
 // contains only the user's own entries.
-function stripSparkEntries(hooks: ClaudeHookMap | undefined): ClaudeHookMap {
+function stripCodaraEntries(hooks: ClaudeHookMap | undefined): ClaudeHookMap {
   const out: ClaudeHookMap = {};
   if (!hooks || typeof hooks !== "object") return out;
   for (const [event, entries] of Object.entries(hooks)) {
     if (!Array.isArray(entries)) continue;
     const keep = entries
       .filter((entry): entry is ClaudeHookEntry => entry !== null && typeof entry === "object")
-      .filter((entry) => entry._sparkManaged !== true)
+      .filter((entry) => entry._codaraManaged !== true && entry._sparkManaged !== true)
       .map((entry) => {
         // Strip our hook commands from any user-shared entry. We keep the
         // entry only if it still has commands of the user's own.
         if (!Array.isArray(entry.hooks)) return entry;
-        const remainingCommands = entry.hooks.filter((cmd) => !isSparkHookCommand(cmd));
+        const remainingCommands = entry.hooks.filter((cmd) => !isCodaraHookCommand(cmd));
         if (remainingCommands.length === 0) return null;
         if (remainingCommands.length === entry.hooks.length) return entry;
         return { ...entry, hooks: remainingCommands };
@@ -548,7 +558,7 @@ function stripSparkEntries(hooks: ClaudeHookMap | undefined): ClaudeHookMap {
   return out;
 }
 
-// Drop every spark-hook command whose script path is gone, and any entry left
+// Drop every Codara hook command whose script path is gone, and any entry left
 // with no commands. This is the rescue path: a user whose settings point at a
 // deleted checkout has a Claude Code that denies every tool call, so they
 // cannot fix it with Claude, but Codara still boots and can fix it for them.
@@ -558,7 +568,7 @@ function stripSparkEntries(hooks: ClaudeHookMap | undefined): ClaudeHookMap {
 // Conservative on purpose: an entry whose path we cannot read out of the
 // command string, or whose path is relative (resolution would depend on
 // Claude's cwd), is left alone. We only remove what we can prove is dead.
-async function pruneDeadSparkEntries(
+async function pruneDeadCodaraEntries(
   hooks: ClaudeHookMap | undefined,
 ): Promise<{ hooks: ClaudeHookMap; removed: string[] }> {
   const out: ClaudeHookMap = {};
@@ -578,7 +588,7 @@ async function pruneDeadSparkEntries(
   // only when NONE of its readings resolves to a file: half a percent of
   // certainty is not enough to justify deleting a hook that works.
   const deadScriptPath = async (cmd: unknown): Promise<string | null> => {
-    if (!isSparkHookCommand(cmd)) return null;
+    if (!isCodaraHookCommand(cmd)) return null;
     const command = (cmd as ClaudeHookCommand).command;
     if (typeof command !== "string") return null;
     const candidates = extractHookScriptCandidates(command).filter((c) => looksAbsolute(c));
@@ -633,13 +643,15 @@ async function pruneDeadSparkEntries(
 }
 
 // Check whether the existing hooks already contain EXACTLY our current set:
-// one spark entry per event, each with exactly our current command string,
-// and no stray spark commands anywhere else (duplicates, retired events,
-// stale install paths all fail this and trigger the strip-and-rewrite).
-// Deliberately does NOT require our `_sparkManaged`/`_sparkVersion` tags:
+// one Codara entry per event, each with exactly our current command string,
+// and no stray Codara commands anywhere else (duplicates, retired events,
+// stale install paths, pre-rename spark-hook entries all fail this and
+// trigger the strip-and-rewrite).
+// Deliberately does NOT require our `_codaraManaged`/`_codaraVersion` tags:
 // Claude Code strips unknown keys when it rewrites the settings file, and
 // re-writing just to restore cosmetic tags would churn the file every boot.
-// When a tag DID survive, a version mismatch still forces a reinstall.
+// When a tag DID survive, a version mismatch still forces a reinstall — and
+// a surviving pre-rename `_sparkVersion` tag counts as a mismatch outright.
 function alreadyInstalled(
   hooks: ClaudeHookMap | undefined,
   scriptPath: string,
@@ -649,11 +661,12 @@ function alreadyInstalled(
   for (const event of HOOK_EVENTS) {
     const entries = hooks[event];
     if (!Array.isArray(entries)) return false;
-    const sparkEntries = entries.filter((entry) => entryHasSparkCommand(entry));
+    const codaraEntries = entries.filter((entry) => entryHasCodaraCommand(entry));
     // 0 = missing, >1 = duplicates: either way, rewrite.
-    if (sparkEntries.length !== 1) return false;
-    const ours = sparkEntries[0];
-    if (ours._sparkVersion !== undefined && ours._sparkVersion !== SPARK_HOOK_VERSION) {
+    if (codaraEntries.length !== 1) return false;
+    const ours = codaraEntries[0];
+    if (ours._sparkVersion !== undefined) return false;
+    if (ours._codaraVersion !== undefined && ours._codaraVersion !== CODARA_HOOK_VERSION) {
       return false;
     }
     // Must be purely ours with a single command — a user-merged entry gets
@@ -662,7 +675,8 @@ function alreadyInstalled(
     if (!Array.isArray(ours.hooks) || ours.hooks.length !== 1) return false;
     const cmd = ours.hooks[0];
     if (cmd === null || typeof cmd !== "object") return false;
-    if (cmd._sparkVersion !== undefined && cmd._sparkVersion !== SPARK_HOOK_VERSION) {
+    if (cmd._sparkVersion !== undefined) return false;
+    if (cmd._codaraVersion !== undefined && cmd._codaraVersion !== CODARA_HOOK_VERSION) {
       return false;
     }
     // Exact command equality — covers script relocation (dev → packaged),
@@ -671,11 +685,11 @@ function alreadyInstalled(
       return false;
     }
   }
-  // No spark leftovers under events we no longer manage.
+  // No Codara leftovers under events we no longer manage.
   for (const [event, entries] of Object.entries(hooks)) {
     if ((HOOK_EVENTS as readonly string[]).includes(event)) continue;
     if (!Array.isArray(entries)) continue;
-    if (entries.some((entry) => entryHasSparkCommand(entry))) return false;
+    if (entries.some((entry) => entryHasCodaraCommand(entry))) return false;
   }
   return true;
 }
@@ -741,7 +755,7 @@ export async function installClaudeHooks(overrides: HookInstallOverrides = {}): 
     // Nothing safe to install. Still repair: leaving a dead hook in place
     // blocks every tool call in every Claude session on this machine.
     console.warn(`[hook-installer] ${target.reason}, repairing existing entries only`);
-    const { hooks: repaired, removed } = await pruneDeadSparkEntries(settings.hooks);
+    const { hooks: repaired, removed } = await pruneDeadCodaraEntries(settings.hooks);
     if (removed.length === 0) return;
     console.warn(
       "[hook-installer] removed",
@@ -756,13 +770,15 @@ export async function installClaudeHooks(overrides: HookInstallOverrides = {}): 
   const scriptPath = target.path;
   const python = resolvePythonBinary();
   if (alreadyInstalled(settings.hooks, scriptPath, python)) {
+    await removeLegacyStableHookScript();
     return;
   }
 
-  // The rewrite is itself the repair for anything dead: stripSparkEntries
-  // drops every command of ours regardless of which path it pointed at, and
-  // the loop below re-adds exactly one live entry per event.
-  const userHooks = stripSparkEntries(settings.hooks);
+  // The rewrite is itself the repair for anything dead: stripCodaraEntries
+  // drops every command of ours regardless of which path it pointed at (the
+  // pre-rename spark-hook.py entries included), and the loop below re-adds
+  // exactly one live entry per event.
+  const userHooks = stripCodaraEntries(settings.hooks);
   const merged: ClaudeHookMap = { ...userHooks };
   for (const event of HOOK_EVENTS) {
     const existing = merged[event] ?? [];
@@ -770,6 +786,26 @@ export async function installClaudeHooks(overrides: HookInstallOverrides = {}): 
   }
 
   await persistSettings(settingsPath, { ...settings, hooks: merged }, raw);
+  await removeLegacyStableHookScript();
+}
+
+// Delete the pre-rename durable copy (<home>/claude-hooks/spark-hook.py) once
+// the settings no longer reference it — the rewrite above replaced every
+// entry with codara-hook.py. Best-effort and safe against a hook that is
+// firing mid-upgrade: the launcher no-ops (exit 0) on a missing script, so a
+// racing old entry costs one lost event, never a blocked session. Only our
+// own stable-directory copies are touched, never a path read from settings.
+async function removeLegacyStableHookScript(): Promise<void> {
+  for (const home of [codaraHome(), defaultCodaraHome()]) {
+    const legacy = resolve(join(home, STABLE_HOOK_DIR_NAME, LEGACY_HOOK_SCRIPT_FILENAME));
+    try {
+      await fs.unlink(legacy);
+      console.log("[hook-installer] removed pre-rename hook script at", legacy);
+    } catch {
+      // Already gone (the steady state), or unreadable — either way nothing
+      // references it after the rewrite above.
+    }
+  }
 }
 
 // Test/diagnostic helpers — exported so future ipc handlers can surface
@@ -778,7 +814,7 @@ export const __test = {
   CLAUDE_SETTINGS_PATH,
   HOOK_EVENTS,
   HOOK_LAUNCHER_CODE,
-  SPARK_HOOK_VERSION,
+  CODARA_HOOK_VERSION,
   STABLE_HOOK_DIR_NAME,
   resolveHookScriptPath,
   resolvePythonBinary,
@@ -787,7 +823,7 @@ export const __test = {
   buildHookCommand,
   extractHookScriptPath,
   isTransientPath,
-  pruneDeadSparkEntries,
-  stripSparkEntries,
+  pruneDeadCodaraEntries,
+  stripCodaraEntries,
   alreadyInstalled,
 };

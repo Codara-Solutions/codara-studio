@@ -1,40 +1,35 @@
 // Cora manager backend registry.
 //
-// Single source of truth for the backends a chat's `chatBackend` field can
-// resolve to. Adding a new backend later is one new file + one entry here.
-//
-// Today: Claude Code (Claude Agent SDK sessions), Codex (app-server JSON-RPC),
-// and Pi (the bundled subscription harness, the default). All three expose
-// the same SparkAgentBackend interface so the dispatch in run-store doesn't
-// change as implementations evolve.
+// Pi is the only manager runtime: the bundled subscription harness drives
+// every chat. The registry shape survives (one file + one entry to add a
+// backend) because run-store's dispatch goes through getBackend, but today it
+// resolves every chat to piBackend. The retired Claude Code and Codex manager
+// backends were deleted in 2026-08; persisted runs stamped with those
+// backends migrate to "pi" in run-store's normalizeRun.
 
 import type { ChatBackendKind } from "@shared/types";
-import { claudeBackend } from "./claude-backend";
-import { codexBackend } from "./codex-backend";
 import { piBackend } from "./pi-backend";
-import type { SparkAgentBackend } from "./spark-agent-backend";
+import type { AgentBackend } from "./agent-backend";
 
-const REGISTRY: Record<ChatBackendKind, SparkAgentBackend> = {
-  claude: claudeBackend,
-  codex: codexBackend,
+const REGISTRY: Record<ChatBackendKind, AgentBackend> = {
   pi: piBackend,
 };
 
-export function getBackend(kind: ChatBackendKind): SparkAgentBackend {
+export function getBackend(kind: ChatBackendKind): AgentBackend {
   const backend = REGISTRY[kind];
   if (!backend) throw new Error(`Unknown Cora manager backend: ${kind}`);
   return backend;
 }
 
-export function listBackends(): readonly SparkAgentBackend[] {
+export function listBackends(): readonly AgentBackend[] {
   return Object.values(REGISTRY);
 }
 
 // End every provider runtime that may still be associated with a run. We fan
 // out across the complete registry rather than trusting the run's current
-// backend field: a chat can switch providers, and an older provider session may
-// still be finishing asynchronous teardown. Each backend is best-effort and
-// independent so one broken disposer cannot strand the others.
+// backend field: an older provider session may still be finishing
+// asynchronous teardown. Each backend is best-effort and independent so one
+// broken disposer cannot strand the others.
 export async function disposeManagerSessions(runId: string): Promise<void> {
   const backends = listBackends();
   for (const backend of backends) {

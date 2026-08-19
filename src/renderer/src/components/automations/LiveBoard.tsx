@@ -93,7 +93,6 @@ export interface LiveBoardProps {
   // terminal visibility and the ticking clock; the board stays mounted while
   // hidden so the canvas viewport and mirror xterms survive sub-tab flips.
   shown: boolean;
-  scrollbackLineLimit: number;
   onClose: () => void;
   onOpenWorkersGrid: () => void;
   onStop: () => void;
@@ -106,7 +105,6 @@ export default function LiveBoard({
   workers,
   initialFocusWorkerId,
   shown,
-  scrollbackLineLimit,
   onClose,
   onOpenWorkersGrid,
   onStop,

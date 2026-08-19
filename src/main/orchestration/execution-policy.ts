@@ -1,8 +1,5 @@
 import type { CoraExecutionPolicy, RunState } from "@shared/types";
-import {
-  DEFAULT_CORA_EXECUTION_POLICY,
-  normalizeCoraExecutionPolicy,
-} from "@shared/cora-execution-policy";
+import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 
 /**
  * The single source of truth for a run's execution policy.
@@ -15,18 +12,10 @@ import {
  * cannot drift apart.
  *
  * `run.coraExecutionPolicy` survives as a pin, not a preference: pre-picker
- * runs carry it, and non-UI callers (frontier smoke scripts, automations) set
- * it deliberately. Frontier is never derived because it additionally requires
- * a discovered verification manifest and the frontier-gate extension, so it
- * stays an explicit opt-in.
+ * runs carry it, and non-UI callers (automations) set it deliberately.
  */
 export function effectiveRunExecutionPolicy(run: RunState): CoraExecutionPolicy {
-  // Only the Pi backend honors the policy. CC/Codex persist the field but
-  // ignore it, so clamp them to the default rather than letting a derived
-  // deep widen their verification budget.
-  if ((run.chatBackend ?? "pi") !== "pi") return DEFAULT_CORA_EXECUTION_POLICY;
   const pinned = normalizeCoraExecutionPolicy(run.coraExecutionPolicy);
-  if (pinned === "frontier") return "frontier";
   switch (run.taskComplexity) {
     case "complex":
       return "deep";

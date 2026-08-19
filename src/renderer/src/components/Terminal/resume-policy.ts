@@ -34,21 +34,22 @@ export type ResumeDecision =
 // PTY, no IPC, and no filesystem.
 export function decideResume(
   probe: ResumeProbe,
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "grok",
 ): ResumeDecision {
   const resumable = probe.exists && probe.resumable !== false;
   if (resumable) {
     if (runtime === "claude" && probe.repairable === true) return { kind: "repair-resume" };
     return { kind: "resume" };
   }
-  return runtime === "claude" ? { kind: "fresh" } : { kind: "clear" };
+  return runtime === "codex" ? { kind: "clear" } : { kind: "fresh" };
 }
 
 // Structural twin of tabs/types.ts TerminalAgentSession, redeclared here so
 // this module stays dep-free for the node test harnesses.
 export interface AgentSessionPointer {
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
   sessionId: string;
   cwd: string;
   transcriptPath?: string;

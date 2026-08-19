@@ -31,7 +31,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(spark-home|fs-atomic|agent-runtimes|pty-manager|notify))$/ },
+      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify))$/ },
       (args) => ({ path: args.path.replace(/^\.\.?\//, ""), namespace: "stub" }),
     );
     // node:fs with an injectable readdir failure. A directory that cannot be
@@ -49,10 +49,10 @@ const harnessPlugin = {
       // what these arming tests want.
       const init =
         "globalThis.__SPARK_TEST ??= { fired: [], launches: 0, events: [] };\n";
-      if (args.path === "spark-home") {
+      if (args.path === "codara-home") {
         return {
           contents:
-            "export function sparkHome(){ return process.env.SPARK_HOME_DIR || require('node:os').tmpdir(); }\nexport function ensureSparkHomeSync(){}\n",
+            "export function codaraHome(){ return process.env.SPARK_HOME_DIR || require('node:os').tmpdir(); }\nexport function ensureCodaraHomeSync(){}\n",
           loader: "js",
         };
       }

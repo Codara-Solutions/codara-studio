@@ -2,13 +2,21 @@ import { existsSync, readFileSync, renameSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { writeFileAtomic } from "../fs-atomic";
+import {
+  coraProfileRoot,
+  DEFAULT_CORA_PROFILE_ID,
+  formatCoraProfileForTurn,
+  normalizeCoraProfileId,
+  resolveCoraProfile,
+} from "./cora-profiles";
 
 // Cora memory v2: curated semantic guidance, two markdown tiers.
 //
-//   ~/.Codara/memory/MEMORY.md                    the global tier
-//   ~/.Codara/memory/workspaces/<id>.md           the per-workspace tier
+//   ~/.Codara/memory/MEMORY.md                    default profile global tier
+//   ~/.Codara/memory/workspaces/<id>.md           default profile workspace tier
+//   ~/.Codara/memory/profiles/<profile>/...       named isolated profiles
 //   ~/.Codara/memory/memory-state.json            the enable/disable toggles
 //
 // The markdown file IS the prompt payload. Injection pastes the raw file body
@@ -92,6 +100,7 @@ export interface MemoryTierStatus {
 }
 
 export interface MemoryStatus {
+  profile: { id: string; name: string; identityPath: string; isDefault: boolean };
   global: MemoryTierStatus;
   workspace: MemoryTierStatus;
 }
@@ -106,6 +115,7 @@ interface MemoryState {
   version: number;
   globalEnabled: boolean;
   workspaces: Record<string, { enabled: boolean }>;
+  profileGlobals: Record<string, { enabled: boolean }>;
 }
 
 interface BulletTag {
@@ -133,7 +143,7 @@ interface MemoryFile {
 // ── paths and state ─────────────────────────────────────────────────────────
 
 function memoryRoot(): string {
-  return join(sparkHome(), "memory");
+  return join(codaraHome(), "memory");
 }
 
 // Strip path separators and other unsafe characters so a workspaceId can never
@@ -145,12 +155,15 @@ function sanitize(workspaceId: string): string {
   return cleaned.length > 0 ? cleaned.slice(0, 200) : "_unknown";
 }
 
-export function globalMemoryPath(): string {
-  return join(memoryRoot(), "MEMORY.md");
+export function globalMemoryPath(profileId = DEFAULT_CORA_PROFILE_ID): string {
+  return join(coraProfileRoot(profileId), "MEMORY.md");
 }
 
-export function workspaceMemoryPath(workspaceId: string): string {
-  return join(memoryRoot(), "workspaces", `${sanitize(workspaceId)}.md`);
+export function workspaceMemoryPath(
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): string {
+  return join(coraProfileRoot(profileId), "workspaces", `${sanitize(workspaceId)}.md`);
 }
 
 function statePath(): string {
@@ -163,18 +176,25 @@ function emptyWorkspaceToggles(): Record<string, { enabled: boolean }> {
   return Object.create(null) as Record<string, { enabled: boolean }>;
 }
 
+function profileWorkspaceKey(profileId: string, workspaceId: string): string {
+  const id = normalizeCoraProfileId(profileId);
+  return id === DEFAULT_CORA_PROFILE_ID ? workspaceId : `profile:${id}:workspace:${workspaceId}`;
+}
+
 /** Missing file / missing fields read as enabled. */
 function readState(): MemoryState {
   const fallback: MemoryState = {
     version: 1,
     globalEnabled: true,
     workspaces: emptyWorkspaceToggles(),
+    profileGlobals: emptyWorkspaceToggles(),
   };
   const path = statePath();
   if (!existsSync(path)) return fallback;
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<MemoryState>;
     const workspaces = emptyWorkspaceToggles();
+    const profileGlobals = emptyWorkspaceToggles();
     if (raw.workspaces && typeof raw.workspaces === "object" && !Array.isArray(raw.workspaces)) {
       for (const [id, entry] of Object.entries(raw.workspaces)) {
         if (entry && typeof entry === "object" && typeof entry.enabled === "boolean") {
@@ -182,22 +202,39 @@ function readState(): MemoryState {
         }
       }
     }
+    if (raw.profileGlobals && typeof raw.profileGlobals === "object" && !Array.isArray(raw.profileGlobals)) {
+      for (const [id, entry] of Object.entries(raw.profileGlobals)) {
+        if (entry && typeof entry === "object" && typeof entry.enabled === "boolean") {
+          profileGlobals[normalizeCoraProfileId(id)] = { enabled: entry.enabled };
+        }
+      }
+    }
     return {
       version: typeof raw.version === "number" ? raw.version : 1,
       globalEnabled: raw.globalEnabled !== false,
       workspaces,
+      profileGlobals,
     };
   } catch {
     return fallback;
   }
 }
 
-function tierEnabled(state: MemoryState, scope: MemoryScope, workspaceId: string): boolean {
+function tierEnabled(
+  state: MemoryState,
+  scope: MemoryScope,
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): boolean {
   // The global toggle is the master switch: a disabled global tier disables
   // memory outright, including per-workspace files (see formatCoraMemoryForTurn).
-  if (!state.globalEnabled) return false;
+  const id = normalizeCoraProfileId(profileId);
+  const globalEnabled = id === DEFAULT_CORA_PROFILE_ID
+    ? state.globalEnabled
+    : state.profileGlobals[id]?.enabled !== false;
+  if (!globalEnabled) return false;
   if (scope === "global") return true;
-  return state.workspaces[workspaceId]?.enabled !== false;
+  return state.workspaces[profileWorkspaceKey(id, workspaceId)]?.enabled !== false;
 }
 
 // ── workspace metadata for the header (best-effort) ─────────────────────────
@@ -208,7 +245,7 @@ function tierEnabled(state: MemoryState, scope: MemoryScope, workspaceId: string
 // unreadable state file degrades to the raw workspaceId.
 function resolveWorkspaceMeta(workspaceId: string): { name: string; cwd: string } {
   try {
-    const raw = JSON.parse(readFileSync(join(sparkHome(), "spark-state.json"), "utf8")) as {
+    const raw = JSON.parse(readFileSync(join(codaraHome(), "spark-state.json"), "utf8")) as {
       workspaces?: Array<{ id?: unknown; name?: unknown; cwd?: unknown }>;
     };
     const match = raw.workspaces?.find((entry) => entry?.id === workspaceId);
@@ -229,17 +266,26 @@ const HEADER_OWNERSHIP_LINES = [
   "     rewritten, or expired. Untagged lines are yours; Cora never deletes them. -->",
 ];
 
-function buildHeader(scope: MemoryScope, workspaceId: string): string[] {
+function buildHeader(
+  scope: MemoryScope,
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): string[] {
+  const profile = resolveCoraProfile(profileId);
   if (scope === "global") {
     return [
-      "# Cora memory (global)",
+      profile.id === DEFAULT_CORA_PROFILE_ID
+        ? "# Cora memory (global)"
+        : `# Cora memory (profile: ${profile.name})`,
       "<!-- Managed by Cora; applies to every workspace. Edit freely in the editor; keep it under 4 KB.",
       ...HEADER_OWNERSHIP_LINES,
     ];
   }
   const meta = resolveWorkspaceMeta(workspaceId);
   return [
-    `# Cora memory (workspace: ${meta.name})`,
+    profile.id === DEFAULT_CORA_PROFILE_ID
+      ? `# Cora memory (workspace: ${meta.name})`
+      : `# Cora memory (profile: ${profile.name}, workspace: ${meta.name})`,
     `<!-- cwd: ${meta.cwd}`,
     "     Managed by Cora. Edit freely in the editor; keep it under 4 KB.",
     ...HEADER_OWNERSHIP_LINES,
@@ -247,7 +293,11 @@ function buildHeader(scope: MemoryScope, workspaceId: string): string[] {
 }
 
 /** Fresh-file template. The global variant suggests a starting heading. */
-function templateFile(scope: MemoryScope, workspaceId: string): MemoryFile {
+function templateFile(
+  scope: MemoryScope,
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): MemoryFile {
   const lines: MemoryLine[] =
     scope === "global"
       ? [
@@ -256,7 +306,7 @@ function templateFile(scope: MemoryScope, workspaceId: string): MemoryFile {
           { raw: "", kind: "blank" },
         ]
       : [{ raw: "", kind: "blank" }];
-  return { headerLines: buildHeader(scope, workspaceId), lines };
+  return { headerLines: buildHeader(scope, workspaceId, profileId), lines };
 }
 
 // ── parsing / serialization ─────────────────────────────────────────────────
@@ -463,9 +513,16 @@ function readMemoryFile(path: string): MemoryFile | null {
  * Programmatic write: header refreshed (name + cwd may have changed since
  * creation), directories created lazily, tmp+rename atomic.
  */
-async function writeMemoryFile(scope: MemoryScope, workspaceId: string, file: MemoryFile): Promise<void> {
-  file.headerLines = buildHeader(scope, workspaceId);
-  const path = scope === "global" ? globalMemoryPath() : workspaceMemoryPath(workspaceId);
+async function writeMemoryFile(
+  scope: MemoryScope,
+  workspaceId: string,
+  file: MemoryFile,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): Promise<void> {
+  file.headerLines = buildHeader(scope, workspaceId, profileId);
+  const path = scope === "global"
+    ? globalMemoryPath(profileId)
+    : workspaceMemoryPath(workspaceId, profileId);
   await mkdir(join(path, ".."), { recursive: true });
   let content = serializeMemoryFile(file);
   if (!content.endsWith("\n")) content += "\n";
@@ -477,10 +534,16 @@ async function writeMemoryFile(scope: MemoryScope, workspaceId: string, file: Me
  * immediately (not at write time) so every byte-cap decision measures the
  * same header the write will actually put on disk.
  */
-function loadForWrite(scope: MemoryScope, workspaceId: string): MemoryFile {
-  const path = scope === "global" ? globalMemoryPath() : workspaceMemoryPath(workspaceId);
-  const file = readMemoryFile(path) ?? templateFile(scope, workspaceId);
-  file.headerLines = buildHeader(scope, workspaceId);
+function loadForWrite(
+  scope: MemoryScope,
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): MemoryFile {
+  const path = scope === "global"
+    ? globalMemoryPath(profileId)
+    : workspaceMemoryPath(workspaceId, profileId);
+  const file = readMemoryFile(path) ?? templateFile(scope, workspaceId, profileId);
+  file.headerLines = buildHeader(scope, workspaceId, profileId);
   return file;
 }
 
@@ -506,8 +569,14 @@ function withPathLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-function tierPath(scope: MemoryScope, workspaceId: string): string {
-  return scope === "global" ? globalMemoryPath() : workspaceMemoryPath(workspaceId);
+function tierPath(
+  scope: MemoryScope,
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): string {
+  return scope === "global"
+    ? globalMemoryPath(profileId)
+    : workspaceMemoryPath(workspaceId, profileId);
 }
 
 // ── migration from ~/.Codara/lessons.json ───────────────────────────────────
@@ -527,7 +596,7 @@ function ensureMigrated(): Promise<void> {
  * malformed ledger is renamed away without import rather than retried forever.
  */
 async function migrateLegacyLessons(): Promise<void> {
-  const legacyPath = join(sparkHome(), "lessons.json");
+  const legacyPath = join(codaraHome(), "lessons.json");
   try {
     if (!existsSync(legacyPath)) return;
     let parsed: unknown = null;
@@ -644,25 +713,38 @@ function renderTier(path: string, now: number): RenderedTier | null {
   return { body, footer };
 }
 
-function renderMemorySections(workspaceId: string, now: number): string | null {
+function renderMemorySections(
+  workspaceId: string,
+  now: number,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): string | null {
   const state = readState();
   // Global disabled is the master off switch: nothing is injected at all.
-  if (!state.globalEnabled) return null;
+  if (!tierEnabled(state, "global", workspaceId, profileId)) return null;
   const sections: string[] = [];
-  const globalTier = renderTier(globalMemoryPath(), now);
+  const profile = resolveCoraProfile(profileId);
+  const profileSection = formatCoraProfileForTurn(profileId);
+  if (profileSection) sections.push(profileSection);
+  const globalPath = globalMemoryPath(profileId);
+  const globalTier = renderTier(globalPath, now);
   if (globalTier) {
     sections.push(
-      `CORA MEMORY, GLOBAL (user-editable file: ${globalMemoryPath()}; applies to every workspace; apply unless this run's own evidence contradicts it)`,
+      profile.id === DEFAULT_CORA_PROFILE_ID
+        ? `CORA MEMORY, GLOBAL (user-editable file: ${globalPath}; applies to every workspace; apply unless this run's own evidence contradicts it)`
+        : `CORA MEMORY, PROFILE GLOBAL (user-editable file: ${globalPath}; applies to every workspace for this profile; apply unless this run's own evidence contradicts it)`,
       globalTier.body,
       ...(globalTier.footer ? [globalTier.footer] : []),
       "[END CORA MEMORY GLOBAL]",
     );
   }
-  if (tierEnabled(state, "workspace", workspaceId)) {
-    const workspaceTier = renderTier(workspaceMemoryPath(workspaceId), now);
+  if (tierEnabled(state, "workspace", workspaceId, profileId)) {
+    const workspacePath = workspaceMemoryPath(workspaceId, profileId);
+    const workspaceTier = renderTier(workspacePath, now);
     if (workspaceTier) {
       sections.push(
-        `CORA MEMORY, THIS WORKSPACE (user-editable file: ${workspaceMemoryPath(workspaceId)}; overrides the global section on conflict)`,
+        profile.id === DEFAULT_CORA_PROFILE_ID
+          ? `CORA MEMORY, THIS WORKSPACE (user-editable file: ${workspacePath}; overrides the global section on conflict)`
+          : `CORA MEMORY, THIS WORKSPACE (user-editable file: ${workspacePath}; overrides profile-global memory on conflict)`,
         workspaceTier.body,
         ...(workspaceTier.footer ? [workspaceTier.footer] : []),
         "[END CORA MEMORY WORKSPACE]",
@@ -672,12 +754,21 @@ function renderMemorySections(workspaceId: string, now: number): string | null {
   return sections.length > 0 ? sections.join("\n") : null;
 }
 
+/** Read-only context for a temporary direct worker. Unlike manager injection,
+ * this is not hash-gated because every worker starts with a fresh context. */
+export function formatCoraMemoryForWorker(
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): string | null {
+  return renderMemorySections(workspaceId, Date.now(), profileId);
+}
+
 // Injection is hash-gated once per run, not per turn: the section is injected
 // on the first manager turn of a run and re-injected only when the rendered
 // bytes change (a write landed, the user edited a file, a toggle flipped) or
 // when the caller forces it (canonical replay after a rewind rebuilds the CLI
 // session, which lost the earlier injection). Same bounded LRU shape as
-// loadRunManagerGuidance in spark-agent-backend.ts. Each entry keeps the hash
+// loadRunManagerGuidance in agent-backend.ts. Each entry keeps the hash
 // recorded before it (one level), so a turn whose prompt was never accepted by
 // the provider can be rolled back and the retry injects again.
 interface RunMemoryInjection {
@@ -721,10 +812,14 @@ export function releaseCoraMemoryInjection(runId: string): void {
 export async function formatCoraMemoryForTurn(
   workspaceId: string,
   runId: string,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; profileId?: string },
 ): Promise<string | null> {
   await ensureMigrated();
-  const rendered = renderMemorySections(workspaceId, Date.now());
+  const rendered = renderMemorySections(
+    workspaceId,
+    Date.now(),
+    opts?.profileId ?? DEFAULT_CORA_PROFILE_ID,
+  );
   if (rendered === null) return null;
   const hash = createHash("sha256").update(rendered).digest("hex");
   const existing = runMemoryHashes.get(runId);
@@ -752,14 +847,15 @@ export async function appendAutoMemories(
   workspaceId: string,
   texts: string[],
   runId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
 ): Promise<void> {
   try {
     await ensureMigrated();
     if (!workspaceId || texts.length === 0) return;
     const state = readState();
-    if (!tierEnabled(state, "workspace", workspaceId)) return;
-    await withPathLock(tierPath("workspace", workspaceId), async () => {
-      const file = loadForWrite("workspace", workspaceId);
+    if (!tierEnabled(state, "workspace", workspaceId, profileId)) return;
+    await withPathLock(tierPath("workspace", workspaceId, profileId), async () => {
+      const file = loadForWrite("workspace", workspaceId, profileId);
       const date = todayStamp();
       pruneExpired(file, Date.now());
       const outcome = addBullets(file, texts, (text) => autoBulletRaw(text, date, runId));
@@ -769,7 +865,7 @@ export async function appendAutoMemories(
       // fills the file; the incoming auto lessons are dropped rather than
       // truncating anything the app does not own.
       if (fileBytes(file) > MEMORY_FILE_MAX_BYTES) return;
-      await writeMemoryFile("workspace", workspaceId, file);
+      await writeMemoryFile("workspace", workspaceId, file, profileId);
     });
   } catch (err) {
     console.warn("[cora-memory] failed to append auto memories:", err);
@@ -788,14 +884,15 @@ export async function rememberAdd(
   workspaceId: string,
   bullets: string[],
   _runId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
 ): Promise<RememberResult> {
   await ensureMigrated();
   const state = readState();
-  if (!tierEnabled(state, scope, workspaceId)) {
+  if (!tierEnabled(state, scope, workspaceId, profileId)) {
     throw new Error(memoryDisabledError(scope));
   }
-  return withPathLock(tierPath(scope, workspaceId), async () => {
-    const file = loadForWrite(scope, workspaceId);
+  return withPathLock(tierPath(scope, workspaceId, profileId), async () => {
+    const file = loadForWrite(scope, workspaceId, profileId);
     const date = todayStamp();
     pruneExpired(file, Date.now());
     const outcome = addBullets(file, bullets, (text) => coraBulletRaw(text, date));
@@ -804,7 +901,7 @@ export async function rememberAdd(
       throw new Error(memoryFullError(bytesUsed, MEMORY_FILE_MAX_BYTES));
     }
     if (outcome.added + outcome.replaced > 0) {
-      await writeMemoryFile(scope, workspaceId, file);
+      await writeMemoryFile(scope, workspaceId, file, profileId);
     }
     const parts: string[] = [];
     if (outcome.added > 0) parts.push(`added ${outcome.added}`);
@@ -847,13 +944,14 @@ export async function rememberReplace(
   body: string,
   confirmDropUserLines: boolean,
   _runId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
 ): Promise<RememberResult> {
   await ensureMigrated();
   const state = readState();
-  if (!tierEnabled(state, scope, workspaceId)) {
+  if (!tierEnabled(state, scope, workspaceId, profileId)) {
     throw new Error(memoryDisabledError(scope));
   }
-  const path = tierPath(scope, workspaceId);
+  const path = tierPath(scope, workspaceId, profileId);
   return withPathLock(path, async () => {
     const current = readMemoryFile(path);
     const next = parseMemoryFile(body);
@@ -902,7 +1000,10 @@ export async function rememberReplace(
       );
     }
 
-    const bytesUsed = fileBytes({ ...next, headerLines: buildHeader(scope, workspaceId) });
+    const bytesUsed = fileBytes({
+      ...next,
+      headerLines: buildHeader(scope, workspaceId, profileId),
+    });
     if (bytesUsed > MEMORY_FILE_MAX_BYTES) {
       const userBytes = Buffer.byteLength(
         next.lines
@@ -917,7 +1018,7 @@ export async function rememberReplace(
       throw new Error(memoryFullError(bytesUsed, MEMORY_FILE_MAX_BYTES));
     }
 
-    await writeMemoryFile(scope, workspaceId, next);
+    await writeMemoryFile(scope, workspaceId, next, profileId);
     return {
       bytesUsed,
       bytesCap: MEMORY_FILE_MAX_BYTES,
@@ -931,7 +1032,12 @@ export async function rememberReplace(
 
 // ── status / toggles / clearing ─────────────────────────────────────────────
 
-function tierStatus(state: MemoryState, scope: MemoryScope, workspaceId: string | null): MemoryTierStatus {
+function tierStatus(
+  state: MemoryState,
+  scope: MemoryScope,
+  workspaceId: string | null,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): MemoryTierStatus {
   // No active workspace: the workspace tier has no backing file yet, so it
   // reports disabled with an empty path (the renderer's documented contract).
   if (scope === "workspace" && workspaceId === null) {
@@ -944,7 +1050,9 @@ function tierStatus(state: MemoryState, scope: MemoryScope, workspaceId: string 
       counts: { user: 0, cora: 0, auto: 0 },
     };
   }
-  const path = scope === "global" ? globalMemoryPath() : workspaceMemoryPath(workspaceId as string);
+  const path = scope === "global"
+    ? globalMemoryPath(profileId)
+    : workspaceMemoryPath(workspaceId as string, profileId);
   const file = readMemoryFile(path);
   const counts = { user: 0, cora: 0, auto: 0 };
   for (const line of file?.lines ?? []) {
@@ -954,7 +1062,7 @@ function tierStatus(state: MemoryState, scope: MemoryScope, workspaceId: string 
   }
   const bytesUsed = file ? fileBytes(file) : 0;
   return {
-    enabled: tierEnabled(state, scope, workspaceId ?? ""),
+    enabled: tierEnabled(state, scope, workspaceId ?? "", profileId),
     path,
     bytesUsed,
     bytesCap: MEMORY_FILE_MAX_BYTES,
@@ -963,12 +1071,22 @@ function tierStatus(state: MemoryState, scope: MemoryScope, workspaceId: string 
   };
 }
 
-export async function getMemoryStatus(workspaceId: string | null): Promise<MemoryStatus> {
+export async function getMemoryStatus(
+  workspaceId: string | null,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): Promise<MemoryStatus> {
   await ensureMigrated();
   const state = readState();
+  const profile = resolveCoraProfile(profileId);
   return {
-    global: tierStatus(state, "global", workspaceId),
-    workspace: tierStatus(state, "workspace", workspaceId),
+    profile: {
+      id: profile.id,
+      name: profile.name,
+      identityPath: profile.identityPath,
+      isDefault: profile.isDefault,
+    },
+    global: tierStatus(state, "global", workspaceId, profileId),
+    workspace: tierStatus(state, "workspace", workspaceId, profileId),
   };
 }
 
@@ -976,6 +1094,7 @@ export async function setMemoryEnabled(
   scope: MemoryScope,
   workspaceId: string | null,
   enabled: boolean,
+  profileId = DEFAULT_CORA_PROFILE_ID,
 ): Promise<void> {
   await ensureMigrated();
   if (scope === "workspace" && workspaceId === null) {
@@ -983,10 +1102,13 @@ export async function setMemoryEnabled(
   }
   await withPathLock(statePath(), async () => {
     const state = readState();
-    if (scope === "global") {
+    const id = normalizeCoraProfileId(profileId);
+    if (scope === "global" && id === DEFAULT_CORA_PROFILE_ID) {
       state.globalEnabled = enabled;
+    } else if (scope === "global") {
+      state.profileGlobals[id] = { enabled };
     } else {
-      state.workspaces[workspaceId as string] = { enabled };
+      state.workspaces[profileWorkspaceKey(id, workspaceId as string)] = { enabled };
     }
     await mkdir(memoryRoot(), { recursive: true });
     await writeFileAtomic(statePath(), `${JSON.stringify(state, null, 2)}\n`);
@@ -1003,20 +1125,21 @@ export async function clearMemory(
   scope: MemoryScope,
   workspaceId: string | null,
   includeUserLines: boolean,
+  profileId = DEFAULT_CORA_PROFILE_ID,
 ): Promise<void> {
   await ensureMigrated();
   if (scope === "workspace" && workspaceId === null) {
     throw new Error("workspace scope requires a workspaceId");
   }
   const wsId = workspaceId ?? "";
-  await withPathLock(tierPath(scope, wsId), async () => {
+  await withPathLock(tierPath(scope, wsId, profileId), async () => {
     if (includeUserLines) {
-      await writeMemoryFile(scope, wsId, templateFile(scope, wsId));
+      await writeMemoryFile(scope, wsId, templateFile(scope, wsId, profileId), profileId);
       return;
     }
-    const file = readMemoryFile(tierPath(scope, wsId));
+    const file = readMemoryFile(tierPath(scope, wsId, profileId));
     if (!file) return;
     file.lines = file.lines.filter((line) => line.kind !== "auto" && line.kind !== "cora");
-    await writeMemoryFile(scope, wsId, file);
+    await writeMemoryFile(scope, wsId, file, profileId);
   });
 }

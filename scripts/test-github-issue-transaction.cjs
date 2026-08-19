@@ -30,7 +30,7 @@ const create = section(
   "const handleStartGitHubIssue = useCallback(",
 );
 const saveAt = create.indexOf("await window.spark.state.save(nextState)");
-const publishAt = create.indexOf("workspacesRef.current = nextWorkspaces");
+const publishAt = create.indexOf("workspacesRef.current = coloredNextWorkspaces");
 assert.ok(saveAt >= 0 && publishAt > saveAt, "workspace state publishes only after durable save");
 assert.match(create, /removeCopyWorktree\(\{[\s\S]*force:\s*true/);
 assert.match(create, /deleteBranch\([\s\S]*res\.branch,[\s\S]*true/);

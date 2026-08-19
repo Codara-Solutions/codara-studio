@@ -1,6 +1,8 @@
 import React, { useMemo } from "react";
 import type { GitStatus } from "@shared/types";
 import DiffTabHost from "../components/git/DiffTabHost";
+import DockedSurface from "./DockedSurface";
+import type { DockRef } from "./dock";
 import type { DiffTab, Tab, TabId } from "./types";
 
 // DiffStack mirrors the other stacks (RunsStack et al): every diff tab stays
@@ -11,6 +13,10 @@ import type { DiffTab, Tab, TabId } from "./types";
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
+  // A diff docked into a terminal tab's split grid is positioned by that grid
+  // rather than filling the workbench (see dockGeometry.ts) — which is how
+  // "review this change beside the file/terminal that produced it" works.
+  dockIndex: ReadonlyMap<TabId, DockRef>;
   cwd: string | null;
   status: GitStatus | null;
   gitVersion: number;
@@ -22,6 +28,7 @@ interface Props {
 function DiffStack({
   tabs,
   activeId,
+  dockIndex,
   cwd,
   status,
   gitVersion,
@@ -36,21 +43,14 @@ function DiffStack({
   if (diffTabs.length === 0 || !cwd) return null;
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      {diffTabs.map((t) => {
-        const visible = t.id === activeId;
-        return (
-          <div
-            key={t.id}
-            aria-hidden={!visible}
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              flexDirection: "column",
-              visibility: visible ? "visible" : "hidden",
-              pointerEvents: visible ? "auto" : "none",
-            }}
-          >
+      {diffTabs.map((t) => (
+        <DockedSurface
+          key={t.id}
+          tabId={t.id}
+          docked={dockIndex.has(t.id)}
+          active={t.id === activeId}
+        >
+          {() => (
             <DiffTabHost
               cwd={cwd}
               path={t.path}
@@ -61,9 +61,9 @@ function DiffStack({
               onChanged={onChanged}
               onClose={() => onCloseTab(t.id)}
             />
-          </div>
-        );
-      })}
+          )}
+        </DockedSurface>
+      ))}
     </div>
   );
 }

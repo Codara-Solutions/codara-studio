@@ -4,7 +4,7 @@ import { join } from "node:path";
 import SSHConfig from "ssh-config";
 import { isValidHostId, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 
 // Remote host registry: hosts parsed from ~/.ssh/config (read-only in the
 // UI, refreshed on every list call) merged with manually-added hosts
@@ -14,7 +14,7 @@ import { sparkHome } from "../spark-home";
 const HOSTS_FILE = "spark-remote-hosts.json";
 
 function hostsPath(): string {
-  return join(sparkHome(), HOSTS_FILE);
+  return join(codaraHome(), HOSTS_FILE);
 }
 
 async function readManualHosts(): Promise<RemoteHostConfig[]> {

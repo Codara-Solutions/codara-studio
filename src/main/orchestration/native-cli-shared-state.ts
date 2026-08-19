@@ -28,7 +28,7 @@ import { promises as fs } from "node:fs";
 import type { Stats } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-export type NativeCliSharedStateRuntime = "claude" | "codex";
+export type NativeCliSharedStateRuntime = "claude" | "codex" | "grok";
 
 /**
  * How one shared name is established/healed:
@@ -149,6 +149,27 @@ export const CODEX_CLI_SHARED_STATE: readonly NativeCliSharedStateName[] = [
  * (.codex-global-state.json, .personality_migration, .sandbox_migration and
  * config.toml.bak* are covered by the dot-prefix/backup-suffix rules.)
  */
+export const GROK_CLI_SHARED_STATE: readonly NativeCliSharedStateName[] = [
+  { name: "sessions", kind: "dir", heal: "link" },
+  { name: "skills", kind: "dir", heal: "link" },
+  { name: "personas", kind: "dir", heal: "link" },
+  { name: "memory", kind: "dir", heal: "link" },
+  { name: "config.toml", kind: "file", heal: "newest-wins" },
+  { name: "AGENTS.md", kind: "file", heal: "newest-wins" },
+];
+
+export const GROK_CLI_PRIVATE_STATE_NAMES: readonly string[] = [
+  "auth.json",
+  "mcp_credentials.json",
+  "logs",
+  "crash",
+  "trace-exports",
+  "worktrees",
+  "tmp",
+  "cache",
+  "version.json",
+];
+
 export const CODEX_CLI_PRIVATE_STATE_NAMES: readonly string[] = [
   "auth.json",
   "log",
@@ -177,13 +198,12 @@ export const CLAUDE_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
 export const CLAUDE_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
   CLAUDE_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
 );
-export const CODEX_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
-  CODEX_CLI_SHARED_STATE.filter((entry) => entry.kind === "dir").map((entry) => entry.name),
+export const GROK_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
+  GROK_CLI_SHARED_STATE.filter((entry) => entry.kind === "dir").map((entry) => entry.name),
 );
-export const CODEX_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
-  CODEX_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
+export const GROK_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
+  GROK_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
 );
-
 export interface EnsureSharedCliStateInput {
   /** A Codara-managed account directory (CLAUDE_CONFIG_DIR / CODEX_HOME). */
   managedDir: string;
@@ -246,7 +266,9 @@ async function lstatOrNull(path: string): Promise<Stats | null> {
 function sharedStateSpec(
   runtime: NativeCliSharedStateRuntime,
 ): readonly NativeCliSharedStateName[] {
-  return runtime === "claude" ? CLAUDE_CLI_SHARED_STATE : CODEX_CLI_SHARED_STATE;
+  if (runtime === "claude") return CLAUDE_CLI_SHARED_STATE;
+  if (runtime === "grok") return GROK_CLI_SHARED_STATE;
+  return CODEX_CLI_SHARED_STATE;
 }
 
 function isRecognizedPersonalName(
@@ -256,7 +278,11 @@ function isRecognizedPersonalName(
   if (name.startsWith(".")) return true; // dot-prefixed misc (.DS_Store, .last-*, migrations)
   if (sharedStateSpec(runtime).some((entry) => entry.name === name)) return true;
   const privateNames =
-    runtime === "claude" ? CLAUDE_CLI_PRIVATE_STATE_NAMES : CODEX_CLI_PRIVATE_STATE_NAMES;
+    runtime === "claude"
+      ? CLAUDE_CLI_PRIVATE_STATE_NAMES
+      : runtime === "grok"
+        ? GROK_CLI_PRIVATE_STATE_NAMES
+        : CODEX_CLI_PRIVATE_STATE_NAMES;
   if (privateNames.includes(name)) return true;
   if (name.includes(".sqlite") || isSqliteArtifactName(name)) return true;
   // Backup copies users, tools, and this module leave beside the originals.

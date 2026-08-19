@@ -1,9 +1,7 @@
 // Looms — direct-worker (automation) inventory and recovery.
 //
 // Automation workers run on the bundled Pi runtime through run-store's Pi
-// worker harness (the legacy Agent SDK / App Server transports survive only
-// behind the SPARK_E2E_LEGACY_WORKER_HARNESS escape hatch). Their pty is a
-// durable activity display; the Automations Hub also reads the ordered
+// worker harness. Their pty is a durable activity display; the Automations Hub also reads the ordered
 // activity logs.
 //
 // Also owns: boot recovery for direct runs (the report-first decision table)
@@ -392,12 +390,7 @@ async function describeWorker(
     questionMessageId: openQuestion?.id,
     nodeId,
     nodeLabel: nodeLabelFor(job?.graph, nodeId),
-    transport:
-      process.env.SPARK_E2E_LEGACY_WORKER_HARNESS === "1"
-        ? task?.runtimePreference === "codex"
-          ? "app-server"
-          : "agent-sdk"
-        : "pi-rpc",
+    transport: "pi-rpc",
     stdoutLogPath: attempt.stdoutLogPath,
     rawLogPath: attempt.rawLogPath,
   };

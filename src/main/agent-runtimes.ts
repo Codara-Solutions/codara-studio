@@ -116,9 +116,24 @@ async function probeClaudeAuth(): Promise<RuntimeAuthProbe> {
   return {};
 }
 
+async function probeGrokAuth(): Promise<RuntimeAuthProbe> {
+  if ((process.env.XAI_API_KEY ?? "").trim()) return { authenticated: true };
+  try {
+    const raw = await fs.readFile(join(homedir(), ".grok", "auth.json"), "utf8");
+    JSON.parse(raw);
+    return { authenticated: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { authenticated: false, authHint: "Run `grok login` to sign in." };
+    }
+    return {};
+  }
+}
+
 async function probeRuntimeAuth(kind: AgentRuntimeKind): Promise<RuntimeAuthProbe> {
   if (kind === "codex") return probeCodexAuth();
   if (kind === "claude") return probeClaudeAuth();
+  if (kind === "grok") return probeGrokAuth();
   return {};
 }
 

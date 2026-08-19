@@ -315,6 +315,41 @@ export type ChatTimelineItem =
       at: string;
     };
 
+/**
+ * Direct Cora chats hand a user message straight to a worker task rather than
+ * a manager turn. Older runs left those messages marked "queued" even after
+ * the matching task existed, which exposed impossible Send now / Unqueue
+ * controls. Treat the task creation as the durable delivery receipt. New runs
+ * are written acknowledged at dispatch; this fallback repairs old history.
+ */
+export function effectiveMessageDeliveryState(
+  run: RunState,
+  message: HumanRunMessage,
+): HumanRunMessage["deliveryState"] {
+  if (
+    run.executionMode !== "direct" ||
+    message.author !== "user" ||
+    message.deliveryState !== "queued" ||
+    message.boardNote ||
+    message.resumeNote
+  ) {
+    return message.deliveryState;
+  }
+  const text = message.message.trim();
+  const sentAt = Date.parse(message.createdAt);
+  const dispatched = run.workerTasks.some((task) => {
+    const taskAt = Date.parse(task.createdAt);
+    const description = task.description.trim();
+    return (
+      Number.isFinite(sentAt) &&
+      Number.isFinite(taskAt) &&
+      taskAt >= sentAt &&
+      (description === text || description.startsWith(`${text}\n`))
+    );
+  });
+  return dispatched ? "acknowledged" : message.deliveryState;
+}
+
 // Merge the human conversation and Cora activity into one ordered stream.
 // Every item carries an ISO timestamp, so a single sort interleaves "you said
 // X" with "Cora read context", "Cora called the manager", and worker runs in
@@ -330,6 +365,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     if (message.compaction) continue;
     const text = message.message.trim();
     if (!text) continue;
+    const deliveryState = effectiveMessageDeliveryState(run, message);
     // The synthetic board-nudge note is authored "user" only so delivery
     // treats it as manager input — rendering it as the user's own bubble
     // (full of tool names) would misattribute it. Surface it like the other
@@ -380,7 +416,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         answersMessageId: message.answersMessageId,
         attachments: [],
         intent: message.intent,
-        deliveryState: message.deliveryState,
+        deliveryState,
         targetTurnId: message.targetTurnId,
         backendTurnId: message.backendTurnId,
         conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,
@@ -403,7 +439,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       answersMessageId: message.answersMessageId,
       attachments: message.attachments ?? [],
       intent: message.intent,
-      deliveryState: message.deliveryState,
+      deliveryState,
       targetTurnId: message.targetTurnId,
       backendTurnId: message.backendTurnId,
       conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,

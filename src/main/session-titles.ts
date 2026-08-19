@@ -133,49 +133,6 @@ export interface CodexTranscriptHead {
   firstUserText: string | null;
 }
 
-// Codex rollout heads mix schema generations; accept both the enveloped
-// (`{type, payload}`) and flat record shapes, and both user-message forms
-// (response_item message with input_text blocks, event_msg user_message).
-export function parseCodexHead(headText: string): CodexTranscriptHead {
-  const out: CodexTranscriptHead = { cwd: null, startedAtMs: null, firstUserText: null };
-  for (const line of headText.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let rec: unknown;
-    try {
-      rec = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (!isRecord(rec)) continue;
-    const payload = isRecord(rec.payload) ? rec.payload : rec;
-    if (rec.type === "session_meta") {
-      if (out.cwd === null && typeof payload.cwd === "string") out.cwd = payload.cwd;
-      const timestamp =
-        typeof payload.timestamp === "string"
-          ? payload.timestamp
-          : typeof rec.timestamp === "string"
-            ? rec.timestamp
-            : null;
-      if (timestamp && out.startedAtMs === null) {
-        const parsed = Date.parse(timestamp);
-        if (Number.isFinite(parsed)) out.startedAtMs = parsed;
-      }
-      continue;
-    }
-    if (out.firstUserText !== null) continue;
-    let text: string | null = null;
-    if (payload.type === "message" && payload.role === "user") {
-      text = textFromContent(payload.content);
-    } else if (payload.type === "user_message" && typeof payload.message === "string") {
-      text = payload.message;
-    }
-    const sanitized = text === null ? null : sanitizeUserText(text);
-    if (sanitized) out.firstUserText = sanitized;
-  }
-  return out;
-}
-
 // ---- ai-title deep scan ----
 //
 // The ai-title record is appended once, early in a session's life — usually

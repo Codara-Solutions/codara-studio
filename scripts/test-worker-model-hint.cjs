@@ -87,7 +87,7 @@ async function main() {
   // Three models, and only three. If this count changes, the planner prompts
   // in prompt-profile.ts / claude-backend.ts / manager-protocol.ts enumerate
   // the roster verbatim and must be updated in the same change.
-  eq("roster exposes exactly three models", ALLOWED_WORKER_MODELS.length, 3);
+  eq("roster exposes four models including Grok", ALLOWED_WORKER_MODELS.length, 4);
   for (const id of ["claude-opus-5", "gpt-5.6-sol", "claude-fable-5"]) {
     check(`roster contains ${id}`, ALLOWED_WORKER_MODELS.includes(id));
   }

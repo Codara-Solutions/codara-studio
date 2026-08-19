@@ -28,11 +28,20 @@
   /* Brand accent — Codara teal by default, overwritten at runtime to the
      active workspace color. Soft variants are low-chroma derivatives for
      backgrounds and tints. */
+  --workspace-accent: #2AA298;
   --accent: #2AA298;
   --accent-ink: #14110d;
+  --on-accent: #14110d;
   --accent-soft: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-edge: color-mix(in oklch, var(--accent) 40%, transparent);
   --accent-glow: color-mix(in oklch, var(--accent) 28%, transparent);
+
+  /* First-party agent brands. These never follow workspace --accent, so a
+     Claude row stays orange in a teal project and a Grok row stays lime in
+     an orange one. Light palettes re-tint them darker below. */
+  --agent-claude: oklch(0.76 0.16 52);
+  --agent-codex: oklch(0.74 0.13 175);
+  --agent-grok: oklch(0.82 0.18 128);
 
   /* Agent-owned surfaces — tabs a background agent created on the user's
      behalf. A warm amber, deliberately distinct from the workspace --accent
@@ -446,6 +455,9 @@
   /* Bright paper needs a darker amber so the agent-tab edge + glyph keep
      contrast (the base 0.78 amber is tuned for dark backgrounds). */
   --agent-tab-accent: oklch(0.62 0.16 60);
+  --agent-claude: oklch(0.58 0.17 50);
+  --agent-codex: oklch(0.50 0.13 175);
+  --agent-grok: oklch(0.48 0.16 128);
 }
 
 * { box-sizing: border-box; }
@@ -1318,7 +1330,11 @@ a { color: inherit; }
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* `safe` matters once the chat is half a split: plain centering pushes
+     overflow past BOTH edges of a scroll container, so the hero and the first
+     starter were cut off at the top with no way to scroll up to them. Safe
+     centering falls back to flex-start exactly when it no longer fits. */
+  justify-content: safe center;
   gap: 13px;
   padding: 30px 24px;
   text-align: center;
@@ -1344,7 +1360,12 @@ a { color: inherit; }
 .cora-welcome__project {
   display: flex;
   align-items: center;
-  max-width: 520px;
+  /* `100%` is the load-bearing half: .cora-welcome centers its children, so
+     they are sized fit-content and a long cwd pushed this pill past the
+     surface — which is what made the whole welcome scroll sideways (and clip
+     its own text) the moment the chat was docked into a split rather than
+     filling the workbench. */
+  max-width: min(520px, 100%);
   min-width: 0;
   gap: 7px;
   padding: 5px 9px;
@@ -1376,7 +1397,10 @@ a { color: inherit; }
 }
 .cora-welcome__starters {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* auto-fit rather than a fixed pair: the chat is as often half a split as it
+     is a whole tab, and a viewport media query cannot see that. Cards drop to
+     one column when two no longer fit the surface, at any window size. */
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
   gap: 8px;
   width: min(620px, 100%);
   margin-top: 3px;
@@ -1502,8 +1526,11 @@ a { color: inherit; }
   color: var(--ink);
 }
 .cora-welcome__automations-sub {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 10.5px;
+  text-overflow: ellipsis;
 }
 .cora-welcome__automations-action {
   flex: 0 0 auto;
@@ -1521,12 +1548,6 @@ a { color: inherit; }
 .cora-welcome__automations:hover .cora-welcome__automations-arrow {
   color: var(--accent);
   transform: translateX(1px);
-}
-
-@media (max-width: 780px) {
-  .cora-welcome { justify-content: flex-start; padding-top: 24px; }
-  .cora-welcome__starters { grid-template-columns: 1fr; }
-  .cora-welcome__project-path { display: none; }
 }
 
 /* ── Automations ── the live machine ─────────────────────────────────────── */
@@ -2378,13 +2399,6 @@ a { color: inherit; }
   color: var(--ink);
   border-color: var(--accent-edge);
 }
-.composer-model-row-copy {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
 .composer-model-row-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2392,22 +2406,6 @@ a { color: inherit; }
   min-width: 0;
   flex: 1;
   font-weight: 600;
-}
-.composer-model-row-description {
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.35;
-}
-.composer-model-row-badges {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  padding-top: 1px;
 }
 /* A row that is just a name. The base row aligns to flex-start for rows that
    carry a description line; with no second line that reads as a top-heavy
@@ -2601,16 +2599,6 @@ a { color: inherit; }
 }
 
 /* Row badge. Fixed width, sits to the right of a menu row's label. */
-.composer-badge {
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  border: 1px solid var(--rule-soft);
-  border-radius: 3px;
-  padding: 1px 4px;
-  flex: 0 0 auto;
-}
 .composer-model-empty {
   padding: 8px;
   font-size: 11px;
@@ -2783,58 +2771,13 @@ a { color: inherit; }
    Full-width row for lists and menus. Hover is an ink-tint; .is-selected
    carries the accent-edge + soft fill the way active rows read across the app.
    --row-h drives the height for vertical rhythm. */
-.spark-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: var(--row-h);
-  padding: 0 9px;
-  border: 1px solid transparent;
-  /* Rows sit on the surface rung (7px) per the --radius-surface comment. */
-  border-radius: var(--radius-surface, 7px);
-  background: transparent;
-  color: var(--ink-dim);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  text-align: left;
-  cursor: default;
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out),
-    box-shadow var(--motion-fast) var(--ease-out);
-}
-.spark-row:hover {
-  background: var(--hover);
-  color: var(--ink);
-}
-.spark-row:active {
-  background: var(--hover-strong);
-}
-.spark-row.is-selected {
-  color: var(--ink);
-  background: var(--accent-soft);
-  border-color: var(--accent-edge);
-  box-shadow: var(--shadow-glow);
-}
 .spark-row.is-disabled,
-.spark-row:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
 
 /* ── Card ────────────────────────────────────────────────────────────────────
    A raised container. Square corners by default to honor the panel-container
    rule (round only interactive children); set a radius inline if the card is
    itself a floating element. Depth is tint + the 1px --lift-hi top highlight,
    not a border on everything. */
-.spark-card {
-  background: var(--panel-2);
-  border: 1px solid var(--rule-soft);
-  border-radius: 0;
-  box-shadow: var(--lift-hi);
-}
 
 /* ── Empty state ─────────────────────────────────────────────────────────────
    Calm centered hint for empty / first-run / error surfaces — never a blank
@@ -2888,11 +2831,6 @@ a { color: inherit; }
   color: var(--danger);
   border-color: color-mix(in oklch, var(--danger) 35%, transparent);
   background: var(--danger-soft);
-}
-.spark-badge.is-info {
-  color: var(--info);
-  border-color: color-mix(in oklch, var(--info) 35%, transparent);
-  background: var(--info-soft);
 }
 .spark-badge.is-warn {
   color: var(--warn);
@@ -3069,8 +3007,21 @@ a { color: inherit; }
   border: 1px solid var(--rule-soft);
   box-shadow: var(--shadow-2), var(--lift-hi);
 }
-.spark-glass--faint {
-  background: var(--panel);
+/* Toasts are the same floating material as menus and dialogs — they were the
+   one such surface left on plain blur (`.spark-backdrop-glass`), with no lens,
+   no sheen and no fresnel edge, which read as a flat card sitting right beside
+   the fully-glass "While you were away" digest. The stack lives here rather
+   than inline on the card because the glass recipe IS a box-shadow stack: an
+   inline shadow carrying the status stripe would clobber it. The card passes
+   its tone in through --toast-status instead, so this owns the whole stack. */
+.spark-toast {
+  --toast-status: inset 3px 0 0 var(--accent);
+  border: 1px solid var(--rule);
+  background: var(--notify-surface, var(--panel-2));
+  box-shadow: var(--toast-status), var(--shadow-1);
+}
+.spark-toast[data-lifted="true"] {
+  box-shadow: var(--toast-status), var(--shadow-2);
 }
 @media not (prefers-reduced-transparency: reduce) {
   html:not([data-glass="off"]) {
@@ -3106,6 +3057,28 @@ a { color: inherit; }
     background: var(--glass-bg-faint);
     -webkit-backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
+  }
+  html:not([data-glass="off"]) .spark-toast {
+    background-color: var(--glass-bg-strong);
+    background-image: var(--glass-sheen);
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    border-color: var(--glass-border);
+    box-shadow:
+      var(--toast-status),
+      var(--glass-edge-hi),
+      var(--glass-edge-lo),
+      var(--glass-bloom),
+      var(--glass-shadow);
+  }
+  html:not([data-glass="off"]) .spark-toast[data-lifted="true"] {
+    box-shadow:
+      var(--toast-status),
+      var(--glass-edge-hi),
+      var(--glass-edge-lo),
+      var(--glass-bloom),
+      var(--glass-shadow),
+      var(--shadow-2);
   }
   html:not([data-glass="off"]) .spark-backdrop-glass {
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
@@ -3166,6 +3139,20 @@ a { color: inherit; }
     -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     contain: paint;
+  }
+  /* Fast modal glass: keep the translucent fill, sheen, rim and one local
+     frost layer on the card, but never run the SVG refraction lens over a
+     large scrolling dialog. Its sibling scrim is deliberately unfiltered so
+     opening a menu does not re-rasterize the terminal-sized workbench. */
+  html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    contain: paint;
+  }
+  html:not([data-glass="off"]) .spark-scrim.spark-scrim--clear {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: color-mix(in oklab, var(--bg) 44%, transparent);
   }
   html:not([data-glass="off"]) .settings-dialog-scrim,
   html:not([data-glass="off"]) .agent-capabilities-scrim,
@@ -3333,14 +3320,6 @@ a { color: inherit; }
   margin: 0;
   align-self: stretch;
   background: var(--rule-soft);
-}
-.spark-divider:not(.is-vertical) {
-  height: 1px;
-  width: 100%;
-}
-.spark-divider.is-vertical {
-  width: 1px;
-  min-height: 100%;
 }
 
 /* ── Loom node-flow canvas (@xyflow/react) ────────────────────────────────────

@@ -89,7 +89,6 @@ function makePointerDir(home) {
 
 async function main() {
   const sources = walkSources(path.join(ROOT, "src"));
-  sources.push(path.join(ROOT, "bin", "cora.cjs"));
   const cleanupPath = path.join(
     ROOT,
     "src",

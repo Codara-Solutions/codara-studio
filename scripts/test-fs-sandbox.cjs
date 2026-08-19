@@ -3,7 +3,7 @@
 //   node scripts/test-fs-sandbox.cjs
 //
 // Guards the two properties that matter:
-//   * Run artifacts under <sparkHome>/runs ARE readable. The automations live
+//   * Run artifacts under <codaraHome>/runs ARE readable. The automations live
 //     feed (LiveRunHero / LiveBoard / WorkersView) and the Runs inspector tail
 //     worker stdout/raw logs and prompts through fs:readTextTail / fs:readText;
 //     when the allowlist misses the runs root, every read throws, the renderer

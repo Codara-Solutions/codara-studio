@@ -22,6 +22,15 @@ import {
   resolveCodexTranscriptPath,
 } from "./orchestration/codex-home";
 import { extractSessionUuid } from "./orchestration/codex-sessions";
+import {
+  grokHomeDir,
+  grokSessionDir,
+  grokSessionTranscriptPath,
+  isGrokSessionId,
+  readGrokSessionSummary,
+  resolveGrokSessionGroupDir,
+  resolveSafeGrokTranscriptPath,
+} from "./orchestration/grok-sessions";
 import { codexProvider } from "./providers/codex";
 import { clampTitle, findClaudeAiTitle, parseClaudeHead } from "./session-titles";
 
@@ -36,6 +45,8 @@ export interface CodexWorkerSessionOptions {
   codexHome?: string | null;
   /** Exact native Claude state root. Omission means legacy ~/.claude. */
   claudeStateDir?: string | null;
+  /** Exact native Grok home. Omission means personal ~/.grok. */
+  grokHome?: string | null;
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -360,6 +371,36 @@ async function listCodexSessions(
   });
 }
 
+async function listGrokSessions(
+  cwd: string,
+  grokHome?: string | null,
+): Promise<WorkerSessionSummary[]> {
+  const group = await resolveGrokSessionGroupDir(cwd, grokHome);
+  const names = await fs.readdir(group).catch(() => [] as string[]);
+  const dirs = names.filter(isGrokSessionId).map((name) => join(group, name));
+  const targetCwd = normalizedPath(cwd);
+  return mapLimited(dirs, async (dir) => {
+    try {
+      const parsed = await readGrokSessionSummary(dir, grokHome);
+      if (!parsed || normalizedPath(parsed.cwd) !== targetCwd) return null;
+      const stat = await fs.stat(parsed.transcriptPath).catch(() => null);
+      const updatedAtMs = Math.max(parsed.updatedAtMs, stat?.mtimeMs ?? 0);
+      return {
+        runtime: "grok",
+        sessionId: parsed.sessionId,
+        title: parsed.title,
+        preview: null,
+        cwd,
+        cwdExists: true,
+        updatedAt: new Date(updatedAtMs || Date.now()).toISOString(),
+        transcriptPath: parsed.transcriptPath,
+      } satisfies WorkerSessionSummary;
+    } catch {
+      return null;
+    }
+  });
+}
+
 export async function listWorkerSessions(
   runtime: WorkerSessionRuntime,
   cwd: string,
@@ -368,7 +409,9 @@ export async function listWorkerSessions(
   const sessions =
     runtime === "claude"
       ? await listClaudeSessions(cwd, options.claudeStateDir)
-      : await listCodexSessions(cwd, options.codexHome);
+      : runtime === "grok"
+        ? await listGrokSessions(cwd, options.grokHome)
+        : await listCodexSessions(cwd, options.codexHome);
   return sessions.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
@@ -508,14 +551,55 @@ async function listAllCodexSessions(
   });
 }
 
+async function listAllGrokSessions(
+  grokHome?: string | null,
+): Promise<WorkerSessionSummary[]> {
+  const sessionsRoot = join(grokHomeDir(grokHome), "sessions");
+  const groups = await fs.readdir(sessionsRoot, { withFileTypes: true }).catch(() => []);
+  const dirs = (
+    await Promise.all(
+      groups
+        .filter((entry) => entry.isDirectory())
+        .map(async (group) => {
+          const groupDir = join(sessionsRoot, group.name);
+          const children = await fs.readdir(groupDir, { withFileTypes: true }).catch(() => []);
+          return children
+            .filter((child) => child.isDirectory() && isGrokSessionId(child.name))
+            .map((child) => join(groupDir, child.name));
+        }),
+    )
+  ).flat();
+  return mapLimited(dirs, async (dir) => {
+    try {
+      const parsed = await readGrokSessionSummary(dir, grokHome);
+      if (!parsed) return null;
+      const stat = await fs.stat(parsed.transcriptPath).catch(() => null);
+      const updatedAtMs = Math.max(parsed.updatedAtMs, stat?.mtimeMs ?? 0);
+      return {
+        runtime: "grok",
+        sessionId: parsed.sessionId,
+        title: parsed.title,
+        preview: null,
+        cwd: parsed.cwd,
+        cwdExists: await pathIsDirectory(parsed.cwd),
+        updatedAt: new Date(updatedAtMs || Date.now()).toISOString(),
+        transcriptPath: parsed.transcriptPath,
+      } satisfies WorkerSessionSummary;
+    } catch {
+      return null;
+    }
+  });
+}
+
 export async function listAllWorkerSessions(
   options: CodexWorkerSessionOptions = {},
 ): Promise<WorkerSessionSummary[]> {
-  const [claude, codex] = await Promise.all([
+  const [claude, codex, grok] = await Promise.all([
     listAllClaudeSessions(options.claudeStateDir),
     listAllCodexSessions(options.codexHome),
+    listAllGrokSessions(options.grokHome),
   ]);
-  return [...claude, ...codex].sort(
+  return [...claude, ...codex, ...grok].sort(
     (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
   );
 }
@@ -524,8 +608,9 @@ async function validateDeleteInput(
   input: DeleteWorkerSessionInput,
   codexHome?: string | null,
   claudeStateDir?: string | null,
+  grokHome?: string | null,
 ): Promise<void> {
-  if (input.runtime !== "claude" && input.runtime !== "codex") {
+  if (input.runtime !== "claude" && input.runtime !== "codex" && input.runtime !== "grok") {
     throw new Error("Unknown worker session runtime.");
   }
   if (!input.cwd || !isAbsolute(input.cwd)) throw new Error("Invalid session workspace.");
@@ -538,7 +623,9 @@ async function validateDeleteInput(
   const allowedMemoryScopes =
     input.runtime === "claude"
       ? new Set(["none", "claude-project"])
-      : new Set(["none", "codex-all"]);
+      : input.runtime === "grok"
+        ? new Set(["none"])
+        : new Set(["none", "codex-all"]);
   if (!allowedMemoryScopes.has(input.memoryScope)) {
     throw new Error("The requested memory deletion scope does not match this provider.");
   }
@@ -564,6 +651,24 @@ async function validateDeleteInput(
       input.memoryScope === "claude-project"
         ? join(dirname(input.transcriptPath), "memory")
         : null,
+    );
+    return;
+  }
+
+  if (input.runtime === "grok") {
+    const expected = grokSessionTranscriptPath(
+      input.cwd,
+      input.sessionId,
+      grokHome,
+    );
+    if (resolve(expected) !== resolve(input.transcriptPath)) {
+      throw new Error("Grok transcript path does not match the selected session.");
+    }
+    await resolveSafeGrokTranscriptPath(
+      input.cwd,
+      input.sessionId,
+      grokHome,
+      { requireExisting: true },
     );
     return;
   }
@@ -736,15 +841,30 @@ export async function deleteWorkerSession(
   input: DeleteWorkerSessionInput,
   options: CodexWorkerSessionOptions = {},
 ): Promise<DeleteWorkerSessionResult> {
-  await validateDeleteInput(input, options.codexHome, options.claudeStateDir);
-  const head = await readHead(input.transcriptPath).catch(() => "");
-  if (head) {
-    const recordedCwd =
-      input.runtime === "claude"
-        ? parseClaudeSessionHead(head).cwd
-        : parseCodexSessionHead(head).cwd;
-    if (recordedCwd && normalizedPath(recordedCwd) !== normalizedPath(input.cwd)) {
+  await validateDeleteInput(
+    input,
+    options.codexHome,
+    options.claudeStateDir,
+    options.grokHome,
+  );
+  if (input.runtime === "grok") {
+    const parsed = await readGrokSessionSummary(
+      grokSessionDir(input.cwd, input.sessionId, options.grokHome),
+      options.grokHome,
+    );
+    if (parsed && normalizedPath(parsed.cwd) !== normalizedPath(input.cwd)) {
       throw new Error("The transcript's recorded workspace no longer matches this session.");
+    }
+  } else {
+    const head = await readHead(input.transcriptPath).catch(() => "");
+    if (head) {
+      const recordedCwd =
+        input.runtime === "claude"
+          ? parseClaudeSessionHead(head).cwd
+          : parseCodexSessionHead(head).cwd;
+      if (recordedCwd && normalizedPath(recordedCwd) !== normalizedPath(input.cwd)) {
+        throw new Error("The transcript's recorded workspace no longer matches this session.");
+      }
     }
   }
 
@@ -754,6 +874,13 @@ export async function deleteWorkerSession(
     if (warning) warnings.push(warning);
     await removeIfPresent(input.transcriptPath);
     await removeCodexCompanionState(input.sessionId, options.codexHome);
+  } else if (input.runtime === "grok") {
+    const sessionDir = grokSessionDir(
+      input.cwd,
+      input.sessionId,
+      options.grokHome,
+    );
+    await removeIfPresent(sessionDir);
   } else {
     await removeIfPresent(input.transcriptPath);
     await removeClaudeCompanionState(input.sessionId, options.claudeStateDir);

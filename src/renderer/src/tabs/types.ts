@@ -46,11 +46,13 @@ export interface EditorTab extends BaseTab {
 // itself lives in the CLI's own on-disk history and is rehydrated by --resume.
 // Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
 export interface TerminalAgentSession {
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   /** Frozen native Claude account. Undefined is legacy personal/unset. */
   nativeClaudeProfileId?: string;
   /** Frozen native Codex account home. Undefined is legacy/personal. */
   nativeCodexProfileId?: string;
+  /** Frozen native Grok Build account home. Undefined is legacy/personal. */
+  nativeGrokProfileId?: string;
   // Claude: UUID we forced with `--session-id`. Codex: UUID discovered from the
   // rollout filename after launch. Empty string means "capture still pending"
   // (Codex, before discovery resolves).
@@ -86,7 +88,20 @@ export type TerminalLeafOrigin = {
 // its RECT comes from the pane tree (see dockGeometry.ts). Moving the content
 // itself into TerminalStack's subtree would re-parent it, which reloads a
 // <webview> guest and throws away editor/chat state.
-export type DockableTabKind = "preview" | "editor" | "chat";
+//
+// Every workspace-level surface is here: if a tab can fill the workbench, it
+// can take half of it instead. The two exclusions are structural rather than
+// arbitrary — a terminal tab IS the grid (its panes already move between tabs
+// by drag), and run-owned tabs live in the chat panel's inner strip, so
+// canDockTab() screens those out on top of this list.
+export type DockableTabKind =
+  | "preview"
+  | "editor"
+  | "chat"
+  | "diff"
+  | "whiteboard"
+  | "usage"
+  | "automations";
 
 // What a grid cell hosts. `undefined` on a leaf means a terminal, which keeps
 // every pre-dock persisted layout structurally valid.
@@ -145,6 +160,7 @@ export interface TerminalLeaf {
   // Runtime-only frozen account for a phone-created Claude pane before its
   // durable session pointer has been discovered.
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
   // Runtime-only one-shot native-account login plan. This is an opaque token;
   // executable/argv/environment/config paths never enter the renderer.
   nativeCliLoginToken?: string;
@@ -156,6 +172,8 @@ export interface TerminalLeafWorker {
   nativeCodexProfileId?: string;
   /** Frozen native Claude account for CLI-backed worker panes. */
   nativeClaudeProfileId?: string;
+  /** Frozen native Grok Build account for CLI-backed worker panes. */
+  nativeGrokProfileId?: string;
   runId: string;
   workerTaskId: string;
   attemptId: string;
@@ -311,8 +329,6 @@ export type Tab =
   | UsageTab
   | WhiteboardTab
   | DiffTab;
-
-export type TabKind = Tab["kind"];
 
 // True when a tab represents content owned by an orchestration run (worker
 // terminal, Runs canvas, orchestration-spawned preview). These render inside

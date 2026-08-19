@@ -4,7 +4,6 @@ import type {
 } from "./codex-cli-account-profiles";
 import { isAbsolute, resolve } from "node:path";
 import {
-  CODEX_CLI_PERSONAL_PROFILE_ID,
   CodexCliAccountProfileLeasedError,
   CodexCliAccountProfileStore,
   normalizeCodexCliProfileId,
@@ -220,10 +219,4 @@ let defaultLeases: CodexCliProfileLeaseRegistry | null = null;
 export function defaultCodexCliProfileLeases(): CodexCliProfileLeaseRegistry {
   defaultLeases ??= new CodexCliProfileLeaseRegistry();
   return defaultLeases;
-}
-
-export function isPersonalCodexCliProfile(
-  profileId: CodexCliProfileId,
-): profileId is typeof CODEX_CLI_PERSONAL_PROFILE_ID {
-  return profileId === CODEX_CLI_PERSONAL_PROFILE_ID;
 }

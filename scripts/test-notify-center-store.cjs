@@ -1,9 +1,9 @@
 // Unit tests for the notification-center store's mutation ops, focused on
 // removeCenterEntry (src/main/notify/center-store.ts). The module pulls in
-// Electron `app`, ./deliver, ../preferences-store and ./spark-home, so — like
+// Electron `app`, ./deliver, ../preferences-store and ./codara-home, so — like
 // the policy harness — we esbuild-bundle it with those four resolved to tiny
 // headless stubs (Electron app is a no-op badge sink, deliver has no window,
-// preferences say osCues on, spark-home points at a throwaway temp dir).
+// preferences say osCues on, codara-home points at a throwaway temp dir).
 // fs-atomic is pure node and bundles as-is, so the debounced atomic writer is
 // exercised for real and we assert against the persisted notifications.json.
 //
@@ -21,7 +21,7 @@ const SHARED_DIR = path.join(ROOT, "src", "shared");
 const CENTER_TS = path.join(ROOT, "src", "main", "notify", "center-store.ts");
 
 // A fresh temp home per run so the store reads/writes an isolated
-// notifications.json and never touches the real sparkHome().
+// notifications.json and never touches the real codaraHome().
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "notify-center-test-"));
 const CENTER_FILE = path.join(TMP_HOME, "notifications.json");
 
@@ -36,8 +36,8 @@ const stubPlugin = {
       path: "electron-stub",
       namespace: "stub",
     }));
-    build.onResolve({ filter: /\/spark-home$/ }, () => ({
-      path: "spark-home-stub",
+    build.onResolve({ filter: /\/codara-home$/ }, () => ({
+      path: "codara-home-stub",
       namespace: "stub",
     }));
     build.onResolve({ filter: /\/preferences-store$/ }, () => ({
@@ -55,8 +55,8 @@ const stubPlugin = {
           loader: "js",
         };
       }
-      if (args.path === "spark-home-stub") {
-        return { contents: `export const sparkHome = () => ${JSON.stringify(TMP_HOME)};`, loader: "js" };
+      if (args.path === "codara-home-stub") {
+        return { contents: `export const codaraHome = () => ${JSON.stringify(TMP_HOME)};`, loader: "js" };
       }
       if (args.path === "preferences-stub") {
         return {

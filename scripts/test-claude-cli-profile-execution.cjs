@@ -359,6 +359,9 @@ async function main() {
       // funnels through native-claude-profile-runtime.
       "src/main/orchestration/native-cli-shell-defaults.ts",
       "src/main/pty-manager.ts",
+      // Read-only transcript discovery needs the personal Claude projects
+      // root; it is analytics, not an execution or launch surface.
+      "src/main/usage-analytics.ts",
     ],
   );
 

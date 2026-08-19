@@ -15,7 +15,7 @@ import {
   type ThemePref,
 } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 
 // Per-user UI preferences (theme + future toggles like vim mode, inline-AI
 // model id, etc.). Lives next to spark-state.json / spark-settings.json so
@@ -31,7 +31,7 @@ let syncCache: AppPreferences | null = null;
 let writing: Promise<void> = Promise.resolve();
 
 function prefsPath(): string {
-  return join(sparkHome(), PREFS_FILE);
+  return join(codaraHome(), PREFS_FILE);
 }
 
 function isEditorThemeId(value: unknown): value is EditorThemeId {

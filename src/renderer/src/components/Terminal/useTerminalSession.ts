@@ -23,7 +23,6 @@ import {
   runtimeFromCommandLine,
   sniffLiveRuntime,
   sniffOsc633CommandRuntime,
-  sniffRuntime,
   stripAnsi,
   unescapeOsc633,
   CLAUDE_RESUME_FAILED_RE,
@@ -35,6 +34,7 @@ import { formatPaneExitLine } from "@shared/pane-format";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
+import { createReplayTracker } from "./replayTracker";
 import {
   registerCwdHandler,
   registerPromptTracker,
@@ -45,6 +45,7 @@ import { buildTerminalTheme } from "./terminalTheme";
 import {
   buildAgentResumeCommand,
   buildClaudeLaunch,
+  buildGrokLaunch,
   isAgentSessionLaunchCommand,
 } from "../../workers/launch-commands";
 import type { TerminalAgentSession } from "../../tabs/types";
@@ -135,7 +136,7 @@ const autoResumeAttempts = new Map<string, number[]>();
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
 
-// Persistent diagnostic trail for restore decisions (<sparkHome>/logs/main.log
+// Persistent diagnostic trail for restore decisions (<codaraHome>/logs/main.log
 // via main). "Some panes resume, some don't" is undebuggable from memory alone.
 function logRestore(line: string): void {
   try {
@@ -193,6 +194,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       transcriptPath: restore.transcriptPath ?? undefined,
       nativeCodexProfileId: restore.nativeCodexProfileId,
       nativeClaudeProfileId: restore.nativeClaudeProfileId,
+      nativeGrokProfileId: restore.nativeGrokProfileId,
     })
     .catch(() => ({ exists: false as const }));
   const decision = decideResume(probe as ResumeProbe, restore.runtime);
@@ -230,6 +232,22 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     };
   }
   if (decision.kind === "fresh") {
+    if (restore.runtime === "grok") {
+      const fresh = buildGrokLaunch();
+      return {
+        resumeCommand: fresh.command,
+        resumeIsFreshFallback: true,
+        fallbackNotice: "previous Grok session couldn't be resumed — starting a fresh one",
+        fallbackSession: {
+          runtime: "grok",
+          sessionId: fresh.sessionId,
+          cwd: restore.cwd,
+          nativeGrokProfileId: restore.nativeGrokProfileId,
+          capturedAt: new Date().toISOString(),
+          active: true,
+        },
+      };
+    }
     // Claude self-heal: the transcript is gone or stillborn. Launch a FRESH
     // forced-id Claude in the same cwd so the pane is immediately useful, and
     // hand the owner the replacement pointer to persist.
@@ -242,6 +260,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
         runtime: "claude",
         sessionId: fresh.sessionId,
         cwd: restore.cwd,
+        nativeClaudeProfileId: restore.nativeClaudeProfileId,
         capturedAt: new Date().toISOString(),
         active: true,
       },
@@ -339,8 +358,8 @@ interface Options {
   initialExternalCols?: number;
   initialExternalRows?: number;
   // Raw-tail reattach mode. Opt-in, default off — used by the hosts that attach
-  // an xterm onto a live Ink TUI (Claude/Codex): ChatPanel's backend terminal,
-  // ChatBackendTerminalStack, and the automation Workers panes. Such a TUI
+  // an xterm onto a live Ink TUI (Claude/Codex): the automation Workers panes.
+  // Such a TUI
   // repaints with cursor-relative sequences assuming its own prior frame is on
   // screen. In this mode every re-attach is made to behave exactly like the
   // known-good FIRST attach: on unmount we call pty.detach (not pty.pause) so
@@ -361,7 +380,13 @@ interface Options {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
-  onDetectedLocalUrl?: (url: string) => void;
+  // A dev-server-style local URL appeared on this pane's byte stream.
+  // `meta.replayed` is true when the bytes carrying it were history main
+  // re-sent (post-sleep backlog drain, raw-tail reattach frame) rather than
+  // fresh child output — the difference between "a server just started" and
+  // "a server started before the laptop slept", which callers that act on the
+  // URL (auto-opening a preview tab) must not confuse.
+  onDetectedLocalUrl?: (url: string, meta?: { replayed?: boolean }) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
   // Fires on every PTY data chunk (input or output activity). Used by the
   // orchestration claim logic to decide whether a pane is "doing nothing"
@@ -403,6 +428,7 @@ interface Options {
   /** Frozen profile while capture has not produced agentSession yet. */
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
   nativeCliLoginToken?: string;
   // One-shot boot-restore marker, minted on the leaf ONLY at hydration
   // (useTabs.loadPersisted) when the persisted pointer was `active` (agent
@@ -474,6 +500,7 @@ export function useTerminalSession({
   agentSession,
   nativeCodexProfileId,
   nativeClaudeProfileId,
+  nativeGrokProfileId,
   nativeCliLoginToken,
   bootResume,
   onResumeUnavailable,
@@ -2358,6 +2385,15 @@ export function useTerminalSession({
         }
       };
 
+      // Replayed history main is about to re-send on the live data channel
+      // (reattach frame, post-sleep backlog). Only the URL sniffer consults
+      // this — replayed bytes must still reach xterm exactly like live ones.
+      const replayTracker = createReplayTracker();
+      const offReplay =
+        window.spark.pty.onReplay?.(sessionId, ({ bytes }) => {
+          replayTracker.announce(bytes);
+        }) ?? (() => undefined);
+
       const offData = window.spark.pty.onData(sessionId, (data) => {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
@@ -2366,6 +2402,12 @@ export function useTerminalSession({
           data instanceof Uint8Array
             ? data
             : new TextEncoder().encode(String(data));
+
+        // Attribute this chunk to the announced replay before anything
+        // downstream reads the flag — including the hidden-pane early returns,
+        // which must still consume the bytes or the replay would leak its
+        // "history" marking onto the live output that follows.
+        const isReplayedChunk = replayTracker.consume(bytes.length);
 
         // Keep the agent lifecycle sniffer running even while the pane is
         // hidden. Some hosts defer hidden xterm writes, so byte-level detection
@@ -2433,7 +2475,12 @@ export function useTerminalSession({
             const url = stripTrailingPunct(matches[matches.length - 1]);
             if (url && url !== detectedRef.current) {
               detectedRef.current = url;
-              onDetectedRef.current(url);
+              // `replayed` tells the owner this URL was scraped out of history
+              // main just re-sent (post-sleep backlog, reattach frame), not out
+              // of something the child printed just now. The URL is still real —
+              // it still earns the click-to-open chip — but it is not evidence
+              // that a server came up, so nothing may auto-open from it.
+              onDetectedRef.current(url, { replayed: isReplayedChunk });
             }
           }
         }
@@ -2611,7 +2658,7 @@ export function useTerminalSession({
           void respawnWithResume();
         }, 400);
       });
-      cleanups.push(offData, offExit);
+      cleanups.push(offData, offReplay, offExit);
 
       const inputDisposable = term.onData((data) => {
         // Read-only / mirror panes must not forward keystrokes — the
@@ -2759,6 +2806,10 @@ export function useTerminalSession({
             agentSessionRef.current?.nativeClaudeProfileId ??
             agentSession?.nativeClaudeProfileId ??
             nativeClaudeProfileId,
+          nativeGrokProfileId:
+            agentSessionRef.current?.nativeGrokProfileId ??
+            agentSession?.nativeGrokProfileId ??
+            nativeGrokProfileId,
           nativeCliLoginToken: preparedNativeCliLoginToken,
           // Read-only mirror panes attach to a session whose canonical xterm
           // lives elsewhere. The mirror flag makes main's existing-session
@@ -2790,7 +2841,11 @@ export function useTerminalSession({
         // normal poller promotes this launching state to working/idle/blocked.
         if (resumeCommand !== null && startupCommandHandled) {
           const restoredRuntime = agentSessionRef.current?.runtime ?? agentSession?.runtime;
-          if (restoredRuntime === "claude" || restoredRuntime === "codex") {
+          if (
+            restoredRuntime === "claude" ||
+            restoredRuntime === "codex" ||
+            restoredRuntime === "grok"
+          ) {
             setAgentRunning(restoredRuntime);
           }
         }

@@ -36,6 +36,10 @@ const flat = (s) => s.replace(/\s+/g, " ");
 
 // Each rule is identified by several distinctive fragments so a reworded but
 // intact rule still passes, while a deleted one cannot.
+// Rules that only make sense where Cora can spawn workers live in the
+// orchestration section, which reaches auto and execute; everything else
+// reaches every mode.
+const ORCHESTRATION_MODES = new Set(["auto", "execute"]);
 const CORA_RULES = [
   {
     name: "red before green (regression test must be shown failing first)",
@@ -55,6 +59,7 @@ const CORA_RULES = [
   },
   {
     name: "mechanical proof before the FIRST verifier, not only the last",
+    orchestrationOnly: true,
     fragments: ["EVERY verifier including the FIRST one", "reading the diff is not the same as holding exit codes"],
   },
   {
@@ -76,13 +81,14 @@ const CORA_RULES = [
 ];
 
 const MODES = ["talk", "auto", "execute", "automation"];
-const POLICIES = ["fast", "deep", "frontier"];
+const POLICIES = ["fast", "deep"];
 
 let checks = 0;
 for (const mode of MODES) {
   for (const policy of POLICIES) {
     const prompt = flat(buildCoraPiSystemPrompt(mode, policy));
     for (const rule of CORA_RULES) {
+      if (rule.orchestrationOnly && !ORCHESTRATION_MODES.has(mode)) continue;
       for (const fragment of rule.fragments) {
         assert.ok(
           prompt.includes(flat(fragment)),

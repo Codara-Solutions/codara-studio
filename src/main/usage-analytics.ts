@@ -8,7 +8,7 @@
 // Three roots, all personal-home only:
 //   claude — <personal claude config dir>/projects/**/*.jsonl
 //   codex  — <codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl
-//   cora   — <sparkHome>/pi-agent/sessions/*.jsonl
+//   cora   — <codaraHome>/pi-agent/sessions/*.jsonl
 // Codara-managed account profiles SYMLINK their projects/ and sessions/ into
 // the personal home (see native-cli-shared-state.ts), so walking the managed
 // roots as well would count the same files twice. For the same reason the walk
@@ -21,7 +21,7 @@
 import { createReadStream, promises as fs } from "node:fs";
 import { createInterface } from "node:readline";
 import { basename, join } from "node:path";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { lookupUsagePrice } from "./model-prices";
 import {
   UsageAggregator,
@@ -71,7 +71,7 @@ let cacheLoaded: Promise<void> | null = null;
 let cacheDirty = false;
 
 function scanCachePath(): string {
-  return join(sparkHome(), "usage-scan-cache.json");
+  return join(codaraHome(), "usage-scan-cache.json");
 }
 
 /* ── Directory resolution ────────────────────────────────────────────────── */
@@ -111,7 +111,7 @@ async function resolveProviderRoots(): Promise<ProviderRoot[]> {
 
   roots.push({
     provider: "cora",
-    dir: join(sparkHome(), "pi-agent", "sessions"),
+    dir: join(codaraHome(), "pi-agent", "sessions"),
     error: null,
   });
 

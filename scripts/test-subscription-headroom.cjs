@@ -6,7 +6,7 @@
 //      window shape, the decisive-vs-neutral routing thresholds, the prompt
 //      section's rendering and its omission, and the Electron-touching reader's
 //      degrade-to-null contract (usage module stubbed).
-//   2. the prompt injection (spark-agent-backend's buildManagerTurnPrompt): the
+//   2. the prompt injection (agent-backend's buildManagerTurnPrompt): the
 //      headroom section must land at the dynamic tail and must never render
 //      when null.
 //   3. the wiring that cannot be bundled standalone (run-store's manager turn,
@@ -390,6 +390,24 @@ async function main() {
     /Codex 78% left(?!\s*\()/.test(decisive ?? ""),
     String(decisive),
   );
+
+  // ── The premium model's own clock (Fable 7-day) ───────────────────────────
+  check(
+    "the premium window is summarized separately from general headroom",
+    both.claude.premiumHeadroomPercent === 2 &&
+      both.claude.premiumWindowLabel === "Fable 5 7-day",
+    JSON.stringify(both.claude),
+  );
+  check(
+    "the prompt names the premium clock with its remaining percent",
+    /Premium model clock: claude-fable-5 .*2% left/.test(decisive ?? ""),
+    String(decisive),
+  );
+  check(
+    "a nearly-exhausted premium clock warns against casual fable assignment",
+    (decisive ?? "").includes("standard-tier attempt already failed"),
+    String(decisive),
+  );
   check(
     "decisive gap adds the routing advice naming the roster standard model",
     (decisive ?? "").includes(`Prefer ${rosterModelFor("codex", "standard")} workers`) &&
@@ -437,8 +455,8 @@ async function main() {
   // ── Injection into the manager turn prompt (dynamic tail) ─────────────────
 
   const backend = await bundle(
-    "spark-agent-backend",
-    path.join(ROOT, "src", "main", "orchestration", "spark-agent-backend.ts"),
+    "agent-backend",
+    path.join(ROOT, "src", "main", "orchestration", "agent-backend.ts"),
   );
   const runFixture = {
     id: "run-headroom",
@@ -503,7 +521,7 @@ async function main() {
     /subscriptionHeadroom = describeHeadroomForPrompt\(await readSubscriptionHeadroomSummary\(\)\)/.test(
       runStoreSource,
     ) &&
-      /coraMemory,\s*\n\s*subscriptionHeadroom,/.test(runStoreSource),
+      /coraMemory,\s*\n\s*priorRuns,\s*\n\s*subscriptionHeadroom,/.test(runStoreSource),
   );
   const socketSource = fs.readFileSync(path.join(ROOT, "src", "main", "agent-socket.ts"), "utf8");
   check(
@@ -512,12 +530,13 @@ async function main() {
   );
   check(
     "verifier reroute health check also avoids a limit-reached provider",
-    socketSource.includes("!runtimeLimitReached(headroomSummary, opposite)"),
+    socketSource.includes("!runtimeLimitReached(headroomSummary, runtime)"),
   );
   check(
     "spawn reroute keys off the decisive preference and exempts fable pins",
     socketSource.includes("preferredRuntimeForHeadroom(headroomSummary)") &&
-      /headroomReroute &&\s*\n\s*!verifierPeerOverride &&\s*\n\s*!resumePlan &&\s*\n\s*effectiveRuntime === headroomReroute\.from &&\s*\n\s*!\/fable\/i\.test\(effectiveModelHint \?\? ""\)/.test(
+      socketSource.includes("constrainedRuntimesForHeadroom") &&
+      /headroomReroute &&\s*\n\s*!verifierPeerOverride &&\s*\n\s*!resumePlan &&\s*\n\s*isAgentRuntimeKind\(effectiveRuntime\) &&\s*\n\s*headroomReroute\.from\.includes\(effectiveRuntime\) &&\s*\n\s*!\/fable\/i\.test\(effectiveModelHint \?\? ""\)/.test(
         socketSource,
       ),
   );

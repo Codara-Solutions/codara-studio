@@ -127,12 +127,6 @@ export function injectEnrichedPath(env: Record<string, string>): void {
   }
 }
 
-/** Test-only hook: forget the memoized value so the next call recomputes. */
-export function _resetPathReconstructionCache(): void {
-  cachedPath = null;
-  inflight = null;
-}
-
 async function computeEnrichedPath(): Promise<string> {
   const fallback = process.env.PATH ?? process.env.Path ?? "";
   try {

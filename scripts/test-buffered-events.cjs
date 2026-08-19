@@ -19,7 +19,7 @@ const plugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve({ filter: /^electron$/ }, () => ({ path: "electron-stub", namespace: "stub" }));
-    build.onResolve({ filter: /\/spark-home$/ }, () => ({ path: "spark-home-stub", namespace: "stub" }));
+    build.onResolve({ filter: /\/codara-home$/ }, () => ({ path: "codara-home-stub", namespace: "stub" }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       if (args.path === "electron-stub") {
         return {
@@ -28,7 +28,7 @@ const plugin = {
           loader: "js",
         };
       }
-      return { contents: `export const sparkHome = () => ${JSON.stringify(TMP_HOME)};`, loader: "js" };
+      return { contents: `export const codaraHome = () => ${JSON.stringify(TMP_HOME)};`, loader: "js" };
     });
   },
 };

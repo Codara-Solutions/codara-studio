@@ -266,9 +266,6 @@ export default function NotificationCenter({
                       void markReadThenRemove(entry.id, () => center.remove(entry.id));
                       setOpen(false);
                     }}
-                    onActed={() => {
-                      void markReadThenRemove(entry.id, () => center.remove(entry.id));
-                    }}
                     resolveQuestion={resolveQuestion}
                   />
                 ))}
@@ -376,14 +373,10 @@ function DndSwitch({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 function CenterEntry({
   entry,
   onOpen,
-  onActed,
   resolveQuestion,
 }: {
   entry: NotificationCenterEntry;
   onOpen: () => void;
-  // Fired when the user resolves an entry in place. It follows the same
-  // mark-read-then-remove lifecycle as opening the entry.
-  onActed: () => void;
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
 }) {
   const [hover, setHover] = useState(false);

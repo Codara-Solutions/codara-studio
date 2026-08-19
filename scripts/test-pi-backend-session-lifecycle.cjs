@@ -59,9 +59,6 @@ function createHarness() {
         openAiFastMode: options.openAiFastMode,
         executionPolicy: options.executionPolicy,
         projectPolicyMode: options.projectPolicyMode,
-        frontierManifestPath: null,
-        frontierManifestSha256: null,
-        frontierAdmissionArtifactSha256: null,
         mcpConfigPath: null,
         agentSocketCapabilityId: capabilityId,
         agentSocketCapabilityExpiresAt: expiresAt,
@@ -102,10 +99,8 @@ async function loadBackend() {
     "./pi-runtime-electron": `
       const h = () => globalThis.${HARNESS_KEY};
       module.exports = {
-        archiveCodaraPiFrontierRevision: async () => null,
         cleanupPiMcpBridgeConfig: async (plan) => h().cleanupPlan(plan),
         createCodaraPiLaunchPlan: async (options) => h().createPlan(options),
-        promoteCodaraPiFrontierAdmission: async () => ({ promoted: false, reason: "test" }),
         resolveCodaraPiExecutionAccount: async (request) => h().resolveAccount(request),
         resolveCodaraPiFastMode: async (provider) => h().fastModeFor(provider),
       };`,
@@ -168,7 +163,6 @@ async function loadBackend() {
       };`,
     "./pi-turn": `
       module.exports = {
-        frontierTurnHasRequiredCompletion: () => true,
         PiTurnAccumulator: class {
           constructor() { this.finalText = ""; }
           consume(event) {
@@ -191,7 +185,7 @@ async function loadBackend() {
           }
         },
       };`,
-    "./spark-agent-backend": `
+    "./agent-backend": `
       module.exports = {
         buildTalkReplyDecision: (reply) => ({ status: "reply", reply }),
       };`,

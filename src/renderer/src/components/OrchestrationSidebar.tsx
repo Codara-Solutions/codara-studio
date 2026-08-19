@@ -11,7 +11,6 @@ interface Props {
   activeRunId: string | null;
   composerDraftKey?: string;
   suspendGlobalEvents?: boolean;
-  terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode — driven by the workspace's hoisted inner
   // tab strip so the toggle survives navigating from the chat tab to a worker
   // or back. Optional during the transition; ChatPanel falls back to its own
@@ -49,7 +48,6 @@ export default function OrchestrationSidebar({
   activeRunId,
   composerDraftKey,
   suspendGlobalEvents,
-  terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
   onOpenBoardCardRun,
@@ -164,8 +162,7 @@ export default function OrchestrationSidebar({
           (chatConfig.backend !== undefined ||
             chatConfig.model !== undefined ||
             chatConfig.mode !== undefined ||
-            chatConfig.effort !== undefined ||
-            chatConfig.oneMillionContext !== undefined),
+            chatConfig.effort !== undefined),
       );
       // A board-minted run that never had a conversation is reused for the
       // first send instead of minting a sibling chat: the welcome the user is
@@ -185,7 +182,6 @@ export default function OrchestrationSidebar({
           chatModel: chatConfig?.model,
           chatMode: chatConfig?.mode,
           chatEffort: chatConfig?.effort,
-          chat1mContext: chatConfig?.oneMillionContext,
         });
         runId = created.id;
       }
@@ -242,7 +238,6 @@ export default function OrchestrationSidebar({
       activeRun={activeRun}
       composerDraftKey={composerDraftKey}
       suspendGlobalEvents={suspendGlobalEvents}
-      terminalScrollbackLineLimit={terminalScrollbackLineLimit}
       error={error}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}

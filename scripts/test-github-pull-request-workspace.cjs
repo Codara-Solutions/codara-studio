@@ -28,7 +28,7 @@ async function loadService() {
           build.onResolve(
             {
               filter:
-                /^(?:electron|\.\/(?:fs-sandbox|git-branches|github-cli|github-pull-request-git|github-pull-request-import-journal|git-worktrees|orchestration\/run-store|preferences-store|spark-home|storage))$/,
+                /^(?:electron|\.\/(?:fs-sandbox|git-branches|github-cli|github-pull-request-git|github-pull-request-import-journal|git-worktrees|orchestration\/run-store|preferences-store|codara-home|storage))$/,
             },
             (args) => ({ path: args.path, namespace: "pr-service-stub" }),
           );
@@ -53,8 +53,8 @@ async function loadService() {
                   "export async function listRuns() { throw new Error('production stub'); } export async function getRun() { throw new Error('production stub'); } export async function createRunWithReservedId() { throw new Error('production stub'); } export async function startAutopilot() { throw new Error('production stub'); }",
                 "./preferences-store":
                   "export async function loadPreferences() { throw new Error('production stub'); }",
-                "./spark-home":
-                  "export function sparkHome() { throw new Error('production stub'); }",
+                "./codara-home":
+                  "export function codaraHome() { throw new Error('production stub'); }",
                 "./storage":
                   "export async function loadState() { throw new Error('production stub'); } export async function updateState() { throw new Error('production stub'); }",
               };

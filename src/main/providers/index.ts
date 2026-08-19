@@ -12,19 +12,21 @@
 
 import type { AgentRuntimeKind } from "@shared/types";
 
+import { isAgentRuntimeKind } from "../../shared/agent-families";
 import { claudeProvider } from "./claude";
 import { codexProvider } from "./codex";
+import { grokProvider } from "./grok";
 
 import type { CliProvider } from "./types";
 
 type OrchestrationCliProvider = CliProvider & { id: AgentRuntimeKind };
 
-const PROVIDERS: readonly CliProvider[] = [claudeProvider, codexProvider];
+const PROVIDERS: readonly CliProvider[] = [claudeProvider, codexProvider, grokProvider];
 
 function isOrchestrationProvider(
   provider: CliProvider,
 ): provider is OrchestrationCliProvider {
-  return provider.id === "claude" || provider.id === "codex";
+  return isAgentRuntimeKind(provider.id);
 }
 
 /**
@@ -45,15 +47,6 @@ export function getProvider(id: AgentRuntimeKind): CliProvider {
     throw new Error(`Unknown CLI provider id: ${id}`);
   }
   return provider;
-}
-
-/**
- * Same as `getProvider` but returns null instead of throwing. Use for
- * defensive code paths (settings migrations, manager decisions parsed
- * from untrusted JSON, etc.).
- */
-export function tryGetProvider(id: string): CliProvider | null {
-  return listProviders().find((p) => p.id === id) ?? null;
 }
 
 export type { CliProvider, SpawnOpts, ResumeOpts } from "./types";

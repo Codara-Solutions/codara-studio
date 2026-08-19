@@ -7,7 +7,7 @@ import {
   type Workspace,
 } from "@shared/types";
 import { syncDirectory, writeFileAtomic } from "./fs-atomic";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 
 export type GitHubPullRequestImportPhase =
   | "fetch-intent"
@@ -350,7 +350,7 @@ function serialize<T>(transactionId: string, operation: () => Promise<T>): Promi
 }
 
 export function createGitHubPullRequestImportJournalStore(
-  home = sparkHome(),
+  home = codaraHome(),
 ): GitHubPullRequestImportJournalStore {
   return {
     async create(input) {

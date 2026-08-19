@@ -29,6 +29,7 @@ import {
   renderRunProjectPolicy,
   runProjectPolicyMode,
 } from "./project-policy";
+import { formatCoraMemoryForWorker } from "./cora-memory";
 
 // Fallback for platforms where the sandbox-exec config shield can't run (see
 // agent-config-shield.ts). There, the CLI still walks ancestor dirs and absorbs
@@ -46,7 +47,7 @@ function personalConfigFallbackLines(run: RunState): string[] {
   return [
     "",
     "## PERSONAL CONFIG NOT APPLICABLE",
-    `Any user-level \`~/.claude/CLAUDE.md\` policies you may have picked up (for example subagent model/effort routing policies that name custom agents like advisor, adversary, or fable-coder), and likewise any global \`~/.codex/AGENTS.md\` personal instructions, are the machine owner's personal settings and DO NOT apply in this Cora-spawned session. Ignore them. Do not attempt to invoke personally-defined custom subagents, they do not exist here. ${projectGuidance}`,
+    `Any user-level \`~/.claude/CLAUDE.md\` policies you may have picked up (for example subagent model/effort routing policies that name custom agents like advisor, adversary, or fable-coder), and likewise any global \`~/.codex/AGENTS.md\` or \`~/.grok/AGENTS.md\` personal instructions, are the machine owner's personal settings and DO NOT apply in this Cora-spawned session. Ignore them. Do not attempt to invoke personally-defined custom subagents, they do not exist here. ${projectGuidance}`,
   ];
 }
 
@@ -107,6 +108,18 @@ function renderPriorHandoffSection(priorHandoffs: WorkerHandoffArtifact[] | unde
   return lines;
 }
 
+function renderWorkerMemorySection(run: RunState): string[] {
+  if (run.automationId) return [];
+  const memory = formatCoraMemoryForWorker(run.workspaceId, run.coraProfileId);
+  if (!memory) return [];
+  return [
+    "",
+    "## READ-ONLY CORA CONTEXT",
+    memory,
+    "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
+  ];
+}
+
 /**
  * Scope a re-verification to the delta instead of the whole surface.
  *
@@ -163,6 +176,7 @@ function taskContextText(step: StepState | undefined, task: WorkerTask): string 
 const COORDINATOR_ONLY_ACCEPTANCE = new Set([
   "all spawned worker tasks complete.",
   "the selected worker tasks complete and report final evidence.",
+  "the direct worker completed the instruction and reported its real results in final-report.json.",
 ]);
 
 function workerAcceptanceCriteria(step: StepState | undefined): string[] {
@@ -258,42 +272,39 @@ export function shouldProvisionWorkerMailbox(
   return managerInboxIsRead(run);
 }
 
-// Mirror of run-store's usePiWorkerHarness gate (kept local to avoid an import
-// cycle; keep the two predicates in sync). Pi-harness workers load
-// resources/pi-cora/worker.ts, which registers the codara-studio bridge tools
-// (preview/terminal/whiteboard-read, plus the automation lifecycle pair for
-// loom workers) in-process, no CLI config file involved. Automation runs use
-// the same harness; only the SPARK_E2E_LEGACY_WORKER_HARNESS escape hatch
-// falls back to the legacy transports.
-function usesPiWorkerHarness(run: RunState, task: WorkerTask): boolean {
+// Pi-harness workers load resources/pi-cora/worker.ts, which registers the
+// codara-studio bridge tools (preview/terminal/whiteboard-read, plus the
+// automation lifecycle pair for loom workers) in-process, no CLI config file
+// involved. Automation runs use the same harness.
+function usesPiWorkerHarness(task: WorkerTask): boolean {
   return (
-    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
-    (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+    task.runtimePreference === "claude" ||
+    task.runtimePreference === "codex" ||
+    task.runtimePreference === "grok"
   );
 }
 
 // Transport-aware availability of the codara-studio preview/terminal tools.
-// The config-file check only describes CLI transports that resolve MCP servers
-// from user-scope configs; Pi-harness workers register the tools in-process and
-// structured automation workers get the entry at launch, claude via the SDK's
-// mcpServers, codex via a forced config install (structured-worker.ts), so
-// all of them always have the tools. Promising tools a worker
-// does not have, or hiding tools it does, is what makes verifiers hedge.
+// Pi-harness workers register the tools in-process, so they always have
+// them. Promising tools a worker does not have, or hiding tools it does, is
+// what makes verifiers hedge.
 function sparkPreviewToolsAvailable(
   run: RunState,
   task: WorkerTask,
   cwd: string,
   settings: AppSettings,
 ): boolean {
-  if (usesPiWorkerHarness(run, task)) return true;
+  if (usesPiWorkerHarness(task)) return true;
   // Structured automation workers always get the tools regardless of config
   // files: claude via the SDK's injected mcpServers entry, codex because
   // runCodexWorker force-installs the codara-studio entry and launches with
-  // SPARK_MCP_MODE=worker (structured-worker.ts).
+  // SPARK_MCP_MODE=worker.
   if (
     run.executionMode === "direct" &&
     Boolean(run.automationId) &&
-    (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+    (task.runtimePreference === "claude" ||
+      task.runtimePreference === "codex" ||
+      task.runtimePreference === "grok")
   ) {
     return true;
   }
@@ -306,23 +317,26 @@ function sparkPreviewToolsAvailable(
 // Only the Pi harness loads the vendored pi-web-search extension, so only
 // those workers are told the tool exists.
 function renderWebResearchGuidance(
-  run: RunState,
   task: WorkerTask,
   // Search quota is shared across the whole parallel batch, so the 429 heads-up
   // below only makes sense when the mailbox actually exists.
   peerCommsAvailable: boolean,
 ): string[] {
-  if (!usesPiWorkerHarness(run, task)) return [];
+  const text = `${task.title}\n${task.description}`;
+  if (
+    !usesPiWorkerHarness(task) ||
+    /\b(?:offline|no web|without web|web (?:search|access).{0,24}(?:forbidden|not permitted|cannot help))\b/i.test(text) ||
+    !/\b(?:web research|search the web|internet research|online sources?|current events?|latest information|cite sources?|source urls?)\b/i.test(text)
+  ) {
+    return [];
+  }
   return [
-    "- Use the `web_search` tool for anything you need from the open web instead of fetching pages with curl or driving the preview browser, and cite the sources it returns in `proof[]`.",
-    "- If `web_search` fails or rate-limits, or the task needs page-level depth, use the bundled `deep_search` tool: free, no API key, backed by DuckDuckGo's public endpoints with a Bing HTML fallback (mode \"deep\" also fetches and digests the top result pages). For structured data, fetch public endpoints (RSS feeds, published APIs) directly rather than waiting for a limit to clear. Never sleep longer than 60 seconds in one command; the wall clock is user-visible.",
-    "- If `deep_search` reports that the backends are bot-challenging rather than empty, free scraping is walled for now: do not rephrase and retry it, go straight to `web_search` or a named public feed or API endpoint.",
+    "- Use `web_search`, then `deep_search` or a named public feed/API if needed. Cite the URLs in `proof[]`; never open a GUI browser.",
     ...(peerCommsAvailable
       ? [
-          "- `web_search` quota is shared by every worker in this batch, not per worker. The moment you hit a 429 or a rate-limit error on it, `peer_send` a one-line heads-up to `all` (subject like \"web_search 429\") before you do anything else, so peers switch to feeds and `deep_search` instead of each burning their own attempts discovering the same limit. If a peer sends you that heads-up, skip `web_search` and start from feeds or `deep_search`; retry it later only if you have no other source.",
+          "- Search quota is shared. If rate-limited, notify peers once and switch sources.",
         ]
       : []),
-    "- Never open the user's system browser or GUI applications (no `open`, `xdg-open`, `osascript`, `start`). All web access goes through `web_search`, `deep_search`, or direct HTTP fetches.",
     "- NEVER copy the user's real credentials anywhere, for any reason. Do not copy an auth file, token, cookie jar, or keychain export (`~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.aws`, `~/.ssh`, and anything like them) into a sandbox home, a temp directory, a worktree, or the workspace, and never point a CLI at a copied credential directory. Refresh tokens ROTATE: the moment the sandboxed tool refreshes, the user's real login is dead and they are signed out of an account they were using. If the task needs a logged in CLI, report that in `risks[]` and finish what you can without it.",
   ];
 }
@@ -346,6 +360,21 @@ function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
       lines.push(
         "- Use worktrees only for explicitly isolated experiments or disjoint write scopes. Do not merge, commit, push, or overwrite another worker's changes unless this task explicitly requires it.",
       );
+    }
+    return lines;
+  }
+
+  if (task.runtimePreference === "grok") {
+    const lines = [
+      "Cora explicitly permits Grok subagents for this task when they are bounded, useful, and mostly read-only.",
+      "- Good uses: codebase exploration, tests/log triage, independent review, summarizing large files, or checking a narrow hypothesis.",
+      "- Give each subagent a concrete job, clear limits, and the exact return format you need. Wait for the result and synthesize disagreements yourself.",
+      "- Do not spawn subagents for every small task. Keep the main path local when the next action depends on the answer.",
+      "- Avoid write-heavy parallel subagents unless scopes are isolated and disjoint. Cora owns top-level parallelism and cross-worker coordination.",
+      "- If you use subagents, your final report must list each subagent's purpose, scope, and distilled findings.",
+    ];
+    if (isVerifier) {
+      lines.push("- This is a verifier task: subagents must be read-only and must not edit files or mutate repository state.");
     }
     return lines;
   }
@@ -404,29 +433,18 @@ function renderPeerCommsGuidance(
     // managerReachable false would mean the two predicates have drifted apart.
     // Say nothing rather than advertise a recipient that does not exist.
     if (!managerReachable) return [];
-    const header = isolated
-      ? [
-          "You are running INDEPENDENTLY. Other workers may be running the same or a related brief at the same time, on purpose, so that their conclusions can be compared against yours.",
-          "Do NOT contact them, do not read their notes, and do not try to discover what they are doing. Reach your own conclusion from the evidence you gather yourself. Agreement you arrived at by yourself is a signal; agreement you arrived at by coordinating is not.",
-          "The one open channel is `manager` (Cora, the orchestrator that spawned you). Use it if you are blocked, if the brief is wrong, or at a significant milestone. Cora may also message you to steer or answer; you will see it next time you read your inbox.",
-        ]
-      : [
-          "This mailbox is MANAGER-ONLY for you. You are not in a group chat with other workers: you cannot message them and they cannot message you, and both mailbox transports refuse the send. Your task brief is complete on its own; work from it and from the evidence you gather yourself.",
-          "The one open channel is `manager` (Cora, the orchestrator that spawned you). Use it if you are blocked, if the brief is wrong or impossible, or at a significant milestone. Cora may also message you to steer or answer; you will see it next time you read your inbox.",
-        ];
+    const header = [
+      isolated
+        ? "Work independently. Do not contact or read other workers; this is intentional diversity."
+        : "This mailbox reaches Cora only, not peer workers. Your brief is self-contained.",
+      "Use `peer_send` to `manager` only for a blocker, a broken brief, or a material milestone. Never idle awaiting a reply.",
+    ];
     return nativePeerTools
-      ? [
-          ...header,
-          "Native mailbox tools are registered in this session:",
-          "- `peer_inbox`: read messages Cora has sent you.",
-          "- `peer_send`: send a short note (under ~300 words) to `manager`. Sending to a peer or to `all` is refused for this task.",
-          "- `peer_await`: block briefly for a reply from `manager` (default 120s timeout). Never idle waiting: on timeout, continue with the safest explicit assumption and record it in `risks[]`.",
-        ]
+      ? header
       : [
           ...header,
           `Read your inbox: node "${paths.peerCommsScript}" inbox --dir "${paths.peerCommsDir}" --self "${task.id}"`,
           `Message Cora: node "${paths.peerCommsScript}" send --dir "${paths.peerCommsDir}" --from "${task.id}" --to manager --subject "<topic>" --body "<note>"`,
-          "Sending to a peer task id or to `all` is refused for this task. Never idle waiting for a reply: continue with the safest explicit assumption and record it in `risks[]`.",
         ];
   }
   const opening = [
@@ -487,12 +505,12 @@ function renderPeerCommsGuidance(
 }
 
 // Mirror of run-store's runHasMcpManager (kept local to avoid an import cycle;
-// see that function's comment for WHY the manager is only reachable in CLI/Pi
-// execute/auto-manager runs). Keep the two predicates in sync.
+// see that function's comment for WHY the manager is only reachable in
+// auto-manager runs). Keep the two predicates in sync.
 function managerInboxIsRead(run: RunState): boolean {
   return (
     run.executionMode !== "direct" &&
-    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
+    run.chatBackend === "pi" &&
     effectiveChatMode(run.chatMode) === "auto"
   );
 }
@@ -653,6 +671,9 @@ function renderImplementationWorkerPrompt({
   settings: AppSettings;
   priorHandoffs?: WorkerHandoffArtifact[];
 }): string {
+  if (run.executionMode === "direct" && !run.automationId) {
+    return renderDirectTaskPrompt({ cwd, run, step, task, paths, settings, priorHandoffs });
+  }
   const lines: string[] = [];
   const promptProfile = loadManagerPromptProfile();
   const projectPolicy = renderRunProjectPolicy(run);
@@ -667,6 +688,7 @@ function renderImplementationWorkerPrompt({
     "",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
+    ...renderWorkerMemorySection(run),
   );
 
   if (step) {
@@ -687,23 +709,7 @@ function renderImplementationWorkerPrompt({
   lines.push(
     "",
     "## SPEC EXACTNESS",
-    "- Treat exact names, exported function shapes, JSON keys, sample output, punctuation, and decimal precision in the task as tests. If the prompt gives an example like `margin 80.0%`, match that formatting exactly unless the task explicitly says the example is illustrative.",
-    "- Before reporting `complete`, run or construct a small probe that checks the exact public contract you implemented, and include the command/output in `proof[]`.",
-  );
-
-  lines.push(
-    "",
-    "## WHEN THE SPEC ITSELF DOES NOT WORK",
-    // A worker that proves the approved plan unbuildable and then stops has
-    // done the expensive half of the job and thrown it away. Observed live: two
-    // workers in a row spent 48 minutes and ~$7 proving the same approved
-    // 16-commit split did not compile, each reporting `blocked` with zero
-    // commits, before a third was allowed to apply the one-line repair and
-    // finish. The repair was never the risky part; re-deriving it twice was.
-    "- If the task as written cannot be satisfied because the SPEC is wrong (it does not compile, the ordering is impossible, a boundary splits one compile unit), you may apply the SMALLEST repair that makes it work and then finish the task. Do not stop at proving it broken.",
-    "- The repair allowance is bounded and is not a licence to redesign. It must be: the minimum change that clears the specific proven blocker; inside the task's stated intent and boundaries; mechanically verified after the change by the same commands the task already requires; and fully disclosed.",
-    "- Disclosure is mandatory. Record the repair in `risks[]` as `PLAN AMENDED: <what the spec said> -> <what you did> because <the proof it could not work>`, put the failing evidence in `proof[]`, and report `partial` rather than `complete` so the manager reviews the amendment.",
-    "- Stop and report `blocked` only when the repair would exceed that bound: a different approach, work outside your boundaries, discarding or rewriting someone else's changes, or anything irreversible. Then say precisely what you proved, what the minimal repair would be, and leave every artifact you built in place for whoever continues.",
+    "Treat exact public names, shapes, formats, and examples as tests. If the brief is mechanically impossible, make only the smallest safe in-scope repair, report `partial`, and prove why; otherwise report `blocked`.",
   );
 
   const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
@@ -718,7 +724,6 @@ function renderImplementationWorkerPrompt({
   }
 
   const webResearchGuidance = renderWebResearchGuidance(
-    run,
     task,
     shouldUsePeerComms(run, step, task) && Boolean(paths.peerCommsDir && paths.peerCommsScript),
   );
@@ -766,7 +771,7 @@ function renderImplementationWorkerPrompt({
         task,
         paths,
         managerInboxIsRead(run),
-        usesPiWorkerHarness(run, task),
+        usesPiWorkerHarness(task),
         shouldUsePeerComms(run, step, task),
         task.isolated === true,
       )
@@ -782,13 +787,7 @@ function renderImplementationWorkerPrompt({
       ...task.verificationCommands.map((c) => `- ${c}`),
       "",
       "## SELF-CHECK",
-      "Before reporting `complete`, you MUST run each command listed under VERIFICATION in a fresh shell and capture its exit code + first 600 chars of stdout. Include the literal output as one `proof[]` entry per verification command, formatted as:",
-      "  $ <command>",
-      "  [exit=<code>]",
-      "  <stdout truncated to 600 chars>",
-      "A `complete` status with empty `proof[]` will be treated as `partial` by the manager review and forced to retry, do not skip this step.",
-      "If any verificationCommand fails (non-zero exit, error in output), set status=\"partial\" or \"failed\" and include the failure mode in `risks[]`. Do NOT paper over a failing check by reporting `complete`.",
-      "If your task description references atomic claims (sub-claims under acceptanceCriteria), enumerate them in `proof[]`: one entry per claim, citing the file:line or command output that demonstrates each one.",
+      "Run every command above in a fresh shell. For each, put `$ command [exit=N]` plus up to 600 characters of output in `proof[]`. A failed command or empty proof cannot be `complete`.",
     );
   }
 
@@ -800,34 +799,87 @@ function renderImplementationWorkerPrompt({
     "## FINAL REPORT",
     `When done, write valid JSON to ${paths.finalReportJson}.`,
     ...promptProfile.workerPrompt.finalReportIntro,
-    "Use this shape:",
-    JSON.stringify(
-      {
-        status: "complete | partial | blocked | failed",
-        summary: "What changed and why.",
-        files_changed: [{ path: "path/to/file", reason: "Why it changed. Workspace files only: never list this report file or anything under the run's artifact directory." }],
-        commands_run: [{ command: "npm run typecheck", exitCode: 0, summary: "What the command proved." }],
-        tests: [{ command: "npm run typecheck", result: "passed | failed | not_run", details: "Optional detail." }],
-        proof: ["Concrete evidence that the task is done."],
-        risks: ["Known risk or empty array."],
-        followups: ["Useful next task or empty array."],
-        handoff: [
-          {
-            path: "/absolute/path/you/left/on/disk",
-            description: "What it is and what it already proves.",
-            reuse: "Exactly how the next worker should reuse it, including commands to re-run.",
-          },
-        ],
-      },
-      null,
-      2,
-    ),
-    // Whoever runs next is handed this list verbatim, before they plan. A
-    // blocked or partial attempt that keeps its scratch harness to itself
-    // forces the next worker to buy the same expensive dry run twice.
-    "`handoff[]` is how you stop your successor from redoing your work. Whenever you leave reusable work on disk - a scratch worktree, a dry-run plan, a computed mapping, a probe script - list it there with an ABSOLUTE path. It is close to mandatory when you report `blocked` or `partial`: those are exactly the states where someone continues from where you stopped. Use an empty array only when you genuinely left nothing behind.",
+    "Required keys: `status` (`complete|partial|blocked|failed`), `summary`, `files_changed` (`path`,`reason`), `commands_run` (`command`,`exitCode`,`summary`), `tests` (`command`,`result`,`details`), `proof`, `risks`, `followups`, and `handoff` (`path`,`description`,`reuse`). Use empty arrays when none. List only workspace files in `files_changed`; use absolute paths for reusable handoffs.",
   );
 
+  return lines.join("\n");
+}
+
+/**
+ * Small Cora chats should feel like one capable agent, not a manager handing a
+ * memo to a fleet. Keep the exact task and safety invariants, but leave fleet
+ * coordination, verbose diff bookkeeping, and a hand-written JSON artifact to
+ * managed runs. The worker extension supplies submit_result for the durable
+ * report, so the model can finish in one tool call after its real checks pass.
+ */
+function renderDirectTaskPrompt({
+  cwd,
+  run,
+  step,
+  task,
+  paths,
+  settings,
+  priorHandoffs,
+}: {
+  cwd: string;
+  run: RunState;
+  step?: StepState;
+  task: WorkerTask;
+  paths: WorkerArtifactPaths;
+  settings: AppSettings;
+  priorHandoffs?: WorkerHandoffArtifact[];
+}): string {
+  const lines = [
+    "Complete this task directly in the workspace.",
+    "Move quickly: inspect only the relevant files and run the named check once, then implement as soon as the contract is clear. Do not inspect repository history or unrelated files unless the task requires it.",
+    "Honor exact names and behavior, make the smallest cohesive change, and preserve unrelated or pre-existing work.",
+    "After the named check passes, run at most one compact batch of explicit boundary checks plus a final diff check. Do not repeat unchanged tests. Never weaken tests or invent evidence.",
+    "Do not commit, push, install packages, or delete data unless the task explicitly asks. If blocked or only partly complete, say so honestly.",
+    "",
+    "## TASK",
+    task.description.trim(),
+    ...renderPriorHandoffSection(priorHandoffs),
+    ...renderWorkerMemorySection(run),
+  ];
+
+  const projectPolicy = renderRunProjectPolicy(run);
+  if (projectPolicy) lines.push("", projectPolicy);
+
+  const acceptanceCriteria = workerAcceptanceCriteria(step);
+  if (acceptanceCriteria.length) {
+    lines.push("", "## ACCEPTANCE", ...acceptanceCriteria.map((criterion) => `- ${criterion}`));
+  }
+
+  if (task.allowedPaths.length || task.forbiddenPaths.length) {
+    lines.push("", "## BOUNDARIES");
+    if (task.allowedPaths.length) lines.push(`Edit only: ${task.allowedPaths.join(", ")}`);
+    if (task.forbiddenPaths.length) lines.push(`Do not edit: ${task.forbiddenPaths.join(", ")}`);
+  }
+  if (task.expectedOutputs.length) {
+    lines.push("", "## EXPECTED OUTPUTS", ...task.expectedOutputs.map((output) => `- ${output}`));
+  }
+  if (task.verificationCommands.length) {
+    lines.push("", "## VERIFY", ...task.verificationCommands.map((command) => `- ${command}`));
+  }
+
+  if (taskLooksLikeVisibleUi(step, task)) {
+    const previewAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
+    lines.push(
+      "",
+      "## UI CHECK",
+      previewAvailable
+        ? "Use Codara's preview tools to exercise the real UI. Check keyboard access, responsive layout, visible states, and remove any dead control."
+        : "Check keyboard access, responsive layout, visible states, and remove any dead control. Report if visual verification is unavailable.",
+    );
+  }
+
+  lines.push(
+    "",
+    "## FINISH",
+    "Call `submit_result` exactly once after the work and checks are finished. Keep its summary and evidence concise. Do not write the report file by hand.",
+    `Workspace: ${cwd}`,
+    `Report destination (handled by submit_result): ${paths.finalReportJson}`,
+  );
   return lines.join("\n");
 }
 
@@ -874,6 +926,7 @@ function renderVerifierWorkerPrompt({
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
     ...renderPriorVerifierRoundSection(priorVerifierRound),
+    ...renderWorkerMemorySection(run),
   );
 
   if (step) {
@@ -921,7 +974,6 @@ function renderVerifierWorkerPrompt({
   }
 
   const webResearchGuidance = renderWebResearchGuidance(
-    run,
     task,
     shouldUsePeerComms(run, step, task) && Boolean(paths.peerCommsDir && paths.peerCommsScript),
   );
@@ -949,7 +1001,7 @@ function renderVerifierWorkerPrompt({
         task,
         paths,
         managerInboxIsRead(run),
-        usesPiWorkerHarness(run, task),
+        usesPiWorkerHarness(task),
         shouldUsePeerComms(run, step, task),
         task.isolated === true,
       )
@@ -973,47 +1025,8 @@ function renderVerifierWorkerPrompt({
     "## FINAL REPORT",
     `When done, write valid JSON to ${paths.finalReportJson}.`,
     ...verifierFinalReportIntro,
-    "Use this shape (note: this is the VERIFIER shape, NOT the implementation-worker shape):",
-    JSON.stringify(
-      {
-        status: "complete",
-        summary: "One-paragraph overview of what you verified and the headline verdict.",
-        verifier: {
-          status: "verified | failed | unsure",
-          confidence: "PERFECT | VERIFIED | PARTIAL | FEEDBACK | FAILED",
-          atomic_claims: [
-            {
-              claim: "function quoteForShell is exported from src/main/shell-utils.ts",
-              verdict: "verified",
-              evidence: "src/main/shell-utils.ts:14, `export function quoteForShell(value: string)`",
-            },
-            {
-              claim: "quoteForShell preserves spaces by quoting (input 'a b' → 'a b' wrapped)",
-              verdict: "failed",
-              evidence: "$ node --eval ... [exit=0] returned 'a b' (unquoted), strips spaces",
-            },
-          ],
-          corrective_prompt:
-            "Full prompt the manager will use as the next implementation task description. Be specific: exact paths, exact failing assertions, suggested fix. 200-400 words. Set to null when status=verified.",
-          missing_oracle: "Describe what fixture/harness/script we need but don't have, or null when not applicable.",
-        },
-        commands_run: [
-          { command: "node --eval \"...\"", exitCode: 0, summary: "Probed quoteForShell with 'a b' input." },
-        ],
-        proof: ["Mirror the atomic_claims array's evidence here for cross-tool consumption."],
-        risks: ["Known risk or empty array."],
-        followups: ["Useful next task or empty array."],
-      },
-      null,
-      2,
-    ),
-    "",
-    "Confidence ladder (Cora uses this to decide what to do next):",
-    "- PERFECT: every atomic claim verified with strong evidence; no missing oracle. Cora accepts the implementation.",
-    "- VERIFIED: every atomic claim verified; minor gaps not load-bearing. Cora accepts.",
-    "- PARTIAL: some atomic claims verified, some unverifiable, none failed. Cora may accept-with-risk or queue a follow-up.",
-    "- FEEDBACK: at least one atomic claim FAILED with a fixable, specific corrective_prompt. Cora retries the implementation worker with your corrective_prompt.",
-    "- FAILED: implementation is broken in ways no narrow corrective prompt fixes (architectural error, wrong file modified, wrong approach). Cora may escalate to the human.",
+    "Required keys: `status: complete`, `summary`, `verifier`, `commands_run`, `proof`, `risks`, `followups`. `verifier` contains `status` (`verified|failed|unsure`), `confidence` (`PERFECT|VERIFIED|PARTIAL|FEEDBACK|FAILED`), `atomic_claims` (`claim`,`verdict`,`evidence`), `corrective_prompt`, and `missing_oracle`.",
+    "Use PERFECT or VERIFIED only when every claim has evidence; PARTIAL for unverified claims without failures; FEEDBACK for a narrow fix with a precise corrective prompt; FAILED for a non-local failure.",
   );
 
   return lines.join("\n");

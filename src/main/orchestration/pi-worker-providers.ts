@@ -1,8 +1,7 @@
 // Worker assignability: which providers Cora may actually send workers to.
 //
-// Every autonomous Cora worker runs on the bundled Pi harness (run-store's
-// `usePiWorkerHarness`; only SPARK_E2E_LEGACY_WORKER_HARNESS=1 reaches the
-// legacy CLI path). A worker therefore needs a connected Pi SUBSCRIPTION for
+// Every autonomous Cora worker runs on the bundled Pi harness. A worker
+// therefore needs a connected Pi SUBSCRIPTION for
 // its provider, not a `claude` or `codex` binary on PATH. The runtimePreference
 // the manager sets is a provider selector: claude means Anthropic, codex means
 // OpenAI.
@@ -18,6 +17,7 @@
 // and never performs an OAuth refresh: a refresh would rotate the stored
 // refresh token and sign the real app out.
 
+import { isAgentRuntimeKind, subscriptionForRuntime } from "../../shared/agent-families";
 import type {
   AgentRuntimeDiagnostic,
   PiSubscriptionProvider,
@@ -27,18 +27,17 @@ import type {
 import { detectAgentRuntimes } from "../agent-runtimes";
 import { inspectPiAccountProfileAuthStore } from "./pi-account-auth-store";
 
-/** The two autonomous runtimePreference values, and the provider each selects. */
+/** The autonomous runtimePreference values, and the provider each selects. */
 export const PI_PROVIDER_FOR_WORKER_RUNTIME = {
   claude: "anthropic",
   codex: "openai-codex",
-} as const satisfies Record<"claude" | "codex", PiSubscriptionProvider>;
+  grok: "xai",
+} as const satisfies Record<"claude" | "codex" | "grok", PiSubscriptionProvider>;
 
 export function piProviderForWorkerRuntime(
   runtime: WorkerRuntime,
 ): PiSubscriptionProvider | null {
-  if (runtime === "claude" || runtime === "codex") {
-    return PI_PROVIDER_FOR_WORKER_RUNTIME[runtime];
-  }
+  if (isAgentRuntimeKind(runtime)) return subscriptionForRuntime(runtime);
   return null;
 }
 
@@ -73,11 +72,8 @@ export function usablePiProviders(
 }
 
 /**
- * Stamp `workerAssignable` onto each diagnostic.
- *
- * `legacyHarness` mirrors SPARK_E2E_LEGACY_WORKER_HARNESS=1: on that path the
- * worker really is the CLI, so assignability really is the binary. Everywhere
- * else it is the subscription.
+ * Stamp `workerAssignable` onto each diagnostic. Workers run on the Pi
+ * harness, so assignability is the subscription, not an installed CLI.
  *
  * shell and manual are human-assisted escape hatches with no provider, so they
  * keep whatever `installed` already said about them.
@@ -85,7 +81,6 @@ export function usablePiProviders(
 export function applyWorkerAssignability(
   diagnostics: readonly AgentRuntimeDiagnostic[],
   usableProviders: ReadonlySet<PiSubscriptionProvider>,
-  legacyHarness: boolean,
 ): AgentRuntimeDiagnostic[] {
   return diagnostics.map((diagnostic) => {
     const provider = piProviderForWorkerRuntime(diagnostic.kind as WorkerRuntime);
@@ -94,9 +89,7 @@ export function applyWorkerAssignability(
     }
     return {
       ...diagnostic,
-      workerAssignable: legacyHarness
-        ? diagnostic.installed
-        : usableProviders.has(provider),
+      workerAssignable: usableProviders.has(provider),
     };
   });
 }
@@ -112,16 +105,11 @@ export function applyWorkerAssignability(
 export async function detectWorkerAssignableRuntimes(): Promise<AgentRuntimeDiagnostic[]> {
   const diagnostics = await detectAgentRuntimes().catch(() => []);
   if (diagnostics.length === 0) return [];
-  const legacyHarness = process.env.SPARK_E2E_LEGACY_WORKER_HARNESS === "1";
-  if (legacyHarness) {
-    return applyWorkerAssignability(diagnostics, new Set(), true);
-  }
   try {
     const inspection = await inspectPiAccountProfileAuthStore();
     return applyWorkerAssignability(
       diagnostics,
       usablePiProviders(inspection.statuses),
-      false,
     );
   } catch {
     return diagnostics.map((diagnostic) => ({

@@ -1,5 +1,10 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { CoraCliInstallStatus } from "@shared/cora-cli";
+import {
+  AGENT_FAMILIES,
+  AGENT_FAMILY_IDS,
+  familyForRuntime,
+  runtimeForSubscription,
+} from "@shared/agent-families";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type {
   AppSettings,
@@ -7,7 +12,6 @@ import type {
   NativeCliAccountProfile,
   NativeCliAccountRuntime,
   NativeCliAccountsInspection,
-  PiSubscriptionAuthEvent,
   PiSubscriptionConnection,
   PiSubscriptionOverview,
   PiSubscriptionPrompt,
@@ -38,6 +42,7 @@ import KeybindingsSection from "../shortcuts/KeybindingsSection";
 import SubscriptionUsage, {
   UsageEntryBody,
   useSubscriptionUsage,
+  type UsageEntry,
 } from "./SubscriptionUsage";
 import AccountCards, {
   type AccountActions,
@@ -249,7 +254,6 @@ interface SettingsDialogProps {
   shells: ShellInfo[];
   defaultShell: ShellInfo | null;
   workspaceCwd?: string | null;
-  workspaceId?: string | null;
   initialTab?: SettingsTab;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
@@ -268,7 +272,6 @@ export default function SettingsDialog({
   shells,
   defaultShell,
   workspaceCwd,
-  workspaceId,
   initialTab = "general",
   onClose,
   onSave,
@@ -435,7 +438,7 @@ export default function SettingsDialog({
             }}
           >
             {renderedTab === "general" && (
-              <GeneralSettings workspaceCwd={workspaceCwd} workspaceId={workspaceId} />
+              <GeneralSettings workspaceCwd={workspaceCwd} />
             )}
             {renderedTab === "editor" && <EditorSettings />}
             {renderedTab === "terminal" && (
@@ -1039,10 +1042,8 @@ const APPEARANCE = APP_THEME_IDS.map((id) => ({
 
 function GeneralSettings({
   workspaceCwd,
-  workspaceId,
 }: {
   workspaceCwd?: string | null;
-  workspaceId?: string | null;
 }) {
   const { theme, setTheme } = useTheme();
   const { preferences, hydrated, setPreference } = usePreferences();
@@ -1256,18 +1257,11 @@ function GeneralSettings({
         </div>
       ) : null}
 
-      <CommandLineSettings />
-
       {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
     </div>
   );
 }
 
-const CORA_CLI_EXAMPLES = [
-  'cora start "Fix the failing tests" --cwd . --wait',
-  'cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex',
-  'cora agent message <run> all "Re-check the acceptance criteria"',
-] as const;
 
 // The "Use the Active account in your terminal" feature was removed: plain
 // `claude` keeps its chats, settings, agents, and commands inside the config
@@ -1311,184 +1305,6 @@ function TerminalAccountLeftoverNote() {
       <code className="spark-mono">{leftover.profilePath}</code> and delete the
       lines from <code className="spark-mono">{leftover.markerBegin}</code>{" "}
       through <code className="spark-mono">{leftover.markerEnd}</code>.
-    </div>
-  );
-}
-
-function CommandLineSettings() {
-  const [status, setStatus] = useState<CoraCliInstallStatus | null>(null);
-  const [busy, setBusy] = useState<"install" | "uninstall" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [copiedExample, setCopiedExample] = useState<string | null>(null);
-
-  const refresh = async () => {
-    try {
-      setStatus(await window.spark.coraCli.status());
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
-
-  useEffect(() => {
-    let mounted = true;
-    void window.spark.coraCli
-      .status()
-      .then((next) => {
-        if (mounted) setStatus(next);
-      })
-      .catch((cause) => {
-        if (mounted) setError(cause instanceof Error ? cause.message : String(cause));
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  const mutate = async (action: "install" | "uninstall") => {
-    setBusy(action);
-    setError(null);
-    try {
-      const result =
-        action === "install"
-          ? await window.spark.coraCli.install()
-          : await window.spark.coraCli.uninstall();
-      setStatus(result.status);
-      if (!result.ok) setError(result.error);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      await refresh();
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const installLabel =
-    status?.state === "needs-repair" || status?.state === "needs-path"
-      ? "Repair command"
-      : "Install command";
-
-  return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <hr className="spark-divider" style={{ margin: "2px 0" }} />
-      <SectionTitle
-        title="Command line"
-        detail="Install the cora command so Claude, Codex, and your own terminals can start Cora sessions and spawn or steer sibling workers. It talks only to this user's running Codara Studio over the authenticated loopback socket."
-      />
-      <div
-        style={{
-          display: "grid",
-          gap: 8,
-          padding: "12px 14px",
-          border: "1px solid var(--rule-soft)",
-          borderRadius: 8,
-        }}
-      >
-        <div style={{ color: "var(--ink)", fontSize: 12, lineHeight: 1.45 }}>
-          {status?.message ?? "Inspecting the Cora command…"}
-        </div>
-        {status?.commandPath ? (
-          <code className="spark-mono" style={{ color: "var(--muted)", fontSize: 11 }}>
-            {status.commandPath}
-          </code>
-        ) : null}
-        {status?.pathInstruction ? (
-          <div style={{ display: "grid", gap: 6 }}>
-            <code
-              className="spark-mono"
-              style={{
-                overflowWrap: "anywhere",
-                color: "var(--muted)",
-                fontSize: 11,
-              }}
-            >
-              {status.pathInstruction}
-            </code>
-            <div>
-              <FooterButton
-                onClick={() => {
-                  void window.spark.clipboard.writeText(status.pathInstruction ?? "");
-                  setCopied(true);
-                  window.setTimeout(() => setCopied(false), 1400);
-                }}
-              >
-                {copied ? "Copied" : "Copy PATH command"}
-              </FooterButton>
-            </div>
-          </div>
-        ) : null}
-        {status?.state === "installed" ? (
-          <div style={{ display: "grid", gap: 7 }}>
-            <div style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.45 }}>
-              Start a session, delegate a worker, or steer its fleet. Replace{" "}
-              <code className="spark-mono">&lt;run&gt;</code> with a run ID or prefix.
-            </div>
-            {CORA_CLI_EXAMPLES.map((command) => (
-              <div
-                key={command}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "minmax(0, 1fr) auto",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <code
-                  className="spark-mono"
-                  style={{
-                    minWidth: 0,
-                    overflowWrap: "anywhere",
-                    color: "var(--ink-dim)",
-                    fontSize: 10.5,
-                  }}
-                >
-                  {command}
-                </code>
-                <FooterButton
-                  onClick={() => {
-                    void window.spark.clipboard.writeText(command);
-                    setCopiedExample(command);
-                    window.setTimeout(
-                      () => setCopiedExample((current) => (current === command ? null : current)),
-                      1400,
-                    );
-                  }}
-                >
-                  {copiedExample === command ? "Copied" : "Copy"}
-                </FooterButton>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {error ? (
-          <div role="alert" style={{ color: "var(--danger)", fontSize: 11, lineHeight: 1.45 }}>
-            {error}
-          </div>
-        ) : null}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {status?.canInstall ? (
-            <FooterButton
-              primary
-              disabled={busy !== null}
-              onClick={() => void mutate("install")}
-            >
-              {busy === "install" ? "Installing…" : installLabel}
-            </FooterButton>
-          ) : null}
-          {status?.canUninstall ? (
-            <FooterButton
-              disabled={busy !== null}
-              onClick={() => void mutate("uninstall")}
-            >
-              {busy === "uninstall" ? "Uninstalling…" : "Uninstall command"}
-            </FooterButton>
-          ) : null}
-          <FooterButton disabled={busy !== null} onClick={() => void refresh()}>
-            Refresh
-          </FooterButton>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1881,33 +1697,25 @@ interface PiInstallView {
 }
 
 /**
- * The two providers behind every account in Codara, each with the local tool it
- * signs in to. Order is the order they appear in Settings.
+ * One provider group per family: Cora subscription + the matching local CLI.
+ * Order is the order they appear in Settings.
  */
 const ACCOUNT_PROVIDERS: ReadonlyArray<{
   provider: PiSubscriptionProvider;
   runtime: NativeCliAccountRuntime;
   label: string;
   cliLabel: string;
-}> = [
-  {
-    provider: "anthropic",
-    runtime: "claude",
-    label: "Anthropic",
-    cliLabel: "Claude Code",
-  },
-  {
-    provider: "openai-codex",
-    runtime: "codex",
-    label: "OpenAI",
-    cliLabel: "Codex CLI",
-  },
-];
+}> = AGENT_FAMILY_IDS.map((id) => ({
+  provider: AGENT_FAMILIES[id].subscription,
+  runtime: AGENT_FAMILIES[id].runtime,
+  label: AGENT_FAMILIES[id].vendorLabel,
+  cliLabel: AGENT_FAMILIES[id].cliLabel,
+}));
 
 function cliRuntimeForProvider(
   provider: PiSubscriptionProvider,
 ): NativeCliAccountRuntime {
-  return provider === "anthropic" ? "claude" : "codex";
+  return runtimeForSubscription(provider);
 }
 
 /**
@@ -1934,6 +1742,7 @@ function AccountsSettings() {
   const [cliLoading, setCliLoading] = useState(true);
   const [cliBusy, setCliBusy] = useState<NativeCliSettingsBusy | null>(null);
   const [cliError, setCliError] = useState<string | null>(null);
+  const [cliNotice, setCliNotice] = useState<string | null>(null);
   const [addingCliProvider, setAddingCliProvider] =
     useState<PiSubscriptionProvider | null>(null);
   const [addCliLabel, setAddCliLabel] = useState("");
@@ -2214,6 +2023,7 @@ function AccountsSettings() {
     ): Promise<boolean> => {
       setCliBusy(nextBusy);
       setCliError(null);
+      setCliNotice(null);
       try {
         await operation();
         await refreshCli();
@@ -2239,7 +2049,7 @@ function AccountsSettings() {
           runtime,
           profileId,
         });
-        const runtimeLabel = runtime === "claude" ? "Claude Code" : "Codex CLI";
+        const runtimeLabel = familyForRuntime(runtime).cliLabel;
         const event = new CustomEvent("spark:open-native-cli-login", {
           cancelable: true,
           detail: {
@@ -2381,7 +2191,12 @@ function AccountsSettings() {
             provider: descriptor.provider,
             ...(email ? { email } : {}),
             ...(usage?.plan ? { plan: usage.plan } : {}),
-            ...(usage ? { usage: <UsageEntryBody usage={usage} compact /> } : {}),
+            // SuperGrok (and any provider with no quota API) reports status
+            // ok and zero windows. That is not a failure — do not render the
+            // empty report as a red "no usage windows" error on the card.
+            ...(usage && accountCardShowsUsage(usage)
+              ? { usage: <UsageEntryBody usage={usage} compact /> }
+              : {}),
             // An email match is a strong hint, not proof, so the card says how
             // to make it one. Reconnecting captures the account id and turns
             // this into a fingerprint pairing.
@@ -2394,7 +2209,11 @@ function AccountsSettings() {
             cora: {
               profileId: profile.id,
               connected: profile.connected,
-              expired: profile.expired,
+              // Claude access tokens last about an hour and are renewed
+              // silently from the refresh token, so a lapsed one is the normal
+              // resting state between sessions, not a broken sign-in. Only a
+              // credential with no way back needs the user to reconnect.
+              expired: profile.expired && !profile.canRefresh,
               active: profile.isDefault,
               busy: accountMutationId === profile.id,
               ...(profile.error ? { error: profile.error } : {}),
@@ -2404,26 +2223,39 @@ function AccountsSettings() {
         });
       const cliOnlyCards = cliProfiles
         .filter((profile) => !pairedCliIds.has(profile.id))
+        // The synthetic personal slot is always in inspect so a signed-in
+        // ~/.claude (or ~/.grok) can pair. An unsigned built-in CLI slot is not an account —
+        // showing that empty card next to real Cora connections looked like a
+        // third login that was connected to nothing.
+        .filter((profile) => profile.managed || profile.status === "connected")
         .map<AccountCardView>((profile) => ({
           key: `cli:${profile.id}`,
-          // The built-in sign-in has no name field in the CLI, so its display
-          // name is a Codara-side preference; "Personal" is the fallback.
+          // The built-in sign-in has no name field in the CLI. Prefer the
+          // Codara-side rename, then the store's "Existing … login" label —
+          // never a bare "Personal", which collides with Cora's default name
+          // and made the unsigned-in ~/.claude slot look like a second copy
+          // of the first Cora account.
           label: profile.managed
             ? profile.label
             : preferences.nativeCliAccountLabels[
                 `${descriptor.runtime}:${profile.id}`
-              ]?.trim() || "Personal",
+              ]?.trim() || profile.label || "Personal",
           provider: descriptor.provider,
           ...(profile.email ? { email: profile.email } : {}),
           cli: cliFacet(profile),
         }));
 
       // Reconnecting is what teaches Codara which account a Cora connection
-      // belongs to, so the offer to merge only appears where there is something
-      // to merge with: an unmatched CLI sign-in in this same provider group.
+      // belongs to. Only a *signed-in* unmatched CLI can merge — an empty
+      // personal slot is not a second account, and offering to pair against
+      // it made every Cora-only card claim a Claude Code sign-in that wasn't
+      // there.
+      const unmatchedSignedInCli = cliOnlyCards.filter(
+        (card) => card.cli?.authState === "connected",
+      );
       const cards: AccountCardView[] = [
         ...coraCards.map((card) =>
-          card.cora && !card.cli && cliOnlyCards.length > 0
+          card.cora && !card.cli && unmatchedSignedInCli.length > 0
             ? {
                 ...card,
                 pairHint: `Reconnect to Cora if this is the same account as your ${descriptor.cliLabel} sign-in — they will then share one card.`,
@@ -2434,7 +2266,9 @@ function AccountsSettings() {
       ];
 
       const coraCount = piProfiles.length;
-      const cliCount = cliProfiles.length;
+      const cliCount = cliProfiles.filter(
+        (profile) => profile.managed || profile.status === "connected",
+      ).length;
       const counts = `${coraCount} ${
         coraCount === 1 ? "account" : "accounts"
       } in Cora · ${cliCount} in ${descriptor.cliLabel}`;
@@ -2484,6 +2318,39 @@ function AccountsSettings() {
     // connect-time fingerprint matches the CLI sign-in, the new connection
     // lands in this same card.
     onCoraConnect: (card) => addAccount(card.provider, card.label),
+    // Cora-only card → sign this account in to the CLI. Prefer the unsigned
+    // built-in slot so the default ~/.claude (or ~/.codex / ~/.grok) is the
+    // one that logs in; otherwise create a named managed profile and sign
+    // that in. Pairing folds the new sign-in back onto this card.
+    onCliConnect: (card) => {
+      const runtime = cliRuntimeForProvider(card.provider);
+      const unsignedPersonal = cliInspection?.runtimes
+        .find((entry) => entry.runtime === runtime)
+        ?.profiles.find(
+          (profile) => !profile.managed && profile.status === "sign_in_required",
+        );
+      if (unsignedPersonal) {
+        void signInCli(runtime, unsignedPersonal.id, card.label);
+        return;
+      }
+      void (async () => {
+        setCliBusy({ runtime, action: "creating" });
+        setCliError(null);
+        try {
+          const created = await window.spark.nativeCliAccounts.create({
+            runtime,
+            label: card.label.trim() || "Personal",
+          });
+          await refreshCli();
+          await signInCli(runtime, created.profile.id, card.label);
+        } catch (err) {
+          setCliError(
+            (err as Error).message || "Could not start the command-line sign-in.",
+          );
+          setCliBusy(null);
+        }
+      })();
+    },
     onBeginAddCora: (provider) => {
       setAddingProvider(provider);
       setAddingCliProvider(null);
@@ -2568,9 +2435,24 @@ function AccountsSettings() {
     onCliUse: (card) => {
       if (!card.cli) return;
       const { runtime, profileId } = card.cli;
-      void mutateCli({ runtime, profileId, action: "setting-default" }, () =>
-        window.spark.nativeCliAccounts.setDefault({ runtime, profileId }),
-      );
+      void (async () => {
+        const changed = await mutateCli(
+          { runtime, profileId, action: "setting-default" },
+          () => window.spark.nativeCliAccounts.setDefault({ runtime, profileId }),
+        );
+        if (!changed) return;
+        const cliLabel = familyForRuntime(runtime).cliLabel;
+        const event = new CustomEvent("spark:open-native-cli-account", {
+          cancelable: true,
+          detail: { runtime, profileId, label: card.label },
+        });
+        const opened = !window.dispatchEvent(event);
+        setCliNotice(
+          opened
+            ? `Opened a new ${cliLabel} session with ${card.label}. Existing sessions keep their current sign-in.`
+            : `${card.label} will be used by new Studio ${cliLabel} sessions. Existing sessions keep their current sign-in.`,
+        );
+      })();
     },
     onCliDelete: (card) => {
       if (!card.cli) return;
@@ -2585,19 +2467,9 @@ function AccountsSettings() {
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="Accounts"
-        detail="Cora and the terminal tools each need their own sign-in, even to the same account. When Codara can tell two sign-ins belong to one account, they share one card; when it cannot, that account appears twice — once for each sign-in."
+        detail="Each account can be the one Cora uses, the one the terminal uses, or both. Cora switches immediately. A terminal switch opens a fresh Studio session. Verified matches share one card; sign-ins Codara cannot safely match stay separate."
       />
-      <div
-        className="spark-glass"
-        style={{
-          display: "grid",
-          gap: 8,
-          padding: 10,
-          borderRadius: "var(--radius-surface, 7px)",
-          border: "1px solid var(--rule-soft)",
-          boxShadow: "var(--well)",
-        }}
-      >
+      <div style={{ display: "grid", gap: 10 }}>
         {overview?.profiles || cliInspection ? (
           <AccountCards providers={providerViews} actions={accountActions} />
         ) : null}
@@ -2672,6 +2544,15 @@ function AccountsSettings() {
           style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}
         >
           {cliError}
+        </div>
+      ) : null}
+
+      {cliNotice ? (
+        <div
+          role="status"
+          style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 12 }}
+        >
+          {cliNotice}
         </div>
       ) : null}
 
@@ -2993,6 +2874,14 @@ type NativeCliSettingsBusy = {
   profileId?: string;
   action: NativeCliAccountBusyAction;
 };
+
+/** True when the in-card usage block has something to say besides silence. */
+function accountCardShowsUsage(usage: UsageEntry): boolean {
+  if (usage.windows.length > 0) return true;
+  if (usage.limitReached) return true;
+  if (usage.status === "ok" || usage.status === "not_connected") return false;
+  return Boolean(usage.message);
+}
 
 function nativeCliAuthState(
   status: NativeCliAccountsInspection["runtimes"][number]["profiles"][number]["status"],

@@ -32,12 +32,3 @@ export function contextWindowForModel(model: string | undefined | null): Context
   }
   return { tokens: DEFAULT_CONTEXT_WINDOW_TOKENS, source: "default" };
 }
-
-export function estimateTokensFromText(text: string): number {
-  if (!text) return 0;
-  return Math.max(1, Math.ceil(text.length / 4));
-}
-
-export function estimateImageTokens(): number {
-  return 1_500;
-}

@@ -16,8 +16,6 @@ import { contextWindowForModel } from "@shared/context-window";
 import { chatContextCapacityTokens } from "@shared/context-compaction";
 import {
   chatModelIsOpenAi,
-  effectiveChatOneMillionContext,
-  normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
@@ -62,7 +60,6 @@ export interface ChatComposerStartConfig {
   model?: string;
   mode?: ChatMode;
   effort?: AgentEffortLevel;
-  oneMillionContext?: boolean;
 }
 
 // The chat composer. One surface for two jobs:
@@ -149,7 +146,6 @@ interface ChatComposerDraftSnapshot {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
-  oneMillionContext: boolean;
 }
 
 // Navigation-only draft cache. It intentionally lives outside React so it
@@ -180,7 +176,6 @@ export interface ChatComposerChipConfig {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
-  oneMillionContext: boolean;
 }
 const liveDraftChipByKey = new Map<string, ChatComposerChipConfig>();
 
@@ -255,9 +250,6 @@ export default function ChatComposer({
   useEffect(() => {
     void refreshPiCatalog();
   }, [refreshPiCatalog]);
-  const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(
-    run?.chat1mContext ?? restoredDraft?.oneMillionContext ?? false,
-  );
   // Latest model-context occupancy from chat.usage SparkEvents. This is a
   // gauge, not a billing counter: each update replaces the prior value so a
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
@@ -301,7 +293,6 @@ export default function ChatComposer({
     backend: draftChatBackend,
     model: draftChatModel,
     effort: draftChatEffort,
-    oneMillionContext: draftOneMillionContext,
   };
   // This instance's draft state belongs to the key it restored from at mount.
   // On a chat-tab switch the parent updates draftKey one commit BEFORE the
@@ -329,7 +320,6 @@ export default function ChatComposer({
       backend: draftChatBackend,
       model: draftChatModel,
       effort: draftChatEffort,
-      oneMillionContext: draftOneMillionContext,
     });
   }
 
@@ -343,13 +333,11 @@ export default function ChatComposer({
     if (run.chatBackend !== undefined) setDraftChatBackend(run.chatBackend);
     if (run.chatModel !== undefined) setDraftChatModel(run.chatModel);
     if (run.chatEffort !== undefined) setDraftChatEffort(run.chatEffort);
-    if (run.chat1mContext !== undefined) setDraftOneMillionContext(run.chat1mContext);
   }, [
     run?.id,
     run?.chatBackend,
     run?.chatModel,
     run?.chatEffort,
-    run?.chat1mContext,
   ]);
 
   // Focus on the global composer shortcut (App broadcasts spark:focus-composer).
@@ -371,7 +359,7 @@ export default function ChatComposer({
     let cancelled = false;
     void window.spark.agents
       .runtimes()
-      .then((diagnostics) => {
+      .then(() => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
         // A pick that landed while this was in flight outranks the default.
@@ -384,13 +372,9 @@ export default function ChatComposer({
         // tier whenever premium happens to lead the first group.
         const first = defaultChatModel(groups);
         if (!first) return;
-        const { baseId, oneMillion } = decomposeModelId(first.id);
-        const normalizedFlags = normalizeChatFeatureFlags(first.backend, {
-          chat1mContext: oneMillion,
-        });
+        const { baseId } = decomposeModelId(first.id);
         setDraftChatBackend(first.backend);
         setDraftChatModel(baseId);
-        setDraftOneMillionContext(normalizedFlags.chat1mContext);
         const allowedEfforts = effortsFor(first);
         const clamped = clampEffort(draftChatEffort, allowedEfforts);
         if (clamped && clamped !== draftChatEffort) setDraftChatEffort(clamped);
@@ -685,8 +669,6 @@ export default function ChatComposer({
           model: latestDraft?.model ?? draftChatModel,
           mode: lockedMode ?? DEFAULT_CHAT_MODE,
           effort: latestDraft?.effort ?? draftChatEffort,
-          oneMillionContext:
-            latestDraft?.oneMillionContext ?? draftOneMillionContext,
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else if (openQuestion) {
@@ -949,8 +931,6 @@ export default function ChatComposer({
   const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
-  const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
-  const activeOneMillionContext: boolean = effectiveChatOneMillionContext(activeChatBackend);
   // The active model's option pulled from the STATIC catalog; null for a model
   // discovered from the live catalog, which has no curated row (effortsFor
   // then yields the full ladder). Used only to derive the available effort
@@ -959,10 +939,9 @@ export default function ChatComposer({
   const activeChatModelOption = findOptionInCatalog(
     activeChatBackend,
     activeChatModelId,
-    activeOneMillionContext,
+    false,
   );
-  // Claude Code always runs with 1M context, represented by the Claude 1M
-  // model rows in the picker. Fast mode remains a single GLOBAL setting even
+  // Fast mode remains a single GLOBAL setting even
   // though its control now lives here: the flash button writes
   // AppSettings.openAiFastMode, and there is still no per-chat fast-mode
   // state. It shows only for an OpenAI model — Anthropic has no priority tier
@@ -981,7 +960,6 @@ export default function ChatComposer({
     chatBackend?: ChatBackendKind;
     chatModel?: string;
     chatEffort?: AgentEffortLevel;
-    chat1mContext?: boolean;
   }) => {
     setError(null);
     // Every caller is a deliberate user action (a pill click or one of the
@@ -995,41 +973,25 @@ export default function ChatComposer({
     const snapshot = draftSnapshotRef.current;
     const baseBackend =
       pendingDesired?.chatBackend ?? snapshot?.backend ?? activeChatBackend;
-    const baseOneMillionContext =
-      pendingDesired?.chat1mContext ??
-      snapshot?.oneMillionContext ??
-      rawOneMillionContext;
     const targetBackend = changes.chatBackend ?? baseBackend;
-    const normalizedFlags = normalizeChatFeatureFlags(targetBackend, {
-      chat1mContext: changes.chat1mContext ?? baseOneMillionContext,
-    });
-    const normalizedChanges = { ...changes };
-    if (
-      changes.chat1mContext !== undefined ||
-      normalizedFlags.chat1mContext !== baseOneMillionContext
-    ) {
-      normalizedChanges.chat1mContext = normalizedFlags.chat1mContext;
-    }
-    if (normalizedChanges.chatBackend !== undefined) setDraftChatBackend(normalizedChanges.chatBackend);
-    if (normalizedChanges.chatModel !== undefined) setDraftChatModel(normalizedChanges.chatModel);
-    if (normalizedChanges.chatEffort !== undefined) setDraftChatEffort(normalizedChanges.chatEffort);
-    if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
+    if (changes.chatBackend !== undefined) setDraftChatBackend(changes.chatBackend);
+    if (changes.chatModel !== undefined) setDraftChatModel(changes.chatModel);
+    if (changes.chatEffort !== undefined) setDraftChatEffort(changes.chatEffort);
     if (!run_ || !mutationScope) return;
 
     const desired: UpdateChatBackendInput = {
       runId: run_.id,
       chatBackend: targetBackend,
       chatModel:
-        normalizedChanges.chatModel ??
+        changes.chatModel ??
         pendingDesired?.chatModel ??
         snapshot?.model ??
         activeChatModelId,
       chatEffort:
-        normalizedChanges.chatEffort ??
+        changes.chatEffort ??
         pendingDesired?.chatEffort ??
         snapshot?.effort ??
         activeChatEffort,
-      chat1mContext: normalizedFlags.chat1mContext,
     };
     const mutation = chatBackendMutationBarriers.enqueue(
       mutationScope,
@@ -1049,10 +1011,8 @@ export default function ChatComposer({
   };
 
   const onPickModel = (model: ChatModelOption) => {
-    // Virtual `:1m` ids decompose into (baseId, oneMillion=true). The
-    // backend only ever sees the real id; the 1M flag rides as
-    // chat1mContext in the same payload the legacy 1M pill used to write.
-    const { baseId, oneMillion } = decomposeModelId(model.id);
+    // Virtual `:1m` ids decompose down to the real id the backend sees.
+    const { baseId } = decomposeModelId(model.id);
     const backendChanged = model.backend !== activeChatBackend;
     // The row's own ladder when it pins one, else the full list, exactly what
     // the thinking pill will offer for this model once the pick lands.
@@ -1066,7 +1026,6 @@ export default function ChatComposer({
       chatBackend: backendChanged ? model.backend : undefined,
       chatModel: baseId,
       chatEffort: nextEffort !== activeChatEffort ? nextEffort : undefined,
-      chat1mContext: oneMillion !== activeOneMillionContext ? oneMillion : undefined,
     });
   };
 
@@ -1097,7 +1056,7 @@ export default function ChatComposer({
         (group) => group.models,
       );
       if (models.length === 0) return;
-      const currentId = composeModelId(activeChatModelId, activeOneMillionContext);
+      const currentId = composeModelId(activeChatModelId, false);
       const index = models.findIndex(
         (model) => model.backend === activeChatBackend && model.id === currentId,
       );
@@ -1317,7 +1276,6 @@ export default function ChatComposer({
             <ModelPicker
               activeBackend={activeChatBackend}
               activeModelId={activeChatModelId}
-              activeOneMillion={activeOneMillionContext}
               onPick={onPickModel}
               openSignal={modelPickerSignal}
             />
@@ -1362,17 +1320,12 @@ export default function ChatComposer({
               used={tokensUsed}
               // A Pi chat never reaches its model window: Codara compacts it at
               // ~256k first, so that is the ceiling the meter measures against.
-              // claude/codex chats drive CLIs with their own compaction and
-              // keep reading against the full window.
               budget={chatContextCapacityTokens({
                 contextWindowTokens:
-                  reportedContextBudget ?? (activeOneMillionContext && activeChatBackend === "claude"
-                    ? 1_000_000
-                    : contextWindowForModel(activeChatModelId).tokens),
-                backend: activeChatBackend,
+                  reportedContextBudget ?? contextWindowForModel(activeChatModelId).tokens,
                 compactAtTokens: reportedCompactAt,
               })}
-              compactsAtBudget={activeChatBackend === "pi"}
+              compactsAtBudget
             />
             <IconButton
               title="MCP and skills"

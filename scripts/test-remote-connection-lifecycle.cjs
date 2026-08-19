@@ -85,7 +85,7 @@ function stubPlugin() {
       export async function deleteSecret() {}
     `,
     "../fs-atomic": "export async function writeFileAtomic() {}",
-    "../spark-home": "export function sparkHome() { return '/tmp/codara-ssh-test'; }",
+    "../codara-home": "export function codaraHome() { return '/tmp/codara-ssh-test'; }",
     "node:fs": `
       export const existsSync = () => false;
       export const promises = {

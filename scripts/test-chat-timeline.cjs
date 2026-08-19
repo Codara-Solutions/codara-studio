@@ -228,6 +228,52 @@ async function main() {
   const digestRun = (id, status, extra = {}) =>
     run([], { id, title: id, status, steps: [], seen: true, ...extra });
 
+  test("a direct message with a matching worker is delivered, not queued", () => {
+    const message = {
+      id: "msg-direct",
+      runId: "run-direct",
+      author: "user",
+      kind: "note",
+      message: "hello",
+      intent: "steer",
+      deliveryState: "queued",
+      createdAt: at(25),
+    };
+    const state = run([], {
+      id: "run-direct",
+      executionMode: "direct",
+      humanMessages: [message],
+      workerTasks: [task("task-direct", {
+        description: "hello",
+        status: "running",
+        createdAt: at(26),
+      })],
+    });
+    assert.equal(T.effectiveMessageDeliveryState(state, message), "acknowledged");
+    const rendered = T.buildChatTimeline(state).find((item) => item.id === message.id);
+    assert.equal(rendered.deliveryState, "acknowledged");
+  });
+
+  test("a direct message without a worker remains genuinely queued", () => {
+    const message = {
+      id: "msg-waiting",
+      runId: "run-direct",
+      author: "user",
+      kind: "note",
+      message: "follow up",
+      intent: "steer",
+      deliveryState: "queued",
+      createdAt: at(25),
+    };
+    const state = run([], {
+      id: "run-direct",
+      executionMode: "direct",
+      humanMessages: [message],
+      workerTasks: [],
+    });
+    assert.equal(T.effectiveMessageDeliveryState(state, message), "queued");
+  });
+
   test("away digest includes only attention states that changed after baseline", () => {
     const blockedBefore = digestRun("blocked-before", "blocked");
     const changedToBlocked = digestRun("changed", "running");

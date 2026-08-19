@@ -243,7 +243,9 @@ export function syncTerminalNotifyPanes(input: {
       existing.tabTitle = String(entry.tabTitle ?? "Terminal");
       existing.excluded = Boolean(entry.excluded);
       existing.runtimeHint =
-        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+        entry.runtimeHint === "claude" ||
+        entry.runtimeHint === "codex" ||
+        entry.runtimeHint === "grok"
           ? entry.runtimeHint
           : null;
       if (!existing.runtime && existing.runtimeHint) existing.runtime = existing.runtimeHint;
@@ -265,11 +267,15 @@ export function syncTerminalNotifyPanes(input: {
       ring: "",
       carry: "",
       runtime:
-        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+        entry.runtimeHint === "claude" ||
+        entry.runtimeHint === "codex" ||
+        entry.runtimeHint === "grok"
           ? entry.runtimeHint
           : null,
       runtimeHint:
-        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+        entry.runtimeHint === "claude" ||
+        entry.runtimeHint === "codex" ||
+        entry.runtimeHint === "grok"
           ? entry.runtimeHint
           : null,
       state: "idle",

@@ -5,7 +5,7 @@ import { promises as fsp } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
 import { waitForLoopbackPreviewServer } from "./preview-navigation";
@@ -47,6 +47,12 @@ import {
   rememberReplace,
   type MemoryScope,
 } from "./orchestration/cora-memory";
+import {
+  createCoraProfile,
+  listCoraProfiles,
+  resolveCoraProfile,
+  setDefaultCoraProfile,
+} from "./orchestration/cora-profiles";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
 import {
   blindApprovalAskProblem,
@@ -72,11 +78,14 @@ import {
 } from "@shared/model-catalog";
 import { ALLOWED_WORKER_MODELS, rosterModelFor } from "./orchestration/worker-model-hint";
 import {
+  constrainedRuntimesForHeadroom,
   headroomForRuntime,
+  otherAssignableRuntime,
   preferredRuntimeForHeadroom,
   readSubscriptionHeadroomSummary,
   runtimeLimitReached,
 } from "./orchestration/subscription-headroom";
+import { AGENT_FAMILY_IDS, isAgentRuntimeKind } from "../shared/agent-families";
 import type {
   AppPreferences,
   AppState,
@@ -85,6 +94,7 @@ import type {
   BoardCardStatus,
   ChatBackendKind,
   ChatMode,
+  CoraExecutionStrategy,
   InAppNotificationTone,
   NotificationSoundKind,
   NotifyKind,
@@ -282,7 +292,7 @@ export async function stopAgentSocket(): Promise<void> {
 }
 
 function handshakeFilePath(): string {
-  return join(sparkHome(), HANDSHAKE_FILE);
+  return join(codaraHome(), HANDSHAKE_FILE);
 }
 
 async function writeHandshakeFile(input: { url: string; token: string }): Promise<void> {
@@ -534,6 +544,15 @@ async function dispatch(
         return await handleChatEvents(params, id, res);
       case "chat.cancel":
         return await handleChatCancel(params, id);
+      case "chat.configure":
+      case "chat.rename":
+      case "chat.compact":
+      case "chat.delete":
+      case "models.list":
+        if (auth.kind !== "root") {
+          return errorResponse(id, ERR_FORBIDDEN, "Chat settings are user-owned.");
+        }
+        return await handleCliChatSettings(method, params, id);
       case "chat.resume":
         if (auth.kind !== "root") {
           return errorResponse(
@@ -543,12 +562,21 @@ async function dispatch(
           );
         }
         return await handleChatResume(params, id);
+      case "workspace.prune":
+        return await handleWorkspacePrune(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
+      case "profiles.list":
+      case "profiles.create":
+      case "profiles.use":
+        if (auth.kind !== "root") {
+          return errorResponse(id, ERR_FORBIDDEN, "Cora profiles are user-owned.");
+        }
+        return await handleCoraProfiles(method, params, id);
       case "app.info":
         return handleAppInfo(id);
       case "app.screenshot":
-        return await handleAppScreenshot(params, id);
+        return await handleAppScreenshot(id);
       case "app.evaluate":
         return await handleAppEvaluate(params, id);
       case "app.notify":
@@ -1007,7 +1035,9 @@ async function handleChatAppend(
   }
 }
 
-const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["claude", "codex", "pi"]);
+// Pi is the only manager backend; an explicit legacy "claude"/"codex" is
+// rejected loudly rather than silently coerced.
+const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["pi"]);
 // Auto is the only chat mode a user-facing chat can be started in. Rejecting an
 // old `--mode plan` loudly beats silently coercing it to something else.
 const CLI_CHAT_MODES = new Set<ChatMode>(["auto"]);
@@ -1018,6 +1048,11 @@ const CLI_CHAT_EFFORTS = new Set<AgentEffortLevel>([
   "high",
   "xhigh",
   "max",
+]);
+const CLI_EXECUTION_STRATEGIES = new Set<CoraExecutionStrategy>([
+  "auto",
+  "direct",
+  "managed",
 ]);
 const CLI_WAIT_STOP_STATUSES = new Set<RunState["status"]>([
   "blocked",
@@ -1110,6 +1145,57 @@ async function activateCliWorkspace(workspaceId: string): Promise<void> {
   broadcastStateChanged(next);
 }
 
+/** Remove workspaces whose directory is gone (default), or exactly the given
+ * cwds. CLI-created throwaway workspaces (bench runs, temp checkouts) pile up
+ * in the rail otherwise; this is their cleanup half. */
+async function pruneCliWorkspaces(cwds?: string[]): Promise<{ removed: Workspace[] }> {
+  const state = await loadState();
+  const wanted = (cwds ?? []).map((cwd) => resolve(cwd));
+  const removed: Workspace[] = [];
+  const kept: Workspace[] = [];
+  for (const workspace of state.workspaces) {
+    let drop = false;
+    if (wanted.length > 0) {
+      drop = wanted.includes(resolve(workspace.cwd));
+    } else {
+      const stat = await fsp.stat(workspace.cwd).catch(() => null);
+      drop = !stat?.isDirectory();
+    }
+    (drop ? removed : kept).push(workspace);
+  }
+  if (removed.length === 0) return { removed };
+  const keptIds = new Set(kept.map((workspace) => workspace.id));
+  const next: AppState = {
+    workspaces: kept,
+    workspaceGroups: state.workspaceGroups,
+    workspaceRailOrder: (state.workspaceRailOrder ?? []).filter((id) => keptIds.has(id)),
+    activeWorkspaceId:
+      state.activeWorkspaceId && keptIds.has(state.activeWorkspaceId)
+        ? state.activeWorkspaceId
+        : (kept[0]?.id ?? null),
+  };
+  await saveState(next);
+  setAllowedRoots(next.workspaces.map((item) => item.cwd));
+  broadcastStateChanged(next);
+  return { removed };
+}
+
+async function handleWorkspacePrune(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const raw = params.cwds;
+  const cwds = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : undefined;
+  try {
+    const { removed } = await pruneCliWorkspaces(cwds && cwds.length > 0 ? cwds : undefined);
+    return successResponse(id, {
+      removed: removed.map((workspace) => ({ id: workspace.id, name: workspace.name, cwd: workspace.cwd })),
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {
   const runStore = await getRunStore();
   const exact = await runStore.getRun(runIdOrPrefix);
@@ -1118,10 +1204,101 @@ async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {
   return matches.length === 1 ? matches[0] : null;
 }
 
-// Public headless Cora lifecycle used by bin/cora.cjs. Unlike orchestrator.*,
+// Public headless Cora lifecycle used by cli/cora.cjs. Unlike orchestrator.*,
 // these methods represent the human at the top of a chat: create starts a real
 // managed run, send appends a user turn (or answers the current question), and
 // wait blocks without consuming manager tokens until the run needs attention.
+async function handleCoraProfiles(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  try {
+    if (method === "profiles.list") {
+      return successResponse(id, { profiles: listCoraProfiles() });
+    }
+    if (method === "profiles.create") {
+      const name = stringParam(params, "name")?.trim();
+      if (!name) return errorResponse(id, ERR_INVALID_PARAMS, "name is required");
+      const profile = await createCoraProfile({
+        name,
+        description: stringParam(params, "description") ?? undefined,
+        instructions: stringParam(params, "instructions") ?? undefined,
+      });
+      return successResponse(id, { profile, profiles: listCoraProfiles() });
+    }
+    const reference = stringParam(params, "profile")?.trim();
+    if (!reference) return errorResponse(id, ERR_INVALID_PARAMS, "profile is required");
+    const profile = await setDefaultCoraProfile(reference);
+    return successResponse(id, { profile, profiles: listCoraProfiles() });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** Small user-owned settings surface for the interactive terminal chat. */
+async function handleCliChatSettings(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  try {
+    if (method === "models.list") {
+      const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
+      return successResponse(id, { models: await inspectPiModelCatalog(false) });
+    }
+
+    const runIdOrPrefix = stringParam(params, "runId")?.trim();
+    if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+    const run = await resolveCliRun(runIdOrPrefix);
+    if (!run) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `Run not found or prefix is ambiguous: ${runIdOrPrefix}`,
+      );
+    }
+
+    const runStore = await getRunStore();
+    if (method === "chat.delete") {
+      await runStore.deleteRun(run.id);
+      return successResponse(id, { ok: true, runId: run.id });
+    }
+    if (method === "chat.rename") {
+      const title = stringParam(params, "title")?.trim();
+      if (!title) return errorResponse(id, ERR_INVALID_PARAMS, "title is required");
+      return successResponse(id, {
+        run: await runStore.renameRun({ runId: run.id, title: title.slice(0, 200) }),
+      });
+    }
+    if (method === "chat.compact") {
+      return successResponse(id, { run: await runStore.compactConversation(run.id) });
+    }
+
+    const model = stringParam(params, "model")?.trim();
+    const effort = enumParam(params, "effort", CLI_CHAT_EFFORTS);
+    if (effort === null) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "effort must be minimal, low, medium, high, xhigh, or max",
+      );
+    }
+    if (!model && effort === undefined) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "model or effort is required");
+    }
+    return successResponse(id, {
+      run: await runStore.updateChatBackend({
+        runId: run.id,
+        ...(model ? { chatModel: model } : {}),
+        ...(effort ? { chatEffort: effort } : {}),
+      }),
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function handleChatCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1133,7 +1310,7 @@ async function handleChatCreate(
 
   const backend = enumParam(params, "backend", CLI_CHAT_BACKENDS);
   if (backend === null) {
-    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be claude, codex, or pi");
+    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be pi");
   }
   const mode = enumParam(params, "mode", CLI_CHAT_MODES);
   if (mode === null) {
@@ -1146,6 +1323,16 @@ async function handleChatCreate(
       ERR_INVALID_PARAMS,
       "effort must be minimal, low, medium, high, xhigh, or max",
     );
+  }
+  const executionStrategy = enumParam(params, "execution", CLI_EXECUTION_STRATEGIES);
+  if (executionStrategy === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "execution must be auto, direct, or managed");
+  }
+  let coraProfileId: string;
+  try {
+    coraProfileId = resolveCoraProfile(stringParam(params, "coraProfile")).id;
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, err instanceof Error ? err.message : String(err));
   }
   let binding: { workspace: Workspace; created: boolean };
   try {
@@ -1172,31 +1359,19 @@ async function handleChatCreate(
   const model = stringParam(params, "model")?.trim();
   const runStore = await getRunStore();
   try {
-    let runId: string | undefined;
-    if (title) {
-      const seeded = await runStore.createRun({
-        workspaceId: binding.workspace.id,
-        workspaceName: binding.workspace.name,
-        cwd: binding.workspace.cwd,
-        title,
-        chatBackend: backend,
-        chatModel: model,
-        chatMode: mode,
-        chatEffort: effort,
-      });
-      runId = seeded.id;
-    }
     const run = await runStore.startAutopilot({
-      runId,
       workspaceId: binding.workspace.id,
       workspaceName: binding.workspace.name,
       cwd: binding.workspace.cwd,
+      coraProfileId,
+      title,
       initialUserNote: prompt,
       initialUserNoteClientMessageId: `cli-${randomBytes(8).toString("hex")}`,
       chatBackend: backend,
       chatModel: model,
       chatMode: mode,
       chatEffort: effort,
+      executionStrategy,
     });
     return successResponse(id, {
       run,
@@ -1221,9 +1396,17 @@ async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
       import("./remote-access/subscription-profile-projection"),
     ]);
     const inspection = await inspectPiAccountProfileAuthStore();
-    const projected = projectRemoteSubscriptionProfiles(
-      inspection,
-      inspectCachedPiSubscriptionUsageProfiles(),
+    const cachedUsage = inspectCachedPiSubscriptionUsageProfiles();
+    const projected = projectRemoteSubscriptionProfiles(inspection, cachedUsage);
+    const windowsByProfile = new Map(
+      cachedUsage.map((usage) => [
+        usage.profileId,
+        (usage.windows ?? []).map((window) => ({
+          label: window.label,
+          remainingPercent: window.remainingPercent,
+          resetsIn: window.resetsIn ?? null,
+        })),
+      ]),
     );
     return successResponse(id, {
       accounts: projected.map((profile) => ({
@@ -1233,6 +1416,10 @@ async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
         status: profile.status,
         isDefault: profile.isDefault,
         remainingPercent: profile.usage?.remainingPercent ?? null,
+        // Every quota clock the provider reported (Anthropic has three:
+        // 5-hour, 7-day, and the Fable-specific 7-day), so clients can show
+        // more than the collapsed number above.
+        windows: windowsByProfile.get(profile.id) ?? [],
       })),
     });
   } catch (err) {
@@ -1530,7 +1717,7 @@ async function handleChatResume(
   }
 }
 
-// ── app.* - dev/test surface for the `cora` CLI (bin/cora.cjs) ──────────────
+// ── app.* - dev/test surface for the `cora` CLI (cli/cora.cjs) ──────────────
 //
 // These drive the APP ITSELF (main window pixels, renderer JS, preferences,
 // the notify pipeline) rather than a preview tab, so a feature can be
@@ -1570,7 +1757,7 @@ function handleAppInfo(id: JsonRpcId): JsonRpcResponse {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
-    homeDir: sparkHome(),
+    homeDir: codaraHome(),
     uptimeSec: Math.round(process.uptime()),
     windows: BrowserWindow.getAllWindows()
       .filter((w) => !w.webContents.isDestroyed())
@@ -1578,10 +1765,7 @@ function handleAppInfo(id: JsonRpcId): JsonRpcResponse {
   });
 }
 
-async function handleAppScreenshot(
-  params: Record<string, unknown>,
-  id: JsonRpcId,
-): Promise<JsonRpcResponse> {
+async function handleAppScreenshot(id: JsonRpcId): Promise<JsonRpcResponse> {
   const gated = requireDevTools(id);
   if (gated) return gated;
   const win = pickAppWindow();
@@ -1786,7 +1970,7 @@ const ORCHESTRATOR_RUNTIME_FALLBACK = "claude" as const;
 interface OrchestratorWorkerInput {
   title: string;
   description: string;
-  runtimePreference?: "claude" | "codex" | "shell" | "manual";
+  runtimePreference?: "claude" | "codex" | "grok" | "shell" | "manual";
   modelHint?: string;
   effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh";
   allowedPaths?: string[];
@@ -1802,6 +1986,10 @@ interface OrchestratorWorkerInput {
    *  Gated by evaluateWorkerSessionReuse; falls back to a cold spawn with an
    *  explanatory note when the gate fails. Never valid on a verifier. */
   follow_up_of?: string;
+  /** Declared-at-spawn verification: a checklist brief for the verifier the
+   *  harness auto-spawns the moment this worker's report is accepted, with no
+   *  manager turn in between. Ignored on verifier-class workers. */
+  verifier?: string;
 }
 
 // Map a requested model onto its counterpart on the OTHER provider, for a
@@ -1810,7 +1998,7 @@ interface OrchestratorWorkerInput {
 // the hop is premium vs standard, and premium exists on Anthropic alone, so a
 // premium Claude worker's Codex peer lands on the frontier model.
 function crossProviderPeerModel(
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "grok",
   requestedModel?: string,
 ): string {
   const model = requestedModel?.trim().toLowerCase() ?? "";
@@ -1819,7 +2007,7 @@ function crossProviderPeerModel(
 
 function runtimeHadEnvironmentalFailure(
   run: RunState,
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "grok",
 ): boolean {
   return run.workerAttempts.some((attempt) =>
     attempt.runtime === runtime &&
@@ -1851,8 +2039,8 @@ function handleOrchestratorSpawnTerminals(
       return errorResponse(id, ERR_INVALID_PARAMS, "each terminal entry must be an object");
     }
     const terminal = raw as Record<string, unknown>;
-    if (terminal.runtime !== "claude" && terminal.runtime !== "codex") {
-      return errorResponse(id, ERR_INVALID_PARAMS, "terminal runtime must be claude or codex");
+    if (terminal.runtime !== "claude" && terminal.runtime !== "codex" && terminal.runtime !== "grok") {
+      return errorResponse(id, ERR_INVALID_PARAMS, "terminal runtime must be claude, codex, or grok");
     }
     if (
       typeof terminal.count !== "number" ||
@@ -1939,10 +2127,10 @@ function countVerifierRoundsForScope(
 
 // Verifier rounds allowed per implementation scope, derived from the run's
 // execution policy (itself derived from the manager's complexity call): fast
-// gets a single independent verification, deep two, frontier three.
+// gets a single independent verification, deep two.
 function verifierRoundCapForRun(run: RunState): number {
   const policy = effectiveRunExecutionPolicy(run);
-  const base = policy === "frontier" ? 3 : policy === "deep" ? 2 : 1;
+  const base = policy === "deep" ? 2 : 1;
   return run.taskComplexity === "complex" ? Math.max(base, 2) : base;
 }
 
@@ -2000,8 +2188,8 @@ function validateUntrustedPullRequestWorkers(
       return "each imported pull-request worker must be an object";
     }
     const worker = raw as Record<string, unknown>;
-    if (worker.runtimePreference !== "claude" && worker.runtimePreference !== "codex") {
-      return "imported pull-request workers must explicitly select claude or codex";
+    if (worker.runtimePreference !== "claude" && worker.runtimePreference !== "codex" && worker.runtimePreference !== "grok") {
+      return "imported pull-request workers must explicitly select claude, codex, or grok";
     }
     if (worker.verificationCommands !== undefined) {
       if (
@@ -2256,21 +2444,20 @@ async function handleOrchestratorSpawnWorkers(
   // untouched so complex work can deliberately request one peer from each
   // provider.
   let verifierPeerOverride: {
-    runtime: "claude" | "codex";
+    runtime: "claude" | "codex" | "grok";
     modelHint: string;
     note: string;
   } | null = null;
   if (
     onlyRequestedWorker?.taskClass === "verifier" &&
-    (onlyRequestedWorker.runtimePreference === "claude" || onlyRequestedWorker.runtimePreference === "codex")
+    isAgentRuntimeKind(onlyRequestedWorker.runtimePreference)
   ) {
     const latestImplementation = [...run.workerTasks].reverse().find(
       (task) =>
         task.taskClass !== "verifier" &&
-        (task.runtimePreference === "claude" || task.runtimePreference === "codex"),
+        isAgentRuntimeKind(task.runtimePreference),
     );
     if (latestImplementation?.runtimePreference === onlyRequestedWorker.runtimePreference) {
-      const opposite = latestImplementation.runtimePreference === "claude" ? "codex" : "claude";
       const runtimes = await detectWorkerAssignableRuntimes();
       // Cross-provider verification is valuable only when that provider is
       // healthy: it needs a connected Pi subscription (the worker runs on the
@@ -2286,11 +2473,20 @@ async function handleOrchestratorSpawnWorkers(
       // the reroute would send the verifier into a provider guaranteed to
       // refuse it. Only the explicit limitReached flag blocks the reroute; a
       // failed or missing usage read stays permissive.
-      const oppositeAvailable =
-        isWorkerAssignable(runtimes, opposite) &&
-        !runtimeHadEnvironmentalFailure(run, opposite) &&
-        !runtimeLimitReached(headroomSummary, opposite);
-      if (oppositeAvailable) {
+      const available = new Set(
+        AGENT_FAMILY_IDS.filter(
+          (runtime) =>
+            runtime !== latestImplementation.runtimePreference &&
+            isWorkerAssignable(runtimes, runtime) &&
+            !runtimeHadEnvironmentalFailure(run, runtime) &&
+            !runtimeLimitReached(headroomSummary, runtime),
+        ),
+      );
+      const opposite = otherAssignableRuntime(
+        latestImplementation.runtimePreference,
+        available,
+      );
+      if (opposite) {
         verifierPeerOverride = {
           runtime: opposite,
           modelHint: crossProviderPeerModel(opposite, onlyRequestedWorker.modelHint),
@@ -2314,21 +2510,33 @@ async function handleOrchestratorSpawnWorkers(
   // actually usable here: installed, and without an environmental failure this
   // run (mirroring the verifier reroute's health check).
   const headroomPreferredRuntime = preferredRuntimeForHeadroom(headroomSummary);
-  let headroomReroute: { from: "claude" | "codex"; to: "claude" | "codex" } | null = null;
+  let headroomReroute: {
+    from: Array<"claude" | "codex" | "grok">;
+    to: "claude" | "codex" | "grok";
+  } | null = null;
   if (headroomPreferredRuntime) {
-    const constrainedRuntime = headroomPreferredRuntime === "claude" ? "codex" : "claude";
-    const anyReroutableWorker = workersToCreate.some(
-      (worker) =>
-        (worker.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) === constrainedRuntime &&
-        !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : ""),
+    const constrainedRuntimes = constrainedRuntimesForHeadroom(
+      headroomSummary,
+      headroomPreferredRuntime,
     );
+    const anyReroutableWorker = workersToCreate.some((worker) => {
+      const runtime = worker.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
+      return (
+        isAgentRuntimeKind(runtime) &&
+        constrainedRuntimes.includes(runtime) &&
+        !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : "")
+      );
+    });
     if (anyReroutableWorker) {
       const detected = await detectWorkerAssignableRuntimes();
       const preferredUsable =
         isWorkerAssignable(detected, headroomPreferredRuntime) &&
         !runtimeHadEnvironmentalFailure(run, headroomPreferredRuntime);
       if (preferredUsable) {
-        headroomReroute = { from: constrainedRuntime, to: headroomPreferredRuntime };
+        headroomReroute = {
+          from: constrainedRuntimes,
+          to: headroomPreferredRuntime,
+        };
       }
     }
   }
@@ -2439,7 +2647,8 @@ async function handleOrchestratorSpawnWorkers(
       headroomReroute &&
       !verifierPeerOverride &&
       !resumePlan &&
-      effectiveRuntime === headroomReroute.from &&
+      isAgentRuntimeKind(effectiveRuntime) &&
+      headroomReroute.from.includes(effectiveRuntime) &&
       !/fable/i.test(effectiveModelHint ?? "")
     ) {
       effectiveRuntime = headroomReroute.to;
@@ -2448,7 +2657,7 @@ async function handleOrchestratorSpawnWorkers(
     }
     const sanitizedModel = untrustedPullRequest
       ? rosterModelFor(
-          effectiveRuntime === "codex" ? "codex" : "claude",
+          isAgentRuntimeKind(effectiveRuntime) ? effectiveRuntime : "claude",
           "standard",
         )
       : runStore.sanitizeWorkerModelHint(effectiveModelHint);
@@ -2458,7 +2667,7 @@ async function handleOrchestratorSpawnWorkers(
       title,
       description,
       runtimePreference: effectiveRuntime as
-        | "claude" | "codex" | "shell" | "manual",
+        | "claude" | "codex" | "grok" | "shell" | "manual",
       modelHint: sanitizedModel,
       effortHint:
         untrustedPullRequest && w.effortHint === "xhigh"
@@ -2490,6 +2699,12 @@ async function handleOrchestratorSpawnWorkers(
       // minting a fresh one. Stamped only when the reuse gate passed above.
       followUpOfTaskId: resumePlan?.sourceTask.id,
       resumeSessionId: resumePlan?.sessionId,
+      // Declared-at-spawn verification: the accept path auto-spawns a
+      // verifier with this brief, so the manager's one wait covers both.
+      verifierBrief:
+        w.taskClass !== "verifier" && typeof w.verifier === "string" && w.verifier.trim()
+          ? w.verifier.trim().slice(0, 8000)
+          : undefined,
       createdBy: "spark",
     });
     // The just-created task is the LAST entry on updated.workerTasks.
@@ -2541,20 +2756,25 @@ async function handleOrchestratorSpawnWorkers(
   const notes: string[] = [...guardrailNotes];
   if (verifierPeerOverride) notes.push(verifierPeerOverride.note);
   if (headroomReroute && headroomReroutedTitles.length > 0) {
-    const constrainedInfo = headroomForRuntime(headroomSummary, headroomReroute.from);
+    const constrainedInfos = headroomReroute.from.map((runtime) =>
+      headroomForRuntime(headroomSummary, runtime),
+    );
     const preferredInfo = headroomForRuntime(headroomSummary, headroomReroute.to);
-    const constrainedLabel = constrainedInfo?.label ?? headroomReroute.from;
-    const constrainedState = constrainedInfo?.limitReached
+    const constrainedLabel = constrainedInfos
+      .map((info, index) => info?.label ?? headroomReroute.from[index])
+      .join("/");
+    const primaryConstrained = constrainedInfos[0];
+    const constrainedState = primaryConstrained?.limitReached
       ? "has hit its subscription limit"
-      : `has only ${constrainedInfo?.headroomPercent ?? 0}% of its ${
-          constrainedInfo?.tightestWindowLabel ?? "quota"
+      : `has only ${primaryConstrained?.headroomPercent ?? 0}% of its ${
+          primaryConstrained?.tightestWindowLabel ?? "quota"
         } window left`;
-    const constrainedReset = constrainedInfo?.tightestWindowResetsIn
-      ? ` (resets in ${constrainedInfo.tightestWindowResetsIn})`
+    const constrainedReset = primaryConstrained?.tightestWindowResetsIn
+      ? ` (resets in ${primaryConstrained.tightestWindowResetsIn})`
       : "";
     notes.push(
       `Subscription headroom reroute: moved ${headroomReroutedTitles.length} worker(s) ` +
-        `(${headroomReroutedTitles.join(", ")}) from ${headroomReroute.from} to ${headroomReroute.to} ` +
+        `(${headroomReroutedTitles.join(", ")}) from ${constrainedLabel} to ${headroomReroute.to} ` +
         `at the equivalent model tier. The ${constrainedLabel} subscription ${constrainedState}` +
         `${constrainedReset}, while ${preferredInfo?.label ?? headroomReroute.to} has ` +
         `${preferredInfo?.headroomPercent != null ? `${preferredInfo.headroomPercent}% left` : "more headroom"}. ` +
@@ -3063,9 +3283,32 @@ async function handleOrchestratorWaitForWorkers(
     final_report_path: string | null;
     final_report: unknown;
     is_terminal: boolean;
-  }[]> =>
-    Promise.all(workerTaskIds.map(async (wtid) => {
-      const task = resolveLatestReplacement(run, wtid);
+    is_requested: boolean;
+  }[]> => {
+    const requested = workerTaskIds.map((wtid) => ({
+      wtid,
+      task: resolveLatestReplacement(run, wtid),
+    }));
+    // Declared-at-spawn verification: a wait on an implementation task also
+    // covers the verifier the harness auto-spawned for it, so the manager's
+    // single wait returns with the verdict in hand.
+    const requestedTaskIds = new Set(
+      requested.map((entry) => entry.task?.id).filter((value): value is string => Boolean(value)),
+    );
+    const attachedVerifiers = run.workerTasks
+      .filter(
+        (candidate) =>
+          candidate.autoVerifierForTaskId && requestedTaskIds.has(candidate.autoVerifierForTaskId),
+      )
+      .map((task) => ({ wtid: task.id, task }));
+    const entries = [
+      ...requested.map((entry) => ({ ...entry, isRequested: true })),
+      ...attachedVerifiers.map((entry) => ({ ...entry, isRequested: false })),
+    ];
+    const taskIsTerminal = (task: WorkerTask): boolean =>
+      TERMINAL_WORKER_TASK_STATUSES.has(task.status) ||
+      (task.status === "needs_review" && task.runtimePreference === "manual");
+    return Promise.all(entries.map(async ({ wtid, task, isRequested }) => {
       const lastAttempt = task
         ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === task.id)
         : null;
@@ -3111,6 +3354,7 @@ async function handleOrchestratorWaitForWorkers(
                 : null,
             }
           : null,
+        is_requested: isRequested,
         // A MANUAL task never advances past needs_review on its own: no
         // manager session reviews it, and its resolution comes from the
         // human-review escalation question (run-store's cycle completion). A
@@ -3119,10 +3363,28 @@ async function handleOrchestratorWaitForWorkers(
         // needs_review status so the manager can read it and act.
         is_terminal:
           taskStatus !== null &&
-          (TERMINAL_WORKER_TASK_STATUSES.has(taskStatus) ||
-            (taskStatus === "needs_review" && task?.runtimePreference === "manual")),
+          task != null &&
+          taskIsTerminal(task) &&
+          // An accepted implementation whose declared verifier has not been
+          // minted yet is NOT settled: the auto-spawn is imminent, and
+          // returning "all_terminal" in that gap would hand the manager a
+          // wait result missing the verdict its brief paid for. A no-files
+          // report never spawns one, so it stays terminal.
+          !(
+            task != null &&
+            task.taskClass !== "verifier" &&
+            typeof task.verifierBrief === "string" &&
+            task.status === "accepted" &&
+            (report?.filesChanged.length ?? 0) > 0 &&
+            !run.workerTasks.some((candidate) => candidate.autoVerifierForTaskId === task.id)
+          ) &&
+          (!isRequested ||
+            run.workerTasks
+              .filter((candidate) => candidate.autoVerifierForTaskId === task.id)
+              .every(taskIsTerminal)),
       };
     }));
+  };
   const firstRun = await runStore.getRun(runId);
   if (!firstRun) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   const blocked = rejectIfAutomationRun(firstRun, id, "codara_wait_for_workers");
@@ -3146,7 +3408,7 @@ async function handleOrchestratorWaitForWorkers(
     reason: string,
   ): Promise<JsonRpcResponse> =>
     successResponse(id, {
-      workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
+      workers: snapshot.map(({ is_terminal: _t, is_requested: _r, ...rest }) => rest),
       manager_messages: await peekManagerInbox(runStore, runId),
       reason,
     });
@@ -3160,11 +3422,12 @@ async function handleOrchestratorWaitForWorkers(
     const run = await runStore.getRun(runId);
     if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
     const snapshot = await snapshotWorkers(run);
-    const terminalCount = snapshot.filter((w) => w.is_terminal).length;
+    const requested = snapshot.filter((worker) => worker.is_requested);
+    const terminalCount = requested.filter((worker) => worker.is_terminal).length;
     if (mode === "any" && terminalCount > 0) {
       return await waitResult(snapshot, "any_terminal");
     }
-    if (mode === "all" && terminalCount === snapshot.length) {
+    if (mode === "all" && terminalCount === requested.length) {
       return await waitResult(snapshot, "all_terminal");
     }
     await new Promise<void>((resolve) => setTimeout(resolve, WAIT_FOR_WORKERS_POLL_MS));
@@ -4879,13 +5142,20 @@ async function handleOrchestratorRemember(
   try {
     const result =
       action === "add"
-        ? await rememberAdd(scope as MemoryScope, run.workspaceId, bullets, runId)
+        ? await rememberAdd(
+            scope as MemoryScope,
+            run.workspaceId,
+            bullets,
+            runId,
+            run.coraProfileId,
+          )
         : await rememberReplace(
             scope as MemoryScope,
             run.workspaceId,
             body as string,
             params.confirm_drop_user_lines === true,
             runId,
+            run.coraProfileId,
           );
     if (action === "add") budget.bulletsAdded += bullets.length;
     return successResponse(id, {

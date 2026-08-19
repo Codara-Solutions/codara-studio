@@ -1125,7 +1125,7 @@ const EXECUTE_TOOLS = [
           type: "string",
           enum: ["trivial", "standard", "complex"],
           description:
-            "Your honest complexity call for the WHOLE user request. Set it on the first spawn of a request and re-send it only if the scope genuinely changed. Codara derives the run's execution tier from this and from nothing else: 'complex' buys a deeper contract-mapping and falsification prompt, a wider verifier-round budget, and more than one corrective rework; trivial/standard run the fast tier. It is a description of the work, not a request for budget. Inflating it burns wall-clock and money on ceremony the task does not need; deflating it strands genuinely subtle work with one verification round and no rework. trivial: ONE module under change, at most 3 atomic acceptance criteria, no public API rename. standard: multi-file change OR public API touch with clear scope. complex: subtle or byte-level work where atomic claims compound, OR a cross-module refactor where at least 3 files change semantics. RISK IS NOT COMPLEXITY: a destructive-but-mechanical operation (deleting files, resetting or recreating a branch, bulk renames) stays trivial/standard no matter how irreversible it feels — protect it with an ask_user approval gate on the destructive act itself, not by buying verifier depth for work that is easy to check. Bias toward standard when genuinely uncertain.",
+            "Your honest complexity call for the WHOLE user request. Set it on the first spawn of a request and re-send it only if the scope genuinely changed. Codara derives the run's execution tier from this and from nothing else: 'complex' buys a deeper contract-mapping and falsification prompt, a wider verifier-round budget, and more than one corrective rework; trivial/standard run the fast tier. It is a description of the work, not a request for budget. Inflating it burns wall-clock and money on ceremony the task does not need; deflating it strands genuinely subtle work with one verification round and no rework. trivial: ONE module under change, at most 3 atomic acceptance criteria, no public API rename. standard: multi-file change OR public API touch with clear scope. complex: subtle or byte-level work where atomic claims compound, OR a cross-module refactor where at least 3 files change semantics. RISK IS NOT COMPLEXITY: a destructive-but-mechanical operation (deleting files, resetting or recreating a branch, bulk renames) stays trivial/standard no matter how irreversible it feels; protect it with an ask_user approval gate on the destructive act itself, not by buying verifier depth for work that is easy to check. Bias toward standard when genuinely uncertain.",
         },
         workers: {
           type: "array",
@@ -1182,6 +1182,11 @@ const EXECUTE_TOOLS = [
                 type: "string",
                 description:
                   "Optional worker_task_id of an ACCEPTED worker from this run. Use it for follow-up or corrective work on files that finished worker just covered: Codara resumes that worker's runtime session (same runtime and model, prior context intact) so the new prompt lands as its next turn instead of paying a cold start. Only honored while the finished attempt's context usage is low; otherwise Codara spawns cold and the result note says why. Never allowed on taskClass verifier; verification must start fresh.",
+              },
+              verifier: {
+                type: "string",
+                description:
+                  "Optional verifier checklist. After an accepted file-changing report, Codara starts a fresh read-only cross-provider verifier; waiting on this worker includes it. Quote the contract clauses and commands with expected results. Do not spawn a duplicate. Ignored for verifier tasks and no-file reports.",
               },
               peers: {
                 type: "boolean",

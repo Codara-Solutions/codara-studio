@@ -18,8 +18,6 @@ function backendStub(name) {
 
 function stubs() {
   const sources = {
-    "./claude-backend": backendStub("claude"),
-    "./codex-backend": backendStub("codex"),
     "./pi-backend": backendStub("pi"),
   };
   return {
@@ -51,32 +49,20 @@ async function main() {
   const outfile = path.join(TMP, "backend-registry.cjs");
   const calls = [];
   globalThis.__codaraManagerCleanupBackends = {
-    claude: {
-      kind: "claude",
-      displayName: "Claude",
-      requestManagerDecision: async () => { throw new Error("unused"); },
-      interruptChat: (runId) => calls.push(`interrupt:claude:${runId}`),
-      disposeChat: async (runId) => {
-        calls.push(`dispose:claude:${runId}`);
-        throw new Error("synthetic Claude cleanup failure");
-      },
-    },
-    codex: {
-      kind: "codex",
-      displayName: "Codex",
-      requestManagerDecision: async () => { throw new Error("unused"); },
-      interruptChat: () => {
-        calls.push("interrupt:codex");
-        throw new Error("synthetic Codex interrupt failure");
-      },
-      disposeChat: async (runId) => calls.push(`dispose:codex:${runId}`),
-    },
     pi: {
       kind: "pi",
       displayName: "Pi",
       requestManagerDecision: async () => { throw new Error("unused"); },
-      interruptChat: (runId) => calls.push(`interrupt:pi:${runId}`),
-      disposeChat: async (runId) => calls.push(`dispose:pi:${runId}`),
+      // Interrupt throws so the test proves a failed interrupt can never
+      // skip disposal, and a rejecting disposer never escapes the fan-out.
+      interruptChat: () => {
+        calls.push("interrupt:pi");
+        throw new Error("synthetic Pi interrupt failure");
+      },
+      disposeChat: async (runId) => {
+        calls.push(`dispose:pi:${runId}`);
+        throw new Error("synthetic Pi cleanup failure");
+      },
     },
   };
 
@@ -92,9 +78,8 @@ async function main() {
   const { disposeManagerSessions } = require(outfile);
   await disposeManagerSessions("run-delete");
 
-  assert(calls.includes("dispose:claude:run-delete"), "Claude disposal must be attempted");
-  assert(calls.includes("dispose:codex:run-delete"), "Codex disposal must survive another backend rejection");
-  assert(calls.includes("dispose:pi:run-delete"), "Pi disposal must survive another backend rejection");
+  assert(calls.includes("interrupt:pi"), "Interrupt must be attempted before disposal");
+  assert(calls.includes("dispose:pi:run-delete"), "Pi disposal must survive the interrupt rejection");
 
   const runStore = fs.readFileSync(
     path.join(ROOT, "src/main/orchestration/run-store.ts"),

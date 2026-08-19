@@ -101,12 +101,7 @@ export class PairedDeviceStore {
   // between, so the revoke's generation bump cannot slip in unseen.
   private renameInFlight: Promise<void> | null = null;
 
-  // `log` carries durability failures that the user would otherwise never
-  // hear about. Never pass anything key-bearing to it.
-  constructor(
-    private readonly remoteDir: string,
-    private readonly log: (line: string) => void = () => {},
-  ) {
+  constructor(private readonly remoteDir: string) {
     this.file = join(remoteDir, PAIRED_DEVICES_FILE);
   }
 

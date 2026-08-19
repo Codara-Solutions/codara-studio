@@ -38,105 +38,14 @@ async function main() {
   };
   const eq = (name, a, b) => ok(`${name} (got ${JSON.stringify(a)})`, JSON.stringify(a) === JSON.stringify(b));
 
-  // ── 1) claudeDisallowedTools: preset → hard-deny list ──────────────────────
+  // The claude/codex CLI-flag helpers (claudeDisallowedTools, codexAccessFlags,
+  // codexFastModeArgs) were deleted with the legacy CLI worker harness in
+  // 2026-08; the Pi worker fence in resources/pi-cora/worker-policy.ts owns
+  // tool access now.
   {
-    eq("full preset disallows nothing", wa.claudeDisallowedTools("full"), []);
-    eq("absent access disallows nothing", wa.claudeDisallowedTools(undefined), []);
-    eq("edits removes shell + web", wa.claudeDisallowedTools("edits"), ["Bash", "WebSearch", "WebFetch"]);
-    eq(
-      "readonly removes edits-to-existing + shell + web but KEEPS Write (for its report)",
-      wa.claudeDisallowedTools("readonly"),
-      ["Edit", "MultiEdit", "NotebookEdit", "Bash", "WebSearch", "WebFetch"],
-    );
-    ok("readonly does NOT deny Write", !wa.claudeDisallowedTools("readonly").includes("Write"));
-  }
-
-  // ── 2) blockedTools merge/dedupe onto ANY preset (incl. full) ──────────────
-  {
-    eq(
-      "blockedTools merge onto full",
-      wa.claudeDisallowedTools("full", ["WebSearch", "Bash"]),
-      ["WebSearch", "Bash"],
-    );
-    eq(
-      "blockedTools dedupe against the edits preset",
-      wa.claudeDisallowedTools("edits", ["Bash", "Grep"]),
-      ["Bash", "WebSearch", "WebFetch", "Grep"],
-    );
-    eq(
-      "blockedTools are trimmed and blanks dropped",
-      wa.claudeDisallowedTools("full", [" Bash ", "", "  "]),
-      ["Bash"],
-    );
-  }
-
-  // ── 3) codexAccessFlags: sandbox mode + approvals + precedence ─────────────
-  {
-    eq("codex full (no sandboxDir) → --yolo, no -a", wa.codexAccessFlags("full", false), {
-      approvalsNever: false,
-    });
-    eq("codex full + sandboxDir → workspace-write, no -a (legacy unchanged)", wa.codexAccessFlags("full", true), {
-      sandboxMode: "workspace-write",
-      approvalsNever: false,
-    });
-    eq("codex edits → workspace-write + approvals never", wa.codexAccessFlags("edits", false), {
-      sandboxMode: "workspace-write",
-      approvalsNever: true,
-    });
-    // codex readonly is IMPOSSIBLE (read-only sandbox can't write the report), so
-    // codexAccessFlags treats it as edits (workspace-write) — the launch backstop.
-    eq("codex readonly → workspace-write (flipped from the impossible read-only)", wa.codexAccessFlags("readonly", false), {
-      sandboxMode: "workspace-write",
-      approvalsNever: true,
-    });
-    eq("codex readonly + sandboxDir → workspace-write (flipped)", wa.codexAccessFlags("readonly", true), {
-      sandboxMode: "workspace-write",
-      approvalsNever: true,
-    });
-  }
-
-  // ── 3b) codex --add-dir emission (mirrors buildLaunchCommandLine's codex loop:
-  // when a sandbox mode is set, each extra writable dir becomes --add-dir <d>) ──
-  {
-    const q = (v) => (/^[A-Za-z0-9_./:@+=,-]+$/.test(v) ? v : `'${v.replace(/'/g, "''")}'`);
-    // Reconstruct the codex arg assembly the way run-store does, to confirm the
-    // report dir + mail dir are made writable on sandboxed launches and NOT on
-    // an unsandboxed --yolo launch.
-    const codexCmd = (access, sandboxDir, extraWritableDirs) => {
-      const c = wa.codexAccessFlags(access, Boolean(sandboxDir));
-      const args = c.sandboxMode ? ["codex", "--sandbox", c.sandboxMode] : ["codex", "--yolo"];
-      if (c.approvalsNever) args.push("-a", "never");
-      if (c.sandboxMode) for (const d of extraWritableDirs) if (d.trim()) args.push("--add-dir", q(d));
-      return args.join(" ");
-    };
-    const REP = "/runs/r1/steps/s/workers/t/attempts/a";
-    const MAIL = "/runs/r1/mail";
-    ok(
-      "codex edits add-dirs the report dir",
-      codexCmd("edits", undefined, [REP]).includes(`--add-dir ${REP}`),
-    );
-    ok(
-      "codex edits + chat add-dirs BOTH report and mail dirs",
-      codexCmd("edits", undefined, [REP, MAIL]).includes(`--add-dir ${REP}`) &&
-        codexCmd("edits", undefined, [REP, MAIL]).includes(`--add-dir ${MAIL}`),
-    );
-    ok(
-      "codex full + legacy sandboxDir ALSO add-dirs the report dir (same report-blocked geometry)",
-      codexCmd("full", "/wt/x", [REP]).includes(`--add-dir ${REP}`),
-    );
-    ok(
-      "codex full (unsandboxed --yolo) does NOT add-dir (already has disk access)",
-      !codexCmd("full", undefined, [REP]).includes("--add-dir"),
-    );
-  }
-
-  // Codex fast mode always overrides the native CLI feature explicitly.
-  {
-    eq("fast mode on enables the Codex feature", wa.codexFastModeArgs(true), ["--enable", "fast_mode"]);
-    eq("fast mode off emits an explicit disable", wa.codexFastModeArgs(false), ["--disable", "fast_mode"]);
-    eq("a missing setting fails closed to disable", wa.codexFastModeArgs(undefined), ["--disable", "fast_mode"]);
-    ok("the fast mode pair is never omitted", wa.codexFastModeArgs(false).length === 2);
-    ok("no Claude fast mode helper exists", typeof wa.claudeFastModeArgs === "undefined");
+    ok("claudeDisallowedTools is gone", typeof wa.claudeDisallowedTools === "undefined");
+    ok("codexAccessFlags is gone", typeof wa.codexAccessFlags === "undefined");
+    ok("codexFastModeArgs is gone", typeof wa.codexFastModeArgs === "undefined");
   }
 
   // ── 4) wave decoration: default is a no-op ─────────────────────────────────

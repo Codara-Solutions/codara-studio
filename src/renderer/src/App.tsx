@@ -30,7 +30,6 @@ import type {
   GitHubWorkQueueItem,
 } from "@shared/github";
 import { makeId } from "@shared/ids";
-import { backendPtySessionId } from "@shared/backend-pty";
 import {
   applyWorkspaceGroupShades,
   ensureWorkspaceGroupColors,
@@ -55,10 +54,9 @@ import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
 import { boardBackend } from "./components/board/board-backend";
 import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
-import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
-import { buildDockIndex, canDockTab, isDockLeaf } from "./tabs/dock";
+import { buildDockIndex, isDockLeaf } from "./tabs/dock";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import {
@@ -114,9 +112,13 @@ import { usePreferences } from "./preferences/usePreferences";
 import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
+  GROK_LAUNCH_COMMAND,
   buildAgentResumeCommand,
   runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
+import { agentBrandColor, agentBrandRuntime } from "./lib/agent-brand";
+import { applyWorkspaceAccent } from "./lib/workspace-accent";
+import { useTheme } from "./theme/theme-context";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
 import {
@@ -145,6 +147,11 @@ import {
   type AwayDigestBaseline,
   type ChatStatusTone,
 } from "./components/chat/timeline";
+
+function workerTabBrandColor(runtime: string | null | undefined): string | undefined {
+  const brand = agentBrandRuntime(runtime);
+  return brand ? agentBrandColor(brand) : undefined;
+}
 
 // Keep the heavyweight settings surfaces out of the startup bundle, but warm
 // their chunks as soon as the workbench has an idle slice. Without this, the
@@ -376,6 +383,7 @@ function normalizedWorkspaceRailOrder(
 }
 
 export default function App() {
+  const { resolvedTheme } = useTheme();
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -438,9 +446,9 @@ export default function App() {
   // context-window / failure tabs. Toggled via the `session.openInspector`
   // shortcut (Mod+Shift+I).
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  // Cmd/Ctrl-K command-palette switcher over every run across all workspaces.
-  // Sourced from the separate global-runs feed (useGlobalRuns) since the
-  // lifted `runs` state above is active-workspace-only.
+  // Cmd/Ctrl-K recent-run picker. It is mounted only while open so the closed
+  // picker has zero rendering cost; RunSwitcher drops orphaned workspace
+  // history and caps its rows.
   const [runSwitcherOpen, setRunSwitcherOpen] = useState(false);
   // Single "While you were away" digest surfaced on window focus-after-away.
   // Holds the snapshot computed at focus time; null when nothing landed or the
@@ -755,6 +763,55 @@ export default function App() {
         handleNativeCliLogin,
       );
   }, [home, newTerminalTab]);
+
+  // Choosing a different CLI account cannot mutate a process that is already
+  // running. Settings therefore opens one fresh, explicitly selected session
+  // after changing the default, which makes the click take effect visibly and
+  // leaves any in-progress terminal untouched.
+  useEffect(() => {
+    const handleNativeCliAccount = (rawEvent: Event) => {
+      const event = rawEvent as CustomEvent<{
+        runtime?: unknown;
+        profileId?: unknown;
+        label?: unknown;
+      }>;
+      const runtime = event.detail?.runtime;
+      const profileId = event.detail?.profileId;
+      if (
+        (runtime !== "claude" && runtime !== "codex" && runtime !== "grok") ||
+        typeof profileId !== "string" ||
+        !activeWorkspace?.cwd
+      ) {
+        return;
+      }
+      const label = typeof event.detail?.label === "string"
+        ? event.detail.label.trim().slice(0, 80)
+        : "account";
+      const command =
+        runtime === "claude"
+          ? CLAUDE_LAUNCH_COMMAND
+          : runtime === "grok"
+            ? GROK_LAUNCH_COMMAND
+            : CODEX_LAUNCH_COMMAND;
+      const titlePrefix =
+        runtime === "claude" ? "Claude" : runtime === "grok" ? "Grok" : "Codex";
+      newTerminalTab(activeWorkspace.cwd, command, {
+        focus: true,
+        title: `${titlePrefix} · ${label}`,
+        manualAgentRuntime: runtime,
+        color: workerTabBrandColor(runtime),
+        ...(runtime === "codex"
+          ? { nativeCodexProfileId: profileId }
+          : runtime === "grok"
+            ? { nativeGrokProfileId: profileId }
+            : { nativeClaudeProfileId: profileId }),
+      });
+      setSettingsOpen(false);
+      event.preventDefault();
+    };
+    window.addEventListener("spark:open-native-cli-account", handleNativeCliAccount);
+    return () => window.removeEventListener("spark:open-native-cli-account", handleNativeCliAccount);
+  }, [activeWorkspace?.cwd, newTerminalTab]);
 
   // Mirror the runs list through a ref so run-selection callbacks can read
   // the latest chat titles without taking `runs` as a dependency.
@@ -1932,12 +1989,15 @@ export default function App() {
     window.spark.app.signalReady?.();
   }, []);
 
-  // Theme the entire UI with the active workspace's color. Falls back to the
-  // default yellow when nothing is active.
+  // Theme the UI from the workspace's raw identity color, but resolve a second
+  // accent that meets small-text contrast against the strongest panel. The
+  // frame lets ThemeProvider stamp the new palette before we read its tokens.
   useEffect(() => {
-    const accent = activeWorkspace?.color || "#2AA298";
-    document.documentElement.style.setProperty("--accent", accent);
-  }, [activeWorkspace?.color]);
+    const frame = window.requestAnimationFrame(() => {
+      applyWorkspaceAccent(activeWorkspace?.color || "#2AA298");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeWorkspace?.color, resolvedTheme]);
 
   // Open the unified in-app SettingsDialog when any part of the app
   // dispatches the `spark:open-settings` window event. Previously this
@@ -2020,7 +2080,7 @@ export default function App() {
       // Pull the task/attempt metadata that names the pane header (title,
       // runtime, attempt ordinal). Best-effort — the header is decoration; the
       // PTY claim itself doesn't depend on it.
-      let runtime: "claude" | "codex" | undefined;
+      let runtime: "claude" | "codex" | "grok" | undefined;
       let title: string | undefined;
       let attemptOrdinal: number | undefined;
       let nativeCodexProfileId =
@@ -2031,6 +2091,10 @@ export default function App() {
         typeof event.payload?.nativeClaudeProfileId === "string"
           ? event.payload.nativeClaudeProfileId
           : undefined;
+      let nativeGrokProfileId =
+        typeof event.payload?.nativeGrokProfileId === "string"
+          ? event.payload.nativeGrokProfileId
+          : undefined;
       let harness: "pi" | "cli" | undefined;
       let startedAt: string | undefined;
       let model: string | undefined;
@@ -2039,7 +2103,8 @@ export default function App() {
         const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
         if (
           task?.runtimePreference === "claude" ||
-          task?.runtimePreference === "codex"
+          task?.runtimePreference === "codex" ||
+          task?.runtimePreference === "grok"
         ) {
           runtime = task.runtimePreference;
         }
@@ -2048,6 +2113,7 @@ export default function App() {
         attemptOrdinal = attempt?.attemptNumber;
         nativeCodexProfileId = attempt?.nativeCodexProfileId;
         nativeClaudeProfileId = attempt?.nativeClaudeProfileId;
+        nativeGrokProfileId = attempt?.nativeGrokProfileId;
         harness = workerHarnessFromCommand(attempt?.command);
         startedAt = attempt?.startedAt;
         // The attempt's resolved model beats the task's hint: the planner's
@@ -2066,6 +2132,7 @@ export default function App() {
         runtime,
         nativeCodexProfileId,
         nativeClaudeProfileId,
+        nativeGrokProfileId,
         runId: event.runId,
         workerTaskId: event.workerTaskId,
         attemptId: event.attemptId,
@@ -2250,9 +2317,11 @@ export default function App() {
 
             const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
             const runtime =
-              attempt.runtime === "claude" || attempt.runtime === "codex"
+              attempt.runtime === "claude" || attempt.runtime === "codex" || attempt.runtime === "grok"
                 ? attempt.runtime
-                : task?.runtimePreference === "claude" || task?.runtimePreference === "codex"
+                : task?.runtimePreference === "claude" ||
+                    task?.runtimePreference === "codex" ||
+                    task?.runtimePreference === "grok"
                   ? task.runtimePreference
                   : undefined;
             const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
@@ -2264,6 +2333,7 @@ export default function App() {
               runtime,
               nativeCodexProfileId: attempt.nativeCodexProfileId,
               nativeClaudeProfileId: attempt.nativeClaudeProfileId,
+              nativeGrokProfileId: attempt.nativeGrokProfileId,
               runId: run.id,
               workerTaskId: attempt.workerTaskId,
               attemptId: attempt.id,
@@ -2420,7 +2490,7 @@ export default function App() {
       tabId: string;
       tabTitle: string;
       excluded: boolean;
-      runtimeHint?: "claude" | "codex" | null;
+      runtimeHint?: "claude" | "codex" | "grok" | null;
     }> = [];
     for (const tab of tabs.tabs) {
       if (tab.kind !== "terminal") continue;
@@ -2995,7 +3065,7 @@ export default function App() {
 
   const previewWsColor = useCallback((id: string, color: string) => {
     if (activeIdRef.current !== id) return;
-    document.documentElement.style.setProperty("--accent", color);
+    applyWorkspaceAccent(color);
   }, []);
 
   const removeWorkspaceFromState = useCallback((id: string) => {
@@ -3736,7 +3806,7 @@ export default function App() {
   const lastOpenedUrlByTerminalRef = useRef<Map<string, string>>(new Map());
 
   const handleDetectedUrl = useCallback(
-    (tabId: string, paneId: string, url: string) => {
+    (tabId: string, paneId: string, url: string, meta?: { replayed?: boolean }) => {
       setDetectedUrl(tabId, paneId, url);
       // Re-broadcast so other listeners (status bar, agent bridge) can
       // react without coupling directly to the terminal stack.
@@ -3754,6 +3824,15 @@ export default function App() {
         return;
       }
       if (port === null || !AUTO_PREVIEW_PORTS.has(port)) return;
+
+      // Replayed history is not an event. Main re-sends a pane's buffered
+      // output verbatim down the live data channel after a lock/sleep (and as
+      // the raw-tail frame on reattach), so a `Local: http://localhost:3000`
+      // line a dev server printed before the laptop slept arrives again on
+      // wake looking exactly like a server that just came up. The chip above
+      // still updates — the URL is real and clickable — but a replay must
+      // never spawn a tab on its own. Genuinely-live output is unaffected.
+      if (meta?.replayed === true) return;
 
       // Part C — auto-open is opt-in. When the user hasn't enabled it, stop
       // here: the detected-URL chip above already ran (setDetectedUrl +
@@ -3781,7 +3860,6 @@ export default function App() {
       // servers each get their own auto-preview.
       const last = lastOpenedUrlByTerminalRef.current.get(paneId);
       if (last && sameOrigin(last, url)) return;
-      lastOpenedUrlByTerminalRef.current.set(paneId, url);
 
       // If a preview tab already shows the same origin, do nothing — it's
       // already in the strip. A passive stdout sniff must never reassign the
@@ -3790,7 +3868,13 @@ export default function App() {
       const existing = tabs.tabs.find(
         (t) => t.kind === "preview" && sameOrigin(t.url, url),
       );
-      if (existing) return;
+      if (existing) {
+        // Still counts as handled for this pane: closing that preview is a
+        // deliberate "I don't want this", and the next line the same dev server
+        // prints must not undo it.
+        lastOpenedUrlByTerminalRef.current.set(paneId, url);
+        return;
+      }
       // Inherit the worker's runId so the chat panel can render this preview
       // inside its inner tab strip; URLs detected on a plain (non-worker)
       // terminal stay top-level by leaving runId undefined. (Worker panes are
@@ -3800,9 +3884,37 @@ export default function App() {
         sourceTab?.kind === "terminal" && sourceTab.scope?.kind === "workers"
           ? sourceTab.scope.runId
           : null;
-      // focus:false — an auto-detected preview opens in the background so it
-      // doesn't steal the active tab from a chat the user is working in.
-      newPreviewTab(url, { runId: ownerRunId, focus: false });
+
+      // Last gate: is anything actually listening there? The replay guard above
+      // covers history main re-sent, but not history a process reprints as its
+      // own fresh output — a resumed `claude --resume` replaying a transcript
+      // that quotes a dev-server URL is indistinguishable from a live banner at
+      // the byte level. A blank tab pointed at a dead port is the exact symptom
+      // either way, so probe the port (main retries briefly, so a server that
+      // printed its banner a moment ago still passes) and only then mint a tab.
+      void window.spark.preview
+        .probeLocalServer(url)
+        .then((reachable) => {
+          if (!reachable) return;
+          // Re-run both dedupes against post-await state: the probe takes up to
+          // a second, in which the user (or another pane) may have opened this
+          // origin. Suppression is recorded only where a tab exists — a probe
+          // that came back dead leaves the pane free to auto-open later, when
+          // the server the user is about to start actually answers.
+          const alreadyOpen = tabsRef.current.tabs.some(
+            (t) => t.kind === "preview" && sameOrigin(t.url, url),
+          );
+          const prior = lastOpenedUrlByTerminalRef.current.get(paneId);
+          if (alreadyOpen || (prior && sameOrigin(prior, url))) {
+            lastOpenedUrlByTerminalRef.current.set(paneId, url);
+            return;
+          }
+          lastOpenedUrlByTerminalRef.current.set(paneId, url);
+          // focus:false — an auto-detected preview opens in the background so it
+          // doesn't steal the active tab from a chat the user is working in.
+          newPreviewTab(url, { runId: ownerRunId, focus: false });
+        })
+        .catch(() => undefined);
     },
     // tabs.tabs is real data read above (worker-pane and existing-preview
     // checks), so it stays a dep; the method references are stable.
@@ -3894,6 +4006,7 @@ export default function App() {
         tabs.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
+          color: workerTabBrandColor(launchRuntime),
         });
         return;
       }
@@ -3964,6 +4077,7 @@ export default function App() {
       tabs.newTerminalTab(cwd, launchCommand, {
         agentSession: makeSession(cwd),
         manualAgentRuntime: launchRuntime ?? undefined,
+        color: workerTabBrandColor(launchRuntime),
       });
     },
     [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
@@ -3992,7 +4106,11 @@ export default function App() {
     (runtime: WorkerSessionRuntime) => {
       const cwd = resolveWorkerLaunchCwd();
       const freshCommand =
-        runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
+        runtime === "claude"
+          ? CLAUDE_LAUNCH_COMMAND
+          : runtime === "grok"
+            ? GROK_LAUNCH_COMMAND
+            : CODEX_LAUNCH_COMMAND;
       if (!cwd) {
         handleNewWorkerTab(freshCommand);
         return;
@@ -4017,6 +4135,10 @@ export default function App() {
     () => openShortcutWorkerSessions("codex"),
     [openShortcutWorkerSessions],
   );
+  const openGrokWorkerSessions = useCallback(
+    () => openShortcutWorkerSessions("grok"),
+    [openShortcutWorkerSessions],
+  );
   const openPaneWorkerSessions = useCallback(
     (
       runtime: WorkerSessionRuntime,
@@ -4024,7 +4146,14 @@ export default function App() {
       launch: WorkerSessionPickerRequest["launch"],
     ) => {
       if (!cwd) {
-        launch(runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND, null);
+        launch(
+          runtime === "claude"
+            ? CLAUDE_LAUNCH_COMMAND
+            : runtime === "grok"
+              ? GROK_LAUNCH_COMMAND
+              : CODEX_LAUNCH_COMMAND,
+          null,
+        );
         return;
       }
       setWorkerSessionPicker({ runtime, cwd, launch });
@@ -4058,6 +4187,7 @@ export default function App() {
             runtime: request.runtime,
             nativeCodexProfileId:
               request.session.nativeCodexProfileId,
+            nativeGrokProfileId: request.session.nativeGrokProfileId,
             sessionId: request.session.sessionId,
             cwd: request.cwd,
             transcriptPath: request.session.transcriptPath,
@@ -4069,10 +4199,13 @@ export default function App() {
         ? buildAgentResumeCommand(pointer)
         : request.runtime === "claude"
           ? CLAUDE_LAUNCH_COMMAND
-          : CODEX_LAUNCH_COMMAND;
+          : request.runtime === "grok"
+            ? GROK_LAUNCH_COMMAND
+            : CODEX_LAUNCH_COMMAND;
       tabsRef.current.newTerminalTab(request.cwd, command, {
         agentSession: pointer,
         manualAgentRuntime: request.runtime,
+        color: workerTabBrandColor(request.runtime),
       });
     },
     [],
@@ -4293,8 +4426,20 @@ export default function App() {
       { workspaceId: string | null; tabId: string; paneId: string }
     >(),
   );
+  // Fingerprint of the last shareable-terminal inventory reported to main, so
+  // the effect below (which re-runs on every tab-state change) only pings the
+  // terminal bridge when a pane a phone could see actually appeared,
+  // disappeared, or was retitled.
+  const sharedTerminalFingerprintRef = useRef<string | null>(null);
   useEffect(() => {
-    setListShareableStudioTerminalsFn(() => {
+    const listShareableTerminals = (): Array<{
+      paneId: string;
+      tabId: string;
+      workspaceId: string;
+      title?: string;
+      cwd?: string;
+      profile: "shell" | "claude" | "codex" | "grok";
+    }> => {
       const layouts: Array<{ workspaceId: string; tabs: Tab[] }> = [];
       if (tabs.tabsWorkspaceId && validWorkspaceIds.has(tabs.tabsWorkspaceId)) {
         layouts.push({ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs });
@@ -4308,7 +4453,7 @@ export default function App() {
         workspaceId: string;
         title?: string;
         cwd?: string;
-        profile: "shell" | "claude" | "codex";
+        profile: "shell" | "claude" | "codex" | "grok";
       }> = [];
       for (const layout of layouts) {
         for (const tab of layout.tabs) {
@@ -4329,7 +4474,27 @@ export default function App() {
         }
       }
       return shared;
-    });
+    };
+    setListShareableStudioTerminalsFn(listShareableTerminals);
+    // Push-notify main when the phone-visible inventory changes. Main owns
+    // debouncing and fan-out; this stays a bare ping so a burst of tab
+    // operations costs a string compare per commit, nothing more.
+    const fingerprint = JSON.stringify(
+      listShareableTerminals().map((entry) => [
+        entry.paneId,
+        entry.tabId,
+        entry.workspaceId,
+        entry.title ?? null,
+        entry.profile,
+      ]),
+    );
+    if (fingerprint !== sharedTerminalFingerprintRef.current) {
+      sharedTerminalFingerprintRef.current = fingerprint;
+      // Optional-called: in dev the renderer can be hot-updated ahead of its
+      // preload, and throwing here unmounts App — which unregisters every
+      // bridge adapter and kills phone/MCP terminal creation with it.
+      window.spark?.terminalBridge?.notifyInventoryChanged?.();
+    }
     setCreateAgentTerminalFn((input) => {
       if (input.workspaceId && !validWorkspaceIds.has(input.workspaceId)) {
         throw new Error(
@@ -4929,7 +5094,7 @@ export default function App() {
         (!wasRunning && !(pointerAgeMs < 90_000));
       if (
         state.running &&
-        (state.runtime === "claude" || state.runtime === "codex") &&
+        (state.runtime === "claude" || state.runtime === "codex" || state.runtime === "grok") &&
         shouldCapture &&
         !capturingPanesRef.current.has(paneId)
       ) {
@@ -4967,6 +5132,9 @@ export default function App() {
               nativeClaudeProfileId:
                 leaf.agentSession?.nativeClaudeProfileId ??
                 leaf.worker?.nativeClaudeProfileId,
+              nativeGrokProfileId:
+                leaf.agentSession?.nativeGrokProfileId ??
+                leaf.worker?.nativeGrokProfileId,
               cwd: capCwd,
               sinceMs: Date.now() - 60_000,
               excludeSessionIds,
@@ -4991,6 +5159,7 @@ export default function App() {
                   transcriptPath: res.transcriptPath,
                   nativeCodexProfileId: res.nativeCodexProfileId,
                   nativeClaudeProfileId: res.nativeClaudeProfileId,
+                  nativeGrokProfileId: res.nativeGrokProfileId,
                   capturedAt: new Date().toISOString(),
                   // Capture polls up to 15s; the agent may have exited in the
                   // meantime. Only a positively confirmed exit after capture
@@ -5166,6 +5335,7 @@ export default function App() {
         t.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
+          color: workerTabBrandColor(launchRuntime),
         });
         return null;
       }
@@ -5188,6 +5358,7 @@ export default function App() {
         t.newTerminalTab(cwd, launchCommand, {
           agentSession: makeSession(cwd),
           manualAgentRuntime: launchRuntime ?? undefined,
+          color: workerTabBrandColor(launchRuntime),
         });
         return null;
       }
@@ -5574,6 +5745,7 @@ export default function App() {
               onNewPreviewTab={handleNewPreviewTab}
               onNewClaudeWorker={openClaudeWorkerSessions}
               onNewCodexWorker={openCodexWorkerSessions}
+              onNewGrokWorker={openGrokWorkerSessions}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
               onRenameChat={handleRenameChatTab}
@@ -5679,7 +5851,6 @@ export default function App() {
               shells={shells}
               defaultShell={defaultShell}
               workspaceCwd={activeWorkspace?.copyBranch?.repoCwd ?? activeWorkspace?.cwd ?? null}
-              workspaceId={activeWorkspace?.id ?? null}
               onClose={closeSettings}
               onSave={handleSaveSettings}
               onOpenRun={handleSettingsOpenRun}
@@ -5709,26 +5880,23 @@ export default function App() {
           </Suspense>
         )}
 
-        <ShortcutsDialog
-          open={shortcutsOpen}
-          onClose={closeShortcuts}
-        />
+        {shortcutsOpen ? <ShortcutsDialog onClose={closeShortcuts} /> : null}
 
         <WorkerSessionPicker
           request={workerSessionPicker}
           onClose={() => setWorkerSessionPicker(null)}
         />
 
-        <RunSwitcher
-          open={runSwitcherOpen}
-          runs={globalRuns.runs.filter(
-            (r) => (!r.automationId && !isBoardCardRun(r)) || r.status === "blocked",
-          )}
-          workspaces={workspaces}
-          onClose={() => setRunSwitcherOpen(false)}
-          onSelectRun={handleSelectRunAnywhere}
-          onAnswered={(run) => handleRunSnapshot(run)}
-        />
+        {runSwitcherOpen ? (
+          <RunSwitcher
+            runs={globalRuns.runs.filter(
+              (r) => !r.automationId && !isBoardCardRun(r),
+            )}
+            workspaces={workspaces}
+            onClose={() => setRunSwitcherOpen(false)}
+            onSelectRun={handleSelectRunAnywhere}
+          />
+        ) : null}
 
         <SearchPanel
           open={searchOpen}
@@ -5857,14 +6025,15 @@ function AwayDigestCard({
       }}
     >
       <div
-        className="spark-glass--strong"
+        className="spark-toast"
         role="status"
         style={{
+          ["--toast-status" as string]: "inset 3px 0 0 var(--accent)",
           display: "flex",
           flexDirection: "column",
           gap: 10,
           padding: "12px 14px",
-          borderRadius: 8,
+          borderRadius: "var(--radius-surface, 7px)",
           fontFamily: "var(--font-sans)",
         }}
       >
@@ -6045,7 +6214,12 @@ interface WorkspaceProps {
     run: RunState,
     options?: { select?: boolean; focusRuns?: boolean },
   ) => void;
-  onDetectedUrl: (tabId: string, paneId: string, url: string) => void;
+  onDetectedUrl: (
+    tabId: string,
+    paneId: string,
+    url: string,
+    meta?: { replayed?: boolean },
+  ) => void;
   onSparkOpenFile: (path: string) => void;
   // Shared git state for the diff tabs (see useSharedGitStatus in App).
   gitStatus: GitStatus | null;
@@ -6083,6 +6257,7 @@ interface WorkspaceProps {
   // deletes one from this workspace's history.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
+  onNewGrokWorker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
   // path, threaded down to the chat panel's embedded board sub-view.
@@ -6136,6 +6311,7 @@ const Workspace = React.memo(function Workspace({
   onNewPreviewTab,
   onNewClaudeWorker,
   onNewCodexWorker,
+  onNewGrokWorker,
   onNewChat,
   onOpenBoardCardRun,
   onRenameChat,
@@ -6156,12 +6332,12 @@ const Workspace = React.memo(function Workspace({
     closeTab,
     setDirty,
     addDraftChatTab,
-    openAutomationsTab,
     setActiveTerminalPane,
     setTerminalSplitRatio,
     splitTerminalPane,
     moveTerminalPane,
     closeTerminalPane,
+    openTabInSplit,
     dockTabInTerminal,
     undockTab,
     toggleTerminalPaneZoom,
@@ -6323,59 +6499,6 @@ const Workspace = React.memo(function Workspace({
     () => (activeRunId ? runs.find((run) => run.id === activeRunId) ?? null : null),
     [runs, activeRunId],
   );
-  const backendSessionId = activeRunForStrip
-    ? backendPtySessionId(activeRunForStrip.id, activeRunForStrip.chatBackend)
-    : null;
-  // backendPtySessionId is a deterministic string derived from the run id
-  // and backend, so it goes truthy the moment a Claude/Codex run exists —
-  // *before* the backend has actually spawned the CLI PTY. If we showed the
-  // Terminal pill on that signal alone, clicking it would mount xterm on a
-  // ghost session and the user sees a black canvas. Poll the real existence
-  // bit so the pill (and downstream TerminalPane mount) only fire when
-  // there's a PTY to attach to.
-  const [backendPtyExists, setBackendPtyExists] = useState(false);
-  useEffect(() => {
-    if (!backendSessionId) {
-      setBackendPtyExists(false);
-      return;
-    }
-    let disposed = false;
-    const check = async () => {
-      try {
-        const exists = await window.spark.pty.exists(backendSessionId);
-        if (!disposed) setBackendPtyExists(exists);
-      } catch {
-        if (!disposed) setBackendPtyExists(false);
-      }
-    };
-    void check();
-    // Nothing observes the pill while the window is hidden, so skip the tick
-    // rather than spend an IPC round-trip per second on a state nobody reads.
-    // Refocus re-checks immediately so the view can't render against a stale
-    // existence bit.
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
-      void check();
-    }, 1000);
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") void check();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [backendSessionId]);
-  // Escape a dead Terminal view: if the backend PTY is gone (or never
-  // existed) while chatView is "terminal", the chat panel renders neither the
-  // terminal nor the composer. Fall back to the chat view so the composer is
-  // always reachable.
-  useEffect(() => {
-    if (chatView === "terminal" && (!backendSessionId || !backendPtyExists)) {
-      setChatView("chat");
-    }
-  }, [chatView, backendSessionId, backendPtyExists]);
   // Same escape for the Whiteboard view: it is run-scoped, so on a draft chat
   // (no run) it would render the welcome state with the composer hidden. The
   // strip hides the whiteboard affordances on drafts (whiteboardCreatable),
@@ -6425,10 +6548,6 @@ const Workspace = React.memo(function Workspace({
       (chatView === "board" || isDraftChatTabId(activeTabForStrip.id)));
   const handleInnerChatClick = useCallback(() => {
     changeChatView("chat");
-    if (activeChatTabId) setActiveTab(activeChatTabId);
-  }, [activeChatTabId, setActiveTab, changeChatView]);
-  const handleInnerTerminalClick = useCallback(() => {
-    changeChatView("terminal");
     if (activeChatTabId) setActiveTab(activeChatTabId);
   }, [activeChatTabId, setActiveTab, changeChatView]);
   const handleBackToRuns = useCallback(() => {
@@ -6535,7 +6654,6 @@ const Workspace = React.memo(function Workspace({
         chatBackend: chip?.backend,
         chatModel: chip?.model,
         chatEffort: chip?.effort,
-        chat1mContext: chip?.oneMillionContext,
       });
       await api.update({
         runId: run.id,
@@ -6608,6 +6726,25 @@ const Workspace = React.memo(function Workspace({
     (id: TabId) => setActiveTab(id),
     [setActiveTab],
   );
+  // A docked chat's own sub-navigation, rendered INSIDE its cell by ChatStack.
+  //
+  // The workbench-level strip keys off the active tab, and a docked chat is
+  // never the active tab (its host terminal is) — so docking a chat silently
+  // stripped it of Chat / Kanban / Runs / Terminal and left the conversation
+  // as the only reachable surface. The strip belongs to the chat, so when the
+  // chat moves into a cell it moves with it.
+  //
+  // These handlers deliberately drop the setActiveTab half of their
+  // workbench-level twins: selecting a docked tab would "activate" a tab that
+  // has no workbench slot, blanking the center while the cell keeps painting.
+  // Flipping the view is the whole job here. Runs / preview pills still route
+  // through handleInnerSelectTab — those are real tabs of their own.
+  const handleDockedChatClick = useCallback(() => changeChatView("chat"), [changeChatView]);
+  const handleDockedWhiteboardClick = useCallback(
+    () => changeChatView("whiteboard"),
+    [changeChatView],
+  );
+  const handleDockedBoardClick = useCallback(() => changeChatView("board"), [changeChatView]);
   // Returns whether a pane was actually focused, so callers with their own
   // notice surface (the board's card button) can explain a miss — a finished
   // worker's pane does not survive an app restart. The Runs Inspector ignores
@@ -6749,13 +6886,14 @@ const Workspace = React.memo(function Workspace({
     },
     [dockTabInTerminal],
   );
-  // Menu route into the grid: no drag, dock into the named host with the
-  // grid's own largest-cell placement.
+  // Menu route into the grid: no drag, so useTabs resolves the host (the grid
+  // on screen, else a container minted around the surface the user is looking
+  // at) and places the cell itself.
   const handleOpenInSplit = useCallback(
-    (dockedTabId: string, hostTabId: string) => {
-      dockTabInTerminal(dockedTabId, hostTabId);
+    (dockedTabId: string) => {
+      openTabInSplit(dockedTabId);
     },
-    [dockTabInTerminal],
+    [openTabInSplit],
   );
   const handleUndockTab = useCallback(
     (dockedTabId: string) => undockTab(dockedTabId, { focus: true }),
@@ -6846,13 +6984,14 @@ const Workspace = React.memo(function Workspace({
         onNewPreview={onNewPreviewTab}
         onNewClaudeWorker={onNewClaudeWorker}
         onNewCodexWorker={onNewCodexWorker}
+        onNewGrokWorker={onNewGrokWorker}
         onNewChat={onNewChat}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}
         onTerminalPaneDrop={onTerminalPaneDrop}
         onReorderTab={onReorderTab}
         onPinEditorTab={onPinEditorTab}
-        onDockTab={handleOpenInSplit}
+        onOpenInSplit={handleOpenInSplit}
         pickerHints={pickerHints}
         closeOnMiddleClick={closeTabsOnMiddleClick}
         workspaceId={workspace?.id ?? null}
@@ -6862,14 +7001,12 @@ const Workspace = React.memo(function Workspace({
           activeId={effectiveActiveId}
           activeChatTabId={activeChatTabId}
           chatView={chatView}
-          backendPtyExists={backendPtyExists}
           whiteboardAvailable={whiteboardAvailable}
           whiteboardCreatable={Boolean(activeRunForStrip)}
           whiteboardAttention={whiteboardAttention}
           runsTab={runOwnedTabs.runs}
           previews={runOwnedTabs.previews}
           onChatClick={handleInnerChatClick}
-          onTerminalClick={handleInnerTerminalClick}
           onWhiteboardClick={handleInnerWhiteboardClick}
           onBoardClick={handleInnerBoardClick}
           onSelectTab={handleInnerSelectTab}
@@ -6886,13 +7023,30 @@ const Workspace = React.memo(function Workspace({
           tabs={visibleTabs}
           activeId={effectiveActiveId}
           dockIndex={dockIndex}
+          dockedStrip={
+            dockedChatTabId ? (
+              <InnerTabStrip
+                activeId={dockedChatTabId}
+                activeChatTabId={dockedChatTabId}
+                chatView={chatView}
+                whiteboardAvailable={whiteboardAvailable}
+                whiteboardCreatable={Boolean(activeRunForStrip)}
+                whiteboardAttention={whiteboardAttention}
+                runsTab={runOwnedTabs.runs}
+                previews={runOwnedTabs.previews}
+                onChatClick={handleDockedChatClick}
+                onWhiteboardClick={handleDockedWhiteboardClick}
+                onBoardClick={handleDockedBoardClick}
+                onSelectTab={handleInnerSelectTab}
+              />
+            ) : null
+          }
           workspace={workspace}
           tabsWorkspaceId={tabs.tabsWorkspaceId}
           validWorkspaceIds={validWorkspaceIds}
           runs={runs}
           runsWorkspaceId={runsWorkspaceId}
           activeRunId={activeRunId}
-          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
           chatView={chatView}
           onChatViewChange={changeChatView}
           onOpenBoardCardRun={handleOpenBoardCardRunInChat}
@@ -6900,25 +7054,6 @@ const Workspace = React.memo(function Workspace({
           onCreateBoardRun={handleCreateBoardRun}
           onSelectRun={onSelectRun}
           onRunSnapshot={onRunSnapshot}
-        />
-        {/* Persistent host for the chat backend terminals. Rendered here — a
-            sibling of ChatStack that App never unmounts — so a chat's live Ink
-            TUI xterm survives ChatStack tearing down the chat panel on any tab
-            or sub-view switch. This is what stops the backend Terminal view from
-            going blank after a few minutes of streaming; ChatStack/ChatPanel
-            deliberately no longer mount the pane inline (see ChatPanel's
-            usingHoistedChatView gate). Sits just above ChatStack and below the
-            other stacks, and hides itself unless the user is on the owning
-            chat's Terminal sub-view, so it never covers another tab. */}
-        <ChatBackendTerminalStack
-          runs={runs}
-          activeRunId={activeRunId}
-          activeChatTabId={activeChatTabId}
-          dockedChatTabId={dockedChatTabId}
-          effectiveActiveId={effectiveActiveId}
-          chatView={chatView}
-          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
-          workspaceCwd={workspace?.cwd ?? null}
         />
         {visibleTabs.some((tab) => tab.kind === "editor") && (
           <Suspense fallback={null}>
@@ -6935,6 +7070,7 @@ const Workspace = React.memo(function Workspace({
         <DiffStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}
+          dockIndex={dockIndex}
           cwd={workspace?.cwd ?? null}
           status={gitStatus}
           gitVersion={gitVersion}
@@ -7032,15 +7168,19 @@ const Workspace = React.memo(function Workspace({
             <AutomationsStack
               tabs={visibleTabs}
               activeId={effectiveActiveId}
+              dockIndex={dockIndex}
               workspace={workspace}
-              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               onOpenRunChat={handleOpenBoardCardRunInChat}
             />
           </Suspense>
         )}
         {visibleTabs.some((tab) => tab.kind === "usage") && (
           <Suspense fallback={null}>
-            <UsageStack tabs={visibleTabs} activeId={effectiveActiveId} />
+            <UsageStack
+              tabs={visibleTabs}
+              activeId={effectiveActiveId}
+              dockIndex={dockIndex}
+            />
           </Suspense>
         )}
         {visibleTabs.some((tab) => tab.kind === "whiteboard") && (
@@ -7048,6 +7188,7 @@ const Workspace = React.memo(function Workspace({
             <WhiteboardStack
               tabs={visibleTabs}
               activeId={effectiveActiveId}
+              dockIndex={dockIndex}
               workspacePath={workspace?.cwd ?? null}
               registerDispose={registerDispose}
               onSavedAs={handleWhiteboardSavedAs}

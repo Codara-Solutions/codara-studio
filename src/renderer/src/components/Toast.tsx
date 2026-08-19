@@ -287,9 +287,6 @@ function ToastCard({
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   onAcknowledge: () => void;
 }) {
-  // In-flight guard so a fast double-click on an answer button (or two
-  // different options) only fires one addRunMessage+resumeRun sequence.
-  const answering = useRef(false);
   const [hover, setHover] = useState(false);
   const [closeHover, setCloseHover] = useState(false);
   const [closeFocus, setCloseFocus] = useState(false);
@@ -347,11 +344,12 @@ function ToastCard({
 
   return (
     <div
-      className="spark-fade-in spark-backdrop-glass"
+      className="spark-fade-in spark-toast"
       // Only a genuine failure (danger) is an assertive "alert"; a needs-you /
       // success toast is the calmer "status" live region so a question doesn't
       // shout like an error to assistive tech.
       role={tone === "danger" ? "alert" : "status"}
+      data-lifted={hover && clickable ? "true" : undefined}
       onClick={() => {
         if (!clickable) return;
         navigateTo?.(toast.target);
@@ -377,18 +375,18 @@ function ToastCard({
         gap: 10,
         padding: "11px 12px 11px 13px",
         borderRadius: "var(--radius-surface, 7px)",
-        border: "1px solid var(--rule)",
-        // Calm neutral popover surface so "done" toasts stop glowing; the
-        // 3px inset left rule (--status-edge) is the only colored signal.
-        background: "var(--notify-surface, var(--panel-2))",
-        // .spark-fade-in owns transform (the entrance translate), so the
-        // hover lift must be expressed via box-shadow only — otherwise an
-        // inline transform would fight the running entrance animation. Older
-        // cards recede slightly (deck depth) using box-shadow / opacity, not
-        // a transform, for the same reason.
-        boxShadow: `inset 3px 0 0 ${toneVar}, ${
-          hover && clickable ? "var(--shadow-2)" : "var(--shadow-1)"
-        }`,
+        // Surface, border and the whole shadow stack belong to .spark-toast:
+        // the glass material IS a box-shadow stack (fresnel edges + bloom +
+        // drop), and an inline shadow here would replace it wholesale — which
+        // is exactly why this card stayed on plain blur while every other
+        // floating surface went glass. Only the TONE travels inline, as the
+        // status stripe layer the class composes into that stack.
+        //
+        // .spark-fade-in owns transform (the entrance translate), so the hover
+        // lift is a shadow swap (data-lifted) rather than a transform, or it
+        // would fight the running entrance animation. Older cards recede
+        // (deck depth) via opacity below, for the same reason.
+        ["--toast-status" as string]: `inset 3px 0 0 ${toneVar}`,
         // Deck recede only after the entrance finishes (see `entered`), so the
         // fade-in's final opacity:1 keyframe never overrides it.
         opacity: !entered || depth === 0 ? 1 : depth === 1 ? 0.92 : 0.82,

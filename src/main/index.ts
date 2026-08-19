@@ -18,8 +18,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
 import { startAgentSocket, stopAgentSocket } from "./agent-socket";
-import { registerDaemonHostScaffold } from "./orchestration/daemon";
-import { ensureSparkHomeSync, sparkHome } from "./spark-home";
+import { ensureCodaraHomeSync, codaraHome } from "./codara-home";
 import { flush, loadSettings, loadState } from "./storage";
 import {
   flushPreferences,
@@ -30,7 +29,6 @@ import {
 import { flushNotificationCenter, registerMainWindow, startNotifications } from "./notify";
 import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
-import { readHeadlessEvalArgs } from "./eval/headless-args";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
@@ -150,30 +148,20 @@ if (process.platform === "win32") {
   app.setAppUserModelId(app.isPackaged ? "com.codara.app" : process.execPath);
 }
 
-// Headless eval mode kicks in only when --eval-plan is on argv. Otherwise
-// Codara boots normally. We read this BEFORE app.whenReady() so the headless
-// branch can skip BrowserWindow + IPC setup entirely.
-const headlessArgs = readHeadlessEvalArgs(process.argv);
-// `enabled` means the user selected eval mode even when argument validation
-// failed. Keep that invocation on the headless branch so it reports the parse
-// error and exits instead of accidentally opening the desktop UI.
-const isHeadlessEval = headlessArgs.enabled;
-
 // Single-instance lock: a second launch should focus the existing window, not
 // spin up a rival process that writes the SAME spark-state.json / preferences /
 // userData concurrently (a real risk after a sleep-freeze when the user, seeing
 // a dead-looking window, relaunches while the old process is still limping).
-// Skipped for headless eval (parallel eval runs are intentional) and behind
-// SPARK_ALLOW_MULTI=1 so a developer can run a packaged build alongside a dev
-// instance. `ownsSingleInstanceLock` gates the whenReady body below so a lost
-// lock exits cleanly even if 'ready' still fires before app.quit() lands.
+// Behind SPARK_ALLOW_MULTI=1 so a developer can run a packaged build
+// alongside a dev instance. `ownsSingleInstanceLock` gates the whenReady body
+// below so a lost lock exits cleanly even if 'ready' still fires before
+// app.quit() lands.
 const ownsSingleInstanceLock =
-  isHeadlessEval ||
   process.env.SPARK_ALLOW_MULTI === "1" ||
   app.requestSingleInstanceLock();
 if (!ownsSingleInstanceLock) {
   app.quit();
-} else if (!isHeadlessEval && process.env.SPARK_ALLOW_MULTI !== "1") {
+} else if (process.env.SPARK_ALLOW_MULTI !== "1") {
   app.on("second-instance", () => {
     showMainWindow();
   });
@@ -446,7 +434,7 @@ function reportRendererEntryRejected(
         (offender
           ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
           : "") +
-        `Details are in ${join(sparkHome(), "logs", "main.log")}.`,
+        `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
     );
   }, 0);
   notify.unref?.();
@@ -892,12 +880,7 @@ app.whenReady().then(async () => {
     app.setActivationPolicy("accessory");
   }
 
-  ensureSparkHomeSync();
-  // Refresh only an explicitly installed CLI. This repairs its launcher after
-  // an app update or move, but never opts a user into command-line access.
-  void import("./cora-cli-install")
-    .then(({ refreshManagedCoraCliInstall }) => refreshManagedCoraCliInstall())
-    .catch((err) => console.warn("[main] Cora CLI refresh failed:", err));
+  ensureCodaraHomeSync();
   logMain(
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
@@ -955,61 +938,6 @@ app.whenReady().then(async () => {
     console.error("[main] failed to start agent socket", err);
   }
 
-  // No-op scaffold reference for the daemon-split migration (see
-  // docs/daemon-split-PLAN.md). Mirrors the startAgentSocket() lazy-startup
-  // shape but starts no server and alters no existing flow — it exists solely
-  // so the new src/main/orchestration/daemon/ modules are reachable from the
-  // boot path while the phased extraction lands.
-  registerDaemonHostScaffold();
-
-  if (isHeadlessEval) {
-    // Headless eval mode: never create a BrowserWindow, never wire renderer
-    // IPC. The headless runner drives the autopilot directly and prints a
-    // single JSON summary on stdout when done.
-    if (headlessArgs.error) {
-      const { fail } = await import("./eval/headless-runner");
-      fail(2, headlessArgs.error);
-      return;
-    }
-    const {
-      emitFinalSummary,
-      exitCodeFor,
-      fail: failHeadless,
-      runHeadlessEval,
-    } = await import("./eval/headless-runner");
-    try {
-      const outcome = await runHeadlessEval(headlessArgs.args!);
-      emitFinalSummary(outcome);
-      pty.disposeAll();
-      await stopAgentSocket().catch(() => undefined);
-      await flush();
-      // Schedule a hard process.exit() fallback before app.exit(): on Windows,
-      // node-pty's conPTY teardown can leave non-daemon worker handles that
-      // keep the Electron event loop alive even after every Codara resource
-      // is disposed. Pilot runs were observed hanging 30+ minutes post-
-      // status=complete because of this. The grace gives Electron a real
-      // chance to exit cleanly (preserves stdout flush, atexit, etc.); the
-      // fallback guarantees the process dies regardless.
-      const exitCode = exitCodeFor(outcome);
-      const hardExitTimer = setTimeout(() => {
-        process.stderr.write(
-          `spark headless eval: forcing process.exit(${exitCode}) after Electron exit grace\n`,
-        );
-        process.exit(exitCode);
-      }, 3000);
-      hardExitTimer.unref();
-      app.exit(exitCode);
-    } catch (err) {
-      pty.disposeAll();
-      await stopAgentSocket().catch(() => undefined);
-      await flush().catch(() => undefined);
-      const hardExitTimer = setTimeout(() => process.exit(1), 3000);
-      hardExitTimer.unref();
-      failHeadless(1, (err as Error).message || String(err));
-    }
-    return;
-  }
-
   // Resolve durable PR-import transactions before any renderer/phone can
   // issue a competing import and before the filesystem sandbox snapshots its
   // workspace roots. Recovery is repair-only: it never calls GitHub, checks
@@ -1047,7 +975,7 @@ app.whenReady().then(async () => {
   // anything unrecognized in that directory is left alone and logged.
   void import("./orchestration/native-cli-terminal-cleanup")
     .then(({ cleanupNativeCliActivePointerArtifacts }) =>
-      cleanupNativeCliActivePointerArtifacts(sparkHome()),
+      cleanupNativeCliActivePointerArtifacts(codaraHome()),
     )
     .then((result) => {
       for (const refusal of result.refused) {
@@ -1115,7 +1043,7 @@ app.whenReady().then(async () => {
   // `/resume` id changes the moment they happen.
   try {
     await initAgentSessionRegistry({
-      dir: sparkHome(),
+      dir: codaraHome(),
       log: (line) => logMain("restore", line),
       broadcast: (rec) => {
         const wc = mainWindow?.webContents;
@@ -1129,7 +1057,7 @@ app.whenReady().then(async () => {
 
   // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
   // observability"). The installer (called earlier in app.whenReady) drops
-  // spark-hook.py into ~/.claude/settings.json; the watcher consumes the
+  // codara-hook.py into ~/.claude/settings.json; the watcher consumes the
   // resulting JSON files from <spark-home>/hooks/. Started AFTER IPC + the
   // hook RPC so dispatching events into run-store can immediately fan out
   // to renderer listeners.
@@ -1250,8 +1178,7 @@ app.whenReady().then(async () => {
   // forget after window creation: delaying scheduler registration until paint
   // could miss startup-time cron/folder events. Dynamic imports still keep the
   // heavy orchestration graph out of the eager main bundle.
-  // NOTE: these fire only while the app is open — surviving app-close is the
-  // daemon split's job (docs/daemon-split-PLAN.md).
+  // NOTE: these fire only while the app is open.
   void (async () => {
     try {
       // Re-arm manager stages whose linked answer was persisted before the
@@ -1298,15 +1225,6 @@ app.whenReady().then(async () => {
       await startScheduler();
     } catch (err) {
       console.warn("[main] scheduler failed to start:", err);
-    }
-    try {
-      // Repair stranded queue items without draining them. Draining here used
-      // to start Cora at boot with no user action, which is the one thing the
-      // restart path must not do.
-      const { reconcileQueueAfterRestart } = await import("./orchestration/run-queue");
-      await reconcileQueueAfterRestart();
-    } catch (err) {
-      console.warn("[main] queue resume failed:", err);
     }
     try {
       // Cora Board. Purely event-driven: when cards are queued on a chat's
@@ -1361,10 +1279,6 @@ async function flushAllStores(): Promise<void> {
 }
 
 app.on("window-all-closed", async () => {
-  // In headless mode the app is already quitting via app.exit() in the
-  // headless branch; this guard prevents a stray window-all-closed handler
-  // from triggering a quit before the summary is flushed.
-  if (isHeadlessEval) return;
   // Close-to-tray: while background running is enabled and we're not quitting,
   // never dispose/quit on window-all-closed — but ONLY when a tray actually
   // exists. The window `close` handler hides rather than closes, so this rarely

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitBranch, GitBranchList, GitOpResult } from "@shared/types";
 import { InlineInput } from "../file-icons/InlineInput";
-import { BranchIcon, Caret, CheckoutIcon, Count, Empty, GroupLabel, IconButton, Spinner } from "./git-ui";
+import { BranchIcon, Caret, Count, Empty, GroupLabel, IconButton, Spinner } from "./git-ui";
 
 interface Props {
   cwd: string;

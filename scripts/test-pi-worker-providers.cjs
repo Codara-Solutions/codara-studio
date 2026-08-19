@@ -139,21 +139,13 @@ async function main() {
     assert.equal(usable.has("openai-codex"), false);
 
     // ── End to end: the CLI binary is irrelevant ─────────────────────────
-    const drive = async ({ diagnostics, statuses, legacy = false, authThrows = false }) => {
+    const drive = async ({ diagnostics, statuses, authThrows = false }) => {
       globalThis.__diagnostics = diagnostics;
       globalThis.__statuses = statuses;
       globalThis.__authStoreThrows = authThrows;
       globalThis.__runtimeDetectionThrows = false;
       globalThis.__authStoreReads = 0;
-      const previous = process.env.SPARK_E2E_LEGACY_WORKER_HARNESS;
-      if (legacy) process.env.SPARK_E2E_LEGACY_WORKER_HARNESS = "1";
-      else delete process.env.SPARK_E2E_LEGACY_WORKER_HARNESS;
-      try {
-        return await mod.detectWorkerAssignableRuntimes();
-      } finally {
-        if (previous === undefined) delete process.env.SPARK_E2E_LEGACY_WORKER_HARNESS;
-        else process.env.SPARK_E2E_LEGACY_WORKER_HARNESS = previous;
-      }
+      return await mod.detectWorkerAssignableRuntimes();
     };
 
     // Subscription but no CLI binary: workers ARE assignable. This is the
@@ -207,23 +199,6 @@ async function main() {
         statuses: [profile("anthropic", { expired: true, canRefresh: true })],
       });
       assert.equal(mod.isWorkerAssignable(decorated, "claude"), true);
-    }
-
-    // The legacy escape hatch really does run the CLI, so there it is the
-    // binary that decides, and the auth store is not consulted at all.
-    {
-      const decorated = await drive({
-        diagnostics: [diagnostic("claude", true), diagnostic("codex", false)],
-        statuses: [profile("openai-codex")],
-        legacy: true,
-      });
-      assert.equal(mod.isWorkerAssignable(decorated, "claude"), true);
-      assert.equal(mod.isWorkerAssignable(decorated, "codex"), false);
-      assert.equal(
-        globalThis.__authStoreReads,
-        0,
-        "the legacy CLI path must not read the subscription store",
-      );
     }
 
     // A failed auth read degrades to the historical CLI-presence behaviour.
