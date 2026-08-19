@@ -208,10 +208,11 @@ const LEGACY_CODEX_TABLE_NAMES = [
 ] as const;
 
 // Resource directories the built-in server has ever shipped from. A
-// codara-studio entry whose args point at one of these, under a path that no
-// longer exists, is a Codara entry stranded by a moved/renamed install, not a
-// server the user wired up: the marker comments that would have identified it
-// can be lost to a merge or truncation, the command path cannot.
+// codara-studio entry whose args point at an absolute <dir>/server.js under one
+// of these, launched through ELECTRON_RUN_AS_NODE, is an entry Codara wrote:
+// the marker comments that would have identified it can be lost to a merge, a
+// truncation, or the agent CLI rewriting its own config.toml, the command shape
+// cannot.
 const MANAGED_SERVER_DIRS = new Set([
   "codara-studio-mcp",
   "cora-preview-mcp",
@@ -221,8 +222,10 @@ const MANAGED_SERVER_DIRS = new Set([
 ]);
 
 // How a `[mcp_servers."codara-studio"]` section sitting outside our markers is
-// classified. "stale" is repairable, "user" is untouchable.
-type CodexBuiltinSection = "absent" | "user" | "stale";
+// classified. "reclaimable" (our shape, install still on disk) and "stale" (our
+// shape, install path gone) are both ours to rewrite or remove; "user" is
+// untouchable.
+type CodexBuiltinSection = "absent" | "user" | "stale" | "reclaimable";
 
 interface ManagedClaudeMcpServer {
   type: "stdio";
@@ -475,20 +478,20 @@ async function installForCodex(
   }
 
   // If the user has a non-Codara `codara-studio` server defined outside our
-  // managed block, leave the file alone. A stale Codara entry (markers lost,
-  // command path gone) is ours to rewrite, so it is swept with the rest.
+  // managed block, leave the file alone. A Codara-shaped entry that lost its
+  // markers is ours to rewrite, so it is swept with the rest.
   const section = classifyCodexBuiltinSection(existing);
   if (section === "user") return false;
 
   // A repair pass only rewrites an entry that is already there: our managed
-  // block, or a stranded table outside it. Absent means the user removed it, and
-  // re-adding it here would undo that.
+  // block, or one of our tables outside it. Absent means the user removed it,
+  // and re-adding it here would undo that.
   const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  if (options?.repairOnly && !managedBlockPresent && section !== "stale") return false;
+  if (options?.repairOnly && !managedBlockPresent && !isCodaraOwnedSection(section)) return false;
 
   // Strip our managed block, the retired orchestrator block, and any broken
   // legacy-named tables, then append one fresh block.
-  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
+  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
   const block = renderCodexBlock();
   const base = stripped.trimEnd();
   const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
@@ -541,9 +544,9 @@ async function installForGrok(
   if (section === "user") return false;
 
   const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  if (options?.repairOnly && !managedBlockPresent && section !== "stale") return false;
+  if (options?.repairOnly && !managedBlockPresent && !isCodaraOwnedSection(section)) return false;
 
-  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
+  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
   const block = renderCodexBlock();
   const base = stripped.trimEnd();
   const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
@@ -574,24 +577,45 @@ function hasUserCodaraStudioSection(text: string): boolean {
 // Classify the codara-studio table that survives outside our markers. JSON
 // entries carry `_sparkManaged` inside the object, so ~/.claude.json always
 // knows whose entry it is; a TOML block only has two comment lines around it,
-// and those have been seen split apart or dropped by a merge. When they are
-// gone, the entry itself is the only evidence left: our own command/args shape
-// pointing at an install path that no longer exists means the entry is a
-// stranded Codara one and repairing it is the whole point.
+// and Codex and Grok rewrite their own config.toml and drop them. When the
+// markers are gone the entry itself is the only evidence left, so ownership is
+// decided by SHAPE: an entry we could have written is ours whether or not the
+// install it points at still exists. Only a codara-studio table of some other
+// shape is genuinely the user's.
 function classifyCodexBuiltinSection(text: string): CodexBuiltinSection {
   const section = readCodexServerSection(stripAllManagedBlocks(text), SERVER_NAME);
   if (!section) return "absent";
-  return isStrandedBuiltinSection(section) ? "stale" : "user";
+  if (!builtinScriptArg(section)) return "user";
+  return isStrandedBuiltinSection(section) ? "stale" : "reclaimable";
 }
 
-function isStrandedBuiltinSection(section: CodexServerSection): boolean {
-  // Every entry we have ever written runs the server script through Electron's
-  // node mode. Without that env the entry is somebody else's.
-  if (section.env.ELECTRON_RUN_AS_NODE !== "1") return false;
+// Both non-user classifications are Codara's own entry: the installer may
+// re-wrap either inside fresh markers and the uninstaller may remove either.
+function isCodaraOwnedSection(section: CodexBuiltinSection): boolean {
+  return section === "stale" || section === "reclaimable";
+}
+
+// The server-script argument that proves the section is one we rendered, or
+// null when the shape does not match. Every entry we have ever written runs the
+// bundled server script through Electron's node mode, from an absolute path
+// inside one of our resource directories. Deliberately says NOTHING about the
+// script existing on disk: a live install whose markers a config rewrite ate
+// must still be recognized as ours.
+function builtinScriptArg(section: CodexServerSection): string | null {
+  if (section.env.ELECTRON_RUN_AS_NODE !== "1") return null;
   const script = section.args.find(
     (arg) => basename(arg) === "server.js" && MANAGED_SERVER_DIRS.has(basename(dirname(arg))),
   );
-  if (!script || !isAbsolute(script)) return false;
+  if (!script || !isAbsolute(script)) return null;
+  return script;
+}
+
+// Our shape, pointing at an install that is gone: still ours, and the case the
+// repair pass exists for. Existence is only asked here, where it distinguishes
+// a broken entry from a working one, never to decide ownership.
+function isStrandedBuiltinSection(section: CodexServerSection): boolean {
+  const script = builtinScriptArg(section);
+  if (!script) return false;
   if (!existsSync(script)) return true;
   const command = section.command ?? "";
   return isAbsolute(command) && !existsSync(command);
@@ -682,9 +706,9 @@ function escapeRegExp(value: string): string {
 // past the SECOND block's END marker (an END marker is a comment, not a `[`
 // line), orphaning the second block's comment lines forever.
 // `sweepBuiltinName` adds the CURRENT name to that final sweep. Only the
-// installer passes it, and only once classifyCodexBuiltinSection has proved the
-// surviving codara-studio table is a stranded Codara entry rather than a
-// user-owned one.
+// installer and the uninstaller pass it, and only once
+// classifyCodexBuiltinSection has proved the surviving codara-studio table is a
+// Codara-shaped entry rather than a user-owned one.
 function stripAllManagedBlocks(text: string, options?: { sweepBuiltinName?: boolean }): string {
   let out = stripManagedCodexRegions(text, CODEX_BLOCK_START, CODEX_BLOCK_END, []);
   out = stripManagedCodexRegions(out, CODEX_ORCHESTRATOR_BLOCK_START, CODEX_ORCHESTRATOR_BLOCK_END, []);
@@ -705,7 +729,7 @@ function stripAllManagedBlocks(text: string, options?: { sweepBuiltinName?: bool
 // lines are consumed; sections named after a RETIRED server (which post-rename
 // can only be our broken leftovers) are dropped whether or not markers survive
 // around them. Current-name (codara-studio) sections outside markers are left
-// alone — those are genuinely user-owned.
+// alone unless the caller passed them in via `sweepBuiltinName`.
 function stripManagedCodexRegions(
   text: string,
   startMarker: string,
@@ -829,7 +853,7 @@ function detectUserSparkEntry(
     tomlCandidates.push(join(cwd, ".grok", "config.toml"));
   }
   for (const path of tomlCandidates) {
-    if (tomlHasUserCodaraStudioSectionAt(path)) return true;
+    if (tomlHasCodaraStudioSectionAt(path)) return true;
   }
   return false;
 }
@@ -868,7 +892,10 @@ function jsonContainsServerName(value: unknown, name: string, depth: number): bo
   return false;
 }
 
-function tomlHasUserCodaraStudioSectionAt(path: string): boolean {
+// Availability, unlike ownership, does not care whose entry it is: a working
+// codara-studio section in a TOML config means sub-agents can call the server.
+// A stranded one (install path gone) does not count, it cannot start.
+function tomlHasCodaraStudioSectionAt(path: string): boolean {
   if (!existsSync(path)) return false;
   let raw: string;
   try {
@@ -876,7 +903,8 @@ function tomlHasUserCodaraStudioSectionAt(path: string): boolean {
   } catch {
     return false;
   }
-  return hasUserCodaraStudioSection(raw);
+  const section = classifyCodexBuiltinSection(raw);
+  return section === "user" || section === "reclaimable";
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,9 +1086,14 @@ async function detectCodexBuiltinState(
       existing = "";
     }
   }
-  if (hasUserCodaraStudioSection(existing)) return { state: "user-managed", configPath: target.configPath };
+  const section = classifyCodexBuiltinSection(existing);
+  if (section === "user") return { state: "user-managed", configPath: target.configPath };
   const managed = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  if (managed) return { state: "installed", configPath: target.configPath };
+  // Codex rewrites its own config.toml and drops our marker comments. A live
+  // entry of our own shape is still an install, so the Capability Center shows
+  // Managed instead of "Set up by you". A stranded one keeps reporting
+  // available: the row's install action is what repairs it.
+  if (managed || section === "reclaimable") return { state: "installed", configPath: target.configPath };
   return { state: runtimeAvailable ? "available" : "unavailable", configPath: target.configPath };
 }
 
@@ -1077,9 +1110,11 @@ async function detectGrokBuiltinState(
       existing = "";
     }
   }
-  if (hasUserCodaraStudioSection(existing)) return { state: "user-managed", configPath: target.configPath };
+  const section = classifyCodexBuiltinSection(existing);
+  if (section === "user") return { state: "user-managed", configPath: target.configPath };
   const managed = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  if (managed) return { state: "installed", configPath: target.configPath };
+  // Same marker loss as Codex: Grok rewrites ~/.grok/config.toml too.
+  if (managed || section === "reclaimable") return { state: "installed", configPath: target.configPath };
   return { state: runtimeAvailable ? "available" : "unavailable", configPath: target.configPath };
 }
 
@@ -1162,7 +1197,7 @@ async function uninstallCodexBuiltinBlock(
       error: `A user-defined ${SERVER_NAME} section exists in config.toml; Codara won't remove it.`,
     };
   }
-  const next = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
+  const next = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
   if (next === existing) return { ok: true };
   try {
     resolveCodexMcpConfigTarget(codexHome);
@@ -1193,7 +1228,7 @@ async function uninstallGrokBuiltinBlock(
       error: `A user-defined ${SERVER_NAME} section exists in config.toml; Codara won't remove it.`,
     };
   }
-  const next = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
+  const next = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
   if (next === existing) return { ok: true };
   try {
     const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
