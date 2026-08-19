@@ -113,7 +113,7 @@ async function agent(args, flags) {
   const [sub, ...rest] = args;
   if (sub === "spawn") {
     if (!rest[0] || rest.length < 2) {
-      fail("usage: cora agent spawn <run> <brief> [--title T --runtime claude|codex --model M --effort E --class feature|leaf|verifier]");
+      fail("usage: cora agent spawn <run> <brief> [--title T --runtime claude|codex|grok --model M --effort E --class feature|leaf|verifier]");
     }
     const run = findRun(flags, rest[0]);
     const worker = {

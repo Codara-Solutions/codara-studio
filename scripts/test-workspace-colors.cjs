@@ -8,6 +8,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const ENTRY = path.join(ROOT, "src", "shared", "workspace-colors.ts");
+const WORKSPACE_RAIL = path.join(ROOT, "src", "renderer", "src", "components", "WorkspaceRail.tsx");
 const outfile = path.join(os.tmpdir(), "codara-workspace-colors-test", "workspace-colors.cjs");
 fs.mkdirSync(path.dirname(outfile), { recursive: true });
 esbuild.buildSync({
@@ -27,10 +28,50 @@ const {
   pickWorkspaceColor,
   pickWorkspaceGroupShade,
   rebalanceWorkspaceColors,
+  readableWorkspaceAccent,
+  workspaceAccentInk,
+  workspaceColorContrast,
   workspaceColorDistance,
   workspaceColorLightness,
   workspaceGroupShades,
 } = require(outfile);
+
+const darkBlueAccent = readableWorkspaceAccent("#0000FF", "#292724", "#F4F3F1");
+assert.ok(
+  workspaceColorContrast(darkBlueAccent, "#292724") >= 4.5,
+  `dark custom blue must resolve to readable UI ink (got ${darkBlueAccent})`,
+);
+assert.notEqual(darkBlueAccent, "#0000FF", "an unreadable accent must be adjusted");
+assert.equal(
+  readableWorkspaceAccent("#7FB3FF", "#292724", "#F4F3F1"),
+  "#7FB3FF",
+  "an already-readable dark-theme accent must retain its exact identity",
+);
+const paleAccent = readableWorkspaceAccent("#FFFF00", "#DDD9CC", "#211F1A");
+assert.ok(
+  workspaceColorContrast(paleAccent, "#DDD9CC") >= 4.5,
+  `pale custom yellow must resolve on a light theme (got ${paleAccent})`,
+);
+assert.ok(
+  workspaceColorContrast(darkBlueAccent, workspaceAccentInk(darkBlueAccent)) >= 4.5,
+  "filled accent controls must receive contrasting text",
+);
+
+const workspaceRailSource = fs.readFileSync(WORKSPACE_RAIL, "utf8");
+const folderPickerSource = workspaceRailSource.slice(
+  workspaceRailSource.indexOf("const committedFolderColor"),
+  workspaceRailSource.indexOf("function WorkspaceRow"),
+);
+assert.match(
+  folderPickerSource,
+  /addEventListener\("change", commitColor\)/,
+  "the folder picker commits from the final native change event",
+);
+assert.doesNotMatch(
+  folderPickerSource,
+  /onChange=\{\(event\) => onChangeColor/,
+  "folder color dragging must not stream changes into the workspace tree",
+);
 
 const firstPath = "/Users/example/Projects/client-alpha";
 const first = pickWorkspaceColor([], firstPath);

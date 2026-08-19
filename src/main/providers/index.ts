@@ -12,19 +12,21 @@
 
 import type { AgentRuntimeKind } from "@shared/types";
 
+import { isAgentRuntimeKind } from "../../shared/agent-families";
 import { claudeProvider } from "./claude";
 import { codexProvider } from "./codex";
+import { grokProvider } from "./grok";
 
 import type { CliProvider } from "./types";
 
 type OrchestrationCliProvider = CliProvider & { id: AgentRuntimeKind };
 
-const PROVIDERS: readonly CliProvider[] = [claudeProvider, codexProvider];
+const PROVIDERS: readonly CliProvider[] = [claudeProvider, codexProvider, grokProvider];
 
 function isOrchestrationProvider(
   provider: CliProvider,
 ): provider is OrchestrationCliProvider {
-  return provider.id === "claude" || provider.id === "codex";
+  return isAgentRuntimeKind(provider.id);
 }
 
 /**

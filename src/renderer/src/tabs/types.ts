@@ -46,11 +46,13 @@ export interface EditorTab extends BaseTab {
 // itself lives in the CLI's own on-disk history and is rehydrated by --resume.
 // Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
 export interface TerminalAgentSession {
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   /** Frozen native Claude account. Undefined is legacy personal/unset. */
   nativeClaudeProfileId?: string;
   /** Frozen native Codex account home. Undefined is legacy/personal. */
   nativeCodexProfileId?: string;
+  /** Frozen native Grok Build account home. Undefined is legacy/personal. */
+  nativeGrokProfileId?: string;
   // Claude: UUID we forced with `--session-id`. Codex: UUID discovered from the
   // rollout filename after launch. Empty string means "capture still pending"
   // (Codex, before discovery resolves).
@@ -158,6 +160,7 @@ export interface TerminalLeaf {
   // Runtime-only frozen account for a phone-created Claude pane before its
   // durable session pointer has been discovered.
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
   // Runtime-only one-shot native-account login plan. This is an opaque token;
   // executable/argv/environment/config paths never enter the renderer.
   nativeCliLoginToken?: string;
@@ -169,6 +172,8 @@ export interface TerminalLeafWorker {
   nativeCodexProfileId?: string;
   /** Frozen native Claude account for CLI-backed worker panes. */
   nativeClaudeProfileId?: string;
+  /** Frozen native Grok Build account for CLI-backed worker panes. */
+  nativeGrokProfileId?: string;
   runId: string;
   workerTaskId: string;
   attemptId: string;

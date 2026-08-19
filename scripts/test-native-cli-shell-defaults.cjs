@@ -65,6 +65,20 @@ const managedCodex = {
   connected: true,
   env: { PATH: "/safe/bin", CODEX_HOME: "/codara/codex-cli/accounts/b" },
 };
+const personalGrok = {
+  profileId: "personal",
+  label: "Existing Grok login",
+  managed: false,
+  connected: true,
+  env: { PATH: "/safe/bin" },
+};
+const managedGrok = {
+  profileId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  label: "Grok Work",
+  managed: true,
+  connected: true,
+  env: { PATH: "/safe/bin", GROK_HOME: "/codara/grok-cli/accounts/c" },
+};
 
 async function main() {
   // Both defaults personal: nothing to apply, the shell stays untouched.
@@ -72,6 +86,7 @@ async function main() {
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => personalClaude,
       resolveCodex: async () => personalCodex,
+      resolveGrok: async () => personalGrok,
     }),
     null,
     "personal defaults must resolve to null so the shell env is not rebuilt",
@@ -83,6 +98,7 @@ async function main() {
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => managedClaude,
       resolveCodex: async () => personalCodex,
+      resolveGrok: async () => personalGrok,
     }),
     { claudeConfigDir: "/codara/claude-cli/accounts/a" },
     "a managed Claude default must contribute exactly its config dir",
@@ -94,6 +110,7 @@ async function main() {
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => personalClaude,
       resolveCodex: async () => managedCodex,
+      resolveGrok: async () => personalGrok,
     }),
     { codexHome: "/codara/codex-cli/accounts/b" },
     "a managed Codex default must contribute exactly its home",
@@ -105,10 +122,12 @@ async function main() {
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => managedClaude,
       resolveCodex: async () => managedCodex,
+      resolveGrok: async () => managedGrok,
     }),
     {
       claudeConfigDir: "/codara/claude-cli/accounts/a",
       codexHome: "/codara/codex-cli/accounts/b",
+      grokHome: "/codara/grok-cli/accounts/c",
     },
     "both managed defaults must contribute both selectors",
   );
@@ -121,6 +140,7 @@ async function main() {
         throw new Error("store corrupt");
       },
       resolveCodex: async () => managedCodex,
+      resolveGrok: async () => personalGrok,
     }),
     { codexHome: "/codara/codex-cli/accounts/b" },
     "a failing Claude resolver must not block the Codex selector",
@@ -136,6 +156,9 @@ async function main() {
       resolveCodex: async () => {
         throw new Error("store corrupt");
       },
+      resolveGrok: async () => {
+        throw new Error("store corrupt");
+      },
     }),
     null,
     "two failing resolvers must resolve to null, never throw",
@@ -147,6 +170,7 @@ async function main() {
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => ({ ...managedClaude, env: { PATH: "/safe/bin" } }),
       resolveCodex: async () => personalCodex,
+      resolveGrok: async () => personalGrok,
     }),
     null,
     "a managed profile without its selector must be skipped, not applied empty",
@@ -165,9 +189,11 @@ async function main() {
   for (const guard of [
     "plainShellCodexHome",
     "plainShellClaudeConfigDir",
+    "plainShellGrokHome",
     'hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID")',
     'hasOwnProperty.call(opts.env ?? {}, "CLAUDE_CONFIG_DIR")',
     'hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME")',
+    'hasOwnProperty.call(opts.env ?? {}, "GROK_HOME")',
   ]) {
     assert.ok(
       pty.includes(guard),

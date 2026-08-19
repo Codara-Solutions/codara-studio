@@ -1,4 +1,5 @@
-import type { AgentModelTier, AgentRuntimeModel } from "./types";
+import { familyForModelId } from "./agent-families";
+import type { AgentModelTier, AgentRuntimeKind, AgentRuntimeModel } from "./types";
 
 // Canonical Codex model catalog shared by the main process, Cora's chat
 // composer, and the automation editor. Keeping this in @shared prevents the
@@ -99,9 +100,7 @@ export const DEFAULT_LOOM_WORKER_MODEL = "claude-opus-5";
 /** Backfill for a legacy codex-engine loom that never pinned a model. */
 export const DEFAULT_LOOM_CODEX_WORKER_MODEL: CodexModelId = "gpt-5.6-sol";
 
-/** Which worker runtime family a loom model id belongs to. gpt-* ids run via
- *  Pi's openai-codex provider (runtime "codex"); everything else — including
- *  every claude-* id — runs via the anthropic provider (runtime "claude"). */
-export function loomRuntimeForModel(model: string | undefined): "claude" | "codex" {
-  return model?.trim().toLowerCase().startsWith("gpt-") ? "codex" : "claude";
+/** Which worker runtime family a loom model id belongs to. */
+export function loomRuntimeForModel(model: string | undefined): AgentRuntimeKind {
+  return familyForModelId(model) ?? "claude";
 }

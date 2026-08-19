@@ -42,7 +42,7 @@ interface Props {
 }
 
 type CapabilityKind = "mcp" | "skill";
-type RuntimeColumn = "claude" | "codex" | "shared";
+type RuntimeColumn = "claude" | "codex" | "grok" | "shared";
 type CapabilityTab = "mcp" | "skills" | "memory" | "policy";
 
 const TABS: { id: CapabilityTab; label: string }[] = [
@@ -84,18 +84,20 @@ interface EditorState {
 // Which config files a remove touches: one runtime column, or all of them.
 type RemoveScope = RuntimeColumn | "all";
 
-const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "shared"];
+const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "grok", "shared"];
 const PAGE_SIZE = 40;
 const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
   claude: "Claude",
   codex: "Codex",
+  grok: "Grok",
   shared: "Shared",
 };
-// What the user calls the two external tools. RUNTIME_LABEL names the config
+// What the user calls the external tools. RUNTIME_LABEL names the config
 // column (and reads right in "Removed X from Claude"); this names the app.
-const CLI_LABEL: Record<"claude" | "codex", string> = {
+const CLI_LABEL: Record<"claude" | "codex" | "grok", string> = {
   claude: "Claude CLI",
   codex: "Codex CLI",
+  grok: "Grok Build",
 };
 const MCP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -702,7 +704,7 @@ export default function AgentCapabilitiesDialog({
                     <div style={{ minWidth: 0 }}>
                       <h2 style={sectionTitleStyle}>MCP servers</h2>
                       <p style={sectionDetailStyle}>
-                        Cora and Workers control what agents inside Codara can use. The Claude and Codex
+                        Cora and Workers control what agents inside Codara can use. The Claude, Codex, and Grok
                         columns show which external CLI configs on this machine carry the server.
                       </p>
                     </div>
@@ -728,7 +730,7 @@ export default function AgentCapabilitiesDialog({
                     {visibleBuiltins.length > 0 || visibleMcp.length > 0 ? (
                       <TableHeader
                         template={MCP_GRID}
-                        labels={["Server", "Cora", "Workers", "Claude", "Codex", ""]}
+                        labels={["Server", "Cora", "Workers", "Claude", "Codex", "Grok", ""]}
                       />
                     ) : null}
                     {visibleBuiltins.map((builtin) => (
@@ -1226,6 +1228,9 @@ function McpRow({
       </Cell>
       <CliCell group={group} runtime="claude" busyKey={busyKey} onInstall={onInstall} />
       <CliCell group={group} runtime="codex" busyKey={busyKey} onInstall={onInstall} />
+      <Cell label="Grok Build" title="Third-party MCP copy into Grok Build is not available yet">
+        <span style={cellDashStyle}>—</span>
+      </Cell>
       <div style={rowActionsStyle}>
         <button type="button" className="spark-btn" style={smallBtnStyle} onClick={() => onEdit(group)}>
           Edit
@@ -1755,7 +1760,7 @@ function BuiltinRow({
   onInstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
   onUninstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
 }) {
-  const runtimes: SparkBuiltinRuntime[] = ["claude", "codex"];
+  const runtimes: SparkBuiltinRuntime[] = ["claude", "codex", "grok"];
   return (
     <div className="agent-capability-row" style={mcpRowStyle}>
       <div style={{ minWidth: 0 }}>
@@ -2379,7 +2384,7 @@ function groupByName(items: AgentAssetInventoryItem[], kind: CapabilityKind): Na
         kind,
         name: item.name,
         sessionKey: item.sessionKey,
-        installs: { claude: [], codex: [], shared: [] },
+        installs: { claude: [], codex: [], grok: [], shared: [] },
         any: item,
       };
       map.set(key, group);
@@ -2657,7 +2662,7 @@ const listStyle: React.CSSProperties = {
 // a "Copy" micro button) because every pixel here comes out of the Server
 // column: at the 860px breakpoint the pane is ~575px and the fixed columns plus
 // gaps and padding take ~442px of it.
-const MCP_GRID = "minmax(0, 1fr) 52px 60px 64px 64px 124px";
+const MCP_GRID = "minmax(0, 1fr) 52px 60px 56px 56px 56px 116px";
 const SKILL_GRID = "minmax(0, 1fr) 60px 64px 64px 124px";
 
 const tableHeadStyle: React.CSSProperties = {

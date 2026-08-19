@@ -73,7 +73,7 @@ export interface SparkManagerDecision {
 }
 
 export interface SparkManagerTerminalRequest {
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   count: number;
   model?: string;
   effort?: string;

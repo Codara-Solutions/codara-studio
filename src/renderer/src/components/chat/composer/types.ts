@@ -1,3 +1,4 @@
+import { AGENT_FAMILIES, familyForModelId } from "@shared/agent-families";
 import type {
   AgentEffortLevel,
   ChatBackendKind,
@@ -71,6 +72,12 @@ const PI_MODELS: ChatModelOption[] = [
     backend: "pi",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
   },
+  {
+    id: "grok-4.5",
+    label: "Grok 4.5",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high"],
+  },
 ];
 
 // ── Ordering ────────────────────────────────────────────────────────────────
@@ -108,6 +115,10 @@ const MODEL_RANK: Array<{ match: RegExp; rank: number }> = [
   { match: /^gpt-5\.6-sol$/i, rank: TIER_RANK.recommended },
   { match: /fable/i, rank: TIER_RANK.premium },
   { match: /opus/i, rank: TIER_RANK.flagship },
+  { match: /^grok-4\.6/i, rank: TIER_RANK.flagship },
+  { match: /^grok-4\.5/i, rank: TIER_RANK.flagship },
+  { match: /^grok-build/i, rank: TIER_RANK.balanced },
+  { match: /^grok-/i, rank: TIER_RANK.balanced },
   { match: /^gpt-5\.6-terra$/i, rank: TIER_RANK.balanced },
   { match: /sonnet/i, rank: TIER_RANK.balanced },
   { match: /^gpt-5\.6-luna$/i, rank: TIER_RANK.fast },
@@ -211,40 +222,34 @@ export function buildVisibleGroups({
   // this group is the default chat model — that alone would silently move the
   // default off Sol.
   const piMerged = mergePiModels(PI_MODELS, piCatalog);
-  const isCodexModel = (model: ChatModelOption): boolean =>
-    /^gpt-/i.test(decomposeModelId(model.id).baseId);
-  const codexModels = keepCurrentGeneration(piMerged.filter(isCodexModel), "openai");
-  const claudeModels = keepCurrentGeneration(
-    piMerged.filter((model) => !isCodexModel(model)),
-    "anthropic",
-  );
-  // Split by model family rather than listed flat. The two families were
-  // interleaved by rank, which read as one arbitrary list once the rows lost
-  // their tier badges.
-  //
-  // Codex leads because the default chat model is the first row of the first
-  // group (several call sites read groups[0].models[0]) and Sol is rank 0.
-  // Sorting within each family keeps the premium tier last inside its own
-  // group, so Fable still cannot become the default.
+  const modelsFor = (family: "claude" | "codex" | "grok") =>
+    keepCurrentGeneration(
+      piMerged.filter((model) => familyForModelId(decomposeModelId(model.id).baseId) === family),
+      family === "codex" ? "openai" : family === "claude" ? "anthropic" : "xai",
+    );
+  // Split by model family rather than listed flat. Codex leads because the
+  // default chat model is the first row of the first group and Sol is rank 0.
   groups.push({
     key: "pi-openai",
     backend: "pi",
     section: PI_SECTION,
-    label: "OpenAI",
-    models: sortByRank(codexModels),
+    label: AGENT_FAMILIES.codex.vendorLabel,
+    models: sortByRank(modelsFor("codex")),
   });
   groups.push({
     key: "pi-anthropic",
     backend: "pi",
     section: PI_SECTION,
-    label: "Anthropic",
-    models: sortByRank(claudeModels),
+    label: AGENT_FAMILIES.claude.vendorLabel,
+    models: sortByRank(modelsFor("claude")),
   });
-  // No Claude Code / Codex CLI groups: those ran CORA ITSELF on a local CLI
-  // instead of Pi, which is a manager-harness choice, not a model choice, and
-  // it confused the menu into looking like three ways to pick the same models.
-  // Cora is Pi-only now. This does not touch WORKER runtimes: Cora still spawns
-  // Claude Code and Codex CLI workers, chosen per task via runtimePreference.
+  groups.push({
+    key: "pi-xai",
+    backend: "pi",
+    section: PI_SECTION,
+    label: AGENT_FAMILIES.grok.vendorLabel,
+    models: sortByRank(modelsFor("grok")),
+  });
   return groups;
 }
 
@@ -371,9 +376,10 @@ function codexGeneration(baseId: string): number[] | null {
  */
 function keepCurrentGeneration(
   models: ChatModelOption[],
-  provider: "anthropic" | "openai",
+  provider: "anthropic" | "openai" | "xai",
 ): ChatModelOption[] {
   if (models.length === 0) return models;
+  if (provider === "xai") return models;
 
   if (provider === "openai") {
     let newest: number[] | null = null;

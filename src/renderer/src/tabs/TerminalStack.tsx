@@ -37,6 +37,8 @@ import type {
 import { BackIcon, CloseIcon, DragHandleIcon, GlobeIcon, LockIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
 import { workerModelLabel } from "../components/runs/run-format";
 import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
+import { agentBrandColor, agentBrandRuntime, agentBrandTone } from "../lib/agent-brand";
+import { visibleWorkerChip } from "./terminalAgentState";
 import {
   TERMINAL_PANE_DRAG_MIME,
   beginTerminalPaneDrag,
@@ -61,6 +63,7 @@ import {
 import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
+  GROK_LAUNCH_COMMAND,
 } from "../workers/launch-commands";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
@@ -1270,6 +1273,10 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 leaf.agentSession?.nativeClaudeProfileId ??
                 leaf.worker?.nativeClaudeProfileId ??
                 leaf.nativeClaudeProfileId
+              }
+              nativeGrokProfileId={
+                leaf.agentSession?.nativeGrokProfileId ??
+                leaf.worker?.nativeGrokProfileId
               }
               bootResume={leaf.bootResume === true}
               visible={visible && !placeOffScreen}
@@ -2550,7 +2557,7 @@ export function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }
   );
 }
 
-type AddPaneKind = "shell" | "claude" | "codex" | "browser";
+type AddPaneKind = "shell" | "claude" | "codex" | "grok" | "browser";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
 // default smart-add behavior (split the most spacious leaf); the two worker
@@ -2565,7 +2572,7 @@ const AddPaneMenu = React.forwardRef<
     title: string;
     hint: string;
     command?: string;
-    accent: "shell" | "claude" | "codex";
+    accent: "shell" | "claude" | "codex" | "grok";
     glyph: React.ReactNode;
   }> = [
     {
@@ -2590,6 +2597,14 @@ const AddPaneMenu = React.forwardRef<
       command: CODEX_LAUNCH_COMMAND,
       accent: "codex",
       glyph: <RuntimeGlyph runtime="codex" />,
+    },
+    {
+      kind: "grok",
+      title: "Grok worker",
+      hint: "worker",
+      command: GROK_LAUNCH_COMMAND,
+      accent: "grok",
+      glyph: <RuntimeGlyph runtime="grok" />,
     },
     {
       kind: "browser",
@@ -2646,7 +2661,7 @@ function AddPaneMenuItem({
   hint: string;
   command?: string;
   glyph: React.ReactNode;
-  accent: "shell" | "claude" | "codex";
+  accent: "shell" | "claude" | "codex" | "grok";
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -2760,30 +2775,12 @@ function AddPaneMenuItem({
   );
 }
 
-function menuItemTone(accent: "shell" | "claude" | "codex"): {
+function menuItemTone(accent: "shell" | "claude" | "codex" | "grok"): {
   color: string;
   background: string;
   border: string;
 } {
-  if (accent === "claude") {
-    return {
-      color: "var(--accent)",
-      background: "color-mix(in oklch, var(--accent) 14%, transparent)",
-      border: "color-mix(in oklch, var(--accent) 30%, transparent)",
-    };
-  }
-  if (accent === "codex") {
-    return {
-      color: "var(--info)",
-      background: "color-mix(in oklch, var(--info) 14%, transparent)",
-      border: "color-mix(in oklch, var(--info) 30%, transparent)",
-    };
-  }
-  return {
-    color: "var(--ink-dim)",
-    background: "color-mix(in oklab, var(--ink) 7%, transparent)",
-    border: "color-mix(in oklab, var(--rule-soft) 90%, transparent)",
-  };
+  return agentBrandTone(accent);
 }
 
 function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {
@@ -2850,43 +2847,9 @@ function forEachLeaf(node: PaneNode, fn: (l: TerminalLeaf) => void): void {
   forEachLeaf(node.b, fn);
 }
 
-// A runtimeState that means the agent's chip should stay visible in the pane
-// (vs "done", which is the post-exit terminal state that lets the chip be torn
-// down by lifecycle). Covers the live states (launching / working / blocked /
-// idle / stalled) plus "error" — a crashed pane must keep showing its red
-// "exited" chip until the user closes the pane, not silently drop the badge.
-// "stalled" belongs here for the same reason: the process has NOT exited, so
-// hiding its chip would be the exact silence the state exists to break.
-function isLiveRuntimeState(state: RuntimeState | undefined): boolean {
-  return (
-    state === "launching" ||
-    state === "working" ||
-    state === "blocked" ||
-    state === "idle" ||
-    state === "stalled" ||
-    state === "error"
-  );
-}
-
-function visibleWorkerChip(worker: TerminalLeafWorker | null | undefined): TerminalLeafWorker | null {
-  if (!worker) return null;
-  if (worker.source === "spark") {
-    if (worker.agentRunning === false) return null;
-    if (worker.state === "done" && worker.agentRunning !== true) return null;
-    return worker;
-  }
-  if (worker.source === "manual") {
-    // Manual chips live for the duration of the foreground TUI. Show through
-    // every live runtime tone (working / blocked / idle), not only the
-    // lifecycle "running" flag — the poller can report idle while the attempt
-    // lifecycle is still "running" and the user should still see the pane is
-    // hosting an agent that's waiting on them.
-    return worker.state === "running" || isLiveRuntimeState(worker.runtimeState)
-      ? worker
-      : null;
-  }
-  return null;
-}
+// visibleWorkerChip lives in terminalAgentState.ts so the tab glyph and the
+// pane chip agree: a standing terminal that once ran Claude does not keep
+// the Claude mark after the TUI is gone.
 
 // Resolved visual treatment for a worker chip, derived from the finer
 // runtimeState (working / blocked / idle / done) when the poller has reported
@@ -2907,6 +2870,11 @@ interface ChipTone {
   frame: "accent" | "warn" | "success" | "danger" | "calm";
 }
 
+function workerBrandColor(worker: TerminalLeafWorker): string {
+  const runtime = agentBrandRuntime(worker.runtime);
+  return runtime ? agentBrandColor(runtime) : "var(--accent)";
+}
+
 function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
   const runtime = worker.runtimeState;
   if (runtime === "launching") {
@@ -2921,10 +2889,11 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
     };
   }
   if (runtime === "working") {
+    const brand = workerBrandColor(worker);
     return {
       status: "working",
-      dot: "var(--accent)",
-      dotGlow: "0 0 9px var(--accent-glow)",
+      dot: brand,
+      dotGlow: `0 0 9px color-mix(in oklch, ${brand} 45%, transparent)`,
       pulse: true,
       frame: "accent",
     };
@@ -3079,7 +3048,9 @@ function WorkerPaneHeader({
       ? "Claude"
       : worker.runtime === "codex"
         ? "Codex"
-        : null;
+        : worker.runtime === "grok"
+          ? "Grok"
+          : null;
   const harnessLabel =
     worker.harness === "pi" ? (runtimeLabel ? `Pi · ${runtimeLabel}` : "Pi") : runtimeLabel;
   // Name the MODEL, not the harness. Under Pi every worker runs the same
@@ -3100,7 +3071,7 @@ function WorkerPaneHeader({
     : undefined;
   const statusColor =
     tone.frame === "accent"
-      ? "var(--accent)"
+      ? workerBrandColor(worker)
       : tone.frame === "warn"
         ? "var(--warn)"
         : tone.frame === "success"
@@ -3204,8 +3175,9 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
   // Border / text colour by frame: accent (working), amber (needs-you), green
   // (ready/your turn), red (crashed), or a calm neutral (launching / idle-pre-
   // poll / done).
+  const brand = workerBrandColor(worker);
   const frameColor = accent
-    ? "var(--accent)"
+    ? brand
     : warn
       ? "var(--warn)"
       : success
@@ -3214,7 +3186,7 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
           ? "var(--danger)"
           : "var(--ink-dim)";
   const frameEdge = accent
-    ? "var(--accent-edge)"
+    ? `color-mix(in oklch, ${brand} 40%, transparent)`
     : warn
       ? "color-mix(in oklch, var(--warn) 40%, transparent)"
       : success
@@ -3223,7 +3195,7 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
           ? "color-mix(in oklch, var(--danger) 40%, transparent)"
           : "var(--rule)";
   const frameGlow = accent
-    ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px var(--accent-glow)"
+    ? `var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px color-mix(in oklch, ${brand} 32%, transparent)`
     : warn
       ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px color-mix(in oklch, var(--warn) 30%, transparent)"
       : success

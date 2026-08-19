@@ -17,6 +17,7 @@
 // and never performs an OAuth refresh: a refresh would rotate the stored
 // refresh token and sign the real app out.
 
+import { isAgentRuntimeKind, subscriptionForRuntime } from "../../shared/agent-families";
 import type {
   AgentRuntimeDiagnostic,
   PiSubscriptionProvider,
@@ -26,18 +27,17 @@ import type {
 import { detectAgentRuntimes } from "../agent-runtimes";
 import { inspectPiAccountProfileAuthStore } from "./pi-account-auth-store";
 
-/** The two autonomous runtimePreference values, and the provider each selects. */
+/** The autonomous runtimePreference values, and the provider each selects. */
 export const PI_PROVIDER_FOR_WORKER_RUNTIME = {
   claude: "anthropic",
   codex: "openai-codex",
-} as const satisfies Record<"claude" | "codex", PiSubscriptionProvider>;
+  grok: "xai",
+} as const satisfies Record<"claude" | "codex" | "grok", PiSubscriptionProvider>;
 
 export function piProviderForWorkerRuntime(
   runtime: WorkerRuntime,
 ): PiSubscriptionProvider | null {
-  if (runtime === "claude" || runtime === "codex") {
-    return PI_PROVIDER_FOR_WORKER_RUNTIME[runtime];
-  }
+  if (isAgentRuntimeKind(runtime)) return subscriptionForRuntime(runtime);
   return null;
 }
 

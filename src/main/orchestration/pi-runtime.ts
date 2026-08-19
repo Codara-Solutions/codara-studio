@@ -3,8 +3,10 @@ import { join, resolve } from "node:path";
 import type {
   ChatMode,
   CoraExecutionPolicy,
+  PiSubscriptionProvider,
   ProjectPolicyMode,
 } from "@shared/types";
+import { familyForModelId, familyForSubscription } from "../../shared/agent-families";
 import { resolveCompactAtTokens } from "@shared/context-compaction";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -38,7 +40,7 @@ export function resolvePiCompactAtTokens(
   return resolveCompactAtTokens(baseEnv.CODARA_PI_COMPACT_AT_TOKENS);
 }
 
-export type PiSubscriptionProvider = "anthropic" | "openai-codex";
+export type { PiSubscriptionProvider };
 export type PiManagerMode = "talk" | "execute" | "automation";
 export type PiThinkingLevel =
   | "off"
@@ -143,6 +145,7 @@ const DEFAULT_MODELS: Record<PiSubscriptionProvider, string> = {
   // Opus so the Settings gate cannot be bypassed by a provider default.
   anthropic: "claude-opus-5",
   "openai-codex": "gpt-5.6-sol",
+  xai: "grok-4.5",
 };
 
 const API_CREDENTIAL_NAMES = new Set([
@@ -176,8 +179,10 @@ function assertSafeSegment(value: string, label: string): void {
 }
 
 function validateProviderModel(provider: PiSubscriptionProvider, model: string): void {
-  const valid = provider === "anthropic" ? model.startsWith("claude-") : model.startsWith("gpt-");
-  if (!valid) throw new Error(`Model ${model} is not compatible with Pi provider ${provider}`);
+  const family = familyForModelId(model);
+  if (!family || familyForSubscription(provider).runtime !== family) {
+    throw new Error(`Model ${model} is not compatible with Pi provider ${provider}`);
+  }
 }
 
 /**

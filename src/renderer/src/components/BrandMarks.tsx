@@ -1,9 +1,9 @@
-// Provider marks from the CC0 simple-icons set. The Anthropic and OpenAI
-// trademarks are used here only to identify the respective CLIs. Both marks
-// draw in currentColor, so the per-runtime tinting each call site already
-// applies (claude → --accent, codex → --info) keeps working unchanged.
+// Provider marks from the CC0 simple-icons set. The Anthropic, OpenAI, and
+// xAI trademarks identify the respective CLIs. Marks draw in currentColor;
+// call sites tint them with the fixed `--agent-claude` / `--agent-codex` /
+// `--agent-grok` tokens so they never follow the workspace accent.
 
-export type BrandRuntime = "claude" | "codex";
+export type BrandRuntime = "claude" | "codex" | "grok";
 
 export function ClaudeMark({ size = 14 }: { size?: number }) {
   return (
@@ -35,6 +35,21 @@ export function CodexMark({ size = 14 }: { size?: number }) {
   );
 }
 
+export function GrokMark({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      aria-hidden
+      focusable="false"
+    >
+      <path d="M3 3h8.2l2.3 4.6L16.2 3H21L13.8 14.2 21 21h-8.3l-2.4-4.7L7.8 21H3l7.3-11z" />
+    </svg>
+  );
+}
+
 export function RuntimeMark({
   runtime,
   size = 14,
@@ -42,5 +57,32 @@ export function RuntimeMark({
   runtime: BrandRuntime;
   size?: number;
 }) {
-  return runtime === "codex" ? <CodexMark size={size} /> : <ClaudeMark size={size} />;
+  if (runtime === "codex") return <CodexMark size={size} />;
+  if (runtime === "grok") return <GrokMark size={size} />;
+  return <ClaudeMark size={size} />;
+}
+
+/**
+ * Codara Studio brand mark: two nested hexagonal C bands, open on the right.
+ * Same geometry as `build/icon.png`. Draws in currentColor so a Cora row can
+ * follow `--accent` instead of an agent family colour.
+ */
+export function CodaraMark({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={3.2}
+      strokeLinejoin="miter"
+      strokeLinecap="butt"
+      aria-hidden
+      focusable="false"
+    >
+      <path d="M21.53 6.5 12 1 2.47 6.5v11L12 23l9.53-5.5" />
+      <path d="M16.76 9.25 12 6.5 7.24 9.25v5.5L12 17.5l4.76-2.75" />
+    </svg>
+  );
 }

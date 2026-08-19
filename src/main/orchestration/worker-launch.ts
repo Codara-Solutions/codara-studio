@@ -323,7 +323,7 @@ export function detectFatalWorkerRuntimeError(
   buffer: string,
   runtime: WorkerTask["runtimePreference"],
 ): string | null {
-  if (runtime !== "claude" && runtime !== "codex") return null;
+  if (runtime !== "claude" && runtime !== "codex" && runtime !== "grok") return null;
   const visible = stripAnsiWorkerTap(buffer);
   for (const [pattern, reason] of FATAL_RUNTIME_ERROR_CHECKS) {
     if (pattern.test(visible)) return reason;

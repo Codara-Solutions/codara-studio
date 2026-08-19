@@ -18,6 +18,12 @@
 // touches the Electron-side usage cache, via a lazy import so this module stays
 // bundleable standalone.
 
+import {
+  AGENT_FAMILIES,
+  AGENT_FAMILY_IDS,
+  subscriptionForRuntime,
+  type AgentRuntimeKind,
+} from "../../shared/agent-families";
 import type {
   PiSubscriptionProvider,
   PiUsageOverview,
@@ -28,7 +34,7 @@ import type {
 
 import { rosterModelFor } from "./worker-model-hint";
 
-export type HeadroomRuntime = "claude" | "codex";
+export type HeadroomRuntime = AgentRuntimeKind;
 
 // ── Decision thresholds ─────────────────────────────────────────────────────
 //
@@ -48,22 +54,21 @@ export type HeadroomRuntime = "claude" | "codex";
 export const TIGHT_HEADROOM_PERCENT = 10;
 export const COMFORTABLE_HEADROOM_PERCENT = 35;
 
-const RUNTIME_FOR_PROVIDER: Record<PiSubscriptionProvider, HeadroomRuntime> = {
-  anthropic: "claude",
-  "openai-codex": "codex",
-};
+const RUNTIME_FOR_PROVIDER: Record<PiSubscriptionProvider, HeadroomRuntime> =
+  Object.fromEntries(
+    AGENT_FAMILY_IDS.map((id) => [AGENT_FAMILIES[id].subscription, id]),
+  ) as Record<PiSubscriptionProvider, HeadroomRuntime>;
 
-const PROVIDER_FOR_RUNTIME: Record<HeadroomRuntime, PiSubscriptionProvider> = {
-  claude: "anthropic",
-  codex: "openai-codex",
-};
+const PROVIDER_FOR_RUNTIME: Record<HeadroomRuntime, PiSubscriptionProvider> =
+  Object.fromEntries(
+    AGENT_FAMILY_IDS.map((id) => [id, subscriptionForRuntime(id)]),
+  ) as Record<HeadroomRuntime, PiSubscriptionProvider>;
 
 /** Short prompt-facing names, matching how the manager prompts talk about the
- * two provider families. */
-const PROMPT_LABEL: Record<HeadroomRuntime, string> = {
-  claude: "Claude",
-  codex: "Codex",
-};
+ * provider families. */
+const PROMPT_LABEL: Record<HeadroomRuntime, string> = Object.fromEntries(
+  AGENT_FAMILY_IDS.map((id) => [id, AGENT_FAMILIES[id].displayName]),
+) as Record<HeadroomRuntime, string>;
 
 export interface ProviderHeadroom {
   provider: PiSubscriptionProvider;
@@ -291,22 +296,17 @@ export function summarizeProviderHeadroom(
     }
     return undefined;
   };
-  const anthropicProfile = profileForProvider("anthropic");
-  const codexProfile = profileForProvider("openai-codex");
-  return {
-    claude: anthropicProfile
-      ? providerHeadroom("claude", anthropicProfile)
-      : overview?.profiles?.some((entry) => entry.provider === "anthropic")
-        ? emptyHeadroom("claude", false)
-        : providerHeadroom("claude", byProvider.get("anthropic")),
-    codex: codexProfile
-      ? providerHeadroom("codex", codexProfile)
-      : overview?.profiles?.some(
-            (entry) => entry.provider === "openai-codex",
-          )
-        ? emptyHeadroom("codex", false)
-        : providerHeadroom("codex", byProvider.get("openai-codex")),
-  };
+  const summary = {} as SubscriptionHeadroomSummary;
+  for (const runtime of AGENT_FAMILY_IDS) {
+    const provider = subscriptionForRuntime(runtime);
+    const selectedProfile = profileForProvider(provider);
+    summary[runtime] = selectedProfile
+      ? providerHeadroom(runtime, selectedProfile)
+      : overview?.profiles?.some((entry) => entry.provider === provider)
+        ? emptyHeadroom(runtime, false)
+        : providerHeadroom(runtime, byProvider.get(provider));
+  }
+  return summary;
 }
 
 /** A provider contributes to the prompt line only when it reported something
@@ -330,25 +330,39 @@ function isComfortable(entry: ProviderHeadroom): boolean {
   );
 }
 
-function otherRuntime(runtime: HeadroomRuntime): HeadroomRuntime {
-  return runtime === "claude" ? "codex" : "claude";
+export function otherAssignableRuntime(
+  runtime: HeadroomRuntime,
+  available: ReadonlySet<HeadroomRuntime> = new Set(AGENT_FAMILY_IDS),
+): HeadroomRuntime | null {
+  for (const candidate of AGENT_FAMILY_IDS) {
+    if (candidate !== runtime && available.has(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**
  * The runtime worker routing should lean toward, or null when there is no
- * decisive gap. Named only when one provider is TIGHT (limitReached or under
- * TIGHT_HEADROOM_PERCENT) while the other is COMFORTABLE (at least
- * COMFORTABLE_HEADROOM_PERCENT and not limit-reached); see the threshold notes
- * above. A provider with no usable data is neither tight nor comfortable, so
- * a failed usage read always yields null.
+ * decisive gap. Named only when one provider is TIGHT while another is
+ * COMFORTABLE. A provider with no usable data is neither, so a failed usage
+ * read always yields null.
  */
 export function preferredRuntimeForHeadroom(
   summary: SubscriptionHeadroomSummary | null | undefined,
 ): HeadroomRuntime | null {
   if (!summary) return null;
-  if (isTight(summary.claude) && isComfortable(summary.codex)) return "codex";
-  if (isTight(summary.codex) && isComfortable(summary.claude)) return "claude";
-  return null;
+  const tight = AGENT_FAMILY_IDS.filter((runtime) => isTight(summary[runtime]));
+  const comfortable = AGENT_FAMILY_IDS.filter((runtime) => isComfortable(summary[runtime]));
+  if (tight.length === 0 || comfortable.length === 0) return null;
+  return comfortable[0] ?? null;
+}
+
+/** Runtimes that are tight relative to a preferred (comfortable) destination. */
+export function constrainedRuntimesForHeadroom(
+  summary: SubscriptionHeadroomSummary | null | undefined,
+  preferred: HeadroomRuntime,
+): HeadroomRuntime[] {
+  if (!summary) return [];
+  return AGENT_FAMILY_IDS.filter((runtime) => runtime !== preferred && isTight(summary[runtime]));
 }
 
 /** Convenience lookup used at the spawn chokepoint. */
@@ -391,7 +405,7 @@ export function describeHeadroomForPrompt(
   summary: SubscriptionHeadroomSummary | null | undefined,
 ): string | null {
   if (!summary) return null;
-  const usable = [summary.claude, summary.codex].filter(hasUsableSignal);
+  const usable = AGENT_FAMILY_IDS.map((runtime) => summary[runtime]).filter(hasUsableSignal);
   if (usable.length === 0) return null;
   const lines = [`Subscription headroom: ${usable.map(describeProvider).join(" · ")}.`];
   // The premium model's own clock. Stated separately because it constrains
@@ -412,10 +426,13 @@ export function describeHeadroomForPrompt(
   }
   const preferred = preferredRuntimeForHeadroom(summary);
   if (preferred) {
-    const constrained = otherRuntime(preferred);
+    const tightLabels = AGENT_FAMILY_IDS
+      .filter((runtime) => runtime !== preferred && isTight(summary[runtime]))
+      .map((runtime) => PROMPT_LABEL[runtime]);
+    const constrained = tightLabels.length > 0 ? tightLabels.join(" and ") : "the other provider";
     lines.push(
       `Prefer ${rosterModelFor(preferred, "standard")} workers on the ${preferred} runtime while ` +
-        `${PROMPT_LABEL[constrained]} is tight; a provider with no remaining quota will fail its workers.`,
+        `${constrained} is tight; a provider with no remaining quota will fail its workers.`,
     );
   }
   return lines.join("\n");

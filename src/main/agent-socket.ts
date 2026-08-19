@@ -78,11 +78,14 @@ import {
 } from "@shared/model-catalog";
 import { ALLOWED_WORKER_MODELS, rosterModelFor } from "./orchestration/worker-model-hint";
 import {
+  constrainedRuntimesForHeadroom,
   headroomForRuntime,
+  otherAssignableRuntime,
   preferredRuntimeForHeadroom,
   readSubscriptionHeadroomSummary,
   runtimeLimitReached,
 } from "./orchestration/subscription-headroom";
+import { AGENT_FAMILY_IDS, isAgentRuntimeKind } from "../shared/agent-families";
 import type {
   AppPreferences,
   AppState,
@@ -1967,7 +1970,7 @@ const ORCHESTRATOR_RUNTIME_FALLBACK = "claude" as const;
 interface OrchestratorWorkerInput {
   title: string;
   description: string;
-  runtimePreference?: "claude" | "codex" | "shell" | "manual";
+  runtimePreference?: "claude" | "codex" | "grok" | "shell" | "manual";
   modelHint?: string;
   effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh";
   allowedPaths?: string[];
@@ -1995,7 +1998,7 @@ interface OrchestratorWorkerInput {
 // the hop is premium vs standard, and premium exists on Anthropic alone, so a
 // premium Claude worker's Codex peer lands on the frontier model.
 function crossProviderPeerModel(
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "grok",
   requestedModel?: string,
 ): string {
   const model = requestedModel?.trim().toLowerCase() ?? "";
@@ -2004,7 +2007,7 @@ function crossProviderPeerModel(
 
 function runtimeHadEnvironmentalFailure(
   run: RunState,
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "grok",
 ): boolean {
   return run.workerAttempts.some((attempt) =>
     attempt.runtime === runtime &&
@@ -2036,8 +2039,8 @@ function handleOrchestratorSpawnTerminals(
       return errorResponse(id, ERR_INVALID_PARAMS, "each terminal entry must be an object");
     }
     const terminal = raw as Record<string, unknown>;
-    if (terminal.runtime !== "claude" && terminal.runtime !== "codex") {
-      return errorResponse(id, ERR_INVALID_PARAMS, "terminal runtime must be claude or codex");
+    if (terminal.runtime !== "claude" && terminal.runtime !== "codex" && terminal.runtime !== "grok") {
+      return errorResponse(id, ERR_INVALID_PARAMS, "terminal runtime must be claude, codex, or grok");
     }
     if (
       typeof terminal.count !== "number" ||
@@ -2185,8 +2188,8 @@ function validateUntrustedPullRequestWorkers(
       return "each imported pull-request worker must be an object";
     }
     const worker = raw as Record<string, unknown>;
-    if (worker.runtimePreference !== "claude" && worker.runtimePreference !== "codex") {
-      return "imported pull-request workers must explicitly select claude or codex";
+    if (worker.runtimePreference !== "claude" && worker.runtimePreference !== "codex" && worker.runtimePreference !== "grok") {
+      return "imported pull-request workers must explicitly select claude, codex, or grok";
     }
     if (worker.verificationCommands !== undefined) {
       if (
@@ -2441,21 +2444,20 @@ async function handleOrchestratorSpawnWorkers(
   // untouched so complex work can deliberately request one peer from each
   // provider.
   let verifierPeerOverride: {
-    runtime: "claude" | "codex";
+    runtime: "claude" | "codex" | "grok";
     modelHint: string;
     note: string;
   } | null = null;
   if (
     onlyRequestedWorker?.taskClass === "verifier" &&
-    (onlyRequestedWorker.runtimePreference === "claude" || onlyRequestedWorker.runtimePreference === "codex")
+    isAgentRuntimeKind(onlyRequestedWorker.runtimePreference)
   ) {
     const latestImplementation = [...run.workerTasks].reverse().find(
       (task) =>
         task.taskClass !== "verifier" &&
-        (task.runtimePreference === "claude" || task.runtimePreference === "codex"),
+        isAgentRuntimeKind(task.runtimePreference),
     );
     if (latestImplementation?.runtimePreference === onlyRequestedWorker.runtimePreference) {
-      const opposite = latestImplementation.runtimePreference === "claude" ? "codex" : "claude";
       const runtimes = await detectWorkerAssignableRuntimes();
       // Cross-provider verification is valuable only when that provider is
       // healthy: it needs a connected Pi subscription (the worker runs on the
@@ -2471,11 +2473,20 @@ async function handleOrchestratorSpawnWorkers(
       // the reroute would send the verifier into a provider guaranteed to
       // refuse it. Only the explicit limitReached flag blocks the reroute; a
       // failed or missing usage read stays permissive.
-      const oppositeAvailable =
-        isWorkerAssignable(runtimes, opposite) &&
-        !runtimeHadEnvironmentalFailure(run, opposite) &&
-        !runtimeLimitReached(headroomSummary, opposite);
-      if (oppositeAvailable) {
+      const available = new Set(
+        AGENT_FAMILY_IDS.filter(
+          (runtime) =>
+            runtime !== latestImplementation.runtimePreference &&
+            isWorkerAssignable(runtimes, runtime) &&
+            !runtimeHadEnvironmentalFailure(run, runtime) &&
+            !runtimeLimitReached(headroomSummary, runtime),
+        ),
+      );
+      const opposite = otherAssignableRuntime(
+        latestImplementation.runtimePreference,
+        available,
+      );
+      if (opposite) {
         verifierPeerOverride = {
           runtime: opposite,
           modelHint: crossProviderPeerModel(opposite, onlyRequestedWorker.modelHint),
@@ -2499,21 +2510,33 @@ async function handleOrchestratorSpawnWorkers(
   // actually usable here: installed, and without an environmental failure this
   // run (mirroring the verifier reroute's health check).
   const headroomPreferredRuntime = preferredRuntimeForHeadroom(headroomSummary);
-  let headroomReroute: { from: "claude" | "codex"; to: "claude" | "codex" } | null = null;
+  let headroomReroute: {
+    from: Array<"claude" | "codex" | "grok">;
+    to: "claude" | "codex" | "grok";
+  } | null = null;
   if (headroomPreferredRuntime) {
-    const constrainedRuntime = headroomPreferredRuntime === "claude" ? "codex" : "claude";
-    const anyReroutableWorker = workersToCreate.some(
-      (worker) =>
-        (worker.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) === constrainedRuntime &&
-        !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : ""),
+    const constrainedRuntimes = constrainedRuntimesForHeadroom(
+      headroomSummary,
+      headroomPreferredRuntime,
     );
+    const anyReroutableWorker = workersToCreate.some((worker) => {
+      const runtime = worker.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
+      return (
+        isAgentRuntimeKind(runtime) &&
+        constrainedRuntimes.includes(runtime) &&
+        !/fable/i.test(typeof worker.modelHint === "string" ? worker.modelHint : "")
+      );
+    });
     if (anyReroutableWorker) {
       const detected = await detectWorkerAssignableRuntimes();
       const preferredUsable =
         isWorkerAssignable(detected, headroomPreferredRuntime) &&
         !runtimeHadEnvironmentalFailure(run, headroomPreferredRuntime);
       if (preferredUsable) {
-        headroomReroute = { from: constrainedRuntime, to: headroomPreferredRuntime };
+        headroomReroute = {
+          from: constrainedRuntimes,
+          to: headroomPreferredRuntime,
+        };
       }
     }
   }
@@ -2624,7 +2647,8 @@ async function handleOrchestratorSpawnWorkers(
       headroomReroute &&
       !verifierPeerOverride &&
       !resumePlan &&
-      effectiveRuntime === headroomReroute.from &&
+      isAgentRuntimeKind(effectiveRuntime) &&
+      headroomReroute.from.includes(effectiveRuntime) &&
       !/fable/i.test(effectiveModelHint ?? "")
     ) {
       effectiveRuntime = headroomReroute.to;
@@ -2633,7 +2657,7 @@ async function handleOrchestratorSpawnWorkers(
     }
     const sanitizedModel = untrustedPullRequest
       ? rosterModelFor(
-          effectiveRuntime === "codex" ? "codex" : "claude",
+          isAgentRuntimeKind(effectiveRuntime) ? effectiveRuntime : "claude",
           "standard",
         )
       : runStore.sanitizeWorkerModelHint(effectiveModelHint);
@@ -2643,7 +2667,7 @@ async function handleOrchestratorSpawnWorkers(
       title,
       description,
       runtimePreference: effectiveRuntime as
-        | "claude" | "codex" | "shell" | "manual",
+        | "claude" | "codex" | "grok" | "shell" | "manual",
       modelHint: sanitizedModel,
       effortHint:
         untrustedPullRequest && w.effortHint === "xhigh"
@@ -2732,20 +2756,25 @@ async function handleOrchestratorSpawnWorkers(
   const notes: string[] = [...guardrailNotes];
   if (verifierPeerOverride) notes.push(verifierPeerOverride.note);
   if (headroomReroute && headroomReroutedTitles.length > 0) {
-    const constrainedInfo = headroomForRuntime(headroomSummary, headroomReroute.from);
+    const constrainedInfos = headroomReroute.from.map((runtime) =>
+      headroomForRuntime(headroomSummary, runtime),
+    );
     const preferredInfo = headroomForRuntime(headroomSummary, headroomReroute.to);
-    const constrainedLabel = constrainedInfo?.label ?? headroomReroute.from;
-    const constrainedState = constrainedInfo?.limitReached
+    const constrainedLabel = constrainedInfos
+      .map((info, index) => info?.label ?? headroomReroute.from[index])
+      .join("/");
+    const primaryConstrained = constrainedInfos[0];
+    const constrainedState = primaryConstrained?.limitReached
       ? "has hit its subscription limit"
-      : `has only ${constrainedInfo?.headroomPercent ?? 0}% of its ${
-          constrainedInfo?.tightestWindowLabel ?? "quota"
+      : `has only ${primaryConstrained?.headroomPercent ?? 0}% of its ${
+          primaryConstrained?.tightestWindowLabel ?? "quota"
         } window left`;
-    const constrainedReset = constrainedInfo?.tightestWindowResetsIn
-      ? ` (resets in ${constrainedInfo.tightestWindowResetsIn})`
+    const constrainedReset = primaryConstrained?.tightestWindowResetsIn
+      ? ` (resets in ${primaryConstrained.tightestWindowResetsIn})`
       : "";
     notes.push(
       `Subscription headroom reroute: moved ${headroomReroutedTitles.length} worker(s) ` +
-        `(${headroomReroutedTitles.join(", ")}) from ${headroomReroute.from} to ${headroomReroute.to} ` +
+        `(${headroomReroutedTitles.join(", ")}) from ${constrainedLabel} to ${headroomReroute.to} ` +
         `at the equivalent model tier. The ${constrainedLabel} subscription ${constrainedState}` +
         `${constrainedReset}, while ${preferredInfo?.label ?? headroomReroute.to} has ` +
         `${preferredInfo?.headroomPercent != null ? `${preferredInfo.headroomPercent}% left` : "more headroom"}. ` +

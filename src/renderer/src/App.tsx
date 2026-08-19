@@ -110,9 +110,13 @@ import { usePreferences } from "./preferences/usePreferences";
 import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
+  GROK_LAUNCH_COMMAND,
   buildAgentResumeCommand,
   runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
+import { agentBrandColor, agentBrandRuntime } from "./lib/agent-brand";
+import { applyWorkspaceAccent } from "./lib/workspace-accent";
+import { useTheme } from "./theme/theme-context";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
 import {
@@ -141,6 +145,11 @@ import {
   type AwayDigestBaseline,
   type ChatStatusTone,
 } from "./components/chat/timeline";
+
+function workerTabBrandColor(runtime: string | null | undefined): string | undefined {
+  const brand = agentBrandRuntime(runtime);
+  return brand ? agentBrandColor(brand) : undefined;
+}
 
 // Keep the heavyweight settings surfaces out of the startup bundle, but warm
 // their chunks as soon as the workbench has an idle slice. Without this, the
@@ -372,6 +381,7 @@ function normalizedWorkspaceRailOrder(
 }
 
 export default function App() {
+  const { resolvedTheme } = useTheme();
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -766,7 +776,7 @@ export default function App() {
       const runtime = event.detail?.runtime;
       const profileId = event.detail?.profileId;
       if (
-        (runtime !== "claude" && runtime !== "codex") ||
+        (runtime !== "claude" && runtime !== "codex" && runtime !== "grok") ||
         typeof profileId !== "string" ||
         !activeWorkspace?.cwd
       ) {
@@ -775,14 +785,24 @@ export default function App() {
       const label = typeof event.detail?.label === "string"
         ? event.detail.label.trim().slice(0, 80)
         : "account";
-      const command = runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
+      const command =
+        runtime === "claude"
+          ? CLAUDE_LAUNCH_COMMAND
+          : runtime === "grok"
+            ? GROK_LAUNCH_COMMAND
+            : CODEX_LAUNCH_COMMAND;
+      const titlePrefix =
+        runtime === "claude" ? "Claude" : runtime === "grok" ? "Grok" : "Codex";
       newTerminalTab(activeWorkspace.cwd, command, {
         focus: true,
-        title: `${runtime === "claude" ? "Claude" : "Codex"} · ${label}`,
+        title: `${titlePrefix} · ${label}`,
         manualAgentRuntime: runtime,
+        color: workerTabBrandColor(runtime),
         ...(runtime === "codex"
           ? { nativeCodexProfileId: profileId }
-          : { nativeClaudeProfileId: profileId }),
+          : runtime === "grok"
+            ? { nativeGrokProfileId: profileId }
+            : { nativeClaudeProfileId: profileId }),
       });
       setSettingsOpen(false);
       event.preventDefault();
@@ -1967,12 +1987,15 @@ export default function App() {
     window.spark.app.signalReady?.();
   }, []);
 
-  // Theme the entire UI with the active workspace's color. Falls back to the
-  // default yellow when nothing is active.
+  // Theme the UI from the workspace's raw identity color, but resolve a second
+  // accent that meets small-text contrast against the strongest panel. The
+  // frame lets ThemeProvider stamp the new palette before we read its tokens.
   useEffect(() => {
-    const accent = activeWorkspace?.color || "#2AA298";
-    document.documentElement.style.setProperty("--accent", accent);
-  }, [activeWorkspace?.color]);
+    const frame = window.requestAnimationFrame(() => {
+      applyWorkspaceAccent(activeWorkspace?.color || "#2AA298");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeWorkspace?.color, resolvedTheme]);
 
   // Open the unified in-app SettingsDialog when any part of the app
   // dispatches the `spark:open-settings` window event. Previously this
@@ -2055,7 +2078,7 @@ export default function App() {
       // Pull the task/attempt metadata that names the pane header (title,
       // runtime, attempt ordinal). Best-effort — the header is decoration; the
       // PTY claim itself doesn't depend on it.
-      let runtime: "claude" | "codex" | undefined;
+      let runtime: "claude" | "codex" | "grok" | undefined;
       let title: string | undefined;
       let attemptOrdinal: number | undefined;
       let nativeCodexProfileId =
@@ -2066,6 +2089,10 @@ export default function App() {
         typeof event.payload?.nativeClaudeProfileId === "string"
           ? event.payload.nativeClaudeProfileId
           : undefined;
+      let nativeGrokProfileId =
+        typeof event.payload?.nativeGrokProfileId === "string"
+          ? event.payload.nativeGrokProfileId
+          : undefined;
       let harness: "pi" | "cli" | undefined;
       let startedAt: string | undefined;
       let model: string | undefined;
@@ -2074,7 +2101,8 @@ export default function App() {
         const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
         if (
           task?.runtimePreference === "claude" ||
-          task?.runtimePreference === "codex"
+          task?.runtimePreference === "codex" ||
+          task?.runtimePreference === "grok"
         ) {
           runtime = task.runtimePreference;
         }
@@ -2083,6 +2111,7 @@ export default function App() {
         attemptOrdinal = attempt?.attemptNumber;
         nativeCodexProfileId = attempt?.nativeCodexProfileId;
         nativeClaudeProfileId = attempt?.nativeClaudeProfileId;
+        nativeGrokProfileId = attempt?.nativeGrokProfileId;
         harness = workerHarnessFromCommand(attempt?.command);
         startedAt = attempt?.startedAt;
         // The attempt's resolved model beats the task's hint: the planner's
@@ -2101,6 +2130,7 @@ export default function App() {
         runtime,
         nativeCodexProfileId,
         nativeClaudeProfileId,
+        nativeGrokProfileId,
         runId: event.runId,
         workerTaskId: event.workerTaskId,
         attemptId: event.attemptId,
@@ -2285,9 +2315,11 @@ export default function App() {
 
             const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
             const runtime =
-              attempt.runtime === "claude" || attempt.runtime === "codex"
+              attempt.runtime === "claude" || attempt.runtime === "codex" || attempt.runtime === "grok"
                 ? attempt.runtime
-                : task?.runtimePreference === "claude" || task?.runtimePreference === "codex"
+                : task?.runtimePreference === "claude" ||
+                    task?.runtimePreference === "codex" ||
+                    task?.runtimePreference === "grok"
                   ? task.runtimePreference
                   : undefined;
             const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
@@ -2299,6 +2331,7 @@ export default function App() {
               runtime,
               nativeCodexProfileId: attempt.nativeCodexProfileId,
               nativeClaudeProfileId: attempt.nativeClaudeProfileId,
+              nativeGrokProfileId: attempt.nativeGrokProfileId,
               runId: run.id,
               workerTaskId: attempt.workerTaskId,
               attemptId: attempt.id,
@@ -2455,7 +2488,7 @@ export default function App() {
       tabId: string;
       tabTitle: string;
       excluded: boolean;
-      runtimeHint?: "claude" | "codex" | null;
+      runtimeHint?: "claude" | "codex" | "grok" | null;
     }> = [];
     for (const tab of tabs.tabs) {
       if (tab.kind !== "terminal") continue;
@@ -3030,7 +3063,7 @@ export default function App() {
 
   const previewWsColor = useCallback((id: string, color: string) => {
     if (activeIdRef.current !== id) return;
-    document.documentElement.style.setProperty("--accent", color);
+    applyWorkspaceAccent(color);
   }, []);
 
   const removeWorkspaceFromState = useCallback((id: string) => {
@@ -3971,6 +4004,7 @@ export default function App() {
         tabs.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
+          color: workerTabBrandColor(launchRuntime),
         });
         return;
       }
@@ -4041,6 +4075,7 @@ export default function App() {
       tabs.newTerminalTab(cwd, launchCommand, {
         agentSession: makeSession(cwd),
         manualAgentRuntime: launchRuntime ?? undefined,
+        color: workerTabBrandColor(launchRuntime),
       });
     },
     [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
@@ -4069,7 +4104,11 @@ export default function App() {
     (runtime: WorkerSessionRuntime) => {
       const cwd = resolveWorkerLaunchCwd();
       const freshCommand =
-        runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
+        runtime === "claude"
+          ? CLAUDE_LAUNCH_COMMAND
+          : runtime === "grok"
+            ? GROK_LAUNCH_COMMAND
+            : CODEX_LAUNCH_COMMAND;
       if (!cwd) {
         handleNewWorkerTab(freshCommand);
         return;
@@ -4094,6 +4133,10 @@ export default function App() {
     () => openShortcutWorkerSessions("codex"),
     [openShortcutWorkerSessions],
   );
+  const openGrokWorkerSessions = useCallback(
+    () => openShortcutWorkerSessions("grok"),
+    [openShortcutWorkerSessions],
+  );
   const openPaneWorkerSessions = useCallback(
     (
       runtime: WorkerSessionRuntime,
@@ -4101,7 +4144,14 @@ export default function App() {
       launch: WorkerSessionPickerRequest["launch"],
     ) => {
       if (!cwd) {
-        launch(runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND, null);
+        launch(
+          runtime === "claude"
+            ? CLAUDE_LAUNCH_COMMAND
+            : runtime === "grok"
+              ? GROK_LAUNCH_COMMAND
+              : CODEX_LAUNCH_COMMAND,
+          null,
+        );
         return;
       }
       setWorkerSessionPicker({ runtime, cwd, launch });
@@ -4135,6 +4185,7 @@ export default function App() {
             runtime: request.runtime,
             nativeCodexProfileId:
               request.session.nativeCodexProfileId,
+            nativeGrokProfileId: request.session.nativeGrokProfileId,
             sessionId: request.session.sessionId,
             cwd: request.cwd,
             transcriptPath: request.session.transcriptPath,
@@ -4146,10 +4197,13 @@ export default function App() {
         ? buildAgentResumeCommand(pointer)
         : request.runtime === "claude"
           ? CLAUDE_LAUNCH_COMMAND
-          : CODEX_LAUNCH_COMMAND;
+          : request.runtime === "grok"
+            ? GROK_LAUNCH_COMMAND
+            : CODEX_LAUNCH_COMMAND;
       tabsRef.current.newTerminalTab(request.cwd, command, {
         agentSession: pointer,
         manualAgentRuntime: request.runtime,
+        color: workerTabBrandColor(request.runtime),
       });
     },
     [],
@@ -4382,7 +4436,7 @@ export default function App() {
       workspaceId: string;
       title?: string;
       cwd?: string;
-      profile: "shell" | "claude" | "codex";
+      profile: "shell" | "claude" | "codex" | "grok";
     }> => {
       const layouts: Array<{ workspaceId: string; tabs: Tab[] }> = [];
       if (tabs.tabsWorkspaceId && validWorkspaceIds.has(tabs.tabsWorkspaceId)) {
@@ -4397,7 +4451,7 @@ export default function App() {
         workspaceId: string;
         title?: string;
         cwd?: string;
-        profile: "shell" | "claude" | "codex";
+        profile: "shell" | "claude" | "codex" | "grok";
       }> = [];
       for (const layout of layouts) {
         for (const tab of layout.tabs) {
@@ -4958,7 +5012,7 @@ export default function App() {
         (!wasRunning && !(pointerAgeMs < 90_000));
       if (
         state.running &&
-        (state.runtime === "claude" || state.runtime === "codex") &&
+        (state.runtime === "claude" || state.runtime === "codex" || state.runtime === "grok") &&
         shouldCapture &&
         !capturingPanesRef.current.has(paneId)
       ) {
@@ -4996,6 +5050,9 @@ export default function App() {
               nativeClaudeProfileId:
                 leaf.agentSession?.nativeClaudeProfileId ??
                 leaf.worker?.nativeClaudeProfileId,
+              nativeGrokProfileId:
+                leaf.agentSession?.nativeGrokProfileId ??
+                leaf.worker?.nativeGrokProfileId,
               cwd: capCwd,
               sinceMs: Date.now() - 60_000,
               excludeSessionIds,
@@ -5020,6 +5077,7 @@ export default function App() {
                   transcriptPath: res.transcriptPath,
                   nativeCodexProfileId: res.nativeCodexProfileId,
                   nativeClaudeProfileId: res.nativeClaudeProfileId,
+                  nativeGrokProfileId: res.nativeGrokProfileId,
                   capturedAt: new Date().toISOString(),
                   // Capture polls up to 15s; the agent may have exited in the
                   // meantime. Only a positively confirmed exit after capture
@@ -5195,6 +5253,7 @@ export default function App() {
         t.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
+          color: workerTabBrandColor(launchRuntime),
         });
         return null;
       }
@@ -5217,6 +5276,7 @@ export default function App() {
         t.newTerminalTab(cwd, launchCommand, {
           agentSession: makeSession(cwd),
           manualAgentRuntime: launchRuntime ?? undefined,
+          color: workerTabBrandColor(launchRuntime),
         });
         return null;
       }
@@ -5603,6 +5663,7 @@ export default function App() {
               onNewPreviewTab={handleNewPreviewTab}
               onNewClaudeWorker={openClaudeWorkerSessions}
               onNewCodexWorker={openCodexWorkerSessions}
+              onNewGrokWorker={openGrokWorkerSessions}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
               onRenameChat={handleRenameChatTab}
@@ -6114,6 +6175,7 @@ interface WorkspaceProps {
   // deletes one from this workspace's history.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
+  onNewGrokWorker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
   // path, threaded down to the chat panel's embedded board sub-view.
@@ -6167,6 +6229,7 @@ const Workspace = React.memo(function Workspace({
   onNewPreviewTab,
   onNewClaudeWorker,
   onNewCodexWorker,
+  onNewGrokWorker,
   onNewChat,
   onOpenBoardCardRun,
   onRenameChat,
@@ -6839,6 +6902,7 @@ const Workspace = React.memo(function Workspace({
         onNewPreview={onNewPreviewTab}
         onNewClaudeWorker={onNewClaudeWorker}
         onNewCodexWorker={onNewCodexWorker}
+        onNewGrokWorker={onNewGrokWorker}
         onNewChat={onNewChat}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}

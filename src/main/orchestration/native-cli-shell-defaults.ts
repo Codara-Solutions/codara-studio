@@ -1,7 +1,9 @@
 import type { ClaudeCliExecutionProfile } from "./claude-cli-profile-execution";
 import type { CodexCliExecutionProfile } from "./codex-cli-profile-execution";
+import type { GrokCliExecutionProfile } from "./grok-cli-profile-execution";
 import { resolveNewNativeClaudeProfile } from "./native-claude-profile-runtime";
 import { resolveNewNativeCodexProfile } from "./native-codex-profile-runtime";
+import { resolveNewNativeGrokProfile } from "./native-grok-profile-runtime";
 
 /**
  * The Active native CLI accounts, projected onto plain Studio shells.
@@ -35,11 +37,14 @@ export interface PlainShellAccountSelectors {
   codexHome?: string;
   /** Managed CLAUDE_CONFIG_DIR for the Active Claude account; absent when personal. */
   claudeConfigDir?: string;
+  /** Managed GROK_HOME for the Active Grok Build account; absent when personal. */
+  grokHome?: string;
 }
 
 export interface PlainShellAccountSelectorDeps {
   resolveClaude?: () => Promise<ClaudeCliExecutionProfile>;
   resolveCodex?: () => Promise<CodexCliExecutionProfile>;
+  resolveGrok?: () => Promise<GrokCliExecutionProfile>;
 }
 
 export async function resolvePlainShellAccountSelectors(
@@ -47,10 +52,12 @@ export async function resolvePlainShellAccountSelectors(
 ): Promise<PlainShellAccountSelectors | null> {
   const resolveClaude = deps.resolveClaude ?? (() => resolveNewNativeClaudeProfile());
   const resolveCodex = deps.resolveCodex ?? (() => resolveNewNativeCodexProfile());
+  const resolveGrok = deps.resolveGrok ?? (() => resolveNewNativeGrokProfile());
 
-  const [claude, codex] = await Promise.all([
+  const [claude, codex, grok] = await Promise.all([
     resolveClaude().catch(() => null),
     resolveCodex().catch(() => null),
+    resolveGrok().catch(() => null),
   ]);
 
   const selectors: PlainShellAccountSelectors = {};
@@ -61,6 +68,10 @@ export async function resolvePlainShellAccountSelectors(
   if (claudeConfigDir) selectors.claudeConfigDir = claudeConfigDir;
   const codexHome = codex?.managed ? codex.env.CODEX_HOME : undefined;
   if (codexHome) selectors.codexHome = codexHome;
+  const grokHome = grok?.managed ? grok.env.GROK_HOME : undefined;
+  if (grokHome) selectors.grokHome = grokHome;
 
-  return selectors.claudeConfigDir || selectors.codexHome ? selectors : null;
+  return selectors.claudeConfigDir || selectors.codexHome || selectors.grokHome
+    ? selectors
+    : null;
 }

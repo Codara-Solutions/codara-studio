@@ -59,7 +59,7 @@ assert.match(
 );
 assert.match(
   runStore,
-  /const isPiWorker =\s*\n?\s*task\.runtimePreference === "claude" \|\| task\.runtimePreference === "codex";/,
+  /const isPiWorker =\s*\n?\s*task\.runtimePreference === "claude" \|\|\s*\n?\s*task\.runtimePreference === "codex" \|\|\s*\n?\s*task\.runtimePreference === "grok";/,
   "the Pi-harness predicate is provider preference only — no env escape hatch",
 );
 for (const legacySymbol of [
@@ -88,7 +88,7 @@ const evaluateGate = new Function(
   "task",
   gateMatch[1],
 );
-for (const runtimePreference of ["claude", "codex"]) {
+for (const runtimePreference of ["claude", "codex", "grok"]) {
   assert.equal(
     evaluateGate({}, { runtimePreference }),
     true,

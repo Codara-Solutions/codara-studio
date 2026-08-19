@@ -25,6 +25,8 @@ fs.writeFileSync(
     `export * from ${source("claude-cli-profile-execution.ts")};`,
     `export * from ${source("codex-cli-account-profiles.ts")};`,
     `export * from ${source("codex-cli-profile-execution.ts")};`,
+    `export * from ${source("grok-cli-account-profiles.ts")};`,
+    `export * from ${source("grok-cli-profile-execution.ts")};`,
     `export * from ${source("native-cli-account-identity.ts")};`,
   ].join("\n"),
 );
@@ -100,19 +102,23 @@ function assertSanitizedEnv(env, runtime, selectedPath) {
           "CLAUDE_CODE_OAUTH_TOKEN",
           "CLAUDE_SECURESTORAGE_CONFIG_DIR",
         ]
-      : [
-          "OPENAI_API_KEY",
-          "CODEX_API_KEY",
-          "CODEX_ACCESS_TOKEN",
-          "AZURE_OPENAI_API_KEY",
-          "OPENROUTER_API_KEY",
-        ];
+      : runtime === "grok"
+        ? ["XAI_API_KEY", "GROK_API_KEY", "GROK_ACCESS_TOKEN"]
+        : [
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "AZURE_OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+          ];
   for (const key of runtimeOverrides) {
     assert.equal(upperKeys.has(key), false, `${runtime} retained ${key}`);
   }
   if (runtime === "claude") {
     assert.equal(env.CLAUDE_CONFIG_DIR, selectedPath);
     assert.equal("CODEX_HOME" in env, true);
+  } else if (runtime === "grok") {
+    assert.equal(env.GROK_HOME, selectedPath);
   } else {
     assert.equal(env.CODEX_HOME, selectedPath);
     assert.equal("CLAUDE_CONFIG_DIR" in env, true);
@@ -122,17 +128,23 @@ function assertSanitizedEnv(env, runtime, selectedPath) {
 async function main() {
   const claudeRoot = path.join(TMP, "claude-store");
   const codexRoot = path.join(TMP, "codex-store");
+  const grokRoot = path.join(TMP, "grok-store");
   const personalClaude = path.join(TMP, "personal-claude");
   const personalCodex = path.join(TMP, "personal-codex");
+  const personalGrok = path.join(TMP, "personal-grok");
   privateDir(personalClaude);
   privateDir(personalCodex);
+  privateDir(personalGrok);
 
   const claudeConnected = new Set([personalClaude]);
   const codexConnected = new Set([personalCodex]);
+  const grokConnected = new Set([personalGrok]);
   const claudeLeases = new mod.ClaudeCliProfileLeaseRegistry();
   const codexLeases = new mod.CodexCliProfileLeaseRegistry();
+  const grokLeases = new mod.GrokCliProfileLeaseRegistry();
   let claudeIdIndex = 0;
   let codexIdIndex = 4;
+  let grokIdIndex = 6;
   const claudeStore = new mod.ClaudeCliAccountProfileStore(claudeRoot, {
     personalConfigDir: personalClaude,
     personalConfigDirEnv: null,
@@ -152,6 +164,15 @@ async function main() {
         ? { connected: true }
         : { connected: false, reason: "missing" },
   });
+  const grokStore = new mod.GrokCliAccountProfileStore(grokRoot, {
+    personalHomeDir: personalGrok,
+    leases: grokLeases,
+    idFactory: () => IDS[grokIdIndex++],
+    authChecker: ({ homeDir }) =>
+      grokConnected.has(homeDir)
+        ? { connected: true }
+        : { connected: false, reason: "missing" },
+  });
 
   const processRequests = [];
   let processBehavior = async () => successResult();
@@ -161,6 +182,8 @@ async function main() {
     SAFE_VALUE: "preserved",
     CLAUDE_CONFIG_DIR: "/wrong/claude",
     CODEX_HOME: "/wrong/codex",
+    GROK_HOME: "/wrong/grok",
+    xai_api_key: "SECRET",
     anthropic_api_key: "SECRET",
     Anthropic_Auth_Token: "SECRET",
     cLaUdE_cOdE_oAuTh_ToKeN: "SECRET",
@@ -176,8 +199,11 @@ async function main() {
     claudeLeases,
     codexStore,
     codexLeases,
+    grokStore,
+    grokLeases,
     claudeExecutable: "/opt/codara/bin/claude",
     codexExecutable: "/opt/codara/bin/codex",
+    grokExecutable: "/opt/codara/bin/grok",
     baseEnv: () => ({ ...baseEnv }),
     processTimeoutMs: 3210,
     processMaxBufferBytes: 4321,
@@ -204,7 +230,7 @@ async function main() {
   const initial = await service.inspect();
   assert.deepEqual(
     initial.runtimes.map((entry) => entry.runtime),
-    ["claude", "codex"],
+    ["claude", "codex", "grok"],
   );
   assert.deepEqual(
     initial.runtimes.flatMap((entry) => entry.profiles),
@@ -229,14 +255,48 @@ async function main() {
         inUse: false,
         status: "connected",
       },
+      {
+        runtime: "grok",
+        id: "personal",
+        label: "Existing Grok login",
+        managed: false,
+        isDefault: true,
+        connected: true,
+        inUse: false,
+        status: "connected",
+      },
     ],
   );
+  const workGrok = await service.create({ runtime: "grok", label: "Work" });
+  grokConnected.add(path.join(grokRoot, "accounts", workGrok.profile.id));
+  const switched = await service.setDefault({
+    runtime: "grok",
+    profileId: workGrok.profile.id,
+  });
+  assert.equal(switched.profile.isDefault, true);
+  assert.equal(switched.profile.id, workGrok.profile.id);
+  const afterSwitch = (await service.inspect("grok")).runtimes[0];
+  const defaults = afterSwitch.profiles.filter((profile) => profile.isDefault);
+  assert.equal(defaults.length, 1);
+  assert.equal(defaults[0].id, workGrok.profile.id);
+  assert.equal(
+    afterSwitch.profiles.find((profile) => profile.id === "personal").isDefault,
+    false,
+  );
+  await service.setDefault({ runtime: "grok", profileId: "personal" });
+  assert.equal(
+    (await service.inspect("grok")).runtimes[0].defaultProfileId,
+    "personal",
+  );
+
   const initialJson = JSON.stringify(initial);
   for (const forbidden of [
     claudeRoot,
     codexRoot,
+    grokRoot,
     personalClaude,
     personalCodex,
+    personalGrok,
     "SECRET",
     "auth.json",
   ]) {
@@ -399,6 +459,70 @@ async function main() {
     email: CODEX_EMAIL,
   });
   assert.deepEqual(await mod.readCodexCliAccountIdentity(malformed), {});
+
+  // Grok Build writes a keyed-by-issuer auth.json (`https://auth.x.ai::<client>`
+  // → { user_id, email, key }), not the Codex `{ tokens }` shape. The user_id
+  // is the same uuid Pi hashes from the xAI access token's `sub`, so a Cora
+  // connection and this sign-in pair as one card. The email is a plaintext
+  // field — xAI access tokens do not carry an `email` claim.
+  const GROK_USER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const GROK_EMAIL = "first.last@example.com";
+  const EXPECTED_GROK_FINGERPRINT = crypto
+    .createHash("sha256")
+    .update(GROK_USER_ID)
+    .digest("hex");
+  const grokAccess = jwt({ sub: GROK_USER_ID, scope: "openid email" });
+  const personalGrokAuth = path.join(personalGrok, "auth.json");
+  privateFile(
+    personalGrokAuth,
+    JSON.stringify({
+      "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+        key: grokAccess,
+        auth_mode: "oidc",
+        user_id: GROK_USER_ID,
+        email: GROK_EMAIL,
+        principal_id: GROK_USER_ID,
+        refresh_token: "SECRET",
+      },
+    }),
+  );
+  const grokIdentity = await mod.readGrokCliAccountIdentity(personalGrokAuth);
+  assert.deepEqual(grokIdentity, {
+    fingerprint: EXPECTED_GROK_FINGERPRINT,
+    email: GROK_EMAIL,
+  });
+  const grokInspected = await service.inspect("grok");
+  const personalGrokRow = grokInspected.runtimes[0].profiles.find(
+    (profile) => profile.id === "personal",
+  );
+  assert.equal(personalGrokRow.accountFingerprint, EXPECTED_GROK_FINGERPRINT);
+  assert.equal(personalGrokRow.email, GROK_EMAIL);
+  const grokInspectedJson = JSON.stringify(grokInspected);
+  for (const forbidden of [GROK_USER_ID, "SECRET", "user_id", "refresh_token"]) {
+    assert.equal(
+      grokInspectedJson.includes(forbidden),
+      false,
+      `${forbidden} must not cross the grok account projection`,
+    );
+  }
+  // A Codex-shaped leftover still pairs on account_id / JWT email so fixtures
+  // and older dumps do not silently un-pair.
+  const grokCodexShaped = path.join(TMP, "grok-codex-shaped-auth.json");
+  privateFile(
+    grokCodexShaped,
+    JSON.stringify({
+      tokens: {
+        account_id: GROK_USER_ID,
+        id_token: jwt({ email: GROK_EMAIL }),
+        access_token: "SECRET",
+      },
+    }),
+  );
+  assert.deepEqual(await mod.readGrokCliAccountIdentity(grokCodexShaped), {
+    fingerprint: EXPECTED_GROK_FINGERPRINT,
+    email: GROK_EMAIL,
+  });
+  assert.deepEqual(await mod.readGrokCliAccountIdentity(malformed), {});
 
   // A sign-in file whose claims cannot be decoded still pairs on its account
   // id; only the address is dropped. Every shape below is a claims payload that

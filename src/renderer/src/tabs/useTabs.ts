@@ -595,7 +595,13 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
 export function validatedTerminalAgentSession(value: unknown): TerminalAgentSession | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<TerminalAgentSession>;
-  if (candidate.runtime !== "claude" && candidate.runtime !== "codex") return null;
+  if (
+    candidate.runtime !== "claude" &&
+    candidate.runtime !== "codex" &&
+    candidate.runtime !== "grok"
+  ) {
+    return null;
+  }
   if (!isSafePersistedString(candidate.sessionId, 256)) return null;
   if (!isSafePersistedString(candidate.cwd, 8192)) return null;
   if (!isSafePersistedString(candidate.capturedAt, 128)) return null;
@@ -632,6 +638,20 @@ export function validatedTerminalAgentSession(value: unknown): TerminalAgentSess
     return null;
   }
   if (candidate.runtime !== "claude" && candidate.nativeClaudeProfileId !== undefined) {
+    return null;
+  }
+  if (
+    candidate.nativeGrokProfileId !== undefined &&
+    !(
+      candidate.nativeGrokProfileId === "personal" ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        candidate.nativeGrokProfileId,
+      )
+    )
+  ) {
+    return null;
+  }
+  if (candidate.runtime !== "grok" && candidate.nativeGrokProfileId !== undefined) {
     return null;
   }
   return candidate as TerminalAgentSession;
@@ -874,6 +894,7 @@ export interface AgentTerminalTabOptions {
   color?: string;
   origin?: TerminalLeafOrigin;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
 }
 
 // Pure helpers shared by the hook and the session-layout regression harness.
@@ -900,6 +921,9 @@ export function appendAgentTerminalToWorkspaceLayout(
       ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
       ...(options?.nativeClaudeProfileId
         ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
+        : {}),
+      ...(options?.nativeGrokProfileId
+        ? { nativeGrokProfileId: options.nativeGrokProfileId }
         : {}),
     },
     activePaneId: paneId,
@@ -1011,7 +1035,9 @@ export interface UseTabsApi {
       nativeCliLoginToken?: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
       title?: string;
+      color?: string;
       manualAgentRuntime?: TerminalAgentSession["runtime"];
     },
   ) => TabId;
@@ -1777,7 +1803,9 @@ export function useTabs(
         nativeCliLoginToken?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
         title?: string;
+        color?: string;
         manualAgentRuntime?: TerminalAgentSession["runtime"];
       },
     ): TabId => {
@@ -1799,6 +1827,9 @@ export function useTabs(
       if (root.worker && options?.nativeClaudeProfileId) {
         root.worker.nativeClaudeProfileId = options.nativeClaudeProfileId;
       }
+      if (root.worker && options?.nativeGrokProfileId) {
+        root.worker.nativeGrokProfileId = options.nativeGrokProfileId;
+      }
       setTabs((curr) => {
         const tab: TerminalTab = {
           id,
@@ -1806,6 +1837,7 @@ export function useTabs(
           title: options?.title?.trim() || "terminals",
           root,
           activePaneId: paneId,
+          ...(options?.color ? { color: options.color } : {}),
         };
         return normalizeTerminalTitles([...curr, tab]);
       });
@@ -1823,6 +1855,9 @@ export function useTabs(
         ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
         ...(options?.nativeClaudeProfileId
           ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
+          : {}),
+        ...(options?.nativeGrokProfileId
+          ? { nativeGrokProfileId: options.nativeGrokProfileId }
           : {}),
       };
       const title = options?.title?.trim() || "terminals";

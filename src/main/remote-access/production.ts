@@ -12,6 +12,7 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
+import { subscriptionForModelId } from "../../shared/agent-families";
 import { makeId } from "@shared/ids";
 import type {
   GitHubMarkReadyInput,
@@ -535,10 +536,7 @@ async function listNativeCliAccountsForRemote(): Promise<
 }
 
 function providerForRemoteModel(model: string | undefined): RemoteSubscriptionProvider | null {
-  const normalized = model?.trim().toLowerCase();
-  if (normalized?.startsWith("claude-")) return "anthropic";
-  if (normalized?.startsWith("gpt-")) return "openai-codex";
-  return null;
+  return model ? subscriptionForModelId(model) : null;
 }
 
 async function resumeCoraRunForRemote(input: {
@@ -2433,7 +2431,7 @@ function toRemoteRun(
 // account the default ~/.claude would offer sessions the create then refuses
 // as "no longer resumable" — a picker full of unresumable entries.
 async function nativeClaudeSessionOptions(
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "grok",
 ): Promise<{ claudeStateDir?: string | null }> {
   if (runtime !== "claude") return {};
   const execution = await resolveNewNativeClaudeProfile();
@@ -2442,7 +2440,7 @@ async function nativeClaudeSessionOptions(
 
 async function listWorkerSessionsForRemote(input: {
   workspaceId: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
 }): Promise<RemoteWorkerSessionInfo[]> {
   const { root } = await requireLocalWorkspace(input.workspaceId);
   const sessions = await listLocalWorkerSessions(
@@ -2460,7 +2458,7 @@ async function listWorkerSessionsForRemote(input: {
 
 async function deleteWorkerSessionForRemote(input: {
   workspaceId: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   sessionId: string;
   memoryScope: WorkerSessionMemoryScope;
 }): Promise<RemoteWorkerSessionDeleteResult> {

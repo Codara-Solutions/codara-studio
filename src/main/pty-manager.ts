@@ -21,12 +21,18 @@ import { getConnection, shQuote } from "./remote/connections";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliProfileEnvironment } from "./orchestration/codex-cli-profile-execution";
+import { buildGrokCliProfileEnvironment } from "./orchestration/grok-cli-profile-execution";
 import { buildClaudeCliProfileEnvironment } from "./orchestration/claude-cli-profile-environment";
 import {
   acquireNativeCodexProfileLease,
   resolveFrozenNativeCodexProfile,
   resolveNewNativeCodexProfile,
 } from "./orchestration/native-codex-profile-runtime";
+import {
+  acquireNativeGrokProfileLease,
+  resolveFrozenNativeGrokProfile,
+  resolveNewNativeGrokProfile,
+} from "./orchestration/native-grok-profile-runtime";
 import {
   acquireNativeClaudeProfileLease,
   resolveFrozenNativeClaudeProfile,
@@ -148,6 +154,8 @@ interface Session {
   releaseNativeCodexProfileLease?: () => void;
   nativeClaudeProfileId?: string;
   releaseNativeClaudeProfileLease?: () => void;
+  nativeGrokProfileId?: string;
+  releaseNativeGrokProfileLease?: () => void;
 }
 
 const sessions = new Map<string, Session>();
@@ -381,6 +389,10 @@ export interface SpawnOptions {
   nativeCodexHome?: string;
   /** Main-process-only lease ownership transferred to the spawned session. */
   releaseNativeCodexProfileLease?: () => void;
+  /** Frozen native Grok Build account for a resume/worker pane. */
+  nativeGrokProfileId?: string;
+  nativeGrokHome?: string;
+  releaseNativeGrokProfileLease?: () => void;
   /** Frozen native Claude account for a resume/worker/manual pane. */
   nativeClaudeProfileId?: string;
   /** Main-process-only exact selector. Null preserves legacy unset. */
@@ -397,6 +409,7 @@ export interface SpawnOptions {
    */
   plainShellCodexHome?: string;
   plainShellClaudeConfigDir?: string;
+  plainShellGrokHome?: string;
   /**
    * Main-process-only exact child environment. When present, pty-manager does
    * not inherit, enrich, or append Studio/provider variables. Renderer IPC
@@ -546,6 +559,7 @@ export async function spawn(
   attached?: boolean;
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
 }> {
   ensureSpawnHelperExecutable();
   // Mirror attach (see SpawnOptions.mirror): observe-only. Checked FIRST so a
@@ -572,6 +586,14 @@ export async function spawn(
         `mirror attach: pty session '${opts.id}' is pinned to another native Claude account`,
       );
     }
+    if (
+      opts.nativeGrokProfileId !== undefined &&
+      opts.nativeGrokProfileId !== target.nativeGrokProfileId
+    ) {
+      throw new Error(
+        `mirror attach: pty session '${opts.id}' is pinned to another native Grok account`,
+      );
+    }
     // attached: the session pre-existed, so an unhandled startupCommand here
     // means "a live shell/TUI already owns this pty", not "shell can't take
     // startup commands" — callers use the distinction to decide whether a
@@ -583,6 +605,7 @@ export async function spawn(
       attached: true,
       nativeCodexProfileId: target.nativeCodexProfileId,
       nativeClaudeProfileId: target.nativeClaudeProfileId,
+      nativeGrokProfileId: target.nativeGrokProfileId,
     };
   }
 
@@ -602,6 +625,7 @@ async function spawnWithSessionLock(
   attached?: boolean;
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
 }> {
   const pending = pendingKills.get(opts.id);
   if (pending) {
@@ -628,6 +652,14 @@ async function spawnWithSessionLock(
     ) {
       throw new Error(
         `pty session '${opts.id}' is already pinned to another native Claude account`,
+      );
+    }
+    if (
+      opts.nativeGrokProfileId !== undefined &&
+      opts.nativeGrokProfileId !== existing.nativeGrokProfileId
+    ) {
+      throw new Error(
+        `pty session '${opts.id}' is already pinned to another native Grok account`,
       );
     }
     // A late-attaching webContents (e.g. ChatPanel's backend-terminal tab
@@ -694,6 +726,7 @@ async function spawnWithSessionLock(
       attached: true,
       nativeCodexProfileId: existing.nativeCodexProfileId,
       nativeClaudeProfileId: existing.nativeClaudeProfileId,
+      nativeGrokProfileId: existing.nativeGrokProfileId,
     };
   }
 
@@ -783,6 +816,29 @@ async function spawnWithSessionLock(
       releaseNativeClaudeProfileLease,
     };
   }
+  if (
+    opts.nativeGrokProfileId !== undefined ||
+    parsedStartup?.runtime === "grok"
+  ) {
+    const execution =
+      opts.nativeGrokProfileId === undefined
+        ? await resolveNewNativeGrokProfile()
+        : await resolveFrozenNativeGrokProfile(opts.nativeGrokProfileId);
+    const nativeGrokHome = execution.env.GROK_HOME;
+    if (!nativeGrokHome) {
+      throw new Error("Resolved native Grok profile has no GROK_HOME.");
+    }
+    const releaseNativeGrokProfileLease = acquireNativeGrokProfileLease(
+      execution.profileId,
+      `terminal:${opts.id}`,
+    );
+    preparedOpts = {
+      ...preparedOpts,
+      nativeGrokProfileId: execution.profileId,
+      nativeGrokHome,
+      releaseNativeGrokProfileLease,
+    };
+  }
   // A plain user shell — no Studio startup command, no worker run, no frozen
   // account, no caller-selected home — follows the Active accounts too, so a
   // hand-typed `claude` or `codex` signs in as the account Settings marks
@@ -798,9 +854,11 @@ async function spawnWithSessionLock(
     !opts.startupCommand &&
     opts.nativeCodexProfileId === undefined &&
     opts.nativeClaudeProfileId === undefined &&
+    opts.nativeGrokProfileId === undefined &&
     !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID") &&
     !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CLAUDE_CONFIG_DIR") &&
-    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME")
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME") &&
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "GROK_HOME")
   ) {
     const selectors = await resolvePlainShellAccountSelectors().catch(() => null);
     if (selectors) {
@@ -819,6 +877,7 @@ async function spawnWithSessionLock(
         ...(selectors.claudeConfigDir
           ? { plainShellClaudeConfigDir: selectors.claudeConfigDir }
           : {}),
+        ...(selectors.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
       };
     }
   }
@@ -1149,6 +1208,7 @@ function doSpawn(
   startupCommandHandled?: boolean;
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
 } {
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
@@ -1270,11 +1330,25 @@ function doSpawn(
       if (typeof value === "string") env[key] = value;
     }
   }
+  if (opts.nativeGrokHome) {
+    const selectedEnv = buildGrokCliProfileEnvironment(env, opts.nativeGrokHome);
+    for (const key of Object.keys(env)) delete env[key];
+    for (const [key, value] of Object.entries(selectedEnv)) {
+      if (typeof value === "string") env[key] = value;
+    }
+  }
   if (opts.plainShellClaudeConfigDir) {
     const selectedEnv = buildClaudeCliProfileEnvironment(
       env,
       opts.plainShellClaudeConfigDir,
     );
+    for (const key of Object.keys(env)) delete env[key];
+    for (const [key, value] of Object.entries(selectedEnv)) {
+      if (typeof value === "string") env[key] = value;
+    }
+  }
+  if (opts.plainShellGrokHome) {
+    const selectedEnv = buildGrokCliProfileEnvironment(env, opts.plainShellGrokHome);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;
@@ -1355,6 +1429,8 @@ function doSpawn(
     releaseNativeCodexProfileLease: opts.releaseNativeCodexProfileLease,
     nativeClaudeProfileId: opts.nativeClaudeProfileId,
     releaseNativeClaudeProfileLease: opts.releaseNativeClaudeProfileLease,
+    nativeGrokProfileId: opts.nativeGrokProfileId,
+    releaseNativeGrokProfileLease: opts.releaseNativeGrokProfileLease,
   };
 
   // Capture the local session reference so we can identity-gate this closure.
@@ -1476,6 +1552,7 @@ function doSpawn(
     startupCommandHandled,
     nativeCodexProfileId: session.nativeCodexProfileId,
     nativeClaudeProfileId: session.nativeClaudeProfileId,
+    nativeGrokProfileId: session.nativeGrokProfileId,
   };
 }
 
@@ -1862,6 +1939,10 @@ export function nativeCodexProfileId(id: string): string | undefined {
 
 export function nativeClaudeProfileId(id: string): string | undefined {
   return sessions.get(id)?.nativeClaudeProfileId;
+}
+
+export function nativeGrokProfileId(id: string): string | undefined {
+  return sessions.get(id)?.nativeGrokProfileId;
 }
 
 export function write(id: string, data: string): void {

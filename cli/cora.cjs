@@ -36,7 +36,7 @@ ${c.bold("RUNS & AGENTS")}
   log <run>                    the conversation transcript
   agents [run]                 subagents: every worker, its status and model
   watch [run]                  ${c.cyan("live dashboard")} of a run and its subagents
-  agent spawn <run> <prompt> [--title T --runtime claude|codex --effort E]
+  agent spawn <run> <prompt> [--title T --runtime claude|codex|grok --effort E]
   agent message <run> <all|task-id> <message>
 
 ${c.bold("SURFACES")}

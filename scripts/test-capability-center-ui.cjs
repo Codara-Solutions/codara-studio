@@ -22,7 +22,7 @@ const source = fs.readFileSync(
 // question from which external CLI config carries the entry, and the dialog has
 // to keep asking them separately. The columns are now where that separation
 // lives — Cora/Workers are Codara-side, Claude/Codex report the CLI configs.
-assert.match(source, /labels=\{\["Server", "Cora", "Workers", "Claude", "Codex", ""\]\}/);
+assert.match(source, /labels=\{\["Server", "Cora", "Workers", "Claude", "Codex", "Grok", ""\]\}/);
 assert.match(source, /labels=\{\["Skill", "Enabled", "Claude", "Codex", ""\]\}/);
 // Header and rows must share one grid template or the columns stop aligning.
 assert.match(source, /const MCP_GRID = /);
@@ -38,7 +38,7 @@ assert.match(source, /Set up by you/);
 
 // The CLI columns name the external tools the way the user does, and the copy
 // action still routes through installAsset via onInstall.
-assert.match(source, /const CLI_LABEL: Record<"claude" \| "codex", string>/);
+assert.match(source, /const CLI_LABEL: Record<"claude" \| "codex" \| "grok", string>/);
 assert.match(source, /onInstall\(group, runtime\)/);
 
 // Retired vocabulary must not come back: the boxed clusters, the badge strip,

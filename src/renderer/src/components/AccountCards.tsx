@@ -1,8 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
+import {
+  runtimeForSubscription,
+  type AgentRuntimeKind,
+} from "@shared/agent-families";
 import type { PiSubscriptionProvider } from "@shared/types";
+import { agentBrandColor } from "../lib/agent-brand";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
+import { CodaraMark, RuntimeMark } from "./BrandMarks";
 
-export type NativeCliAccountRuntime = "claude" | "codex";
+export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
 
 export type NativeCliAccountAuthState =
   | "connected"
@@ -114,6 +120,12 @@ export interface AccountActions {
   /** Connect a card that only has a CLI sign-in to Cora (same login flow as
    *  "Add account → Connect to Cora", seeded with the card's name). */
   onCoraConnect: (card: AccountCardView) => void;
+  /**
+   * Sign this account in to the command-line tool from a Cora-only card.
+   * Uses the unsigned built-in slot when it is free, otherwise creates a
+   * named CLI account and opens its sign-in.
+   */
+  onCliConnect: (card: AccountCardView) => void;
   onBeginAddCora: (provider: PiSubscriptionProvider) => void;
   onAddCoraLabel: (label: string) => void;
   onAddCora: (provider: PiSubscriptionProvider) => void;
@@ -190,13 +202,11 @@ const COMPACT_PRIMARY_BUTTON_STYLE: React.CSSProperties = {
 };
 
 /**
- * Action diet: a card shows at most two buttons — the single most useful next
- * step first (accent), one runner-up beside it — and everything else waits
- * behind the "···" menu. A state that is already true never gets a button, so
- * a fully connected active card shows no buttons at all: its state is the
- * point.
+ * Use-for-Cora and use-for-CLI live on their own role rows, always visible
+ * when that side is not already selected. Everything else — rename, reconnect,
+ * sign out, delete — waits behind the "···" menu. A fully connected active
+ * card shows Using on both rows and no buttons.
  */
-const MAX_VISIBLE_CARD_ACTIONS = 2;
 
 /**
  * One entry in the card's action model. `run` may return false to keep the
@@ -308,6 +318,7 @@ function ActionButton({
   disabled,
   primary = false,
   compact = false,
+  tone,
   onClick,
 }: {
   children: React.ReactNode;
@@ -315,6 +326,8 @@ function ActionButton({
   primary?: boolean;
   /** Card-scale rather than form-scale — see COMPACT_BUTTON_STYLE. */
   compact?: boolean;
+  /** Agent brand colour; when set, the button follows the family instead of the workspace accent. */
+  tone?: string;
   onClick: () => void;
 }) {
   const base = compact
@@ -324,6 +337,18 @@ function ActionButton({
     : primary
       ? PRIMARY_BUTTON_STYLE
       : BUTTON_STYLE;
+  const tinted = tone
+    ? {
+        ...base,
+        ...(primary
+          ? {
+              border: `1px solid color-mix(in oklch, ${tone} 40%, transparent)`,
+              background: `color-mix(in oklch, ${tone} 16%, transparent)`,
+              color: tone,
+            }
+          : {}),
+      }
+    : base;
   return (
     <button
       type="button"
@@ -331,12 +356,135 @@ function ActionButton({
       disabled={disabled}
       onClick={onClick}
       style={{
-        ...base,
+        ...tinted,
         ...(disabled ? { cursor: "default", opacity: 0.5 } : {}),
       }}
     >
       {children}
     </button>
+  );
+}
+
+function UsingChip({ label, color }: { label: string; color: string }) {
+  return (
+    <span
+      style={{
+        color,
+        border: `1px solid color-mix(in oklch, ${color} 55%, transparent)`,
+        background: `color-mix(in oklch, ${color} 18%, var(--panel-2))`,
+        borderRadius: 99,
+        padding: "2px 8px",
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
+        fontWeight: 650,
+        lineHeight: 1.3,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * One independently switchable role on an account card. Cora and the CLI each
+ * get a row so "use this account for Cora" and "use this account for Claude
+ * Code" are always separate actions, never a combined "Use this account".
+ */
+function AccountRoleRow({
+  label,
+  mark,
+  using,
+  usingLabel,
+  status,
+  danger,
+  action,
+  brand,
+}: {
+  label: string;
+  mark?: React.ReactNode;
+  using: boolean;
+  usingLabel: string;
+  status?: string;
+  danger?: boolean;
+  action?: { id: string; label: string; disabled: boolean; run: () => void };
+  brand: string;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+        minHeight: 28,
+      }}
+    >
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          minWidth: 0,
+          color: "var(--ink)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 600,
+          lineHeight: 1.3,
+        }}
+      >
+        {mark ? (
+          <span
+            aria-hidden
+            style={{
+              display: "inline-flex",
+              color: brand,
+              flex: "0 0 auto",
+            }}
+          >
+            {mark}
+          </span>
+        ) : null}
+        {label}
+      </span>
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 7,
+          flex: "0 1 auto",
+          minWidth: 0,
+        }}
+      >
+        {using ? (
+          <UsingChip label={usingLabel} color={brand} />
+        ) : status ? (
+          <span
+            style={{
+              color: danger ? "var(--danger)" : "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 10.5,
+              lineHeight: 1.3,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {status}
+          </span>
+        ) : null}
+        {action ? (
+          <ActionButton
+            compact
+            primary
+            tone={brand}
+            disabled={action.disabled}
+            onClick={() => void action.run()}
+          >
+            {action.label}
+          </ActionButton>
+        ) : null}
+      </span>
+    </div>
   );
 }
 
@@ -710,6 +858,7 @@ function RenameForm({
 
 function AccountCard({
   card,
+  runtime,
   cliLabel,
   coraDisabled,
   coraBusy,
@@ -717,6 +866,7 @@ function AccountCard({
   actions,
 }: {
   card: AccountCardView;
+  runtime: AgentRuntimeKind;
   cliLabel: string;
   coraDisabled: boolean;
   coraBusy: boolean;
@@ -731,96 +881,86 @@ function AccountCard({
   const cliOnly = Boolean(cli && !cora);
   const cliBusy = Boolean(cli?.busyAction);
   const coraFacetBusy = Boolean(cora?.busy);
+  const brand = agentBrandColor(runtime);
   // Cora switches immediately. A CLI default is used by the next process:
   // an already-running CLI cannot have its environment changed underneath it.
-  const active = Boolean(cora?.active || cli?.active);
-  // The pill always names the side it means — "Active" alone next to "Not
-  // connected to Cora" read as a contradiction. Plain "Active" is reserved for
-  // a paired card that is the live account on both sides.
-  const activeLabel =
-    cora && cli && cora.active && cli.active
-      ? `Cora + new ${cliLabel} sessions`
-      : cora?.active
-        ? "Active in Cora"
-        : `New ${cliLabel} sessions`;
+  const coraUsing = Boolean(cora?.connected && !cora.expired && cora.active);
+  const cliUsing = Boolean(cli?.authState === "connected" && cli.active);
+  const active = coraUsing || cliUsing;
   const coraControlsDisabled = coraDisabled || coraBusy;
   const cliControlsDisabled =
     cliDisabled || cliBusy || Boolean(cli?.inUse);
+  const cliNeedsSignIn =
+    !cli ||
+    cli.authState === "signed-out" ||
+    cli.authState === "expired" ||
+    cli.authState === "error";
   const signInHint = cliSignInHint(cli, cliLabel);
 
-  // The next-step ladder, most useful first. Only entries whose state is NOT
-  // already true are built, so the first two are the visible buttons and the
-  // first of those is the accent primary; anything past two waits in the "···"
-  // menu. A healthy card that is active everywhere builds none of these.
-  const nextSteps: CardAction[] = [];
-  const cliNeedsSignIn =
-    cli &&
-    (cli.authState === "signed-out" ||
-      cli.authState === "expired" ||
-      cli.authState === "error");
-  if (cliNeedsSignIn) {
-    nextSteps.push({
-      id: "cli-sign-in",
-      label:
-        cli.authState === "signed-out"
-          ? `Sign in to ${cliLabel}`
-          : `Sign in to ${cliLabel} again`,
-      disabled: cliControlsDisabled,
-      run: () => actions.onCliSignIn(card),
-    });
-  }
-  if (!cora && cli) {
-    // Connect-time fingerprint capture folds the new Cora connection into
-    // this card when the identities match.
-    nextSteps.push({
-      id: "cora-connect",
-      label: "Connect to Cora",
-      disabled: coraControlsDisabled,
-      run: () => actions.onCoraConnect(card),
-    });
-  }
-  if (cora && !cora.connected) {
-    nextSteps.push({
-      id: "cora-connect",
-      label: "Connect to Cora",
-      disabled: coraControlsDisabled,
-      run: () => actions.onCoraReconnect(card),
-    });
-  }
-  if (cora?.connected && cora.expired) {
-    nextSteps.push({
-      id: "cora-reconnect",
-      label: "Reconnect to Cora",
-      disabled: coraControlsDisabled,
-      run: () => actions.onCoraReconnect(card),
-    });
-  }
-  // Same stored defaults as before — the wording only says which side is
-  // being switched, because a merged card has one per side.
-  if (cora?.connected && !cora.expired && !cora.active) {
-    nextSteps.push({
-      id: "cora-use",
-      label: cli ? "Use this account for Cora" : "Use this account",
-      disabled: coraControlsDisabled,
-      run: () => actions.onCoraUse(card),
-    });
-  }
-  if (cli?.authState === "connected" && !cli.active) {
-    nextSteps.push({
-      id: "cli-use",
-      label: `Open ${cliLabel} with this account`,
-      disabled: cliControlsDisabled,
-      run: () => actions.onCliUse(card),
-    });
-  }
-  const visibleActions = nextSteps.slice(0, MAX_VISIBLE_CARD_ACTIONS);
+  const coraAction: CardAction | undefined = (() => {
+    if (!cora) {
+      return {
+        id: "cora-connect",
+        label: "Connect to Cora",
+        disabled: coraControlsDisabled,
+        run: () => actions.onCoraConnect(card),
+      };
+    }
+    if (!cora.connected) {
+      return {
+        id: "cora-connect",
+        label: "Connect to Cora",
+        disabled: coraControlsDisabled,
+        run: () => actions.onCoraReconnect(card),
+      };
+    }
+    if (cora.expired) {
+      return {
+        id: "cora-reconnect",
+        label: "Reconnect to Cora",
+        disabled: coraControlsDisabled,
+        run: () => actions.onCoraReconnect(card),
+      };
+    }
+    if (!cora.active) {
+      return {
+        id: "cora-use",
+        label: "Use this account for Cora",
+        disabled: coraControlsDisabled,
+        run: () => actions.onCoraUse(card),
+      };
+    }
+    return undefined;
+  })();
 
-  // Everything else lives in the menu: re-auth for sides that are already
-  // signed in, Rename, and — bottom group, behind a hairline — Sign out and
-  // Delete. Delete keeps its two-step arming inside the menu.
-  const menuActions: CardAction[] = [
-    ...nextSteps.slice(MAX_VISIBLE_CARD_ACTIONS),
-  ];
+  const cliAction: CardAction | undefined = (() => {
+    if (cliNeedsSignIn) {
+      return {
+        id: "cli-sign-in",
+        label:
+          cli && cli.authState !== "signed-out"
+            ? `Sign in to ${cliLabel} again`
+            : `Sign in to ${cliLabel}`,
+        disabled: cliDisabled || cliBusy,
+        run: () =>
+          cli ? actions.onCliSignIn(card) : actions.onCliConnect(card),
+      };
+    }
+    if (cli && !cli.active) {
+      return {
+        id: "cli-use",
+        label: `Use this account for ${cliLabel}`,
+        disabled: cliControlsDisabled,
+        run: () => actions.onCliUse(card),
+      };
+    }
+    return undefined;
+  })();
+
+  const coraState = coraConnectionState(cora);
+  const cliState = cliConnectionState(cli, cliLabel);
+
+  const menuActions: CardAction[] = [];
   if (cora?.connected && !cora.expired) {
     menuActions.push({
       id: "cora-reconnect",
@@ -837,9 +977,6 @@ function AccountCard({
       run: () => actions.onCliSignIn(card),
     });
   }
-  // Every card can be named. CLI sign-ins the tool itself cannot rename (the
-  // built-in one) get a Codara-side display name via onCliRename, so this
-  // affordance never disappears.
   menuActions.push({
     id: "rename",
     label: "Rename",
@@ -907,25 +1044,16 @@ function AccountCard({
       aria-current={active ? "true" : undefined}
       style={{
         display: "grid",
-        gap: 5,
-        padding: "7px 9px",
-        borderRadius: "var(--radius-control, 5px)",
-        border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
-        // Selection, not status: an accent hairline plus a faint ring and a
-        // near-transparent wash. A heavier accent fill on a card this large
-        // reads as a warning tint, so the pill and border carry the accent.
-        background: active
-          ? "color-mix(in oklch, var(--accent) 3%, transparent)"
-          : "color-mix(in oklab, var(--ink) 3%, transparent)",
+        gap: 10,
+        padding: "12px 13px",
+        borderRadius: "var(--radius-surface, 7px)",
+        border: "1px solid var(--rule)",
+        background: "var(--panel-2)",
         boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent)"
-          : undefined,
+          ? `inset 2px 0 0 ${brand}`
+          : "none",
       }}
     >
-      {/* Name, address, and plan share one line — three stacked lines was the
-          card's tallest block and its least informative. Both the name and the
-          address can give ground to the other and ellipsize; the plan is two
-          words at most, so it holds its width. */}
       <div
         style={{
           display: "flex",
@@ -939,16 +1067,10 @@ function AccountCard({
             minWidth: 0,
             display: "grid",
             gridAutoFlow: "column",
-            // minmax(0, max-content) is load-bearing, not decoration. A flex
-            // row of nowrap text reports the sum of that text as the row's own
-            // minimum width, so one long address would stop the whole panel
-            // from narrowing and hand the Settings scroll pane a horizontal
-            // scrollbar. Grid tracks with a zero floor take their content width
-            // when it fits and let it ellipsize when it does not.
             gridAutoColumns: "minmax(0, max-content)",
             justifyContent: "start",
             alignItems: "baseline",
-            columnGap: 6,
+            columnGap: 7,
           }}
         >
           <span
@@ -956,9 +1078,9 @@ function AccountCard({
               minWidth: 0,
               color: "var(--ink)",
               fontFamily: "var(--font-sans)",
-              fontSize: 12,
+              fontSize: 13,
               fontWeight: 650,
-              lineHeight: 1.35,
+              lineHeight: 1.3,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -973,8 +1095,8 @@ function AccountCard({
                 minWidth: 0,
                 color: "var(--muted)",
                 fontFamily: "var(--font-sans)",
-                fontSize: 10,
-                lineHeight: 1.35,
+                fontSize: 11,
+                lineHeight: 1.3,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -989,8 +1111,8 @@ function AccountCard({
                 minWidth: 0,
                 color: "var(--muted)",
                 fontFamily: "var(--font-sans)",
-                fontSize: 10,
-                lineHeight: 1.35,
+                fontSize: 10.5,
+                lineHeight: 1.3,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -1000,55 +1122,50 @@ function AccountCard({
             </span>
           ) : null}
         </div>
-        {/* The card's right edge belongs to state + the overflow menu: the
-            Active pill first, then the "···" outermost. The menu lives here —
-            not in the action row — so it sits in the same place on every card,
-            including one whose action row has nothing to show. */}
-        <div
-          style={{
-            flex: "0 0 auto",
-            display: "flex",
-            alignItems: "center",
-            gap: 5,
-          }}
-        >
-          {active ? (
-            <span
-              style={{
-                color: "var(--accent)",
-                border: "1px solid var(--accent-edge)",
-                background: "var(--accent-soft)",
-                borderRadius: 99,
-                padding: "1px 7px",
-                fontFamily: "var(--font-sans)",
-                fontSize: 9.5,
-                fontWeight: 650,
-                lineHeight: 1.4,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {activeLabel}
-            </span>
-          ) : null}
-          <CardOverflowMenu
-            label={`More actions for ${card.label}`}
-            groups={[menuActions, destructiveActions]}
-            onClose={() => setDeleteArmed(null)}
-          />
-        </div>
+        <CardOverflowMenu
+          label={`More actions for ${card.label}`}
+          groups={[menuActions, destructiveActions]}
+          onClose={() => setDeleteArmed(null)}
+        />
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "baseline",
-          columnGap: 12,
-          rowGap: 2,
-        }}
-      >
-        <ConnectionLine state={coraConnectionState(cora)} />
-        <ConnectionLine state={cliConnectionState(cli, cliLabel)} />
+      <div style={{ display: "grid", gap: 0 }}>
+        <AccountRoleRow
+          label="Cora"
+          mark={<CodaraMark size={13} />}
+          brand="var(--accent)"
+          using={coraUsing}
+          usingLabel="Using"
+          status={
+            coraUsing || (coraAction && !coraState.danger)
+              ? undefined
+              : coraState.text
+          }
+          danger={coraState.danger}
+          action={coraAction}
+        />
+        <div
+          aria-hidden
+          style={{
+            height: 1,
+            background: "var(--rule-soft)",
+            margin: "6px 0",
+          }}
+        />
+        <AccountRoleRow
+          label={cliLabel}
+          mark={<RuntimeMark runtime={runtime} size={13} />}
+          brand={brand}
+          using={cliUsing}
+          usingLabel="Using"
+          status={
+            cliUsing || (cliAction && !cliState.danger)
+              ? undefined
+              : cliState.text
+          }
+          danger={cliState.danger}
+          action={cliAction}
+        />
       </div>
 
       {signInHint ? (
@@ -1056,8 +1173,8 @@ function AccountCard({
           style={{
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            lineHeight: 1.35,
+            fontSize: 10.5,
+            lineHeight: 1.4,
           }}
         >
           {signInHint}
@@ -1069,8 +1186,8 @@ function AccountCard({
           style={{
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            lineHeight: 1.35,
+            fontSize: 10.5,
+            lineHeight: 1.4,
           }}
         >
           {card.pairHint}
@@ -1081,26 +1198,20 @@ function AccountCard({
         <div
           style={{
             display: "grid",
-            gap: 5,
-            paddingTop: 5,
+            gap: 6,
+            paddingTop: 10,
             borderTop: "1px solid var(--rule-soft)",
           }}
         >
           {card.usage}
         </div>
       ) : cliOnly ? (
-        // Limits are read with the Cora connection's own credential, and Codara
-        // never borrows the command-line tool's. So this card has no bars to
-        // show — and says why, rather than looking like an account with no
-        // limits. Nothing here is fetched or guessed.
         <div
           style={{
-            paddingTop: 5,
-            borderTop: "1px solid var(--rule-soft)",
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            lineHeight: 1.35,
+            fontSize: 10.5,
+            lineHeight: 1.4,
           }}
         >
           {CLI_ONLY_USAGE_HINT}
@@ -1112,16 +1223,11 @@ function AccountCard({
           ariaLabel={`Rename ${card.label}`}
           initial={card.label}
           busy={coraFacetBusy || cliBusy}
-          // A merged card names one account, so a rename applies to every side
-          // that stores a name for it.
           onSave={async (label) => {
             let saved = false;
             if (cora) saved = await actions.onCoraRename(card, label);
             if (cli && (saved || !cora)) {
               const renamedCli = await actions.onCliRename(card, label);
-              // Half a rename would split one account into two differently
-              // named cards, so put the Cora side back and let the failure
-              // stand on its own.
               if (!renamedCli && cora && saved) {
                 await actions.onCoraRename(card, card.label);
               }
@@ -1132,22 +1238,6 @@ function AccountCard({
           }}
           onCancel={() => setRenaming(false)}
         />
-      ) : visibleActions.length > 0 ? (
-        // Primary/secondary buttons only — the "···" menu lives in the header
-        // row above, so a card with no next step renders no action row at all.
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-          {visibleActions.map((action, index) => (
-            <ActionButton
-              key={action.id}
-              compact
-              disabled={action.disabled}
-              primary={index === 0}
-              onClick={() => void action.run()}
-            >
-              {action.label}
-            </ActionButton>
-          ))}
-        </div>
       ) : null}
     </div>
   );
@@ -1161,17 +1251,15 @@ function AccountProviderGroup({
   actions: AccountActions;
 }) {
   const addBusy = view.addingCora || view.addingCli;
+  const runtime = runtimeForSubscription(view.provider);
+  const brand = agentBrandColor(runtime);
 
   return (
     <section
       aria-labelledby={`accounts-${view.provider}-title`}
       style={{
         display: "grid",
-        gap: 7,
-        padding: 9,
-        borderRadius: "var(--radius-surface, 7px)",
-        border: "1px solid var(--rule-soft)",
-        background: "color-mix(in oklab, var(--ink) 2%, transparent)",
+        gap: 8,
       }}
     >
       <div
@@ -1187,12 +1275,18 @@ function AccountProviderGroup({
           <span
             id={`accounts-${view.provider}-title`}
             style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
               color: "var(--ink)",
               fontFamily: "var(--font-sans)",
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 700,
             }}
           >
+            <span aria-hidden style={{ display: "inline-flex", color: brand }}>
+              <RuntimeMark runtime={runtime} size={16} />
+            </span>
             {view.label}
           </span>
           <span
@@ -1272,11 +1366,12 @@ function AccountProviderGroup({
         </div>
       ) : null}
 
-      <div style={{ display: "grid", gap: 5 }}>
+      <div style={{ display: "grid", gap: 8 }}>
         {view.cards.map((card) => (
           <AccountCard
             key={card.key}
             card={card}
+            runtime={runtime}
             cliLabel={view.cliLabel}
             coraDisabled={view.coraDisabled}
             coraBusy={view.coraBusy}
@@ -1353,7 +1448,7 @@ export default function AccountCards({
   actions: AccountActions;
 }) {
   return (
-    <div style={{ display: "grid", gap: 8 }}>
+    <div style={{ display: "grid", gap: 18 }}>
       {providers.map((view) => (
         <AccountProviderGroup key={view.provider} view={view} actions={actions} />
       ))}

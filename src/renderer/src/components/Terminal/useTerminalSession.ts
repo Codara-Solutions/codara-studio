@@ -45,6 +45,7 @@ import { buildTerminalTheme } from "./terminalTheme";
 import {
   buildAgentResumeCommand,
   buildClaudeLaunch,
+  buildGrokLaunch,
   isAgentSessionLaunchCommand,
 } from "../../workers/launch-commands";
 import type { TerminalAgentSession } from "../../tabs/types";
@@ -193,6 +194,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       transcriptPath: restore.transcriptPath ?? undefined,
       nativeCodexProfileId: restore.nativeCodexProfileId,
       nativeClaudeProfileId: restore.nativeClaudeProfileId,
+      nativeGrokProfileId: restore.nativeGrokProfileId,
     })
     .catch(() => ({ exists: false as const }));
   const decision = decideResume(probe as ResumeProbe, restore.runtime);
@@ -230,6 +232,22 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     };
   }
   if (decision.kind === "fresh") {
+    if (restore.runtime === "grok") {
+      const fresh = buildGrokLaunch();
+      return {
+        resumeCommand: fresh.command,
+        resumeIsFreshFallback: true,
+        fallbackNotice: "previous Grok session couldn't be resumed — starting a fresh one",
+        fallbackSession: {
+          runtime: "grok",
+          sessionId: fresh.sessionId,
+          cwd: restore.cwd,
+          nativeGrokProfileId: restore.nativeGrokProfileId,
+          capturedAt: new Date().toISOString(),
+          active: true,
+        },
+      };
+    }
     // Claude self-heal: the transcript is gone or stillborn. Launch a FRESH
     // forced-id Claude in the same cwd so the pane is immediately useful, and
     // hand the owner the replacement pointer to persist.
@@ -242,6 +260,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
         runtime: "claude",
         sessionId: fresh.sessionId,
         cwd: restore.cwd,
+        nativeClaudeProfileId: restore.nativeClaudeProfileId,
         capturedAt: new Date().toISOString(),
         active: true,
       },
@@ -409,6 +428,7 @@ interface Options {
   /** Frozen profile while capture has not produced agentSession yet. */
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
   nativeCliLoginToken?: string;
   // One-shot boot-restore marker, minted on the leaf ONLY at hydration
   // (useTabs.loadPersisted) when the persisted pointer was `active` (agent
@@ -480,6 +500,7 @@ export function useTerminalSession({
   agentSession,
   nativeCodexProfileId,
   nativeClaudeProfileId,
+  nativeGrokProfileId,
   nativeCliLoginToken,
   bootResume,
   onResumeUnavailable,
@@ -2785,6 +2806,10 @@ export function useTerminalSession({
             agentSessionRef.current?.nativeClaudeProfileId ??
             agentSession?.nativeClaudeProfileId ??
             nativeClaudeProfileId,
+          nativeGrokProfileId:
+            agentSessionRef.current?.nativeGrokProfileId ??
+            agentSession?.nativeGrokProfileId ??
+            nativeGrokProfileId,
           nativeCliLoginToken: preparedNativeCliLoginToken,
           // Read-only mirror panes attach to a session whose canonical xterm
           // lives elsewhere. The mirror flag makes main's existing-session
@@ -2816,7 +2841,11 @@ export function useTerminalSession({
         // normal poller promotes this launching state to working/idle/blocked.
         if (resumeCommand !== null && startupCommandHandled) {
           const restoredRuntime = agentSessionRef.current?.runtime ?? agentSession?.runtime;
-          if (restoredRuntime === "claude" || restoredRuntime === "codex") {
+          if (
+            restoredRuntime === "claude" ||
+            restoredRuntime === "codex" ||
+            restoredRuntime === "grok"
+          ) {
             setAgentRunning(restoredRuntime);
           }
         }

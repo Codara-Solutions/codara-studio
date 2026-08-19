@@ -63,6 +63,15 @@ import {
 } from "./orchestration/claude-paths";
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
 import { resolveCodexTranscriptPath } from "./orchestration/codex-home";
+import {
+  discoverGrokSessionForCwd,
+  grokSessionTranscriptPath,
+  resolveSafeGrokTranscriptPath,
+} from "./orchestration/grok-sessions";
+import {
+  resolveFrozenNativeGrokProfile,
+  resolveNewNativeGrokProfile,
+} from "./orchestration/native-grok-profile-runtime";
 import { latestSessionStart } from "./agent-session-registry";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
@@ -389,10 +398,11 @@ import type {
   WorkerSessionRuntime,
   WorkerSessionSummary,
 } from "@shared/types";
+import { isPiSubscriptionProvider } from "../shared/agent-families";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
-  if (value === "claude" || value === "codex") return value;
-  throw new TypeError("Native CLI account runtime must be Claude or Codex.");
+  if (value === "claude" || value === "codex" || value === "grok") return value;
+  throw new TypeError("Native CLI account runtime must be Claude, Codex, or Grok.");
 }
 
 function nativeCliAccountProfileIdFromIpc(value: unknown): string {
@@ -586,7 +596,7 @@ const PI_ACCOUNT_IN_USE_MESSAGE =
   "This account is still in use by an active Cora run or worker. Finish or cancel that work before deleting it.";
 
 function piSubscriptionProviderFromIpc(value: unknown): PiSubscriptionProvider {
-  if (value === "anthropic" || value === "openai-codex") return value;
+  if (isPiSubscriptionProvider(value)) return value;
   throw new TypeError("Unsupported Pi subscription provider");
 }
 
@@ -1118,11 +1128,12 @@ export function registerIpc(): void {
       detectAgentRuntimes(false),
       loadSettings(),
     ]);
-    const isAvailable = (kind: "claude" | "codex") =>
+    const isAvailable = (kind: "claude" | "codex" | "grok") =>
       runtimes.some((r) => r.kind === kind && r.installed);
     return getSparkBuiltinStatus({
       claudeRuntimeAvailable: isAvailable("claude"),
       codexRuntimeAvailable: isAvailable("codex"),
+      grokRuntimeAvailable: isAvailable("grok"),
       autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
   });
@@ -2449,6 +2460,7 @@ export function registerIpc(): void {
         startupCommand?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
         nativeCliLoginToken?: string;
         mirror?: boolean;
         preserveSizeOnAttach?: boolean;
@@ -2484,6 +2496,7 @@ export function registerIpc(): void {
         projectPolicyMode,
         nativeCodexProfileId: args.nativeCodexProfileId,
         nativeClaudeProfileId: args.nativeClaudeProfileId,
+        nativeGrokProfileId: args.nativeGrokProfileId,
         mirror: args.mirror,
         preserveSizeOnAttach: args.preserveSizeOnAttach,
         webContents: e.sender,
@@ -2589,9 +2602,15 @@ export function registerIpc(): void {
         cwd: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
       },
     ): Promise<WorkerSessionSummary[]> => {
-      if (!args || (args.runtime !== "claude" && args.runtime !== "codex")) return [];
+      if (
+        !args ||
+        (args.runtime !== "claude" && args.runtime !== "codex" && args.runtime !== "grok")
+      ) {
+        return [];
+      }
       if (typeof args.cwd !== "string" || !args.cwd.trim()) return [];
       assertLocalWorkspace(args.cwd, "Worker session history");
       if (args.runtime === "claude") {
@@ -2608,6 +2627,19 @@ export function registerIpc(): void {
         return items.map((item) => ({
           ...item,
           nativeClaudeProfileId: execution.profileId,
+        }));
+      }
+      if (args.runtime === "grok") {
+        const execution =
+          args.nativeGrokProfileId === undefined
+            ? await resolveNewNativeGrokProfile()
+            : await resolveFrozenNativeGrokProfile(args.nativeGrokProfileId);
+        const items = await listWorkerSessions(args.runtime, args.cwd, {
+          grokHome: execution.env.GROK_HOME,
+        });
+        return items.map((item) => ({
+          ...item,
+          nativeGrokProfileId: execution.profileId,
         }));
       }
       const execution =
@@ -2629,19 +2661,23 @@ export function registerIpc(): void {
   handle(
     "agentSession:listAll",
     async (): Promise<WorkerSessionSummary[]> => {
-      const [execution, claudeExecution] = await Promise.all([
+      const [execution, claudeExecution, grokExecution] = await Promise.all([
         resolveNewNativeCodexProfile(),
         resolveNewNativeClaudeProfile(),
+        resolveNewNativeGrokProfile(),
       ]);
       const items = await listAllWorkerSessions({
         codexHome: execution.env.CODEX_HOME,
         claudeStateDir:
           claudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
+        grokHome: grokExecution.env.GROK_HOME,
       });
       return items.map((item) =>
         item.runtime === "codex"
           ? { ...item, nativeCodexProfileId: execution.profileId }
-          : { ...item, nativeClaudeProfileId: claudeExecution.profileId },
+          : item.runtime === "grok"
+            ? { ...item, nativeGrokProfileId: grokExecution.profileId }
+            : { ...item, nativeClaudeProfileId: claudeExecution.profileId },
       );
     },
   );
@@ -2659,6 +2695,14 @@ export function registerIpc(): void {
         return deleteWorkerSession(input, {
           claudeStateDir:
             execution.env.CLAUDE_CONFIG_DIR ?? null,
+        });
+      }
+      if (input.runtime === "grok") {
+        const execution = await resolveFrozenNativeGrokProfile(
+          input.nativeGrokProfileId,
+        );
+        return deleteWorkerSession(input, {
+          grokHome: execution.env.GROK_HOME,
         });
       }
       const execution = await resolveFrozenNativeCodexProfile(
@@ -2682,10 +2726,11 @@ export function registerIpc(): void {
     async (
       _e,
       args: {
-        runtime: "claude" | "codex";
+        runtime: "claude" | "codex" | "grok";
         paneId?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
         cwd: string;
         sinceMs: number;
         // Session ids already bound to OTHER panes. Two agents launched in the
@@ -2699,6 +2744,7 @@ export function registerIpc(): void {
       transcriptPath: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
     } | null> => {
       const since = args.sinceMs;
       const spawnDate = new Date(since);
@@ -2724,12 +2770,22 @@ export function registerIpc(): void {
         args.runtime === "claude"
           ? await resolveFrozenNativeClaudeProfile(nativeClaudeProfileId)
           : null;
+      const nativeGrokProfileId =
+        args.runtime === "grok"
+          ? args.nativeGrokProfileId ??
+            (args.paneId ? pty.nativeGrokProfileId(args.paneId) : undefined)
+          : undefined;
+      const nativeGrokExecution =
+        args.runtime === "grok"
+          ? await resolveFrozenNativeGrokProfile(nativeGrokProfileId)
+          : null;
       for (;;) {
         let found: {
           sessionId: string;
           transcriptPath: string;
           nativeCodexProfileId?: string;
           nativeClaudeProfileId?: string;
+          nativeGrokProfileId?: string;
         } | null = null;
         if (args.runtime === "claude") {
           const discovered = await discoverClaudeSessionForCwd(
@@ -2742,6 +2798,19 @@ export function registerIpc(): void {
             ? {
                 ...discovered,
                 nativeClaudeProfileId: nativeClaudeExecution?.profileId,
+              }
+            : null;
+        } else if (args.runtime === "grok") {
+          const discovered = await discoverGrokSessionForCwd(
+            args.cwd,
+            since,
+            exclude,
+            nativeGrokExecution?.env.GROK_HOME ?? null,
+          ).catch(() => null);
+          found = discovered
+            ? {
+                ...discovered,
+                nativeGrokProfileId: nativeGrokExecution?.profileId,
               }
             : null;
         } else {
@@ -2802,15 +2871,39 @@ export function registerIpc(): void {
     async (
       _e,
       args: {
-        runtime: "claude" | "codex";
+        runtime: "claude" | "codex" | "grok";
         sessionId: string;
         cwd: string;
         transcriptPath?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
       },
     ): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> => {
       if (!args.sessionId) return { exists: false };
+      if (args.runtime === "grok") {
+        const execution = await resolveFrozenNativeGrokProfile(
+          args.nativeGrokProfileId,
+        );
+        const expectedPath = grokSessionTranscriptPath(
+          args.cwd,
+          args.sessionId,
+          execution.env.GROK_HOME ?? null,
+        );
+        const path = await resolveSafeGrokTranscriptPath(
+          args.cwd,
+          args.sessionId,
+          execution.env.GROK_HOME ?? null,
+        ).catch(() => null);
+        if (!path) return { exists: false, transcriptPath: expectedPath };
+        const stat = await fs.stat(path).catch(() => null);
+        if (!stat) return { exists: false, transcriptPath: path };
+        return {
+          exists: true,
+          resumable: stat.size >= 64,
+          transcriptPath: path,
+        };
+      }
       if (args.runtime === "claude") {
         const execution = await resolveFrozenNativeClaudeProfile(
           args.nativeClaudeProfileId,

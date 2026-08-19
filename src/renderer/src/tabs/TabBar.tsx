@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
 import { buildDockIndex, canDockTab } from "./dock";
-import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
+import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import AutomationsStripButton from "../components/automations/AutomationsStripButton";
-import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
+import { CodaraMark, RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
+import { agentBrandTone } from "../lib/agent-brand";
+import { liveTerminalRuntime } from "./terminalAgentState";
 import { collectLeaves } from "./paneTree";
 import {
   TAB_DOCK_DRAG_MIME,
@@ -66,6 +68,7 @@ interface Props {
   // worker or resumes (or deletes) an earlier session.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
+  onNewGrokWorker: () => void;
   // Starts a new draft Cora chat — the ✦ Cora button's action (identical to
   // the chat.new chord). The new-chat welcome surface is Cora's landing page.
   onNewChat: () => void;
@@ -133,6 +136,7 @@ function TabBar({
   onNewPreview,
   onNewClaudeWorker,
   onNewCodexWorker,
+  onNewGrokWorker,
   onNewChat,
   onRenameChat,
   onCloseChat,
@@ -841,7 +845,7 @@ function TabBar({
         title="Cora: start a new chat"
         aria-label="New Cora chat"
       >
-        <SparkIcon size={11} />
+        <CodaraMark size={11} />
         <span>Cora</span>
       </button>
       {/* Icon-only Automations door, a first-class neighbor of ✦ Cora rather
@@ -906,6 +910,15 @@ function TabBar({
               onClick={() => {
                 setPickerOpen(false);
                 onNewCodexWorker();
+              }}
+            />
+            <PickerItem
+              label="Grok worker"
+              glyph={<RuntimeGlyph runtime="grok" />}
+              accent="grok"
+              onClick={() => {
+                setPickerOpen(false);
+                onNewGrokWorker();
               }}
             />
           </div>
@@ -1280,7 +1293,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
       title={tab.title}
     >
       <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
-        <SparkIcon size={13} />
+        <CodaraMark size={13} />
       </span>
       {editing ? (
         <input
@@ -1397,7 +1410,7 @@ function KindIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "chat") {
     return (
       <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
-        <SparkIcon size={13} />
+        <CodaraMark size={13} />
       </span>
     );
   }
@@ -1423,6 +1436,14 @@ function KindIcon({ tab }: { tab: Tab }) {
           }}
         >
           <PhoneIcon size={12} />
+        </span>
+      );
+    }
+    const workerRuntime = terminalWorkerRuntime(tab);
+    if (workerRuntime) {
+      return (
+        <span style={{ display: "inline-flex", flex: "0 0 14px", color: `var(--agent-${workerRuntime})` }}>
+          <RuntimeMark runtime={workerRuntime} size={13} />
         </span>
       );
     }
@@ -1652,7 +1673,7 @@ function PickerItem({
   );
 }
 
-type PickerAccent = "shell" | "claude" | "codex";
+type PickerAccent = "shell" | "claude" | "codex" | "grok";
 
 // Same three tints the pane toolbar's add-pane menu uses, so a Claude row
 // reads identically whether it is spawned from the strip or from a pane.
@@ -1661,25 +1682,18 @@ function pickerItemTone(accent: PickerAccent): {
   background: string;
   border: string;
 } {
-  if (accent === "claude") {
-    return {
-      color: "var(--accent)",
-      background: "color-mix(in oklch, var(--accent) 14%, transparent)",
-      border: "color-mix(in oklch, var(--accent) 30%, transparent)",
-    };
+  return agentBrandTone(accent);
+}
+
+function terminalWorkerRuntime(tab: TerminalTab): BrandRuntime | null {
+  for (const leaf of collectLeaves(tab.root)) {
+    // Only while the agent TUI is actually in the pane. A durable
+    // agentSession pointer is kept for resume after Claude exits, and must
+    // not keep the Claude mark on a shell tab.
+    const runtime = liveTerminalRuntime(leaf.worker);
+    if (runtime) return runtime;
   }
-  if (accent === "codex") {
-    return {
-      color: "var(--info)",
-      background: "color-mix(in oklch, var(--info) 14%, transparent)",
-      border: "color-mix(in oklch, var(--info) 30%, transparent)",
-    };
-  }
-  return {
-    color: "var(--ink-dim)",
-    background: "color-mix(in oklab, var(--ink) 7%, transparent)",
-    border: "color-mix(in oklab, var(--rule-soft) 90%, transparent)",
-  };
+  return null;
 }
 
 function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {

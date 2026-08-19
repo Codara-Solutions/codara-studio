@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join, resolve } from "node:path";
 import type { PiSubscriptionProvider } from "@shared/types";
+import { PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
 
 // Metadata-only account profile registry.
 //
@@ -20,7 +21,7 @@ const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const IDENTITY_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
-const PROVIDERS = new Set<PiSubscriptionProvider>(["anthropic", "openai-codex"]);
+const PROVIDERS = new Set<PiSubscriptionProvider>(PI_SUBSCRIPTION_PROVIDERS);
 const PROFILE_KEYS = new Set([
   "id",
   "provider",
@@ -31,7 +32,7 @@ const PROFILE_KEYS = new Set([
   "accountEmail",
 ]);
 const ROOT_KEYS = new Set(["version", "profiles", "defaults"]);
-const DEFAULT_KEYS = new Set<PiSubscriptionProvider>(["anthropic", "openai-codex"]);
+const DEFAULT_KEYS = new Set<PiSubscriptionProvider>(PI_SUBSCRIPTION_PROVIDERS);
 const MAX_ID_GENERATION_ATTEMPTS = 32;
 
 export interface PiAccountProfile {

@@ -23,6 +23,8 @@ function runtimeName(runtime: OpenWorker["runtime"]): string {
       return "Claude";
     case "codex":
       return "Codex";
+    case "grok":
+      return "Grok";
   }
 }
 
@@ -42,7 +44,7 @@ function walkLeaves(node: PaneNode, out: OpenWorker[], runs: RunState[]): void {
     // land at the shell, not the CLI agent, and quietly corrupt the line.
     if (worker.agentRunning === false) return;
     const runtime = worker.runtime;
-    if (runtime !== "claude" && runtime !== "codex") {
+    if (runtime !== "claude" && runtime !== "codex" && runtime !== "grok") {
       return;
     }
     const runLabel =

@@ -103,6 +103,7 @@ interface Props {
   agentSession?: TerminalAgentSession | null;
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
   nativeCliLoginToken?: string;
   // One-shot hydration marker: true only on the pane's first mount after app
   // boot when its agent was running at quit. Gates the restore in
@@ -147,6 +148,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       agentSession,
       nativeCodexProfileId,
       nativeClaudeProfileId,
+      nativeGrokProfileId,
       nativeCliLoginToken,
       bootResume,
       onResumeUnavailable,
@@ -228,6 +230,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       agentSession,
       nativeCodexProfileId,
       nativeClaudeProfileId,
+      nativeGrokProfileId,
       nativeCliLoginToken,
       bootResume,
       onResumeUnavailable,

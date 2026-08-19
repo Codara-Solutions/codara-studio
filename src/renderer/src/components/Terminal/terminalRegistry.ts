@@ -43,7 +43,7 @@ export interface ShareableStudioTerminal {
   workspaceId: string;
   title?: string;
   cwd?: string;
-  profile: "shell" | "claude" | "codex";
+  profile: "shell" | "claude" | "codex" | "grok";
 }
 
 type ListShareableStudioTerminalsFn = () => ShareableStudioTerminal[];

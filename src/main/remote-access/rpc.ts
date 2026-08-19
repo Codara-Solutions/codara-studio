@@ -138,7 +138,7 @@ export interface RemoteFleetOverviewProjection {
   agents: RemoteFleetAgentOverview[];
 }
 
-export type RemoteSubscriptionProvider = "anthropic" | "openai-codex";
+export type RemoteSubscriptionProvider = "anthropic" | "openai-codex" | "xai";
 export type RemoteSubscriptionStatus = "configured" | "unavailable" | "unknown";
 
 export interface RemoteSubscriptionUsage {
@@ -157,7 +157,7 @@ export interface RemoteSubscriptionProfile {
   usage?: RemoteSubscriptionUsage;
 }
 
-export type RemoteNativeCliAccountRuntime = "claude" | "codex";
+export type RemoteNativeCliAccountRuntime = "claude" | "codex" | "grok";
 export type RemoteNativeCliAccountStatus =
   | "connected"
   | "sign_in_required"
@@ -749,7 +749,7 @@ export interface RemoteAutomationDetail extends RemoteAutomationInfo {
 }
 
 export interface RemoteWorkerSessionInfo {
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   sessionId: string;
   title: string;
   updatedAt: string;
@@ -1269,11 +1269,11 @@ export interface RemoteRpcServices {
   setOpenAiFastMode?(input: { enabled: boolean }): Promise<void>;
   listWorkerSessions?(input: {
     workspaceId: string;
-    runtime: "claude" | "codex";
+    runtime: "claude" | "codex" | "grok";
   }): Promise<RemoteWorkerSessionInfo[]>;
   deleteWorkerSession?(input: {
     workspaceId: string;
-    runtime: "claude" | "codex";
+    runtime: "claude" | "codex" | "grok";
     sessionId: string;
     memoryScope: RemoteWorkerSessionMemoryScope;
   }): Promise<RemoteWorkerSessionDeleteResult>;

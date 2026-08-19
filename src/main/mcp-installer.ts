@@ -1,5 +1,5 @@
 // codara-studio MCP auto-installer — registers Codara's single built-in stdio
-// MCP server in the user-scope Claude and Codex configs so every sub-agent
+// MCP server in the user-scope Claude, Codex, and Grok configs so every sub-agent
 // Codara spawns (including verifier passes) can drive the actual <preview> tab
 // and open/steer agent-owned terminal tabs inside Codara. The server lives at
 // resources/codara-studio-mcp/server.js and proxies JSON-RPC calls back to
@@ -32,7 +32,7 @@
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import type {
   SparkBuiltinActionResult,
@@ -46,6 +46,7 @@ import { resolveBinary } from "./binary-resolver";
 import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
+import { defaultPersonalGrokHomeDir } from "./orchestration/grok-cli-account-profiles";
 import { codaraHome } from "./codara-home";
 
 // The merged built-in server. Was two servers (cora-preview + cora-orchestrator)
@@ -158,6 +159,8 @@ const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");
 export interface CodexMcpHomeOptions {
   /** Exact resolved native Codex home. Omission preserves personal-home use. */
   codexHome?: string | null;
+  /** Exact resolved native Grok home. Omission preserves personal-home use. */
+  grokHome?: string | null;
 }
 
 export interface CodexMcpConfigTarget {
@@ -170,6 +173,20 @@ export function resolveCodexMcpConfigTarget(
 ): CodexMcpConfigTarget {
   const paths = resolveCodexHomePaths(codexHome);
   return { codexHome: paths.homeDir, configPath: paths.configPath };
+}
+
+export interface GrokMcpConfigTarget {
+  grokHome: string;
+  configPath: string;
+}
+
+export function resolveGrokMcpConfigTarget(
+  grokHome?: string | null,
+): GrokMcpConfigTarget {
+  const home = grokHome && grokHome.trim()
+    ? resolve(grokHome)
+    : defaultPersonalGrokHomeDir();
+  return { grokHome: home, configPath: join(home, "config.toml") };
 }
 
 const CODEX_BLOCK_START = "# >>> SPARK_AGENT_BUILTIN_MCP";
@@ -248,6 +265,7 @@ export async function installSparkPreviewMcp(
   await Promise.all([
     installForClaude(),
     installForCodex(false, undefined, options.codexHome),
+    installForGrok(false, undefined, options.grokHome),
   ]);
 }
 
@@ -259,12 +277,13 @@ export async function installSparkPreviewMcp(
 // removed until the next launch or an explicit install.
 export async function repairSparkBuiltinEntries(
   input: CodexMcpHomeOptions = {},
-): Promise<{ claude: boolean; codex: boolean }> {
-  const [claude, codex] = await Promise.all([
+): Promise<{ claude: boolean; codex: boolean; grok: boolean }> {
+  const [claude, codex, grok] = await Promise.all([
     installForClaude(false, { repairOnly: true }),
     installForCodex(false, { repairOnly: true }, input.codexHome),
+    installForGrok(false, { repairOnly: true }, input.grokHome),
   ]);
-  return { claude, codex };
+  return { claude, codex, grok };
 }
 
 // Boot-time installer. Design rule #3 (stay conservative) says the auto-
@@ -276,13 +295,15 @@ export async function repairSparkBuiltinEntries(
 // createIfMissing so the entry lands the first time. The never-overwrite-a-
 // user-entry guards inside installForClaude/installForCodex still hold.
 export async function installSparkPreviewMcpAtBoot(): Promise<void> {
-  const [claudeBin, codexBin] = await Promise.all([
+  const [claudeBin, codexBin, grokBin] = await Promise.all([
     resolveBinary("claude").catch(() => null),
     resolveBinary("codex").catch(() => null),
+    resolveBinary("grok").catch(() => null),
   ]);
   await Promise.all([
     installForClaude(Boolean(claudeBin)),
     installForCodex(Boolean(codexBin)),
+    installForGrok(Boolean(grokBin)),
   ]);
 }
 
@@ -291,6 +312,13 @@ export async function installSparkPreviewMcpForCodex(
   options: CodexMcpHomeOptions = {},
 ): Promise<void> {
   await installForCodex(createIfMissing, undefined, options.codexHome);
+}
+
+export async function installSparkPreviewMcpForGrok(
+  createIfMissing = false,
+  options: CodexMcpHomeOptions = {},
+): Promise<void> {
+  await installForGrok(createIfMissing, undefined, options.grokHome);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +504,57 @@ async function installForCodex(
     return true;
   } catch (err) {
     console.warn("[mcp-installer] failed to write the selected Codex config:", err);
+    return false;
+  }
+}
+
+async function installForGrok(
+  createIfMissing = false,
+  options?: { repairOnly?: boolean },
+  grokHome?: string | null,
+): Promise<boolean> {
+  if (isSandboxedHome()) return false;
+  let target = resolveGrokMcpConfigTarget(grokHome);
+  const dirExists = directoryExists(target.grokHome);
+  if (!dirExists && !createIfMissing) return false;
+  if (!dirExists) {
+    try {
+      await fs.mkdir(target.grokHome, { recursive: true, mode: 0o700 });
+      target = resolveGrokMcpConfigTarget(grokHome);
+    } catch (err) {
+      console.warn("[mcp-installer] could not create the selected Grok home:", err);
+      return false;
+    }
+  }
+
+  let existing = "";
+  try {
+    existing = await fs.readFile(target.configPath, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("[mcp-installer] could not read the selected Grok config:", err);
+      return false;
+    }
+  }
+
+  const section = classifyCodexBuiltinSection(existing);
+  if (section === "user") return false;
+
+  const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
+  if (options?.repairOnly && !managedBlockPresent && section !== "stale") return false;
+
+  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
+  const block = renderCodexBlock();
+  const base = stripped.trimEnd();
+  const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
+  if (next === existing) return false;
+
+  try {
+    const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
+    await writeFileAtomic(writePath, next, { mode: 0o600 });
+    return true;
+  } catch (err) {
+    console.warn("[mcp-installer] failed to write the selected Grok config:", err);
     return false;
   }
 }
@@ -719,6 +798,7 @@ export function isSparkPreviewMcpAvailable(input: {
   if (input.autoInstallEnabled) {
     if (existsSync(CLAUDE_USER_CONFIG)) return true;
     if (existsSync(codexTarget.codexHome)) return true;
+    if (existsSync(resolveGrokMcpConfigTarget().grokHome)) return true;
   }
   return detectUserSparkEntry(input.cwd, input.codexHome);
 }
@@ -740,8 +820,14 @@ function detectUserSparkEntry(
   for (const path of jsonCandidates) {
     if (jsonHasServer(path, SERVER_NAME)) return true;
   }
-  const tomlCandidates = [resolveCodexMcpConfigTarget(codexHome).configPath];
-  if (cwd) tomlCandidates.push(join(cwd, ".codex", "config.toml"));
+  const tomlCandidates = [
+    resolveCodexMcpConfigTarget(codexHome).configPath,
+    resolveGrokMcpConfigTarget().configPath,
+  ];
+  if (cwd) {
+    tomlCandidates.push(join(cwd, ".codex", "config.toml"));
+    tomlCandidates.push(join(cwd, ".grok", "config.toml"));
+  }
   for (const path of tomlCandidates) {
     if (tomlHasUserCodaraStudioSectionAt(path)) return true;
   }
@@ -888,15 +974,18 @@ function builtinMeta(autoInstallEnabled: boolean): SparkBuiltinMeta[] {
 export async function getSparkBuiltinStatus(input: {
   claudeRuntimeAvailable: boolean;
   codexRuntimeAvailable: boolean;
+  grokRuntimeAvailable?: boolean;
   autoInstallEnabled: boolean;
   codexHome?: string | null;
+  grokHome?: string | null;
 }): Promise<SparkBuiltinMcpStatus[]> {
   const metas = builtinMeta(input.autoInstallEnabled);
   return Promise.all(
     metas.map(async (meta) => {
-      const [claude, codex] = await Promise.all([
+      const [claude, codex, grok] = await Promise.all([
         detectClaudeBuiltinState(meta.serverName, input.claudeRuntimeAvailable),
         detectCodexBuiltinState(input.codexRuntimeAvailable, input.codexHome),
+        detectGrokBuiltinState(Boolean(input.grokRuntimeAvailable), input.grokHome),
       ]);
       return {
         id: meta.id,
@@ -907,6 +996,7 @@ export async function getSparkBuiltinStatus(input: {
         autoManaged: meta.autoManaged,
         claude,
         codex,
+        grok,
       } satisfies SparkBuiltinMcpStatus;
     }),
   );
@@ -919,6 +1009,7 @@ export async function installSparkBuiltin(
 ): Promise<SparkBuiltinActionResult> {
   try {
     if (runtime === "claude") await installForClaude(true);
+    else if (runtime === "grok") await installForGrok(true, undefined, options.grokHome);
     else await installForCodex(true, undefined, options.codexHome);
     return { ok: true };
   } catch (err) {
@@ -933,6 +1024,7 @@ export async function uninstallSparkBuiltin(
 ): Promise<SparkBuiltinActionResult> {
   try {
     if (runtime === "claude") return await uninstallManagedClaudeServer(SERVER_NAME);
+    if (runtime === "grok") return await uninstallGrokBuiltinBlock(options.grokHome);
     return await uninstallCodexBuiltinBlock(options.codexHome);
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -958,6 +1050,25 @@ async function detectCodexBuiltinState(
   codexHome?: string | null,
 ): Promise<SparkBuiltinRuntimeStatus> {
   const target = resolveCodexMcpConfigTarget(codexHome);
+  let existing = "";
+  if (existsSync(target.configPath)) {
+    try {
+      existing = await fs.readFile(target.configPath, "utf8");
+    } catch {
+      existing = "";
+    }
+  }
+  if (hasUserCodaraStudioSection(existing)) return { state: "user-managed", configPath: target.configPath };
+  const managed = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
+  if (managed) return { state: "installed", configPath: target.configPath };
+  return { state: runtimeAvailable ? "available" : "unavailable", configPath: target.configPath };
+}
+
+async function detectGrokBuiltinState(
+  runtimeAvailable: boolean,
+  grokHome?: string | null,
+): Promise<SparkBuiltinRuntimeStatus> {
+  const target = resolveGrokMcpConfigTarget(grokHome);
   let existing = "";
   if (existsSync(target.configPath)) {
     try {
@@ -1064,6 +1175,35 @@ async function uninstallCodexBuiltinBlock(
   }
 }
 
+async function uninstallGrokBuiltinBlock(
+  grokHome?: string | null,
+): Promise<SparkBuiltinActionResult> {
+  const target = resolveGrokMcpConfigTarget(grokHome);
+  if (!existsSync(target.configPath)) return { ok: true };
+  let existing: string;
+  try {
+    existing = await fs.readFile(target.configPath, "utf8");
+  } catch (err) {
+    return { ok: false, error: `Could not read ~/.grok/config.toml: ${(err as Error).message}` };
+  }
+  const section = classifyCodexBuiltinSection(existing);
+  if (section === "user") {
+    return {
+      ok: false,
+      error: `A user-defined ${SERVER_NAME} section exists in config.toml; Codara won't remove it.`,
+    };
+  }
+  const next = stripAllManagedBlocks(existing, { sweepBuiltinName: section === "stale" });
+  if (next === existing) return { ok: true };
+  try {
+    const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
+    await writeFileAtomic(writePath, next, { mode: 0o600 });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `Could not write ~/.grok/config.toml: ${(err as Error).message}` };
+  }
+}
+
 // Test/diagnostic surface.
 export const __test = {
   SERVER_NAME,
@@ -1082,6 +1222,7 @@ export const __test = {
   LEGACY_CODEX_TABLE_NAMES,
   renderClaudeEntry,
   renderCodexBlock,
+  resolveGrokMcpConfigTarget,
   hasUserCodaraStudioSection,
   stripAllManagedBlocks,
   matchesCurrent,

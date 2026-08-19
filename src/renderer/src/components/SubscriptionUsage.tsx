@@ -116,6 +116,11 @@ export function UsageEntryBody({
 }) {
   const connected = usage.status === "ok";
   const temporarilyThrottled = usage.message?.startsWith("Claude temporarily throttled") === true;
+  // A connected account with no windows is not broken — SuperGrok publishes
+  // no client-readable quota. Render nothing rather than a red empty report.
+  if (connected && usage.windows.length === 0 && !usage.limitReached) {
+    return null;
+  }
   return (
     <div style={{ display: "grid", gap: compact ? 4 : 7 }}>
       {connected && usage.windows.length > 0 ? (
@@ -131,7 +136,7 @@ export function UsageEntryBody({
             <UsageBar key={usageWindow.id} window={usageWindow} compact={compact} />
           ))}
         </div>
-      ) : (
+      ) : usage.status === "not_connected" && compact ? null : (
         <span
           style={{
             color:
@@ -147,10 +152,7 @@ export function UsageEntryBody({
         >
           {usage.status === "not_connected"
             ? "Not connected — reconnect this account to see its limits."
-            : usage.message ||
-              (connected
-                ? "This provider reported no usage windows."
-                : "Could not read usage limits.")}
+            : usage.message || "Could not read usage limits."}
         </span>
       )}
 

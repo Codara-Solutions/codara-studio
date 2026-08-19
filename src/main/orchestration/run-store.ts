@@ -7234,11 +7234,16 @@ async function rerouteUnavailableAgentRuntimes(
   const available = diagnostics.filter(runtimeAssignable);
   const availableKinds = new Set(available.map((runtime) => runtime.kind));
   const fallback = available.find((runtime) => runtime.kind === "codex")
-    ?? available.find((runtime) => runtime.kind === "claude");
+    ?? available.find((runtime) => runtime.kind === "claude")
+    ?? available.find((runtime) => runtime.kind === "grok");
   const rerouted: RuntimeReroute[] = [];
 
   const rewrite = (runtimePreference: WorkerRuntime, modelHint?: string, effortHint?: WorkerTask["effortHint"]) => {
-    if (runtimePreference !== "claude" && runtimePreference !== "codex") {
+    if (
+      runtimePreference !== "claude" &&
+      runtimePreference !== "codex" &&
+      runtimePreference !== "grok"
+    ) {
       return { runtimePreference, modelHint, effortHint };
     }
     if (availableKinds.has(runtimePreference)) {
@@ -7752,7 +7757,7 @@ const STANDING_TERMINAL_EFFORTS = new Set(["low", "medium", "high", "xhigh", "ma
 // (see src/main/providers/) so adding a new CLI later only requires a new
 // provider file.
 function buildStandingTerminalCommand(
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "grok",
   model?: string,
   effort?: string,
 ): string {
@@ -7773,15 +7778,13 @@ function buildStandingTerminalCommand(
     effort: effectiveEffort,
   });
 
-  // Claude and Codex bin names are unique on PATH and don't collide with
-  // PowerShell aliases, so the head is just the runtime name.
-  const head = runtime === "codex" ? "codex" : "claude";
+  const head = provider.binaryName;
   const tail = providerArgs.map((arg) => quoteShellArg(arg));
   return [head, ...tail].join(" ");
 }
 
-function standingTerminalTitle(runtime: "claude" | "codex", model?: string): string {
-  const base = runtime === "codex" ? "Codex" : "Claude";
+function standingTerminalTitle(runtime: "claude" | "codex" | "grok", model?: string): string {
+  const base = runtime === "codex" ? "Codex" : runtime === "grok" ? "Grok" : "Claude";
   return model ? `${base} ${model}` : base;
 }
 
@@ -7791,7 +7794,8 @@ function standingTerminalTitle(runtime: "claude" | "codex", model?: string): str
 function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
+    const label =
+      terminal.runtime === "codex" ? "Codex" : terminal.runtime === "grok" ? "Grok" : "Claude";
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${n} ${label}`);
@@ -7806,7 +7810,8 @@ function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string
 function spawnedTerminalsTitle(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
+    const label =
+      terminal.runtime === "codex" ? "Codex" : terminal.runtime === "grok" ? "Grok" : "Claude";
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${label} x${n}`);
@@ -12683,7 +12688,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // as ordinary Cora workers. shell/manual are human-assisted escape hatches
   // that keep a plain pty pane instead.
   const isPiWorker =
-    task.runtimePreference === "claude" || task.runtimePreference === "codex";
+    task.runtimePreference === "claude" ||
+    task.runtimePreference === "codex" ||
+    task.runtimePreference === "grok";
   const piWorkerModel = isPiWorker ? piModelForWorker(task, isAutomationRun) : undefined;
   const command = isPiWorker
     ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
@@ -14631,7 +14638,9 @@ async function computeStepVerifierFacts(
       changedFiles = true;
       if (
         !implementerRuntime &&
-        (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+        (task.runtimePreference === "claude" ||
+        task.runtimePreference === "codex" ||
+        task.runtimePreference === "grok")
       ) {
         implementerRuntime = task.runtimePreference;
       }

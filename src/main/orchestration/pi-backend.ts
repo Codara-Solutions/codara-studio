@@ -1,3 +1,4 @@
+import { subscriptionForModelId } from "../../shared/agent-families";
 import type {
   ChatMode,
   CoraExecutionPolicy,
@@ -77,9 +78,9 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 export function piProviderForModel(model: string): PiSubscriptionProvider {
-  if (model.startsWith("claude-")) return "anthropic";
-  if (model.startsWith("gpt-")) return "openai-codex";
-  throw new Error(`Pi subscription backend does not support model ${model}`);
+  const provider = subscriptionForModelId(model);
+  if (!provider) throw new Error(`Pi subscription backend does not support model ${model}`);
+  return provider;
 }
 
 // resolveChatBackendConfig already collapses every chat to auto or automation,

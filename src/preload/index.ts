@@ -908,6 +908,7 @@ const api = {
       startupCommand?: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
       // Opaque, one-shot login handle. Main resolves the direct executable,
       // argv, config home, and exact child environment.
       nativeCliLoginToken?: string;
@@ -928,6 +929,7 @@ const api = {
       attached?: boolean;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
     }> =>
       ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
@@ -992,6 +994,7 @@ const api = {
       cwd: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
     }): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:list", args),
     listAll: (): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:listAll"),
     delete: (input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> =>
@@ -1000,10 +1003,11 @@ const api = {
     // pane, by finding the transcript it started writing for this cwd. Resolves
     // null on timeout.
     capture: (args: {
-      runtime: "claude" | "codex";
+      runtime: "claude" | "codex" | "grok";
       paneId?: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
       cwd: string;
       sinceMs: number;
       // Session ids already bound to other panes — discovery must never rebind
@@ -1014,6 +1018,7 @@ const api = {
       transcriptPath: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
     } | null> =>
       ipcRenderer.invoke("agentSession:capture", args),
     // Fire-and-forget diagnostic trail: restore decisions land in
@@ -1025,12 +1030,13 @@ const api = {
     // (has a real user message; stillborn transcripts make `--resume` refuse)
     // — before resuming it.
     probe: (args: {
-      runtime: "claude" | "codex";
+      runtime: "claude" | "codex" | "grok";
       sessionId: string;
       cwd: string;
       transcriptPath?: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
     }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
     // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
@@ -1045,7 +1051,7 @@ const api = {
     // Repair a Claude transcript whose tail a sleep/crash truncated, so
     // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
     repairTranscript: (args: {
-      runtime: "claude" | "codex";
+      runtime: "claude" | "codex" | "grok";
       sessionId: string;
       cwd: string;
       nativeClaudeProfileId?: string;
@@ -1094,7 +1100,7 @@ const api = {
         tabId: string;
         tabTitle: string;
         excluded: boolean;
-        runtimeHint?: "claude" | "codex" | null;
+        runtimeHint?: "claude" | "codex" | "grok" | null;
       }>;
     }): Promise<TerminalAgentStatePayload[]> => ipcRenderer.invoke("terminalNotify:sync", input),
     // Level-triggered recovery for renderer reload/cold hydration. Live events

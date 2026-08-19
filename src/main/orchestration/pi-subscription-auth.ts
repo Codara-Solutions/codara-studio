@@ -13,6 +13,7 @@ import type {
   PiSubscriptionProvider,
 } from "@shared/types";
 
+import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS, isPiSubscriptionProvider } from "../../shared/agent-families";
 import { resolveCodaraPiRuntime } from "./pi-runtime-electron";
 import { CODARA_PI_VERSION } from "./pi-runtime";
 import { installPinnedPiRuntime, isPinnedPiRuntimeInstalling } from "./pi-runtime-install";
@@ -122,16 +123,22 @@ const PROVIDER_META: Record<
   { label: string; model: string; oauthModule: string; exportName: string }
 > = {
   "openai-codex": {
-    label: "ChatGPT Plus / Pro",
+    label: familyForSubscription("openai-codex").planLabel,
     model: "GPT-5.6 Sol",
     oauthModule: "openai-codex.js",
     exportName: "openaiCodexOAuth",
   },
   anthropic: {
-    label: "Claude Pro / Max",
+    label: familyForSubscription("anthropic").planLabel,
     model: "Fable 5",
     oauthModule: "anthropic.js",
     exportName: "anthropicOAuth",
+  },
+  xai: {
+    label: familyForSubscription("xai").planLabel,
+    model: "Grok 4.5",
+    oauthModule: "xai.js",
+    exportName: "xaiOAuth",
   },
 };
 
@@ -150,7 +157,7 @@ function nonEmptyString(value: unknown): value is string {
 }
 
 function providerFrom(value: unknown): PiSubscriptionProvider {
-  if (value === "anthropic" || value === "openai-codex") return value;
+  if (isPiSubscriptionProvider(value)) return value;
   throw new Error("Unsupported Pi subscription provider");
 }
 
@@ -307,10 +314,9 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
       ...(email ? { email } : {}),
     };
   });
-  const connections = [
-    compatibilityConnection("openai-codex", profiles),
-    compatibilityConnection("anthropic", profiles),
-  ];
+  const connections = PI_SUBSCRIPTION_PROVIDERS.map((provider) =>
+    compatibilityConnection(provider, profiles),
+  );
   return {
     runtimeInstalled: runtimeResult.installed,
     runtimeVersion: runtimeResult.version,

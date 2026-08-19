@@ -47,7 +47,7 @@ function personalConfigFallbackLines(run: RunState): string[] {
   return [
     "",
     "## PERSONAL CONFIG NOT APPLICABLE",
-    `Any user-level \`~/.claude/CLAUDE.md\` policies you may have picked up (for example subagent model/effort routing policies that name custom agents like advisor, adversary, or fable-coder), and likewise any global \`~/.codex/AGENTS.md\` personal instructions, are the machine owner's personal settings and DO NOT apply in this Cora-spawned session. Ignore them. Do not attempt to invoke personally-defined custom subagents, they do not exist here. ${projectGuidance}`,
+    `Any user-level \`~/.claude/CLAUDE.md\` policies you may have picked up (for example subagent model/effort routing policies that name custom agents like advisor, adversary, or fable-coder), and likewise any global \`~/.codex/AGENTS.md\` or \`~/.grok/AGENTS.md\` personal instructions, are the machine owner's personal settings and DO NOT apply in this Cora-spawned session. Ignore them. Do not attempt to invoke personally-defined custom subagents, they do not exist here. ${projectGuidance}`,
   ];
 }
 
@@ -277,7 +277,11 @@ export function shouldProvisionWorkerMailbox(
 // automation lifecycle pair for loom workers) in-process, no CLI config file
 // involved. Automation runs use the same harness.
 function usesPiWorkerHarness(task: WorkerTask): boolean {
-  return task.runtimePreference === "claude" || task.runtimePreference === "codex";
+  return (
+    task.runtimePreference === "claude" ||
+    task.runtimePreference === "codex" ||
+    task.runtimePreference === "grok"
+  );
 }
 
 // Transport-aware availability of the codara-studio preview/terminal tools.
@@ -298,7 +302,9 @@ function sparkPreviewToolsAvailable(
   if (
     run.executionMode === "direct" &&
     Boolean(run.automationId) &&
-    (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+    (task.runtimePreference === "claude" ||
+      task.runtimePreference === "codex" ||
+      task.runtimePreference === "grok")
   ) {
     return true;
   }
@@ -354,6 +360,21 @@ function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
       lines.push(
         "- Use worktrees only for explicitly isolated experiments or disjoint write scopes. Do not merge, commit, push, or overwrite another worker's changes unless this task explicitly requires it.",
       );
+    }
+    return lines;
+  }
+
+  if (task.runtimePreference === "grok") {
+    const lines = [
+      "Cora explicitly permits Grok subagents for this task when they are bounded, useful, and mostly read-only.",
+      "- Good uses: codebase exploration, tests/log triage, independent review, summarizing large files, or checking a narrow hypothesis.",
+      "- Give each subagent a concrete job, clear limits, and the exact return format you need. Wait for the result and synthesize disagreements yourself.",
+      "- Do not spawn subagents for every small task. Keep the main path local when the next action depends on the answer.",
+      "- Avoid write-heavy parallel subagents unless scopes are isolated and disjoint. Cora owns top-level parallelism and cross-worker coordination.",
+      "- If you use subagents, your final report must list each subagent's purpose, scope, and distilled findings.",
+    ];
+    if (isVerifier) {
+      lines.push("- This is a verifier task: subagents must be read-only and must not edit files or mutate repository state.");
     }
     return lines;
   }

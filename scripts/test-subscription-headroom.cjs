@@ -530,12 +530,13 @@ async function main() {
   );
   check(
     "verifier reroute health check also avoids a limit-reached provider",
-    socketSource.includes("!runtimeLimitReached(headroomSummary, opposite)"),
+    socketSource.includes("!runtimeLimitReached(headroomSummary, runtime)"),
   );
   check(
     "spawn reroute keys off the decisive preference and exempts fable pins",
     socketSource.includes("preferredRuntimeForHeadroom(headroomSummary)") &&
-      /headroomReroute &&\s*\n\s*!verifierPeerOverride &&\s*\n\s*!resumePlan &&\s*\n\s*effectiveRuntime === headroomReroute\.from &&\s*\n\s*!\/fable\/i\.test\(effectiveModelHint \?\? ""\)/.test(
+      socketSource.includes("constrainedRuntimesForHeadroom") &&
+      /headroomReroute &&\s*\n\s*!verifierPeerOverride &&\s*\n\s*!resumePlan &&\s*\n\s*isAgentRuntimeKind\(effectiveRuntime\) &&\s*\n\s*headroomReroute\.from\.includes\(effectiveRuntime\) &&\s*\n\s*!\/fable\/i\.test\(effectiveModelHint \?\? ""\)/.test(
         socketSource,
       ),
   );

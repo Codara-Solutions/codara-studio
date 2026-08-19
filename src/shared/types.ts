@@ -1,3 +1,11 @@
+import type {
+  AgentRuntimeKind as AgentFamilyRuntime,
+  NativeCliAccountRuntime as NativeCliAccountFamily,
+  PiSubscriptionProvider as PiSubscriptionFamily,
+  SparkBuiltinRuntime as SparkBuiltinFamily,
+  WorkerSessionRuntime as WorkerSessionFamily,
+} from "./agent-families";
+
 export type ShellId = string;
 
 export interface ShellInfo {
@@ -601,7 +609,7 @@ export interface AppSettings {
 // runtime. Subscription credentials deliberately live outside AppSettings in
 // Pi's private auth.json; these shapes expose status and the interactive OAuth
 // ceremony without ever crossing IPC with access or refresh tokens.
-export type PiSubscriptionProvider = "anthropic" | "openai-codex";
+export type PiSubscriptionProvider = PiSubscriptionFamily;
 
 export interface PiSubscriptionConnection {
   provider: PiSubscriptionProvider;
@@ -704,7 +712,7 @@ export interface PiSubscriptionOverview {
 // accountFingerprint digest and the account's own email address below — never
 // as a raw account id, and never onto a phone: the remote projections in
 // src/main/remote-access strip the email.
-export type NativeCliAccountRuntime = "claude" | "codex";
+export type NativeCliAccountRuntime = NativeCliAccountFamily;
 
 export type NativeCliAccountConnectionStatus =
   | "connected"
@@ -1293,7 +1301,7 @@ export interface TerminalAgentStatePayload {
   workspaceId: string;
   tabId: string;
   paneId: string;
-  runtime: "claude" | "codex" | null;
+  runtime: AgentFamilyRuntime | null;
   state: RuntimeState;
 }
 
@@ -1421,9 +1429,9 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
   value: AppPreferences[K];
 }
 
-export type AgentRuntimeKind = "claude" | "codex";
+export type AgentRuntimeKind = AgentFamilyRuntime;
 
-export type WorkerSessionRuntime = "claude" | "codex";
+export type WorkerSessionRuntime = WorkerSessionFamily;
 
 // Lightweight metadata read from the CLI-owned transcript stores for the
 // manual-worker session picker. The transcript itself never crosses IPC.
@@ -1433,6 +1441,8 @@ export interface WorkerSessionSummary {
   nativeClaudeProfileId?: string;
   /** Frozen native Codex account home. Undefined is legacy/personal. */
   nativeCodexProfileId?: string;
+  /** Frozen native Grok Build account home. Undefined is legacy/personal. */
+  nativeGrokProfileId?: string;
   sessionId: string;
   title: string;
   // First real user question, set when `title` is Claude Code's generated
@@ -1453,6 +1463,8 @@ export interface DeleteWorkerSessionInput {
   nativeClaudeProfileId?: string;
   /** Home that owns transcriptPath. Undefined is legacy/personal. */
   nativeCodexProfileId?: string;
+  /** Frozen native Grok Build account. Undefined is legacy/personal. */
+  nativeGrokProfileId?: string;
   sessionId: string;
   cwd: string;
   transcriptPath: string;
@@ -1553,9 +1565,9 @@ export interface AgentSyncResult {
 }
 
 export type AgentAssetKind = "mcp" | "skill";
-export type AgentAssetRuntime = "claude" | "codex" | "shared";
+export type AgentAssetRuntime = AgentFamilyRuntime | "shared";
 export type AgentAssetScope = "user" | "workspace";
-export type AgentAssetCompatibility = "both" | "claude" | "codex" | "unknown";
+export type AgentAssetCompatibility = "both" | "claude" | "codex" | "grok" | "unknown";
 
 export interface AgentAssetInventoryItem {
   id: string;
@@ -1650,7 +1662,7 @@ export interface AgentAssetInstallResult {
 // third-party MCPs the user wires up — with per-runtime install controls.
 
 export type SparkBuiltinMcpId = "codara-studio";
-export type SparkBuiltinRuntime = "claude" | "codex";
+export type SparkBuiltinRuntime = SparkBuiltinFamily;
 
 // Per-runtime install state for a built-in:
 //  - "installed":    a Codara-managed entry is present (we can uninstall it).
@@ -1685,6 +1697,7 @@ export interface SparkBuiltinMcpStatus {
   autoManaged: boolean;
   claude: SparkBuiltinRuntimeStatus;
   codex: SparkBuiltinRuntimeStatus;
+  grok: SparkBuiltinRuntimeStatus;
 }
 
 export interface SparkBuiltinActionResult {
@@ -2134,7 +2147,7 @@ export type StepStatus =
 // replan downstream steps using prior worker reports as evidence.
 export type StepKind = "worker_batch" | "brake";
 
-export type WorkerRuntime = "claude" | "codex" | "shell" | "manual";
+export type WorkerRuntime = AgentFamilyRuntime | "shell" | "manual";
 
 export type WorkerTaskStatus =
   | "created"
@@ -2209,7 +2222,7 @@ export type RuntimeState =
 // pointers are deactivated only for confirmed exits; heuristic loss still
 // clears the cosmetic worker chip but must not disable restart restoration.
 export interface TerminalAgentForegroundState {
-  runtime: "claude" | "codex" | null;
+  runtime: AgentFamilyRuntime | null;
   running: boolean;
   exitConfirmed?: boolean;
 }
@@ -3373,6 +3386,8 @@ export interface WorkerAttempt {
   nativeCodexProfileId?: string;
   /** Concrete native Claude CLI account for a native Claude attempt. */
   nativeClaudeProfileId?: string;
+  /** Concrete native Grok Build account for a native Grok attempt. */
+  nativeGrokProfileId?: string;
   command?: string;
   cwd: string;
   status: WorkerAttemptStatus;
@@ -3494,6 +3509,8 @@ export interface WorkerTaskEnvelope {
   nativeCodexProfileId?: string;
   /** Frozen native Claude account for CLI/SDK-backed attempts. */
   nativeClaudeProfileId?: string;
+  /** Frozen native Grok Build account for CLI-backed attempts. */
+  nativeGrokProfileId?: string;
   cwd: string;
   executionDisabled: true;
   task: WorkerTask;
@@ -3635,6 +3652,8 @@ export interface SparkCall {
   nativeCodexProfileId?: string;
   /** Frozen native Claude CLI profile for this manager call. */
   nativeClaudeProfileId?: string;
+  /** Frozen native Grok Build CLI profile for this manager call. */
+  nativeGrokProfileId?: string;
   status: "started" | "completed" | "failed";
   /** Ordered user-message ids frozen onto this manager turn before startup. */
   inputMessageIds?: string[];
