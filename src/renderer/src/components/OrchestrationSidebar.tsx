@@ -162,7 +162,8 @@ export default function OrchestrationSidebar({
           (chatConfig.backend !== undefined ||
             chatConfig.model !== undefined ||
             chatConfig.mode !== undefined ||
-            chatConfig.effort !== undefined),
+            chatConfig.effort !== undefined ||
+            chatConfig.profileId !== undefined),
       );
       // A board-minted run that never had a conversation is reused for the
       // first send instead of minting a sibling chat: the welcome the user is
@@ -182,6 +183,7 @@ export default function OrchestrationSidebar({
           chatModel: chatConfig?.model,
           chatMode: chatConfig?.mode,
           chatEffort: chatConfig?.effort,
+          coraProfileId: chatConfig?.profileId,
         });
         runId = created.id;
       }
@@ -193,6 +195,7 @@ export default function OrchestrationSidebar({
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
         initialAttachments: attachments,
+        coraProfileId: chatConfig?.profileId,
       });
       setCreatingNewRun(false);
       onRunSnapshot(run, { select: true, focusRuns: false });

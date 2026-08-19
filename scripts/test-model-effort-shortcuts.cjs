@@ -32,8 +32,9 @@ const read = (...segments) => fs.readFileSync(path.join(ROOT, ...segments), "utf
 const commands = read("src/renderer/src/shortcuts/commands.ts");
 const app = read("src/renderer/src/App.tsx");
 const composer = read("src/renderer/src/components/chat/ChatComposer.tsx");
-const modelPicker = read("src/renderer/src/components/chat/composer/ModelPicker.tsx");
-const thinking = read("src/renderer/src/components/chat/composer/ThinkingControl.tsx");
+const modelThinkingPicker = read(
+  "src/renderer/src/components/chat/composer/ModelThinkingPicker.tsx",
+);
 const anchored = read("src/renderer/src/components/chat/composer/AnchoredMenu.tsx");
 const toast = read("src/renderer/src/components/Toast.tsx");
 
@@ -115,30 +116,35 @@ assert.ok(listenerEffect, "the agent-chord listeners must be gated on suspendGlo
 assert.match(composer, /onPickModel\(next\);/);
 assert.match(composer, /const next = nextEffortInLadder\(visibleEffort, availableEfforts\);/);
 assert.match(composer, /onPickEffort\(next\);/);
-// The open chords ride down as counters, not as listeners inside the pills.
-assert.match(composer, /openSignal=\{modelPickerSignal\}/);
-assert.match(composer, /openSignal=\{thinkingPickerSignal\}/);
-for (const [name, source] of [
-  ["ModelPicker", modelPicker],
-  ["ThinkingControl", thinking],
-]) {
-  assert.match(source, /openSignal\?: number;/, `${name} must accept openSignal`);
-  assert.match(
-    source,
-    /useEffect\(\(\) => \{\s*if \(!openSignal\) return;\s*setOpen\(true\);\s*\}, \[openSignal\]\);/,
-    `${name} must open from the signal`,
-  );
-  assert.doesNotMatch(
-    source,
-    /addEventListener\("spark:open-/,
-    `${name} must not listen for the open chord itself (hidden tabs stay mounted)`,
-  );
-}
+// Both open chords ride down to the one combined control as a counter. The
+// picker itself never listens globally: hidden chat tabs stay mounted.
+assert.match(composer, /openModelSignal=\{modelPickerSignal\}/);
+assert.match(composer, /openEffortSignal=\{effortPickerSignal\}/);
+assert.match(modelThinkingPicker, /openModelSignal\?: number;/);
+assert.match(modelThinkingPicker, /openEffortSignal\?: number;/);
+assert.match(
+  modelThinkingPicker,
+  /if \(!openModelSignal\) return;\s*setEffortStep\(null\);\s*setOpen\(true\);/,
+);
+assert.match(modelThinkingPicker, /if \(!openEffortSignal\) return;[\s\S]*?setEffortStep\(/);
+assert.doesNotMatch(modelThinkingPicker, /addEventListener\("spark:open-/);
+
+// Grok-style chained selection: choosing a reasoning model advances the same
+// compact panel to its effort step instead of rendering two separate menus.
+assert.match(modelThinkingPicker, /setEffortStep\(\{ model, efforts: nextEfforts \}\)/);
+assert.ok(
+  modelThinkingPicker.indexOf("onPickModel(effortStep.model)") >
+    modelThinkingPicker.indexOf("setEffortStep({ model, efforts: nextEfforts })"),
+  "a reasoning-model choice is applied only after its effort is confirmed",
+);
+assert.match(modelThinkingPicker, /Choose model/);
+assert.match(modelThinkingPicker, /Choose thinking depth/);
 
 // ── Keyboard navigation inside an opened menu ──────────────────────────────
 assert.match(anchored, /\["ArrowDown", "ArrowUp", "Home", "End"\]\.includes\(event\.key\)/);
 assert.match(anchored, /querySelectorAll<HTMLElement>\('\[role="option"\]:not\(\[disabled\]\)'\)/);
 assert.match(anchored, /\[role="option"\]\[aria-selected="true"\]/);
+assert.match(anchored, /\[open, focusSignal\]/);
 
 // ── Local toasts bypass the viewed-suppression policy ──────────────────────
 assert.match(toast, /window\.addEventListener\("spark:local-toast", handler\)/);

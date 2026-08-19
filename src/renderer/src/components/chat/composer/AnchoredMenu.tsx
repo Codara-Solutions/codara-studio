@@ -70,6 +70,8 @@ interface Props {
   boundaryRef?: React.RefObject<HTMLElement | null>;
   /** Which trigger edge the menu lines up with. "end" right-aligns. */
   align?: "start" | "end";
+  /** Bump when a multi-step menu replaces its option list while staying open. */
+  focusSignal?: string | number;
   /**
    * Stack position for surfaces that must clear more than the workbench — the
    * Settings dialog sits at z 100, so its menus pass something above that.
@@ -106,6 +108,7 @@ export default function AnchoredMenu({
   placement = "above",
   boundaryRef,
   align = "start",
+  focusSignal = 0,
   zIndex = 60,
   children,
 }: Props) {
@@ -242,7 +245,7 @@ export default function AnchoredMenu({
       (selected ?? menu.querySelector<HTMLElement>('[role="option"]'))?.focus();
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [open]);
+  }, [open, focusSignal]);
 
   useEffect(() => {
     if (!open) return;

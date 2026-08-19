@@ -437,6 +437,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
+  const [capabilitiesInitialTab, setCapabilitiesInitialTab] = useState<
+    "mcp" | "skills" | "memory" | "policy"
+  >("mcp");
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [workerSessionPicker, setWorkerSessionPicker] =
     useState<WorkerSessionPickerRequest | null>(null);
@@ -2881,7 +2884,13 @@ export default function App() {
     tabsRef.current.openUsageTab();
   }, []);
 
-  const handleOpenCapabilities = useCallback(() => {
+  const handleOpenCapabilities = useCallback((event?: Event) => {
+    const requested = (event as CustomEvent<{ tab?: unknown }> | undefined)?.detail?.tab;
+    setCapabilitiesInitialTab(
+      requested === "skills" || requested === "memory" || requested === "policy"
+        ? requested
+        : "mcp",
+    );
     void loadAgentCapabilitiesDialog();
     setCapabilitiesOpen(true);
   }, []);
@@ -5874,6 +5883,7 @@ export default function App() {
               settings={settings}
               workspaceCwd={activeWorkspace?.cwd ?? null}
               workspaceId={activeWorkspace?.id ?? null}
+              initialTab={capabilitiesInitialTab}
               onClose={closeCapabilities}
               onSave={handleSaveSettings}
             />
@@ -6654,6 +6664,7 @@ const Workspace = React.memo(function Workspace({
         chatBackend: chip?.backend,
         chatModel: chip?.model,
         chatEffort: chip?.effort,
+        coraProfileId: chip?.profileId,
       });
       await api.update({
         runId: run.id,

@@ -37,6 +37,7 @@ interface Props {
   /** Identifies the workspace memory tier. Null when no workspace is active,
    *  which leaves that tier reported as unavailable rather than guessed. */
   workspaceId: string | null;
+  initialTab?: CapabilityTab;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
 }
@@ -185,10 +186,11 @@ export default function AgentCapabilitiesDialog({
   settings,
   workspaceCwd,
   workspaceId,
+  initialTab = "mcp",
   onClose,
   onSave,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<CapabilityTab>("mcp");
+  const [activeTab, setActiveTab] = useState<CapabilityTab>(initialTab);
   // Selecting a section should acknowledge the click before the inventory it
   // holds builds its DOM. The nav follows activeTab immediately while React
   // renders the section body at deferred priority. Mirrors SettingsDialog.
@@ -218,6 +220,7 @@ export default function AgentCapabilitiesDialog({
   const [memoryBusy, setMemoryBusy] = useState<CoraMemoryScope | null>(null);
   const [profiles, setProfiles] = useState<CoraProfile[]>([]);
   const [profileName, setProfileName] = useState("");
+  const [profileDescription, setProfileDescription] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
@@ -382,6 +385,7 @@ export default function AgentCapabilitiesDialog({
       .use(reference)
       .then(async (nextProfiles) => {
         setProfiles(nextProfiles);
+        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
         setMemory(await window.spark.memory.get(workspaceId));
       })
       .catch((err) => setStatus((err as Error).message))
@@ -395,12 +399,14 @@ export default function AgentCapabilitiesDialog({
     setProfileBusy(true);
     setStatus(null);
     void window.spark.coraProfiles
-      .create({ name })
+      .create({ name, description: profileDescription.trim() || undefined })
       .then(async () => {
         const nextProfiles = await window.spark.coraProfiles.use(name);
         setProfiles(nextProfiles);
+        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
         setMemory(await window.spark.memory.get(workspaceId));
         setProfileName("");
+        setProfileDescription("");
         setStatus(`${name} is now the default profile for new Cora chats.`);
       })
       .catch((err) => setStatus((err as Error).message))
@@ -843,9 +849,9 @@ export default function AgentCapabilitiesDialog({
                     </div>
                   </div>
 
-                  <form style={profilePickerStyle} onSubmit={createProfile}>
-                    <label style={profileFieldStyle}>
-                      <span style={fieldLabelStyle}>Default profile for new chats</span>
+                  <div style={profilePickerStyle}>
+                    <label style={{ ...profileFieldStyle, flexBasis: "100%" }}>
+                      <span style={fieldLabelStyle}>Cora used by default</span>
                       <select
                         className="spark-input"
                         value={memory?.profile.id ?? "default"}
@@ -858,16 +864,47 @@ export default function AgentCapabilitiesDialog({
                           </option>
                         ))}
                       </select>
+                      <span style={profileHintStyle}>
+                        Every new chat also has a profile picker, so this is only the starting choice.
+                      </span>
                     </label>
+                    {memory && memory.profile.id !== "default" ? (
+                      <button
+                        type="button"
+                        className="spark-btn"
+                        style={smallBtnStyle}
+                        onClick={() => openMemoryFile(memory.profile.identityPath)}
+                      >
+                        Edit {memory.profile.name}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <form style={profileCreatorStyle} onSubmit={createProfile}>
+                    <div style={profileCreatorHeadingStyle}>
+                      <strong>Make another Cora</strong>
+                      <span>Its identity and memories stay isolated from every other profile.</span>
+                    </div>
                     <label style={profileFieldStyle}>
-                      <span style={fieldLabelStyle}>Create an isolated profile</span>
+                      <span style={fieldLabelStyle}>Name</span>
                       <input
                         className="spark-input"
                         value={profileName}
                         maxLength={80}
-                        placeholder="Reviewer, Designer, Release Cora..."
+                        placeholder="Reviewer, Designer, Release Cora…"
                         disabled={profileBusy}
                         onChange={(event) => setProfileName(event.target.value)}
+                      />
+                    </label>
+                    <label style={{ ...profileFieldStyle, flex: "2 1 260px" }}>
+                      <span style={fieldLabelStyle}>Purpose <span style={profileOptionalStyle}>optional</span></span>
+                      <input
+                        className="spark-input"
+                        value={profileDescription}
+                        maxLength={300}
+                        placeholder="What should this Cora focus on?"
+                        disabled={profileBusy}
+                        onChange={(event) => setProfileDescription(event.target.value)}
                       />
                     </label>
                     <button
@@ -876,18 +913,8 @@ export default function AgentCapabilitiesDialog({
                       style={smallBtnStyle}
                       disabled={profileBusy || profileName.trim().length === 0}
                     >
-                      {profileBusy ? "Working" : "Create and use"}
+                      {profileBusy ? "Creating…" : "Create & use"}
                     </button>
-                    {memory && memory.profile.id !== "default" ? (
-                      <button
-                        type="button"
-                        className="spark-btn"
-                        style={smallBtnStyle}
-                        onClick={() => openMemoryFile(memory.profile.identityPath)}
-                      >
-                        Open profile instructions
-                      </button>
-                    ) : null}
                   </form>
 
                   <div className="agent-capability-list" style={listStyle}>
@@ -2828,6 +2855,32 @@ const profilePickerStyle: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
   borderRadius: 10,
   background: "color-mix(in oklab, var(--panel) 72%, transparent)",
+};
+
+const profileCreatorStyle: React.CSSProperties = {
+  ...profilePickerStyle,
+  marginTop: 10,
+};
+
+const profileCreatorHeadingStyle: React.CSSProperties = {
+  display: "grid",
+  flex: "1 0 100%",
+  gap: 3,
+  color: "var(--ink)",
+  fontSize: 12,
+};
+
+const profileHintStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 10,
+  lineHeight: 1.35,
+};
+
+const profileOptionalStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontWeight: 400,
+  textTransform: "none",
+  letterSpacing: 0,
 };
 
 const profileFieldStyle: React.CSSProperties = {

@@ -724,9 +724,8 @@ async function chat(args, flags) {
       ui,
     });
     modelPickerOverlay = tui.showOverlay(picker, {
-      width: "68%",
-      minWidth: 54,
-      maxHeight: "84%",
+      width: 56,
+      maxHeight: "80%",
       anchor: "center",
       margin: 2,
     });

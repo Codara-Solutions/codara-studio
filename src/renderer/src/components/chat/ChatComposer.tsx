@@ -4,6 +4,7 @@ import type {
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
+  CoraProfile,
   FsEntry,
   PiCatalogModel,
   RunState,
@@ -26,8 +27,8 @@ import {
 import { isUnstartedChatRun } from "./cora-view";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
-import ModelPicker from "./composer/ModelPicker";
-import ThinkingControl from "./composer/ThinkingControl";
+import ModelThinkingPicker from "./composer/ModelThinkingPicker";
+import ProfilePicker from "./composer/ProfilePicker";
 import {
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
@@ -60,6 +61,7 @@ export interface ChatComposerStartConfig {
   model?: string;
   mode?: ChatMode;
   effort?: AgentEffortLevel;
+  profileId?: string;
 }
 
 // The chat composer. One surface for two jobs:
@@ -146,6 +148,7 @@ interface ChatComposerDraftSnapshot {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
+  profileId: string;
 }
 
 // Navigation-only draft cache. It intentionally lives outside React so it
@@ -176,6 +179,7 @@ export interface ChatComposerChipConfig {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
+  profileId: string;
 }
 const liveDraftChipByKey = new Map<string, ChatComposerChipConfig>();
 
@@ -208,11 +212,10 @@ export default function ChatComposer({
   // Anchor for the portalled @-mention panel (see AnchoredMenu).
   const composerShellRef = useRef<HTMLDivElement>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
-  // Keyboard "open this dropdown" signals for the two selector pills. A
-  // counter, not a boolean: pressing the chord again while the menu is already
-  // open must still register.
+  // Both keyboard commands target one control, but effort opens directly at
+  // its second step. Counters ensure repeated chords still register.
   const [modelPickerSignal, setModelPickerSignal] = useState(0);
-  const [thinkingPickerSignal, setThinkingPickerSignal] = useState(0);
+  const [effortPickerSignal, setEffortPickerSignal] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pastingImages, setPastingImages] = useState(false);
@@ -226,6 +229,11 @@ export default function ChatComposer({
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(
     run?.chatEffort ?? restoredDraft?.effort ?? DEFAULT_CHAT_EFFORT,
   );
+  const [profiles, setProfiles] = useState<CoraProfile[]>([]);
+  const [draftCoraProfileId, setDraftCoraProfileId] = useState(
+    run?.coraProfileId ?? restoredDraft?.profileId ?? "default",
+  );
+  const profileChosenRef = useRef(Boolean(restoredDraft?.profileId || run?.coraProfileId));
   // Tracks whether the draft default has been resolved from settings + runtime
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
   // IPC round-trip returns we replace them with the actual first visible
@@ -250,6 +258,24 @@ export default function ChatComposer({
   useEffect(() => {
     void refreshPiCatalog();
   }, [refreshPiCatalog]);
+  const refreshProfiles = useCallback(async (): Promise<void> => {
+    try {
+      const next = await window.spark.coraProfiles.list();
+      setProfiles(next);
+      if (!runRef.current && !profileChosenRef.current) {
+        const profile = next.find((item) => item.isDefault) ?? next[0];
+        if (profile) setDraftCoraProfileId(profile.id);
+      }
+    } catch {
+      /* The built-in profile remains the main-process fallback. */
+    }
+  }, []);
+  useEffect(() => {
+    void refreshProfiles();
+    const onProfilesChanged = () => void refreshProfiles();
+    window.addEventListener("spark:cora-profiles-changed", onProfilesChanged);
+    return () => window.removeEventListener("spark:cora-profiles-changed", onProfilesChanged);
+  }, [refreshProfiles]);
   // Latest model-context occupancy from chat.usage SparkEvents. This is a
   // gauge, not a billing counter: each update replaces the prior value so a
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
@@ -293,6 +319,7 @@ export default function ChatComposer({
     backend: draftChatBackend,
     model: draftChatModel,
     effort: draftChatEffort,
+    profileId: draftCoraProfileId,
   };
   // This instance's draft state belongs to the key it restored from at mount.
   // On a chat-tab switch the parent updates draftKey one commit BEFORE the
@@ -320,6 +347,7 @@ export default function ChatComposer({
       backend: draftChatBackend,
       model: draftChatModel,
       effort: draftChatEffort,
+      profileId: draftCoraProfileId,
     });
   }
 
@@ -380,7 +408,7 @@ export default function ChatComposer({
         if (clamped && clamped !== draftChatEffort) setDraftChatEffort(clamped);
       })
       .catch(() => {
-        /* keep hardcoded defaults; ModelPicker will surface the empty state */
+        /* keep hardcoded defaults; the combined picker will surface the empty state */
       });
     return () => {
       cancelled = true;
@@ -669,6 +697,7 @@ export default function ChatComposer({
           model: latestDraft?.model ?? draftChatModel,
           mode: lockedMode ?? DEFAULT_CHAT_MODE,
           effort: latestDraft?.effort ?? draftChatEffort,
+          profileId: latestDraft?.profileId ?? draftCoraProfileId,
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else if (openQuestion) {
@@ -916,6 +945,11 @@ export default function ChatComposer({
   const openCapabilities = () => {
     window.dispatchEvent(new CustomEvent("spark:open-capabilities"));
   };
+  const openProfileManager = () => {
+    window.dispatchEvent(
+      new CustomEvent("spark:open-capabilities", { detail: { tab: "memory" } }),
+    );
+  };
 
   const focusComposerShell = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target;
@@ -934,8 +968,8 @@ export default function ChatComposer({
   // The active model's option pulled from the STATIC catalog; null for a model
   // discovered from the live catalog, which has no curated row (effortsFor
   // then yields the full ladder). Used only to derive the available effort
-  // cycle for the thinking pill; rendering of the model name happens inside
-  // the ModelPicker, which reads from the dynamic visible groups.
+  // cycle for the combined control; its model label resolves from the same
+  // dynamic visible groups.
   const activeChatModelOption = findOptionInCatalog(
     activeChatBackend,
     activeChatModelId,
@@ -1015,7 +1049,7 @@ export default function ChatComposer({
     const { baseId } = decomposeModelId(model.id);
     const backendChanged = model.backend !== activeChatBackend;
     // The row's own ladder when it pins one, else the full list, exactly what
-    // the thinking pill will offer for this model once the pick lands.
+    // the picker's second step offers once the model lands.
     const nextEffortLevels = effortsFor(model);
     const nextEffort: AgentEffortLevel = nextEffortLevels.includes(activeChatEffort)
       ? activeChatEffort
@@ -1033,7 +1067,7 @@ export default function ChatComposer({
     applyChatBackendChange({ chatEffort: effort });
   };
 
-  // Keyboard chords for the two selector pills (App broadcasts these; see the
+  // Keyboard chords for model and effort (App broadcasts these; see the
   // agent.* commands). They deliberately route through the same onPick*
   // handlers the dropdowns use, so a chord and a click are indistinguishable
   // downstream — draft-only state before the first send, updateChatBackend
@@ -1089,7 +1123,7 @@ export default function ChatComposer({
     // listener down there would have every hidden tab's menu race the visible
     // one. This effect is the visibility gate.
     const onOpenModel = () => setModelPickerSignal((value) => value + 1);
-    const onOpenThinking = () => setThinkingPickerSignal((value) => value + 1);
+    const onOpenThinking = () => setEffortPickerSignal((value) => value + 1);
     window.addEventListener("spark:cycle-model", onCycleModel);
     window.addEventListener("spark:cycle-effort", onCycleEffort);
     window.addEventListener("spark:open-model-picker", onOpenModel);
@@ -1107,9 +1141,8 @@ export default function ChatComposer({
   // chat1mContext directly via applyChatBackendChange. No standalone
   // toggle handler is needed here anymore.
 
-  // Click-outside / Escape handling for the model picker lives inside the
-  // ModelPicker component itself — the thinking pill is click-to-cycle and
-  // has no popover, so no global listener is needed here anymore.
+  // Click-outside / Escape handling lives in the shared AnchoredMenu; this
+  // composer only gates the app-wide keyboard broadcasts by tab visibility.
 
   // An unstarted board-minted run still reads like a fresh chat: its first
   // send is a first message (see the isUnstartedChatRun branch in send()).
@@ -1273,18 +1306,27 @@ export default function ChatComposer({
             cannot reach inline styles. */}
         <div className="composer-toolbar">
           <div className="composer-toolbar__left">
-            <ModelPicker
+            <ModelThinkingPicker
               activeBackend={activeChatBackend}
               activeModelId={activeChatModelId}
-              onPick={onPickModel}
-              openSignal={modelPickerSignal}
-            />
-            <ThinkingControl
               effort={visibleEffort}
               availableEfforts={availableEfforts}
-              onCycle={onPickEffort}
-              openSignal={thinkingPickerSignal}
+              onPickModel={onPickModel}
+              onPickEffort={onPickEffort}
+              openModelSignal={modelPickerSignal}
+              openEffortSignal={effortPickerSignal}
             />
+            {!run_ ? (
+              <ProfilePicker
+                profiles={profiles}
+                activeProfileId={draftCoraProfileId}
+                onPick={(profileId) => {
+                  profileChosenRef.current = true;
+                  setDraftCoraProfileId(profileId);
+                }}
+                onManage={openProfileManager}
+              />
+            ) : null}
             {fastModeAvailable && (
               <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
             )}

@@ -2285,6 +2285,9 @@ a { color: inherit; }
   .composer-toolbar .composer-model:has(.composer-pill-label) {
     max-width: 38cqi;
   }
+  .composer-profile-label {
+    display: none;
+  }
 }
 
 .composer-pill {
@@ -2322,22 +2325,117 @@ a { color: inherit; }
 .composer-model {
   position: relative;
 }
+.composer-profile {
+  position: relative;
+  flex: 0 0 auto;
+}
+.composer-profile-trigger {
+  max-width: 150px;
+}
+.composer-profile-glyph {
+  color: var(--accent);
+  font-size: 10px;
+}
+.composer-profile-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-profile-menu {
+  width: 250px;
+  max-width: min(300px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px;
+}
+.composer-profile-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: default;
+}
+.composer-profile-option:hover,
+.composer-profile-option.is-active {
+  background: var(--hover);
+}
+.composer-profile-option.is-active {
+  border-color: var(--accent-edge);
+  background: var(--accent-soft);
+}
+.composer-profile-mark {
+  width: 12px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  text-align: center;
+}
+.composer-profile-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 650;
+}
+.composer-profile-copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-profile-manage {
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 8px;
+  border: 0;
+  border-top: 1px solid var(--rule-soft);
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-align: left;
+  cursor: default;
+}
+.composer-profile-manage:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
 /* Positioned by AnchoredMenu (fixed, portalled to <body>), so no static
    placement here, only size and material. */
-.composer-model-menu {
-  min-width: 330px;
-  max-width: min(390px, calc(100vw - 32px));
-  max-height: 360px;
-  overflow: auto;
-  /* Stop a wheel at the top/bottom of the list from chaining into the page
-     behind it: that page scroll is what dismisses the menu, so without this
-     the list flicks shut the moment you overscroll it. */
-  overscroll-behavior: contain;
-  padding: 4px;
+.composer-model-thinking-menu {
+  width: 286px;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  padding: 0;
   background: var(--panel-2);
   border: 1px solid var(--rule);
   border-radius: var(--radius-popover, 9px);
   box-shadow: var(--shadow-2);
+}
+.composer-model-thinking-list {
+  max-height: 272px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 3px 5px 5px;
+}
+.composer-model-thinking-trigger {
+  gap: 5px;
+}
+.composer-model-spark {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.composer-model-thinking-dot {
+  color: var(--muted);
 }
 .composer-model-group + .composer-model-group {
   margin-top: 4px;
@@ -2351,106 +2449,91 @@ a { color: inherit; }
   text-transform: uppercase;
   color: var(--muted);
 }
-/* The harness heading: printed once above the vendor groups, and styled as the
-   stronger of the two so the hierarchy reads "all of this is Cora on Pi, and
-   within it these come from OpenAI and these from Anthropic". */
-.composer-model-section-label {
-  padding: 6px 8px 1px;
+.composer-picker-title {
+  padding: 9px 11px 7px;
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+}
+.composer-picker-title.is-substep {
+  border-top: 1px solid var(--rule-soft);
+  border-bottom: 0;
+  color: var(--muted);
   font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
   font-weight: 600;
-  color: var(--ink-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
-/* Indented and quieter than the section above it: a subdivision, not a peer. */
-.composer-model-group-label.is-vendor {
-  padding-left: 16px;
-  color: var(--muted-2, var(--muted));
-  letter-spacing: 0.1em;
-}
-/* The vendor groups belong to one heading, so no divider between them. The
-   rule above adds a top border to every subsequent group; suppress it where
-   both sides sit under the same section. */
-.composer-model-group + .composer-model-group:not(:has(> .composer-model-section-label)) {
-  margin-top: 2px;
-  padding-top: 0;
-  border-top: none;
-}
-.composer-model-row {
+.composer-picker-back {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
   width: 100%;
-  padding: 7px 8px;
-  border-radius: var(--radius-control, 7px);
-  border: 1px solid transparent;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 12px;
   font-family: var(--font-sans);
-  cursor: default;
+  font-size: 11px;
+  font-weight: 650;
   text-align: left;
+  cursor: default;
 }
-.composer-model-row:hover {
+.composer-picker-back:hover {
   background: var(--hover);
 }
-.composer-model-row.is-active {
-  background: var(--accent-soft);
-  color: var(--ink);
-  border-color: var(--accent-edge);
-}
-.composer-model-row-label {
+.composer-picker-back > span:last-child {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
-  flex: 1;
-  font-weight: 600;
 }
-/* A row that is just a name. The base row aligns to flex-start for rows that
-   carry a description line; with no second line that reads as a top-heavy
-   row, so centre it. */
-.composer-model-row.is-compact {
+.composer-picker-row {
+  display: flex;
+  width: 100%;
   align-items: center;
-}
-
-.composer-thinking-wrap {
-  position: relative;
-}
-.composer-thinking {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 999px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
-  border: 1px solid var(--rule-soft);
-  color: var(--ink-dim);
-  font-size: 11px;
-  cursor: default;
+  color: var(--ink);
   font-family: var(--font-sans);
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out);
+  font-size: 11px;
+  text-align: left;
+  cursor: default;
 }
-.composer-thinking.is-active {
-  color: var(--accent-text);
+.composer-picker-row:hover {
+  background: var(--hover);
+}
+.composer-picker-row.is-active {
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
-.composer-thinking:hover {
-  background: var(--hover-strong);
-  color: var(--ink);
+.composer-picker-row > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.composer-thinking:active {
-  background: var(--press);
+.composer-picker-row-tail {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 9px;
 }
+.composer-effort-list {
+  max-height: 260px;
+  overflow: auto;
+  padding: 0 5px 5px;
+}
+
 .composer-thinking-label {
   white-space: nowrap;
 }
-/* Glyph-only sibling of the thinking pill: same round border and accent-on
-   treatment, sized square so the row reads as [model · thinking · flash]. */
+/* Glyph-only sibling of the combined model control, sized square so fast mode
+   stays an optional modifier rather than looking like another selector. */
 .composer-fast {
   display: inline-flex;
   align-items: center;
@@ -2497,15 +2580,6 @@ a { color: inherit; }
   transform: translateY(-1px);
 }
 
-/* Placement is owned by AnchoredMenu, which portals these to <body> and sets
-   position/left/bottom inline. (They must escape the composer shell: it
-   carries spark-glass--strong, and a backdrop-filter ancestor is a backdrop
-   root, so a .spark-menu nested inside it frosts the shell's empty interior
-   and paints flat.) Only the intrinsic box belongs here. */
-.composer-thinking-menu {
-  width: 310px;
-  max-width: min(360px, calc(100vw - 32px));
-}
 .composer-menu-heading {
   padding: 5px 8px 7px;
   color: var(--muted);
@@ -2514,62 +2588,6 @@ a { color: inherit; }
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.composer-effort-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  width: 100%;
-  min-height: 48px;
-  padding: 7px 8px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control, 7px);
-  background: transparent;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  text-align: left;
-  cursor: default;
-}
-.composer-effort-option:hover {
-  background: var(--hover);
-}
-.composer-effort-option.is-active {
-  background: var(--accent-soft);
-  border-color: var(--accent-edge);
-}
-/* Two-line label/description copy inside a composer menu row. Shared by the
-   thinking menu; the mode menu that introduced the names is gone. */
-.composer-mode-option-copy {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-.composer-mode-option-label {
-  color: var(--ink);
-  font-size: 11px;
-  font-weight: 650;
-  line-height: 1.3;
-}
-.composer-mode-option-description {
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.4;
-}
-.composer-menu-check {
-  flex: 0 0 auto;
-  padding-top: 2px;
-  color: var(--accent-text);
-  font-size: 11px;
-}
-.composer-effort-option {
-  align-items: center;
-}
-.composer-effort-option > svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-}
-
 .composer-context {
   display: inline-flex;
   align-items: center;
