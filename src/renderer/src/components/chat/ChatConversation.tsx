@@ -2261,6 +2261,7 @@ function trimByteNumber(value: number): string {
 // One quiet line per logical worker inside an expanded step — dot, task
 // title, muted runtime/status detail. Same language as the tool rows.
 function StepWorkerRow({ worker }: { worker: ChatWorker }) {
+  const [diffOpen, setDiffOpen] = useState(false);
   // runtimeState (from the live terminal poller) wins over the static
   // workerTask status for the dot tone, because it reflects what the agent
   // is doing *right now* — accept ("blocked" → steady red) is more urgent
@@ -2292,20 +2293,100 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         ? `attempt ${attemptCount} of ${workerAttemptDenominator(attemptCount)}`
         : null,
   ].filter(Boolean).join(" · ");
-  return (
-    <div
-      title={`${worker.title}: ${worker.status}${titleSuffix}`}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 7,
-        minHeight: 20,
-        minWidth: 0,
-      }}
-    >
+  const diff = worker.diff;
+  const hasDiff = Boolean(diff && diff.fileCount > 0);
+  const header = (
+    <>
       <StatusDot color={color} pulse={pulse} size={5} />
       <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
       <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+      {hasDiff && diff && (
+        <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
+          <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
+          <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
+        </span>
+      )}
+      {hasDiff && <Caret open={diffOpen} />}
+    </>
+  );
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        minWidth: 0,
+      }}
+    >
+      {hasDiff ? (
+        <DisclosureButton
+          baseStyle={{
+            ...TOOL_ROW_BUTTON_STYLE,
+            minHeight: 20,
+            padding: "1px 0",
+            cursor: "pointer",
+          }}
+          onClick={() => setDiffOpen((value) => !value)}
+          title={`${worker.title}: ${worker.status}${titleSuffix}. Show changed files.`}
+        >
+          {header}
+        </DisclosureButton>
+      ) : (
+        <div
+          title={`${worker.title}: ${worker.status}${titleSuffix}`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            minHeight: 20,
+            minWidth: 0,
+          }}
+        >
+          {header}
+        </div>
+      )}
+      {diffOpen && diff && (
+        <div
+          style={{
+            margin: "2px 0 4px 12px",
+            padding: "3px 0 3px 12px",
+            borderLeft: "1px solid color-mix(in oklab, var(--rule-soft) 66%, transparent)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 3,
+          }}
+        >
+          {diff.files.map((file) => (
+            <div
+              key={file.path}
+              title={file.path}
+              style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
+            >
+              <span
+                style={{
+                  color: "var(--ink-dim)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 10,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  flex: 1,
+                  minWidth: 0,
+                }}
+              >
+                {file.path}
+              </span>
+              <span style={{ ...TOOL_STATS_STYLE, color: "var(--ok)" }}>+{file.additions}</span>
+              <span style={{ ...TOOL_STATS_STYLE, color: "var(--danger)" }}>−{file.deletions}</span>
+            </div>
+          ))}
+          {diff.fileCount > diff.files.length && (
+            <span style={{ ...TOOL_INLINE_DETAIL_STYLE, flex: "none" }}>
+              +{diff.fileCount - diff.files.length} more files
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

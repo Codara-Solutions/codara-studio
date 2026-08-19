@@ -273,6 +273,7 @@ import {
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
 import { shouldResumeForUserMessage } from "./user-message-resume";
+import { captureWorkerDiff } from "./worker-diff";
 import * as pty from "../pty-manager";
 import {
   deleteAgentTerminalRun,
@@ -12881,6 +12882,10 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   finishedAttempt.stderrLogPath = paths.stderrLog;
   finishedAttempt.rawLogPath = paths.rawLog;
   finishedAttempt.finalReportPath = paths.finalReportJson;
+  // Snapshot the worker's measurable code impact before merge/review or a
+  // later worker can move the shared tree. Best-effort: non-Git workspaces and
+  // legacy attempts without a pre-worker baseline simply omit the counters.
+  await persistAttemptDiff(run, finishedAttempt, paths).catch(() => undefined);
   finishedTask.status =
     result.exitCode === 0 ? "needs_review" : pauseInterrupted ? "cancelled" : "failed";
   finishedTask.updatedAt = finishedAt;
@@ -17629,6 +17634,34 @@ function findAttemptByPaneId(
   return null;
 }
 
+const liveWorkerDiffRefreshes = new Map<string, Promise<void>>();
+
+function scheduleLiveWorkerDiffRefresh(attemptId: string): void {
+  const prior = liveWorkerDiffRefreshes.get(attemptId) ?? Promise.resolve();
+  const refresh = prior
+    .catch(() => undefined)
+    .then(async () => {
+      const target = findAttemptByPaneId(attemptId);
+      if (!target) return;
+      const captured = await measureAttemptDiff(target.run, target.attempt);
+      if (!captured) return;
+      // Re-resolve after Git returns: a rewind or retry may have replaced the
+      // cached run while this read-only measurement was in flight.
+      const current = findAttemptByPaneId(attemptId);
+      if (!current) return;
+      if (JSON.stringify(current.attempt.diffSummary) === JSON.stringify(captured.summary)) return;
+      const timestamp = new Date().toISOString();
+      current.attempt.diffSummary = captured.summary;
+      current.run.updatedAt = timestamp;
+    })
+    .finally(() => {
+      if (liveWorkerDiffRefreshes.get(attemptId) === refresh) {
+        liveWorkerDiffRefreshes.delete(attemptId);
+      }
+    });
+  liveWorkerDiffRefreshes.set(attemptId, refresh);
+}
+
 // Live agent state report from the renderer-side terminal poller. paneId is
 // the same id the renderer used for pty:spawn — for Cora workers this is
 // the attemptId. We walk the in-memory run cache to find the matching
@@ -17730,7 +17763,61 @@ function workerArtifactPaths(
     stderrLog: join(attemptDir, "stderr.log"),
     rawLog: join(attemptDir, "raw.log"),
     finalReportJson: join(attemptDir, "final-report.json"),
+    diffPatch: join(attemptDir, "changes.patch"),
   };
+}
+
+function diffCaptureSource(
+  run: RunState,
+  attempt: WorkerAttempt,
+): { cwd: string; baseSha: string } | null {
+  if (attempt.sandboxWorktreePath) {
+    return { cwd: attempt.sandboxWorktreePath, baseSha: "HEAD" };
+  }
+  const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
+  return cwd && attempt.preWorkerCheckpointSha
+    ? { cwd, baseSha: attempt.preWorkerCheckpointSha }
+    : null;
+}
+
+async function measureAttemptDiff(
+  run: RunState,
+  attempt: WorkerAttempt,
+  changedPaths?: string[],
+): Promise<Awaited<ReturnType<typeof captureWorkerDiff>>> {
+  const source = diffCaptureSource(run, attempt);
+  if (!source) return null;
+  // A sandbox belongs only to this worker, so its whole tree is exact. Shared
+  // workspaces prefer the final report, then the task's declared ownership,
+  // so a parallel sibling's disjoint edits are not attributed to this row.
+  const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+  const paths = attempt.sandboxWorktreePath
+    ? undefined
+    : changedPaths && changedPaths.length > 0
+      ? changedPaths
+      : task?.allowedPaths.length
+        ? task.allowedPaths
+        : undefined;
+  return captureWorkerDiff({ ...source, paths });
+}
+
+async function persistAttemptDiff(
+  run: RunState,
+  attempt: WorkerAttempt,
+  paths: WorkerArtifactPaths,
+): Promise<void> {
+  const report = await readWorkerReport(paths.finalReportJson).catch(() => null);
+  const changedPaths = report?.filesChanged.map((file) => file.path);
+  const captured = await measureAttemptDiff(run, attempt, changedPaths);
+  if (!captured) return;
+  attempt.diffSummary = captured.summary;
+  if (captured.patch.trim()) {
+    await fs.writeFile(paths.diffPatch, captured.patch, "utf8");
+    attempt.diffPath = paths.diffPatch;
+  } else {
+    await fs.rm(paths.diffPatch, { force: true }).catch(() => undefined);
+    delete attempt.diffPath;
+  }
 }
 
 interface PeerCommsAgentCard {
@@ -18283,6 +18370,15 @@ function piWorkerToolLabel(value: unknown): string {
     .filter(Boolean)
     .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
     .join(" ");
+}
+
+function piWorkerToolMayChangeFiles(value: unknown): boolean {
+  const name = typeof value === "string"
+    ? value.replace(/^mcp__codara-studio__/, "").toLowerCase()
+    : "";
+  // Bash is included because package generators, formatters, and patch tools
+  // frequently write without going through Pi's native edit/write tools.
+  return name === "write" || name === "edit" || name === "multi_edit" || name === "bash";
 }
 
 function piWorkerSafeText(value: unknown, maxLength = 260): string {
@@ -18979,6 +19075,9 @@ async function runPiWorkerSession({
           paintFolded(`${marker}${detail}\r\n`, `${marker}\r\n${raw}\r\n`);
         } else {
           paint(`${marker}\r\n`);
+        }
+        if (!failed && piWorkerToolMayChangeFiles(event.toolName)) {
+          scheduleLiveWorkerDiffRefresh(attemptId);
         }
       } else if (event.type === "message_update") {
         const delta = event.assistantMessageEvent as Record<string, unknown> | undefined;

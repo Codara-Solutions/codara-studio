@@ -2999,6 +2999,22 @@ export interface WorkerArtifactPaths {
   stderrLog: string;
   rawLog: string;
   finalReportJson: string;
+  diffPatch: string;
+}
+
+export interface WorkerDiffFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  binary?: true;
+}
+
+export interface WorkerDiffSummary {
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  /** Capped detail list; fileCount remains the truthful total. */
+  files: WorkerDiffFile[];
 }
 
 export interface StepState {
@@ -3401,6 +3417,9 @@ export interface WorkerAttempt {
   workpadPath?: string;
   finalReportPath?: string;
   diffPath?: string;
+  /** Measured against this attempt's pre-worker Git checkpoint. Refreshed
+   *  while Pi edits and persisted when the attempt settles. */
+  diffSummary?: WorkerDiffSummary;
   /**
    * Sandbox worktree fields. Set only for sandboxed unattended attempts
    * (AppSettings.autopilotSandbox on + an autopilot caller), undefined for

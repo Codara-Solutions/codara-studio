@@ -94,6 +94,7 @@
     "test:composer-fast-mode": "node scripts/test-composer-fast-mode.cjs",
     "test:model-effort-shortcuts": "node scripts/test-model-effort-shortcuts.cjs",
     "test:worker-independence": "node scripts/test-worker-independence.cjs",
+    "test:worker-diff": "node scripts/test-worker-diff.cjs",
     "test:peer-comms-opt-in": "node scripts/test-peer-comms-opt-in.cjs",
     "test:verifier-scoping": "node scripts/test-verifier-scoping.cjs",
     "test:user-message-resume": "node scripts/test-user-message-resume.cjs",

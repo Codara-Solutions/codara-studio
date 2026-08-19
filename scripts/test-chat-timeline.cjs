@@ -504,6 +504,23 @@ async function main() {
     assert.equal(crypto.id, "task-crypto-dead");
   });
 
+  test("step worker rows carry measured file and line changes", () => {
+    const parts = wave();
+    parts.accepted.attempts[1].diffSummary = {
+      fileCount: 2,
+      additions: 18,
+      deletions: 4,
+      files: [
+        { path: "src/App.tsx", additions: 12, deletions: 3 },
+        { path: "src/styles.css", additions: 6, deletions: 1 },
+      ],
+    };
+    const timeline = T.buildChatTimeline(run(Object.values(parts)));
+    const stepItem = timeline.find((item) => item.kind === "step");
+    const worker = stepItem.workers.find((item) => item.title === "Global markets news");
+    assert.deepEqual(worker.diff, parts.accepted.attempts[1].diffSummary);
+  });
+
   test("a wait row counts replacements, not the dead tasks it was handed", () => {
     const parts = wave();
     const state = run(Object.values(parts));
@@ -681,10 +698,10 @@ async function main() {
 
   // Synthetic notes (the board nudge, the pause-resume note) are authored
   // "user" only so the next manager turn consumes them as its input. Their
-  // bodies are lists of card titles and attempt ids, so rendering either as the
-  // user's own bubble misattributes machine text to the person. Both are
-  // flagged on the message and surface as quiet system rows instead.
-  function syntheticNoteRun(id, flag, message) {
+  // bodies are never rendered as user prose: board notes get a system row;
+  // standalone Resume gets a compact action; message-triggered Resume folds
+  // into the real message.
+  function syntheticNoteRun(id, flag, message, noteOverrides = {}, userOverrides = {}) {
     return run([], {
       steps: [],
       humanMessages: [
@@ -698,6 +715,7 @@ async function main() {
           intent: "turn",
           conversationEpoch: 0,
           createdAt: at(25),
+          ...userOverrides,
         },
         {
           id,
@@ -710,6 +728,7 @@ async function main() {
           intent: "turn",
           conversationEpoch: 0,
           createdAt: at(30),
+          ...noteOverrides,
         },
       ],
     });
@@ -774,6 +793,44 @@ async function main() {
     assert.ok(bubble, "the plain resume note must render as a chat message");
     assert.equal(bubble.author, "user");
     assert.equal(bubble.text, "Resume");
+  });
+
+  test("sending into a paused run does not add a second Resume bubble", () => {
+    const timeline = T.buildChatTimeline(
+      syntheticNoteRun(
+        "msg-linked-resume",
+        "resumeNote",
+        "The user resumed this run. Continue from the current durable state of the plan and conversation.",
+        { resumesMessageId: "msg-user" },
+      ),
+    );
+    assert.equal(
+      timeline.some((item) => item.kind === "message" && item.id === "msg-linked-resume"),
+      false,
+      "the internal recovery note must fold into the message that resumed the run",
+    );
+    assert.equal(
+      timeline.find((item) => item.kind === "message" && item.id === "msg-user")?.text,
+      "build the parser",
+    );
+  });
+
+  test("old linked resume notes are recognized by their shared backend turn", () => {
+    const timeline = T.buildChatTimeline(
+      syntheticNoteRun(
+        "msg-legacy-linked-resume",
+        "resumeNote",
+        "The user resumed this run. Continue from the current durable state of the plan and conversation.",
+        { backendTurnId: "spark-shared" },
+        { backendTurnId: "spark-shared" },
+      ),
+    );
+    assert.equal(
+      timeline.some(
+        (item) => item.kind === "message" && item.id === "msg-legacy-linked-resume",
+      ),
+      false,
+    );
   });
 
   test("the board note keeps its own system row (the pattern resume notes copy)", () => {

@@ -6,6 +6,7 @@ import type {
   RunState,
   StepStatus,
   WorkerAttempt,
+  WorkerDiffSummary,
   WorkerRuntime,
   WorkerTask,
   WorkerTaskStatus,
@@ -49,6 +50,8 @@ export interface ChatWorker {
    * predecessor's model ("Opus 5") is the one thing the row must not claim.
    */
   model?: string;
+  /** Measured Git changes from the latest attempt, refreshed while it works. */
+  diff?: WorkerDiffSummary;
   /** Set while another attempt is still owed to this worker. */
   pending?: ChatPendingAttempt;
 }
@@ -503,6 +506,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         runtimeState: worker.latestAttempt?.runtimeState,
         attemptCount: worker.attempts.length,
         model: workerRowModel(worker, automation),
+        diff: worker.latestAttempt?.diffSummary,
         pending: pendingAttemptFor(worker, automation) ?? undefined,
       }));
     items.push({
