@@ -5,6 +5,7 @@ import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
+import { studioBrowserOnlyDecision } from "./studio-browser-policy";
 import {
   buildCoraPiSystemPrompt,
   type CoraPiExecutionPolicy,
@@ -85,6 +86,9 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   registerContextCompaction(pi);
   // OpenAI fast tier only when Settings asked for it; Anthropic never.
   registerServiceTierPolicy(pi);
+  // Browser automation is confined to Codara's own Browser webview. The
+  // native shell must not become a side door into Safari/Chrome/Edge.
+  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
 
   pi.on("before_agent_start", async (event) => {
     const untrustedContract = untrustedPullRequest

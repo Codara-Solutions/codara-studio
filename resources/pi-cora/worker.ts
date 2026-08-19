@@ -6,6 +6,7 @@ import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
+import { studioBrowserOnlyDecision } from "./studio-browser-policy";
 import { createRepeatedCallGuard } from "./repeat-guard";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
 import {
@@ -271,6 +272,7 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   registerContextCompaction(pi);
   // Workers obey the same service-tier policy as the manager.
   registerServiceTierPolicy(pi);
+  pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
 
   pi.on("before_agent_start", async (event) => {
     const { systemPrompt } = event;
@@ -327,8 +329,9 @@ Worker contract:
   peers switch to feeds and deep_search instead of each burning their own
   attempts on the same limit. Honor the same heads-up from a peer.` : ""}
 - Never open the user's system browser or GUI applications (no open,
-  xdg-open, osascript, start). All web access goes through web_search,
-  deep_search, or direct HTTP fetches.
+  xdg-open, osascript, start). Interactive page work goes through the
+  codara_preview_* tools in Codara's built-in Browser; research uses
+  web_search, deep_search, or direct HTTP fetches.
 - Never sleep longer than 60 seconds in one command. Long waits burn the wall
   clock the user is watching; retry sooner or switch data source instead.
 - Preserve existing user changes and obey every allowedPaths, forbiddenPaths,

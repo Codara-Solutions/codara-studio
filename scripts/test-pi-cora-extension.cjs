@@ -32,6 +32,14 @@ const extension = loadTypeScriptModule(
 const policies = loadTypeScriptModule(
   path.join(__dirname, "..", "src", "shared", "cora-execution-policy.ts"),
 );
+const browserPolicy = loadTypeScriptModule(
+  path.join(__dirname, "..", "resources", "pi-cora", "studio-browser-policy.ts"),
+);
+const managerExtensionSource = fs.readFileSync(
+  path.join(__dirname, "..", "resources", "pi-cora", "index.ts"),
+  "utf8",
+);
+assert.match(managerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
 process.env.SPARK_MCP_MODE = "talk";
 const studioBridge = require(path.join(
   __dirname,
@@ -68,6 +76,8 @@ assert.doesNotMatch(automation, /Call codara_complete/);
 assert.match(deep, /Deep execution policy/);
 assert.match(deep, /actively seek a counterexample/);
 assert.match(execute, /codara_whiteboard_update/);
+assert.match(execute, /Codara Studio's built-in Browser tab/);
+assert.match(execute, /codara_preview_\*/);
 const studioToolNames = new Set(studioBridge.listTools().map((tool) => tool.name));
 assert.equal(studioToolNames.has("codara_whiteboard_get"), true);
 assert.equal(studioToolNames.has("codara_whiteboard_update"), true);
@@ -103,6 +113,25 @@ const studioBridgePath = path.join(
 process.env.SPARK_MCP_MODE = "execute";
 delete require.cache[require.resolve(studioBridgePath)];
 const executeBridge = require(studioBridgePath);
+const executeToolNames = new Set(executeBridge.listTools().map((tool) => tool.name));
+for (const browserTool of [
+  "codara_preview_list",
+  "codara_preview_navigate",
+  "codara_preview_snapshot",
+  "codara_preview_screenshot",
+  "codara_preview_mouse",
+  "codara_preview_scroll",
+  "codara_preview_hover",
+  "codara_preview_drag",
+  "codara_preview_key",
+  "codara_preview_upload",
+  "codara_preview_console",
+  "codara_preview_network",
+  "codara_preview_resize",
+  "codara_preview_run",
+]) {
+  assert.equal(executeToolNames.has(browserTool), true, `execute mode exposes ${browserTool}`);
+}
 const spawnTool = executeBridge.listTools().find((tool) => tool.name === "codara_spawn_workers");
 assert.ok(spawnTool, "codara_spawn_workers is not exposed in execute mode");
 assert.deepEqual(spawnTool.inputSchema.properties.taskComplexity.enum, [
@@ -116,6 +145,44 @@ assert.ok(
   "declared-verifier tool guidance stays compact",
 );
 
+// Browser computer-use has one home: Codara Studio's mounted Browser webview.
+// The shell remains useful for code and HTTP, but cannot open a parallel GUI
+// browser that the user cannot see or control from the Studio tab.
+for (const command of [
+  "open https://example.com",
+  "/usr/bin/open -a 'Google Chrome' https://example.com",
+  "env FOO=1 xdg-open https://example.com",
+  "/usr/bin/gio open https://example.com",
+  `osascript -e 'open location "https://example.com"'`,
+  "google-chrome https://example.com",
+  "/usr/bin/firefox https://example.com",
+  '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" https://example.com',
+  "cmd.exe /c start https://example.com",
+  "powershell Start-Process https://example.com",
+  "python3 -m webbrowser https://example.com",
+  "python3 -c 'import webbrowser; webbrowser.open(\"https://example.com\")'",
+  "npx playwright open https://example.com",
+]) {
+  assert.equal(browserPolicy.launchesExternalBrowser(command), true, `blocks external browser: ${command}`);
+  assert.equal(
+    browserPolicy.studioBrowserOnlyDecision("bash", { command })?.block,
+    true,
+    `bash guard blocks: ${command}`,
+  );
+}
+for (const command of [
+  "curl https://example.com",
+  "git grep 'open https'",
+  "printf 'open https://example.com'",
+  "npm run build",
+]) {
+  assert.equal(browserPolicy.launchesExternalBrowser(command), false, `allows non-GUI shell work: ${command}`);
+}
+assert.equal(
+  browserPolicy.studioBrowserOnlyDecision("read", { path: "open https://example.com" }),
+  undefined,
+);
+
 // ── Worker policy (resources/pi-cora/worker-policy.ts): roster + fence ──────
 // The pure policy behind worker.ts: which bridge tools a worker registers and
 // which Pi tools the automation access fence vetoes.
@@ -126,6 +193,7 @@ const workerExtensionSource = fs.readFileSync(
   path.join(__dirname, "..", "resources", "pi-cora", "worker.ts"),
   "utf8",
 );
+assert.match(workerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
 assert.match(workerExtensionSource, /const SCRATCHPAD_MAX_CHARS = 4_000/);
 assert.match(workerExtensionSource, /name: "scratchpad"/);
 assert.match(workerExtensionSource, /if \(!untrustedPullRequest\) registerScratchpadTool\(pi\)/);
@@ -538,6 +606,14 @@ const noInput = {};
   usage = { tokens: 1500, contextWindow: 1000000 };
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "crossing the override threshold compacts");
+  assert.equal(
+    lastOptions.customInstructions,
+    compaction.CORA_COMPACTION_INSTRUCTIONS,
+    "automatic compaction uses Cora's continuation handoff prompt",
+  );
+  assert.match(lastOptions.customInstructions, /newest user intent/);
+  assert.match(lastOptions.customInstructions, /exact files\/symbols\/commands\/IDs/);
+  assert.match(lastOptions.customInstructions, /pending tasks/);
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "an in-flight compaction suppresses a second request");
 

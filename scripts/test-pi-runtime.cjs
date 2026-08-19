@@ -40,6 +40,11 @@ function loadTypeScriptModule(sourcePath) {
         path.join(ROOT, "src", "shared", `${specifier.slice("@shared/".length)}.ts`),
       );
     }
+    if (specifier.startsWith(".")) {
+      const base = path.resolve(path.dirname(resolved), specifier);
+      const candidate = fs.existsSync(`${base}.ts`) ? `${base}.ts` : path.join(base, "index.ts");
+      if (fs.existsSync(candidate)) return loadTypeScriptModule(candidate);
+    }
     return nativeRequire(specifier);
   };
   tsModuleCache.set(resolved, loaded.exports);
