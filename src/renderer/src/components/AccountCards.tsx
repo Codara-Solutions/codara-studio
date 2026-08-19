@@ -731,19 +731,18 @@ function AccountCard({
   const cliOnly = Boolean(cli && !cora);
   const cliBusy = Boolean(cli?.busyAction);
   const coraFacetBusy = Boolean(cora?.busy);
-  // The stored default on each side is the account that side runs on right now
-  // — one live login apiece — so the accent edge reads as an active selection.
-  // Nothing else in this panel may claim that edge.
+  // Cora switches immediately. A CLI default is used by the next process:
+  // an already-running CLI cannot have its environment changed underneath it.
   const active = Boolean(cora?.active || cli?.active);
   // The pill always names the side it means — "Active" alone next to "Not
   // connected to Cora" read as a contradiction. Plain "Active" is reserved for
   // a paired card that is the live account on both sides.
   const activeLabel =
     cora && cli && cora.active && cli.active
-      ? "Active"
+      ? `Cora + new ${cliLabel} sessions`
       : cora?.active
         ? "Active in Cora"
-        : `Active in ${cliLabel}`;
+        : `New ${cliLabel} sessions`;
   const coraControlsDisabled = coraDisabled || coraBusy;
   const cliControlsDisabled =
     cliDisabled || cliBusy || Boolean(cli?.inUse);
@@ -809,7 +808,7 @@ function AccountCard({
   if (cli?.authState === "connected" && !cli.active) {
     nextSteps.push({
       id: "cli-use",
-      label: cora ? `Use this account for ${cliLabel}` : "Use this account",
+      label: `Open ${cliLabel} with this account`,
       disabled: cliControlsDisabled,
       run: () => actions.onCliUse(card),
     });

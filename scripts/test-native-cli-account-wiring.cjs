@@ -132,11 +132,11 @@ assert.match(
 assert.match(app, /cancelLogin\(\{ launchToken \}\)/);
 assert.match(app, /event\.preventDefault\(\)/);
 
-// Settings presents one merged Accounts section: CLI sign-ins and Cora
-// connections share a single card list, and the copy still tells the user the
-// two logins are stored apart — in plain language, with no OAuth vocabulary.
+// Settings presents one merged Accounts section and explains the actual switch
+// boundary: Cora changes now, while a CLI needs a fresh process.
 assert.match(settings, /title="Accounts"/);
-assert.match(settings, /each need their own sign-in, even to the same account/);
+assert.match(settings, /Cora switches immediately/);
+assert.match(settings, /opens a fresh Studio session/);
 assert.match(settings, /<AccountCards providers=\{providerViews\}/);
 assert.ok(
   settings.indexOf("<AccountsSettings />") >= 0,
@@ -158,7 +158,7 @@ assert.match(settings, /\.\.\.\(paired \? \{ cli: cliFacet\(paired\) \} : \{\}\)
 // Cora-only card sitting beside an unmatched CLI sign-in — offers it.
 assert.match(settings, /filter\(\(profile\) => !pairedCliIds\.has\(profile\.id\)\)/);
 assert.match(settings, /key: `cli:\$\{profile\.id\}`/);
-assert.match(settings, /that account appears twice — once for each sign-in/);
+assert.match(settings, /sign-ins Codara cannot safely match stay separate/);
 assert.match(settings, /card\.cora && !card\.cli && cliOnlyCards\.length > 0/);
 assert.match(settings, /pairHint: `Reconnect to Cora if this is the same account/);
 // The built-in CLI sign-in has no name field of its own, so its card name is a
@@ -350,13 +350,12 @@ assert.match(settingsView, /Connected to Cora/);
 assert.match(settingsView, /Not signed in to \$\{cliLabel\}/);
 assert.match(settingsView, /cli\?\.managed/);
 assert.match(settingsView, /"Active in Cora"/);
-assert.match(settingsView, /`Active in \$\{cliLabel\}`/);
-// The pill always names the side it means; plain "Active" is reserved for a
-// paired card that is the live account on both sides — a lone "Active" next to
-// "Not connected to Cora" read as a contradiction.
+assert.match(settingsView, /`New \$\{cliLabel\} sessions`/);
+// The pill says that a CLI selection belongs to future processes; a running
+// CLI cannot have its account environment switched underneath it.
 assert.match(
   settingsView,
-  /cora && cli && cora\.active && cli\.active\s*\? "Active"/,
+  /cora && cli && cora\.active && cli\.active\s*\? `Cora \+ new \$\{cliLabel\} sessions`/,
 );
 // A card with a CLI sign-in but no Cora connection leads with "Connect to
 // Cora", wired to the same add-account login flow seeded with the card's name.
@@ -367,10 +366,10 @@ assert.match(
   /onCoraConnect: \(card\) => addAccount\(card\.provider, card\.label\)/,
 );
 assert.match(settingsView, /cli \? "Use this account for Cora" : "Use this account"/);
-assert.match(
-  settingsView,
-  /cora \? `Use this account for \$\{cliLabel\}` : "Use this account"/,
-);
+assert.match(settingsView, /label: `Open \$\{cliLabel\} with this account`/);
+assert.match(settings, /spark:open-native-cli-account/);
+assert.match(app, /spark:open-native-cli-account/);
+assert.match(app, /nativeCodexProfileId: profileId/);
 assert.match(settingsView, /"Remove from Cora"/);
 assert.match(settingsView, /`Remove the \$\{cliLabel\} account`/);
 

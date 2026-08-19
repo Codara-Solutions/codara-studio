@@ -244,6 +244,7 @@ import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
+import { resolveCoraProfile } from "./cora-profiles";
 import {
   describeHeadroomForPrompt,
   readSubscriptionHeadroomSummary,
@@ -784,6 +785,7 @@ async function createRunInternal(
     origin,
     projectPolicyMode: input.projectPolicyMode,
   });
+  const coraProfileId = resolveCoraProfile(input.coraProfileId).id;
   // Runtime coercion, not just a type: IPC payloads (tests, older remote
   // clients) can still carry a retired "claude"/"codex" string, and stamping
   // it would strand the run on a backend the registry no longer serves.
@@ -791,6 +793,7 @@ async function createRunInternal(
   const run: RunState = {
     id: reservedRunId ?? makeId("run"),
     workspaceId: input.workspaceId,
+    coraProfileId,
     origin,
     projectPolicyMode,
     title: input.title?.trim() || `Run - ${input.workspaceName}`,
@@ -1126,6 +1129,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
       cwd: input.cwd,
+      coraProfileId: input.coraProfileId,
       origin: input.origin,
       projectPolicyMode: input.projectPolicyMode,
       title: chatTitleFromInput(input),
@@ -1143,6 +1147,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
       cwd: input.cwd,
+      coraProfileId: input.coraProfileId,
       origin: input.origin,
       projectPolicyMode: input.projectPolicyMode,
       title: chatTitleFromInput(input),
@@ -1563,6 +1568,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     workspaceId: input.workspaceId,
     workspaceName: input.workspaceName ?? "workspace",
     cwd: input.cwd,
+    coraProfileId: input.coraProfileId,
     origin: input.origin,
     projectPolicyMode: input.projectPolicyMode,
     title: input.title,
@@ -1603,6 +1609,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
         author: "user",
         kind: "note",
         message: node.template,
+        deliveryState: "acknowledged",
         skipDirectDispatch: true,
       });
     }
@@ -1619,6 +1626,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     author: "user",
     kind: "note",
     message: input.prompt,
+    deliveryState: "acknowledged",
     skipDirectDispatch: true,
   });
   return launchDirectIterationTask({
@@ -1665,6 +1673,7 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
         author: "user",
         kind: "note",
         message: input.nodes[i].template,
+        deliveryState: "acknowledged",
         skipDirectDispatch: true,
       });
     }
@@ -1697,6 +1706,7 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
     author: "user",
     kind: "note",
     message: input.prompt,
+    deliveryState: "acknowledged",
     skipDirectDispatch: true,
   });
   const passNumber = run.steps.length + 1;
@@ -1832,6 +1842,7 @@ async function launchDirectNodeTasks(
   const vars = _opts?.vars ?? {};
   const nodeOutputs = _opts?.nodeOutputs ?? {};
   const freshPass = _opts?.freshPass === true;
+  let run = await requireRun(runId);
 
   // Looms on Pi: a node's runtime family is derived from its model id (gpt-* →
   // codex provider, everything else → claude provider). No install detection —
@@ -1891,7 +1902,6 @@ async function launchDirectNodeTasks(
     }),
   );
 
-  let run = await requireRun(runId);
   const passTitle = run.automationId
     ? `Loom pass ${passNumber}`
     : passNumber === 1
@@ -1907,6 +1917,7 @@ async function launchDirectNodeTasks(
         author: "user",
         kind: "note",
         message: decorated[i],
+        deliveryState: "acknowledged",
         skipDirectDispatch: true,
       });
     }
@@ -5311,6 +5322,7 @@ async function prepareManagerTurn(
   try {
     coraMemory = await formatCoraMemoryForTurn(prepared.workspaceId, prepared.id, {
       force: includeCanonicalReplay,
+      profileId: prepared.coraProfileId,
     });
   } catch {
     coraMemory = null;
@@ -13513,6 +13525,47 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
   }
 }
 
+/**
+ * User-requested context compaction. It deliberately reuses the same durable
+ * summary + epoch cutover as automatic compaction, so `/compact` cannot create
+ * a second, subtly different replay format. Busy runs are rejected instead of
+ * interrupting work or racing queued input.
+ */
+export async function compactConversation(runId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  if (runsMidAutoCompaction.has(runId)) {
+    throw new Error("This conversation is already being compacted.");
+  }
+  if (activeManagerCall(run)) {
+    throw new Error("Wait for Cora's current turn to finish before compacting.");
+  }
+  if (activeWorkersForRun(runId).length > 0) {
+    throw new Error("Wait for the active agents to finish before compacting.");
+  }
+  if (queuedManagerInputMessages(run).length > 0) {
+    throw new Error("Send or finish the queued message before compacting.");
+  }
+  if (["paused", "blocked", "cancelled", "failed"].includes(run.status)) {
+    throw new Error(`Cannot compact while this run is ${run.status}.`);
+  }
+  if (!resolveChatBackendConfig(run).sessionUuid) {
+    throw new Error("There is no provider conversation to compact yet.");
+  }
+  const cwd = workspaceCwdFromRun(run);
+  if (!cwd) throw new Error("This run has no workspace directory.");
+
+  const oldEpoch = conversationEpoch(run);
+  await performAutoCompaction(runId, cwd);
+  const compacted = await requireRun(runId);
+  if (conversationEpoch(compacted) === oldEpoch) {
+    const failed = [...compacted.sparkCalls]
+      .reverse()
+      .find((call) => call.purpose === "compaction" && call.status === "failed");
+    throw new Error(failed?.error || "Cora could not produce a safe conversation summary.");
+  }
+  return compacted;
+}
+
 async function markConversationRewindFailed(
   run: RunState,
   error: unknown,
@@ -18550,20 +18603,8 @@ const PI_WORKER_FALLBACK_COLS = 110;
 const PI_WORKER_FALLBACK_ROWS = 32;
 // WorkerAttempt.runtimeActivity is one ellipsized console line on the Runs
 // card; anything longer than this is noise the title= tooltip can carry.
-// WorkerAttempt.runtimeActivity is one ellipsized console line on the Runs
-// card; anything longer than this is noise the title= tooltip can carry.
 const PI_WORKER_ACTIVITY_MAX_CHARS = 120;
 
-/**
- * Pi runs in a main-process RPC client; its PTY is only a durable activity
- * display, and MAIN owns that session outright. The renderer's workers pane
- * is a pure attacher: it materializes only once this session exists (App.tsx
- * gates the pane on pty.exists) and hands TerminalPane a fail-closed display
- * shell, so pane creation can never spawn a process of its own. Create the
- * headless display PTY immediately — a later TerminalPane attach receives the
- * full tail, so background workspaces and late-opened panes see the whole
- * transcript instead of a black hole.
- */
 /**
  * Pi runs in a main-process RPC client; its PTY is only a durable activity
  * display, and MAIN owns that session outright. The renderer's workers pane

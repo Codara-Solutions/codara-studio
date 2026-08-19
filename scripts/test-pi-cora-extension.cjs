@@ -122,6 +122,17 @@ assert.ok(
 const policy = loadTypeScriptModule(
   path.join(__dirname, "..", "resources", "pi-cora", "worker-policy.ts"),
 );
+const workerExtensionSource = fs.readFileSync(
+  path.join(__dirname, "..", "resources", "pi-cora", "worker.ts"),
+  "utf8",
+);
+assert.match(workerExtensionSource, /const SCRATCHPAD_MAX_CHARS = 4_000/);
+assert.match(workerExtensionSource, /name: "scratchpad"/);
+assert.match(workerExtensionSource, /if \(!untrustedPullRequest\) registerScratchpadTool\(pi\)/);
+assert.match(workerExtensionSource, /never hidden reasoning/);
+assert.match(workerExtensionSource, /For greetings, opinions, and questions/);
+assert.match(workerExtensionSource, /The result summary\s+is shown to the user verbatim/);
+assert.match(workerExtensionSource, /Do not inspect the repository or say "acknowledged"/);
 
 // Automation detection is the SPARK_AUTOMATION_ID stamp.
 assert.equal(policy.isAutomationWorker({}), false);

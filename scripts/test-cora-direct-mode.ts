@@ -3,7 +3,10 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { shouldUseDirectExecution } from "../src/main/orchestration/direct-execution.ts";
+import {
+  isConversationalRequest,
+  shouldUseDirectExecution,
+} from "../src/main/orchestration/direct-execution.ts";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "cora-direct-mode-"));
 try {
@@ -13,6 +16,19 @@ try {
     await shouldUseDirectExecution({ cwd: root, prompt: "Implement the parser and run node test.js." }),
     true,
     "bounded work in a small workspace uses the direct lane",
+  );
+  assert.equal(isConversationalRequest("hello!"), true);
+  assert.equal(isConversationalRequest("what is your favorite food?"), true);
+  assert.equal(isConversationalRequest("fix the hello button"), false);
+  assert.equal(
+    await shouldUseDirectExecution({ cwd: root, prompt: "hello" }),
+    false,
+    "a greeting stays in Cora's conversational lane",
+  );
+  assert.equal(
+    await shouldUseDirectExecution({ cwd: root, prompt: "what is your favorite food?" }),
+    false,
+    "a casual question does not launch an engineering worker",
   );
   assert.equal(
     await shouldUseDirectExecution({

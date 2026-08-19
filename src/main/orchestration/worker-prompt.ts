@@ -29,6 +29,7 @@ import {
   renderRunProjectPolicy,
   runProjectPolicyMode,
 } from "./project-policy";
+import { formatCoraMemoryForWorker } from "./cora-memory";
 
 // Fallback for platforms where the sandbox-exec config shield can't run (see
 // agent-config-shield.ts). There, the CLI still walks ancestor dirs and absorbs
@@ -105,6 +106,18 @@ function renderPriorHandoffSection(priorHandoffs: WorkerHandoffArtifact[] | unde
     lines.push(`- ${artifact.path}`, `    what: ${artifact.description}`, `    reuse: ${artifact.reuse}`);
   }
   return lines;
+}
+
+function renderWorkerMemorySection(run: RunState): string[] {
+  if (run.automationId) return [];
+  const memory = formatCoraMemoryForWorker(run.workspaceId, run.coraProfileId);
+  if (!memory) return [];
+  return [
+    "",
+    "## READ-ONLY CORA CONTEXT",
+    memory,
+    "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
+  ];
 }
 
 /**
@@ -654,6 +667,7 @@ function renderImplementationWorkerPrompt({
     "",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
+    ...renderWorkerMemorySection(run),
   );
 
   if (step) {
@@ -804,6 +818,7 @@ function renderDirectTaskPrompt({
     "## TASK",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
+    ...renderWorkerMemorySection(run),
   ];
 
   const projectPolicy = renderRunProjectPolicy(run);
@@ -890,6 +905,7 @@ function renderVerifierWorkerPrompt({
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
     ...renderPriorVerifierRoundSection(priorVerifierRound),
+    ...renderWorkerMemorySection(run),
   );
 
   if (step) {

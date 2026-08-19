@@ -17,12 +17,18 @@ ${logo()}
   ${c.bold("cora")} — drive Cora, Codara Studio's orchestrator, from your terminal
 
 ${c.bold("SESSIONS")}
-  chat [run] [--cwd DIR --model M --effort E --direct]     ${c.cyan("fullscreen Cora chat")}
-  start <prompt> [--cwd DIR --model M --effort E --direct] start a Cora run
+  chat [run] [--cwd DIR --profile NAME --direct]            ${c.cyan("fullscreen Cora chat")}
+  start <prompt> [--cwd DIR --profile NAME --direct]        start a Cora run
   send <run> <message|option#> [--wait]                    reply / answer a question
   wait <run> [--timeout SECONDS]                           block until it needs you
   tail <run> [--all]                                       stream live events
   cancel <run> [reason]                                    stop a run
+
+${c.bold("PROFILES & MEMORY")}
+  profile list                         list named Cora identities
+  profile create <name> [--description TEXT --instructions TEXT]
+                                       create isolated profile + memory
+  profile use <name|id>                select the default for new chats
 
 ${c.bold("RUNS & AGENTS")}
   runs                         list runs (works offline)
@@ -97,6 +103,9 @@ async function main() {
 
     case "chat":
       return require("./commands/chat.cjs").chat(args, flags);
+
+    case "profile":
+      return require("./commands/profiles.cjs").profile(args, flags);
 
     case "status":
       return require("./commands/status.cjs").status(args, flags);

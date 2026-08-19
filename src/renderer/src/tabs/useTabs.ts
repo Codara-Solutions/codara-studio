@@ -1009,6 +1009,8 @@ export interface UseTabsApi {
       focus?: boolean;
       agentSession?: TerminalAgentSession | null;
       nativeCliLoginToken?: string;
+      nativeCodexProfileId?: string;
+      nativeClaudeProfileId?: string;
       title?: string;
       manualAgentRuntime?: TerminalAgentSession["runtime"];
     },
@@ -1773,6 +1775,8 @@ export function useTabs(
         focus?: boolean;
         agentSession?: TerminalAgentSession | null;
         nativeCliLoginToken?: string;
+        nativeCodexProfileId?: string;
+        nativeClaudeProfileId?: string;
         title?: string;
         manualAgentRuntime?: TerminalAgentSession["runtime"];
       },
@@ -1788,6 +1792,12 @@ export function useTabs(
       }
       if (options?.nativeCliLoginToken) {
         root.nativeCliLoginToken = options.nativeCliLoginToken;
+      }
+      if (root.worker && options?.nativeCodexProfileId) {
+        root.worker.nativeCodexProfileId = options.nativeCodexProfileId;
+      }
+      if (root.worker && options?.nativeClaudeProfileId) {
+        root.worker.nativeClaudeProfileId = options.nativeClaudeProfileId;
       }
       setTabs((curr) => {
         const tab: TerminalTab = {

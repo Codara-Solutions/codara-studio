@@ -1743,6 +1743,7 @@ function AccountsSettings() {
   const [cliLoading, setCliLoading] = useState(true);
   const [cliBusy, setCliBusy] = useState<NativeCliSettingsBusy | null>(null);
   const [cliError, setCliError] = useState<string | null>(null);
+  const [cliNotice, setCliNotice] = useState<string | null>(null);
   const [addingCliProvider, setAddingCliProvider] =
     useState<PiSubscriptionProvider | null>(null);
   const [addCliLabel, setAddCliLabel] = useState("");
@@ -2023,6 +2024,7 @@ function AccountsSettings() {
     ): Promise<boolean> => {
       setCliBusy(nextBusy);
       setCliError(null);
+      setCliNotice(null);
       try {
         await operation();
         await refreshCli();
@@ -2381,9 +2383,24 @@ function AccountsSettings() {
     onCliUse: (card) => {
       if (!card.cli) return;
       const { runtime, profileId } = card.cli;
-      void mutateCli({ runtime, profileId, action: "setting-default" }, () =>
-        window.spark.nativeCliAccounts.setDefault({ runtime, profileId }),
-      );
+      void (async () => {
+        const changed = await mutateCli(
+          { runtime, profileId, action: "setting-default" },
+          () => window.spark.nativeCliAccounts.setDefault({ runtime, profileId }),
+        );
+        if (!changed) return;
+        const cliLabel = runtime === "claude" ? "Claude Code" : "Codex CLI";
+        const event = new CustomEvent("spark:open-native-cli-account", {
+          cancelable: true,
+          detail: { runtime, profileId, label: card.label },
+        });
+        const opened = !window.dispatchEvent(event);
+        setCliNotice(
+          opened
+            ? `Opened a new ${cliLabel} session with ${card.label}. Existing sessions keep their current sign-in.`
+            : `${card.label} will be used by new Studio ${cliLabel} sessions. Existing sessions keep their current sign-in.`,
+        );
+      })();
     },
     onCliDelete: (card) => {
       if (!card.cli) return;
@@ -2398,7 +2415,7 @@ function AccountsSettings() {
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="Accounts"
-        detail="Cora and the terminal tools each need their own sign-in, even to the same account. When Codara can tell two sign-ins belong to one account, they share one card; when it cannot, that account appears twice — once for each sign-in."
+        detail="Cora switches immediately. A CLI account switch opens a fresh Studio session because a running CLI cannot change sign-in underneath itself. Verified matches share one card; sign-ins Codara cannot safely match stay separate."
       />
       <div
         className="spark-glass"
@@ -2485,6 +2502,15 @@ function AccountsSettings() {
           style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}
         >
           {cliError}
+        </div>
+      ) : null}
+
+      {cliNotice ? (
+        <div
+          role="status"
+          style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 12 }}
+        >
+          {cliNotice}
         </div>
       ) : null}
 

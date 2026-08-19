@@ -58,6 +58,8 @@ import type {
   RunBoardUpdateResult,
   CoraMemoryScope,
   CoraMemoryStatus,
+  CoraProfile,
+  CoraProfileCreateInput,
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
@@ -444,6 +446,13 @@ const api = {
       includeUserLines: boolean,
     ): Promise<CoraMemoryStatus> =>
       ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines }),
+  },
+  coraProfiles: {
+    list: (): Promise<CoraProfile[]> => ipcRenderer.invoke("cora-profiles:list"),
+    create: (input: CoraProfileCreateInput): Promise<CoraProfile[]> =>
+      ipcRenderer.invoke("cora-profiles:create", input),
+    use: (reference: string): Promise<CoraProfile[]> =>
+      ipcRenderer.invoke("cora-profiles:use", reference),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),

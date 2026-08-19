@@ -15,6 +15,7 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 const CLI = path.join(ROOT, "cli", "cora.cjs");
+const asynchronousAssertions = [];
 
 // ── synthetic home ──────────────────────────────────────────────────────────
 
@@ -100,11 +101,14 @@ for (const command of ["chat", "start", "send", "watch", "agents", "board", "whi
 // ── full-screen chat's pure view helpers ───────────────────────────────────
 
 const {
-  activityText,
   compactTokens,
   conversationMessages,
+  deleteRunRpc,
+  directMessageWasDispatched,
+  messageIsQueued,
   resolveReplyContent,
   runStats,
+  turnStatus,
 } = require(path.join(ROOT, "cli", "commands", "chat.cjs"));
 
 assert.equal(compactTokens(999), "999");
@@ -131,7 +135,233 @@ assert.deepEqual(conversationMessages(chatRun).map((message) => message.id), ["m
 assert.deepEqual(resolveReplyContent("1", chatRun), { content: "Ship it now", label: "Yes" });
 assert.deepEqual(resolveReplyContent("please wait", chatRun), { content: "please wait" });
 assert.deepEqual(runStats(chatRun), { activeAgents: 1, finishedSteps: 1, totalSteps: 2 });
-assert.match(activityText(chatRun), /needs your answer/);
+assert.match(turnStatus(chatRun).left, /needs your answer/);
+const directMessages = [
+  { author: "user", message: "hello", deliveryState: "queued", createdAt: "2026-08-19T09:00:00.000Z" },
+];
+const dispatchedDirectRun = {
+  executionMode: "direct",
+  workerTasks: [{ description: "hello", createdAt: "2026-08-19T09:00:01.000Z" }],
+};
+assert.equal(directMessageWasDispatched(dispatchedDirectRun, directMessages[0]), true);
+assert.equal(messageIsQueued(directMessages, 0, dispatchedDirectRun), false);
+assert.equal(messageIsQueued(directMessages, 0, { executionMode: "direct", workerTasks: [] }), true);
+assert.equal(messageIsQueued([
+  directMessages[0],
+  { author: "spark", message: "Earlier turn finished", deliveryState: "acknowledged" },
+], 0, { executionMode: "managed", workerTasks: [] }), true);
+assert.match(turnStatus({ ...chatRun, status: "working", createdAt: now }, 0).left, /Working/);
+
+const {
+  ANIMATION_TICK_MS,
+  SPINNER_FRAMES,
+  motionDuration,
+  spinnerFrame,
+} = require(path.join(ROOT, "cli", "lib", "chat-motion.cjs"));
+assert.equal(ANIMATION_TICK_MS, 33);
+assert.deepEqual(SPINNER_FRAMES, ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"]);
+assert.equal(spinnerFrame(0), "⠋");
+assert.equal(spinnerFrame(3), "⠋", "a Grok spinner frame is held for four ticks");
+assert.equal(spinnerFrame(4), "⠙");
+assert.equal(motionDuration("2026-08-19T09:00:00.000Z", "2026-08-19T09:00:05.200Z"), "5.2s");
+assert.equal(motionDuration("2026-08-19T09:00:00.000Z", "2026-08-19T09:01:05.000Z"), "1m5s");
+
+const deleteRequests = [];
+asynchronousAssertions.push(
+  deleteRunRpc({}, "run-old-app", async (_flags, method, params) => {
+    deleteRequests.push({ method, params });
+    return method === "chat.delete"
+      ? { error: { code: -32601, message: "unknown method: chat.delete" } }
+      : { result: { value: { ok: true } } };
+  }).then(() => {
+    assert.deepEqual(deleteRequests.map((request) => request.method), ["chat.delete", "app.evaluate"]);
+    assert.match(deleteRequests[1].params.code, /window\.spark\.orchestration\.deleteRun\("run-old-app"\)/);
+  }),
+);
+
+const {
+  createCommandEditor,
+  replaceCursorWithGhost,
+  slashGhostSuffix,
+} = require(path.join(ROOT, "cli", "lib", "command-editor.cjs"));
+assert.equal(slashGhostSuffix("/re", "resume"), "sume");
+assert.equal(slashGhostSuffix("/re", "rename"), "name");
+assert.equal(slashGhostSuffix("/resume", "resume"), "");
+assert.equal(slashGhostSuffix("ordinary text", "resume"), "");
+const ghostLine = replaceCursorWithGhost(
+  `/re\x1b[7m \x1b[0m          `,
+  "sume",
+  (value) => `<${value}>`,
+  20,
+  (value) => value.replace(/\x1b\[[0-9;]*m/gu, "").length,
+  (value, width) => value.slice(0, width),
+);
+assert.match(ghostLine, /\/re\x1b\[7m \x1b\[0m<sume>/);
+assert.equal(ghostLine.endsWith("      "), true, "ghost text replaces editor padding");
+
+class FakeEditor {
+  constructor() {
+    this.state = { lines: ["/re"], cursorLine: 0, cursorCol: 3 };
+    this.autocompleteState = "regular";
+    this.autocompletePrefix = "/re";
+    this.selectedIndex = 0;
+    this.autocompleteList = {
+      getSelectedItem: () => [
+        { value: "resume" },
+        { value: "rename" },
+      ][this.selectedIndex],
+    };
+    this.autocompleteProvider = {
+      applyCompletion: (lines, cursorLine, _cursorCol, selected) => ({
+        lines: [`/${selected.value} `],
+        cursorLine,
+        cursorCol: selected.value.length + 2,
+      }),
+    };
+    this.tui = { requestRender: () => {} };
+    this.submitted = false;
+  }
+  pushUndoSnapshot() {}
+  setCursorCol(value) { this.state.cursorCol = value; }
+  cancelAutocomplete() { this.autocompleteState = null; }
+  getText() { return this.state.lines.join("\n"); }
+  getLines() { return this.state.lines; }
+  getCursor() { return { line: this.state.cursorLine, col: this.state.cursorCol }; }
+  render() { return [`${this.getText()}\x1b[7m \x1b[0m          `]; }
+  handleInput(data) {
+    if (data === "down") this.selectedIndex = 1;
+    if (data === "enter") this.submitted = true;
+  }
+}
+const TestCommandEditor = createCommandEditor({
+  Editor: FakeEditor,
+  matchesKey: (data, key) => data === key,
+  visibleWidth: (value) => value.replace(/\x1b\[[0-9;]*m/gu, "").length,
+  truncateToWidth: (value, width) => value.slice(0, width),
+  ghostStyle: (value) => `<${value}>`,
+});
+const completionEditor = new TestCommandEditor();
+completionEditor.handleInput("down");
+assert.equal(completionEditor.getText(), "/re", "arrow navigation preserves the typed prefix");
+assert.match(completionEditor.render(20)[0], /<name>/, "arrow navigation updates the ghost suffix");
+completionEditor.handleInput("space");
+assert.equal(completionEditor.getText(), "/rename ", "Space accepts the selected command into the draft");
+assert.equal(completionEditor.submitted, false, "accepting a slash command does not execute it");
+const enterCompletionEditor = new TestCommandEditor();
+enterCompletionEditor.handleInput("enter");
+assert.equal(enterCompletionEditor.getText(), "/resume ", "Enter accepts before a later Enter submits");
+assert.equal(enterCompletionEditor.submitted, false);
+
+const {
+  COMMAND_META,
+  createSlashCommands,
+  modelItems,
+  parseSlashCommand,
+} = require(path.join(ROOT, "cli", "lib", "chat-slash.cjs"));
+for (const command of ["model", "effort", "compact", "profile", "mode", "resume", "copy-id", "agents", "board", "runs", "rename", "clear"]) {
+  assert.ok(COMMAND_META.some((entry) => entry.name === command), `chat registers /${command}`);
+}
+assert.deepEqual(parseSlashCommand(" /m gpt-5.6-sol high "), {
+  name: "model",
+  rawName: "m",
+  args: "gpt-5.6-sol high",
+});
+assert.equal(parseSlashCommand("ordinary prompt"), null);
+assert.equal(parseSlashCommand("/id").name, "copy-id");
+assert.ok(modelItems([], "gpt-5.6-sol ").some((item) => item.value === "gpt-5.6-sol high"));
+const slashCommands = createSlashCommands({
+  listModels: async () => [],
+  listProfiles: async () => [{ id: "reviewer", name: "Reviewer", isDefault: true }],
+  listRuns: async () => [{ id: "run-old", title: "Old run", status: "complete" }],
+});
+assert.equal(typeof slashCommands.find((entry) => entry.name === "profile").getArgumentCompletions, "function");
+assert.match(fs.readFileSync(path.join(ROOT, "cli", "commands", "chat.cjs"), "utf8"), /setAutocompleteProvider/);
+
+const {
+  closestEffort,
+  createModelEffortPicker,
+  providerLabel,
+} = require(path.join(ROOT, "cli", "lib", "model-picker.cjs"));
+assert.equal(closestEffort(["low", "medium", "high"], "high"), "high");
+assert.equal(closestEffort(["low", "medium", "high"], "xhigh"), "medium");
+assert.equal(providerLabel({ id: "claude-test" }), "Anthropic");
+let pickerSelection = null;
+const picker = createModelEffortPicker({
+  models: [
+    { id: "gpt-one", label: "GPT One", thinkingLevels: ["low", "medium", "high"] },
+    { id: "claude-two", label: "Claude Two", thinkingLevels: ["medium", "high"] },
+  ],
+  currentModel: "gpt-one",
+  currentEffort: "medium",
+  onApply: (selection) => { pickerSelection = selection; },
+  onCancel: () => {},
+  requestRender: () => {},
+  ui: {
+    matchesKey: (data, key) => data === key,
+    truncateToWidth: (text, width) => String(text).slice(0, width),
+    visibleWidth: (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "").length,
+  },
+});
+picker.handleInput("down");
+picker.handleInput("right");
+picker.handleInput("enter");
+assert.equal(pickerSelection.model.id, "claude-two");
+assert.equal(pickerSelection.effort, "high");
+assert.match(picker.render(72).join("\n"), /MODEL \+ REASONING/);
+
+const { createRunPicker } = require(path.join(ROOT, "cli", "lib", "run-picker.cjs"));
+let resumedRun = null;
+const runPicker = createRunPicker({
+  runs: [
+    { id: "run-one", title: "First chat", status: "complete", updatedAt: now },
+    { id: "run-two", title: "Second chat", status: "running", updatedAt: now },
+  ],
+  currentRunId: "run-one",
+  onApply: (run) => { resumedRun = run; },
+  onCancel: () => {},
+  requestRender: () => {},
+  ui: {
+    matchesKey: (data, key) => data === key,
+    truncateToWidth: (text, width) => String(text).slice(0, width),
+    visibleWidth: (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "").length,
+  },
+});
+runPicker.handleInput("down");
+runPicker.handleInput("enter");
+assert.equal(resumedRun.id, "run-two");
+assert.match(runPicker.render(72).join("\n"), /RESUME CHAT/);
+
+let copiedRun = null;
+let deletedRun = null;
+const managingPicker = createRunPicker({
+  runs: [
+    { id: "run-copy", title: "Copy me", status: "complete", updatedAt: now },
+    { id: "run-delete", title: "Delete me", status: "complete", updatedAt: now },
+  ],
+  onApply: () => {},
+  onCancel: () => {},
+  onCopy: (selected) => { copiedRun = selected; },
+  onDelete: (selected) => { deletedRun = selected; },
+  requestRender: () => {},
+  ui: {
+    matchesKey: (data, key) => data === key,
+    truncateToWidth: (text, width) => String(text).slice(0, width),
+    visibleWidth: (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "").length,
+  },
+});
+managingPicker.handleInput("c");
+assert.equal(copiedRun.id, "run-copy");
+managingPicker.busy = false;
+managingPicker.handleInput("down");
+managingPicker.handleInput("d");
+assert.match(managingPicker.render(72).join("\n"), /d again/);
+assert.equal(deletedRun, null, "the first delete key only asks for confirmation");
+managingPicker.handleInput("d");
+assert.equal(deletedRun.id, "run-delete");
+
+const { clipboardCommands } = require(path.join(ROOT, "cli", "lib", "clipboard.cjs"));
+assert.deepEqual(clipboardCommands("darwin"), [["pbcopy"]]);
+assert.deepEqual(clipboardCommands("win32"), [["clip.exe"]]);
 
 // ── offline run inspection ──────────────────────────────────────────────────
 
@@ -365,4 +595,9 @@ assert.doesNotMatch(offline, /at Object/);
 assert.match(cliFails("frobnicate") ?? "", /unknown command/);
 
 fs.rmSync(home, { recursive: true, force: true });
-console.log("test-cora-cli: all assertions passed");
+Promise.all(asynchronousAssertions)
+  .then(() => console.log("test-cora-cli: all assertions passed"))
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

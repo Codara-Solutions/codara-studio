@@ -752,6 +752,45 @@ export default function App() {
       );
   }, [home, newTerminalTab]);
 
+  // Choosing a different CLI account cannot mutate a process that is already
+  // running. Settings therefore opens one fresh, explicitly selected session
+  // after changing the default, which makes the click take effect visibly and
+  // leaves any in-progress terminal untouched.
+  useEffect(() => {
+    const handleNativeCliAccount = (rawEvent: Event) => {
+      const event = rawEvent as CustomEvent<{
+        runtime?: unknown;
+        profileId?: unknown;
+        label?: unknown;
+      }>;
+      const runtime = event.detail?.runtime;
+      const profileId = event.detail?.profileId;
+      if (
+        (runtime !== "claude" && runtime !== "codex") ||
+        typeof profileId !== "string" ||
+        !activeWorkspace?.cwd
+      ) {
+        return;
+      }
+      const label = typeof event.detail?.label === "string"
+        ? event.detail.label.trim().slice(0, 80)
+        : "account";
+      const command = runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
+      newTerminalTab(activeWorkspace.cwd, command, {
+        focus: true,
+        title: `${runtime === "claude" ? "Claude" : "Codex"} · ${label}`,
+        manualAgentRuntime: runtime,
+        ...(runtime === "codex"
+          ? { nativeCodexProfileId: profileId }
+          : { nativeClaudeProfileId: profileId }),
+      });
+      setSettingsOpen(false);
+      event.preventDefault();
+    };
+    window.addEventListener("spark:open-native-cli-account", handleNativeCliAccount);
+    return () => window.removeEventListener("spark:open-native-cli-account", handleNativeCliAccount);
+  }, [activeWorkspace?.cwd, newTerminalTab]);
+
   // Mirror the runs list through a ref so run-selection callbacks can read
   // the latest chat titles without taking `runs` as a dependency.
   const runsRef = useRef(runs);
@@ -5843,14 +5882,15 @@ function AwayDigestCard({
       }}
     >
       <div
-        className="spark-glass--strong"
+        className="spark-toast"
         role="status"
         style={{
+          ["--toast-status" as string]: "inset 3px 0 0 var(--accent)",
           display: "flex",
           flexDirection: "column",
           gap: 10,
           padding: "12px 14px",
-          borderRadius: 8,
+          borderRadius: "var(--radius-surface, 7px)",
           fontFamily: "var(--font-sans)",
         }}
       >

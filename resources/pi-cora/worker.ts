@@ -49,13 +49,59 @@ interface DirectResultParams {
   followups?: string[];
 }
 
+type ScratchpadParams =
+  | { action: "read" }
+  | { action: "write"; content?: string }
+  | { action: "clear" };
+
+const SCRATCHPAD_MAX_CHARS = 4_000;
+
+function registerScratchpadTool(pi: ExtensionAPI): void {
+  let notes = "";
+  pi.registerTool({
+    name: "scratchpad",
+    label: "Scratchpad",
+    description:
+      "Keep a tiny operational note for this worker only. Use for long tasks or before compaction, not routine one-step work. Store objective, confirmed facts, next actions, blockers, and checks, never hidden reasoning. The note is ephemeral and cannot write project or Cora memory.",
+    promptSnippet: "Read, replace, or clear this worker's bounded operational scratchpad",
+    parameters: {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: { type: "string", enum: ["read", "write", "clear"] },
+        content: {
+          type: "string",
+          maxLength: SCRATCHPAD_MAX_CHARS,
+          description: "Complete replacement note for action=write.",
+        },
+      },
+      additionalProperties: false,
+    } as never,
+    async execute(_toolCallId, params: ScratchpadParams) {
+      if (params.action === "clear") notes = "";
+      if (params.action === "write") {
+        notes = cleanText(params.content, SCRATCHPAD_MAX_CHARS);
+      }
+      const text = notes || "Scratchpad is empty.";
+      return {
+        content: [{ type: "text" as const, text }],
+        details: { action: params.action, chars: notes.length },
+      };
+    },
+  });
+}
+
 function directTaskSystemPrompt(systemPrompt: string, mcpSuffix: string): string {
   return `${systemPrompt}
 
-You are Cora, working directly on one bounded engineering task.
+You are Cora, handling one user request directly.
 
-- Work in the supplied directory with the native file, search, edit, write,
-  and shell tools. Inspect before editing and keep the change focused.
+- For greetings, opinions, and questions that need no project work, answer
+  naturally and warmly. Do not inspect the repository or say "acknowledged",
+  "no workspace changes", or mention this report contract. The result summary
+  is shown to the user verbatim, so write it as Cora's actual answer.
+- For engineering work, use the native file, search, edit, write, and shell
+  tools. Inspect before editing and keep the change focused.
 - Move quickly on bounded tasks: inspect the relevant files, run the named
   check once, then implement. Skip repository history and unrelated files
   unless they are needed. Do not repeat unchanged tests.
@@ -66,6 +112,8 @@ You are Cora, working directly on one bounded engineering task.
   invent success or evidence.
 - Use Codara preview tools when they are available and the task has a visible
   UI. Use web tools only when current external facts are actually needed.
+- For a genuinely long task, keep only objective, confirmed facts, next steps,
+  blockers, and pending checks in scratchpad. Skip it for ordinary short work.
 - When finished, call submit_result exactly once. It writes Cora's durable
   result; do not create final-report.json yourself.${mcpSuffix}`;
 }
@@ -300,7 +348,8 @@ Worker contract:
   that report before ending, even when blocked or failed. Cora accepts the work
   from the report, not from an optimistic prose claim.
 - Keep prose concise while working; the live Workers surface already explains
-  the lifecycle to the user.${fence.size > 0 ? `
+  the lifecycle to the user. Use scratchpad only for operational continuity on
+  long work or before compaction; it is not persistent memory.${fence.size > 0 ? `
 - Some tools are disabled for this worker by its access policy. A blocked call
   returns an explanation instead of running; work within the remaining tools
   and record the limitation in your final report if it blocks the task.` : ""}
@@ -308,6 +357,7 @@ ${mcp?.promptSuffix() ?? ""}`,
     };
   });
 
+  if (!untrustedPullRequest) registerScratchpadTool(pi);
   if (directTask) registerDirectResultTool(pi, directReportPath);
 
   // Tool-access fence: veto blocked tools (and out-of-workspace write/edit

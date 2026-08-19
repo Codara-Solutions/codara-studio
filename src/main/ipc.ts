@@ -334,6 +334,8 @@ import type {
   RunBoardUpdateResult,
   CoraMemoryScope,
   CoraMemoryStatus,
+  CoraProfile,
+  CoraProfileCreateInput,
   MemoryClearInput,
   MemorySetEnabledInput,
   MemoryStatusInput,
@@ -1182,7 +1184,8 @@ export function registerIpc(): void {
     async (_e, input: MemorySetEnabledInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
       const { setMemoryEnabled } = coraMemory;
-      await setMemoryEnabled(input.scope, workspaceId, input.enabled);
+      const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+      await setMemoryEnabled(input.scope, workspaceId, input.enabled, resolveCoraProfile().id);
       return readMemoryStatus(input.workspaceId ?? null);
     },
   );
@@ -1192,10 +1195,39 @@ export function registerIpc(): void {
     async (_e, input: MemoryClearInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
       const { clearMemory } = coraMemory;
+      const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
       // The user's own lines survive unless the caller opted in explicitly:
       // a missing flag must never be read as permission to delete them.
-      await clearMemory(input.scope, workspaceId, input.includeUserLines === true);
+      await clearMemory(
+        input.scope,
+        workspaceId,
+        input.includeUserLines === true,
+        resolveCoraProfile().id,
+      );
       return readMemoryStatus(input.workspaceId ?? null);
+    },
+  );
+
+  handle("cora-profiles:list", async (): Promise<CoraProfile[]> => {
+    const { listCoraProfiles } = await import("./orchestration/cora-profiles");
+    return listCoraProfiles();
+  });
+
+  handle(
+    "cora-profiles:create",
+    async (_e, input: CoraProfileCreateInput): Promise<CoraProfile[]> => {
+      const { createCoraProfile, listCoraProfiles } = await import("./orchestration/cora-profiles");
+      await createCoraProfile(input);
+      return listCoraProfiles();
+    },
+  );
+
+  handle(
+    "cora-profiles:use",
+    async (_e, reference: string): Promise<CoraProfile[]> => {
+      const { listCoraProfiles, setDefaultCoraProfile } = await import("./orchestration/cora-profiles");
+      await setDefaultCoraProfile(reference);
+      return listCoraProfiles();
     },
   );
 
@@ -3278,9 +3310,11 @@ export function registerIpc(): void {
 // workspace tier to report, so say so instead of inventing one.
 async function readMemoryStatus(workspaceId: string | null): Promise<CoraMemoryStatus> {
   const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = coraMemory;
-  const status = await getMemoryStatus(workspaceId ?? "");
+  const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+  const status = await getMemoryStatus(workspaceId ?? "", resolveCoraProfile().id);
   if (workspaceId) return status;
   return {
+    profile: status.profile,
     global: status.global,
     workspace: {
       enabled: false,

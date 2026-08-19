@@ -63,6 +63,7 @@ async function start(args, flags) {
     backend: "pi",
   };
   for (const key of ["title", "model", "effort"]) if (flags[key]) params[key] = flags[key];
+  if (flags.profile) params.coraProfile = flags.profile;
   if (flags.direct || flags.managed) params.execution = flags.direct ? "direct" : "managed";
   const started = await rpc(flags, "chat.create", params);
   if (flags.json && !flags.wait) return console.log(JSON.stringify(started, null, 2));

@@ -86,6 +86,11 @@ async function main() {
   const app = source("App.tsx");
   assert.match(app, /!r\.automationId && !isBoardCardRun\(r\)/);
   assert.doesNotMatch(app, /!isBoardCardRun\(r\)\) \|\| r\.status === "blocked"/);
+  const awayDigest = app.slice(app.indexOf("function AwayDigestCard"));
+  assert.match(awayDigest, /className="spark-toast"/);
+  assert.doesNotMatch(awayDigest.slice(0, awayDigest.indexOf("function AppContent")), /spark-glass--strong/);
+  const styles = source("styles.css");
+  assert.match(styles, /html:not\(\[data-glass="off"\]\) \.spark-toast[\s\S]*?backdrop-filter:/);
 
   const selectRows = await loadRunSelector();
   const workspaces = [

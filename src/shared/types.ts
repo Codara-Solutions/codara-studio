@@ -2290,6 +2290,9 @@ export interface ManagerTurnRecovery {
 export interface RunState {
   id: string;
   workspaceId: string;
+  /** Named Cora identity and isolated memory namespace. Missing on legacy runs
+   * means the built-in `default` profile. Frozen for the life of the run. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   /**
    * Missing on legacy ordinary runs and therefore interpreted as "trusted".
@@ -2721,6 +2724,23 @@ export interface WorkspaceMemoryLedger {
  */
 export type CoraMemoryScope = "global" | "workspace";
 
+/** A named Cora identity. Each profile owns its own global and per-workspace
+ * memory files; the built-in `default` profile keeps the legacy paths. */
+export interface CoraProfile {
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  identityPath: string;
+  createdAt: string;
+}
+
+export interface CoraProfileCreateInput {
+  name: string;
+  description?: string;
+  instructions?: string;
+}
+
 /** One memory file's live state, as reported to the renderer. */
 export interface MemoryTierStatus {
   /** Whether this tier is read into prompts and writable by `codara_remember`. */
@@ -2744,6 +2764,7 @@ export interface MemoryTierStatus {
 /** Both tiers at once: every memory IPC resolves to this pair, including the
  *  mutations, so the renderer never has to re-read after a change. */
 export interface CoraMemoryStatus {
+  profile: Pick<CoraProfile, "id" | "name" | "identityPath" | "isDefault">;
   global: MemoryTierStatus;
   workspace: MemoryTierStatus;
 }
@@ -3689,6 +3710,8 @@ export interface CreateRunInput {
   workspaceId: string;
   workspaceName: string;
   cwd: string;
+  /** Named Cora profile. Omitted selects the user's current default profile. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
   title?: string;
@@ -4039,6 +4062,8 @@ export interface StartAutopilotInput {
   workspaceId: string;
   workspaceName: string;
   cwd: string;
+  /** Named Cora profile. Omitted selects the current default for a new run. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
   runId?: string;
@@ -4503,6 +4528,8 @@ export interface StartDirectWorkerRunInput {
   workspaceId: string;
   workspaceName?: string;
   cwd: string;
+  /** Frozen named Cora profile for memory and identity on this run. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
   /** Present for a Loom-owned run; omitted for a direct Cora chat. */

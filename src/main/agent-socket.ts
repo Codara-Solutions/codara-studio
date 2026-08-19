@@ -47,6 +47,12 @@ import {
   rememberReplace,
   type MemoryScope,
 } from "./orchestration/cora-memory";
+import {
+  createCoraProfile,
+  listCoraProfiles,
+  resolveCoraProfile,
+  setDefaultCoraProfile,
+} from "./orchestration/cora-profiles";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
 import {
   blindApprovalAskProblem,
@@ -535,6 +541,15 @@ async function dispatch(
         return await handleChatEvents(params, id, res);
       case "chat.cancel":
         return await handleChatCancel(params, id);
+      case "chat.configure":
+      case "chat.rename":
+      case "chat.compact":
+      case "chat.delete":
+      case "models.list":
+        if (auth.kind !== "root") {
+          return errorResponse(id, ERR_FORBIDDEN, "Chat settings are user-owned.");
+        }
+        return await handleCliChatSettings(method, params, id);
       case "chat.resume":
         if (auth.kind !== "root") {
           return errorResponse(
@@ -548,6 +563,13 @@ async function dispatch(
         return await handleWorkspacePrune(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
+      case "profiles.list":
+      case "profiles.create":
+      case "profiles.use":
+        if (auth.kind !== "root") {
+          return errorResponse(id, ERR_FORBIDDEN, "Cora profiles are user-owned.");
+        }
+        return await handleCoraProfiles(method, params, id);
       case "app.info":
         return handleAppInfo(id);
       case "app.screenshot":
@@ -1183,6 +1205,97 @@ async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {
 // these methods represent the human at the top of a chat: create starts a real
 // managed run, send appends a user turn (or answers the current question), and
 // wait blocks without consuming manager tokens until the run needs attention.
+async function handleCoraProfiles(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  try {
+    if (method === "profiles.list") {
+      return successResponse(id, { profiles: listCoraProfiles() });
+    }
+    if (method === "profiles.create") {
+      const name = stringParam(params, "name")?.trim();
+      if (!name) return errorResponse(id, ERR_INVALID_PARAMS, "name is required");
+      const profile = await createCoraProfile({
+        name,
+        description: stringParam(params, "description") ?? undefined,
+        instructions: stringParam(params, "instructions") ?? undefined,
+      });
+      return successResponse(id, { profile, profiles: listCoraProfiles() });
+    }
+    const reference = stringParam(params, "profile")?.trim();
+    if (!reference) return errorResponse(id, ERR_INVALID_PARAMS, "profile is required");
+    const profile = await setDefaultCoraProfile(reference);
+    return successResponse(id, { profile, profiles: listCoraProfiles() });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** Small user-owned settings surface for the interactive terminal chat. */
+async function handleCliChatSettings(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  try {
+    if (method === "models.list") {
+      const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
+      return successResponse(id, { models: await inspectPiModelCatalog(false) });
+    }
+
+    const runIdOrPrefix = stringParam(params, "runId")?.trim();
+    if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+    const run = await resolveCliRun(runIdOrPrefix);
+    if (!run) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `Run not found or prefix is ambiguous: ${runIdOrPrefix}`,
+      );
+    }
+
+    const runStore = await getRunStore();
+    if (method === "chat.delete") {
+      await runStore.deleteRun(run.id);
+      return successResponse(id, { ok: true, runId: run.id });
+    }
+    if (method === "chat.rename") {
+      const title = stringParam(params, "title")?.trim();
+      if (!title) return errorResponse(id, ERR_INVALID_PARAMS, "title is required");
+      return successResponse(id, {
+        run: await runStore.renameRun({ runId: run.id, title: title.slice(0, 200) }),
+      });
+    }
+    if (method === "chat.compact") {
+      return successResponse(id, { run: await runStore.compactConversation(run.id) });
+    }
+
+    const model = stringParam(params, "model")?.trim();
+    const effort = enumParam(params, "effort", CLI_CHAT_EFFORTS);
+    if (effort === null) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "effort must be minimal, low, medium, high, xhigh, or max",
+      );
+    }
+    if (!model && effort === undefined) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "model or effort is required");
+    }
+    return successResponse(id, {
+      run: await runStore.updateChatBackend({
+        runId: run.id,
+        ...(model ? { chatModel: model } : {}),
+        ...(effort ? { chatEffort: effort } : {}),
+      }),
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function handleChatCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1194,7 +1307,7 @@ async function handleChatCreate(
 
   const backend = enumParam(params, "backend", CLI_CHAT_BACKENDS);
   if (backend === null) {
-    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be claude, codex, or pi");
+    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be pi");
   }
   const mode = enumParam(params, "mode", CLI_CHAT_MODES);
   if (mode === null) {
@@ -1211,6 +1324,12 @@ async function handleChatCreate(
   const executionStrategy = enumParam(params, "execution", CLI_EXECUTION_STRATEGIES);
   if (executionStrategy === null) {
     return errorResponse(id, ERR_INVALID_PARAMS, "execution must be auto, direct, or managed");
+  }
+  let coraProfileId: string;
+  try {
+    coraProfileId = resolveCoraProfile(stringParam(params, "coraProfile")).id;
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, err instanceof Error ? err.message : String(err));
   }
   let binding: { workspace: Workspace; created: boolean };
   try {
@@ -1241,6 +1360,7 @@ async function handleChatCreate(
       workspaceId: binding.workspace.id,
       workspaceName: binding.workspace.name,
       cwd: binding.workspace.cwd,
+      coraProfileId,
       title,
       initialUserNote: prompt,
       initialUserNoteClientMessageId: `cli-${randomBytes(8).toString("hex")}`,
@@ -4993,13 +5113,20 @@ async function handleOrchestratorRemember(
   try {
     const result =
       action === "add"
-        ? await rememberAdd(scope as MemoryScope, run.workspaceId, bullets, runId)
+        ? await rememberAdd(
+            scope as MemoryScope,
+            run.workspaceId,
+            bullets,
+            runId,
+            run.coraProfileId,
+          )
         : await rememberReplace(
             scope as MemoryScope,
             run.workspaceId,
             body as string,
             params.confirm_drop_user_lines === true,
             runId,
+            run.coraProfileId,
           );
     if (action === "add") budget.bulletsAdded += bullets.length;
     return successResponse(id, {

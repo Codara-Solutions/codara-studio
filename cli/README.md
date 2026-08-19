@@ -15,18 +15,21 @@ cora chat                     # fullscreen chat (also the TTY default)
 Run `cora` in a terminal to open the chat UI, or use `cora chat <run-prefix>`
 to resume a run. The transcript follows Cora in real time and the status bar
 shows active agents and step progress; closing the UI leaves long-running work
-alive in Codara Studio. Type `/help`
-for the intentionally small command set (`/new`, `/cancel`, `/quit`). A bare
-number answers the matching option when Cora asks a question.
+alive in Codara Studio. Type `/` to browse commands. `/resume` lists chats from
+the current directory; press `c` to copy a highlighted run id or `d` twice to
+delete it. `/copy-id` (or `/id`) copies the open chat's run id. A bare number
+answers the matching option when Cora asks a question.
 
 Fresh bounded chats use Cora's compact direct loop: one capable worker, a
 small exact prompt, focused checks, and one structured result call. Broad,
 long, multi-part, attachment, and explicit parallel work stays on the managed
 orchestration path. Use `--direct` or `--managed` to override auto-routing.
 
-The interface uses Pi's MIT-licensed TUI primitives. Its compact status bar,
-scrolling transcript, bordered composer, and contextual shortcut row are an
-original Cora surface inspired by the clarity of Grok Build's terminal UI.
+The interface uses Pi's MIT-licensed TUI primitives. Its active-turn motion
+matches Grok Build's source cadence: an eight-frame braille spinner driven by
+a 30 fps clock with four-tick frame holds, plus live phase and turn timers.
+Cora redraws only when the visible frame changes, keeping that motion smooth
+without spending CPU repainting idle screens.
 
 ## Layout
 

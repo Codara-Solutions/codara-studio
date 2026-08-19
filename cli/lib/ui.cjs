@@ -11,6 +11,8 @@ const wrap = (open, close) => (text) =>
 const c = {
   bold: wrap("1", "22"),
   dim: wrap("2", "22"),
+  surface: wrap("48;5;235", "49"),
+  surfaceStrong: wrap("48;5;237", "49"),
   violet: wrap("38;5;135", "39"),
   cyan: wrap("38;5;51", "39"),
   green: wrap("38;5;42", "39"),

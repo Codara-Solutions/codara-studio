@@ -31,7 +31,7 @@
     "test:manager-prompt-cache": "node scripts/test-manager-prompt-cache.cjs",
     "test:manager-call-settlement": "node scripts/test-manager-call-settlement.cjs",
     "test:codara-complete-application": "node scripts/test-codara-complete-application.cjs",
-    "test:cora-memory": "node scripts/test-cora-memory.cjs && node scripts/test-workspace-lessons.cjs",
+    "test:cora-memory": "node scripts/test-cora-memory.cjs && node scripts/test-cora-profiles.cjs && node scripts/test-workspace-lessons.cjs",
     "test:completion-tail": "node scripts/test-completion-tail.cjs",
     "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-backend-session-lifecycle.cjs && node scripts/test-pi-mcp-config.cjs && node scripts/test-pi-worker-harness-gate.cjs && node scripts/test-pi-worker-providers.cjs && node scripts/test-pi-oauth-branding.cjs && node scripts/test-pi-subscription-refresh.cjs",
     "test:pi-subscription-refresh": "node scripts/test-pi-subscription-refresh.cjs",

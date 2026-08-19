@@ -338,7 +338,7 @@ async function main() {
   );
   check(
     "run-store renders Cora memory through the hash-gated per-run seam",
-    /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,?\s*\}/s.test(
+    /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,\s*profileId:\s*prepared\.coraProfileId,?\s*\}/s.test(
       runStoreSrc,
     ),
     "prepareManagerTurn no longer calls formatCoraMemoryForTurn",

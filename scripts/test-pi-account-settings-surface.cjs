@@ -211,10 +211,9 @@ assert.match(
   settings,
   /Same email address — reconnect to Cora to fully pair these sign-ins\./,
 );
-// Unmatched accounts — every Anthropic one, since Pi's Anthropic credential
-// carries no account id — still get their own card and their own copy.
+// Unmatched accounts still get their own card and clear copy explaining why.
 assert.match(settings, /filter\(\(profile\) => !pairedCliIds\.has\(profile\.id\)\)/);
-assert.match(settings, /that account appears twice — once for each sign-in/);
+assert.match(settings, /sign-ins Codara cannot safely match stay separate/);
 
 const connectionDtoStart = shared.indexOf(
   "export interface PiSubscriptionProfileConnection",

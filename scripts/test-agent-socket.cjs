@@ -264,6 +264,31 @@ async function main() {
     // is the realpath. On macOS a temp dir resolves /var -> /private/var, so the
     // raw path is still what gets sent but the expectation must be canonical.
     const cliWorkspaceCanonical = fs.realpathSync(cliWorkspace);
+    const initialProfiles = await rpc(handshake, "profiles.list", {});
+    check(
+      "profiles.list exposes the built-in Cora identity",
+      initialProfiles.result?.profiles?.length === 1 &&
+        initialProfiles.result.profiles[0].id === "default" &&
+        initialProfiles.result.profiles[0].isDefault === true,
+      JSON.stringify(initialProfiles).slice(0, 180),
+    );
+    const createdProfile = await rpc(handshake, "profiles.create", {
+      name: "Socket Reviewer",
+      instructions: "Review changes carefully.",
+    });
+    check(
+      "profiles.create makes an isolated named identity",
+      createdProfile.result?.profile?.id === "socket-reviewer" &&
+        fs.existsSync(createdProfile.result.profile.identityPath),
+      JSON.stringify(createdProfile).slice(0, 220),
+    );
+    const selectedProfile = await rpc(handshake, "profiles.use", { profile: "Socket Reviewer" });
+    check(
+      "profiles.use selects one default identity",
+      selectedProfile.result?.profiles?.filter((profile) => profile.isDefault).length === 1 &&
+        selectedProfile.result?.profile?.id === "socket-reviewer",
+      JSON.stringify(selectedProfile).slice(0, 220),
+    );
     const created = await rpc(handshake, "chat.create", {
       cwd: cliWorkspace,
       prompt: "Create a deterministic socket-test session.",
@@ -273,8 +298,68 @@ async function main() {
     });
     check(
       "chat.create starts a managed Cora run",
-      Boolean(created.result?.run?.id) && created.result?.run?.title === "CLI socket test",
+      Boolean(created.result?.run?.id) &&
+        created.result?.run?.title === "CLI socket test" &&
+        created.result?.run?.coraProfileId === "socket-reviewer",
       JSON.stringify(created).slice(0, 180),
+    );
+    const configured = await rpc(handshake, "chat.configure", {
+      runId: created.result?.run?.id.slice(0, 12),
+      model: "gpt-5.6-sol",
+      effort: "high",
+    });
+    check(
+      "chat.configure applies /model and /effort to the live run",
+      configured.result?.run?.chatModel === "gpt-5.6-sol" &&
+        configured.result?.run?.chatEffort === "high",
+      JSON.stringify(configured).slice(0, 220),
+    );
+    const renamed = await rpc(handshake, "chat.rename", {
+      runId: created.result?.run?.id,
+      title: "Renamed from Cora CLI",
+    });
+    check(
+      "chat.rename updates the terminal chat title",
+      renamed.result?.run?.title === "Renamed from Cora CLI",
+      JSON.stringify(renamed).slice(0, 180),
+    );
+    fabricateRun("run-cli-delete", {
+      status: "complete",
+      title: "Delete from Cora CLI",
+      cwd: cliWorkspaceCanonical,
+      humanMessages: [],
+      sparkCalls: [],
+      workerAttempts: [],
+      workerTasks: [],
+    });
+    const deleted = await rpc(handshake, "chat.delete", { runId: "run-cli-delete" });
+    check(
+      "chat.delete removes a selected terminal chat",
+      deleted.result?.ok === true && !fs.existsSync(path.join(HOME, "runs", "run-cli-delete")),
+      JSON.stringify(deleted).slice(0, 180),
+    );
+    const badConfiguration = await rpc(handshake, "chat.configure", {
+      runId: created.result?.run?.id,
+      effort: "unlimited",
+    });
+    check(
+      "chat.configure rejects unknown effort levels",
+      badConfiguration.error?.code === -32602,
+      JSON.stringify(badConfiguration).slice(0, 180),
+    );
+    fabricateRun("run-compact-empty", {
+      status: "complete",
+      humanMessages: [],
+      sparkCalls: [],
+      workerTasks: [],
+      workerAttempts: [],
+      settingsSnapshot: { workspaceCwd: os.homedir() },
+    });
+    const emptyCompact = await rpc(handshake, "chat.compact", { runId: "run-compact-empty" });
+    check(
+      "chat.compact is real and rejects an empty provider context clearly",
+      emptyCompact.error?.code === -32602 && /no provider conversation/i.test(emptyCompact.error?.message),
+      JSON.stringify(emptyCompact).slice(0, 180),
     );
     const removedAccountSelect = await rpc(handshake, "accounts.select", {
       runId: created.result?.run?.id,
