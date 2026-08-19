@@ -328,10 +328,8 @@ async function ensureSession(
 interface PiTurnLiveness {
   /** Epoch ms of the last stream event. */
   lastEventAt: number;
-  /** Epoch ms a long-poll tool call started, or null when none is in flight. */
-  longPollSince: number | null;
-  /** Name of the last long-poll tool, for the timeout message. */
-  longPollName: string | null;
+  /** Tool starts awaiting their matching tool_execution_end event. */
+  inFlightTools: Map<string, { name: string; startedAt: number; longPoll: boolean }>;
 }
 
 /**
@@ -351,8 +349,7 @@ async function waitForSettled(settled: Promise<void>, liveness: PiTurnLiveness):
             now: Date.now(),
             startedAt,
             lastEventAt: liveness.lastEventAt,
-            longPollSince: liveness.longPollSince,
-            longPollName: liveness.longPollName,
+            inFlightTools: [...liveness.inFlightTools.values()],
           });
           if (verdict.action === "fail") reject(new Error(verdict.detail));
         }, PI_TURN_IDLE_CHECK_MS);
@@ -420,20 +417,23 @@ async function requestPiDecision(
     session.settleActiveTurn = settle;
     const liveness: PiTurnLiveness = {
       lastEventAt: Date.now(),
-      longPollSince: null,
-      longPollName: null,
+      inFlightTools: new Map(),
     };
     unsubscribe = session.client.onEvent((event) => {
       liveness.lastEventAt = Date.now();
-      // A blocking orchestration tool means the manager is waiting on workers
-      // or on the user. Hold the idle clock for its duration instead of ageing
-      // a perfectly healthy turn toward a timeout.
-      if (event.type === "tool_execution_start" && isLongPollToolName(event.toolName)) {
-        liveness.longPollSince = Date.now();
-        liveness.longPollName = typeof event.toolName === "string" ? event.toolName : null;
+      if (
+        event.type === "tool_execution_start" &&
+        typeof event.toolCallId === "string" && event.toolCallId &&
+        typeof event.toolName === "string" && event.toolName
+      ) {
+        liveness.inFlightTools.set(event.toolCallId, {
+          name: event.toolName,
+          startedAt: Date.now(),
+          longPoll: isLongPollToolName(event.toolName),
+        });
       }
-      if (event.type === "tool_execution_end" && liveness.longPollSince !== null) {
-        liveness.longPollSince = null;
+      if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
+        liveness.inFlightTools.delete(event.toolCallId);
       }
       turn.consume(event);
       if (event.type === "agent_settled") settle();
@@ -524,6 +524,9 @@ async function requestPiDecision(
     const message = error instanceof Error ? error.message : String(error);
     const diagnostic = session?.client.diagnostics().stderr.trim();
     const detail = diagnostic ? `${message}\n${diagnostic}` : message;
+    // A turn exception means this runtime cannot be trusted for reuse. Stop it
+    // before parking/requeueing so native tools cannot outlive their run.
+    if (session) await stopSession(runId, session);
     onStream?.({ kind: "error", message: detail });
     return {
       decision: buildTalkReplyDecision(`Cora Pi backend error: ${detail}`),

@@ -87,7 +87,7 @@ check("a manager-turn timeout parks the run instead of failing it", () => {
   assert.ok(plan.parkReason.length > 0);
 });
 
-check("the park reason tells the user their workers survived", () => {
+check("the park reason accurately names the saved retry without inventing workers", () => {
   const plan = planManagerTurnFailure({
     error: TURN_TIMEOUT,
     runStatus: "running",
@@ -96,8 +96,9 @@ check("the park reason tells the user their workers survived", () => {
     backend: "pi",
   });
   assert.equal(plan.action, "park");
-  assert.match(plan.parkReason, /kept running/i,
-    "the whole point of parking is that in-flight work is not lost; say so");
+  assert.doesNotMatch(plan.parkReason, /workers?/i,
+    "the policy does not know whether this run has workers, so it must not invent them");
+  assert.match(plan.parkReason, /saved request/i);
   assert.match(plan.parkReason, /retry/i, "and name the control that actually exists");
 });
 
@@ -106,6 +107,7 @@ check("the new idle-timeout message also parks", () => {
   // to keep classifying it, or the park silently reverts to a fail.
   for (const error of [
     "Cora's Pi turn went quiet for 25 min with no tool call in flight.",
+    "Cora's Pi turn is stuck in bash: 25 min with no result.",
     "Cora's Pi turn is stuck in codara_wait_for_workers: 30 min with no result, past the point that call can legally take.",
     "Cora's Pi turn exceeded its 6h ceiling.",
   ]) {

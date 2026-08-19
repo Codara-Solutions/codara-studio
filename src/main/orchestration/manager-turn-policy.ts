@@ -171,7 +171,7 @@ export function planManagerTurnFailure(input: {
       // sentence pair, naming the control that actually exists.
       parkReason:
         kind === "timeout"
-          ? "Cora's turn ran out of time. Any workers it started kept running — retry the saved turn to pick them back up."
+          ? "Cora's turn ran out of time. Its saved request is ready to retry."
           : kind === "rate_limit"
             ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
             : kind === "auth"

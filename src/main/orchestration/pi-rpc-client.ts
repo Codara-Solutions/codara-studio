@@ -1,6 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { PiManagerLaunchPlan } from "./pi-runtime";
+import {
+  captureOwnedProcessTree,
+  isOwnedProcessTreeAlive,
+  signalOwnedProcessTree,
+} from "../owned-process-tree";
 
 export type PiRpcPhase = "idle" | "starting" | "running" | "stopping" | "stopped" | "failed";
 
@@ -410,6 +415,7 @@ export class PiRpcClient {
     this.stopPromise = new Promise<void>((resolve) => {
       let finished = false;
       let killTimer: ReturnType<typeof setTimeout> | null = null;
+      const ownedTree = captureOwnedProcessTree(child.pid ?? 0);
       const finish = () => {
         if (finished) return;
         finished = true;
@@ -418,17 +424,29 @@ export class PiRpcClient {
         this.phase = "stopped";
         resolve();
       };
-      child.once("close", finish);
+      const signalTree = (signal: NodeJS.Signals) => {
+        const signaled = signalOwnedProcessTree(ownedTree, signal);
+        if (signaled === 0) {
+          try { child.kill(signal); } catch {}
+        }
+      };
+      child.once("close", () => {
+        // Pi's bash tool starts its own process group. The Pi parent can exit
+        // first while that group keeps Chrome, dev servers, or tests alive.
+        // Keep the force timer until every identity captured below Pi is gone.
+        if (!isOwnedProcessTreeAlive(ownedTree)) finish();
+      });
       try { child.stdin.end(); } catch {}
       if (this.shutdownGraceMs === 0) {
-        try { child.kill("SIGKILL"); } catch {}
+        signalTree("SIGKILL");
+        killTimer = setTimeout(finish, 250);
       } else {
-        try { child.kill("SIGTERM"); } catch {}
+        signalTree("SIGTERM");
+        killTimer = setTimeout(() => {
+          signalTree("SIGKILL");
+          setTimeout(finish, 250).unref();
+        }, this.shutdownGraceMs);
       }
-      killTimer = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch {}
-        setTimeout(finish, 250).unref();
-      }, this.shutdownGraceMs);
       killTimer.unref();
     });
     return this.stopPromise;
@@ -630,6 +648,14 @@ export class PiRpcClient {
     this.failure = { code, message };
     this.rejectPending(codedError(code, message));
     this.writes = [];
-    try { this.child?.kill("SIGKILL"); } catch {}
+    const child = this.child;
+    if (!child) return;
+    const signaled = signalOwnedProcessTree(
+      captureOwnedProcessTree(child.pid ?? 0),
+      "SIGKILL",
+    );
+    if (signaled === 0) {
+      try { child.kill("SIGKILL"); } catch {}
+    }
   }
 }

@@ -2,30 +2,62 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const Module = require("node:module");
 const path = require("node:path");
 const ts = require("typescript");
 
+function alive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function waitFor(predicate, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
+const tsModuleCache = new Map();
+
 function loadTypeScriptModule(sourcePath) {
-  const source = fs.readFileSync(sourcePath, "utf8");
+  const resolved = path.resolve(sourcePath);
+  const cached = tsModuleCache.get(resolved);
+  if (cached) return cached;
+  const source = fs.readFileSync(resolved, "utf8");
   const output = ts.transpileModule(source, {
-    fileName: sourcePath,
+    fileName: resolved,
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
       esModuleInterop: true,
     },
   }).outputText;
-  const loaded = new Module(sourcePath, module);
-  loaded.filename = sourcePath;
-  loaded.paths = Module._nodeModulePaths(path.dirname(sourcePath));
-  loaded._compile(output, sourcePath);
+  const loaded = new Module(resolved, module);
+  loaded.filename = resolved;
+  loaded.paths = Module._nodeModulePaths(path.dirname(resolved));
+  const nativeRequire = loaded.require.bind(loaded);
+  loaded.require = (specifier) => {
+    if (specifier.startsWith(".")) {
+      const base = path.resolve(path.dirname(resolved), specifier);
+      const candidate = fs.existsSync(`${base}.ts`) ? `${base}.ts` : path.join(base, "index.ts");
+      if (fs.existsSync(candidate)) return loadTypeScriptModule(candidate);
+    }
+    return nativeRequire(specifier);
+  };
+  tsModuleCache.set(resolved, loaded.exports);
+  loaded._compile(output, resolved);
+  tsModuleCache.set(resolved, loaded.exports);
   return loaded.exports;
 }
 
 const CHILD = String.raw`
 const { StringDecoder } = require("node:string_decoder");
+const { spawn } = require("node:child_process");
 const decoder = new StringDecoder("utf8");
 let input = "";
 if (process.env.FIXTURE_STDERR === "1") {
@@ -54,6 +86,13 @@ process.stdin.on("data", (chunk) => {
       process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: false, error: "fixture failure" }) + "\n");
     } else if (command.type === "malformed") {
       process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: false }) + "\n");
+    } else if (command.type === "spawn_descendant") {
+      const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      descendant.unref();
+      process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true, data: { pid: descendant.pid } }) + "\n");
     }
   }
 });
@@ -115,7 +154,24 @@ async function main() {
     client.request({ type: "echo", value: 1 }, { unknown: true }),
     /Unknown Pi RPC request option/,
   );
+  let descendantPid = 0;
+  let unrelated;
+  if (process.platform !== "win32") {
+    unrelated = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    unrelated.unref();
+    const descendant = await client.request({ type: "spawn_descendant" });
+    descendantPid = descendant.pid;
+    assert.equal(alive(descendantPid), true, "fixture descendant should be running before stop");
+  }
   await client.stop();
+  if (process.platform !== "win32") {
+    await waitFor(() => !alive(descendantPid), 3_000, "detached Pi tool descendant teardown");
+    assert.equal(alive(unrelated.pid), true, "stopping Pi must not touch an unrelated process");
+    try { process.kill(unrelated.pid, "SIGKILL"); } catch {}
+  }
   assert.equal(client.state().phase, "stopped");
   assert.equal(client.state().pendingCount, 0);
 
