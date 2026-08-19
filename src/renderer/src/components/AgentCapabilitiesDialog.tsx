@@ -470,11 +470,14 @@ export default function AgentCapabilitiesDialog({
     })();
   };
 
-  const installToRuntime = (group: NameGroup, target: "claude" | "codex") => {
-    // Prefer a shared source, then the opposite runtime's install.
+  const installToRuntime = (group: NameGroup, target: "claude" | "codex" | "grok") => {
+    // Prefer a shared source, then whichever other CLI config already carries
+    // the entry, then any discovered copy of it.
     const source =
       group.installs.shared[0] ??
-      (target === "claude" ? group.installs.codex[0] : group.installs.claude[0]) ??
+      RUNTIME_COLUMNS.filter((rt) => rt !== target && rt !== "shared")
+        .map((rt) => group.installs[rt][0])
+        .find(Boolean) ??
       group.any;
     setBusyKey(`${group.sessionKey}:${target}`);
     void window.spark.agents
@@ -1187,7 +1190,7 @@ function McpRow({
   onTogglePiScope: (group: NameGroup, scope: "cora" | "worker", assigned: boolean) => void;
   onEdit: (group: NameGroup) => void;
   onRemove: (group: NameGroup, scope: RemoveScope) => void;
-  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
+  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
 }) {
   const transport = group.any.mcpTransport ?? "stdio";
   const summary = group.any.mcpSummary ?? group.any.path;
@@ -1228,9 +1231,7 @@ function McpRow({
       </Cell>
       <CliCell group={group} runtime="claude" busyKey={busyKey} onInstall={onInstall} />
       <CliCell group={group} runtime="codex" busyKey={busyKey} onInstall={onInstall} />
-      <Cell label="Grok Build" title="Third-party MCP copy into Grok Build is not available yet">
-        <span style={cellDashStyle}>—</span>
-      </Cell>
+      <CliCell group={group} runtime="grok" busyKey={busyKey} onInstall={onInstall} />
       <div style={rowActionsStyle}>
         <button type="button" className="spark-btn" style={smallBtnStyle} onClick={() => onEdit(group)}>
           Edit
@@ -1279,9 +1280,9 @@ function CliCell({
   onInstall,
 }: {
   group: NameGroup;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   busyKey: string | null;
-  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
+  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
 }) {
   const noun = group.kind === "mcp" ? "server" : "skill";
   const direct = group.installs[runtime];
@@ -1377,7 +1378,9 @@ function SkillRow({
   enabled: boolean;
   onToggle: (group: NameGroup, enabled: boolean) => void;
   onRemove: (group: NameGroup, scope: RemoveScope) => void;
-  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
+  // Skills only ever render the Claude and Codex columns; Grok Build has no
+  // skill root, so the wide union here is the shared handler's, not an offer.
+  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
 }) {
   return (
     <div
@@ -1612,7 +1615,7 @@ function MemoryClearControl({
 
 type ShareState = { kind: "covered" } | { kind: "ready" } | { kind: "blocked"; reason: string };
 
-function shareState(group: NameGroup, target: "claude" | "codex"): ShareState {
+function shareState(group: NameGroup, target: "claude" | "codex" | "grok"): ShareState {
   if (group.installs.shared.length > 0 || group.installs[target].length > 0) return { kind: "covered" };
   const source = RUNTIME_COLUMNS.some((rt) => group.installs[rt].length > 0);
   if (!source) return { kind: "covered" };
@@ -1622,7 +1625,11 @@ function shareState(group: NameGroup, target: "claude" | "codex"): ShareState {
       reason: group.any.compatibilityReason ?? `This entry cannot be copied to ${RUNTIME_LABEL[target]}.`,
     };
   }
-  if (group.any.compatibility === (target === "claude" ? "codex" : "claude")) {
+  // An entry pinned to one runtime cannot be copied into another. A remote
+  // server carrying request headers is "claude", which blocks both TOML
+  // configs (Codex and Grok Build) rather than only Codex.
+  const only = group.any.compatibility;
+  if (only !== "both" && only !== "unknown" && only !== target) {
     return {
       kind: "blocked",
       reason: group.any.compatibilityReason ?? `This entry does not work under ${RUNTIME_LABEL[target]}.`,
@@ -1764,11 +1771,11 @@ function BuiltinRow({
   return (
     <div className="agent-capability-row" style={mcpRowStyle}>
       <div style={{ minWidth: 0 }}>
-        <div style={rowNameStyle}>
+        {/* Same trap McpRow documents: rowNameStyle is nowrap + ellipsis inside
+            the narrow Server column, so a badge parked on the name line gets
+            sliced. The badges ride the wrapping meta row instead. */}
+        <div style={rowNameStyle} title="Codara Studio tools">
           Codara Studio tools
-          <span className="spark-badge is-accent" style={flagBadgeStyle}>
-            built in
-          </span>
         </div>
         <div style={rowMetaStyle}>
           <span style={rowSummaryStyle} title={builtin.detail}>
@@ -1777,6 +1784,9 @@ function BuiltinRow({
         </div>
         <div style={rowMetaStyle}>
           <span style={rowScopeStyle}>{builtin.name}</span>
+          <span className="spark-badge is-accent" style={flagBadgeStyle}>
+            built in
+          </span>
           <span className="spark-badge" style={flagBadgeStyle} title={builtin.tools.join(", ")}>
             {builtin.tools.length} tools
           </span>

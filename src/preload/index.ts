@@ -373,7 +373,7 @@ const api = {
         }
         throw err;
       }),
-    installAsset: (id: string, target: "claude" | "codex"): Promise<AgentAssetInstallResult> =>
+    installAsset: (id: string, target: "claude" | "codex" | "grok"): Promise<AgentAssetInstallResult> =>
       ipcRenderer.invoke("agents:installAsset", { id, target }).catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:installAsset")) {
           return { ok: false, installed: [], error: "Restart Codara to enable installing to another runtime." };

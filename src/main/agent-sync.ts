@@ -19,9 +19,14 @@ import type {
   AgentMcpTarget,
   AgentMcpTransport,
 } from "@shared/types";
+import { writeFileAtomic } from "./fs-atomic";
 
 type SyncKind = "mcp" | "skill";
-type SyncSourceRuntime = "claude" | "codex" | "shared";
+// Grok Build reads the same Codex-shaped TOML (`[mcp_servers.<name>]`), which
+// is why mcp-installer registers the built-in server in ~/.grok/config.toml
+// with renderCodexBlock(). One parser and one writer serve both.
+type SyncSourceRuntime = "claude" | "codex" | "grok" | "shared";
+type TomlCopyRuntime = "codex" | "grok";
 type SyncScope = "user" | "workspace";
 
 interface SyncSource {
@@ -283,11 +288,11 @@ export async function syncAgentAssets(input: { cwd?: string | null }): Promise<A
 }
 
 // Copy a single discovered asset into the runtime that was missing it. Powers
-// the per-cell "Add to Claude/Codex" action in the Capability Center, so the
-// user can spread one MCP server or skill without running a full sync.
+// the per-cell "Add to Claude/Codex/Grok" action in the Capability Center, so
+// the user can spread one MCP server or skill without running a full sync.
 export async function installAgentAssetToRuntime(input: {
   id: string;
-  target: "claude" | "codex";
+  target: "claude" | "codex" | "grok";
 }): Promise<AgentAssetInstallResult> {
   const parsed = parseAssetId(input.id);
   if (!parsed) return { ok: false, installed: [], error: "Invalid agent asset id." };
@@ -297,6 +302,11 @@ export async function installAgentAssetToRuntime(input: {
   try {
     if (parsed.kind === "mcp") {
       return await installMcpAssetToRuntime(parsed, input.target);
+    }
+    // Skills are a Claude/Codex directory convention; Grok Build has no
+    // equivalent skill root, so the Skills tab never offers a Grok column.
+    if (input.target === "grok") {
+      return { ok: false, installed: [], error: `Grok Build cannot carry skill '${parsed.name}'.` };
     }
     return await installSkillAssetToRuntime(parsed, input.target);
   } catch (err) {
@@ -316,7 +326,7 @@ function blankSyncResult(): AgentSyncResult {
 
 async function installMcpAssetToRuntime(
   asset: { name: string; path: string },
-  target: "claude" | "codex",
+  target: "claude" | "codex" | "grok",
 ): Promise<AgentAssetInstallResult> {
   const server = readMcpServerByName(asset.path, asset.name);
   if (!server) {
@@ -339,22 +349,32 @@ async function installMcpAssetToRuntime(
     }
     return { ok: true, installed: added };
   }
+  const label = TOML_RUNTIME_LABEL[target];
   if (server.url && server.headers) {
     return {
       ok: false,
       installed: [],
-      error: `'${asset.name}' sends request headers, which Codex config.toml cannot carry. Keep it in a JSON config.`,
+      error: `'${asset.name}' sends request headers, which ${label} config.toml cannot carry. Keep it in a JSON config.`,
     };
   }
-  const added = await writeCodexManagedMcpServers(
-    join(homedir(), ".codex", "config.toml"),
-    [server],
-    result,
-  );
+  const added = await writeCodexManagedMcpServers(tomlRuntimeConfigPath(target), [server], result, {
+    runtime: target,
+  });
   if (added.length === 0) {
-    return { ok: false, installed: [], error: firstMcpMessage(result, `Could not add '${asset.name}' to Codex.`) };
+    return { ok: false, installed: [], error: firstMcpMessage(result, `Could not add '${asset.name}' to ${label}.`) };
   }
   return { ok: true, installed: added };
+}
+
+const TOML_RUNTIME_LABEL: Record<TomlCopyRuntime, string> = {
+  codex: "Codex",
+  grok: "Grok Build",
+};
+
+function tomlRuntimeConfigPath(runtime: TomlCopyRuntime): string {
+  return runtime === "grok"
+    ? join(homedir(), ".grok", "config.toml")
+    : join(homedir(), ".codex", "config.toml");
 }
 
 async function installSkillAssetToRuntime(
@@ -655,7 +675,10 @@ function parseAssetId(id: string): {
     const parsed = JSON.parse(id) as Record<string, unknown>;
     const kind = parsed.kind === "mcp" || parsed.kind === "skill" ? parsed.kind : null;
     const runtime =
-      parsed.runtime === "claude" || parsed.runtime === "codex" || parsed.runtime === "shared"
+      parsed.runtime === "claude" ||
+      parsed.runtime === "codex" ||
+      parsed.runtime === "grok" ||
+      parsed.runtime === "shared"
         ? parsed.runtime
         : null;
     const scope = parsed.scope === "user" || parsed.scope === "workspace" ? parsed.scope : null;
@@ -673,7 +696,7 @@ async function deleteMcpAsset(asset: { runtime: SyncSourceRuntime; name: string;
     await deleteClaudeMcpServer(asset.path, asset.name);
     return [asset.name];
   }
-  if (asset.runtime === "codex") {
+  if (asset.runtime === "codex" || asset.runtime === "grok") {
     await deleteCodexMcpServer(asset.path, asset.name);
     return [asset.name];
   }
@@ -831,12 +854,18 @@ function parseCodexTomlMcpServers(text: string): McpServerConfig[] {
   return [...servers.values()].filter((server) => server.command || server.url);
 }
 
+// Writes the Codex-shaped managed block. `options.runtime` only changes which
+// CLI the skip messages name and how carefully the file is replaced; the TOML
+// itself is identical, because Grok Build parses the same tables.
 async function writeCodexManagedMcpServers(
   path: string,
   sourceServers: McpServerConfig[],
   result: AgentSyncResult,
+  options?: { runtime?: TomlCopyRuntime },
 ): Promise<string[]> {
   if (sourceServers.length === 0) return [];
+  const runtime = options?.runtime ?? "codex";
+  const label = TOML_RUNTIME_LABEL[runtime];
   let existing = "";
   try {
     existing = await fs.readFile(path, "utf8");
@@ -851,26 +880,26 @@ async function writeCodexManagedMcpServers(
   const existingNames = new Set(parseCodexTomlMcpServers(stripped.text).map((server) => server.name));
   const syncable = sourceServers.filter((server) => {
     if (existingNames.has(server.name)) {
-      result.mcp.skipped.push(`Codex already has MCP server '${server.name}'.`);
+      result.mcp.skipped.push(`${label} already has MCP server '${server.name}'.`);
       return false;
     }
     // config.toml has no headers table, so copying one over would drop the
     // credential and leave a server that connects but cannot call.
     if (server.url && server.headers) {
       result.mcp.skipped.push(
-        `MCP server '${server.name}' sends request headers, which Codex config.toml cannot carry.`,
+        `MCP server '${server.name}' sends request headers, which ${label} config.toml cannot carry.`,
       );
       return false;
     }
     if (!server.command && !server.url) {
-      result.mcp.skipped.push(`Claude MCP server '${server.name}' is missing command/url and was skipped for Codex.`);
+      result.mcp.skipped.push(`Claude MCP server '${server.name}' is missing command/url and was skipped for ${label}.`);
       return false;
     }
     return true;
   });
   if (syncable.length === 0 && !stripped.removed) return [];
 
-  await fs.mkdir(join(homedir(), ".codex"), { recursive: true });
+  await fs.mkdir(dirname(path), { recursive: true, mode: runtime === "grok" ? 0o700 : undefined });
   // Source definitions win over the copy already in the block, so a re-sync
   // still refreshes a changed command or env.
   const merged = new Map(managed.map((server) => [server.name, server]));
@@ -878,7 +907,16 @@ async function writeCodexManagedMcpServers(
   const block = merged.size > 0 ? renderCodexManagedBlock([...merged.values()]) : "";
   const base = stripped.text.trimEnd();
   const next = [base, block].filter(Boolean).join("\n\n") + "\n";
-  await fs.writeFile(path, next, "utf8");
+  if (runtime === "grok") {
+    // ~/.grok/config.toml can be a share link into a Codara-managed account
+    // profile and carries credentials, so the swap has to land on the real
+    // file, atomically and owner-only, exactly as mcp-installer's
+    // installForGrok does.
+    const writePath = await fs.realpath(path).catch(() => path);
+    await writeFileAtomic(writePath, next, { mode: 0o600 });
+  } else {
+    await fs.writeFile(path, next, "utf8");
+  }
   return syncable.map((server) => server.name);
 }
 
@@ -1176,10 +1214,14 @@ function mcpConfigCandidates(cwd: string): Array<{
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "settings.json") },
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "settings.local.json") },
     { runtime: "codex", scope: "workspace", path: join(cwd, ".codex", "config.toml") },
+    // Grok Build's workspace config mirrors Codex's, and mcp-installer already
+    // probes the same path when it looks for a user-owned built-in entry.
+    { runtime: "grok", scope: "workspace", path: join(cwd, ".grok", "config.toml") },
     { runtime: "shared", scope: "user", path: join(home, ".mcp.json") },
     { runtime: "claude", scope: "user", path: join(home, ".claude.json") },
     { runtime: "claude", scope: "user", path: join(home, ".claude", "settings.json") },
     { runtime: "codex", scope: "user", path: join(home, ".codex", "config.toml") },
+    { runtime: "grok", scope: "user", path: join(home, ".grok", "config.toml") },
   ];
 }
 

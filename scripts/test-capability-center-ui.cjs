@@ -17,6 +17,16 @@ const source = fs.readFileSync(
   ),
   "utf8",
 );
+const composer = fs.readFileSync(
+  path.join(__dirname, "..", "src", "renderer", "src", "components", "chat", "ChatComposer.tsx"),
+  "utf8",
+);
+const sidebar = fs.readFileSync(
+  path.join(__dirname, "..", "src", "renderer", "src", "components", "OrchestrationSidebar.tsx"),
+  "utf8",
+);
+const preload = fs.readFileSync(path.join(__dirname, "..", "src", "preload", "index.ts"), "utf8");
+const agentSync = fs.readFileSync(path.join(__dirname, "..", "src", "main", "agent-sync.ts"), "utf8");
 
 // The point of this file: what an agent inside Codara may use is a different
 // question from which external CLI config carries the entry, and the dialog has
@@ -36,10 +46,46 @@ assert.match(source, /template=\{SKILL_GRID\}/);
 assert.match(source, /Codara Studio tools/);
 assert.match(source, /Set up by you/);
 
+// The Server column is the only flexible MCP_GRID track, so rowNameStyle stays
+// a nowrap + ellipsis line. That is fine for the name and fatal for a badge:
+// the `built in` accent badge used to sit there and was sliced in half.
+assert.match(
+  source,
+  /const rowNameStyle: React\.CSSProperties = \{[\s\S]*?whiteSpace: "nowrap",\n\};/,
+);
+assert.match(
+  source,
+  /<div style=\{rowNameStyle\} title="Codara Studio tools">\s*\n\s*Codara Studio tools\s*\n\s*<\/div>/,
+);
+// It now rides the wrapping meta row next to the tool count, which is the same
+// place McpRow parks its own badges for exactly this reason.
+assert.match(
+  source,
+  /<span style=\{rowScopeStyle\}>\{builtin\.name\}<\/span>\s*\n\s*<span className="spark-badge is-accent" style=\{flagBadgeStyle\}>\s*\n\s*built in\s*\n\s*<\/span>\s*\n\s*<span className="spark-badge" style=\{flagBadgeStyle\} title=\{builtin\.tools\.join\(", "\)\}>/,
+);
+
 // The CLI columns name the external tools the way the user does, and the copy
 // action still routes through installAsset via onInstall.
 assert.match(source, /const CLI_LABEL: Record<"claude" \| "codex" \| "grok", string>/);
 assert.match(source, /onInstall\(group, runtime\)/);
+
+// Grok Build is a real copy target: the Grok column renders the same CliCell
+// the Claude and Codex columns do, not a hardcoded em dash, and the whole
+// install path carries "grok" from the row down to the preload bridge.
+assert.match(source, /<CliCell group=\{group\} runtime="claude" busyKey=\{busyKey\} onInstall=\{onInstall\} \/>/);
+assert.match(source, /<CliCell group=\{group\} runtime="codex" busyKey=\{busyKey\} onInstall=\{onInstall\} \/>/);
+assert.match(source, /<CliCell group=\{group\} runtime="grok" busyKey=\{busyKey\} onInstall=\{onInstall\} \/>/);
+assert.doesNotMatch(source, /Third-party MCP copy into Grok Build is not available yet/);
+assert.doesNotMatch(source, /label="Grok Build"/);
+assert.match(source, /runtime: "claude" \| "codex" \| "grok";/);
+assert.match(
+  source,
+  /const installToRuntime = \(group: NameGroup, target: "claude" \| "codex" \| "grok"\) =>/,
+);
+assert.match(preload, /installAsset: \(id: string, target: "claude" \| "codex" \| "grok"\)/);
+assert.match(agentSync, /target: "claude" \| "codex" \| "grok";\n\}\): Promise<AgentAssetInstallResult>/);
+// Grok discovery reads the same user-scope TOML mcp-installer writes into.
+assert.match(agentSync, /\{ runtime: "grok", scope: "user", path: join\(home, "\.grok", "config\.toml"\) \}/);
 
 // Retired vocabulary must not come back: the boxed clusters, the badge strip,
 // and the jargon the user could not read.
@@ -67,6 +113,14 @@ assert.match(
   source,
   /if \(editorBusy\) return;[\s\S]{0,300}?setStatus\(null\);\s*\n\s*setEditor\(null\);\s*\n\s*setActiveTab\(tab\.id\);/,
 );
+
+// A profile is chosen where a new conversation starts and then frozen onto
+// that run. The Capability Center remains the editor, not the only selector.
+assert.match(source, /Every new chat also has a profile picker/);
+assert.match(source, /description: profileDescription\.trim\(\) \|\| undefined/);
+assert.match(composer, /<ProfilePicker/);
+assert.match(composer, /profileId: latestDraft\?\.profileId \?\? draftCoraProfileId/);
+assert.match(sidebar, /coraProfileId: chatConfig\?\.profileId/);
 
 console.log(
   "PASS Capability Center separates Codara access from external CLI configuration",

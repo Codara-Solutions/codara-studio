@@ -1083,7 +1083,7 @@ export function registerIpc(): void {
   );
   handle(
     "agents:installAsset",
-    async (_e, input: { id: string; target: "claude" | "codex" }) => {
+    async (_e, input: { id: string; target: "claude" | "codex" | "grok" }) => {
       const { installAgentAssetToRuntime } = await getAgentSync();
       return installAgentAssetToRuntime({ id: input.id, target: input.target });
     },
