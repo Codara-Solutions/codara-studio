@@ -102,6 +102,7 @@ for (const command of ["chat", "start", "send", "watch", "agents", "board", "whi
 
 const {
   compactTokens,
+  contextReadout,
   conversationMessages,
   deleteRunRpc,
   directMessageWasDispatched,
@@ -114,6 +115,18 @@ const {
 assert.equal(compactTokens(999), "999");
 assert.equal(compactTokens(1_200), "1.2k");
 assert.equal(compactTokens(200_000), "200k");
+assert.deepEqual(contextReadout({ promptTokens: 42_000, contextWindowTokens: 400_000 }), {
+  used: 42_000,
+  target: 256_000,
+  effective: 256_000,
+  earlier: false,
+});
+assert.deepEqual(contextReadout({ promptTokens: 7_000, contextWindowTokens: 200_000 }), {
+  used: 7_000,
+  target: 256_000,
+  effective: 183_616,
+  earlier: true,
+});
 
 const chatRun = {
   id: "run-chat",
@@ -303,11 +316,39 @@ const picker = createModelEffortPicker({
   },
 });
 picker.handleInput("down");
-picker.handleInput("right");
+picker.handleInput("enter");
+assert.equal(picker.phase, "effort", "model selection advances to reasoning depth");
+picker.handleInput("down");
 picker.handleInput("enter");
 assert.equal(pickerSelection.model.id, "claude-two");
 assert.equal(pickerSelection.effort, "high");
-assert.match(picker.render(72).join("\n"), /MODEL \+ REASONING/);
+assert.match(picker.render(72).join("\n"), /THINKING DEPTH/);
+assert.match(
+  fs.readFileSync(path.join(ROOT, "cli", "commands", "chat.cjs"), "utf8"),
+  /modelPickerOverlay = tui\.showOverlay\(picker, \{\s*width: 56,/,
+  "the model picker stays compact on wide terminals",
+);
+
+let cancelledPicker = false;
+const backPicker = createModelEffortPicker({
+  models: [{ id: "gpt-one", label: "GPT One", thinkingLevels: ["low", "medium"] }],
+  currentModel: "gpt-one",
+  currentEffort: "medium",
+  onApply: () => {},
+  onCancel: () => { cancelledPicker = true; },
+  requestRender: () => {},
+  ui: {
+    matchesKey: (data, key) => data === key,
+    truncateToWidth: (text, width) => String(text).slice(0, width),
+    visibleWidth: (text) => String(text).replace(/\x1b\[[0-9;]*m/g, "").length,
+  },
+});
+backPicker.handleInput("enter");
+backPicker.handleInput("escape");
+assert.equal(backPicker.phase, "model", "escape returns from reasoning to models");
+assert.equal(cancelledPicker, false);
+backPicker.handleInput("escape");
+assert.equal(cancelledPicker, true, "escape closes from the model step");
 
 const { createRunPicker } = require(path.join(ROOT, "cli", "lib", "run-picker.cjs"));
 let resumedRun = null;

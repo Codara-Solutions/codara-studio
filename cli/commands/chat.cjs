@@ -82,6 +82,21 @@ function latestUsage(run) {
     .find((call) => call.promptTokens || call.contextWindowTokens);
 }
 
+const CORA_COMPACT_TARGET_TOKENS = 256_000;
+const PI_COMPACT_HEADROOM_TOKENS = 16_384;
+
+function contextReadout(usage) {
+  if (!usage?.contextWindowTokens) return null;
+  const providerSafe = Math.max(1, usage.contextWindowTokens - PI_COMPACT_HEADROOM_TOKENS);
+  const effective = Math.min(CORA_COMPACT_TARGET_TOKENS, providerSafe);
+  return {
+    used: usage.promptTokens ?? 0,
+    target: CORA_COMPACT_TARGET_TOKENS,
+    effective,
+    earlier: effective < CORA_COMPACT_TARGET_TOKENS,
+  };
+}
+
 function latestModel(run, fallback = "auto") {
   return run?.chatModel || [...(run?.sparkCalls ?? [])].reverse().find((call) => call.model)?.model || fallback;
 }
@@ -571,8 +586,9 @@ async function chat(args, flags) {
     else if (nextNotice !== undefined) notice = { text: nextNotice, until: Date.now() + 5_000 };
     if (notice && notice.until <= Date.now()) notice = null;
     const usage = latestUsage(run);
-    const context = usage?.contextWindowTokens
-      ? `${compactTokens(usage.promptTokens ?? 0)} / ${compactTokens(usage.contextWindowTokens)} context`
+    const contextGauge = contextReadout(usage);
+    const context = contextGauge
+      ? `${compactTokens(contextGauge.used)} / ${compactTokens(contextGauge.target)} context`
       : "";
     header.set(`${c.violet("◆")} ${c.bold("CORA")}`, c.dim(`${displayPath(cwd)}${context ? `  ·  ${context}` : ""}`));
     const moving = Boolean(pendingSendAt) || BUSY_RUN_STATUSES.has(run?.status);
@@ -913,10 +929,17 @@ async function chat(args, flags) {
 
     if (command.name === "context") {
       const usage = latestUsage(run);
+      const context = contextReadout(usage);
       showOutput(
         "CONTEXT",
-        usage?.contextWindowTokens
-          ? `${compactTokens(usage.promptTokens ?? 0)} used of ${compactTokens(usage.contextWindowTokens)} tokens`
+        context
+          ? [
+              `${compactTokens(context.used)} used · Cora's compact target is ${compactTokens(context.target)} tokens.`,
+              ...(context.earlier
+                ? [`This model keeps extra safety room, so it may compact around ${compactTokens(context.effective)}.`]
+                : []),
+              "Run /compact whenever you want a fresh context now.",
+            ].join("\n")
           : "No context-window measurement yet for this chat.",
       );
       return true;
@@ -1108,6 +1131,7 @@ module.exports = {
   activeWork,
   chat,
   compactTokens,
+  contextReadout,
   conversationMessages,
   directMessageWasDispatched,
   deleteRunRpc,

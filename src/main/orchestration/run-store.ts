@@ -13171,11 +13171,12 @@ const AUTO_COMPACTION_NOTE_PREFIX =
   "**Conversation compacted.** Older history was summarized to stay within the model's context window:\n\n";
 
 const AUTO_COMPACTION_SUMMARY_PROMPT = [
-  "Summarize this entire conversation so a fresh session can continue seamlessly:",
-  "capture the user's goals, all decisions and constraints, the current state of the",
-  "work (files, branches, outstanding tasks), and unresolved questions. Be dense and",
-  "complete; this summary replaces the conversation history for the next session.",
-  "Reply with the summary text only — do not call any tools and do not start new work.",
+  "Create a dense handoff for a fresh Cora session. Preserve the newest user intent;",
+  "requirements and preferences; decisions and rationale; exact files, symbols, commands,",
+  "IDs and configuration that matter; work completed with verification; current workspace",
+  "and process state; failures, blockers, pending work, and the next concrete actions.",
+  "Drop greetings, repetition, and obsolete exploration unless it explains the current state.",
+  "Do not invent. Use concise structured Markdown. Reply only with the handoff; call no tools.",
 ].join(" ");
 
 /** A compaction summary shorter than this is a refusal, an error string, or a

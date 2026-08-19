@@ -14,7 +14,10 @@ import type {
 import { makeId } from "@shared/ids";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { contextWindowForModel } from "@shared/context-window";
-import { chatContextCapacityTokens } from "@shared/context-compaction";
+import {
+  DEFAULT_PI_COMPACT_AT_TOKENS,
+  chatContextCapacityTokens,
+} from "@shared/context-compaction";
 import {
   chatModelIsOpenAi,
 } from "@shared/chat-policy";
@@ -1360,14 +1363,12 @@ export default function ChatComposer({
           <div className="composer-toolbar__right">
             <ContextPill
               used={tokensUsed}
-              // A Pi chat never reaches its model window: Codara compacts it at
-              // ~256k first, so that is the ceiling the meter measures against.
-              budget={chatContextCapacityTokens({
+              budget={DEFAULT_PI_COMPACT_AT_TOKENS}
+              effectiveBudget={chatContextCapacityTokens({
                 contextWindowTokens:
                   reportedContextBudget ?? contextWindowForModel(activeChatModelId).tokens,
                 compactAtTokens: reportedCompactAt,
               })}
-              compactsAtBudget
             />
             <IconButton
               title="MCP and skills"

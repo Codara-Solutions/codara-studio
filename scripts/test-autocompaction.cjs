@@ -1,6 +1,6 @@
 // Focused scratchpad checks for the autocompaction change set.
 //
-//   node test-autocompaction.cjs   (from anywhere; ROOT is hardcoded)
+//   node scripts/test-autocompaction.cjs   (from anywhere)
 //
 // 1. Replay generalization (real source, bundled): when includeCanonicalReplay
 //    is on and a compactionSummary is supplied, buildManagerTurnPrompt replays
@@ -13,7 +13,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const ROOT = "/Users/etienne/Documents/Projects/Codara/codara-studio";
+const ROOT = path.resolve(__dirname, "..");
 const esbuild = require(path.join(ROOT, "node_modules", "esbuild"));
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-autocompact-test-"));
 const SHARED_DIR = path.join(ROOT, "src", "shared");
@@ -255,7 +255,11 @@ async function main() {
   );
   check(
     "the composer meter measures against the shared capacity helper",
-    /budget=\{chatContextCapacityTokens\(\{/.test(composer),
+    /effectiveBudget=\{chatContextCapacityTokens\(\{/.test(composer),
+  );
+  check(
+    "the composer labels Cora's stable 256k target",
+    /budget=\{DEFAULT_PI_COMPACT_AT_TOKENS\}/.test(composer),
   );
   check(
     "the composer resets its meter when the conversation epoch changes",
