@@ -23,12 +23,26 @@ const tabBar = fs.readFileSync(
   path.join(root, "src/renderer/src/tabs/TabBar.tsx"),
   "utf8",
 );
+const styles = fs.readFileSync(
+  path.join(root, "src/renderer/src/styles.css"),
+  "utf8",
+);
 assert.match(
   tabBar,
   /liveTerminalRuntime\(leaf\.worker\)/,
   "the tab glyph must follow the live worker chip, not a leftover agentSession runtime",
 );
 assert.match(tabBar, /<CodaraMark size=\{11\} \/>/);
+assert.doesNotMatch(
+  tabBar,
+  /spark-tab--agent|--agent-accent/,
+  "agent activity belongs in the runtime glyph, not a full-tab tint",
+);
+assert.doesNotMatch(
+  styles,
+  /\.spark-tab--agent/,
+  "agent terminals must use the same calm selected-tab surface as every other tab",
+);
 
 const launches = compile(
   "src/renderer/src/workers/launch-commands.ts",

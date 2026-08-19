@@ -1042,8 +1042,9 @@ export interface UseTabsApi {
     },
   ) => TabId;
   // Create a terminal tab owned by a bridge caller (agent-socket
-  // terminal.create or a trusted paired phone). Agent tabs are tinted; phone
-  // tabs carry an origin badge. Neither is EVER focused automatically.
+  // terminal.create or a trusted paired phone). Agent tabs carry a compact
+  // runtime/fallback glyph; phone tabs carry an origin badge. Neither is EVER
+  // focused automatically.
   // Returns BOTH ids: the paneId is the PTY session id the agent then drives
   // via terminal.write / terminal.read.
   newAgentTerminalTab: (

@@ -997,20 +997,15 @@ const TabItem = React.memo(function TabItem({
     tab.kind === "terminal" &&
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
 
-  // Terminals a background agent spawned carry an opaque color token; tint the
-  // pill edge + wash so the user can tell an agent owns the tab. The token is
-  // fed to the CSS as a local custom property the .spark-tab--agent rules read.
-  const agentColor = tab.kind === "terminal" ? tab.color : undefined;
   const tabClass = [
     "spark-tab",
     active && "spark-tab--active",
     dragging && "spark-tab--dragging",
     (dropActive || paneDragHover) && "spark-tab--drop-target",
-    agentColor && "spark-tab--agent",
   ]
     .filter(Boolean)
     .join(" ");
-  const tabStyle = tabStyleFor(agentColor, dragOffset);
+  const tabStyle = tabStyleFor(dragOffset);
 
   return (
     <div
@@ -1246,7 +1241,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
       aria-selected={active}
       data-tab-id={tab.id}
       className={className}
-      style={tabStyleFor(undefined, dragOffset)}
+      style={tabStyleFor(dragOffset)}
       // Not draggable while renaming: the text selection inside the input has
       // to win over the tab gesture.
       draggable={!editing}
@@ -1370,21 +1365,12 @@ const ChatTabItem = React.memo(function ChatTabItem({
   );
 });
 
-// Inline style for a tab row: the agent tint (a CSS custom property the
-// .spark-tab--agent rules consume) and the reorder preview's slide. translate3d
-// keeps the slide on the compositor — the strip never reflows mid-drag, which
-// is what makes the motion smooth instead of a per-frame layout pass.
-// undefined (not an empty object) when neither applies, so the common case
-// hands React the same "no style" it had before.
-function tabStyleFor(
-  agentColor: string | undefined,
-  dragOffset: number,
-): React.CSSProperties | undefined {
-  if (!agentColor && !dragOffset) return undefined;
-  const style: React.CSSProperties = {};
-  if (agentColor) (style as Record<string, string>)["--agent-accent"] = agentColor;
-  if (dragOffset) style.transform = `translate3d(${dragOffset}px, 0, 0)`;
-  return style;
+// Keep reorder motion on the compositor so the strip never reflows mid-drag.
+// The normal case returns no style object at all.
+function tabStyleFor(dragOffset: number): React.CSSProperties | undefined {
+  return dragOffset
+    ? { transform: `translate3d(${dragOffset}px, 0, 0)` }
+    : undefined;
 }
 
 function PencilGlyph() {
