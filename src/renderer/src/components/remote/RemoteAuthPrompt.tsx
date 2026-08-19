@@ -75,7 +75,7 @@ export default function RemoteAuthPrompt() {
           gap: 12,
         }}
       >
-        <div className="spark-eyebrow" style={{ color: "var(--accent)" }}>
+        <div className="spark-eyebrow" style={{ color: "var(--accent-text)" }}>
           SSH · {request.hostId}
         </div>
         <div style={{ fontSize: 13, color: "var(--ink)", fontWeight: 600 }}>{request.message}</div>

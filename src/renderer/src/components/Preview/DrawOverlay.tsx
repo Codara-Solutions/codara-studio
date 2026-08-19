@@ -250,7 +250,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
             {busy ? (
               <span
                 style={{
-                  color: "var(--accent)",
+                  color: "var(--accent-text)",
                   animation: "spark-pulse 1.4s ease-in-out infinite",
                 }}
               >

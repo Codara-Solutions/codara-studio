@@ -1995,7 +1995,7 @@ function TerminalDragGhost({ x, y }: { x: number; y: number }) {
           fontFamily: "var(--font-mono)",
           fontSize: 10,
           letterSpacing: "0.06em",
-          color: "var(--accent)",
+          color: "var(--accent-text)",
           fontWeight: 600,
         }}
       >

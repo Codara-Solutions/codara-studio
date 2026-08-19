@@ -317,7 +317,7 @@ export default function GitHubWorkQueue({
                 <span
                   style={{
                     fontSize: 10,
-                    color: "var(--accent)",
+                    color: "var(--accent-text)",
                     fontWeight: 650,
                     whiteSpace: "nowrap",
                   }}

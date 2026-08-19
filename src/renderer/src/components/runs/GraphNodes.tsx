@@ -540,7 +540,7 @@ export const SparkNode = React.memo(function SparkNode({
     >
       <span
         style={{
-          color: failed ? "var(--danger)" : "var(--accent)",
+          color: failed ? "var(--danger)" : "var(--accent-text)",
           display: "inline-flex",
         }}
       >
@@ -1117,7 +1117,7 @@ function WorkerBatchNode({
             <span
               style={{
                 flex: "0 0 auto",
-                color: live ? "var(--accent)" : "var(--muted)",
+                color: live ? "var(--accent-text)" : "var(--muted)",
                 fontWeight: live ? 600 : undefined,
               }}
             >
@@ -1704,7 +1704,7 @@ export const WorkerNode = React.memo(function WorkerNode({
             padding: 2,
             margin: -2,
             cursor: queued ? "default" : "pointer",
-            color: queued ? "var(--muted-2)" : hover || selected ? "var(--accent)" : "var(--muted)",
+            color: queued ? "var(--muted-2)" : hover || selected ? "var(--accent-text)" : "var(--muted)",
             transition: "color var(--motion-fast) var(--ease-out)",
           }}
         >
@@ -1778,7 +1778,7 @@ export const WorkerNode = React.memo(function WorkerNode({
               flex: "0 0 auto",
               minWidth: 30,
               textAlign: "right",
-              color: running ? "var(--accent)" : stateColor,
+              color: running ? "var(--accent-text)" : stateColor,
               fontWeight: running ? 600 : undefined,
             }}
           >

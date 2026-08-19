@@ -160,7 +160,7 @@ export default function CommitDetail({
         <IconButton title="Back to history" onClick={onClose} size={22}>
           <BackIcon />
         </IconButton>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--accent)" }}>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--accent-text)" }}>
           {detail?.shortHash ?? hash.slice(0, 7)}
         </span>
         <span

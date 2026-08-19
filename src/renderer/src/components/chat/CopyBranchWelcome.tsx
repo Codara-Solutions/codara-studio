@@ -115,7 +115,7 @@ function Mono({ children, accent = false }: { children: React.ReactNode; accent?
         background: accent
           ? "color-mix(in oklch, var(--accent) 16%, transparent)"
           : "color-mix(in oklab, var(--ink) 7%, transparent)",
-        color: accent ? "var(--accent)" : "var(--ink)",
+        color: accent ? "var(--accent-text)" : "var(--ink)",
         border: accent ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
       }}
     >

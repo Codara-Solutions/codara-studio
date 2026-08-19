@@ -4702,7 +4702,7 @@ function ModelPresetCard({
           {badge && (
             <span
               style={{
-                color: active ? "var(--accent)" : "var(--muted)",
+                color: active ? "var(--accent-text)" : "var(--muted)",
                 border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
                 borderRadius: 999,
                 padding: "1px 6px",

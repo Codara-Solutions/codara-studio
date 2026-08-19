@@ -25,11 +25,12 @@
   --rule-strong: #5a5853;
   --rule-soft: #242320;
 
-  /* Brand accent — Codara teal by default, overwritten at runtime to the
-     active workspace color. Soft variants are low-chroma derivatives for
-     backgrounds and tints. */
+  /* Workspace accent — the exact selected hex at runtime. `--accent-text` is
+     the same identity adjusted only when a small foreground needs contrast;
+     fills, edges, glows, and diagrams continue to derive from `--accent`. */
   --workspace-accent: #2AA298;
   --accent: #2AA298;
+  --accent-text: #2AA298;
   --accent-ink: #14110d;
   --on-accent: #14110d;
   --accent-soft: color-mix(in oklch, var(--accent) 18%, transparent);
@@ -991,7 +992,7 @@ a { color: inherit; }
   margin-right: 2px;
   border-radius: 999px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
@@ -999,12 +1000,12 @@ a { color: inherit; }
 
 .spark-tabbar-cora:hover {
   background: color-mix(in oklab, var(--accent) 18%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .spark-tabbar-cora:active {
   background: color-mix(in oklab, var(--accent) 26%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .spark-tabbar-picker {
@@ -1090,7 +1091,7 @@ a { color: inherit; }
   margin: 0;
   transform: translate(-50%, -50%);
   overflow: hidden;
-  color: color-mix(in oklch, var(--accent) 82%, var(--ink));
+  color: var(--accent-text);
   font-family: var(--font-mono);
   font-size: clamp(6px, 1.9cqw, 14px);
   font-weight: 600;
@@ -1191,7 +1192,7 @@ a { color: inherit; }
 }
 
 .cora-worker-terminal-control.is-protected {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px var(--accent-edge);
 }
@@ -1436,7 +1437,7 @@ a { color: inherit; }
 }
 .cora-starter:active { transform: translateY(0); }
 .cora-starter__label {
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.12em;
@@ -1461,7 +1462,7 @@ a { color: inherit; }
   transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
 }
 .cora-starter:hover .cora-starter__arrow {
-  color: var(--accent);
+  color: var(--accent-text);
   transform: translate(1px, -1px);
 }
 /* The welcome's door to Automations: one quiet full-width row under the
@@ -1510,7 +1511,7 @@ a { color: inherit; }
   flex: 0 0 16px;
   color: var(--muted);
 }
-.cora-welcome__automations.is-live .cora-welcome__automations-glyph { color: var(--accent); }
+.cora-welcome__automations.is-live .cora-welcome__automations-glyph { color: var(--accent-text); }
 .cora-welcome__automations-text {
   flex: 1;
   min-width: 0;
@@ -1538,7 +1539,7 @@ a { color: inherit; }
   font-weight: 600;
   color: var(--muted);
 }
-.cora-welcome__automations.is-live .cora-welcome__automations-action { color: var(--accent); }
+.cora-welcome__automations.is-live .cora-welcome__automations-action { color: var(--accent-text); }
 .cora-welcome__automations-arrow {
   flex: 0 0 auto;
   color: var(--muted-2);
@@ -1546,7 +1547,7 @@ a { color: inherit; }
   transition: transform var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .cora-welcome__automations:hover .cora-welcome__automations-arrow {
-  color: var(--accent);
+  color: var(--accent-text);
   transform: translateX(1px);
 }
 
@@ -1706,7 +1707,7 @@ a { color: inherit; }
   flex: 0 0 auto;
   font-size: 11px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .loom-live-strip.is-blocked .loom-live-strip__action { color: var(--danger); }
 
@@ -1850,7 +1851,7 @@ a { color: inherit; }
 }
 
 .automation-variable-chip__token {
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
@@ -1933,7 +1934,7 @@ a { color: inherit; }
   border: 1px solid var(--accent-edge);
   border-radius: 6px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-mono);
   font-size: 11px;
 }
@@ -2313,7 +2314,7 @@ a { color: inherit; }
   background: var(--press);
 }
 .composer-pill.is-active {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
@@ -2434,7 +2435,7 @@ a { color: inherit; }
     color var(--motion-fast) var(--ease-out);
 }
 .composer-thinking.is-active {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
@@ -2468,7 +2469,7 @@ a { color: inherit; }
     color var(--motion-fast) var(--ease-out);
 }
 .composer-fast.is-on {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
@@ -2477,7 +2478,7 @@ a { color: inherit; }
   color: var(--ink);
 }
 .composer-fast.is-on:hover {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 .composer-fast:active {
@@ -2558,7 +2559,7 @@ a { color: inherit; }
 .composer-menu-check {
   flex: 0 0 auto;
   padding-top: 2px;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
 }
 .composer-effort-option {
@@ -2715,7 +2716,7 @@ a { color: inherit; }
   background: color-mix(in oklab, var(--ink) 13%, transparent);
 }
 .spark-icon-btn.is-active {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 .spark-icon-btn:disabled,
@@ -2838,7 +2839,7 @@ a { color: inherit; }
   background: color-mix(in oklch, var(--warn) 14%, transparent);
 }
 .spark-badge.is-accent {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: var(--accent-edge);
   background: var(--accent-soft);
 }

@@ -324,7 +324,7 @@ function Row({
       {(busy || destination.sublabel) && (
         <span
           style={{
-            color: busy ? "var(--accent)" : "var(--muted)",
+            color: busy ? "var(--accent-text)" : "var(--muted)",
             fontSize: 9,
             fontWeight: 600,
             animation: busy ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
@@ -336,4 +336,3 @@ function Row({
     </button>
   );
 }
-

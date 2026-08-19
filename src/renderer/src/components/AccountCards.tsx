@@ -176,7 +176,7 @@ const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
   ...BUTTON_STYLE,
   border: "1px solid var(--accent-edge)",
   background: "var(--accent-soft)",
-  color: "var(--accent)",
+  color: "var(--accent-text)",
 };
 
 /**
@@ -198,7 +198,7 @@ const COMPACT_PRIMARY_BUTTON_STYLE: React.CSSProperties = {
   ...COMPACT_BUTTON_STYLE,
   border: "1px solid var(--accent-edge)",
   background: "var(--accent-soft)",
-  color: "var(--accent)",
+  color: "var(--accent-text)",
 };
 
 /**

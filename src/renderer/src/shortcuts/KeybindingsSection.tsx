@@ -223,7 +223,7 @@ function Row({
               style={{
                 marginLeft: 8,
                 fontSize: 10,
-                color: "var(--accent)",
+                color: "var(--accent-text)",
                 letterSpacing: "0.08em",
                 textTransform: "uppercase",
               }}

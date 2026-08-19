@@ -929,7 +929,12 @@ const AutomationRow = React.memo(function AutomationRow({
           </span>
           <span
             className="spark-mono"
-            style={{ flex: "0 0 auto", fontSize: 9.5, color: st.color, letterSpacing: "0.04em" }}
+            style={{
+              flex: "0 0 auto",
+              fontSize: 9.5,
+              color: st.kind === "running" ? "var(--accent-text)" : st.color,
+              letterSpacing: "0.04em",
+            }}
           >
             {st.label}
           </span>
@@ -1091,7 +1096,7 @@ function AutomationDetail({
               className="spark-badge"
               style={{
                 flex: "0 0 auto",
-                color: st.color,
+                color: st.kind === "running" ? "var(--accent-text)" : st.color,
                 borderColor: `color-mix(in oklch, ${st.color} 32%, transparent)`,
                 background: `color-mix(in oklch, ${st.color} 8%, transparent)`,
               }}
@@ -1130,7 +1135,7 @@ function AutomationDetail({
         >
           {running ? (
             <>
-              <span aria-hidden style={{ color: "var(--accent)", marginRight: 6 }}>
+              <span aria-hidden style={{ color: "var(--accent-text)", marginRight: 6 }}>
                 ●
               </span>
               Live board

@@ -540,7 +540,7 @@ const BranchRow = React.memo(function BranchRow({
         style={{
           display: "inline-flex",
           width: 14,
-          color: isCurrent ? "var(--accent)" : "var(--muted-2)",
+          color: isCurrent ? "var(--accent-text)" : "var(--muted-2)",
         }}
       >
         {isCurrent ? <CheckGlyph /> : <BranchIcon />}

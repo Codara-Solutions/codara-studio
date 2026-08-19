@@ -1989,9 +1989,9 @@ export default function App() {
     window.spark.app.signalReady?.();
   }, []);
 
-  // Theme the UI from the workspace's raw identity color, but resolve a second
-  // accent that meets small-text contrast against the strongest panel. The
-  // frame lets ThemeProvider stamp the new palette before we read its tokens.
+  // Theme the UI with the workspace's exact identity color. The frame lets
+  // ThemeProvider stamp its palette first so our per-workspace accent remains
+  // authoritative after a theme change.
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       applyWorkspaceAccent(activeWorkspace?.color || "#2AA298");
@@ -7399,12 +7399,12 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
         <button
           type="button"
           onClick={onNewChat}
-          style={{ ...buttonStyle, color: "var(--accent)", borderColor: "var(--accent-edge)" }}
+          style={{ ...buttonStyle, color: "var(--accent-text)", borderColor: "var(--accent-edge)" }}
           onMouseEnter={onEnter}
           onMouseLeave={(e) => {
             e.currentTarget.style.background = "transparent";
             e.currentTarget.style.borderColor = "var(--accent-edge)";
-            e.currentTarget.style.color = "var(--accent)";
+            e.currentTarget.style.color = "var(--accent-text)";
           }}
         >
           + New chat

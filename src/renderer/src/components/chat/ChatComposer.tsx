@@ -1753,7 +1753,7 @@ function MentionRow({
         transition: "background var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span aria-hidden style={{ color: active ? "var(--accent)" : "var(--muted)", display: "inline-flex" }}>
+      <span aria-hidden style={{ color: active ? "var(--accent-text)" : "var(--muted)", display: "inline-flex" }}>
         <FileGlyph />
       </span>
       <span style={{ minWidth: 0, display: "grid", gap: 1 }}>
@@ -1834,7 +1834,7 @@ function AttachmentChip({
         fontSize: 11,
       }}
     >
-      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex", flex: "0 0 auto" }}>
+      <span aria-hidden style={{ color: "var(--accent-text)", display: "inline-flex", flex: "0 0 auto" }}>
         <FileGlyph />
       </span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -2110,7 +2110,8 @@ function TextButton({
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [focusRing, setFocusRing] = useState(false);
-  const color = tone === "danger" ? "var(--danger)" : "var(--accent)";
+  const color = tone === "danger" ? "var(--danger)" : "var(--accent-text)";
+  const borderColor = tone === "danger" ? "var(--danger)" : "var(--accent)";
   const active = pressed && !disabled;
   return (
     <button
@@ -2129,7 +2130,7 @@ function TextButton({
       style={{
         appearance: "none",
         border: `1px solid ${
-          disabled ? "var(--rule-soft)" : "color-mix(in oklch, " + color + " 45%, transparent)"
+          disabled ? "var(--rule-soft)" : "color-mix(in oklch, " + borderColor + " 45%, transparent)"
         }`,
         borderRadius: "var(--radius-control, 7px)",
         background: hover && !disabled ? "var(--hover)" : "transparent",

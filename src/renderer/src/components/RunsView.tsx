@@ -487,7 +487,7 @@ function ConversationRestState({ run }: { run: RunState }) {
             borderRadius: 9,
             border: "1px solid var(--rule)",
             background: "var(--panel)",
-            color: live ? "var(--accent)" : "var(--muted)",
+            color: live ? "var(--accent-text)" : "var(--muted)",
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",

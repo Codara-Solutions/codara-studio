@@ -1472,7 +1472,7 @@ function QuestionOptionButton({
         aria-hidden
         style={{
           ...QUESTION_OPTION_GO_STYLE,
-          color: recommended ? "var(--accent)" : "var(--muted)",
+          color: recommended ? "var(--accent-text)" : "var(--muted)",
           opacity: active ? 1 : 0,
           transform: active ? "translateX(0)" : "translateX(-3px)",
         }}
@@ -1525,7 +1525,7 @@ function AttachmentStrip({
             fontSize: 10.5,
           }}
         >
-          <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex", flex: "0 0 auto" }}>
+          <span aria-hidden style={{ color: "var(--accent-text)", display: "inline-flex", flex: "0 0 auto" }}>
             <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
               <path d="M4 2.5h4.2L11 5.3v6.2H4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
               <path d="M8.1 2.7v2.8h2.7" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
@@ -2755,7 +2755,7 @@ function RepeatChip({ count }: { count: number }) {
 function ConversationEmpty() {
   return (
     <div className="spark-empty" style={{ margin: "auto", maxWidth: 250 }}>
-      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
+      <span aria-hidden style={{ color: "var(--accent-text)", display: "inline-flex" }}>
         <SparkMark />
       </span>
       <span className="spark-eyebrow">Getting started</span>
@@ -2865,7 +2865,7 @@ function Caret({ open }: { open: boolean }) {
 
 function SparkMark() {
   return (
-    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent)" }}>
+    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent-text)" }}>
       <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
         <path
           d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"
@@ -2957,7 +2957,7 @@ const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
   border: "1px solid var(--accent-edge)",
   borderRadius: 999,
   background: "var(--panel-2)",
-  color: "var(--accent)",
+  color: "var(--accent-text)",
   boxShadow: "var(--shadow-float)",
   padding: "7px 12px",
   fontFamily: "var(--font-sans)",
@@ -3253,7 +3253,7 @@ const QUESTION_OPTION_KEY_STYLE: React.CSSProperties = {
 
 const QUESTION_OPTION_KEY_REC_STYLE: React.CSSProperties = {
   background: "var(--accent-soft)",
-  color: "var(--accent)",
+  color: "var(--accent-text)",
 };
 
 // Single-line body: label, then the recommended star, then the description

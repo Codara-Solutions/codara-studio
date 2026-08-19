@@ -81,7 +81,7 @@ export default function CommitMenu({
             fontFamily: "var(--font-mono)",
             fontSize: 10,
             fontWeight: 700,
-            color: "var(--accent)",
+            color: "var(--accent-text)",
           }}
         >
           {row.shortHash ?? hash.slice(0, 7)}

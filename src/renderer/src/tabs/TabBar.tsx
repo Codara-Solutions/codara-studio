@@ -1292,7 +1292,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
       }}
       title={tab.title}
     >
-      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
         <CodaraMark size={13} />
       </span>
       {editing ? (
@@ -1409,7 +1409,7 @@ function PencilGlyph() {
 function KindIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "chat") {
     return (
-      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
         <CodaraMark size={13} />
       </span>
     );
@@ -1447,9 +1447,9 @@ function KindIcon({ tab }: { tab: Tab }) {
         </span>
       );
     }
-    return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent)"} />;
+    return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent-text)"} />;
   }
-  if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
+  if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent-text)" />;
   if (tab.kind === "automations") {
     return (
       <span
@@ -1460,7 +1460,7 @@ function KindIcon({ tab }: { tab: Tab }) {
           justifyContent: "center",
           width: 14,
           flex: "0 0 14px",
-          color: "var(--accent)",
+          color: "var(--accent-text)",
         }}
       >
         <AutomationsGlyph size={12} />
@@ -1477,7 +1477,7 @@ function KindIcon({ tab }: { tab: Tab }) {
           justifyContent: "center",
           width: 14,
           flex: "0 0 14px",
-          color: "var(--accent)",
+          color: "var(--accent-text)",
         }}
       >
         {/* Three ascending bars — the daily-usage chart in miniature. */}
@@ -1497,7 +1497,7 @@ function KindIcon({ tab }: { tab: Tab }) {
   }
   if (tab.kind === "whiteboard") {
     return (
-      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
         <svg
           aria-hidden
           width="12"
@@ -1516,8 +1516,8 @@ function KindIcon({ tab }: { tab: Tab }) {
       </span>
     );
   }
-  if (tab.kind === "diff") return <GlyphIcon glyph="±" color="var(--accent)" />;
-  return <GlyphIcon glyph="◆" color="var(--accent)" />;
+  if (tab.kind === "diff") return <GlyphIcon glyph="±" color="var(--accent-text)" />;
+  return <GlyphIcon glyph="◆" color="var(--accent-text)" />;
 }
 
 function GlyphIcon({ glyph, color }: { glyph: string; color: string }) {
@@ -1632,7 +1632,7 @@ function PickerItem({
         background: "transparent",
         border: "none",
         padding: "8px 12px",
-        color: primary ? "var(--accent)" : "var(--ink)",
+        color: primary ? "var(--accent-text)" : "var(--ink)",
         fontFamily: "var(--font-sans)",
         fontSize: 12,
         fontWeight: primary ? 600 : 500,
@@ -1781,7 +1781,7 @@ function NewTabDropZone() {
       style={{
         pointerEvents: "none",
         flex: "0 0 auto",
-        color: "var(--accent)",
+        color: "var(--accent-text)",
         border: "1px dashed var(--accent-edge)",
         background: "var(--accent-soft)",
         fontSize: 11,

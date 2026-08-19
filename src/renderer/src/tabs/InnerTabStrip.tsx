@@ -175,7 +175,7 @@ function Pill({
         background: active
           ? "var(--accent-soft)"
           : "transparent",
-        color: active ? "var(--accent)" : "var(--muted)",
+        color: active ? "var(--accent-text)" : "var(--muted)",
         // No visible border in any state — the active pill reads as a gentle
         // tinted segment, not an outlined chip. Keep a 1px transparent border
         // so there is never a width shift between active/inactive/hover.
@@ -268,7 +268,7 @@ function IconTab({
         border: "1px solid transparent",
         borderRadius: "var(--radius-control, 7px)",
         background: active ? "var(--accent-soft)" : "transparent",
-        color: active ? "var(--accent)" : "var(--muted-2)",
+        color: active ? "var(--accent-text)" : "var(--muted-2)",
         fontFamily: "var(--font-sans)",
         fontSize: 11,
         fontWeight: 550,

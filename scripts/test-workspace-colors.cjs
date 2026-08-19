@@ -9,6 +9,8 @@ const esbuild = require("esbuild");
 const ROOT = path.resolve(__dirname, "..");
 const ENTRY = path.join(ROOT, "src", "shared", "workspace-colors.ts");
 const WORKSPACE_RAIL = path.join(ROOT, "src", "renderer", "src", "components", "WorkspaceRail.tsx");
+const WORKSPACE_ACCENT = path.join(ROOT, "src", "renderer", "src", "lib", "workspace-accent.ts");
+const RENDERER_STYLES = path.join(ROOT, "src", "renderer", "src", "styles.css");
 const outfile = path.join(os.tmpdir(), "codara-workspace-colors-test", "workspace-colors.cjs");
 fs.mkdirSync(path.dirname(outfile), { recursive: true });
 esbuild.buildSync({
@@ -58,6 +60,29 @@ assert.ok(
 );
 
 const workspaceRailSource = fs.readFileSync(WORKSPACE_RAIL, "utf8");
+const workspaceAccentSource = fs.readFileSync(WORKSPACE_ACCENT, "utf8");
+const rendererStylesSource = fs.readFileSync(RENDERER_STYLES, "utf8");
+assert.match(
+  workspaceAccentSource,
+  /setProperty\("--accent", accent\.raw\)/,
+  "the app accent must use the exact workspace color",
+);
+assert.doesNotMatch(
+  workspaceAccentSource,
+  /setProperty\("--accent", accent\.readable\)/,
+  "contrast handling must never replace the selected workspace color",
+);
+assert.match(
+  workspaceAccentSource,
+  /setProperty\("--accent-text", accent\.readable\)/,
+  "accent foregrounds must retain a contrast-safe companion color",
+);
+assert.match(rendererStylesSource, /--accent-text:/, "the renderer must define an accent foreground token");
+assert.doesNotMatch(
+  rendererStylesSource,
+  /(?:^|\n)\s*color:\s*var\(--accent\);/,
+  "small CSS foregrounds must use the readable accent token, not the raw identity fill",
+);
 const folderPickerSource = workspaceRailSource.slice(
   workspaceRailSource.indexOf("const committedFolderColor"),
   workspaceRailSource.indexOf("function WorkspaceRow"),

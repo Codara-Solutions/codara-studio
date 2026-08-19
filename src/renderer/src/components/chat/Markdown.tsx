@@ -21,7 +21,7 @@ const COMPONENTS: Components = {
         if (href) void window.spark.openExternal(href);
       }}
       rel="noreferrer"
-      style={{ color: "var(--accent)", textDecoration: "none" }}
+      style={{ color: "var(--accent-text)", textDecoration: "none" }}
     >
       {children}
     </a>

@@ -475,7 +475,7 @@ export function ChatHistoryButton({
               : hover
                 ? "var(--hover-strong)"
                 : "transparent",
-          color: open ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
+          color: open ? "var(--accent-text)" : hover ? "var(--ink)" : "var(--ink-dim)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -669,7 +669,7 @@ function ChatHistoryRow({
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
             fontSize: 12,
-            color: active ? "var(--accent)" : "var(--ink)",
+            color: active ? "var(--accent-text)" : "var(--ink)",
           }}
         >
           {run.title || "Untitled chat"}
@@ -1056,7 +1056,7 @@ function ErrorBar({ message }: { message: string }) {
 
 function SparkMark({ size = 13 }: { size?: number }) {
   return (
-    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent)" }}>
+    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent-text)" }}>
       <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
         <path
           d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"

@@ -64,7 +64,7 @@ export default function SshManagerDialog({ onClose, onPick }: Props) {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span className="spark-eyebrow" style={{ color: "var(--accent)" }}>
+          <span className="spark-eyebrow" style={{ color: "var(--accent-text)" }}>
             SSH
           </span>
           <TabButton label="Servers" active={tab === "servers"} onClick={() => setTab("servers")} />

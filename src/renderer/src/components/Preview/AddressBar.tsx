@@ -239,7 +239,7 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
               textTransform: "uppercase",
               // Reflect the open state with accent ink on a soft fill, matching
               // the .spark-icon-btn.is-active idiom — no extra border/glow.
-              color: portsOpen ? "var(--accent)" : "var(--ink-dim)",
+              color: portsOpen ? "var(--accent-text)" : "var(--ink-dim)",
               background: portsOpen ? "var(--accent-soft)" : undefined,
               borderColor: portsOpen ? "var(--accent-edge)" : undefined,
             }}
@@ -276,7 +276,7 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
                     {checking ? (
                       <span
                         style={{
-                          color: "var(--accent)",
+                          color: "var(--accent-text)",
                           fontFamily: "var(--font-mono)",
                           fontVariantNumeric: "tabular-nums",
                           fontSize: 10,

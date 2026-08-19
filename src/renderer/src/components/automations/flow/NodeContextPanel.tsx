@@ -101,7 +101,7 @@ function kindGlyph(node: FlowNode): { glyph: string; eyebrow: string; color: str
       return {
         glyph: "◇",
         eyebrow: "Worker",
-        color: "var(--accent)",
+        color: "var(--accent-text)",
         tint: "color-mix(in oklch, var(--accent) 14%, var(--panel-2))",
       };
     case "guard":

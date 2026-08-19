@@ -262,7 +262,7 @@ function PlusButton({
         ...style,
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.color = "var(--accent)";
+        e.currentTarget.style.color = "var(--accent-text)";
         e.currentTarget.style.borderColor = "var(--accent-edge)";
       }}
       onMouseLeave={(e) => {

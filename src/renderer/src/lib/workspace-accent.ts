@@ -18,15 +18,20 @@ export function resolveWorkspaceAccent(color: string): WorkspaceAccentTokens {
   const surface = tokens.getPropertyValue("--panel-3").trim() || "#292724";
   const themeInk = tokens.getPropertyValue("--ink").trim() || "#F4F3F1";
   const readable = readableWorkspaceAccent(raw, surface, themeInk);
-  return { raw, readable, ink: workspaceAccentInk(readable) };
+  return { raw, readable, ink: workspaceAccentInk(raw) };
 }
 
-/** Apply the accessible functional accent while retaining the exact identity. */
+/**
+ * Apply the workspace identity verbatim. Fills, edges, glows, and diagrams use
+ * `--accent`; small foregrounds use the contrast-safe `--accent-text`; text on
+ * a solid accent fill uses `--accent-ink`. The selected identity never moves.
+ */
 export function applyWorkspaceAccent(color: string): void {
   const root = document.documentElement;
   const accent = resolveWorkspaceAccent(color);
   root.style.setProperty("--workspace-accent", accent.raw);
-  root.style.setProperty("--accent", accent.readable);
+  root.style.setProperty("--accent", accent.raw);
+  root.style.setProperty("--accent-text", accent.readable);
   root.style.setProperty("--accent-ink", accent.ink);
   root.style.setProperty("--on-accent", accent.ink);
 }

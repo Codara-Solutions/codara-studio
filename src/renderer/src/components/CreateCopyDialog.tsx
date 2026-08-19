@@ -152,7 +152,7 @@ export default function CreateCopyDialog({
                 background: "color-mix(in oklch, var(--accent) 10%, transparent)",
               }}
             >
-              <span style={{ display: "inline-flex", color: "var(--accent)" }}>
+              <span style={{ display: "inline-flex", color: "var(--accent-text)" }}>
                 <BranchIcon />
               </span>
               <InlineInput
@@ -188,7 +188,7 @@ export default function CreateCopyDialog({
                 opacity: busy ? 0.6 : 1,
               }}
             >
-              <span style={{ display: "inline-flex", color: "var(--accent)" }}>
+              <span style={{ display: "inline-flex", color: "var(--accent-text)" }}>
                 <PlusGlyph />
               </span>
               <span style={{ display: "grid", gap: 1, minWidth: 0 }}>
