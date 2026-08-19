@@ -107,7 +107,7 @@ function promptSnippet(prompt: string): string {
   return flat.length > 100 ? `${flat.slice(0, 100)}…` : flat;
 }
 
-function awarenessBlock(self: WavePeerInfo, peers: WavePeerInfo[]): string {
+function awarenessBlock(peers: WavePeerInfo[]): string {
   const lines = peers.map((p) => `- ${p.label || p.nodeId} (${p.model}): ${promptSnippet(p.prompt)}`);
   return (
     `You are one of ${peers.length + 1} workers running in parallel in this pass. ` +
@@ -171,7 +171,7 @@ export function decorateWavePrompt(rendered: string, input: WaveDecorationInput)
   if (!awarenessOn && !chatOn) return rendered;
 
   const parts: string[] = [];
-  if (awarenessOn) parts.push(awarenessBlock(self, peers));
+  if (awarenessOn) parts.push(awarenessBlock(peers));
   parts.push(rendered);
   if (chatOn) parts.push(chatBlock(self, postingPeers, runDir, selfCanPost));
   return parts.join("\n\n");

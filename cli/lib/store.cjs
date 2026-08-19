@@ -35,9 +35,14 @@ function listRuns(flags) {
   return runs.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
 }
 
+/** Read one exact run id without exiting. Useful for live polling. */
+function readRun(flags, runId) {
+  return readJson(path.join(homeDir(flags), "runs", runId, "run.json"));
+}
+
 /** Resolve a run by exact id or unique prefix; exits with a clear message otherwise. */
 function findRun(flags, idOrPrefix) {
-  const direct = readJson(path.join(homeDir(flags), "runs", idOrPrefix, "run.json"));
+  const direct = readRun(flags, idOrPrefix);
   if (direct) return direct;
   const matches = listRuns(flags).filter((run) => run.id.startsWith(idOrPrefix));
   if (matches.length === 1) return matches[0];
@@ -60,7 +65,7 @@ function tailEvents(flags, runId, count) {
     return [];
   }
   const lines = raw.split("\n").filter(Boolean).slice(-count);
-  return lines.map((line) => readJson === null ? null : safeParse(line)).filter(Boolean);
+  return lines.map(safeParse).filter(Boolean);
 }
 
 function safeParse(line) {
@@ -82,4 +87,4 @@ function blockedQuestion(run) {
   return null;
 }
 
-module.exports = { listRuns, findRun, latestRun, tailEvents, blockedQuestion };
+module.exports = { listRuns, readRun, findRun, latestRun, tailEvents, blockedQuestion };

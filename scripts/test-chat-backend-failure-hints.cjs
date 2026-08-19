@@ -245,17 +245,17 @@ async function main() {
     id: `spark-call:${sparkCallId}`,
   });
   assert.equal(
-    isRedundantParkedBackendFailure(failedTool("call-retry-1"), parkedRun),
+    isRedundantParkedBackendFailure(failedTool("call-retry-1"), parkedRun, new Set()),
     true,
     "quiet retries in the same exact input lineage collapse behind the final failed call",
   );
   assert.equal(
-    isRedundantParkedBackendFailure(failedTool("call-final"), parkedRun),
+    isRedundantParkedBackendFailure(failedTool("call-final"), parkedRun, new Set()),
     false,
     "the exact failed call named by recovery remains visible",
   );
   assert.equal(
-    isRedundantParkedBackendFailure(failedTool("call-unrelated"), parkedRun),
+    isRedundantParkedBackendFailure(failedTool("call-unrelated"), parkedRun, new Set()),
     false,
     "an older failed turn with different input remains part of history",
   );

@@ -85,6 +85,7 @@ import type {
   BoardCardStatus,
   ChatBackendKind,
   ChatMode,
+  CoraExecutionStrategy,
   InAppNotificationTone,
   NotificationSoundKind,
   NotifyKind,
@@ -550,7 +551,7 @@ async function dispatch(
       case "app.info":
         return handleAppInfo(id);
       case "app.screenshot":
-        return await handleAppScreenshot(params, id);
+        return await handleAppScreenshot(id);
       case "app.evaluate":
         return await handleAppEvaluate(params, id);
       case "app.notify":
@@ -1023,6 +1024,11 @@ const CLI_CHAT_EFFORTS = new Set<AgentEffortLevel>([
   "xhigh",
   "max",
 ]);
+const CLI_EXECUTION_STRATEGIES = new Set<CoraExecutionStrategy>([
+  "auto",
+  "direct",
+  "managed",
+]);
 const CLI_WAIT_STOP_STATUSES = new Set<RunState["status"]>([
   "blocked",
   "paused",
@@ -1202,6 +1208,10 @@ async function handleChatCreate(
       "effort must be minimal, low, medium, high, xhigh, or max",
     );
   }
+  const executionStrategy = enumParam(params, "execution", CLI_EXECUTION_STRATEGIES);
+  if (executionStrategy === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "execution must be auto, direct, or managed");
+  }
   let binding: { workspace: Workspace; created: boolean };
   try {
     binding = await ensureCliWorkspace(rawCwd, stringParam(params, "workspaceName") ?? undefined);
@@ -1227,31 +1237,18 @@ async function handleChatCreate(
   const model = stringParam(params, "model")?.trim();
   const runStore = await getRunStore();
   try {
-    let runId: string | undefined;
-    if (title) {
-      const seeded = await runStore.createRun({
-        workspaceId: binding.workspace.id,
-        workspaceName: binding.workspace.name,
-        cwd: binding.workspace.cwd,
-        title,
-        chatBackend: backend,
-        chatModel: model,
-        chatMode: mode,
-        chatEffort: effort,
-      });
-      runId = seeded.id;
-    }
     const run = await runStore.startAutopilot({
-      runId,
       workspaceId: binding.workspace.id,
       workspaceName: binding.workspace.name,
       cwd: binding.workspace.cwd,
+      title,
       initialUserNote: prompt,
       initialUserNoteClientMessageId: `cli-${randomBytes(8).toString("hex")}`,
       chatBackend: backend,
       chatModel: model,
       chatMode: mode,
       chatEffort: effort,
+      executionStrategy,
     });
     return successResponse(id, {
       run,
@@ -1645,10 +1642,7 @@ function handleAppInfo(id: JsonRpcId): JsonRpcResponse {
   });
 }
 
-async function handleAppScreenshot(
-  params: Record<string, unknown>,
-  id: JsonRpcId,
-): Promise<JsonRpcResponse> {
+async function handleAppScreenshot(id: JsonRpcId): Promise<JsonRpcResponse> {
   const gated = requireDevTools(id);
   if (gated) return gated;
   const win = pickAppWindow();
@@ -3140,6 +3134,7 @@ async function handleOrchestratorWaitForWorkers(
     final_report_path: string | null;
     final_report: unknown;
     is_terminal: boolean;
+    is_requested: boolean;
   }[]> => {
     const requested = workerTaskIds.map((wtid) => ({
       wtid,
@@ -3157,8 +3152,14 @@ async function handleOrchestratorWaitForWorkers(
           candidate.autoVerifierForTaskId && requestedTaskIds.has(candidate.autoVerifierForTaskId),
       )
       .map((task) => ({ wtid: task.id, task }));
-    const entries = [...requested, ...attachedVerifiers];
-    return Promise.all(entries.map(async ({ wtid, task }) => {
+    const entries = [
+      ...requested.map((entry) => ({ ...entry, isRequested: true })),
+      ...attachedVerifiers.map((entry) => ({ ...entry, isRequested: false })),
+    ];
+    const taskIsTerminal = (task: WorkerTask): boolean =>
+      TERMINAL_WORKER_TASK_STATUSES.has(task.status) ||
+      (task.status === "needs_review" && task.runtimePreference === "manual");
+    return Promise.all(entries.map(async ({ wtid, task, isRequested }) => {
       const lastAttempt = task
         ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === task.id)
         : null;
@@ -3204,6 +3205,7 @@ async function handleOrchestratorWaitForWorkers(
                 : null,
             }
           : null,
+        is_requested: isRequested,
         // A MANUAL task never advances past needs_review on its own: no
         // manager session reviews it, and its resolution comes from the
         // human-review escalation question (run-store's cycle completion). A
@@ -3212,8 +3214,8 @@ async function handleOrchestratorWaitForWorkers(
         // needs_review status so the manager can read it and act.
         is_terminal:
           taskStatus !== null &&
-          (TERMINAL_WORKER_TASK_STATUSES.has(taskStatus) ||
-            (taskStatus === "needs_review" && task?.runtimePreference === "manual")) &&
+          task != null &&
+          taskIsTerminal(task) &&
           // An accepted implementation whose declared verifier has not been
           // minted yet is NOT settled: the auto-spawn is imminent, and
           // returning "all_terminal" in that gap would hand the manager a
@@ -3226,7 +3228,11 @@ async function handleOrchestratorWaitForWorkers(
             task.status === "accepted" &&
             (report?.filesChanged.length ?? 0) > 0 &&
             !run.workerTasks.some((candidate) => candidate.autoVerifierForTaskId === task.id)
-          ),
+          ) &&
+          (!isRequested ||
+            run.workerTasks
+              .filter((candidate) => candidate.autoVerifierForTaskId === task.id)
+              .every(taskIsTerminal)),
       };
     }));
   };
@@ -3253,7 +3259,7 @@ async function handleOrchestratorWaitForWorkers(
     reason: string,
   ): Promise<JsonRpcResponse> =>
     successResponse(id, {
-      workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
+      workers: snapshot.map(({ is_terminal: _t, is_requested: _r, ...rest }) => rest),
       manager_messages: await peekManagerInbox(runStore, runId),
       reason,
     });
@@ -3267,11 +3273,12 @@ async function handleOrchestratorWaitForWorkers(
     const run = await runStore.getRun(runId);
     if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
     const snapshot = await snapshotWorkers(run);
-    const terminalCount = snapshot.filter((w) => w.is_terminal).length;
+    const requested = snapshot.filter((worker) => worker.is_requested);
+    const terminalCount = requested.filter((worker) => worker.is_terminal).length;
     if (mode === "any" && terminalCount > 0) {
       return await waitResult(snapshot, "any_terminal");
     }
-    if (mode === "all" && terminalCount === snapshot.length) {
+    if (mode === "all" && terminalCount === requested.length) {
       return await waitResult(snapshot, "all_terminal");
     }
     await new Promise<void>((resolve) => setTimeout(resolve, WAIT_FOR_WORKERS_POLL_MS));

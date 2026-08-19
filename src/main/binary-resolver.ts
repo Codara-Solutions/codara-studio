@@ -258,9 +258,6 @@ async function probeCommonDirs(name: string): Promise<string | null> {
     const localAppData =
       process.env.LOCALAPPDATA ?? join(home, "AppData", "Local");
     const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
-    const programFilesX86 =
-      process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
-
     // npm global (default prefix on Windows). `.exe` first so a native image
     // beats the cmd/sh shims — the bare shim isn't launchable under node-pty.
     for (const ext of ["exe", "cmd", "bat", "ps1", ""]) {

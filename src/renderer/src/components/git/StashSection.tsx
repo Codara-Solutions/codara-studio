@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { GitStashEntry, GitStashList, GitStatus } from "@shared/types";
+import type { GitStashEntry, GitStashList } from "@shared/types";
 import { ChevronIcon } from "../icons";
 import { InlineInput } from "../file-icons/InlineInput";
 import { IconButton, Spinner } from "./git-ui";

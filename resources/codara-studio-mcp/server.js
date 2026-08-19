@@ -1186,7 +1186,7 @@ const EXECUTE_TOOLS = [
               verifier: {
                 type: "string",
                 description:
-                  "Declared-at-spawn verification (STRONGLY preferred over spawning verifier workers yourself). A checklist brief for this worker's verifier: the moment the worker's report is accepted, Codara auto-spawns a read-only cross-provider verifier with this brief - no manager turn in between - and your codara_wait_for_workers on this worker also waits for that verifier and returns its verdict. Write it like a verifier brief: quote the contract clauses to check verbatim, list the commands to run with expected results. When you attach this, do NOT also spawn a separate verifier for the same scope. Ignored on taskClass verifier and when the worker changes no files.",
+                  "Optional verifier checklist. After an accepted file-changing report, Codara starts a fresh read-only cross-provider verifier; waiting on this worker includes it. Quote the contract clauses and commands with expected results. Do not spawn a duplicate. Ignored for verifier tasks and no-file reports.",
               },
               peers: {
                 type: "boolean",

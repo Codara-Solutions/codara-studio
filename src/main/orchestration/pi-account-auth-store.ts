@@ -13,7 +13,6 @@ import {
 } from "./pi-account-profiles";
 import {
   inspectPiSubscriptionAuth,
-  type PiSubscriptionAuthStatus,
 } from "./pi-runtime";
 
 export const PI_ACCOUNT_AUTH_DIRECTORY = "accounts";

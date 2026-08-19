@@ -8,7 +8,6 @@ import type {
   GitHubIssueSummary,
   GitHubMergeStrategy,
   GitHubPullRequestCheckoutMetadata,
-  GitHubPullRequestState,
   GitHubPullRequestSummary,
   GitHubRepositoryIdentity,
   GitHubWorkspaceStatus,

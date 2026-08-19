@@ -57,6 +57,11 @@ assert.match(auto, /Never call codara_complete merely to end a conversational tu
 assert.match(execute, /This is Execute mode/);
 assert.match(execute, /Call codara_complete only after/);
 assert.match(execute, /Treat worker reports as claims/);
+const orchestration = execute.slice(
+  execute.indexOf("How you orchestrate:"),
+  execute.indexOf("Effort calibration:"),
+);
+assert.ok(orchestration.length < 3500, `orchestration prompt stays compact (${orchestration.length} chars)`);
 assert.match(automation, /This is Automation mode/);
 assert.match(automation, /Do not spawn coding workers/);
 assert.doesNotMatch(automation, /Call codara_complete/);
@@ -105,6 +110,11 @@ assert.deepEqual(spawnTool.inputSchema.properties.taskComplexity.enum, [
   "standard",
   "complex",
 ]);
+assert.equal(spawnTool.inputSchema.properties.workers.items.properties.verifier.type, "string");
+assert.ok(
+  spawnTool.inputSchema.properties.workers.items.properties.verifier.description.length < 500,
+  "declared-verifier tool guidance stays compact",
+);
 
 // ── Worker policy (resources/pi-cora/worker-policy.ts): roster + fence ──────
 // The pure policy behind worker.ts: which bridge tools a worker registers and

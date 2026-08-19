@@ -27,7 +27,7 @@ function readHandshake(flags) {
   try {
     handshake = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
-    fail(
+    throw new Error(
       `Codara Studio isn't running — no socket handshake at ${file}\n` +
         "Open the app (contributors: `npm run dev`), or point --home / $CODARA_HOME_DIR at its home dir.",
     );
@@ -38,7 +38,7 @@ function readHandshake(flags) {
   try {
     parsed = new URL(url);
   } catch {
-    fail(`Malformed handshake file: ${file}`);
+    throw new Error(`Malformed handshake file: ${file}`);
   }
   const port = Number(parsed.port);
   const safe =
@@ -51,15 +51,15 @@ function readHandshake(flags) {
     port >= 1 &&
     port <= 65535 &&
     /^[a-f0-9]{64}$/i.test(token);
-  if (!safe) fail(`Unsafe or malformed handshake file: ${file}`);
+  if (!safe) throw new Error(`Unsafe or malformed handshake file: ${file}`);
   return { port, token };
 }
 
 /** Raw JSON-RPC request. Resolves to the full {result} / {error} envelope. */
-function rpcRaw(flags, method, params, { timeoutMs } = {}) {
+async function rpcRaw(flags, method, params, { timeoutMs } = {}) {
   const { port, token } = readHandshake(flags);
   const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: params ?? {} });
-  return new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     const req = http.request(
       {
         hostname: "127.0.0.1",

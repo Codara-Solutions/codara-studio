@@ -1,5 +1,3 @@
-import React from "react";
-
 // Provider marks from the CC0 simple-icons set. The Anthropic and OpenAI
 // trademarks are used here only to identify the respective CLIs. Both marks
 // draw in currentColor, so the per-runtime tinting each call site already

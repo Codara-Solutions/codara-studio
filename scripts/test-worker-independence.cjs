@@ -226,8 +226,9 @@ check("the isolated prompt replaces the coordination block rather than softening
       `isolated prompt must not contain "${contradiction}"`,
     );
   }
-  assert.match(isolatedBranch, /running INDEPENDENTLY/);
-  assert.match(isolatedBranch, /Do NOT contact them/);
+  assert.match(isolatedBranch, /Work independently/);
+  assert.match(isolatedBranch, /Do not contact or read other workers/);
+  assert.match(isolatedBranch, /intentional diversity/);
   assert.match(isolatedBranch, /manager/, "the manager channel must still be advertised");
 });
 

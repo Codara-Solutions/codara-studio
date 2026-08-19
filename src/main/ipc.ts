@@ -6,18 +6,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
 import { browseRemoteDir } from "./remote/browse";
-import {
-  listKeys as listSshKeys,
-  generateKey as generateSshKey,
-  importKey as importSshKey,
-  deleteKey as deleteSshKey,
-} from "./remote/ssh-keys";
-import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import {
   answerAuthPrompt,
   disconnectHost,
@@ -28,7 +21,6 @@ import {
 } from "./remote/connections";
 import { isRemotePath } from "@shared/remote";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
-import { detectRemoteAgents, type RemoteAgentAvailability } from "./remote/remote-agents";
 import type {
   RemoteAuthPromptAnswer,
   RemoteBrowseResult,
@@ -389,7 +381,6 @@ import type {
   UiAttentionSnapshot,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
-  UpdateRunStatusInput,
   UpdateScheduledJobInput,
   DeleteWorkerSessionInput,
   DeleteWorkerSessionResult,
@@ -791,7 +782,7 @@ export function registerIpc(): void {
     return loadState();
   });
 
-  handle("state:save", async (event, state: AppState): Promise<void> => {
+  handle("state:save", async (_event, state: AppState): Promise<void> => {
     // Persisting workspaces re-seeds the fs sandbox allowlist (below), so this
     // channel can widen readable roots. It is gated to the trusted renderer by
     // default via handle() (see the sender-gating section above).
@@ -1155,7 +1146,7 @@ export function registerIpc(): void {
   handle(
     "preferences:set",
     async <K extends PrefKey>(
-      event: Electron.IpcMainInvokeEvent,
+      _event: Electron.IpcMainInvokeEvent,
       args: { key: K; value: AppPreferences[K] },
     ): Promise<AppPreferences> => {
       const next = await setPreference(args.key, args.value);
@@ -1483,7 +1474,7 @@ export function registerIpc(): void {
   handle(
     "fs:writeText",
     async (
-      event,
+      _event,
       args: { path: string; content: string; expectedMtimeMs?: number },
     ): Promise<FsWriteResult> => {
       // Write/create/delete/rename/import/move take arbitrary destination paths
@@ -1497,11 +1488,11 @@ export function registerIpc(): void {
     },
   );
 
-  handle("fs:renameFile", async (event, args: RenameFileInput): Promise<FsEntry> => {
+  handle("fs:renameFile", async (_event, args: RenameFileInput): Promise<FsEntry> => {
     return renameFile(args.path, args.newName);
   });
 
-  handle("fs:deleteFile", async (event, path: string): Promise<void> => {
+  handle("fs:deleteFile", async (_event, path: string): Promise<void> => {
     await deleteFile(path);
   });
 
@@ -1509,13 +1500,13 @@ export function registerIpc(): void {
   // of the OS trash, so fs:undoDelete can restore it. Evicted/stale stash
   // entries end up in the OS trash via fs:purgeDeleteStash (and the startup
   // sweep below), so delete still ultimately means "goes to trash".
-  handle("fs:deleteToStash", async (event, path: string) => {
+  handle("fs:deleteToStash", async (_event, path: string) => {
     return deleteToStash(path);
   });
 
   handle(
     "fs:undoDelete",
-    async (event, args: { token: string; originalPath: string }) => {
+    async (_event, args: { token: string; originalPath: string }) => {
       if (typeof args?.token !== "string" || typeof args?.originalPath !== "string") {
         throw new Error("Invalid undo request.");
       }
@@ -1523,7 +1514,7 @@ export function registerIpc(): void {
     },
   );
 
-  handle("fs:purgeDeleteStash", async (event, tokens: string[]): Promise<void> => {
+  handle("fs:purgeDeleteStash", async (_event, tokens: string[]): Promise<void> => {
     const list = Array.isArray(tokens)
       ? tokens.filter((t): t is string => typeof t === "string")
       : [];
@@ -1534,11 +1525,11 @@ export function registerIpc(): void {
   // that was never consumed) move on to the OS trash at startup.
   void purgeDeleteStash().catch(() => undefined);
 
-  handle("fs:createFile", async (event, args: CreateEntryInput): Promise<FsEntry> => {
+  handle("fs:createFile", async (_event, args: CreateEntryInput): Promise<FsEntry> => {
     return createFile(args.parentPath, args.name);
   });
 
-  handle("fs:createFolder", async (event, args: CreateEntryInput): Promise<FsEntry> => {
+  handle("fs:createFolder", async (_event, args: CreateEntryInput): Promise<FsEntry> => {
     return createFolder(args.parentPath, args.name);
   });
 
@@ -1548,7 +1539,7 @@ export function registerIpc(): void {
   // (that's the whole point of importing them in).
   handle(
     "fs:importEntries",
-    async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+    async (_event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing import destination.");
       await assertAllowedReadPathResolved(destDir);
@@ -1567,7 +1558,7 @@ export function registerIpc(): void {
   // already sit inside an allowed workspace root.
   handle(
     "fs:moveEntries",
-    async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+    async (_event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing move destination.");
       await assertAllowedReadPathResolved(destDir);
@@ -1650,7 +1641,7 @@ export function registerIpc(): void {
   // The renderer is authoritative about which workspaces are open, but the
   // sandbox lives in main. Renderer pushes the cwd list whenever it changes;
   // main treats the list as the source of truth for read-path checks.
-  handle("ui:setAllowedRoots", async (event, roots: unknown): Promise<void> => {
+  handle("ui:setAllowedRoots", async (_event, roots: unknown): Promise<void> => {
     // This directly sets the fs read-sandbox allowlist, so only the trusted
     // renderer may call it.
     if (!Array.isArray(roots)) return;
@@ -3156,7 +3147,7 @@ export function registerIpc(): void {
   });
   handle(
     "remoteAccess:setEnabled",
-    async (event, enabled: boolean): Promise<RemoteAccessStatus> => {
+    async (_event, enabled: boolean): Promise<RemoteAccessStatus> => {
       const on = enabled === true;
       // Persist first so a crash mid-start still remembers the intent, then
       // fan the preference out exactly like the preferences:set handler.
@@ -3166,21 +3157,21 @@ export function registerIpc(): void {
       return service.setEnabled(on);
     },
   );
-  handle("remoteAccess:startPairing", async (event): Promise<RemotePairingSession> => {
+  handle("remoteAccess:startPairing", async (_event): Promise<RemotePairingSession> => {
     const service = await getRemoteAccess();
     return service.startPairing();
   });
-  handle("remoteAccess:cancelPairing", async (event): Promise<void> => {
+  handle("remoteAccess:cancelPairing", async (_event): Promise<void> => {
     const service = await getRemoteAccess();
     service.cancelPairing();
   });
-  handle("remoteAccess:listDevices", async (event): Promise<RemotePairedDevice[]> => {
+  handle("remoteAccess:listDevices", async (_event): Promise<RemotePairedDevice[]> => {
     const service = await getRemoteAccess();
     return service.listPairedDevices();
   });
   handle(
     "remoteAccess:revokeDevice",
-    async (event, publicKey: string): Promise<RemotePairedDevice[]> => {
+    async (_event, publicKey: string): Promise<RemotePairedDevice[]> => {
       const service = await getRemoteAccess();
       // Awaited: the renderer's list must not repaint as "revoked" until the
       // removal is durable, so the UI can never claim a revocation that a
@@ -3192,11 +3183,11 @@ export function registerIpc(): void {
   // Approving is what actually writes a device into the trust store, so it is
   // gated like the rest: only the real renderer's top frame can decide, never
   // a navigated-away document or a preview guest.
-  handle("remoteAccess:approvePairing", async (event): Promise<void> => {
+  handle("remoteAccess:approvePairing", async (_event): Promise<void> => {
     const service = await getRemoteAccess();
     service.approvePairing();
   });
-  handle("remoteAccess:denyPairing", async (event): Promise<void> => {
+  handle("remoteAccess:denyPairing", async (_event): Promise<void> => {
     const service = await getRemoteAccess();
     service.denyPairing();
   });

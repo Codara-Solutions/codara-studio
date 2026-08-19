@@ -23,7 +23,6 @@ import {
   runtimeFromCommandLine,
   sniffLiveRuntime,
   sniffOsc633CommandRuntime,
-  sniffRuntime,
   stripAnsi,
   unescapeOsc633,
   CLAUDE_RESUME_FAILED_RE,

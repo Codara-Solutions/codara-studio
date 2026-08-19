@@ -14,10 +14,7 @@ import {
   NETWORK_TIMEOUT_MS,
   errorText,
   isNotARepo,
-  readGitText,
   runGit,
-  splitGitLines,
-  uniqueSorted,
 } from "./git-exec";
 
 // The git backend for the Source Control panel: cached status / log reads
@@ -488,17 +485,6 @@ export function initRepo(cwd: string): Promise<GitOpResult> {
 }
 
 // ── Smart merge preflight ─────────────────────────────────────────────────────
-
-function parseAheadBehind(value: string, fallback: { ahead: number; behind: number }) {
-  const [aheadRaw, behindRaw] = value.trim().split(/\s+/);
-  const ahead = Number(aheadRaw);
-  const behind = Number(behindRaw);
-  return {
-    ahead: Number.isFinite(ahead) ? ahead : fallback.ahead,
-    behind: Number.isFinite(behind) ? behind : fallback.behind,
-  };
-}
-
 
 // ── Diff ─────────────────────────────────────────────────────────────────────
 

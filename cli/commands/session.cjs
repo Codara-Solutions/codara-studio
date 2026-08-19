@@ -55,13 +55,15 @@ async function follow(flags, runId, { fromStart = false, deadline } = {}) {
 }
 
 async function start(args, flags) {
-  if (args.length === 0) fail("usage: cora start <prompt> [--cwd DIR --model M --effort E --wait]");
+  if (args.length === 0) fail("usage: cora start <prompt> [--cwd DIR --model M --effort E --direct --wait]");
+  if (flags.direct && flags.managed) fail("choose only one of --direct or --managed");
   const params = {
     cwd: path.resolve(flags.cwd || process.cwd()),
     prompt: args.join(" "),
     backend: "pi",
   };
   for (const key of ["title", "model", "effort"]) if (flags[key]) params[key] = flags[key];
+  if (flags.direct || flags.managed) params.execution = flags.direct ? "direct" : "managed";
   const started = await rpc(flags, "chat.create", params);
   if (flags.json && !flags.wait) return console.log(JSON.stringify(started, null, 2));
   console.log(`${c.cyan(started.run.id)}  started`);

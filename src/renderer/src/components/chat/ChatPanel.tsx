@@ -39,7 +39,6 @@ interface Props {
   activeRun: RunState | null;
   composerDraftKey?: string;
   suspendGlobalEvents?: boolean;
-  terminalScrollbackLineLimit: number;
   error: string | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -90,7 +89,6 @@ export default function ChatPanel({
   activeRun,
   composerDraftKey,
   suspendGlobalEvents,
-  terminalScrollbackLineLimit,
   error,
   collapsed,
   onToggleCollapse,

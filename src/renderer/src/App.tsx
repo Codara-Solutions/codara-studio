@@ -56,7 +56,7 @@ import { boardBackend } from "./components/board/board-backend";
 import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
-import { buildDockIndex, canDockTab, isDockLeaf } from "./tabs/dock";
+import { buildDockIndex, isDockLeaf } from "./tabs/dock";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import {
@@ -434,9 +434,9 @@ export default function App() {
   // context-window / failure tabs. Toggled via the `session.openInspector`
   // shortcut (Mod+Shift+I).
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  // Cmd/Ctrl-K command-palette switcher over every run across all workspaces.
-  // Sourced from the separate global-runs feed (useGlobalRuns) since the
-  // lifted `runs` state above is active-workspace-only.
+  // Cmd/Ctrl-K recent-run picker. It is mounted only while open so the closed
+  // picker has zero rendering cost; RunSwitcher drops orphaned workspace
+  // history and caps its rows.
   const [runSwitcherOpen, setRunSwitcherOpen] = useState(false);
   // Single "While you were away" digest surfaced on window focus-after-away.
   // Holds the snapshot computed at focus time; null when nothing landed or the
@@ -5669,7 +5669,6 @@ export default function App() {
               shells={shells}
               defaultShell={defaultShell}
               workspaceCwd={activeWorkspace?.copyBranch?.repoCwd ?? activeWorkspace?.cwd ?? null}
-              workspaceId={activeWorkspace?.id ?? null}
               onClose={closeSettings}
               onSave={handleSaveSettings}
               onOpenRun={handleSettingsOpenRun}
@@ -5699,26 +5698,23 @@ export default function App() {
           </Suspense>
         )}
 
-        <ShortcutsDialog
-          open={shortcutsOpen}
-          onClose={closeShortcuts}
-        />
+        {shortcutsOpen ? <ShortcutsDialog onClose={closeShortcuts} /> : null}
 
         <WorkerSessionPicker
           request={workerSessionPicker}
           onClose={() => setWorkerSessionPicker(null)}
         />
 
-        <RunSwitcher
-          open={runSwitcherOpen}
-          runs={globalRuns.runs.filter(
-            (r) => (!r.automationId && !isBoardCardRun(r)) || r.status === "blocked",
-          )}
-          workspaces={workspaces}
-          onClose={() => setRunSwitcherOpen(false)}
-          onSelectRun={handleSelectRunAnywhere}
-          onAnswered={(run) => handleRunSnapshot(run)}
-        />
+        {runSwitcherOpen ? (
+          <RunSwitcher
+            runs={globalRuns.runs.filter(
+              (r) => !r.automationId && !isBoardCardRun(r),
+            )}
+            workspaces={workspaces}
+            onClose={() => setRunSwitcherOpen(false)}
+            onSelectRun={handleSelectRunAnywhere}
+          />
+        ) : null}
 
         <SearchPanel
           open={searchOpen}
@@ -6151,7 +6147,6 @@ const Workspace = React.memo(function Workspace({
     closeTab,
     setDirty,
     addDraftChatTab,
-    openAutomationsTab,
     setActiveTerminalPane,
     setTerminalSplitRatio,
     splitTerminalPane,
@@ -6866,7 +6861,6 @@ const Workspace = React.memo(function Workspace({
           runs={runs}
           runsWorkspaceId={runsWorkspaceId}
           activeRunId={activeRunId}
-          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
           chatView={chatView}
           onChatViewChange={changeChatView}
           onOpenBoardCardRun={handleOpenBoardCardRunInChat}
@@ -6990,7 +6984,6 @@ const Workspace = React.memo(function Workspace({
               activeId={effectiveActiveId}
               dockIndex={dockIndex}
               workspace={workspace}
-              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               onOpenRunChat={handleOpenBoardCardRunInChat}
             />
           </Suspense>

@@ -449,10 +449,6 @@ function ConversationMinimap({
   );
 }
 
-function ResultAction({ label, onClick }: { label: string; onClick: () => void }) {
-  return <button type="button" onClick={onClick} style={RESULT_ACTION_STYLE}>{label}</button>;
-}
-
 function timelineItemKey(item: ConversationItem): string {
   return `${item.kind}:${item.id}`;
 }
@@ -2966,38 +2962,6 @@ const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
   padding: "7px 12px",
   fontFamily: "var(--font-sans)",
   fontSize: 11,
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
-const RESULT_CARD_STYLE: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--ok) 34%, var(--rule))",
-  borderRadius: 10,
-  background: "color-mix(in oklch, var(--ok) 5%, var(--panel-2))",
-  boxShadow: "var(--lift-hi)",
-  padding: 14,
-  display: "flex",
-  flexDirection: "column",
-  gap: 10,
-};
-
-const RESULT_FILE_ROW_STYLE: React.CSSProperties = {
-  minWidth: 0,
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 6,
-  alignItems: "center",
-  padding: "5px 7px",
-  borderRadius: 6,
-  background: "color-mix(in oklab, var(--bg) 54%, transparent)",
-};
-
-const RESULT_ACTION_STYLE: React.CSSProperties = {
-  border: "none",
-  background: "transparent",
-  color: "var(--accent)",
-  padding: "2px 3px",
-  fontSize: 10,
   fontWeight: 700,
   cursor: "pointer",
 };

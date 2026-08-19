@@ -285,8 +285,8 @@ async function main() {
           /const projectPolicy = renderRunProjectPolicy\(run\);/g,
         ) ?? []
       ).length,
-      2,
-      "implementation and verifier prompts both carry the policy",
+      3,
+      "direct, managed implementation, and verifier prompts all carry the policy",
     );
     assert.equal(
       (

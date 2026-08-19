@@ -29,7 +29,6 @@ interface WorkerGroup {
 export interface WorkersViewProps {
   workers: AutomationWorkerInfo[];
   jobs: ScheduledJob[];
-  scrollbackLineLimit: number;
   visible: boolean;
   onStopLoom: (automationId: string) => void;
   onSelectLoom: (automationId: string) => void;
@@ -39,7 +38,6 @@ export interface WorkersViewProps {
 export default function WorkersView({
   workers,
   jobs,
-  scrollbackLineLimit,
   visible,
   onStopLoom,
   onSelectLoom,
@@ -183,7 +181,6 @@ export default function WorkersView({
               onSetFocus={setFocusedAttemptId}
               viewVisible={visible}
               now={now}
-              scrollbackLineLimit={scrollbackLineLimit}
               onStopLoom={onStopLoom}
               onSelectLoom={onSelectLoom}
             />
@@ -205,7 +202,6 @@ function AutomationSection({
   onSetFocus,
   viewVisible,
   now,
-  scrollbackLineLimit,
   onStopLoom,
   onSelectLoom,
 }: {
@@ -217,7 +213,6 @@ function AutomationSection({
   onSetFocus: (id: string | null) => void;
   viewVisible: boolean;
   now: number;
-  scrollbackLineLimit: number;
   onStopLoom: (automationId: string) => void;
   onSelectLoom: (automationId: string) => void;
 }): React.ReactElement {
@@ -358,7 +353,6 @@ function AutomationSection({
             <div key={worker.attemptId} style={{ minWidth: 0, height: 420 }}>
               <WorkerPane
                 worker={worker}
-                scrollbackLineLimit={scrollbackLineLimit}
                 visible={paneVisible}
                 now={now}
                 focusMode={focusMode}
@@ -379,7 +373,6 @@ function AutomationSection({
 
 function WorkerPane({
   worker,
-  scrollbackLineLimit,
   visible,
   now,
   focusMode,
@@ -389,7 +382,6 @@ function WorkerPane({
   onSelectLoom,
 }: {
   worker: AutomationWorkerInfo;
-  scrollbackLineLimit: number;
   visible: boolean;
   now: number;
   focusMode: boolean;

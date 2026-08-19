@@ -252,7 +252,7 @@ export class RemoteAccessService {
   private readonly workerTerminalControls: WorkerTerminalControlRegistry;
 
   constructor(private readonly deps: RemoteAccessDeps) {
-    this.devices = new PairedDeviceStore(deps.remoteDir, deps.log);
+    this.devices = new PairedDeviceStore(deps.remoteDir);
     this.terminalLeases = new RemoteTerminalLeaseRegistry({
       createTerminal: deps.createTerminal,
       now: deps.now,

@@ -219,9 +219,6 @@ function ToastCard({
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   onAcknowledge: () => void;
 }) {
-  // In-flight guard so a fast double-click on an answer button (or two
-  // different options) only fires one addRunMessage+resumeRun sequence.
-  const answering = useRef(false);
   const [hover, setHover] = useState(false);
   const [closeHover, setCloseHover] = useState(false);
   const [closeFocus, setCloseFocus] = useState(false);

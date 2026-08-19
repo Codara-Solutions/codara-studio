@@ -5,7 +5,7 @@
 // a card per provider — including ones that are not connected — so the absence
 // of a card never has to be interpreted.
 
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   PiUsageOverview,
   PiUsageProfile,

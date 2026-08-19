@@ -33,7 +33,6 @@ interface Props {
   runs: RunState[];
   runsWorkspaceId: string | null;
   activeRunId: string | null;
-  terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode, lifted into App so the inner tab strip can
   // drive it without ChatPanel keeping a duplicate state.
   chatView: CoraView;
@@ -63,7 +62,6 @@ function ChatStack({
   runs,
   runsWorkspaceId,
   activeRunId,
-  terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
   onOpenBoardCardRun,
@@ -189,7 +187,6 @@ function ChatStack({
               activeRunId={entry.activeRunId}
               composerDraftKey={`${workspaceId}:${entry.tab.id}`}
               suspendGlobalEvents={!visible}
-              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               chatView={chatView}
               onChatViewChange={onChatViewChange}
               onOpenBoardCardRun={onOpenBoardCardRun}

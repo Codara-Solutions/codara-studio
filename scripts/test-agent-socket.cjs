@@ -1022,6 +1022,54 @@ async function main() {
       JSON.stringify(waitedVerifier).slice(0, 260),
     );
 
+    fabricateRun("run-declared-wait", {
+      chatMode: "execute",
+      workerTasks: [
+        {
+          id: "wt-declared-impl",
+          title: "implement declared scope",
+          status: "accepted",
+          taskClass: "feature",
+          verifierBrief: "Re-run the contract checks.",
+        },
+        {
+          id: "wt-declared-verifier",
+          title: "verify declared scope",
+          status: "running",
+          taskClass: "verifier",
+          autoVerifierForTaskId: "wt-declared-impl",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-declared-impl",
+          workerTaskId: "wt-declared-impl",
+          status: "succeeded",
+          runtime: "claude",
+          finishedAt: "2026-07-18T10:00:00.000Z",
+          finalReportPath: implementationReportPath,
+        },
+        {
+          id: "attempt-declared-verifier",
+          workerTaskId: "wt-declared-verifier",
+          status: "running",
+          runtime: "codex",
+          startedAt: "2026-07-18T10:00:01.000Z",
+        },
+      ],
+    });
+    const waitedDeclared = await rpc(handshake, "orchestrator.wait_for_workers", {
+      runId: "run-declared-wait",
+      worker_task_ids: ["wt-declared-impl"],
+      mode: "any",
+      timeout_ms: 1000,
+    });
+    check(
+      "wait_for_workers mode any keeps a declared scope open for its verifier",
+      waitedDeclared.result?.reason === "timeout" && waitedDeclared.result?.workers?.length === 2,
+      JSON.stringify(waitedDeclared).slice(0, 280),
+    );
+
     // Runtime fallback lineage: waiting on the cancelled predecessor must
     // transparently follow the system replacement. Otherwise the manager sees
     // a terminal cancellation, spawns another verifier, and duplicates work.

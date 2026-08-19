@@ -4,7 +4,7 @@
 // harness worked, not just whether the tree ended up correct.
 //
 //   correctness   55  weighted checks; hidden contract checks keep 100 honest
-//   efficiency    20  wall time and manager tokens against the task's par
+//   efficiency    20  wall time and total provider tokens against task par
 //   discipline    15  time spent AFTER the visible tests first went green is
 //                     waste (over-verification); never-green scores 0 here
 //   orchestration 10  parallel tasks: did independent work actually overlap?
@@ -38,7 +38,7 @@ const clamp01 = (n) => Math.max(0, Math.min(1, n));
  *   checks           [{ name, pass, weight }]
  *   wallMs           task wall clock
  *   greenAtMs        ms from start until the visible test first passed (null if never)
- *   tokens           manager input+output tokens
+ *   tokens           manager + worker provider usage tokens
  *   workers          worker task count
  *   maxConcurrent    max simultaneously-running worker attempts
  *   questionsAsked   how often Cora blocked on a question

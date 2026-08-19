@@ -19,7 +19,7 @@ import {
   type PanelSide,
 } from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
-import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
+import SectionHeader from "../panels/SectionHeader";
 import {
   beforeItemForVerticalPlan,
   planVerticalReorder,

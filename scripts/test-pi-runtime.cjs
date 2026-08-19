@@ -605,6 +605,19 @@ async function main() {
     );
     await plans.cleanupPiMcpBridgeConfig(workerPlan);
 
+    const directReport = path.join(directory, "direct-attempt", "final-report.json");
+    const directWorkerPlan = await plans.createCodaraPiWorkerLaunchPlan({
+      provider: "anthropic",
+      runId: "run-direct-task",
+      attemptId: "attempt-direct-task",
+      cwd: directory,
+      directTask: { finalReportPath: directReport, studioTools: true },
+    });
+    assert.equal(directWorkerPlan.env.CODARA_PI_DIRECT_TASK, "1");
+    assert.equal(directWorkerPlan.env.CODARA_PI_FINAL_REPORT, path.resolve(directReport));
+    assert.equal(directWorkerPlan.env.CODARA_PI_DIRECT_STUDIO_TOOLS, "1");
+    await plans.cleanupPiMcpBridgeConfig(directWorkerPlan);
+
     const untrustedReport = path.join(directory, "attempt", "final-report.json");
     const untrustedWorkerPlan = await plans.createCodaraPiWorkerLaunchPlan({
       provider: "anthropic",

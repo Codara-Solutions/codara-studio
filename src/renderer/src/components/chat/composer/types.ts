@@ -127,7 +127,7 @@ function withModelRank(option: ChatModelOption): ChatModelOption {
 export const DEFAULT_CHAT_BACKEND: ChatBackendKind = "pi";
 export const DEFAULT_CHAT_MODEL = "gpt-5.6-sol";
 export const DEFAULT_CHAT_MODE: ChatMode = "auto";
-export const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "high";
+export const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "medium";
 
 export const EFFORT_LABELS: Record<AgentEffortLevel, string> = {
   minimal: "Minimal",

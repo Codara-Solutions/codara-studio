@@ -6,7 +6,6 @@ import type {
   NativeCliAccountProfile,
   NativeCliAccountRuntime,
   NativeCliAccountsInspection,
-  PiSubscriptionAuthEvent,
   PiSubscriptionConnection,
   PiSubscriptionOverview,
   PiSubscriptionPrompt,
@@ -248,7 +247,6 @@ interface SettingsDialogProps {
   shells: ShellInfo[];
   defaultShell: ShellInfo | null;
   workspaceCwd?: string | null;
-  workspaceId?: string | null;
   initialTab?: SettingsTab;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
@@ -267,7 +265,6 @@ export default function SettingsDialog({
   shells,
   defaultShell,
   workspaceCwd,
-  workspaceId,
   initialTab = "general",
   onClose,
   onSave,
@@ -434,7 +431,7 @@ export default function SettingsDialog({
             }}
           >
             {renderedTab === "general" && (
-              <GeneralSettings workspaceCwd={workspaceCwd} workspaceId={workspaceId} />
+              <GeneralSettings workspaceCwd={workspaceCwd} />
             )}
             {renderedTab === "editor" && <EditorSettings />}
             {renderedTab === "terminal" && (
@@ -1038,10 +1035,8 @@ const APPEARANCE = APP_THEME_IDS.map((id) => ({
 
 function GeneralSettings({
   workspaceCwd,
-  workspaceId,
 }: {
   workspaceCwd?: string | null;
-  workspaceId?: string | null;
 }) {
   const { theme, setTheme } = useTheme();
   const { preferences, hydrated, setPreference } = usePreferences();

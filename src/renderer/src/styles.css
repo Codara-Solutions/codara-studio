@@ -3128,6 +3128,20 @@ a { color: inherit; }
     backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     contain: paint;
   }
+  /* Fast modal glass: keep the translucent fill, sheen, rim and one local
+     frost layer on the card, but never run the SVG refraction lens over a
+     large scrolling dialog. Its sibling scrim is deliberately unfiltered so
+     opening a menu does not re-rasterize the terminal-sized workbench. */
+  html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    contain: paint;
+  }
+  html:not([data-glass="off"]) .spark-scrim.spark-scrim--clear {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: color-mix(in oklab, var(--bg) 44%, transparent);
+  }
   html:not([data-glass="off"]) .settings-dialog-scrim,
   html:not([data-glass="off"]) .agent-capabilities-scrim,
   html:not([data-glass="off"]) .worker-session-scrim {

@@ -1203,7 +1203,6 @@ function CheckpointNode({
   const inMotion = status === "running" || status === "reviewing";
   const held = runPaused && (active || inMotion);
   const tone = held ? statusColor("paused") : stepStatusColor(status);
-  const complete = status === "complete" || status === "skipped";
   const live = !runPaused && (active || inMotion);
   const border = selected
     ? "var(--accent)"

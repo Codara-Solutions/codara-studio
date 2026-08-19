@@ -9,31 +9,24 @@
 //   node cli/bench/adopt.cjs <runId> <taskName> <workspaceDir>
 const fs = require("node:fs");
 const path = require("node:path");
-const crypto = require("node:crypto");
 const ROOT = path.join(__dirname, "..", "..");
 const { rpcRaw } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
 const { TASKS, TIER_CAP_MS } = require(path.join(ROOT, "cli/bench/tasks.cjs"));
 const { scoreTask } = require(path.join(ROOT, "cli/bench/score.cjs"));
-const { gradeChecks, probeGreen, driveToCompletion, runMetrics, appendHistory } = require(path.join(ROOT, "cli/commands/bench.cjs"));
+const { gradeChecks, probeGreen, driveToCompletion, runMetrics, appendHistory, historyMetadata } = require(path.join(ROOT, "cli/commands/bench.cjs"));
 const { findRun } = require(path.join(ROOT, "cli/lib/store.cjs"));
 
 const [runId, taskName, dir] = process.argv.slice(2);
 const task = TASKS.find((t) => t.name === taskName);
 if (!task || !fs.existsSync(dir)) throw new Error("bad args");
 const flags = {};
+const control = {
+  model: "gpt-5.6-sol",
+  effort: "high",
+  execution: "direct",
+  provider: "openai-codex",
+};
 const { rpc } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
-
-function promptHash() {
-  const hash = crypto.createHash("sha1");
-  for (const file of ["resources/pi-cora/prompt.ts", "resources/orchestration/manager-profile.json"]) {
-    try {
-      hash.update(fs.readFileSync(path.join(ROOT, file)));
-    } catch {
-      hash.update("missing");
-    }
-  }
-  return hash.digest("hex").slice(0, 10);
-}
 
 (async () => {
   const run = findRun(flags, runId);
@@ -84,8 +77,8 @@ function promptHash() {
     churn: result.churn, models: result.models, runStatus: result.runStatus, runId,
   };
   appendHistory({
-    at: new Date().toISOString(), promptHash: promptHash(), agent: "cora",
-    split: `task:${task.name}`, repeat: 1, score: score.total,
+    at: new Date().toISOString(), ...historyMetadata("cora", [task.name], 1, control), agent: "cora",
+    split: `task:${task.name}`, score: score.total,
     calibration: { [task.tier]: Math.round((wallMs / 1000 / task.par.wallS) * 10) / 10 },
     tasks: [row], adopted: true,
   });

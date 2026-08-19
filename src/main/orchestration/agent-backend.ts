@@ -309,7 +309,7 @@ export interface AgentBackend {
  *   - backend: Pi (the bundled, subscription-only Cora harness — the only one)
  *   - model:   GPT-5.6 Sol, the Codex runtime's default
  *   - mode:    auto for every chat except an Automations loom (effectiveChatMode)
- *   - effort:  high
+ *   - effort:  medium (coordination stays quick; workers choose task effort)
  *
  * This is the single authoritative mode seam: an unset chatMode (explorer "Run
  * plan", `cora start` with no mode) and a legacy talk/plan/execute stamp both
@@ -320,7 +320,7 @@ export function resolveChatBackendConfig(run: RunState): ChatBackendConfig {
     backend: run.chatBackend ?? "pi",
     model: run.chatModel?.trim() || DEFAULT_CODEX_CHAT_MODEL,
     mode: effectiveChatMode(run.chatMode),
-    effort: run.chatEffort ?? "high",
+    effort: run.chatEffort ?? "medium",
     accountProfileId: run.chatAccountProfileId,
     executionPolicy: effectiveRunExecutionPolicy(run),
     sessionUuid: run.chatSessionUuid,

@@ -4,7 +4,6 @@ import type {
 } from "./codex-cli-account-profiles";
 import { isAbsolute, resolve } from "node:path";
 import {
-  CODEX_CLI_PERSONAL_PROFILE_ID,
   CodexCliAccountProfileLeasedError,
   CodexCliAccountProfileStore,
   normalizeCodexCliProfileId,

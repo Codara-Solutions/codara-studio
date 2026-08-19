@@ -331,7 +331,7 @@ export default function ChatComposer({
     let cancelled = false;
     void window.spark.agents
       .runtimes()
-      .then((diagnostics) => {
+      .then(() => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
         const groups = buildVisibleGroups({});

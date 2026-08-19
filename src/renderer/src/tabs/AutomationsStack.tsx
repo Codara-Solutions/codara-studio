@@ -19,7 +19,6 @@ interface Props {
   // the shells an automation's workers are running in.
   dockIndex: ReadonlyMap<TabId, DockRef>;
   workspace: Workspace | null;
-  terminalScrollbackLineLimit: number;
   // Opens a run's chat surface (chat tab + chat sub-view). Used by the page's
   // "Open chat" on an automation's creator run.
   onOpenRunChat?: (runId: string) => void;
@@ -33,7 +32,6 @@ function AutomationsStack({
   activeId,
   dockIndex,
   workspace,
-  terminalScrollbackLineLimit,
   onOpenRunChat,
 }: Props) {
   // Memoize the filtered list so it isn't reallocated on every render.
@@ -62,7 +60,6 @@ function AutomationsStack({
                 workspaceName={workspace.name}
                 cwd={workspace.cwd}
                 active={visible}
-                terminalScrollbackLineLimit={terminalScrollbackLineLimit}
                 onOpenRunChat={onOpenRunChat}
               />
             ) : (

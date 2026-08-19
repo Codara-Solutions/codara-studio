@@ -10,7 +10,6 @@
 
 import type {
   SparkManagerDecision,
-  SparkManagerQuestionOption,
   SparkManagerTaskDecision,
 } from "./manager-protocol";
 import { buildSpawnTerminalsDecisionFromToolCalls } from "./cli-terminal-decision";
@@ -101,10 +100,6 @@ export function buildExecuteDecisionFromToolCalls(
   if (askCall) {
     const input = isRecord(askCall.input) ? askCall.input : {};
     const question = typeof input.question === "string" ? input.question : "";
-    const rawOptions = Array.isArray(input.options) ? input.options : [];
-    const questionOptions: SparkManagerQuestionOption[] = rawOptions
-      .map((opt, idx) => coerceQuestionOption(opt, idx))
-      .filter((o): o is SparkManagerQuestionOption => o !== null);
     // The MCP call already ran through the main-process question policy and, for
     // a real blocker, waited for the linked answer before this provider turn
     // resumed. Re-emitting ask_user here would post the same question a second
@@ -196,23 +191,5 @@ function coerceWorkerSpec(raw: unknown): SparkManagerTaskDecision | null {
     canRunParallel: allowedPaths.length > 0,
     conflictsWith: [],
     taskClass,
-  };
-}
-
-function coerceQuestionOption(
-  raw: unknown,
-  index: number,
-): SparkManagerQuestionOption | null {
-  if (!isRecord(raw)) return null;
-  const label = typeof raw.label === "string" ? raw.label.trim() : "";
-  if (!label) return null;
-  return {
-    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : `opt-${index}`,
-    label,
-    description:
-      typeof raw.description === "string" ? raw.description : label,
-    answer:
-      typeof raw.answer === "string" && raw.answer.trim() ? raw.answer : label,
-    recommended: raw.recommended === true,
   };
 }

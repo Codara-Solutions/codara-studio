@@ -3060,6 +3060,466 @@ module.exports = { transform };
     },
   },
 
+  // ── model-controlled micro-hard tasks ─────────────────────────────────────
+  {
+    name: "patch-atomic",
+    brief: "small JSON-patch engine; pointer escaping, arrays, and atomic failure",
+    tier: "hard",
+    split: "train",
+    par: { wallS: 180, tokensK: 120 },
+    files: {
+      "patch.js": `"use strict";
+
+class PatchError extends Error {
+  constructor(index, message) {
+    super(message);
+    this.name = "PatchError";
+    this.index = index;
+  }
+}
+
+// TODO: implement applyPatch(document, operations).
+// Contract:
+// - JSON-shaped inputs only. Return a deep-cloned result and never mutate the
+//   input document, operation objects, or operation values.
+// - Apply operations sequentially. Support add, replace, and remove.
+// - Paths are RFC 6901 JSON pointers: "" names the root; segments decode ~1
+//   to / and ~0 to ~. Any other ~ escape is invalid.
+// - Object add may create or overwrite a key. Object replace/remove require an
+//   existing own key.
+// - Array paths use canonical non-negative integer indexes (no leading zero,
+//   except "0"). add inserts at 0..length and also accepts "-" to append;
+//   replace/remove require 0..length-1. "-" is invalid outside array add.
+// - Root add/replace replaces the whole document. Root remove is invalid.
+// - The first invalid operation throws PatchError with .index equal to the
+//   zero-based operation index. Because the input is immutable, failure is
+//   atomic from the caller's perspective.
+module.exports = { PatchError };
+`,
+      "test.js": `"use strict";
+const assert = require("node:assert/strict");
+const { applyPatch, PatchError } = require("./patch.js");
+
+const input = { user: { name: "Ada", tags: ["math", "code"] } };
+const output = applyPatch(input, [
+  { op: "replace", path: "/user/name", value: "Grace" },
+  { op: "add", path: "/user/tags/1", value: "navy" },
+  { op: "remove", path: "/user/tags/0" },
+]);
+assert.deepEqual(output, { user: { name: "Grace", tags: ["navy", "code"] } });
+assert.deepEqual(input, { user: { name: "Ada", tags: ["math", "code"] } });
+assert.throws(
+  () => applyPatch(input, [{ op: "remove", path: "/missing" }]),
+  (error) => error instanceof PatchError && error.index === 0,
+);
+console.log("ok");
+`,
+    },
+    prompt:
+      "Implement applyPatch in patch.js so `node test.js` passes. Every bullet in the documented contract is graded, " +
+      "including pointer escaping, canonical array indexes, root replacement, immutability, and failure metadata. " +
+      "Do not change test.js or weaken PatchError.",
+    hidden: [
+      {
+        name: "pointer escapes and root replacement",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { applyPatch } = require("./patch.js");
+const source = { "a/b": { "m~n": 1 } };
+assert.deepEqual(
+  applyPatch(source, [{ op: "replace", path: "/a~1b/m~0n", value: 2 }]),
+  { "a/b": { "m~n": 2 } },
+);
+assert.deepEqual(applyPatch(source, [{ op: "add", path: "", value: [1, 2] }]), [1, 2]);
+assert.deepEqual(source, { "a/b": { "m~n": 1 } });
+console.log("ok");`,
+      },
+      {
+        name: "arrays, cloning, and indexed failures",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { applyPatch, PatchError } = require("./patch.js");
+const value = { deep: [1] };
+const ops = [{ op: "add", path: "/-", value }];
+const result = applyPatch([], ops);
+value.deep.push(2);
+assert.deepEqual(result, [{ deep: [1] }]);
+assert.deepEqual(ops, [{ op: "add", path: "/-", value: { deep: [1, 2] } }]);
+for (const path of ["/01", "/2", "/~2bad"]) {
+  assert.throws(
+    () => applyPatch(["x"], [{ op: "add", path: "/-", value: "y" }, { op: "replace", path, value: "z" }]),
+    (error) => error instanceof PatchError && error.index === 1,
+  );
+}
+assert.throws(
+  () => applyPatch({ a: 1 }, [{ op: "remove", path: "" }]),
+  (error) => error instanceof PatchError && error.index === 0,
+);
+console.log("ok");`,
+      },
+    ],
+    extraChecks(dir) {
+      return [{
+        name: "test.js untouched",
+        pass: (readFile(dir, "test.js") ?? "").includes("error.index === 0"),
+        weight: 1,
+      }];
+    },
+    reference: {
+      "patch.js": `"use strict";
+
+class PatchError extends Error {
+  constructor(index, message) {
+    super(message);
+    this.name = "PatchError";
+    this.index = index;
+  }
+}
+
+const clone = (value) => structuredClone(value);
+
+function tokens(path) {
+  if (path === "") return [];
+  if (typeof path !== "string" || !path.startsWith("/")) throw new Error("invalid pointer");
+  return path.slice(1).split("/").map((raw) => {
+    if (/~(?![01])/u.test(raw)) throw new Error("invalid pointer escape");
+    return raw.replace(/~1/gu, "/").replace(/~0/gu, "~");
+  });
+}
+
+function arrayIndex(token, length, allowEnd) {
+  if (!/^(0|[1-9]\\d*)$/u.test(token)) throw new Error("invalid array index");
+  const index = Number(token);
+  if (index < 0 || index > length || (!allowEnd && index === length)) {
+    throw new Error("array index out of bounds");
+  }
+  return index;
+}
+
+function applyPatch(document, operations) {
+  let output = clone(document);
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index];
+    try {
+      if (!operation || !["add", "replace", "remove"].includes(operation.op)) {
+        throw new Error("unsupported operation");
+      }
+      const parts = tokens(operation.path);
+      if (parts.length === 0) {
+        if (operation.op === "remove") throw new Error("cannot remove root");
+        output = clone(operation.value);
+        continue;
+      }
+      let parent = output;
+      for (const part of parts.slice(0, -1)) {
+        if (parent === null || typeof parent !== "object") throw new Error("missing parent");
+        if (Array.isArray(parent)) {
+          parent = parent[arrayIndex(part, parent.length, false)];
+        } else {
+          if (!Object.hasOwn(parent, part)) throw new Error("missing parent");
+          parent = parent[part];
+        }
+      }
+      if (parent === null || typeof parent !== "object") throw new Error("missing parent");
+      const key = parts.at(-1);
+      if (Array.isArray(parent)) {
+        if (operation.op === "add") {
+          const at = key === "-" ? parent.length : arrayIndex(key, parent.length, true);
+          parent.splice(at, 0, clone(operation.value));
+        } else {
+          if (key === "-") throw new Error("invalid array index");
+          const at = arrayIndex(key, parent.length, false);
+          if (operation.op === "replace") parent[at] = clone(operation.value);
+          else parent.splice(at, 1);
+        }
+      } else if (operation.op === "add") {
+        parent[key] = clone(operation.value);
+      } else {
+        if (!Object.hasOwn(parent, key)) throw new Error("missing key");
+        if (operation.op === "replace") parent[key] = clone(operation.value);
+        else delete parent[key];
+      }
+    } catch (error) {
+      throw new PatchError(index, error instanceof Error ? error.message : String(error));
+    }
+  }
+  return output;
+}
+
+module.exports = { applyPatch, PatchError };
+`,
+    },
+  },
+
+  {
+    name: "stable-dag",
+    brief: "stable dependency planner with missing and cyclic work",
+    tier: "hard",
+    split: "train",
+    par: { wallS: 150, tokensK: 90 },
+    files: {
+      "planner.js": `"use strict";
+
+// TODO: implement plan(jobs) -> { order, unresolved }.
+// Each job is { id: string, after?: string[] }.
+// Contract:
+// - Inputs are not mutated. Empty input returns two empty arrays.
+// - ids must be non-empty and unique; invalid ids or duplicate ids throw.
+// - A job is ready only after every listed dependency was emitted.
+// - Repeated dependency names count once. A job may not depend on itself.
+// - At each step emit the ready job that appeared earliest in the input. This
+//   makes the topological order deterministic without alphabetic sorting.
+// - Stop when no job is ready. unresolved contains every un-emitted id in
+//   original input order: cycles, jobs with missing dependencies, and anything
+//   transitively waiting on either condition.
+module.exports = {};
+`,
+      "test.js": `"use strict";
+const assert = require("node:assert/strict");
+const { plan } = require("./planner.js");
+
+assert.deepEqual(plan([
+  { id: "ship", after: ["test", "build"] },
+  { id: "lint" },
+  { id: "build", after: ["lint"] },
+  { id: "test", after: ["build"] },
+]), { order: ["lint", "build", "test", "ship"], unresolved: [] });
+
+assert.deepEqual(plan([
+  { id: "a", after: ["b"] },
+  { id: "b", after: ["a"] },
+  { id: "c", after: ["missing"] },
+]), { order: [], unresolved: ["a", "b", "c"] });
+console.log("ok");
+`,
+    },
+    prompt:
+      "Implement plan in planner.js so `node test.js` passes. Honor every documented invariant, especially " +
+      "original-order tie breaking and transitive unresolved work. Do not change test.js.",
+    hidden: [
+      {
+        name: "stable ready-order and repeated dependencies",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { plan } = require("./planner.js");
+const jobs = [
+  { id: "late", after: ["root", "root"] },
+  { id: "first" },
+  { id: "root" },
+  { id: "second" },
+  { id: "tail", after: ["late"] },
+];
+const snapshot = structuredClone(jobs);
+assert.deepEqual(plan(jobs), {
+  order: ["first", "root", "late", "second", "tail"],
+  unresolved: [],
+});
+assert.deepEqual(jobs, snapshot);
+assert.deepEqual(plan([]), { order: [], unresolved: [] });
+console.log("ok");`,
+      },
+      {
+        name: "invalid ids and transitive unresolved work",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { plan } = require("./planner.js");
+assert.throws(() => plan([{ id: "x" }, { id: "x" }]));
+assert.throws(() => plan([{ id: "" }]));
+assert.throws(() => plan([{ id: "x", after: ["x"] }]));
+assert.deepEqual(plan([
+  { id: "ok" },
+  { id: "missing", after: ["ghost"] },
+  { id: "downstream", after: ["missing"] },
+  { id: "cycle-a", after: ["cycle-b"] },
+  { id: "cycle-b", after: ["cycle-a"] },
+  { id: "after-cycle", after: ["cycle-a"] },
+]), {
+  order: ["ok"],
+  unresolved: ["missing", "downstream", "cycle-a", "cycle-b", "after-cycle"],
+});
+console.log("ok");`,
+      },
+    ],
+    reference: {
+      "planner.js": `"use strict";
+
+function plan(jobs) {
+  const ids = new Set();
+  for (const job of jobs) {
+    if (!job || typeof job.id !== "string" || !job.id) throw new Error("invalid job id");
+    if (ids.has(job.id)) throw new Error("duplicate job id");
+    ids.add(job.id);
+  }
+  const normalized = jobs.map((job) => {
+    const after = [...new Set(job.after ?? [])];
+    if (after.includes(job.id)) throw new Error("self dependency");
+    return { id: job.id, after };
+  });
+  const emitted = new Set();
+  const order = [];
+  for (;;) {
+    const ready = normalized.find(
+      (job) => !emitted.has(job.id) && job.after.every((dependency) => emitted.has(dependency)),
+    );
+    if (!ready) break;
+    emitted.add(ready.id);
+    order.push(ready.id);
+  }
+  return {
+    order,
+    unresolved: normalized.filter((job) => !emitted.has(job.id)).map((job) => job.id),
+  };
+}
+
+module.exports = { plan };
+`,
+    },
+  },
+
+  {
+    name: "async-pool",
+    brief: "bounded async map with ordered output and fail-fast scheduling",
+    tier: "hard",
+    split: "train",
+    par: { wallS: 180, tokensK: 100 },
+    files: {
+      "pool.js": `"use strict";
+
+// TODO: implement async mapPool(values, limit, worker).
+// Contract:
+// - limit must be a positive integer; otherwise reject with RangeError.
+// - Call worker(value, index) exactly once for each started item and run no more
+//   than limit workers concurrently.
+// - Resolve to results in INPUT order, regardless of completion order. Empty
+//   input resolves to []. Inputs are not mutated.
+// - A synchronous throw and a rejected worker promise are equivalent.
+// - After the first observed failure, start no additional items. Let workers
+//   already in flight settle, then reject with that exact first error object.
+// - The function must not leak unhandled rejections from in-flight workers.
+module.exports = {};
+`,
+      "test.js": `"use strict";
+const assert = require("node:assert/strict");
+const { mapPool } = require("./pool.js");
+
+(async () => {
+  let active = 0;
+  let peak = 0;
+  const result = await mapPool([30, 5, 15, 1], 2, async (delay, index) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    active -= 1;
+    return index * 10;
+  });
+  assert.deepEqual(result, [0, 10, 20, 30]);
+  assert.equal(peak, 2);
+  console.log("ok");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+`,
+    },
+    prompt:
+      "Implement mapPool in pool.js so `node test.js` passes. Every concurrency and error-handling bullet in " +
+      "the documented contract is graded. Do not change test.js.",
+    hidden: [
+      {
+        name: "failure stops new starts and drains in-flight work",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { mapPool } = require("./pool.js");
+(async () => {
+  const boom = new Error("boom");
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const pending = mapPool([0, 1, 2, 3], 2, async (_value, index) => {
+    started.push(index);
+    if (index === 0) { await gate; return "done"; }
+    if (index === 1) throw boom;
+    return "should not start";
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [0, 1]);
+  let settled = false;
+  pending.catch(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "must wait for the in-flight worker");
+  release();
+  await assert.rejects(pending, (error) => error === boom);
+  assert.deepEqual(started, [0, 1]);
+  console.log("ok");
+})().catch((error) => { console.error(error); process.exitCode = 1; });`,
+      },
+      {
+        name: "empty, invalid limit, and synchronous throw",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { mapPool } = require("./pool.js");
+(async () => {
+  assert.deepEqual(await mapPool([], 3, () => 1), []);
+  for (const limit of [0, -1, 1.5, NaN]) {
+    await assert.rejects(mapPool([1], limit, () => 1), RangeError);
+  }
+  const exact = new Error("sync");
+  const values = [1, 2, 3];
+  await assert.rejects(
+    mapPool(values, 1, () => { throw exact; }),
+    (error) => error === exact,
+  );
+  assert.deepEqual(values, [1, 2, 3]);
+  console.log("ok");
+})().catch((error) => { console.error(error); process.exitCode = 1; });`,
+      },
+    ],
+    reference: {
+      "pool.js": `"use strict";
+
+async function mapPool(values, limit, worker) {
+  if (!Number.isInteger(limit) || limit < 1) throw new RangeError("limit must be a positive integer");
+  const input = [...values];
+  if (input.length === 0) return [];
+  return new Promise((resolve, reject) => {
+    const results = new Array(input.length);
+    let next = 0;
+    let active = 0;
+    let stopped = false;
+    let firstError;
+
+    const launch = () => {
+      while (!stopped && active < limit && next < input.length) {
+        const index = next++;
+        active += 1;
+        Promise.resolve()
+          .then(() => worker(input[index], index))
+          .then(
+            (value) => { results[index] = value; },
+            (error) => {
+              if (!stopped) {
+                stopped = true;
+                firstError = error;
+              }
+            },
+          )
+          .finally(() => {
+            active -= 1;
+            if (stopped) {
+              if (active === 0) reject(firstError);
+              return;
+            }
+            if (next === input.length && active === 0) resolve(results);
+            else launch();
+          });
+      }
+    };
+    launch();
+  });
+}
+
+module.exports = { mapPool };
+`,
+    },
+  },
+
   // ── holdout ────────────────────────────────────────────────────────────────
   {
     name: "holdout-sort-bug",

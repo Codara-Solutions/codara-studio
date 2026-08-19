@@ -10,27 +10,35 @@ import { usePreferences } from "../preferences/usePreferences";
 // like siblings.
 
 interface ShortcutsDialogProps {
-  open: boolean;
   onClose: () => void;
 }
 
-export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps) {
+export default function ShortcutsDialog({ onClose }: ShortcutsDialogProps) {
   const { preferences } = usePreferences();
   const table = useMemo<BindingTable>(
     () => buildBindingTable(preferences.keybindings),
     [preferences.keybindings],
   );
+  const groups = useMemo(
+    () =>
+      COMMAND_GROUPS.map((group) => ({
+        group,
+        // A cheat sheet only shows shortcuts that can actually be pressed.
+        // Unbound commands stay available in Settings → Keybindings.
+        items: table.filter(
+          (binding) => binding.command.group === group && binding.chords.length > 0,
+        ),
+      })).filter((entry) => entry.items.length > 0),
+    [table],
+  );
 
   useEffect(() => {
-    if (!open) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  if (!open) return null;
+  }, [onClose]);
 
   return (
     <div
@@ -41,26 +49,23 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklab, var(--bg) 58%, transparent)",
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
       }}
       onMouseDown={onClose}
     >
+      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Keyboard shortcuts"
+        className="spark-glass--strong spark-overlay-surface"
         style={{
-          width: "min(540px, calc(100vw - 44px))",
-          maxHeight: "min(640px, calc(100vh - 44px))",
+          zIndex: 1,
+          width: "min(720px, calc(100vw - 44px))",
+          maxHeight: "min(620px, calc(100vh - 44px))",
           display: "flex",
           flexDirection: "column",
-          background: "var(--panel)",
-          border: "1px solid var(--rule-soft)",
           borderRadius: 12,
-          boxShadow: "var(--shadow-2)",
           overflow: "hidden",
         }}
         onMouseDown={(event) => event.stopPropagation()}
@@ -75,26 +80,13 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
             gap: 9,
           }}
         >
-          <span
-            aria-hidden
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: 999,
-              background: "var(--accent)",
-              boxShadow: "0 0 9px var(--accent-glow)",
-            }}
-          />
-          <div
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              fontWeight: 700,
-              letterSpacing: "0.02em",
-              color: "var(--ink)",
-            }}
-          >
-            Keyboard shortcuts
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>
+              Keyboard shortcuts
+            </div>
+            <div style={{ fontSize: 11, color: "var(--muted)" }}>
+              Active shortcuts only · customize them in Settings
+            </div>
           </div>
           <div style={{ flex: 1 }} />
           <button
@@ -124,25 +116,31 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
             minHeight: 0,
             overflow: "auto",
             padding: "14px 18px 18px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 18,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+            alignItems: "start",
+            gap: 12,
           }}
         >
-          {COMMAND_GROUPS.map((group) => {
-            const items = table.filter((b) => b.command.group === group);
-            if (items.length === 0) return null;
+          {groups.map(({ group, items }) => {
             return (
-              <section key={group} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <section
+                key={group}
+                style={{
+                  overflow: "hidden",
+                  border: "1px solid var(--rule-soft)",
+                  borderRadius: 9,
+                  background: "color-mix(in oklab, var(--panel) 62%, transparent)",
+                }}
+              >
                 <h3
                   style={{
                     margin: 0,
-                    fontFamily: "var(--font-sans)",
-                    fontSize: 9,
+                    padding: "8px 10px",
+                    borderBottom: "1px solid var(--rule-soft)",
+                    fontSize: 11,
                     fontWeight: 700,
-                    letterSpacing: "0.16em",
-                    textTransform: "uppercase",
-                    color: "var(--muted)",
+                    color: "var(--ink-dim)",
                   }}
                 >
                   {group}
@@ -156,7 +154,7 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
                     flexDirection: "column",
                   }}
                 >
-                  {items.map((b) => {
+                  {items.map((b, index) => {
                     // We display the first chord in the list so the cheat
                     // sheet stays uncluttered (zoom-in defaults to two
                     // shift-equivalent chords — showing both would be
@@ -165,9 +163,7 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
                     const chips =
                       b.command.id === "view.selectByIndex"
                         ? [...chordToDisplay(b.chords[0]).slice(0, -1), "1…9"]
-                        : b.chords.length > 0
-                          ? chordToDisplay(b.chords[0])
-                          : ["—"];
+                        : chordToDisplay(b.chords[0]);
                     return (
                       <li
                         key={b.command.id}
@@ -176,14 +172,14 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
                           alignItems: "center",
                           justifyContent: "space-between",
                           gap: 12,
-                          padding: "8px 0",
-                          borderBottom: "1px solid var(--rule-soft)",
+                          padding: "7px 10px",
+                          borderTop: index === 0 ? "none" : "1px solid var(--rule-soft)",
                         }}
                       >
                         <span
                           style={{
                             fontFamily: "var(--font-sans)",
-                            fontSize: 12,
+                            fontSize: 11.5,
                             color: "var(--ink)",
                           }}
                         >

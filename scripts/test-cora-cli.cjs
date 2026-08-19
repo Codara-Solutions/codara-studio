@@ -93,9 +93,45 @@ function cliFails(...args) {
 
 const help = cli("help");
 assert.match(help, /██/, "help shows the Codara logo");
-for (const command of ["start", "send", "watch", "agents", "board", "whiteboard", "auto", "bench", "runs"]) {
+for (const command of ["chat", "start", "send", "watch", "agents", "board", "whiteboard", "auto", "bench", "runs"]) {
   assert.match(help, new RegExp(`\\b${command}\\b`), `help lists ${command}`);
 }
+
+// ── full-screen chat's pure view helpers ───────────────────────────────────
+
+const {
+  activityText,
+  compactTokens,
+  conversationMessages,
+  resolveReplyContent,
+  runStats,
+} = require(path.join(ROOT, "cli", "commands", "chat.cjs"));
+
+assert.equal(compactTokens(999), "999");
+assert.equal(compactTokens(1_200), "1.2k");
+assert.equal(compactTokens(200_000), "200k");
+
+const chatRun = {
+  id: "run-chat",
+  status: "blocked",
+  createdAt: now,
+  humanMessages: [
+    { id: "m1", author: "user", kind: "note", message: "Build it" },
+    { id: "m2", author: "user", kind: "note", message: "Build it" },
+    { id: "m3", author: "system", kind: "note", message: "hidden summary", compaction: true },
+    { id: "m4", author: "spark", kind: "question", message: "Ship it?", questionOptions: [
+      { label: "Yes", answer: "Ship it now" },
+      { label: "No", answer: "Do not ship" },
+    ] },
+  ],
+  steps: [{ status: "complete" }, { status: "running" }],
+  workerAttempts: [{ status: "running" }, { status: "succeeded" }],
+};
+assert.deepEqual(conversationMessages(chatRun).map((message) => message.id), ["m1", "m4"]);
+assert.deepEqual(resolveReplyContent("1", chatRun), { content: "Ship it now", label: "Yes" });
+assert.deepEqual(resolveReplyContent("please wait", chatRun), { content: "please wait" });
+assert.deepEqual(runStats(chatRun), { activeAgents: 1, finishedSteps: 1, totalSteps: 2 });
+assert.match(activityText(chatRun), /needs your answer/);
 
 // ── offline run inspection ──────────────────────────────────────────────────
 
@@ -152,13 +188,82 @@ const benchList = cli("bench", "list");
 assert.match(benchList, /typo-fix/);
 assert.match(benchList, /parallel-slices/);
 assert.match(benchList, /interval-merge/);
+assert.match(benchList, /patch-atomic/);
+assert.match(benchList, /stable-dag/);
+assert.match(benchList, /async-pool/);
 assert.match(benchList, /holdout/);
 
+const {
+  buildRivalCommand,
+  readHermesUsage,
+} = require(path.join(ROOT, "cli", "bench", "rivals.cjs"));
+const hermesCommand = buildRivalCommand("hermes", {
+  prompt: "fix",
+  resume: "session-1",
+  usageFile: "/tmp/hermes-usage.json",
+  model: "gpt-5.6-sol",
+  effort: "high",
+});
+assert.ok(hermesCommand.args.includes("terminal,file,code_execution"));
+assert.ok(hermesCommand.args.includes("session-1"));
+assert.deepEqual(hermesCommand.args.slice(hermesCommand.args.indexOf("--model"), hermesCommand.args.indexOf("--model") + 4), [
+  "--model", "gpt-5.6-sol", "--provider", "openai-codex",
+]);
+assert.deepEqual(hermesCommand.args.slice(hermesCommand.args.indexOf("--reasoning"), hermesCommand.args.indexOf("--reasoning") + 2), [
+  "--reasoning", "high",
+]);
+const hermesUsageFile = path.join(home, "hermes-usage.json");
+fs.writeFileSync(hermesUsageFile, JSON.stringify({
+  session_id: "session-1",
+  api_calls: 4,
+  total_tokens: 321,
+  model: "test-model",
+  provider: "openai-codex",
+  failed: false,
+}));
+assert.deepEqual(readHermesUsage(hermesUsageFile), {
+  sessionId: "session-1",
+  turns: 4,
+  tokens: 321,
+  model: "test-model",
+  provider: "openai-codex",
+  failed: false,
+});
+
 const { TASKS } = require(path.join(ROOT, "cli", "bench", "tasks.cjs"));
-const { gradeChecks } = require(path.join(ROOT, "cli", "commands", "bench.cjs"));
+const { gradeChecks, comparableEntry, totalRunTokens } = require(path.join(ROOT, "cli", "commands", "bench.cjs"));
 assert.ok(TASKS.length >= 8, "bench suite has at least 8 tasks");
 assert.equal(new Set(TASKS.map((t) => t.name)).size, TASKS.length, "task names unique");
 assert.ok(TASKS.some((t) => t.split === "train") && TASKS.some((t) => t.split === "holdout"), "train/holdout split exists");
+const benchIdentity = {
+  suiteHash: "suite-a",
+  scorerHash: "score-a",
+  runnerHash: "run-a",
+  toolVersions: { cora: "1", hermes: "4" },
+  control: { model: "gpt-5.6-sol", effort: "high", execution: "direct", provider: "openai-codex" },
+  repeat: 3,
+  taskNames: ["a", "b"],
+};
+assert.equal(comparableEntry({ ...benchIdentity }, benchIdentity), true, "identical benchmark runs compare");
+for (const mismatch of [
+  { suiteHash: "suite-b" },
+  { scorerHash: "score-b" },
+  { runnerHash: "run-b" },
+  { toolVersions: { ...benchIdentity.toolVersions, hermes: "new" } },
+  { control: { ...benchIdentity.control, effort: "medium" } },
+  { repeat: 1 },
+  { taskNames: ["a"] },
+]) {
+  assert.equal(comparableEntry({ ...benchIdentity, ...mismatch }, benchIdentity), false, "mismatched runs do not compare");
+}
+assert.equal(
+  totalRunTokens({
+    sparkCalls: [{ inputTokens: 10, outputTokens: 5, cacheReadTokens: 20 }],
+    workerAttempts: [{ inputTokens: 7, outputTokens: 3, cacheReadTokens: 4, cacheWriteTokens: 1 }],
+  }),
+  50,
+  "benchmark counts manager and worker provider usage",
+);
 
 function seedDir(task, overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bench-seed-${task.name}-`));

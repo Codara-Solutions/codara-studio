@@ -17,7 +17,8 @@ ${logo()}
   ${c.bold("cora")} — drive Cora, Codara Studio's orchestrator, from your terminal
 
 ${c.bold("SESSIONS")}
-  start <prompt> [--cwd DIR --model M --effort E --wait]   start a Cora run
+  chat [run] [--cwd DIR --model M --effort E --direct]     ${c.cyan("fullscreen Cora chat")}
+  start <prompt> [--cwd DIR --model M --effort E --direct] start a Cora run
   send <run> <message|option#> [--wait]                    reply / answer a question
   wait <run> [--timeout SECONDS]                           block until it needs you
   tail <run> [--all]                                       stream live events
@@ -39,12 +40,12 @@ ${c.bold("SURFACES")}
   auto run|pause|resume|on|off <automation-id>
 
 ${c.bold("BENCH")}
-  bench [--split train|holdout|all] [--task NAME] [--repeat N] [--keep]
+  bench [--split train|holdout|all] [--task NAME[,NAME]] [--repeat N] [--keep]
                                harness benchmark via the live app: 0-100 score
                                (correctness, par efficiency, post-green
                                discipline, orchestration); appends history.jsonl
-  bench --agent claude         same tasks via headless Claude Code (opus-5,
-                               effort high): the single-agent rival harness
+  bench --agent hermes [--model M --effort E]
+                               same-model comparison through Hermes Agent
   bench list                   show the suite's tasks (tier, split)
   bench history                score trajectory across runs
   ws prune                     remove workspaces whose directory is gone
@@ -69,7 +70,7 @@ function parseArgs(argv) {
       continue;
     }
     const name = arg.slice(2);
-    const boolFlags = new Set(["json", "wait", "all", "keep", "verbose"]);
+    const boolFlags = new Set(["json", "wait", "all", "keep", "verbose", "direct", "managed"]);
     if (boolFlags.has(name)) flags[name] = true;
     else flags[name] = argv[++i];
   }
@@ -82,11 +83,20 @@ async function main() {
 
   switch (command) {
     case undefined:
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        return require("./commands/chat.cjs").chat([], flags);
+      }
+      console.log(HELP);
+      return;
+
     case "help":
     case "--help":
     case "-h":
       console.log(HELP);
       return;
+
+    case "chat":
+      return require("./commands/chat.cjs").chat(args, flags);
 
     case "status":
       return require("./commands/status.cjs").status(args, flags);

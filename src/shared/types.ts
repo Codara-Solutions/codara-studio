@@ -2090,6 +2090,7 @@ export type ChatBackendKind = "pi";
 // contract mapping and falsification. (A third "frontier" tier was removed
 // in 2026-08; persisted values migrate to "deep" on read.)
 export type CoraExecutionPolicy = "fast" | "deep";
+export type CoraExecutionStrategy = "auto" | "direct" | "managed";
 
 // Manager behaviour mode chosen per chat:
 //   auto    — Cora routes each message herself: answer directly, spawn workers,
@@ -3393,6 +3394,11 @@ export interface WorkerAttempt {
    * `estimatedWorkerCostUsd` placeholder estimate.
    */
   costUsd?: number;
+  /** Provider usage for this attempt. Absent on legacy/non-structured workers. */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   /**
    * Classification of `error`, written whenever an attempt is recorded as
    * failed. Purely additive: absent for successful attempts, for runs written
@@ -4036,6 +4042,13 @@ export interface StartAutopilotInput {
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
   runId?: string;
+  /**
+   * auto: direct for bounded work in a small workspace, managed otherwise.
+   * direct/managed are explicit overrides used by the CLI and advanced flows.
+   */
+  executionStrategy?: CoraExecutionStrategy;
+  /** Optional explicit title. Ordinary chats still derive one from the prompt. */
+  title?: string;
   planPath?: string;
   planTitle?: string;
   planText?: string;
@@ -4122,6 +4135,8 @@ export interface AddRunMessageInput {
    *  their own question — an unlinked affirmative ("yes" to some other
    *  question, a casual "ok" note) must never approve a pending change. */
   answersMessageId?: string;
+  /** Internal recursion guard used while addDirectIteration records its note. */
+  skipDirectDispatch?: true;
 }
 
 export interface CancelQueuedMessageInput {
@@ -4490,9 +4505,11 @@ export interface StartDirectWorkerRunInput {
   cwd: string;
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
-  automationId: string;
+  /** Present for a Loom-owned run; omitted for a direct Cora chat. */
+  automationId?: string;
   title: string; // `Loom: ${name} — pass ${n}`
   prompt: string; // fully rendered loop prompt
+  clientMessageId?: string;
   model: string; // provider-native id; selects the Pi provider (claude-*/gpt-*)
   effort?: AgentEffortLevel;
   /** Looms v2.5: the graph node this pass's single worker executes (its prompt

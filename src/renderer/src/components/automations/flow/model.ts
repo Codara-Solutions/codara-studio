@@ -17,7 +17,6 @@ import type {
 } from "@shared/types";
 import type { Edge, Node } from "@xyflow/react";
 import { DEFAULT_WORKER_EFFORT, DEFAULT_WORKER_MODEL } from "../worker-models";
-import type { LoomPreset } from "./presets";
 
 // The node-flow editor's data model. The TRIGGER + LOOP live OFF the graph
 // (job.trigger / job.loop); the graph holds the worker/guard/merge pipeline.
