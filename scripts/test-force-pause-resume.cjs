@@ -621,6 +621,43 @@ async function main() {
   );
   check(`post-resume driver invariant holds with no prior work (${bareInvariant.why})`, bareInvariant.ok);
 
+  // Sending a message is also Resume, but it remains one visible interaction:
+  // the synthetic manager note links to the genuine message so renderers can
+  // fold it away without guessing from timestamps or prose.
+  const messageResumeId = writeRun(
+    forcePausedRun("run-message-resume", {
+      steps: [],
+      workerTasks: [],
+      workerAttempts: [],
+      humanMessages: [
+        {
+          id: "msg-message-resume",
+          runId: "run-message-resume",
+          author: "user",
+          kind: "note",
+          message: "continue with the browser",
+          attachments: [],
+          intent: "turn",
+          deliveryState: "queued",
+          conversationEpoch: 1,
+          createdAt: PAUSED_AT,
+        },
+      ],
+    }),
+  );
+  await runStore.resumeRun({
+    runId: messageResumeId,
+    triggerMessageId: "msg-message-resume",
+  });
+  const linkedResume = readRun(messageResumeId).humanMessages.find(
+    (message) => message.resumeNote === true,
+  );
+  check(
+    "message-triggered Resume links its internal note to the real user turn",
+    linkedResume?.resumesMessageId === "msg-message-resume",
+    JSON.stringify(linkedResume),
+  );
+
   // ── 3b. a run paused with its manager turn still in flight keeps that turn ──
   // The soft pauseRun path never kills the turn, so the run already has a
   // driver; a second concurrent chat turn would race the first one's decision.

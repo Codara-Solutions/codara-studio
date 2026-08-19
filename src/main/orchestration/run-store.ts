@@ -3225,6 +3225,7 @@ function hasQueuedSteering(run: RunState): boolean {
 function scheduleResumeForUserMessage(
   run: RunState,
   intent: RunConversationMessageIntent,
+  messageId: string,
 ): void {
   if (!shouldResumeForUserMessage(run, intent)) return;
   if (activeUserMessageResumes.has(run.id)) return;
@@ -3243,7 +3244,7 @@ function scheduleResumeForUserMessage(
       // Re-decide on the freshly read run: the Resume button, another client,
       // or a question arriving in the meantime may already own the next move.
       if (!shouldResumeForUserMessage(latest, intent)) return;
-      await resumeRun({ runId: latest.id });
+      await resumeRun({ runId: latest.id, triggerMessageId: messageId });
     })
     .catch(async (err) => {
       // Leave the run paused and usable — the Resume button is still there.
@@ -10141,10 +10142,21 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         // may be a mutation or two old by the time the commit runs.
         const interrupted = interruptedAttemptsForResume(draft);
         const noteAlreadyDeliverable = settleResumeInterruptedNotes(draft);
-        // EVERY chat-route resume writes its note, not only interrupted-attempt
-        // ones: the note is what makes the resume a first-class, undoable user
-        // turn (rendered as the user's "Resume" bubble, checkpointed below so
-        // Undo can rewind to before the resume).
+        const resumesMessageId = input.triggerMessageId &&
+          draft.humanMessages.some(
+            (message) =>
+              message.id === input.triggerMessageId &&
+              message.author === "user" &&
+              !message.compaction &&
+              !message.boardNote &&
+              !message.resumeNote &&
+              (message.conversationEpoch ?? 0) === conversationEpoch(draft),
+          )
+          ? input.triggerMessageId
+          : undefined;
+        // Every chat-route resume writes manager context. Standalone Resume is
+        // a visible, undoable action; when sending a real message caused the
+        // resume, the note links back to that turn and stays UI-internal.
         if (!noteAlreadyDeliverable) {
           draft.humanMessages.push({
             id: resumeMessageId,
@@ -10155,6 +10167,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
             // to the manager, flagged so no surface or heuristic mistakes it
             // for something the user typed.
             resumeNote: true,
+            // Sending into a paused chat already produced the visible user
+            // turn. Keep this recovery instruction as manager-only context;
+            // a standalone Resume (no trigger id) remains its own UI action.
+            ...(resumesMessageId ? { resumesMessageId } : {}),
             message:
               interrupted.length > 0
                 ? composeResumeInterruptedNote(interrupted)
@@ -10685,7 +10701,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   // Sending IS resuming — see scheduleResumeForUserMessage for what that
   // covers and what it deliberately leaves to the question/terminal paths.
   if (input.author === "user") {
-    scheduleResumeForUserMessage(updated, recordedIntent);
+    scheduleResumeForUserMessage(updated, recordedIntent, messageId);
   }
 
   return updated;
@@ -13674,6 +13690,19 @@ async function performConversationRewind(
     restoredMessage && !restoredMessage.resumeNote && !restoredMessage.boardNote
       ? restoredMessage.message
       : null;
+  // A send into a paused run creates a real message followed by a linked,
+  // backend-only resume note. Undoing that visible message removes both and
+  // must restore the stopped state just like undoing standalone Resume. The
+  // shared backend-turn fallback covers runs written before the explicit link.
+  const rewindsLinkedResume = original.humanMessages.slice(pointer).some(
+    (message) =>
+      message.resumeNote === true &&
+      Boolean(restoredMessage) &&
+      (message.resumesMessageId === restoredMessage?.id ||
+        (!message.resumesMessageId &&
+          Boolean(message.backendTurnId) &&
+          message.backendTurnId === restoredMessage?.backendTurnId)),
+  );
   const cutoff = original.humanMessages[pointer]?.createdAt;
   const priorPendingResume = original.pendingManagerResume;
   const interruptedCall = activeManagerCall(original);
@@ -13931,7 +13960,7 @@ async function performConversationRewind(
           openQuestion.questionContext?.reason ?? "Cora still needs this answer.",
           timestamp,
         );
-      } else if (restoredMessage?.resumeNote) {
+      } else if (restoredMessage?.resumeNote || rewindsLinkedResume) {
         // Undoing a RESUME returns to the state the resume left: a stopped
         // run with its Resume affordance back, not a "complete" one. The user
         // can rewind, adjust, and press Resume again.

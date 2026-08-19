@@ -12,6 +12,7 @@ import {
   findOpenQuestion,
   isToolRowTicking,
   runtimeLabel,
+  resumedByMessageId,
   stepStatusColor,
   summarizeWorkerWait,
   toolDurationLabel,
@@ -185,10 +186,12 @@ export default function ChatConversation({ run }: { run: RunState }) {
   const latestUndoableCheckpoint = useMemo(() => {
     let lastUserMessageId: string | null = null;
     for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
-      if (run.humanMessages[i].author === "user") {
-        lastUserMessageId = run.humanMessages[i].id;
-        break;
-      }
+      const message = run.humanMessages[i];
+      if (message.author !== "user") continue;
+      if (message.resumeNote && resumedByMessageId(run.humanMessages, message)) continue;
+      if (message.compaction || message.boardNote) return null;
+      lastUserMessageId = message.id;
+      break;
     }
     if (!lastUserMessageId) return null;
     return (

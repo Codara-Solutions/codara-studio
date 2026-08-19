@@ -2976,6 +2976,10 @@ export interface HumanRunMessage {
    *  only so delivery treats it as manager input — like `boardNote`, it is not
    *  the user's own words, so attribution and intent heuristics skip it. */
   resumeNote?: true;
+  /** The real user message whose send also resumed the paused run. When set,
+   *  the synthetic resume note is backend-only context and UI surfaces fold it
+   *  into this message instead of showing a second, fake user turn. */
+  resumesMessageId?: string;
 }
 
 export interface RunArtifactPaths {
@@ -4171,6 +4175,8 @@ export interface PauseRunInput {
 
 export interface ResumeRunInput {
   runId: string;
+  /** Internal linkage used when sending a message implicitly presses Resume. */
+  triggerMessageId?: string;
 }
 
 export interface CancelRunInput {

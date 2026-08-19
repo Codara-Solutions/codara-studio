@@ -353,6 +353,38 @@ export function effectiveMessageDeliveryState(
   return dispatched ? "acknowledged" : message.deliveryState;
 }
 
+/**
+ * Return the real message whose send implicitly resumed a paused run.
+ *
+ * New runs persist the relationship explicitly. The backend-turn fallback is
+ * for existing runs written before that field existed: the genuine message
+ * and its immediately-created recovery note were claimed by the same turn.
+ */
+export function resumedByMessageId(
+  messages: HumanRunMessage[],
+  resumeMessage: HumanRunMessage,
+): string | undefined {
+  if (!resumeMessage.resumeNote) return undefined;
+  if (resumeMessage.resumesMessageId) return resumeMessage.resumesMessageId;
+  if (!resumeMessage.backendTurnId) return undefined;
+  const resumeIndex = messages.findIndex((message) => message.id === resumeMessage.id);
+  if (resumeIndex <= 0) return undefined;
+  for (let index = resumeIndex - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if ((candidate.conversationEpoch ?? 0) !== (resumeMessage.conversationEpoch ?? 0)) break;
+    if (
+      candidate.author === "user" &&
+      !candidate.compaction &&
+      !candidate.boardNote &&
+      !candidate.resumeNote &&
+      candidate.backendTurnId === resumeMessage.backendTurnId
+    ) {
+      return candidate.id;
+    }
+  }
+  return undefined;
+}
+
 // Merge the human conversation and Cora activity into one ordered stream.
 // Every item carries an ISO timestamp, so a single sort interleaves "you said
 // X" with "Cora read context", "Cora called the manager", and worker runs in
@@ -392,13 +424,13 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       });
       continue;
     }
-    // The synthetic resume note's BODY is manager input (a list of attempt
-    // ids), but the resume itself is a user action the user may want to take
-    // back. Render it as the user's own compact "Resume" bubble — id kept as
-    // the message id so the user-message checkpoint recorded at resume time
-    // attaches the standard Undo control, letting the user rewind to before
-    // the resume.
+    // Sending a real message into a paused chat also resumes it. In that case
+    // the message is the complete visible interaction; the synthetic recovery
+    // note remains backend context and must not create a second "Resume"
+    // bubble underneath. A standalone press of Resume still renders as its own
+    // compact, undoable action.
     if (message.resumeNote) {
+      if (resumedByMessageId(run.humanMessages, message)) continue;
       // The note names attempts one per line and tails off into "…and N more"
       // past its cap, so the count is the named rows plus that remainder.
       const namedAttempts = (text.match(/^- (?!…)/gm) ?? []).length;
