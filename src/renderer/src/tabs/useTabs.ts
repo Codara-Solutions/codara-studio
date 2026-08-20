@@ -869,12 +869,9 @@ function initialTabsState(
   return { tabs: seed, activeId: seed[0].id, closedChatRunIds: [] };
 }
 
-// One workspace's terminal layout, surfaced so the workbench can keep every
-// visited (or bridge-initialized) workspace's TerminalStack mounted (hidden)
-// instead of unmounting it on a workspace switch. Unmounting is what disposed
-// the live xterm and forced the lossy gray-text snapshot/replay; keeping the
-// stack mounted preserves the real colored / alt-screen buffer and scrollback.
-// See App's terminalWorkspaceLayers.
+// One workspace's retained tab layout. The workbench mounts a small MRU subset
+// and keeps the rest here without their expensive xterm/WebGL views. See App's
+// terminalWorkspaceLayers.
 export interface WorkspaceTerminalLayout {
   workspaceId: string;
   tabs: Tab[];
@@ -1000,10 +997,8 @@ export interface UseTabsApi {
   // one render during a workspace switch — see the note at the useMemo.
   tabsWorkspaceId: string | null;
   // Frozen layouts for every visited or bridge-initialized workspace that is
-  // NOT currently active.
-  // The active workspace is driven by `tabs`/`activeId` above; these let the
-  // workbench render a mounted-but-hidden TerminalStack per inactive workspace
-  // so its panes (and the live PTYs behind them) survive a workspace switch.
+  // not currently active. The workbench keeps a bounded MRU subset mounted;
+  // the rest retain their tab model here while their PTYs live in main.
   inactiveWorkspaceLayouts: ReadonlyArray<WorkspaceTerminalLayout>;
   // Drop frozen layouts for workspaces that no longer exist (see the callback
   // for why the switch effect alone can't catch every deletion).
@@ -1129,13 +1124,13 @@ export interface UseTabsApi {
     agentSession?: TerminalAgentSession | null,
   ) => string | null;
   closeTerminalPane: (tabId: TabId, paneId: string) => void;
-  // closeTerminalPane for a pane living in either the active workspace or a
-  // mounted-but-hidden one (worker_attempt.finished / failed agent creates keep
-  // firing while their workspace is in the background). Dropping the tab's last
+  // closeTerminalPane for a pane living in either the active workspace or an
+  // inactive retained layout (worker_attempt.finished / failed agent creates
+  // keep firing while their workspace is in the background). Dropping the tab's last
   // pane removes the tab from the frozen layout, rerouting a stranded frozen
   // activeId the same way pruneDeletedRunTabsFromInactiveWorkspaces does.
   closeTerminalPaneInWorkspace: (workspaceId: string, tabId: TabId, paneId: string) => void;
-  // Locate a terminal pane in the mounted-but-hidden workspace layouts (the
+  // Locate a terminal pane in the inactive workspace layouts (the
   // active store is searched by callers directly). Returns the owning
   // workspace/tab so cross-workspace cleanup can target the right layout.
   findTerminalPaneInInactiveWorkspaces: (
@@ -1489,9 +1484,9 @@ export function useTabs(
       });
     }
     // Keep the inactive-layout mirror in sync with this switch: the workspace
-    // we're LEAVING (with its final live tabs) becomes a hidden mounted stack,
-    // and the workspace we're ENTERING becomes the active live stack — so drop
-    // any entry for it. `tabs`/`activeId` here still hold the leaving
+    // we're LEAVING (with its final live tabs) becomes an inactive retained
+    // layout, and the workspace we're ENTERING becomes the active live layout —
+    // so drop any entry for it. `tabs`/`activeId` here still hold the leaving
     // workspace's layout (the swap happens below), which is exactly what we
     // want to freeze.
     setInactiveWorkspaceLayouts((prev) => {
@@ -1883,7 +1878,7 @@ export function useTabs(
   // See UseTabsApi: agent tab minted into a background workspace's frozen
   // layout. Mirrors updateLeafWorkerInWorkspace's write pattern — ref first so
   // back-to-back bridge calls compose, then the render-driving mirror so the
-  // hidden mounted stack mounts the pane (which is what spawns its PTY).
+  // bridge-pinned background stack mounts the pane (which spawns its PTY).
   const newAgentTerminalTabInWorkspace = useCallback(
     (
       targetWorkspaceId: string,
@@ -2584,7 +2579,7 @@ export function useTabs(
     [],
   );
 
-  // See UseTabsApi: close a pane inside a mounted-but-hidden workspace's frozen
+  // See UseTabsApi: close a pane inside an inactive workspace's frozen
   // layout. Mirrors pruneDeletedRunTabsFromInactiveWorkspaces' write pattern
   // (ref first, then the render-driving mirror). No reseed on an emptied
   // layout — hidden layouts are allowed to go empty, same contract as the run
@@ -3383,7 +3378,7 @@ export function useTabs(
     [],
   );
 
-  // Hidden workspace stacks own live xterms too. Persist their final buffers
+  // Mounted warm/bridge workspace stacks own live xterms too. Persist their final buffers
   // directly into that workspace's frozen layout instead of routing through the
   // active tab store (which would corrupt the wrong workspace). This path is
   // used only for explicit final/unload flushing; periodic snapshots remain

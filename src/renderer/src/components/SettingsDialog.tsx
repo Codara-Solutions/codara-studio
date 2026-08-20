@@ -54,6 +54,10 @@ import RemoteAccessSettings from "./RemoteAccessSettings";
 import { RuntimeMark } from "./BrandMarks";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
 import packageJson from "../../../../package.json";
+import {
+  workerSessionMemoryDeleteOption,
+  workerSessionMemoryScope,
+} from "../lib/worker-session-memory";
 
 // Settings is a single in-app dialog with seven tabs. Everything renders
 // inline here — there is no separate Settings BrowserWindow.
@@ -3228,18 +3232,19 @@ function SessionsSettings({
       setError("Restart Codara once to enable session deletion.");
       return;
     }
-    const memoryScope: WorkerSessionMemoryScope = deleteMemory
-      ? session.runtime === "claude"
-        ? "claude-project"
-        : "codex-all"
-      : "none";
+    const memoryScope: WorkerSessionMemoryScope = workerSessionMemoryScope(
+      session.runtime,
+      deleteMemory,
+    );
     setBusyId(`${session.runtime}:${session.sessionId}`);
     setError(null);
     setNotice(null);
     try {
       const result = await deleteSession({
         runtime: session.runtime,
+        nativeClaudeProfileId: session.nativeClaudeProfileId,
         nativeCodexProfileId: session.nativeCodexProfileId,
+        nativeGrokProfileId: session.nativeGrokProfileId,
         sessionId: session.sessionId,
         cwd: session.cwd,
         transcriptPath: session.transcriptPath,
@@ -3285,7 +3290,9 @@ function SessionsSettings({
       try {
         const result = await deleteSession({
           runtime: session.runtime,
+          nativeClaudeProfileId: session.nativeClaudeProfileId,
           nativeCodexProfileId: session.nativeCodexProfileId,
+          nativeGrokProfileId: session.nativeGrokProfileId,
           sessionId: session.sessionId,
           cwd: session.cwd,
           transcriptPath: session.transcriptPath,
@@ -3429,7 +3436,8 @@ function SessionsSettings({
               ? "This removes the local transcript and cannot be undone. Close a running copy of the session before deleting it."
               : "This removes each local transcript and cannot be undone. Close any running copies of these sessions before deleting them."}
           </div>
-          {pendingDelete.kind === "one" ? (
+          {pendingDelete.kind === "one" &&
+          workerSessionMemoryDeleteOption(pendingDelete.session.runtime) ? (
             <label
               style={{
                 display: "flex",
@@ -3446,16 +3454,17 @@ function SessionsSettings({
                 onChange={(event) => setDeleteMemory(event.currentTarget.checked)}
               />
               <span>
-                {pendingDelete.session.runtime === "claude"
-                  ? "Also delete this Claude project's auto-memory. This affects every Claude session sharing that project memory."
-                  : "Also delete ALL local Codex memories. This affects every Codex project and session on this machine."}
+                {
+                  workerSessionMemoryDeleteOption(pendingDelete.session.runtime)
+                    ?.detail
+                }
               </span>
             </label>
-          ) : (
+          ) : pendingDelete.kind === "many" ? (
             <div style={{ color: "var(--muted)", fontSize: 10, lineHeight: 1.4 }}>
               Local agent memory is kept. Delete a session individually to also remove its memory.
             </div>
-          )}
+          ) : null}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 7 }}>
             <FooterButton
               disabled={bulkBusy}

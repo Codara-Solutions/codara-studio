@@ -280,7 +280,10 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
 // running in main. Stashing the full buffer here and replaying it on the next
 // mount preserves same-process workspace continuity. Cold app hydration
 // deliberately ignores persisted scrollback.
-const MAX_XTERM_BUFFER_SNAPSHOTS = 64;
+const MAX_XTERM_BUFFER_SNAPSHOTS = 16;
+const MAX_XTERM_SNAPSHOT_TEXT_CHARS = 512 * 1024;
+const MAX_XTERM_SNAPSHOT_PENDING_BYTES = 1024 * 1024;
+const MAX_XTERM_SNAPSHOT_CACHE_BYTES = 16 * 1024 * 1024;
 // A snapshot is the xterm buffer text captured at unmount PLUS any raw bytes
 // that arrived while the pane was hidden (and therefore never reached xterm,
 // so `captureXtermBuffer` by construction can't see them). On the next mount
@@ -290,21 +293,54 @@ const MAX_XTERM_BUFFER_SNAPSHOTS = 64;
 interface XtermBufferSnapshot {
   text: string;
   pendingBytes: Uint8Array | null;
+  viewportFromBottom: number;
 }
 const xtermBufferSnapshots = new Map<string, XtermBufferSnapshot>();
+let xtermBufferSnapshotBytes = 0;
+
+function xtermBufferSnapshotSize(snapshot: XtermBufferSnapshot): number {
+  // V8 commonly stores JS strings as one- or two-byte strings. Count two so
+  // the cache remains bounded even when terminal output contains non-Latin
+  // text, then add the typed-array payload exactly.
+  return snapshot.text.length * 2 + (snapshot.pendingBytes?.byteLength ?? 0);
+}
+
+function forgetXtermBufferSnapshot(sessionId: string): void {
+  const previous = xtermBufferSnapshots.get(sessionId);
+  if (!previous) return;
+  xtermBufferSnapshotBytes = Math.max(
+    0,
+    xtermBufferSnapshotBytes - xtermBufferSnapshotSize(previous),
+  );
+  xtermBufferSnapshots.delete(sessionId);
+}
 
 function rememberXtermBufferSnapshot(
   sessionId: string,
   snapshot: XtermBufferSnapshot,
 ): void {
-  // Keep the cache finite across many closed/switched panes. Each snapshot is
-  // already line-limited; this caps the number of sessions that can retain one.
-  xtermBufferSnapshots.delete(sessionId);
-  xtermBufferSnapshots.set(sessionId, snapshot);
-  while (xtermBufferSnapshots.size > MAX_XTERM_BUFFER_SNAPSHOTS) {
+  // A line limit alone is not a memory limit: a tool can print a single
+  // multi-megabyte JSON line. Cap both halves of a snapshot before retaining
+  // it, then enforce a process-wide byte budget as well as an entry count.
+  const text = snapshot.text.length > MAX_XTERM_SNAPSHOT_TEXT_CHARS
+    ? snapshot.text.slice(-MAX_XTERM_SNAPSHOT_TEXT_CHARS)
+    : snapshot.text;
+  const pendingBytes =
+    snapshot.pendingBytes &&
+    snapshot.pendingBytes.byteLength > MAX_XTERM_SNAPSHOT_PENDING_BYTES
+      ? snapshot.pendingBytes.slice(-MAX_XTERM_SNAPSHOT_PENDING_BYTES)
+      : snapshot.pendingBytes;
+  const bounded = { ...snapshot, text, pendingBytes };
+  forgetXtermBufferSnapshot(sessionId);
+  xtermBufferSnapshots.set(sessionId, bounded);
+  xtermBufferSnapshotBytes += xtermBufferSnapshotSize(bounded);
+  while (
+    xtermBufferSnapshots.size > MAX_XTERM_BUFFER_SNAPSHOTS ||
+    xtermBufferSnapshotBytes > MAX_XTERM_SNAPSHOT_CACHE_BYTES
+  ) {
     const oldest = xtermBufferSnapshots.keys().next().value;
     if (!oldest) break;
-    xtermBufferSnapshots.delete(oldest);
+    forgetXtermBufferSnapshot(oldest);
   }
 }
 // Matches dev-server-style local URLs (vite, next dev, webpack, ...). Anchors
@@ -1453,7 +1489,7 @@ export function useTerminalSession({
         ? null
         : xtermBufferSnapshots.get(sessionId);
       if (rawTailReattachRef.current) {
-        xtermBufferSnapshots.delete(sessionId);
+        forgetXtermBufferSnapshot(sessionId);
       }
       if (liveSnapshot) {
         // Replay the cached buffer, then any bytes that arrived while the pane
@@ -1472,7 +1508,20 @@ export function useTerminalSession({
         replayPending = true;
         const finishReplay = () => {
           replayPending = false;
-          xtermBufferSnapshots.delete(sessionId);
+          forgetXtermBufferSnapshot(sessionId);
+          const frame = window.requestAnimationFrame(() => {
+            try {
+              const buffer = term.buffer.active;
+              const target = Math.max(
+                0,
+                buffer.baseY - liveSnapshot.viewportFromBottom,
+              );
+              term.scrollToLine(target);
+            } catch {
+              /* the pane may have unmounted again before replay finished */
+            }
+          });
+          cleanups.push(() => window.cancelAnimationFrame(frame));
         };
         if (replay) {
           term.write(`${normalizeForTerminalReplay(replay)}\r\n`, () => {
@@ -3300,7 +3349,12 @@ export function useTerminalSession({
             scrollbackLineLimitRef.current,
           );
           if (text.length > 0 || (pendingBytes && pendingBytes.length > 0)) {
-            rememberXtermBufferSnapshot(sessionId, { text, pendingBytes });
+            const buffer = dyingTerm.buffer.active;
+            rememberXtermBufferSnapshot(sessionId, {
+              text,
+              pendingBytes,
+              viewportFromBottom: Math.max(0, buffer.baseY - buffer.viewportY),
+            });
           }
         } catch {
           /* best-effort; an inaccessible buffer just means no scrollback restore */
@@ -3346,6 +3400,12 @@ export function useTerminalSession({
           line: buffer.viewportY,
           atBottom: buffer.viewportY >= buffer.baseY,
         };
+      } else if (!viewportBeforeHideRef.current) {
+        // A pane can mount for the first time underneath an inactive tab or a
+        // background workspace. It has no visible viewport to capture yet, but
+        // its xterm may already be receiving a Codex/Claude startup frame.
+        // First reveal should follow that live output, not expose row zero.
+        viewportBeforeHideRef.current = { line: 0, atBottom: true };
       }
       hiddenReplayPendingRef.current = false;
       return;
@@ -3430,27 +3490,39 @@ export function useTerminalSession({
     // The host can finish expanding one paint later when it sits inside a
     // flex/absolute stack or a tab transition. Re-fit on the next frame so
     // xterm doesn't stay pinned to the smaller first-pass row count.
-    const raf = window.requestAnimationFrame(() => {
+    // scheduleFitRetry deliberately runs for three animation frames because a
+    // flex/absolute terminal host can report an intermediate size. FitAddon can
+    // reset xterm's viewport on ANY of those frames, so restoring scroll only
+    // after frame one still left Codex at the top. Restore after each matching
+    // frame; the last callback wins after the final fit while the whole sequence
+    // remains under ~50 ms.
+    let raf: number | null = null;
+    let remainingRestoreFrames = 3;
+    let rendererRecovered = false;
+    const restoreAfterFit = () => {
+      raf = null;
       try {
         resizeXtermForOwner();
       } catch {
         /* ignore late layout churn */
       }
-      // After the final fit (rows settled), force a full repaint and reload the
-      // WebGL context if it was lost while hidden. Without this the pane can
-      // return from a tab switch rendering all black — the WebGL canvas
-      // (preserveDrawingBuffer:false) composites black until a draw, and xterm
-      // only repaints dirtied rows. Runs once per re-activation, not on typing.
-      recoverRendererRef.current?.();
-      // Fit/repaint can reset xterm's viewport while a hidden full-screen TUI
-      // is being revealed. Put the user back exactly where they left it; a
-      // pane that was following live output continues following the bottom.
+      if (!rendererRecovered) {
+        rendererRecovered = true;
+        // Force a full repaint and recreate a lost WebGL context before
+        // restoring the viewport into the final renderer.
+        recoverRendererRef.current?.();
+      }
       const term = termRef.current;
       if (term && savedViewport) {
         if (savedViewport.atBottom) term.scrollToBottom();
         else term.scrollToLine(savedViewport.line);
       }
-    });
+      remainingRestoreFrames -= 1;
+      if (remainingRestoreFrames > 0) {
+        raf = window.requestAnimationFrame(restoreAfterFit);
+      }
+    };
+    raf = window.requestAnimationFrame(restoreAfterFit);
     // Read-only mirrors and input-blocked watch panes don't grab keyboard
     // focus on reveal: they drop every keystroke, so stealing focus from e.g.
     // a blocked-worker answer input would silently eat the user's typing. An
@@ -3460,7 +3532,9 @@ export function useTerminalSession({
     if (!readOnlyRef.current && !inputBlockedRef.current && !modalDialogIsOpen()) {
       termRef.current?.focus();
     }
-    return () => window.cancelAnimationFrame(raf);
+    return () => {
+      if (raf !== null) window.cancelAnimationFrame(raf);
+    };
   }, [resizeXtermForOwner, visible]);
 
   // System sleep does not necessarily toggle React's `visible` prop, so the

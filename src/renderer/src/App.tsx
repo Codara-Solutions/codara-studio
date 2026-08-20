@@ -43,12 +43,7 @@ import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
-import WorkerSessionPicker, {
-  type WorkerSessionPickerRequest,
-} from "./components/WorkerSessionPicker";
-import RunSwitcher from "./components/RunSwitcher";
-import { CopyBranchDeleteDialog } from "./components/CopyBranchDialogs";
-import CreateCopyDialog from "./components/CreateCopyDialog";
+import type { WorkerSessionPickerRequest } from "./components/WorkerSessionPicker";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
@@ -71,6 +66,7 @@ import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
+import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import { emitLocalToast } from "./notifications/local-toast";
@@ -101,7 +97,6 @@ import {
 } from "./tabs/workbenchRouting";
 import type { CoraView } from "./components/chat/cora-view";
 import { basename } from "./path-utils";
-import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
 import { buildBindingTable, type BindingTable } from "./shortcuts/bindings";
 import { chordToHint } from "./shortcuts/chord";
@@ -153,15 +148,23 @@ function workerTabBrandColor(runtime: string | null | undefined): string | undef
   return brand ? agentBrandColor(brand) : undefined;
 }
 
-// Keep the heavyweight settings surfaces out of the startup bundle, but warm
-// their chunks as soon as the workbench has an idle slice. Without this, the
-// first click has to fetch, parse, and evaluate several thousand lines before
-// React can paint anything, which reads as a missed/laggy click.
+// Closed dialogs and pickers stay out of the startup runtime. Their chunks are
+// local files and begin loading as soon as the corresponding user intent is
+// handled, so normal sessions do not retain UI code they never opened.
 const loadSettingsDialog = () => import("./components/SettingsDialog");
 const loadAgentCapabilitiesDialog = () => import("./components/AgentCapabilitiesDialog");
 const SettingsDialog = lazy(loadSettingsDialog);
 const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
+const WorkerSessionPicker = lazy(() => import("./components/WorkerSessionPicker"));
+const RunSwitcher = lazy(() => import("./components/RunSwitcher"));
+const CreateCopyDialog = lazy(() => import("./components/CreateCopyDialog"));
+const CopyBranchDeleteDialog = lazy(() =>
+  import("./components/CopyBranchDialogs").then((module) => ({
+    default: module.CopyBranchDeleteDialog,
+  })),
+);
+const ShortcutsDialog = lazy(() => import("./shortcuts/ShortcutsDialog"));
 const EditorStack = lazy(() => import("./tabs/EditorStack"));
 const RunsStack = lazy(() => import("./tabs/RunsStack"));
 const AutomationsStack = lazy(() => import("./tabs/AutomationsStack"));
@@ -358,6 +361,24 @@ function countRunningTerminalWorkers(tabs: Tab[]): number {
     (count, tab) => count + (tab.kind === "terminal" ? countRunningWorkerLeaves(tab.root) : 0),
     0,
   );
+}
+
+function hasLiveAgentTerminal(tabs: Tab[]): boolean {
+  for (const tab of tabs) {
+    if (tab.kind !== "terminal") continue;
+    let live = false;
+    forEachTerminalLeaf(tab.root, (leaf) => {
+      if (
+        leaf.agentSession?.active === true ||
+        leaf.worker?.state === "running" ||
+        leaf.worker?.agentRunning === true
+      ) {
+        live = true;
+      }
+    });
+    if (live) return true;
+  }
+  return false;
 }
 
 function normalizedWorkspaceRailOrder(
@@ -2052,23 +2073,6 @@ export default function App() {
     };
     window.addEventListener("spark:open-settings", handler);
     return () => window.removeEventListener("spark:open-settings", handler);
-  }, []);
-
-  // Warm both large dialog chunks after the initial workbench paint. The
-  // timeout keeps this deterministic on a busy renderer where requestIdleCallback
-  // might otherwise wait indefinitely. Dynamic imports are module-cached, so
-  // the explicit preload and React.lazy always share the same evaluation.
-  useEffect(() => {
-    const preload = () => {
-      void loadSettingsDialog();
-      void loadAgentCapabilitiesDialog();
-    };
-    if (typeof window.requestIdleCallback === "function") {
-      const id = window.requestIdleCallback(preload, { timeout: 1200 });
-      return () => window.cancelIdleCallback(id);
-    }
-    const id = window.setTimeout(preload, 250);
-    return () => window.clearTimeout(id);
   }, []);
 
   // Mirror the workspaces list through a ref so the orchestration listener
@@ -4708,6 +4712,22 @@ export default function App() {
     tabs.inactiveWorkspaceLayouts,
     validWorkspaceIds,
   ]);
+  const liveTerminalWorkspaceIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const placement of agentTerminalPlacementsRef.current.values()) {
+      if (placement.workspaceId) ids.add(placement.workspaceId);
+    }
+    for (const layout of tabs.inactiveWorkspaceLayouts) {
+      // Full-screen agent TUIs live in xterm's alternate buffer, which cannot
+      // be flattened into a lossless text snapshot. Keep those renderers alive
+      // until the foreground agent exits; idle shells remain eligible for the
+      // bounded warm-workspace policy below.
+      if (hasLiveAgentTerminal(layout.tabs)) ids.add(layout.workspaceId);
+    }
+    // Placement and foreground-state mutations accompany a layout mutation;
+    // those are the render-driving values for this ref-backed registry.
+    return ids;
+  }, [tabs.tabs, tabs.inactiveWorkspaceLayouts]);
 
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {
@@ -5816,6 +5836,7 @@ export default function App() {
               tabs={tabs}
               workspace={activeWorkspace}
               validWorkspaceIds={validWorkspaceIds}
+              liveTerminalWorkspaceIds={liveTerminalWorkspaceIds}
               shell={terminalShell}
               terminalScrollbackLineLimit={settings.terminalScrollbackLineLimit}
               runs={runs}
@@ -5978,22 +5999,32 @@ export default function App() {
           </Suspense>
         )}
 
-        {shortcutsOpen ? <ShortcutsDialog onClose={closeShortcuts} /> : null}
+        {shortcutsOpen ? (
+          <Suspense fallback={null}>
+            <ShortcutsDialog onClose={closeShortcuts} />
+          </Suspense>
+        ) : null}
 
-        <WorkerSessionPicker
-          request={workerSessionPicker}
-          onClose={() => setWorkerSessionPicker(null)}
-        />
+        {workerSessionPicker ? (
+          <Suspense fallback={null}>
+            <WorkerSessionPicker
+              request={workerSessionPicker}
+              onClose={() => setWorkerSessionPicker(null)}
+            />
+          </Suspense>
+        ) : null}
 
         {runSwitcherOpen ? (
-          <RunSwitcher
-            runs={globalRuns.runs.filter(
-              (r) => !r.automationId && !isBoardCardRun(r),
-            )}
-            workspaces={workspaces}
-            onClose={() => setRunSwitcherOpen(false)}
-            onSelectRun={handleSelectRunAnywhere}
-          />
+          <Suspense fallback={null}>
+            <RunSwitcher
+              runs={globalRuns.runs.filter(
+                (r) => !r.automationId && !isBoardCardRun(r),
+              )}
+              workspaces={workspaces}
+              onClose={() => setRunSwitcherOpen(false)}
+              onSelectRun={handleSelectRunAnywhere}
+            />
+          </Suspense>
         ) : null}
 
         <SearchPanel
@@ -6026,44 +6057,48 @@ export default function App() {
           />
         )}
         {createCopyDialogWs && (
-          <CreateCopyDialog
-            workspace={createCopyDialogWs}
-            busy={createCopyBusy}
-            error={createCopyError}
-            onDismissError={() => setCreateCopyError(null)}
-            onClose={() => {
-              if (!createCopyBusy) {
-                setCreateCopyDialogWs(null);
-                setCreateCopyError(null);
+          <Suspense fallback={null}>
+            <CreateCopyDialog
+              workspace={createCopyDialogWs}
+              busy={createCopyBusy}
+              error={createCopyError}
+              onDismissError={() => setCreateCopyError(null)}
+              onClose={() => {
+                if (!createCopyBusy) {
+                  setCreateCopyDialogWs(null);
+                  setCreateCopyError(null);
+                }
+              }}
+              onCreateNew={(name) =>
+                void createCopyBranchWs(createCopyDialogWs, { newBranch: name }).catch(
+                  () => undefined,
+                )
               }
-            }}
-            onCreateNew={(name) =>
-              void createCopyBranchWs(createCopyDialogWs, { newBranch: name }).catch(
-                () => undefined,
-              )
-            }
-            onOpenBranch={(b) =>
-              void createCopyBranchWs(createCopyDialogWs, {
-                checkoutBranch: b.name,
-                checkoutIsRemote: b.isRemote,
-              }).catch(() => undefined)
-            }
-          />
+              onOpenBranch={(b) =>
+                void createCopyBranchWs(createCopyDialogWs, {
+                  checkoutBranch: b.name,
+                  checkoutIsRemote: b.isRemote,
+                }).catch(() => undefined)
+              }
+            />
+          </Suspense>
         )}
         {pendingCopyDelete?.copyBranch && (
-          <CopyBranchDeleteDialog
-            workspaceName={pendingCopyDelete.name}
-            branch={pendingCopyDelete.copyBranch.branch}
-            busy={copyDeleteBusy}
-            error={copyDeleteError}
-            onCancel={() => {
-              if (!copyDeleteBusy) {
-                setPendingCopyDelete(null);
-                setCopyDeleteError(null);
-              }
-            }}
-            onConfirm={confirmCopyDelete}
-          />
+          <Suspense fallback={null}>
+            <CopyBranchDeleteDialog
+              workspaceName={pendingCopyDelete.name}
+              branch={pendingCopyDelete.copyBranch.branch}
+              busy={copyDeleteBusy}
+              error={copyDeleteError}
+              onCancel={() => {
+                if (!copyDeleteBusy) {
+                  setPendingCopyDelete(null);
+                  setCopyDeleteError(null);
+                }
+              }}
+              onConfirm={confirmCopyDelete}
+            />
+          </Suspense>
         )}
       </div>
 
@@ -6337,8 +6372,11 @@ interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
   // Ids of all existing workspaces — used to prune deleted workspaces from the
-  // mounted-but-hidden terminal stacks (see terminalWorkspaceLayers).
+  // bounded terminal workspace layers (see terminalWorkspaceLayers).
   validWorkspaceIds: ReadonlySet<string>;
+  // Workspaces with a bridge-created terminal or a live full-screen agent TUI.
+  // They stay mounted even when outside the normal one-workspace warm budget.
+  liveTerminalWorkspaceIds: ReadonlySet<string>;
   shell: ShellInfo | null;
   terminalScrollbackLineLimit: number;
   runs: RunState[];
@@ -6420,6 +6458,7 @@ const Workspace = React.memo(function Workspace({
   tabs,
   workspace,
   validWorkspaceIds,
+  liveTerminalWorkspaceIds,
   shell,
   terminalScrollbackLineLimit,
   runs,
@@ -6520,35 +6559,35 @@ const Workspace = React.memo(function Workspace({
   // per-workspace write-backs — deliberately out of scope here.
   const noopTerminalCb = useCallback(() => {}, []);
 
-  // One terminal layer per kept-alive workspace: the ACTIVE workspace driven by
-  // the live tab store, plus every visited-or-bridge-initialized inactive
-  // workspace driven by its frozen layout. Rendering them all mounted (only the
-  // active one visible) is what keeps each workspace's xterm — colors,
-  // alt-screen TUI frame, real scrollback — alive across a switch, instead of
-  // disposing it and replaying a lossy gray text snapshot. Keyed AND sorted by
-  // workspaceId so React preserves each stack's instance (and its live PTYs)
-  // as it moves between the active and hidden roles. The active layer is keyed
-  // off `tabsWorkspaceId` (not App's activeId) so its key always agrees with
-  // `tabs.tabs`, which lags by one render during a switch.
+  // Keep the current workspace and one recently-used workspace mounted. Each
+  // TerminalStack owns xterm buffers plus a DOM/WebGL renderer, so keeping every
+  // visited workspace hidden made renderer RAM grow for the whole app session.
+  // Older layouts stay in useTabs and their PTYs pause into bounded backlogs;
+  // useTerminalSession snapshots the visible buffer before disposal and
+  // restores it on return. Bridge-owned background terminals are exempt because
+  // their first mount is what creates the PTY the bridge is waiting for.
   const terminalWorkspaceLayers = useMemo(() => {
-    const layers: Array<{ workspaceId: string; active: boolean; tabs: Tab[] }> = [];
-    const seen = new Set<string>();
     const activeWorkspaceId = tabs.tabsWorkspaceId;
-    if (activeWorkspaceId) {
-      layers.push({ workspaceId: activeWorkspaceId, active: true, tabs: tabs.tabs });
-      seen.add(activeWorkspaceId);
-    }
-    for (const layout of tabs.inactiveWorkspaceLayouts) {
-      if (seen.has(layout.workspaceId)) continue;
-      if (!validWorkspaceIds.has(layout.workspaceId)) continue; // pruned: deleted
-      layers.push({ workspaceId: layout.workspaceId, active: false, tabs: layout.tabs });
-      seen.add(layout.workspaceId);
-    }
-    layers.sort((a, b) =>
-      a.workspaceId < b.workspaceId ? -1 : a.workspaceId > b.workspaceId ? 1 : 0,
-    );
-    return layers;
-  }, [tabs.tabsWorkspaceId, tabs.tabs, tabs.inactiveWorkspaceLayouts, validWorkspaceIds]);
+    const activeLayout = activeWorkspaceId
+      ? { workspaceId: activeWorkspaceId, tabs: tabs.tabs }
+      : null;
+    return selectTerminalWorkspaceLayers(
+      activeLayout,
+      tabs.inactiveWorkspaceLayouts,
+      validWorkspaceIds,
+      liveTerminalWorkspaceIds,
+    ).map((layer) => ({
+      workspaceId: layer.workspaceId,
+      active: layer.active,
+      tabs: layer.value.tabs,
+    }));
+  }, [
+    tabs.tabsWorkspaceId,
+    tabs.tabs,
+    tabs.inactiveWorkspaceLayouts,
+    validWorkspaceIds,
+    liveTerminalWorkspaceIds,
+  ]);
 
   // Tabs the top strip renders: chat + workspace-level tabs only. Run-owned
   // tabs (workers, Runs, run-tagged previews) are surfaced inside the chat
@@ -7225,13 +7264,9 @@ const Workspace = React.memo(function Workspace({
           onChanged={onGitChanged}
           onCloseTab={handleTabClose}
         />
-        {/* One mounted TerminalStack per kept-alive workspace. Only the active
-            one is visible/interactive; the rest stay mounted-but-hidden so
-            their live xterms + PTYs survive a workspace switch (no dispose, no
-            lossy gray snapshot/replay). Hidden stacks get null activeId (every
-            pane is non-interactive) but continue writing into their in-memory
-            xterm buffers; no-op write-backs keep them from corrupting the active
-            workspace's tab store. */}
+        {/* A bounded set of mounted TerminalStacks. The active workspace is
+            visible; one recent workspace stays warm for instant switching and
+            bridge-owned background terminals stay mounted while in use. */}
         {terminalWorkspaceLayers.map((layer) => {
           const isActive = layer.active;
           return (

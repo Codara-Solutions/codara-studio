@@ -83,6 +83,15 @@ async function main() {
     "revealing a Codex terminal restores bottom-follow or its prior line",
     /savedViewport\.atBottom\) term\.scrollToBottom\(\);[\s\S]*term\.scrollToLine\(savedViewport\.line\)/.test(terminalSource),
   );
+  check(
+    "a Codex terminal first created while hidden follows the bottom on reveal",
+    terminalSource.includes("viewportBeforeHideRef.current = { line: 0, atBottom: true }"),
+  );
+  check(
+    "the viewport is restored after all three delayed fit frames",
+    terminalSource.includes("let remainingRestoreFrames = 3") &&
+      terminalSource.includes("requestAnimationFrame(restoreAfterFit)"),
+  );
 
   // ---- never-visited background workspace placement ----
 

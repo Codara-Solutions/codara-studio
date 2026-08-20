@@ -47,6 +47,10 @@ import {
 } from "./navigation-allowlist";
 import { E2E_BACKGROUND, hideWindowFromDesktop, revealWindow } from "./e2e-background";
 import { safeUserDataOverride } from "./private-user-data";
+import {
+  cleanupNativeCliActivePointerArtifacts,
+  cleanupRetiredCodexHomeEnvironment,
+} from "./orchestration/native-cli-terminal-cleanup";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -56,6 +60,15 @@ let runStoreMod: typeof import("./orchestration/run-store") | undefined;
 async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
   runStoreMod ??= await import("./orchestration/run-store");
   return runStoreMod;
+}
+
+// Account selection used to export a per-account CODEX_HOME. Clear only that
+// retired Codara value before any child process can inherit it; every account
+// now shares ~/.codex and switching replaces auth.json only. Custom homes
+// outside Codara remain untouched.
+const retiredCodexHome = cleanupRetiredCodexHomeEnvironment(process.env);
+if (retiredCodexHome.removedKeys.length > 0) {
+  console.info("[main] cleared retired Codara CODEX_HOME selector");
 }
 
 app.setName("Codara Studio");
@@ -981,10 +994,7 @@ app.whenReady().then(async () => {
   // feature: delete the pointer symlinks and generated env.sh it kept under
   // <codara-home>/cli/active/. Once they are gone this is a no-op, and
   // anything unrecognized in that directory is left alone and logged.
-  void import("./orchestration/native-cli-terminal-cleanup")
-    .then(({ cleanupNativeCliActivePointerArtifacts }) =>
-      cleanupNativeCliActivePointerArtifacts(codaraHome()),
-    )
+  void cleanupNativeCliActivePointerArtifacts(codaraHome())
     .then((result) => {
       for (const refusal of result.refused) {
         console.warn(

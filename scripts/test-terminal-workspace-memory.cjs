@@ -1,0 +1,141 @@
+// Regression contracts for Codara's terminal renderer memory budget.
+
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const esbuild = require("esbuild");
+
+const ROOT = path.resolve(__dirname, "..");
+const ENTRY = path.join(
+  ROOT,
+  "src",
+  "renderer",
+  "src",
+  "tabs",
+  "terminalWorkspaceLayers.ts",
+);
+const SESSION = path.join(
+  ROOT,
+  "src",
+  "renderer",
+  "src",
+  "components",
+  "Terminal",
+  "useTerminalSession.ts",
+);
+const TERMINAL_STACK = path.join(
+  ROOT,
+  "src",
+  "renderer",
+  "src",
+  "tabs",
+  "TerminalStack.tsx",
+);
+const APP = path.join(ROOT, "src", "renderer", "src", "App.tsx");
+
+let failures = 0;
+function check(name, condition, detail = "") {
+  if (!condition) failures += 1;
+  console.log(`${condition ? "PASS" : "FAIL"} ${name}${condition || !detail ? "" : `: ${detail}`}`);
+}
+
+async function main() {
+  const outDir = path.join(os.tmpdir(), `codara-terminal-memory-${process.pid}`);
+  const outfile = path.join(outDir, "layers.cjs");
+  fs.mkdirSync(outDir, { recursive: true });
+  await esbuild.build({
+    entryPoints: [ENTRY],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+  });
+  const { selectTerminalWorkspaceLayers } = require(outfile);
+
+  const layout = (workspaceId) => ({ workspaceId });
+  const valid = new Set(["a", "b", "c", "d", "bridge"]);
+  const selected = selectTerminalWorkspaceLayers(
+    layout("d"),
+    [layout("a"), layout("b"), layout("c")],
+    valid,
+  );
+  check(
+    "only active and most-recent inactive workspaces keep renderers",
+    selected.map((item) => item.workspaceId).sort().join(",") === "c,d",
+    selected.map((item) => item.workspaceId).join(","),
+  );
+  check(
+    "the active layer stays marked active",
+    selected.find((item) => item.workspaceId === "d")?.active === true,
+  );
+
+  const withBridge = selectTerminalWorkspaceLayers(
+    layout("d"),
+    [layout("bridge"), layout("a"), layout("b")],
+    valid,
+    new Set(["bridge"]),
+  );
+  check(
+    "bridge-owned background terminals bypass the warm-workspace cap",
+    withBridge.map((item) => item.workspaceId).sort().join(",") === "b,bridge,d",
+    withBridge.map((item) => item.workspaceId).join(","),
+  );
+
+  const pruned = selectTerminalWorkspaceLayers(
+    layout("d"),
+    [layout("deleted"), layout("b")],
+    valid,
+  );
+  check(
+    "deleted workspaces never retain a terminal renderer",
+    !pruned.some((item) => item.workspaceId === "deleted"),
+  );
+
+  const source = fs.readFileSync(SESSION, "utf8");
+  const stackSource = fs.readFileSync(TERMINAL_STACK, "utf8");
+  const appSource = fs.readFileSync(APP, "utf8");
+  check(
+    "running agent TUIs bypass the warm-workspace cap",
+    appSource.includes("function hasLiveAgentTerminal") &&
+      appSource.includes("leaf.agentSession?.active === true") &&
+      appSource.includes('leaf.worker?.state === "running"') &&
+      appSource.includes("liveTerminalWorkspaceIds"),
+  );
+  check(
+    "snapshot count is strictly bounded",
+    source.includes("const MAX_XTERM_BUFFER_SNAPSHOTS = 16"),
+  );
+  check(
+    "snapshot cache also has a process-wide byte budget",
+    source.includes("MAX_XTERM_SNAPSHOT_CACHE_BYTES") &&
+      source.includes("xtermBufferSnapshotBytes > MAX_XTERM_SNAPSHOT_CACHE_BYTES"),
+  );
+  check(
+    "workspace remount restores the viewport distance from the bottom",
+    source.includes("viewportFromBottom") &&
+      source.includes("buffer.baseY - liveSnapshot.viewportFromBottom"),
+  );
+  check(
+    "hidden panes keep their live renderer and exact TUI buffer",
+    stackSource.includes("writeWhileHidden") &&
+      !stackSource.includes("suspendWebglWhenHidden"),
+  );
+  check(
+    "a terminal first revealed after a hidden mount follows live output",
+    source.includes("viewportBeforeHideRef.current = { line: 0, atBottom: true }"),
+  );
+  check(
+    "viewport restoration survives every delayed fit frame",
+    source.includes("let remainingRestoreFrames = 3") &&
+      source.includes("raf = window.requestAnimationFrame(restoreAfterFit)"),
+  );
+
+  fs.rmSync(outDir, { recursive: true, force: true });
+  if (failures > 0) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

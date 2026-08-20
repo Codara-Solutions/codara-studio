@@ -14,6 +14,10 @@ import {
 } from "../lib/agent-brand";
 import type { TerminalAgentSession } from "../tabs/types";
 import {
+  workerSessionMemoryDeleteOption,
+  workerSessionMemoryScope,
+} from "../lib/worker-session-memory";
+import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
@@ -210,18 +214,19 @@ export default function WorkerSessionPicker({
       setRowError({ key, message: "Restart Codara once to enable session deletion." });
       return;
     }
-    const memoryScope: WorkerSessionMemoryScope = deleteMemory
-      ? session.runtime === "claude"
-        ? "claude-project"
-        : "codex-all"
-      : "none";
+    const memoryScope: WorkerSessionMemoryScope = workerSessionMemoryScope(
+      session.runtime,
+      deleteMemory,
+    );
     setDeletingKey(key);
     setRowError(null);
     setNotice(null);
     try {
       const result = await deleteSession({
         runtime: session.runtime,
+        nativeClaudeProfileId: session.nativeClaudeProfileId,
         nativeCodexProfileId: session.nativeCodexProfileId,
+        nativeGrokProfileId: session.nativeGrokProfileId,
         sessionId: session.sessionId,
         cwd: session.cwd || target.cwd,
         transcriptPath: session.transcriptPath,
@@ -682,6 +687,7 @@ function SessionRow({
   // warnings. Hover also drives the row highlight, keeping the two in step.
   const [trashHover, setTrashHover] = useState(false);
   const tint = agentBrandColor(session.runtime);
+  const memoryDeleteOption = workerSessionMemoryDeleteOption(session.runtime);
   const shell: React.CSSProperties = {
     minHeight: ROW_HEIGHT,
     borderBottom: "1px solid var(--rule-soft)",
@@ -725,25 +731,27 @@ function SessionRow({
           This removes the local transcript and cannot be undone. Close a running copy of the
           session before deleting it.
         </div>
-        <label
-          title={memoryScopeDetail(session.runtime)}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            color: deleteMemory ? "var(--danger)" : "var(--ink-dim)",
-            fontSize: 9.5,
-            lineHeight: 1.4,
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={deleteMemory}
-            disabled={deleting}
-            onChange={(event) => onDeleteMemoryChange(event.currentTarget.checked)}
-          />
-          <span>{memoryScopeLabel(session.runtime)}</span>
-        </label>
+        {memoryDeleteOption ? (
+          <label
+            title={memoryDeleteOption.detail}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+              color: deleteMemory ? "var(--danger)" : "var(--ink-dim)",
+              fontSize: 9.5,
+              lineHeight: 1.4,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={deleteMemory}
+              disabled={deleting}
+              onChange={(event) => onDeleteMemoryChange(event.currentTarget.checked)}
+            />
+            <span>{memoryDeleteOption.label}</span>
+          </label>
+        ) : null}
         {error ? (
           <div role="alert" style={{ color: "var(--danger)", fontSize: 9.5, lineHeight: 1.45 }}>
             {error}
@@ -890,20 +898,6 @@ function SessionRow({
       </span>
     </div>
   );
-}
-
-// Short forms of the Settings → Sessions memory copy. The row only has one
-// line for it, so the full sentence rides along as the label's tooltip.
-function memoryScopeLabel(runtime: WorkerSessionRuntime): string {
-  return runtime === "claude"
-    ? "Also delete this Claude project's auto-memory"
-    : "Also delete ALL local Codex memories";
-}
-
-function memoryScopeDetail(runtime: WorkerSessionRuntime): string {
-  return runtime === "claude"
-    ? "Also delete this Claude project's auto-memory. This affects every Claude session sharing that project memory."
-    : "Also delete ALL local Codex memories. This affects every Codex project and session on this machine.";
 }
 
 function TrashIcon() {

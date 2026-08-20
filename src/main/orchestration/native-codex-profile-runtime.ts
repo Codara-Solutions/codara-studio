@@ -7,7 +7,6 @@ import {
 import {
   buildCodexCliSharedEnvironment,
   defaultCodexCliProfileLeases,
-  resolveCodexCliExecutionProfile,
   type CodexCliExecutionProfile,
 } from "./codex-cli-profile-execution";
 import {
@@ -40,9 +39,11 @@ export async function resolveNewNativeCodexProfile(
   if (active !== defaultProfileId) {
     await activateCodexCliAccount(nativeCodexProfileStore, defaultProfileId);
   }
-  const selected = await resolveCodexCliExecutionProfile(nativeCodexProfileStore, {
+  // Resolve account metadata directly. The more general execution-profile
+  // helper intentionally builds an isolated CODEX_HOME for `codex login` and
+  // `codex logout`; normal terminals must never even construct that env.
+  const selected = await nativeCodexProfileStore.resolveProfile({
     useDefault: true,
-    baseEnv,
   });
   return {
     ...selected,

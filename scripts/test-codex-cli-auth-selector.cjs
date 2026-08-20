@@ -45,6 +45,15 @@ async function main() {
     const managed = path.join(store.rootDir, "accounts", PROFILE, "auth.json");
     writePrivate(live, "PERSONAL_SECRET");
     writePrivate(managed, "MANAGED_SECRET");
+    const sharedState = path.join(store.personalHomeDir, "state_5.sqlite");
+    const legacySplitState = path.join(
+      store.rootDir,
+      "accounts",
+      PROFILE,
+      "state_5.sqlite",
+    );
+    writePrivate(sharedState, "SHARED_SESSION_INDEX");
+    writePrivate(legacySplitState, "LEGACY_SPLIT_INDEX");
 
     assert.equal(await T.ensureCodexCliAuthVault(store), "personal");
     assert.equal(
@@ -56,6 +65,16 @@ async function main() {
     assert.equal(await T.activateCodexCliAccount(store, PROFILE), "personal");
     assert.equal(fs.readFileSync(live, "utf8"), "MANAGED_SECRET");
     assert.equal(fs.statSync(live).mode & 0o777, 0o600);
+    assert.equal(
+      fs.readFileSync(sharedState, "utf8"),
+      "SHARED_SESSION_INDEX",
+      "account switching never replaces the shared session database",
+    );
+    assert.equal(
+      fs.readFileSync(legacySplitState, "utf8"),
+      "LEGACY_SPLIT_INDEX",
+      "legacy account databases are never activated or copied over shared state",
+    );
 
     // Simulate Codex refreshing its live token, then switch back. The refresh
     // must be saved into only that account's vault slot.

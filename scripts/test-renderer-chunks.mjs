@@ -143,6 +143,13 @@ const featureOnlyPackages = [
     pattern: /\/node_modules\/(?:rehype-raw|rehype-sanitize|parse5)\//,
   },
 ];
+const closedSurfaceModules = [
+  "components/WorkerSessionPicker.tsx",
+  "components/RunSwitcher.tsx",
+  "components/CreateCopyDialog.tsx",
+  "components/CopyBranchDialogs.tsx",
+  "shortcuts/ShortcutsDialog.tsx",
+];
 const allModuleIds = chunks.flatMap((chunk) => Object.keys(chunk.modules));
 const staticModuleIds = staticChunks.flatMap((chunk) => Object.keys(chunk.modules));
 for (const feature of featureOnlyPackages) {
@@ -155,6 +162,17 @@ for (const feature of featureOnlyPackages) {
     eagerIds.length,
     0,
     `${feature.label} packages entered the static closure:\n${eagerIds.join("\n")}`,
+  );
+}
+for (const suffix of closedSurfaceModules) {
+  const normalizedSuffix = `/src/renderer/src/${suffix}`;
+  assert(
+    allModuleIds.some((id) => normalizeId(id).endsWith(normalizedSuffix)),
+    `${suffix} was not found in the analysis bundle`,
+  );
+  assert(
+    !staticModuleIds.some((id) => normalizeId(id).endsWith(normalizedSuffix)),
+    `${suffix} entered the startup closure`,
   );
 }
 
@@ -195,6 +213,7 @@ const staticBrotliBytes = staticChunks.reduce(
 console.log("PASS renderer chunk graph has no generic vendor chunk or circular imports");
 console.log(`PASS React is owned only by ${reactOwners[0].fileName}`);
 console.log("PASS Mermaid, QR code, and Markdown preview-only packages remain outside the static closure");
+console.log("PASS closed dialogs and pickers remain outside the startup closure");
 console.log(
   `PASS static renderer JS closure ${staticRawBytes.toLocaleString()} raw / ${staticGzipBytes.toLocaleString()} gzip / ${staticBrotliBytes.toLocaleString()} Brotli (${staticChunks.length} chunks, ${STATIC_RAW_BUDGET_BYTES.toLocaleString()}-byte raw budget)`,
 );
