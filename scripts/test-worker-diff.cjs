@@ -79,6 +79,56 @@ async function main() {
       null,
       "remote workspaces do not run a local Git capture",
     );
+
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), "codara-worker-plain-test-"));
+    const baseline = path.join(plain, ".artifacts", "before");
+    try {
+      assert.equal(
+        await T.captureWorkerFilesystemBaseline({
+          cwd: plain,
+          paths: ["calculator.html"],
+          destination: baseline,
+        }),
+        true,
+        "captures an empty declared path before a worker creates it",
+      );
+      fs.writeFileSync(path.join(plain, "calculator.html"), "one\ntwo\nthree\n");
+      fs.writeFileSync(path.join(plain, "unowned.txt"), "ignore me\n");
+      const created = await T.captureWorkerFilesystemDiff({
+        cwd: plain,
+        paths: ["calculator.html"],
+        baselineDir: baseline,
+      });
+      assert.deepEqual(created?.summary, {
+        fileCount: 1,
+        additions: 3,
+        deletions: 0,
+        files: [{ path: "calculator.html", additions: 3, deletions: 0 }],
+      });
+
+      assert.equal(
+        await T.captureWorkerFilesystemBaseline({
+          cwd: plain,
+          paths: ["calculator.html"],
+          destination: baseline,
+        }),
+        true,
+      );
+      fs.writeFileSync(path.join(plain, "calculator.html"), "one changed\ntwo\nfour\nfive\n");
+      const edited = await T.captureWorkerFilesystemDiff({
+        cwd: plain,
+        paths: ["calculator.html"],
+        baselineDir: baseline,
+      });
+      assert.deepEqual(edited?.summary, {
+        fileCount: 1,
+        additions: 3,
+        deletions: 2,
+        files: [{ path: "calculator.html", additions: 3, deletions: 2 }],
+      });
+    } finally {
+      fs.rmSync(plain, { recursive: true, force: true });
+    }
     console.log("worker diff contracts passed");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });

@@ -3004,6 +3004,8 @@ export interface WorkerArtifactPaths {
   rawLog: string;
   finalReportJson: string;
   diffPatch: string;
+  /** Pre-launch copy of declared files for truthful diffs outside Git repos. */
+  diffBaselineDir: string;
 }
 
 export interface WorkerDiffFile {

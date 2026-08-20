@@ -1568,6 +1568,14 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   const doneWorkers = item.workers.filter(
     (worker) => worker.status === "accepted",
   ).length;
+  const stepDiff = item.workers.reduce(
+    (total, worker) => ({
+      fileCount: total.fileCount + (worker.diff?.fileCount ?? 0),
+      additions: total.additions + (worker.diff?.additions ?? 0),
+      deletions: total.deletions + (worker.diff?.deletions ?? 0),
+    }),
+    { fileCount: 0, additions: 0, deletions: 0 },
+  );
   const hasBody = Boolean(item.goal) || item.workers.length > 0;
 
   return (
@@ -1590,6 +1598,13 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
         <span style={STEP_INDEX_TEXT_STYLE}>Step {item.index} ·</span>
         <span style={STEP_TITLE_STYLE}>{item.title}</span>
         <span style={STEP_GOAL_INLINE_STYLE}>{item.goal}</span>
+        {stepDiff.fileCount > 0 && (
+          <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span>{stepDiff.fileCount} {stepDiff.fileCount === 1 ? "file" : "files"}</span>
+            <span style={{ color: "var(--ok)" }}>+{stepDiff.additions}</span>
+            <span style={{ color: "var(--danger)" }}>−{stepDiff.deletions}</span>
+          </span>
+        )}
         {item.workers.length > 0 && (
           <span style={STEP_PROGRESS_STYLE}>
             {doneWorkers} of {item.workers.length} {item.workers.length === 1 ? "worker" : "workers"}

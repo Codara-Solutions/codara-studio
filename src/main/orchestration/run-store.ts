@@ -273,7 +273,11 @@ import {
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
 import { shouldResumeForUserMessage } from "./user-message-resume";
-import { captureWorkerDiff } from "./worker-diff";
+import {
+  captureWorkerDiff,
+  captureWorkerFilesystemBaseline,
+  captureWorkerFilesystemDiff,
+} from "./worker-diff";
 import * as pty from "../pty-manager";
 import {
   deleteAgentTerminalRun,
@@ -12800,6 +12804,23 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     }
   }
 
+  // A checkpoint SHA gives Git workspaces their exact before/after diff. For
+  // ordinary folders (for example Playground) keep a bounded copy of only the
+  // paths this worker owns so those edits receive the same useful summary.
+  if (taskWritesWorkspace(task) && !attempt.preWorkerCheckpointSha) {
+    const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
+    const declaredPaths = task.allowedPaths.length > 0
+      ? task.allowedPaths
+      : task.expectedOutputs;
+    if (cwd && declaredPaths.length > 0) {
+      await captureWorkerFilesystemBaseline({
+        cwd,
+        paths: declaredPaths,
+        destination: paths.diffBaselineDir,
+      }).catch(() => false);
+    }
+  }
+
   // Mailbox-traffic observability rides the batch lifecycle: the first worker
   // with a mailbox to launch opens the run's watcher, the last one to finish
   // closes it. Gated on provisioning rather than group membership so
@@ -17793,6 +17814,7 @@ function workerArtifactPaths(
     rawLog: join(attemptDir, "raw.log"),
     finalReportJson: join(attemptDir, "final-report.json"),
     diffPatch: join(attemptDir, "changes.patch"),
+    diffBaselineDir: join(attemptDir, "diff-baseline"),
   };
 }
 
@@ -17815,7 +17837,6 @@ async function measureAttemptDiff(
   changedPaths?: string[],
 ): Promise<Awaited<ReturnType<typeof captureWorkerDiff>>> {
   const source = diffCaptureSource(run, attempt);
-  if (!source) return null;
   // A sandbox belongs only to this worker, so its whole tree is exact. Shared
   // workspaces prefer the final report, then the task's declared ownership,
   // so a parallel sibling's disjoint edits are not attributed to this row.
@@ -17826,8 +17847,23 @@ async function measureAttemptDiff(
       ? changedPaths
       : task?.allowedPaths.length
         ? task.allowedPaths
+        : task?.expectedOutputs.length
+          ? task.expectedOutputs
         : undefined;
-  return captureWorkerDiff({ ...source, paths });
+  if (source) return captureWorkerDiff({ ...source, paths });
+  const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
+  if (!cwd || !paths?.length) return null;
+  const artifacts = workerArtifactPaths(
+    run.id,
+    task?.stepId,
+    attempt.workerTaskId,
+    attempt.id,
+  );
+  return captureWorkerFilesystemDiff({
+    cwd,
+    paths,
+    baselineDir: artifacts.diffBaselineDir,
+  });
 }
 
 async function persistAttemptDiff(
