@@ -1425,7 +1425,11 @@ function KindIcon({ tab }: { tab: Tab }) {
         </span>
       );
     }
-    const workerRuntime = terminalWorkerRuntime(tab);
+    const workerRuntimes = terminalWorkerRuntimes(tab);
+    if (workerRuntimes.length > 1) {
+      return <SplitAgentsMark runtimes={workerRuntimes} />;
+    }
+    const workerRuntime = workerRuntimes[0];
     if (workerRuntime) {
       return (
         <span style={{ display: "inline-flex", flex: "0 0 14px", color: `var(--agent-${workerRuntime})` }}>
@@ -1671,15 +1675,48 @@ function pickerItemTone(accent: PickerAccent): {
   return agentBrandTone(accent);
 }
 
-function terminalWorkerRuntime(tab: TerminalTab): BrandRuntime | null {
+function terminalWorkerRuntimes(tab: TerminalTab): BrandRuntime[] {
+  const runtimes: BrandRuntime[] = [];
   for (const leaf of collectLeaves(tab.root)) {
     // Only while the agent TUI is actually in the pane. A durable
     // agentSession pointer is kept for resume after Claude exits, and must
     // not keep the Claude mark on a shell tab.
     const runtime = liveTerminalRuntime(leaf.worker);
-    if (runtime) return runtime;
+    if (runtime && !runtimes.includes(runtime)) runtimes.push(runtime);
   }
-  return null;
+  return runtimes;
+}
+
+/** A tiny split-grid mark for a tab hosting more than one live agent family. */
+function SplitAgentsMark({ runtimes }: { runtimes: BrandRuntime[] }) {
+  return (
+    <span
+      aria-label={`${runtimes.length} agent types in split terminal`}
+      title={runtimes.map((runtime) => runtime[0].toUpperCase() + runtime.slice(1)).join(" + ")}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(2, 5px)",
+        gridAutoRows: 5,
+        gap: 1.5,
+        width: 12,
+        height: 12,
+        flex: "0 0 14px",
+        alignContent: "center",
+      }}
+    >
+      {runtimes.slice(0, 4).map((runtime) => (
+        <span
+          key={runtime}
+          aria-hidden
+          style={{
+            borderRadius: 1.5,
+            background: `var(--agent-${runtime})`,
+            boxShadow: "inset 0 0 0 1px color-mix(in oklch, white 22%, transparent)",
+          }}
+        />
+      ))}
+    </span>
+  );
 }
 
 function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {

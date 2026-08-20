@@ -4173,7 +4173,7 @@ export default function App() {
 
   // Bound per-runtime so the tab strip's "+" rows get referentially stable
   // callbacks (TabBar is memoized). Both land on the same picker the
-  // worker.newClaude / worker.newCodex commands open.
+  // worker.newClaude / worker.newCodex / worker.newGrok commands open.
   const openClaudeWorkerSessions = useCallback(
     () => openShortcutWorkerSessions("claude"),
     [openShortcutWorkerSessions],
@@ -4771,8 +4771,10 @@ export default function App() {
       // The picker lives on its own `worker.*Sessions` commands.
       "worker.newClaude": () => handleNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
       "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
+      "worker.newGrok": () => handleNewWorkerTab(GROK_LAUNCH_COMMAND),
       "worker.claudeSessions": () => openShortcutWorkerSessions("claude"),
       "worker.codexSessions": () => openShortcutWorkerSessions("codex"),
+      "worker.grokSessions": () => openShortcutWorkerSessions("grok"),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);

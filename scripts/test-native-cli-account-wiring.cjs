@@ -17,6 +17,9 @@ const settings = read("src/renderer/src/components/SettingsDialog.tsx");
 const settingsView = read("src/renderer/src/components/AccountCards.tsx");
 const app = read("src/renderer/src/App.tsx");
 const tabs = read("src/renderer/src/tabs/useTabs.ts");
+const tabBar = read("src/renderer/src/tabs/TabBar.tsx");
+const picker = read("src/renderer/src/components/WorkerSessionPicker.tsx");
+const shortcutCommands = read("src/renderer/src/shortcuts/commands.ts");
 const session = read(
   "src/renderer/src/components/Terminal/useTerminalSession.ts",
 );
@@ -131,6 +134,27 @@ assert.match(
 );
 assert.match(app, /cancelLogin\(\{ launchToken \}\)/);
 assert.match(app, /event\.preventDefault\(\)/);
+assert.doesNotMatch(
+  app,
+  /title:\s*`\$\{titlePrefix\}\s*·/,
+  "an account switch must keep the normal terminal tab title",
+);
+assert.match(tabBar, /workerRuntimes\.length > 1/);
+assert.match(tabBar, /<SplitAgentsMark runtimes=\{workerRuntimes\}/);
+assert.match(picker, /const \[selectedIndex, setSelectedIndex\] = useState\(-1\)/);
+assert.match(picker, /historyKeyboardArmedRef\.current = true/);
+assert.match(
+  picker,
+  /if \(!historyKeyboardArmedRef\.current \|\| !session\) \{\s*void launchNew\(\)/,
+);
+for (const [id, label, handler] of [
+  ["worker.newGrok", "New Grok worker pane", "handleNewWorkerTab(GROK_LAUNCH_COMMAND)"],
+  ["worker.grokSessions", "Open Grok worker sessions…", 'openShortcutWorkerSessions("grok")'],
+]) {
+  assert.match(shortcutCommands, new RegExp(`\\| "${id}"`));
+  assert.match(shortcutCommands, new RegExp(`id: "${id}"[\\s\\S]*?label: "${label}"`));
+  assert.ok(app.includes(`"${id}": () => ${handler}`), `${id} must have an App handler`);
+}
 
 // Settings presents one merged Accounts section and explains the actual switch
 // boundary: Cora changes now, while a CLI needs a fresh process.

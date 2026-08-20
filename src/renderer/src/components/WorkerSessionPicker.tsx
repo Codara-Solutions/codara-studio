@@ -41,7 +41,7 @@ export default function WorkerSessionPicker({
   const [sessions, setSessions] = useState<WorkerSessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState(-1);
   const [launching, setLaunching] = useState(false);
   // Delete state. One row is armed at a time, mirroring the single
   // `pendingDelete` the Settings → Sessions tab keeps.
@@ -57,6 +57,10 @@ export default function WorkerSessionPicker({
   // fires mouseenter, moves the highlight again and scrolls again — a loop
   // that costs a forced layout per turn. Pointer moves never scroll.
   const keyboardMoveRef = useRef(false);
+  // Enter means New session until the user deliberately enters history with
+  // an arrow key. Pointer hover may preview a row but never steals that safe
+  // default.
+  const historyKeyboardArmedRef = useRef(false);
   // The request the current `sessions` belong to. A background re-list that
   // resolves after the picker was reopened for another runtime/cwd is dropped
   // instead of overwriting the newer list.
@@ -68,7 +72,8 @@ export default function WorkerSessionPicker({
     let cancelled = false;
     setSessions([]);
     setError(null);
-    setSelectedIndex(0);
+    setSelectedIndex(-1);
+    historyKeyboardArmedRef.current = false;
     setLoading(true);
     setLaunching(false);
     setPendingDeleteKey(null);
@@ -107,7 +112,7 @@ export default function WorkerSessionPicker({
   // Deleting the last row would leave the highlight past the end of the list.
   useEffect(() => {
     setSelectedIndex((index) =>
-      sessions.length === 0 ? 0 : Math.min(index, sessions.length - 1),
+      sessions.length === 0 ? -1 : Math.min(index, sessions.length - 1),
     );
   }, [sessions.length]);
 
@@ -285,16 +290,20 @@ export default function WorkerSessionPicker({
       }
       return;
     }
-    const session = sessions[selectedIndex];
+    const session = selectedIndex >= 0 ? sessions[selectedIndex] : undefined;
     const armed = session ? sessionKey(session) === pendingDeleteKey : false;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       keyboardMoveRef.current = true;
-      setSelectedIndex((index) => (index + 1) % sessions.length);
+      historyKeyboardArmedRef.current = true;
+      setSelectedIndex((index) => (index < 0 ? 0 : (index + 1) % sessions.length));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       keyboardMoveRef.current = true;
-      setSelectedIndex((index) => (index - 1 + sessions.length) % sessions.length);
+      historyKeyboardArmedRef.current = true;
+      setSelectedIndex((index) =>
+        index < 0 ? sessions.length - 1 : (index - 1 + sessions.length) % sessions.length,
+      );
     } else if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
       // Auto-repeat must never drive this branch. Held down, it would arm a
@@ -305,7 +314,11 @@ export default function WorkerSessionPicker({
       else armDelete(session);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      if (event.repeat || !session) return;
+      if (event.repeat) return;
+      if (!historyKeyboardArmedRef.current || !session) {
+        void launchNew();
+        return;
+      }
       // On an armed row the whole row reads as a confirm prompt, so Enter
       // commits the delete rather than resuming.
       if (armed) void confirmDelete(session);
@@ -524,8 +537,8 @@ export default function WorkerSessionPicker({
             fontSize: 10,
           }}
         >
-          <span>↵  open</span>
-          <span>↑↓  move</span>
+          <span>↵  new session</span>
+          <span>↑↓  choose history</span>
           <span>⌫  delete</span>
         </footer>
       </section>

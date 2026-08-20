@@ -159,6 +159,7 @@ async function main() {
   feed("p1", "\x1b]633;E;claude\x07");
   // v2.1.170 banner: word gaps are cursor-forward moves, not spaces.
   feed("p1", "\x1b[1m\x1b[3CClaude\x1b[1CCode\x1b[38;2;153;153;153m\x1b[22m\x1b[1Cv2.1.170\r\n");
+  mod.noteTerminalUserInput("p1");
   // v2.1.17x stats footer (live-captured frames): no "esc to interrupt".
   feed("p1", "\x1b[38;2;215;119;87m\x1b[11;1H✻ Pouncing… \x1b[38;2;153;153;153m(3s · ↓ 1 tokens)\x1b[K");
   await sleep(1200);
@@ -211,6 +212,7 @@ async function main() {
   // A turn-complete message (kind=done) — a second blocked alert here would
   // be correctly deduped by the same-kind cooldown, which is also why this
   // scenario uses done rather than approval text.
+  mod.noteTerminalUserInput("p1");
   feed("p1", "\x1b]9;Codex: turn completed — refactor finished\x07");
   check("OSC 9 turn-complete fired immediately", alertCount() === 3);
   check(
@@ -227,6 +229,7 @@ async function main() {
   feed("p1", "\x1b]9;9;C:\\Users\\jorge\x07");
   feed("p1", "\x1b]9;4;1;50\x07");
   check("ConEmu OSC 9 subcommands (cwd, progress) produced no toast", alertCount() === beforeConEmu);
+  mod.noteTerminalUserInput("p1");
   feed("p1", "\x1b]9;3 tests failed in suite\x07");
   check(
     "digit-leading free text still toasts",
@@ -241,6 +244,7 @@ async function main() {
   T.activeContext = { workspaceId: "ws2", tabId: "elsewhere", paneId: null };
   feed("p4", "\x1b]633;E;claude\x07");
   feed("p4", "Claude Code v2.1.170\r\n");
+  mod.noteTerminalUserInput("p4");
   feed("p4", "✻ Percolating… (2s · ↓ 10 tokens)");
   await sleep(1700);
   feed("p4", "✻ Percolating… (4s · ↓ 80 tokens)"); // footer is the LAST paint before silence
@@ -275,6 +279,7 @@ async function main() {
   // ── Scenario 5: agent exits mid-work (prompt marker) → immediate done ──
   feed("p2", "\x1b]633;E;claude --continue\x07");
   feed("p2", "Claude Code v2.1.170\r\n");
+  mod.noteTerminalUserInput("p2");
   // Legacy (≤2.1.1x) footer — keeps the old "esc to interrupt" path covered.
   feed("p2", "✻ Frobnicating… (esc to interrupt · 12s)");
   await sleep(1700);
@@ -323,6 +328,7 @@ async function main() {
   // ── Scenario 8: a visible sibling split is not the selected input pane ──
   const beforeSibling = alertCount();
   T.activeContext = { workspaceId: "ws1", tabId: "t2", paneId: "p4" };
+  mod.noteTerminalUserInput("p2");
   feed("p2", "\x1b]9;Codex: turn completed in sibling pane\x07");
   check(
     "same-tab sibling pane still alerts because it is not selected",
@@ -335,8 +341,8 @@ async function main() {
   feed("p5", "\x1b]633;E;claude\x07Claude Code v2.1.209\r\n");
   feed("p5", "Do you trust the files in this folder?\r\n❯ 1. Yes\r\n  2. No");
   check(
-    "launch-time trust prompt alerts without a working-footer phase",
-    alertCount() === beforeStartupPrompt + 1 && T.alerts.at(-1).kind === "blocked",
+    "launch-time trust prompt stays quiet until a real task is submitted",
+    alertCount() === beforeStartupPrompt,
   );
 
   mod.noteTerminalUserInput("p5");

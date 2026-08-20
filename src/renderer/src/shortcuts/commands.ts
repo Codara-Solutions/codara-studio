@@ -43,8 +43,10 @@ export type CommandId =
   | "tab.cyclePrev"
   | "worker.newClaude"
   | "worker.newCodex"
+  | "worker.newGrok"
   | "worker.claudeSessions"
   | "worker.codexSessions"
+  | "worker.grokSessions"
   | "agent.cycleModel"
   | "agent.cycleEffort"
   | "agent.openModelPicker"
@@ -349,6 +351,12 @@ export const COMMANDS: Command[] = [
     defaultChords: [],
   },
   {
+    id: "worker.newGrok",
+    label: "New Grok worker pane",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
     id: "worker.claudeSessions",
     label: "Open Claude worker sessions…",
     group: "Workers",
@@ -357,6 +365,12 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.codexSessions",
     label: "Open Codex worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.grokSessions",
+    label: "Open Grok worker sessions…",
     group: "Workers",
     defaultChords: [],
   },
