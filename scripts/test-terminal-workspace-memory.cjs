@@ -23,6 +23,15 @@ const SESSION = path.join(
   "Terminal",
   "useTerminalSession.ts",
 );
+const VIEWPORT = path.join(
+  ROOT,
+  "src",
+  "renderer",
+  "src",
+  "components",
+  "Terminal",
+  "terminalViewport.ts",
+);
 const TERMINAL_STACK = path.join(
   ROOT,
   "src",
@@ -52,6 +61,16 @@ async function main() {
     logLevel: "silent",
   });
   const { selectTerminalWorkspaceLayers } = require(outfile);
+  const viewportOutfile = path.join(outDir, "viewport.cjs");
+  await esbuild.build({
+    entryPoints: [VIEWPORT],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: viewportOutfile,
+    logLevel: "silent",
+  });
+  const { preserveTerminalViewport } = require(viewportOutfile);
 
   const layout = (workspaceId) => ({ workspaceId });
   const valid = new Set(["a", "b", "c", "d", "bridge"]);
@@ -92,6 +111,51 @@ async function main() {
     !pruned.some((item) => item.workspaceId === "deleted"),
   );
 
+  {
+    const active = { baseY: 120, viewportY: 120 };
+    let followedBottom = false;
+    const terminal = {
+      buffer: { active },
+      scrollToBottom: () => {
+        followedBottom = true;
+        active.viewportY = active.baseY;
+      },
+      scrollToLine: (line) => {
+        active.viewportY = line;
+      },
+    };
+    preserveTerminalViewport(terminal, () => {
+      active.baseY = 84;
+      active.viewportY = 0;
+    });
+    check(
+      "a split-pane fit keeps an active agent following the bottom",
+      followedBottom && active.viewportY === 84,
+    );
+  }
+
+  {
+    const active = { baseY: 120, viewportY: 95 };
+    const terminal = {
+      buffer: { active },
+      scrollToBottom: () => {
+        active.viewportY = active.baseY;
+      },
+      scrollToLine: (line) => {
+        active.viewportY = line;
+      },
+    };
+    preserveTerminalViewport(terminal, () => {
+      active.baseY = 90;
+      active.viewportY = 0;
+    });
+    check(
+      "a split-pane fit preserves deliberate scrollback distance",
+      active.viewportY === 65,
+      String(active.viewportY),
+    );
+  }
+
   const source = fs.readFileSync(SESSION, "utf8");
   const stackSource = fs.readFileSync(TERMINAL_STACK, "utf8");
   const appSource = fs.readFileSync(APP, "utf8");
@@ -129,6 +193,11 @@ async function main() {
     "viewport restoration survives every delayed fit frame",
     source.includes("let remainingRestoreFrames = 3") &&
       source.includes("raf = window.requestAnimationFrame(restoreAfterFit)"),
+  );
+  check(
+    "every layout-driven terminal fit preserves its viewport",
+    source.includes("preserveTerminalViewport(term") &&
+      source.includes("preserveTerminalViewport(term, () => fit.fit())"),
   );
 
   fs.rmSync(outDir, { recursive: true, force: true });

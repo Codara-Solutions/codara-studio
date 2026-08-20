@@ -59,6 +59,7 @@ import {
 } from "./resume-policy";
 import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
+import { preserveTerminalViewport } from "./terminalViewport";
 
 export type { SparkOpenInput };
 
@@ -637,11 +638,15 @@ export function useTerminalSession({
     const externalGrid = externalGridRef.current;
     if (externalSizeOwnerRef.current && externalGrid) {
       if (term.cols !== externalGrid.cols || term.rows !== externalGrid.rows) {
-        term.resize(externalGrid.cols, externalGrid.rows);
+        preserveTerminalViewport(term, () => {
+          term.resize(externalGrid.cols, externalGrid.rows);
+        });
       }
       return;
     }
-    fitRef.current?.fit();
+    const fit = fitRef.current;
+    if (!fit) return;
+    preserveTerminalViewport(term, () => fit.fit());
   }, []);
   useEffect(() => {
     if (
