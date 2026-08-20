@@ -4030,7 +4030,7 @@ export default function App() {
     [],
   );
 
-  const handleNewWorkerTab = useCallback(
+  const handleNewWorkerPane = useCallback(
     (
       autorun: string,
       options?: { cwd?: string; session?: TerminalAgentSession | null },
@@ -4130,6 +4130,31 @@ export default function App() {
     [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
   );
 
+  // The top tab-strip "+" has a different scope from the "+" inside a
+  // terminal. Its worker rows always mint a separate terminal tab, even when
+  // the active terminal has an unused pane. The terminal-local menu supplies
+  // its own split callback through openPaneWorkerSessions below.
+  const launchWorkerInNewTerminalTab = useCallback(
+    (
+      autorun: string,
+      options?: { cwd?: string; session?: TerminalAgentSession | null },
+    ) => {
+      const { command: launchCommand, makeSession } = prepareWorkerLaunch(
+        autorun,
+        options?.session,
+      );
+      const launchRuntime =
+        options?.session?.runtime ?? runtimeFromAgentSessionLaunchCommand(launchCommand);
+      const cwd = options?.cwd ?? activeWorkspace?.cwd ?? undefined;
+      tabs.newTerminalTab(cwd, launchCommand, {
+        agentSession: makeSession(cwd),
+        manualAgentRuntime: launchRuntime ?? undefined,
+        color: workerTabBrandColor(launchRuntime),
+      });
+    },
+    [activeWorkspace?.cwd, prepareWorkerLaunch, tabs],
+  );
+
   const resolveWorkerLaunchCwd = useCallback((): string | null => {
     const current = tabsRef.current;
     const active = current.tabs.find((tab) => tab.id === current.activeId);
@@ -4159,32 +4184,55 @@ export default function App() {
             ? GROK_LAUNCH_COMMAND
             : CODEX_LAUNCH_COMMAND;
       if (!cwd) {
-        handleNewWorkerTab(freshCommand);
+        handleNewWorkerPane(freshCommand);
         return;
       }
       setWorkerSessionPicker({
         runtime,
         cwd,
-        launch: (command, session) => handleNewWorkerTab(command, { cwd, session }),
+        launch: (command, session) => handleNewWorkerPane(command, { cwd, session }),
       });
     },
-    [handleNewWorkerTab, resolveWorkerLaunchCwd],
+    [handleNewWorkerPane, resolveWorkerLaunchCwd],
   );
 
-  // Bound per-runtime so the tab strip's "+" rows get referentially stable
-  // callbacks (TabBar is memoized). Both land on the same picker the
-  // worker.newClaude / worker.newCodex / worker.newGrok commands open.
+  const openTabBarWorkerSessions = useCallback(
+    (runtime: WorkerSessionRuntime) => {
+      const cwd = resolveWorkerLaunchCwd();
+      const freshCommand =
+        runtime === "claude"
+          ? CLAUDE_LAUNCH_COMMAND
+          : runtime === "grok"
+            ? GROK_LAUNCH_COMMAND
+            : CODEX_LAUNCH_COMMAND;
+      if (!cwd) {
+        launchWorkerInNewTerminalTab(freshCommand);
+        return;
+      }
+      setWorkerSessionPicker({
+        runtime,
+        cwd,
+        launch: (command, session) =>
+          launchWorkerInNewTerminalTab(command, { cwd, session }),
+      });
+    },
+    [launchWorkerInNewTerminalTab, resolveWorkerLaunchCwd],
+  );
+
+  // Bound per runtime so the memoized TabBar gets stable callbacks. These
+  // deliberately use the tab-scoped launcher, while keyboard commands keep
+  // their pane-scoped behavior below.
   const openClaudeWorkerSessions = useCallback(
-    () => openShortcutWorkerSessions("claude"),
-    [openShortcutWorkerSessions],
+    () => openTabBarWorkerSessions("claude"),
+    [openTabBarWorkerSessions],
   );
   const openCodexWorkerSessions = useCallback(
-    () => openShortcutWorkerSessions("codex"),
-    [openShortcutWorkerSessions],
+    () => openTabBarWorkerSessions("codex"),
+    [openTabBarWorkerSessions],
   );
   const openGrokWorkerSessions = useCallback(
-    () => openShortcutWorkerSessions("grok"),
-    [openShortcutWorkerSessions],
+    () => openTabBarWorkerSessions("grok"),
+    [openTabBarWorkerSessions],
   );
   const openPaneWorkerSessions = useCallback(
     (
@@ -4769,9 +4817,9 @@ export default function App() {
       // Fresh-launch commands bypass the session picker entirely — rebinding
       // them to the picker broke existing muscle memory (Ctrl+Shift+ñ etc.).
       // The picker lives on its own `worker.*Sessions` commands.
-      "worker.newClaude": () => handleNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
-      "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
-      "worker.newGrok": () => handleNewWorkerTab(GROK_LAUNCH_COMMAND),
+      "worker.newClaude": () => handleNewWorkerPane(CLAUDE_LAUNCH_COMMAND),
+      "worker.newCodex": () => handleNewWorkerPane(CODEX_LAUNCH_COMMAND),
+      "worker.newGrok": () => handleNewWorkerPane(GROK_LAUNCH_COMMAND),
       "worker.claudeSessions": () => openShortcutWorkerSessions("claude"),
       "worker.codexSessions": () => openShortcutWorkerSessions("codex"),
       "worker.grokSessions": () => openShortcutWorkerSessions("grok"),
@@ -4918,7 +4966,7 @@ export default function App() {
       handleNewPreviewTab,
       handleNewTerminalTab,
       handleNewWhiteboard,
-      handleNewWorkerTab,
+      handleNewWorkerPane,
       openShortcutWorkerSessions,
       handleCloseChatTab,
       handleToggleLeft,
@@ -5365,7 +5413,7 @@ export default function App() {
   // and the CLI agent reads the file off disk.
 
   // Spawn a fresh worker pane in the same way the keyboard shortcut does
-  // (handleNewWorkerTab). Returns the new pane id so the caller can later
+  // (handleNewWorkerPane). Returns the new pane id so the caller can later
   // inject a prompt once the agent is up; null if no terminal tab exists
   // and we had to fall back to creating a whole new tab (no stable id).
   const spawnRoutedWorkerPane = useCallback(

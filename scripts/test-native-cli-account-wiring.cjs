@@ -20,6 +20,7 @@ const tabs = read("src/renderer/src/tabs/useTabs.ts");
 const tabBar = read("src/renderer/src/tabs/TabBar.tsx");
 const picker = read("src/renderer/src/components/WorkerSessionPicker.tsx");
 const shortcutCommands = read("src/renderer/src/shortcuts/commands.ts");
+const terminalStack = read("src/renderer/src/tabs/TerminalStack.tsx");
 const session = read(
   "src/renderer/src/components/Terminal/useTerminalSession.ts",
 );
@@ -148,13 +149,34 @@ assert.match(
   /if \(!historyKeyboardArmedRef\.current \|\| !session\) \{\s*void launchNew\(\)/,
 );
 for (const [id, label, handler] of [
-  ["worker.newGrok", "New Grok worker pane", "handleNewWorkerTab(GROK_LAUNCH_COMMAND)"],
+  ["worker.newGrok", "New Grok worker pane", "handleNewWorkerPane(GROK_LAUNCH_COMMAND)"],
   ["worker.grokSessions", "Open Grok worker sessions…", 'openShortcutWorkerSessions("grok")'],
 ]) {
   assert.match(shortcutCommands, new RegExp(`\\| "${id}"`));
   assert.match(shortcutCommands, new RegExp(`id: "${id}"[\\s\\S]*?label: "${label}"`));
   assert.ok(app.includes(`"${id}": () => ${handler}`), `${id} must have an App handler`);
 }
+assert.match(
+  app,
+  /const launchWorkerInNewTerminalTab = useCallback\([\s\S]*?tabs\.newTerminalTab\(cwd, launchCommand/,
+  "the tab-strip worker launcher must always create a terminal tab",
+);
+assert.match(
+  app,
+  /const openTabBarWorkerSessions = useCallback\([\s\S]*?launchWorkerInNewTerminalTab\(command, \{ cwd, session \}\)/,
+  "tab-strip session resumes must use the new-tab launcher too",
+);
+for (const runtime of ["claude", "codex", "grok"]) {
+  assert.ok(
+    app.includes(`() => openTabBarWorkerSessions("${runtime}")`),
+    `the tab-strip ${runtime} row must use tab scope`,
+  );
+}
+assert.match(
+  terminalStack,
+  /onOpenWorkerSessions: \(runtime\)[\s\S]*?splitRef\.current\(\s*tabId,\s*target\.paneId,\s*target\.direction,\s*command,\s*session/,
+  "the terminal-toolbar worker launcher must split inside its own tab",
+);
 
 // Settings presents one merged Accounts section and explains the actual switch
 // boundary: Cora changes now, while a CLI needs a fresh process.
