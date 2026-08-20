@@ -436,19 +436,13 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
             // empty husk. Saved boards come back as editor tabs instead.
             tab.kind !== "whiteboard" &&
             tab.kind !== "chat" &&
+            // A Cora-owned browser is a live tool surface, not durable
+            // workspace furniture. If the renderer reloads mid-run, Cora can
+            // reopen it through the preview bridge; if the run already ended,
+            // restoring it would promote an orphaned inner tab into a normal
+            // top-level browser and keep a Chromium process alive forever.
+            !(tab.kind === "preview" && Boolean(tab.runId)) &&
             !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
-        )
-        // A persisted preview's runId ties it to a run whose workbench is
-        // not selected at boot, which would hide it inside an inner tab
-        // strip with no owning run — effectively unreachable. Strip the
-        // runId so it restores as a plain, clickable top-strip preview.
-        .map((tab) =>
-          tab.kind === "preview" && tab.runId
-            ? (() => {
-                const { runId: _runId, ...rest } = tab;
-                return rest as Tab;
-              })()
-            : tab,
         ),
     );
     parsed.tabs = validateDockLeaves(parsed.tabs);
@@ -1268,6 +1262,8 @@ export interface UseTabsApi {
   // a deleted run can never re-surface them via its inner tab strip, so
   // leaving them would strand invisible, uncloseable browser tabs).
   closePreviewTabsFor: (runId: string) => void;
+  /** Close Cora-owned browsers even when their workspace is in the background. */
+  closePreviewTabsForInWorkspace: (workspaceId: string, runId: string) => void;
   // run.deleted cleanup for background workspaces: purge the dead run's owned
   // tabs from the frozen live-snapshot map and the inactive-layout mirror so
   // switching back can't restore a stranded (pill-less) active tab.
@@ -3619,6 +3615,42 @@ export function useTabs(
     [fireDispose],
   );
 
+  const closePreviewTabsForInWorkspace = useCallback(
+    (targetWorkspaceId: string, runId: string) => {
+      if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
+        closePreviewTabsFor(runId);
+        return;
+      }
+      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      if (!live) return;
+      const doomed = live.tabs.filter(
+        (tab): tab is PreviewTab => tab.kind === "preview" && tab.runId === runId,
+      );
+      if (doomed.length === 0) return;
+      const doomedIds = new Set(doomed.map((tab) => tab.id));
+      const nextTabs = live.tabs.filter((tab) => !doomedIds.has(tab.id));
+      let nextActiveId = live.activeId;
+      if (nextActiveId && doomedIds.has(nextActiveId)) {
+        nextActiveId =
+          nextTabs.find((tab) => tab.kind === "chat" && tab.id === runId)?.id
+          ?? nextTabs.find((tab) => !isRunOwnedTab(tab))?.id
+          ?? null;
+      }
+      const next = { tabs: nextTabs, activeId: nextActiveId };
+      liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
+      setInactiveWorkspaceLayouts((current) => {
+        let changed = false;
+        const layouts = current.map((layout) => {
+          if (layout.workspaceId !== targetWorkspaceId) return layout;
+          changed = true;
+          return { ...layout, ...next };
+        });
+        return changed ? layouts : current;
+      });
+    },
+    [closePreviewTabsFor],
+  );
+
   // run.deleted cleanup for workspaces that are NOT the active one. The
   // closers above only mutate the active workspace's tab store; a run living
   // in a background workspace keeps its owned tabs (chat, workers terminal,
@@ -3875,6 +3907,7 @@ export function useTabs(
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
       closePreviewTabsFor,
+      closePreviewTabsForInWorkspace,
       pruneDeletedRunTabsFromInactiveWorkspaces,
       openEditorTab,
       pinEditorTab,

@@ -27,6 +27,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const esbuild = require("esbuild");
@@ -134,6 +135,38 @@ function testBootSelection(resolveBootActiveTabId) {
   console.log("PASS a restored preview is never the tab the app boots onto");
 }
 
+function testCoraPreviewLifetime() {
+  const tabsSource = fs.readFileSync(
+    path.join(ROOT, "src/renderer/src/tabs/useTabs.ts"),
+    "utf8",
+  );
+  const appSource = fs.readFileSync(
+    path.join(ROOT, "src/renderer/src/App.tsx"),
+    "utf8",
+  );
+  assert.match(
+    tabsSource,
+    /!\(tab\.kind === "preview" && Boolean\(tab\.runId\)\)/,
+    "cold restore must discard Cora-owned preview tabs",
+  );
+  assert.doesNotMatch(
+    tabsSource,
+    /const \{ runId: _runId, \.\.\.rest \} = tab/,
+    "cold restore must never promote a Cora preview to a normal browser tab",
+  );
+  assert.match(
+    appSource,
+    /event\.type === "run\.status_updated"[\s\S]*closePreviewTabsForInWorkspace/,
+    "settled runs must close their webviews in active and background workspaces",
+  );
+  assert.match(
+    appSource,
+    /legacyCoraPreviewOwner\(tab\.url, runs\)/,
+    "the one-time migration must remove previews already orphaned by the old build",
+  );
+  console.log("PASS Cora browser tabs stay ephemeral and run-owned");
+}
+
 async function testLivenessProbe(isLoopbackPreviewServerUp) {
   const server = net.createServer((socket) => socket.end());
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -173,6 +206,7 @@ async function main() {
 
   testReplayTracker(createReplayTracker);
   testBootSelection(resolveBootActiveTabId);
+  testCoraPreviewLifetime();
   await testLivenessProbe(isLoopbackPreviewServerUp);
 
   console.log("all preview auto-open checks passed");

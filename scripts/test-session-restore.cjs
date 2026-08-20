@@ -71,6 +71,19 @@ async function main() {
     console.log(`${cond ? "PASS" : "FAIL"} ${name}`);
   };
 
+  const terminalSource = fs.readFileSync(
+    path.join(ROOT, "src", "renderer", "src", "components", "Terminal", "useTerminalSession.ts"),
+    "utf8",
+  );
+  check(
+    "tab/workspace hides remember the exact xterm viewport",
+    /viewportBeforeHideRef[\s\S]*line: buffer\.viewportY[\s\S]*atBottom: buffer\.viewportY >= buffer\.baseY/.test(terminalSource),
+  );
+  check(
+    "revealing a Codex terminal restores bottom-follow or its prior line",
+    /savedViewport\.atBottom\) term\.scrollToBottom\(\);[\s\S]*term\.scrollToLine\(savedViewport\.line\)/.test(terminalSource),
+  );
+
   // ---- never-visited background workspace placement ----
 
   const deferredPhone = appendAgentTerminalToWorkspaceLayout(

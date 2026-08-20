@@ -3334,10 +3334,19 @@ export function useTerminalSession({
   // those were previously on React's pre-paint path, and a few busy panes with
   // multi-megabyte backlogs made workspace clicks visibly stall.
   const prevVisibleRef = useRef<boolean | null>(null);
+  const viewportBeforeHideRef = useRef<{ line: number; atBottom: boolean } | null>(null);
   useLayoutEffect(() => {
     const prev = prevVisibleRef.current;
     prevVisibleRef.current = visible;
     if (!visible) {
+      const term = termRef.current;
+      if (term) {
+        const buffer = term.buffer.active;
+        viewportBeforeHideRef.current = {
+          line: buffer.viewportY,
+          atBottom: buffer.viewportY >= buffer.baseY,
+        };
+      }
       hiddenReplayPendingRef.current = false;
       return;
     }
@@ -3402,6 +3411,7 @@ export function useTerminalSession({
 
   useLayoutEffect(() => {
     if (!visible) return;
+    const savedViewport = viewportBeforeHideRef.current;
     try {
       resizeXtermForOwner();
     } catch {
@@ -3432,6 +3442,14 @@ export function useTerminalSession({
       // (preserveDrawingBuffer:false) composites black until a draw, and xterm
       // only repaints dirtied rows. Runs once per re-activation, not on typing.
       recoverRendererRef.current?.();
+      // Fit/repaint can reset xterm's viewport while a hidden full-screen TUI
+      // is being revealed. Put the user back exactly where they left it; a
+      // pane that was following live output continues following the bottom.
+      const term = termRef.current;
+      if (term && savedViewport) {
+        if (savedViewport.atBottom) term.scrollToBottom();
+        else term.scrollToLine(savedViewport.line);
+      }
     });
     // Read-only mirrors and input-blocked watch panes don't grab keyboard
     // focus on reveal: they drop every keystroke, so stealing focus from e.g.

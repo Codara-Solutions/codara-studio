@@ -1551,6 +1551,35 @@ export default function App() {
     });
   }, [runs]);
 
+  // One-time repair for layouts saved by the short-lived build that removed a
+  // runId from Cora browser tabs during hydration. Those tabs then appeared as
+  // ordinary browsers in unrelated workbench strips. Match only local files
+  // recorded in a settled run's result manifest; genuine user browser tabs and
+  // network pages are untouched. New layouts never need this because useTabs
+  // now drops run-owned previews instead of promoting them.
+  useEffect(() => {
+    if (
+      !booted ||
+      !activeId ||
+      runsWorkspaceId !== activeId ||
+      tabs.tabsWorkspaceId !== activeId
+    ) {
+      return;
+    }
+    const migrationKey = `spark.migration:cora-preview-ownership-v1:${activeId}`;
+    if (window.localStorage.getItem(migrationKey) === "done") return;
+    const orphanIds = tabs.tabs
+      .filter(
+        (tab): tab is PreviewTab =>
+          tab.kind === "preview" &&
+          !tab.runId &&
+          legacyCoraPreviewOwner(tab.url, runs) !== null,
+      )
+      .map((tab) => tab.id);
+    window.localStorage.setItem(migrationKey, "done");
+    for (const id of orphanIds) tabsRef.current.closeTab(id);
+  }, [activeId, booted, runs, runsWorkspaceId, tabs.tabs, tabs.tabsWorkspaceId]);
+
   useEffect(() => {
     if (!booted) return undefined;
 
@@ -1608,6 +1637,21 @@ export default function App() {
       // refresh per burst rather than one per event.
       runRefreshPendingRef.current.add(event.workspaceId);
       armRunRefresh();
+
+      // Browser tabs opened through Cora's preview bridge are tool surfaces.
+      // Tear their webviews down as soon as the owning run settles, including
+      // when that run finishes in a background workspace. User-opened browser
+      // tabs have no runId and are deliberately untouched.
+      if (event.type === "run.status_updated" && event.runId) {
+        const payload = event.payload as Record<string, unknown> | undefined;
+        const status = payload?.status ?? payload?.nextStatus;
+        if (status === "complete" || status === "failed" || status === "cancelled") {
+          tabsRef.current.closePreviewTabsForInWorkspace(
+            event.workspaceId,
+            event.runId,
+          );
+        }
+      }
 
       // A deletion can race with the orchestration runner still flushing the
       // run file; a delayed second pass picks up the settled state. We just
@@ -6201,6 +6245,43 @@ function isTabVisibleForRun(tab: Tab, activeRunId: string | null): boolean {
   );
 }
 
+function legacyCoraPreviewOwner(url: string, runs: RunState[]): RunState | null {
+  let filePath: string;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "file:") return null;
+    filePath = decodeURIComponent(parsed.pathname).replace(/\\/g, "/");
+    if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1);
+  } catch {
+    return null;
+  }
+  const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
+  for (const run of runs) {
+    if (!run.resultManifest || !["complete", "failed", "cancelled"].includes(run.status)) {
+      continue;
+    }
+    const manifestCwd = run.resultManifest.workspace.cwd;
+    const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
+    const cwd = normalize(
+      typeof manifestCwd === "string"
+        ? manifestCwd
+        : typeof snapshotCwd === "string"
+          ? snapshotCwd
+          : "",
+    );
+    if (!cwd) continue;
+    const owns = run.resultManifest.workspaceDelta.some((entry) => {
+      const path = normalize(entry.path);
+      const absolute = path.startsWith("/") || /^[A-Za-z]:\//.test(path)
+        ? path
+        : `${cwd}/${path}`;
+      return absolute === normalize(filePath);
+    });
+    if (owns) return run;
+  }
+  return null;
+}
+
 // Filter for what the top tab strip displays. Top strip = chat + workspace
 // tabs (editors, plain user terminals, user-opened previews). Anything
 // run-owned moves inside the chat panel.
@@ -6357,18 +6438,29 @@ const Workspace = React.memo(function Workspace({
     setLeafBootResumeConsumed,
     flushWorkspaceScrollbackNow,
   } = tabs;
+  // During a workspace switch, the tab snapshot and the run selection arrive
+  // in separate commits. Do not "repair" the entering workspace's active tab
+  // against the workspace we just left; that race was what occasionally moved
+  // users to a different tab on return.
+  const runScopeReady =
+    Boolean(workspace?.id) &&
+    tabs.tabsWorkspaceId === workspace?.id &&
+    runsWorkspaceId === workspace?.id;
   const visibleTabs = useMemo(
-    () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
-    [tabs.tabs, activeRunId],
+    () => runScopeReady
+      ? tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId))
+      : tabs.tabs,
+    [tabs.tabs, activeRunId, runScopeReady],
   );
   const effectiveActiveId = useMemo(
     () => resolveEffectiveActiveId(tabs.activeId, visibleTabs),
     [tabs.activeId, visibleTabs],
   );
   useEffect(() => {
+    if (!runScopeReady) return;
     if (!effectiveActiveId || tabs.activeId === effectiveActiveId) return;
     setActiveTab(effectiveActiveId);
-  }, [effectiveActiveId, tabs.activeId, setActiveTab]);
+  }, [effectiveActiveId, tabs.activeId, runScopeReady, setActiveTab]);
 
   // Stable no-op for the mounted-but-hidden workspace stacks. Their pane
   // write-backs (exit / cwd / agent-state / scrollback / …) must NOT reach the
