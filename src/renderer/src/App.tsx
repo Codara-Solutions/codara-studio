@@ -787,20 +787,14 @@ export default function App() {
       ) {
         return;
       }
-      const label = typeof event.detail?.label === "string"
-        ? event.detail.label.trim().slice(0, 80)
-        : "account";
       const command =
         runtime === "claude"
           ? CLAUDE_LAUNCH_COMMAND
           : runtime === "grok"
             ? GROK_LAUNCH_COMMAND
             : CODEX_LAUNCH_COMMAND;
-      const titlePrefix =
-        runtime === "claude" ? "Claude" : runtime === "grok" ? "Grok" : "Codex";
       newTerminalTab(activeWorkspace.cwd, command, {
         focus: true,
-        title: `${titlePrefix} · ${label}`,
         manualAgentRuntime: runtime,
         color: workerTabBrandColor(runtime),
         ...(runtime === "codex"

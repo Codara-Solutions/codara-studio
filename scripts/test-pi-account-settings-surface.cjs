@@ -228,7 +228,7 @@ assert.match(
   "an unsigned built-in CLI slot must not render as its own account card",
 );
 assert.match(settings, /unsigned built-in CLI slot is not an account/);
-assert.match(settings, /sign-ins Codara cannot safely match stay separate/);
+assert.match(settings, /Only a \*signed-in\* unmatched CLI can merge/);
 
 assert.match(settings, /function accountCardShowsUsage/);
 assert.match(usageUi, /connected && usage\.windows\.length === 0 && !usage\.limitReached/);

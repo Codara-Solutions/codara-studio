@@ -23,7 +23,6 @@ import {
   resolveClaudeCliExecutionProfile,
 } from "./claude-cli-profile-execution";
 import {
-  CODEX_CLI_AUTH_FILE,
   CODEX_CLI_PERSONAL_PROFILE_ID,
   codexCliManagedProfilePaths,
   CodexCliAccountProfileLeasedError,
@@ -77,6 +76,10 @@ import {
   nativeGrokProfileStore,
 } from "./native-grok-profile-runtime";
 import { isAgentRuntimeKind } from "../../shared/agent-families";
+import {
+  activateCodexCliAccount,
+  ensureCodexCliAuthVault,
+} from "./codex-cli-auth-selector";
 
 export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
 
@@ -482,6 +485,10 @@ export interface NativeCliAccountServiceOptions {
   loginPlanTtlMs?: number;
   tokenFactory?: () => string;
   now?: () => number;
+  /** Test seam. Production swaps only auth.json in the one shared Codex home. */
+  codexAuthSelector?: (profileId: string) => Promise<unknown>;
+  /** Test seam for the one-time migration of the historical personal login. */
+  codexAuthVaultInitializer?: () => Promise<unknown>;
 }
 
 export class NativeCliAccountService {
@@ -504,6 +511,8 @@ export class NativeCliAccountService {
   private readonly loginPlanTtlMs: number;
   private readonly tokenFactory: () => string;
   private readonly now: () => number;
+  private readonly codexAuthSelector: (profileId: string) => Promise<unknown>;
+  private readonly codexAuthVaultInitializer: () => Promise<unknown>;
   private readonly pendingLoginPlans = new Map<string, PendingLoginPlan>();
   private readonly expiredLoginTokens = new Map<string, number>();
   private readonly mutationTails = new Map<
@@ -550,6 +559,22 @@ export class NativeCliAccountService {
     this.processRunner = options.processRunner ?? runNativeCliAccountProcess;
     this.codexIdentityReader =
       options.codexIdentityReader ?? readCodexCliAccountIdentity;
+    this.codexAuthSelector =
+      options.codexAuthSelector ??
+      (options.codexStore
+        ? async () => undefined
+        : (profileId) => activateCodexCliAccount(this.codexStore, profileId));
+    this.codexAuthVaultInitializer =
+      options.codexAuthVaultInitializer ??
+      (options.codexStore
+        ? async () => undefined
+        : async () => {
+            const active = await ensureCodexCliAuthVault(this.codexStore);
+            const { defaultProfileId } = await this.codexStore.snapshot();
+            if (active !== defaultProfileId) {
+              await activateCodexCliAccount(this.codexStore, defaultProfileId);
+            }
+          });
     this.grokIdentityReader =
       options.grokIdentityReader ?? readGrokCliAccountIdentity;
     this.claudeIdentityReader =
@@ -674,7 +699,7 @@ export class NativeCliAccountService {
           authFile = profile.managed
             ? codexCliManagedProfilePaths(this.codexStore.rootDir, profile.id)
                 .authFile
-            : join(this.codexStore.personalHomeDir, CODEX_CLI_AUTH_FILE);
+            : this.codexStore.personalAuthFile;
         } catch {
           return;
         }
@@ -739,6 +764,7 @@ export class NativeCliAccountService {
         };
       }
       const store = runtime === "grok" ? this.grokStore : this.codexStore;
+      if (runtime === "codex") await this.codexAuthVaultInitializer();
       const inspection = await store.inspect();
       const identities =
         runtime === "grok"
@@ -985,6 +1011,17 @@ export class NativeCliAccountService {
           await this.grokStore.setDefaultProfile(profileId);
         } else {
           await this.codexStore.setDefaultProfile(profileId);
+          try {
+            await this.codexAuthSelector(profileId);
+          } catch (error) {
+            await this.codexStore
+              .setDefaultProfile(before.inspection.defaultProfileId)
+              .catch(() => undefined);
+            await this.codexAuthSelector(before.inspection.defaultProfileId).catch(
+              () => undefined,
+            );
+            throw error;
+          }
         }
         const inspection = await this.inspectRuntime(runtime);
         return {

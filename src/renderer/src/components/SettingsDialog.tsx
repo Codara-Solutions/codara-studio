@@ -2448,9 +2448,13 @@ function AccountsSettings() {
         });
         const opened = !window.dispatchEvent(event);
         setCliNotice(
-          opened
-            ? `Opened a new ${cliLabel} session with ${card.label}. Existing sessions keep their current sign-in.`
-            : `${card.label} will be used by new Studio ${cliLabel} sessions. Existing sessions keep their current sign-in.`,
+          runtime === "codex"
+            ? opened
+              ? `Opened ${cliLabel} with ${card.label}. New terminal sessions use this account too; existing Codex processes keep their current sign-in.`
+              : `${card.label} will be used by new ${cliLabel} and terminal sessions. Existing Codex processes keep their current sign-in.`
+            : opened
+              ? `Opened a new ${cliLabel} session with ${card.label}. Existing sessions keep their current sign-in.`
+              : `${card.label} will be used by new Studio ${cliLabel} sessions. Existing sessions keep their current sign-in.`,
         );
       })();
     },
@@ -2467,7 +2471,7 @@ function AccountsSettings() {
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="Accounts"
-        detail="Each account can be the one Cora uses, the one the terminal uses, or both. Cora switches immediately. A terminal switch opens a fresh Studio session. Verified matches share one card; sign-ins Codara cannot safely match stay separate."
+        detail="Each account can be the one Cora uses, the one the terminal uses, or both. Cora switches immediately. A CLI switch opens a fresh Studio session; already-running processes keep their sign-in. Verified matches share one card."
       />
       <div style={{ display: "grid", gap: 10 }}>
         {overview?.profiles || cliInspection ? (

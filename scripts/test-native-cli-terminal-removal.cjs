@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Pins the removal of the "use the Active account in your terminal" feature.
+// Pins the removal of the old combined native-CLI shell selector.
 //
 // The retired feature exported CLAUDE_CONFIG_DIR / CODEX_HOME from the user's
 // shell profile. Claude Code keeps its chats, settings, agents, and commands
@@ -7,9 +7,8 @@
 // silently swapped the user's terminal Claude Code state for an empty managed
 // directory. These checks pin three things:
 //
-//   (a) no code writes to shell startup files, anywhere;
-//   (b) no ambient CLAUDE_CONFIG_DIR / CODEX_HOME export mechanism exists —
-//       the selector is passed only per-spawn to Codara-launched terminals;
+//   (a) no account selector may touch a shell startup file;
+//   (b) no CODEX_HOME/CLAUDE_CONFIG_DIR export mechanism can return;
 //   (c) the one-time cleanup removes exactly the three artifacts the old
 //       feature generated, and refuses everything else.
 "use strict";
@@ -97,7 +96,7 @@ async function main() {
     "native-cli-terminal-cleanup.ts",
   );
 
-  // ── (a) nothing writes to shell startup files ──
+  // ── (a) the retired combined feature stays gone ──
   await check("the shell-profile and active-pointer modules are gone", () => {
     for (const gone of [
       "src/main/orchestration/native-cli-shell-profile.ts",
@@ -172,8 +171,8 @@ async function main() {
     }
   });
 
-  // ── (b) no ambient selector export mechanism ──
-  await check("no source renders selector exports for a shell to source", () => {
+  // ── (b) no combined selector export mechanism ──
+  await check("no module renders a shell account selector", () => {
     for (const file of sources) {
       const text = fs.readFileSync(file, "utf8");
       assert.ok(

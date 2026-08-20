@@ -2663,7 +2663,7 @@ export function registerIpc(): void {
               args.nativeCodexProfileId,
             );
       const items = await listWorkerSessions(args.runtime, args.cwd, {
-        codexHome: execution.env.CODEX_HOME,
+        codexHome: execution.stateHome,
       });
       return items.map((item) => ({
         ...item,
@@ -2681,7 +2681,7 @@ export function registerIpc(): void {
         resolveNewNativeGrokProfile(),
       ]);
       const items = await listAllWorkerSessions({
-        codexHome: execution.env.CODEX_HOME,
+        codexHome: execution.stateHome,
         claudeStateDir:
           claudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
         grokHome: grokExecution.env.GROK_HOME,
@@ -2723,7 +2723,7 @@ export function registerIpc(): void {
         input.nativeCodexProfileId,
       );
       return deleteWorkerSession(input, {
-        codexHome: execution.env.CODEX_HOME,
+        codexHome: execution.stateHome,
       });
     },
   );
@@ -2834,7 +2834,7 @@ export function registerIpc(): void {
           const path = await discoverRolloutForCwd(since, spawnDate, args.cwd, {
             strict: true,
             excludeSessionIds: exclude,
-            codexHome: nativeCodexExecution?.env.CODEX_HOME,
+            codexHome: nativeCodexExecution?.stateHome,
           }).catch(() => null);
           if (path) {
             const sessionId = extractSessionUuid(path);
@@ -2969,7 +2969,7 @@ export function registerIpc(): void {
         );
         const safePath = resolveCodexTranscriptPath(
           path,
-          execution.env.CODEX_HOME,
+          execution.stateHome,
         );
         const stat = await fs.stat(safePath).catch(() => null);
         if (stat) {
@@ -2998,7 +2998,7 @@ export function registerIpc(): void {
           );
     await ensureCodexProjectTrust(
       args.cwd,
-      execution.env.CODEX_HOME,
+      execution.stateHome,
     ).catch(() => undefined);
   });
 

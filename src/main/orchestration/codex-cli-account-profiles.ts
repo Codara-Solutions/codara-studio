@@ -7,7 +7,6 @@ import {
   codaraHomeDir,
   isCodaraManagedCliPath,
 } from "./codara-managed-cli-roots";
-import { ensureSharedCliState } from "./native-cli-shared-state";
 
 export const CODEX_CLI_PERSONAL_PROFILE_ID = "personal" as const;
 export const CODEX_CLI_ACCOUNT_PROFILES_VERSION = 1 as const;
@@ -90,6 +89,8 @@ export interface CodexCliProfileLeaseView {
 export interface CodexCliAccountProfileStoreOptions {
   /** Existing Codex home represented by the synthetic `personal` profile. */
   personalHomeDir?: string;
+  /** Private backup of the historical login; live auth is swapped into ~/.codex. */
+  personalAuthFile?: string;
   /** Test seam. Production uses cryptographically random UUIDv4 values. */
   idFactory?: () => string;
   /** Test seam. */
@@ -571,6 +572,7 @@ export class CodexCliAccountProfileStore {
   readonly accountsDir: string;
   readonly filePath: string;
   readonly personalHomeDir: string;
+  readonly personalAuthFile: string;
   private readonly idFactory: () => string;
   private readonly now: () => Date;
   private readonly authChecker: CodexCliAuthChecker;
@@ -594,6 +596,10 @@ export class CodexCliAccountProfileStore {
     this.personalHomeDir = resolve(
       options.personalHomeDir?.trim() || defaultPersonalCodexHomeDir(),
     );
+    this.personalAuthFile = resolve(
+      options.personalAuthFile?.trim() ||
+        join(this.personalHomeDir, CODEX_CLI_AUTH_FILE),
+    );
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? (() => new Date());
     this.authChecker = options.authChecker ?? defaultCodexCliAuthChecker;
@@ -603,40 +609,6 @@ export class CodexCliAccountProfileStore {
   private async ensureStoreDirectories(): Promise<void> {
     await assertSafeDirectory(this.rootDir, { create: true });
     await assertSafeDirectory(this.accountsDir, { create: true });
-  }
-
-  /**
-   * Managed accounts share the user-state surfaces (sessions, history,
-   * config, prompts) with the personal Codex home so switching accounts
-   * behaves like logout+login in one home; auth.json stays per-account.
-   *
-   * Best-effort by design: resolution must never start failing because a
-   * symlink could not be made. A leased profile is skipped entirely — every
-   * launch resolves BEFORE acquiring its lease, so the first spawn of a
-   * profile always healed its directory, and migrating a real directory out
-   * from under a live CLI would lose its writes. The per-profile mutation key
-   * serializes concurrent resolutions of the same profile without blocking
-   * other profiles or the metadata lock.
-   */
-  private async ensureManagedSharedState(
-    profileId: string,
-    homeDir: string,
-  ): Promise<void> {
-    if (process.platform === "win32") return;
-    if (this.leases?.isLeased(profileId)) return;
-    try {
-      await withMutationLock(`${this.filePath}::share::${profileId}`, async () => {
-        if (this.leases?.isLeased(profileId)) return;
-        await ensureSharedCliState({
-          managedDir: homeDir,
-          personalDir: this.personalHomeDir,
-          runtime: "codex",
-        });
-      });
-    } catch {
-      // ensureSharedCliState reports per-name outcomes and never throws; this
-      // guard keeps even an unexpected failure out of the launch path.
-    }
   }
 
   private async reconcileLocked(
@@ -752,8 +724,8 @@ export class CodexCliAccountProfileStore {
           id: CODEX_CLI_PERSONAL_PROFILE_ID,
           label: "Existing Codex login",
           managed: false,
-          homeDir: this.personalHomeDir,
-          authFile: join(this.personalHomeDir, CODEX_CLI_AUTH_FILE),
+          homeDir: dirname(this.personalAuthFile),
+          authFile: this.personalAuthFile,
         },
         ...snapshot.profiles.map((profile) => {
           const paths = codexCliManagedProfilePaths(this.rootDir, profile.id);
@@ -837,9 +809,6 @@ export class CodexCliAccountProfileStore {
 
       await fs.mkdir(homeDir, { mode: 0o700 });
       if (process.platform !== "win32") await fs.chmod(homeDir, 0o700);
-      // A fresh directory takes the pure "managed entry missing" branch of
-      // the heal: every shared name becomes a link before first use.
-      await this.ensureManagedSharedState(id, homeDir);
       const timestamp = this.now().toISOString();
       const profile: CodexCliManagedProfile = {
         id,
@@ -941,8 +910,8 @@ export class CodexCliAccountProfileStore {
         : normalizeCodexCliProfileId(input.profileId);
     let label = "Existing Codex login";
     let managed = false;
-    let homeDir = this.personalHomeDir;
-    let authFile = join(homeDir, CODEX_CLI_AUTH_FILE);
+    let homeDir = dirname(this.personalAuthFile);
+    let authFile = this.personalAuthFile;
     if (profileId !== CODEX_CLI_PERSONAL_PROFILE_ID) {
       const profile = snapshot.profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new CodexCliAccountProfileNotFoundError(profileId);
@@ -950,7 +919,6 @@ export class CodexCliAccountProfileStore {
       managed = true;
       ({ homeDir, authFile } = codexCliManagedProfilePaths(this.rootDir, profileId));
       await assertSafeDirectory(homeDir, { create: false });
-      await this.ensureManagedSharedState(profileId, homeDir);
     }
     const status = await Promise.resolve(
       this.authChecker({

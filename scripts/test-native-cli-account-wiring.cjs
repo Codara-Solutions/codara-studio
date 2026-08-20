@@ -164,7 +164,7 @@ assert.match(
 );
 assert.match(settings, /unsigned built-in CLI slot is not an account/);
 assert.match(settings, /key: `cli:\$\{profile\.id\}`/);
-assert.match(settings, /sign-ins Codara cannot safely match stay separate/);
+assert.match(settings, /Only a \*signed-in\* unmatched CLI can merge/);
 assert.match(settings, /card\.cora && !card\.cli && unmatchedSignedInCli\.length > 0/);
 assert.match(settings, /pairHint: `Reconnect to Cora if this is the same account/);
 assert.match(settings, /card\.cli\?\.authState === "connected"/);

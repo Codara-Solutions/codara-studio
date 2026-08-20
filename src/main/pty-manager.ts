@@ -2,7 +2,7 @@ import * as nodePty from "node-pty";
 import { spawn as spawnChild } from "node:child_process";
 import { promises as fsp, chmodSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { WebContents } from "electron";
 import type {
@@ -20,7 +20,8 @@ import { codaraHome } from "./codara-home";
 import { getConnection, shQuote } from "./remote/connections";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
-import { buildCodexCliProfileEnvironment } from "./orchestration/codex-cli-profile-execution";
+import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
+import { isCodaraManagedCliPath } from "./orchestration/codara-managed-cli-roots";
 import { buildGrokCliProfileEnvironment } from "./orchestration/grok-cli-profile-execution";
 import { buildClaudeCliProfileEnvironment } from "./orchestration/claude-cli-profile-environment";
 import {
@@ -407,7 +408,6 @@ export interface SpawnOptions {
    * account is Active at restore time. Set by spawn() itself, never accepted
    * over IPC.
    */
-  plainShellCodexHome?: string;
   plainShellClaudeConfigDir?: string;
   plainShellGrokHome?: string;
   /**
@@ -774,10 +774,7 @@ async function spawnWithSessionLock(
       opts.nativeCodexProfileId === undefined
         ? await resolveNewNativeCodexProfile()
         : await resolveFrozenNativeCodexProfile(opts.nativeCodexProfileId);
-    const nativeCodexHome = execution.env.CODEX_HOME;
-    if (!nativeCodexHome) {
-      throw new Error("Resolved native Codex profile has no CODEX_HOME.");
-    }
+    const nativeCodexHome = execution.stateHome;
     const releaseNativeCodexProfileLease = acquireNativeCodexProfileLease(
       execution.profileId,
       `terminal:${opts.id}`,
@@ -840,15 +837,12 @@ async function spawnWithSessionLock(
     };
   }
   // A plain user shell — no Studio startup command, no worker run, no frozen
-  // account, no caller-selected home — follows the Active accounts too, so a
-  // hand-typed `claude` or `codex` signs in as the account Settings marks
-  // Active. Managed accounts share every user-state surface with the personal
-  // home (native-cli-shared-state.ts), so this changes the sign-in and
-  // nothing else; a PERSONAL default leaves the shell environment exactly as
-  // inherited. Best-effort because a shell must always open. Deliberately no
-  // lease and no persistence: an idle shell tab must not block account
-  // operations, and a restored shell should follow whatever account is
-  // Active at restore time rather than a login pinned before the restart.
+  // account, no caller-selected home — follows the Active Claude and Grok
+  // accounts. Codex is intentionally omitted because its account selector
+  // swaps auth.json in one shared state home. Best-effort because a shell must
+  // always open. Deliberately no lease and no persistence: an idle shell tab
+  // must not block account operations, and a restored shell should follow the
+  // account that is Active at restore time.
   if (
     parsedStartup === null &&
     !opts.startupCommand &&
@@ -862,18 +856,8 @@ async function spawnWithSessionLock(
   ) {
     const selectors = await resolvePlainShellAccountSelectors().catch(() => null);
     if (selectors) {
-      if (selectors.codexHome) {
-        // Same courtesy agent panes get: seed workspace trust so the first
-        // hand-typed `codex` here doesn't stall on the trust prompt.
-        await ensureCodexProjectTrust(opts.cwd, selectors.codexHome).catch(
-          () => undefined,
-        );
-      }
       preparedOpts = {
         ...preparedOpts,
-        ...(selectors.codexHome
-          ? { plainShellCodexHome: selectors.codexHome }
-          : {}),
         ...(selectors.claudeConfigDir
           ? { plainShellClaudeConfigDir: selectors.claudeConfigDir }
           : {}),
@@ -1264,6 +1248,19 @@ function doSpawn(
       if (typeof v === "string") env[k] = v;
     }
   }
+  // Older Codara builds selected accounts by exporting CODEX_HOME. OpenAI
+  // treats that variable as the root for every Codex setting and session, so
+  // carrying our retired selector into a new shell both split state and made
+  // user-level keys appear project-local. Remove only Codara's known values;
+  // an unrelated custom CODEX_HOME remains the user's choice.
+  const inheritedCodexHome = env.CODEX_HOME?.trim();
+  if (
+    inheritedCodexHome &&
+    (isCodaraManagedCliPath(inheritedCodexHome) ||
+      resolve(inheritedCodexHome) === resolve(join(homedir(), ".codex")))
+  ) {
+    delete env.CODEX_HOME;
+  }
   // Hook RPC env (big-bet "Hook contract for sub-agents to self-report").
   // Layered LAST so the values main process owns (URL, token) can't be
   // accidentally overridden by a caller — every worker pty sees the same
@@ -1297,10 +1294,7 @@ function doSpawn(
     env.SPARK_AGENT_PANE_ID = opts.id;
   }
   if (opts.nativeCodexHome) {
-    const selectedEnv = buildCodexCliProfileEnvironment(
-      env,
-      opts.nativeCodexHome,
-    );
+    const selectedEnv = buildCodexCliSharedEnvironment(env);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;
@@ -1320,16 +1314,6 @@ function doSpawn(
   // frozen-profile fields above). Same builders, applied late on the enriched
   // env, so the child sees exactly one selected home per CLI with that CLI's
   // credential-override routes stripped while Studio's own variables survive.
-  if (opts.plainShellCodexHome) {
-    const selectedEnv = buildCodexCliProfileEnvironment(
-      env,
-      opts.plainShellCodexHome,
-    );
-    for (const key of Object.keys(env)) delete env[key];
-    for (const [key, value] of Object.entries(selectedEnv)) {
-      if (typeof value === "string") env[key] = value;
-    }
-  }
   if (opts.nativeGrokHome) {
     const selectedEnv = buildGrokCliProfileEnvironment(env, opts.nativeGrokHome);
     for (const key of Object.keys(env)) delete env[key];
