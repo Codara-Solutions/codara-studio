@@ -142,6 +142,10 @@ const featureOnlyPackages = [
     label: "Markdown preview-only parsing",
     pattern: /\/node_modules\/(?:rehype-raw|rehype-sanitize|parse5)\//,
   },
+  {
+    label: "Excel preview parsing",
+    pattern: /\/node_modules\/(?:read-excel-file|worker-f|saxen|fflate)\//,
+  },
 ];
 const closedSurfaceModules = [
   "components/WorkerSessionPicker.tsx",
@@ -149,6 +153,7 @@ const closedSurfaceModules = [
   "components/CreateCopyDialog.tsx",
   "components/CopyBranchDialogs.tsx",
   "shortcuts/ShortcutsDialog.tsx",
+  "components/file-preview/SpreadsheetPreview.tsx",
 ];
 const allModuleIds = chunks.flatMap((chunk) => Object.keys(chunk.modules));
 const staticModuleIds = staticChunks.flatMap((chunk) => Object.keys(chunk.modules));
@@ -212,7 +217,7 @@ const staticBrotliBytes = staticChunks.reduce(
 
 console.log("PASS renderer chunk graph has no generic vendor chunk or circular imports");
 console.log(`PASS React is owned only by ${reactOwners[0].fileName}`);
-console.log("PASS Mermaid, QR code, and Markdown preview-only packages remain outside the static closure");
+console.log("PASS Mermaid, QR code, Markdown, and Excel preview-only packages remain outside the static closure");
 console.log("PASS closed dialogs and pickers remain outside the startup closure");
 console.log(
   `PASS static renderer JS closure ${staticRawBytes.toLocaleString()} raw / ${staticGzipBytes.toLocaleString()} gzip / ${staticBrotliBytes.toLocaleString()} Brotli (${staticChunks.length} chunks, ${STATIC_RAW_BUDGET_BYTES.toLocaleString()}-byte raw budget)`,

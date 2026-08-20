@@ -41,6 +41,10 @@ const MarkdownPreview = lazy(() => import("./markdown-preview/MarkdownPreview"))
 import FilePreview from "./file-preview/FilePreview";
 import { DockablePaneBar } from "../tabs/dockChromeSlot";
 import { previewKindForPath } from "./file-preview/previewKind";
+import {
+  PreviewFullscreenButton,
+  usePreviewFullscreen,
+} from "./file-preview/PreviewFullscreenButton";
 
 // Path-based detection used to decide whether to expose the "Preview" toggle
 // and listen for the markdown.togglePreview shortcut. Keeping this co-located
@@ -112,6 +116,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences } = usePreferences();
+  const previewVisible = previewOnly || (hasViewToggle && viewMode === "preview");
+  const { fullscreen, toggleFullscreen } = usePreviewFullscreen(active && previewVisible);
+  const fullscreenAction = previewVisible ? (
+    <PreviewFullscreenButton fullscreen={fullscreen} onToggle={toggleFullscreen} />
+  ) : null;
 
   const { doc, dirty, conflict, onChange, save, reload, flush } = useDocument({
     path,
@@ -386,9 +395,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         style={{
           flex: 1,
           minHeight: 0,
+          minWidth: 0,
           display: "flex",
           flexDirection: "column",
           background: "var(--bg)",
+          position: fullscreen ? "fixed" : "relative",
+          inset: fullscreen ? 0 : undefined,
+          zIndex: fullscreen ? 10_000 : undefined,
+          boxShadow: fullscreen
+            ? "0 0 0 1px var(--rule), 0 24px 80px rgba(0,0,0,0.42)"
+            : undefined,
         }}
       >
         {hasViewToggle && doc.status === "ready" && (
@@ -397,12 +413,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             copied={copiedAt !== null}
             onCopy={handleCopy}
             onSetMode={setViewMode}
+            fullscreenAction={viewMode === "preview" ? fullscreenAction : null}
+            forceLocalToolbar={fullscreen}
           />
         )}
         {previewOnly && (
           <FilePreview
             path={path}
             kind={previewKind!}
+            toolbarAction={fullscreenAction}
+            forceLocalToolbar={fullscreen}
             onWhiteboardDirtyChange={handleWhiteboardDirty}
             onWhiteboardSaved={handleWhiteboardSaved}
           />
@@ -678,26 +698,30 @@ function MarkdownToolbar({
   copied,
   onCopy,
   onSetMode,
+  fullscreenAction,
+  forceLocalToolbar,
 }: {
   mode: ViewMode;
   copied: boolean;
   onCopy: () => void;
   onSetMode: (next: ViewMode) => void;
+  fullscreenAction?: React.ReactNode;
+  forceLocalToolbar?: boolean;
 }) {
   return (
-    <DockablePaneBar style={{ gap: 8 }}>
+    <DockablePaneBar style={{ gap: 8 }} forceLocal={forceLocalToolbar}>
       <button
         type="button"
         onClick={onCopy}
-        title={copied ? "Copied" : "Copy markdown source"}
-        aria-label="Copy markdown source"
+        title={copied ? "Copied" : "Copy source"}
+        aria-label="Copy source"
         style={toolbarIconButton}
       >
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
       <div
         role="group"
-        aria-label="Markdown view mode"
+        aria-label="File view mode"
         style={segmentedGroup}
       >
         <SegmentedButton
@@ -715,6 +739,7 @@ function MarkdownToolbar({
           Edit
         </SegmentedButton>
       </div>
+      {fullscreenAction}
     </DockablePaneBar>
   );
 }

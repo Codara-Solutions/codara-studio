@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { PreviewKind } from "./previewKind";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { isRemotePath } from "@shared/remote";
@@ -9,11 +9,14 @@ const PdfPreview = lazy(() => import("./PdfPreview"));
 const HtmlPreview = lazy(() => import("./HtmlPreview"));
 const DocxPreview = lazy(() => import("./DocxPreview"));
 const PptxPreview = lazy(() => import("./PptxPreview"));
+const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
 const WhiteboardFilePreview = lazy(() => import("./WhiteboardFilePreview"));
 
 interface Props {
   path: string;
   kind: PreviewKind;
+  toolbarAction?: ReactNode;
+  forceLocalToolbar?: boolean;
   // Whiteboard-only (kind === "whiteboard"): the .coraboard surface is an
   // editable board, so it reports dirty/saved state up to the hosting editor
   // tab (dirty dot in the strip, git refresh on save).
@@ -39,6 +42,8 @@ const CHECKER_BG: React.CSSProperties = {
 export default function FilePreview({
   path,
   kind,
+  toolbarAction,
+  forceLocalToolbar,
   onWhiteboardDirtyChange,
   onWhiteboardSaved,
 }: Props) {
@@ -86,11 +91,15 @@ export default function FilePreview({
         });
     };
     refreshStat();
-    // Remote files have no file:// form — load their bytes over IPC into a
-    // blob URL straight away instead of waiting for the <img> to error.
-    // HTML is exempt: its previewer shows a not-supported notice for remote
-    // paths (a webview guest can't resolve the page's linked assets anyway).
-    if (isRemotePath(path) && kind !== "html") activateBlobFallback();
+    // Remote native media has no file:// form, so load it into a blob URL.
+    // Document/board/spreadsheet viewers already read their own bytes over
+    // IPC; creating another whole-file blob for them only doubles memory.
+    if (
+      isRemotePath(path) &&
+      (kind === "image" || kind === "svg" || kind === "video" || kind === "audio")
+    ) {
+      activateBlobFallback();
+    }
     // fs:changed only fires for create/delete/rename (content writes are
     // filtered main-side), so this catches deletion/replacement of the
     // previewed file; the mtime doubles as the <img> cache-buster.
@@ -123,6 +132,7 @@ export default function FilePreview({
   if (kind === "whiteboard") {
     return (
       <div style={{ ...hostStyle, overflow: "hidden" }}>
+        {toolbarAction && <FloatingPreviewAction>{toolbarAction}</FloatingPreviewAction>}
         <Suspense
           fallback={
             <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>
@@ -158,7 +168,14 @@ export default function FilePreview({
   // when the real mtime arrives a tick later — for pptx/docx that is a full
   // OOXML re-parse and re-render of every page. Hold a lightweight placeholder
   // for the stat round-trip instead; it resolves in milliseconds.
-  if (stat === null && (kind === "html" || kind === "pdf" || kind === "docx" || kind === "pptx")) {
+  if (
+    stat === null &&
+    (kind === "html" ||
+      kind === "pdf" ||
+      kind === "docx" ||
+      kind === "pptx" ||
+      kind === "spreadsheet")
+  ) {
     return (
       <div style={hostStyle}>
         <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>Loading…</div>
@@ -192,7 +209,12 @@ export default function FilePreview({
             </div>
           }
         >
-          <PdfPreview path={path} mtimeMs={stat?.mtimeMs ?? 0} />
+          <PdfPreview
+            path={path}
+            mtimeMs={stat?.mtimeMs ?? 0}
+            toolbarAction={toolbarAction}
+            forceLocalToolbar={forceLocalToolbar}
+          />
         </Suspense>
       </div>
     );
@@ -226,6 +248,7 @@ export default function FilePreview({
   if (kind === "image" || kind === "svg") {
     return (
       <div style={hostStyle}>
+        {toolbarAction && <FloatingPreviewAction>{toolbarAction}</FloatingPreviewAction>}
         <div
           style={{
             flex: 1,
@@ -280,7 +303,12 @@ export default function FilePreview({
             </div>
           }
         >
-          <DocxPreview path={path} mtimeMs={stat?.mtimeMs ?? 0} />
+          <DocxPreview
+            path={path}
+            mtimeMs={stat?.mtimeMs ?? 0}
+            toolbarAction={toolbarAction}
+            forceLocalToolbar={forceLocalToolbar}
+          />
         </Suspense>
       </div>
     );
@@ -296,7 +324,33 @@ export default function FilePreview({
             </div>
           }
         >
-          <PptxPreview path={path} mtimeMs={stat?.mtimeMs ?? 0} />
+          <PptxPreview
+            path={path}
+            mtimeMs={stat?.mtimeMs ?? 0}
+            toolbarAction={toolbarAction}
+            forceLocalToolbar={forceLocalToolbar}
+          />
+        </Suspense>
+      </div>
+    );
+  }
+
+  if (kind === "spreadsheet") {
+    return (
+      <div style={{ ...hostStyle, overflow: "hidden" }}>
+        <Suspense
+          fallback={
+            <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>
+              Loading spreadsheet viewer…
+            </div>
+          }
+        >
+          <SpreadsheetPreview
+            path={path}
+            mtimeMs={stat?.mtimeMs ?? 0}
+            toolbarAction={toolbarAction}
+            forceLocalToolbar={forceLocalToolbar}
+          />
         </Suspense>
       </div>
     );
@@ -305,6 +359,7 @@ export default function FilePreview({
   if (kind === "video") {
     return (
       <div style={hostStyle}>
+        {toolbarAction && <FloatingPreviewAction>{toolbarAction}</FloatingPreviewAction>}
         <div
           style={{
             flex: 1,
@@ -334,6 +389,7 @@ export default function FilePreview({
   // audio
   return (
     <div style={hostStyle}>
+      {toolbarAction && <FloatingPreviewAction>{toolbarAction}</FloatingPreviewAction>}
       <div
         style={{
           flex: 1,
@@ -364,5 +420,27 @@ const hostStyle: React.CSSProperties = {
   minHeight: 0,
   display: "flex",
   flexDirection: "column",
+  position: "relative",
   background: "var(--bg)",
 };
+
+function FloatingPreviewAction({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 8,
+        right: 10,
+        zIndex: 3,
+        display: "flex",
+        padding: 2,
+        borderRadius: 9,
+        background: "color-mix(in oklch, var(--panel) 86%, transparent)",
+        boxShadow: "var(--lift-hi), 0 5px 18px rgba(0,0,0,0.16)",
+        backdropFilter: "blur(12px) saturate(1.25)",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
