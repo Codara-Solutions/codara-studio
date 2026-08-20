@@ -136,11 +136,11 @@ import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import {
   buildAwayDigest,
   captureAwayDigestBaseline,
-  compareRunsByAttention,
   describeRunStatus,
   findOpenQuestion,
   pruneAwayDigest,
   statusToneColor,
+  workspaceRailTone,
   type AwayDigest,
   type AwayDigestBaseline,
   type ChatStatusTone,
@@ -1065,10 +1065,16 @@ export default function App() {
   // Per-workspace status-tone for the WorkspaceRail dots: the tone of each
   // workspace's highest-attention run (blocked > done-unseen > live > …),
   // sourced from the global feed so the dot reflects every project, not just
-  // the active one. Unseen terminal-agent alerts fold into the same dot —
-  // blocked terminals rank like blocked runs, finished ones like done-unseen
-  // — so the rail has ONE attention cue, not two competing ones.
+  // the active one. Runs that want nothing resolve to null and the row shows
+  // no dot at all — see workspaceRailTone. Unseen terminal-agent alerts fold
+  // into the same dot — blocked terminals rank like blocked runs, finished
+  // ones like done-unseen — so the rail has ONE attention cue, not two
+  // competing ones.
   const toneByWorkspaceId = useMemo(() => {
+    // Merge ranking for the run tone vs the terminal tone. Only attention
+    // tones can appear on either side (workspaceRailTone filters the run
+    // side; the terminal side is blocked/done-unseen by construction), so the
+    // settled entries exist solely to satisfy the Record.
     const rank: Record<ChatStatusTone, number> = {
       blocked: 6,
       failed: 5,
@@ -1080,20 +1086,16 @@ export default function App() {
     };
     const m: Record<string, ChatStatusTone | null> = {};
     for (const w of workspaces) {
-      let tone: ChatStatusTone | null = null;
       // Loom passes count only while blocked ("needs you" must light the dot);
       // their completions are per-iteration noise — and since no chat tab ever
       // views a loom run, an unfiltered feed would pin "done-unseen" forever.
       const wr = globalRuns.runs.filter(
         (r) => r.workspaceId === w.id && (!r.automationId || r.status === "blocked"),
       );
-      if (wr.length > 0) {
-        // compareRunsByAttention sorts highest-attention first, so the head
-        // run dictates the dot. describeRunStatus(top).tone is the same tone
-        // the switcher buckets and chat rows use, so the cues never disagree.
-        const top = wr.slice().sort(compareRunsByAttention)[0];
-        tone = describeRunStatus(top).tone;
-      }
+      // workspaceRailTone drops settled runs (acknowledged-done, failed,
+      // cancelled, idle) BEFORE ranking, so a project whose only history is a
+      // chat it already finished rolls up to null and its dot goes dark.
+      let tone: ChatStatusTone | null = workspaceRailTone(wr);
       const attention = terminalAttention[w.id];
       if (attention && Object.keys(attention).length > 0) {
         const termTone: ChatStatusTone = Object.values(attention).some(

@@ -1402,6 +1402,59 @@ export function workspaceAttentionPriority(runs: RunState[]): number {
   return max;
 }
 
+// Whether a status tone is asking anything of the user — the predicate behind
+// the workspace rail's attention dot.
+//
+// The dot answers ONE question: "does this project want me?" So it lights only
+// for states that are still moving or still owed an answer. Everything else is
+// settled and stays dark:
+//   - `done`      the run finished AND was acknowledged (run.seen — see
+//                 markRunSeen). The whole point of that acknowledgement is to
+//                 clear the cue; leaving the dot lit in green merely recolored
+//                 it and pinned a permanent "pending" mark on every project
+//                 that ever finished a chat.
+//   - `failed` /
+//     `cancelled` terminal and unchangeable. ATTENTION_PRIORITY already scores
+//                 failed at 0 and the run switcher files it under "Done", so a
+//                 rail dot for it would contradict both — and, sharing --danger
+//                 with `blocked`, would be indistinguishable from a run that
+//                 really is waiting on a reply.
+//   - `idle`      never started.
+// Declared as a type predicate so a caller that guards on it (the rail's
+// StatusDot) keeps a non-null tone in hand for statusToneColor.
+export function toneWantsAttention(
+  tone: ChatStatusTone | null | undefined,
+): tone is ChatStatusTone {
+  switch (tone) {
+    case "blocked":
+    case "done-unseen":
+    case "live":
+    case "paused":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// The single tone a workspace's rail dot should paint, or null for "stay dark".
+//
+// Filter FIRST, then rank: taking the highest-attention run and asking whether
+// that one wants attention is not the same question. `done` and `paused` tie at
+// ATTENTION_PRIORITY 1, so a workspace holding a freshly finished (and seen)
+// chat next to an older parked one would resolve to `done` on the createdAt
+// tiebreak and swallow the parked run's dot entirely.
+//
+// Caller owns which runs are eligible (App filters out automation passes that
+// are not blocked); this owns what the surviving set means.
+export function workspaceRailTone(runs: RunState[]): ChatStatusTone | null {
+  const wanting = runs.filter((run) => toneWantsAttention(describeRunStatus(run).tone));
+  if (wanting.length === 0) return null;
+  // compareRunsByAttention sorts highest-attention first, so the head run
+  // dictates the dot. Its tone is the same one the switcher buckets and chat
+  // rows use, so the cues never disagree.
+  return describeRunStatus(wanting.slice().sort(compareRunsByAttention)[0]).tone;
+}
+
 // The four display buckets the global run switcher groups every run into.
 // Distinct from ChatStatusTone (seven tones): several tones collapse to one
 // bucket — e.g. `live` and `paused` are both "Working", `failed` and `idle`

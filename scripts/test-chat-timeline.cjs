@@ -22,6 +22,8 @@ const CHAT_CONVERSATION = path.join(
 const TIMELINE = path.join(ROOT, "src", "renderer", "src", "components", "chat", "timeline.ts");
 const TOOL_LABELS = path.join(ROOT, "src", "renderer", "src", "components", "chat", "tool-labels.ts");
 const RUN_FORMAT = path.join(ROOT, "src", "renderer", "src", "components", "runs", "run-format.ts");
+const WORKSPACE_RAIL = path.join(ROOT, "src", "renderer", "src", "components", "WorkspaceRail.tsx");
+const APP = path.join(ROOT, "src", "renderer", "src", "App.tsx");
 
 async function loadContract() {
   const out = await esbuild.build({
@@ -1456,6 +1458,82 @@ async function main() {
       "compaction calls never supersede a conversational failure");
     assert.match(body, /inputMessageIds\.every\(\(id, index\) => id === inputs\[index\]\)/,
       "supersession must match the exact frozen input messages");
+  });
+
+  // -- Workspace rail attention dot ---------------------------------------
+  //
+  // Regression: every project that had ever finished a chat wore a permanent
+  // green dot. `complete` + `seen` maps to the `done` tone, and the rail
+  // suppressed only `idle`, so acknowledging a run merely recolored its dot
+  // teal -> green instead of clearing it. The rail dot must mean "this project
+  // wants you", nothing weaker.
+  const railRun = (id, status, extra = {}) =>
+    run([], { id, title: id, status, steps: [], workerTasks: [], workerAttempts: [], ...extra });
+
+  test("toneWantsAttention lights only unsettled or unacknowledged tones", () => {
+    for (const tone of ["blocked", "done-unseen", "live", "paused"]) {
+      assert.equal(T.toneWantsAttention(tone), true, `${tone} must light the rail`);
+    }
+    for (const tone of ["done", "failed", "idle", null, undefined]) {
+      assert.equal(T.toneWantsAttention(tone), false, `${tone} must leave the rail dark`);
+    }
+  });
+
+  test("an acknowledged finished chat leaves no rail dot", () => {
+    const acknowledged = railRun("done-seen", "complete", { seen: true });
+    assert.equal(T.describeRunStatus(acknowledged).tone, "done");
+    assert.equal(T.workspaceRailTone([acknowledged]), null);
+  });
+
+  test("a chat that finished while the user was away still lights the rail", () => {
+    const unseen = railRun("done-unseen", "complete", { seen: false });
+    assert.equal(T.workspaceRailTone([unseen]), "done-unseen");
+  });
+
+  test("a blocked chat outranks a finished one", () => {
+    const blocked = railRun("blocked", "blocked", { createdAt: at(10) });
+    const unseen = railRun("unseen", "complete", { seen: false, createdAt: at(40) });
+    assert.equal(T.workspaceRailTone([unseen, blocked]), "blocked");
+  });
+
+  test("settled terminal runs never pin the rail", () => {
+    assert.equal(T.workspaceRailTone([railRun("failed", "failed")]), null);
+    assert.equal(T.workspaceRailTone([railRun("cancelled", "cancelled")]), null);
+    assert.equal(T.workspaceRailTone([railRun("idle", "idle")]), null);
+    assert.equal(T.workspaceRailTone([]), null);
+  });
+
+  // Why workspaceRailTone filters BEFORE it ranks: `done` and `paused` tie at
+  // ATTENTION_PRIORITY 1, so ranking first would hand back the newer
+  // acknowledged run and then suppress it -- swallowing the parked run's dot.
+  test("an acknowledged chat cannot swallow an older parked one", () => {
+    const parked = railRun("parked", "paused", { createdAt: at(10) });
+    const acknowledged = railRun("done-seen", "complete", { seen: true, createdAt: at(40) });
+    assert.equal(T.workspaceRailTone([acknowledged, parked]), "paused");
+  });
+
+  // The paint site repeats the rule so neither layer can regress alone.
+  test("the rail's StatusDot gates on toneWantsAttention", () => {
+    const source = fs.readFileSync(WORKSPACE_RAIL, "utf8");
+    const start = source.indexOf("function StatusDot(");
+    assert.notEqual(start, -1, "WorkspaceRail must own a StatusDot");
+    const body = source.slice(start, source.indexOf("\n}", start));
+    assert.match(body, /if \(!toneWantsAttention\(tone\)\) return null;/,
+      "StatusDot must suppress every tone that wants nothing");
+    assert.doesNotMatch(body, /tone === "idle"/, "the old idle-only guard must be gone");
+  });
+
+  // App must roll each workspace up through the shared helper rather than
+  // re-deriving "top run wins" locally, or the two rules drift apart again.
+  test("App rolls rail tones up through workspaceRailTone", () => {
+    const source = fs.readFileSync(APP, "utf8");
+    const start = source.indexOf("const toneByWorkspaceId = useMemo(");
+    assert.notEqual(start, -1, "App must own the rail tone rollup");
+    const end = source.indexOf("}, [workspaces, globalRuns.runs, terminalAttention]);", start);
+    assert.notEqual(end, -1, "the rollup must keep its memo dependency list");
+    const body = source.slice(start, end);
+    assert.match(body, /workspaceRailTone\(wr\)/, "the rollup must delegate to workspaceRailTone");
+    assert.doesNotMatch(body, /compareRunsByAttention/, "the rollup must not re-rank runs itself");
   });
 
   console.log(`\n${passed} chat timeline contract tests passed`);

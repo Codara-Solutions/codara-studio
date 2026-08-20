@@ -6,7 +6,7 @@ import type { GitHubWorkQueueItem } from "@shared/github";
 import { WORKSPACE_COLORS } from "@shared/workspace-colors";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
 import type { ChatStatusTone } from "./chat/timeline";
-import { statusToneColor } from "./chat/timeline";
+import { statusToneColor, toneWantsAttention } from "./chat/timeline";
 import { PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
@@ -2545,10 +2545,12 @@ function RowMenuItem({
 // run-status tone rolled up across the workspace's runs (blocked / done-unseen
 // / live / …). Deliberately static — no pulse — to honor the house rule that
 // blocked never animates and to keep the rail calm when nothing is happening.
-// Quiet workspaces render nothing: a null/undefined tone, or `idle` (which
-// maps to the muted token), is suppressed so only meaningful states show.
+// Quiet workspaces render nothing: toneWantsAttention is the one gate, so a
+// settled tone (done-and-acknowledged, failed, cancelled, idle) draws no dot
+// even if a caller hands one down. App's rollup already filters those out;
+// this repeats the rule at the paint site so neither layer can regress alone.
 function StatusDot({ tone }: { tone?: ChatStatusTone | null }) {
-  if (!tone || tone === "idle") return null;
+  if (!toneWantsAttention(tone)) return null;
   const color = statusToneColor(tone);
   return (
     <span
