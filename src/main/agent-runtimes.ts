@@ -11,6 +11,7 @@ import type {
 
 import { listProviders } from "./providers";
 import type { CliProvider } from "./providers/types";
+import { claudeConfigDir } from "./orchestration/claude-paths";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,7 +74,7 @@ async function probeClaudeAuth(): Promise<RuntimeAuthProbe> {
   // An apiKeyHelper in settings hands the CLI a credential at launch time —
   // presence of the key (not its output) is the signal.
   try {
-    const raw = await fs.readFile(join(homedir(), ".claude", "settings.json"), "utf8");
+    const raw = await fs.readFile(join(claudeConfigDir(), "settings.json"), "utf8");
     const settings = JSON.parse(raw) as { apiKeyHelper?: unknown };
     if (typeof settings.apiKeyHelper === "string" && settings.apiKeyHelper.trim()) {
       return { authenticated: true };
@@ -85,7 +86,7 @@ async function probeClaudeAuth(): Promise<RuntimeAuthProbe> {
   // OAuth credential here. Check it first — it also covers macOS installs
   // that predate the Keychain move.
   try {
-    const raw = await fs.readFile(join(homedir(), ".claude", ".credentials.json"), "utf8");
+    const raw = await fs.readFile(join(claudeConfigDir(), ".credentials.json"), "utf8");
     JSON.parse(raw);
     return { authenticated: true };
   } catch (err) {

@@ -8,6 +8,7 @@ import type {
   AppSettings,
   WorkerRuntime,
 } from "@shared/types";
+import { claudeConfigDir, claudeUserConfigFile } from "./orchestration/claude-paths";
 import type {
   AgentAssetDeleteResult,
   AgentAssetInstallResult,
@@ -194,7 +195,7 @@ export function listMcpWriteTargets(input: { cwd?: string | null }): AgentMcpTar
     targets.push(mcpTarget("codex", "workspace", join(cwd, ".codex", "config.toml"), "This workspace, Codex"));
   }
   targets.push(mcpTarget("shared", "user", join(home, ".mcp.json"), "Every workspace, all agents"));
-  targets.push(mcpTarget("claude", "user", join(home, ".claude.json"), "Every workspace, Claude"));
+  targets.push(mcpTarget("claude", "user", claudeUserConfigFile(), "Every workspace, Claude"));
   targets.push(mcpTarget("codex", "user", join(home, ".codex", "config.toml"), "Every workspace, Codex"));
   return targets;
 }
@@ -355,7 +356,7 @@ async function installMcpAssetToRuntime(
     // Unlike a full sync, an explicit copy of one server carries its headers:
     // the destination is JSON, and a remote server without its Authorization
     // header is a connection that fails on the first call.
-    const added = await writeClaudeMcpServers(join(homedir(), ".claude.json"), [server], result, {
+    const added = await writeClaudeMcpServers(claudeUserConfigFile(), [server], result, {
       keepHeaders: true,
     });
     if (added.length === 0) {
@@ -745,7 +746,7 @@ async function syncSkillDirs(cwd: string | null, result: AgentSyncResult): Promi
   const rootPairs = [
     {
       codex: join(home, ".codex", "skills"),
-      claude: join(home, ".claude", "skills"),
+      claude: join(claudeConfigDir(), "skills"),
       label: "user",
     },
   ];
@@ -1201,8 +1202,8 @@ function mcpConfigCandidates(cwd: string): Array<{
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "settings.local.json") },
     { runtime: "codex", scope: "workspace", path: join(cwd, ".codex", "config.toml") },
     { runtime: "shared", scope: "user", path: join(home, ".mcp.json") },
-    { runtime: "claude", scope: "user", path: join(home, ".claude.json") },
-    { runtime: "claude", scope: "user", path: join(home, ".claude", "settings.json") },
+    { runtime: "claude", scope: "user", path: claudeUserConfigFile() },
+    { runtime: "claude", scope: "user", path: join(claudeConfigDir(), "settings.json") },
     { runtime: "codex", scope: "user", path: join(home, ".codex", "config.toml") },
   ];
 }
@@ -1218,7 +1219,7 @@ function skillRootCandidates(cwd: string): Array<{
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "skills") },
     { runtime: "shared", scope: "workspace", path: join(cwd, ".agents", "skills") },
     { runtime: "codex", scope: "user", path: join(home, ".codex", "skills") },
-    { runtime: "claude", scope: "user", path: join(home, ".claude", "skills") },
+    { runtime: "claude", scope: "user", path: join(claudeConfigDir(), "skills") },
   ];
 }
 

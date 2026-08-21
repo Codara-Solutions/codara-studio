@@ -29,8 +29,40 @@ export function encodeCwdForClaudeProjects(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
+/**
+ * The PERSONAL Claude Code config root, mirroring the CLI's own resolution:
+ * `CLAUDE_CONFIG_DIR ?? ~/.claude`. Users relocate this (e.g. to keep $HOME
+ * tidy), and every reader/writer of Claude's user-scope config has to follow
+ * or the app and the CLI silently diverge onto two config trees.
+ *
+ * A Codara-managed account root inherited from the shell is NOT the personal
+ * login, so it is ignored here — same rule as
+ * `defaultPersonalClaudeConfigDirEnv` in claude-cli-account-profiles.ts.
+ */
+export function personalClaudeConfigDir(): string {
+  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
+  if (configured && !isCodaraManagedCliPath(configured)) return resolve(configured);
+  return join(homedir(), ".claude");
+}
+
 export function claudeConfigDir(stateDir?: string | null): string {
-  return stateDir || join(homedir(), ".claude");
+  return stateDir || personalClaudeConfigDir();
+}
+
+/**
+ * Claude Code's user-scope config FILE. The asymmetry here is deliberate and
+ * mirrors the CLI exactly: with CLAUDE_CONFIG_DIR set the file is
+ * `<dir>/.claude.json`, but with it UNSET the file is `~/.claude.json` — not
+ * `~/.claude/.claude.json`. Deriving it as join(claudeConfigDir(), …) would be
+ * wrong in the unset case, which is every default install.
+ */
+export function claudeUserConfigFile(stateDir?: string | null): string {
+  if (stateDir) return join(stateDir, ".claude.json");
+  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
+  if (configured && !isCodaraManagedCliPath(configured)) {
+    return join(resolve(configured), ".claude.json");
+  }
+  return join(homedir(), ".claude.json");
 }
 
 export function claudeProjectsDirForCwd(

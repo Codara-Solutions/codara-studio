@@ -46,6 +46,7 @@ import { resolveBinary } from "./binary-resolver";
 import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
+import { claudeConfigDir, claudeUserConfigFile } from "./orchestration/claude-paths";
 import { sparkHome } from "./spark-home";
 
 // The merged built-in server. Was two servers (cora-preview + cora-orchestrator)
@@ -153,7 +154,7 @@ const SPARK_ORCHESTRATION_TOOLS = [
 // codara_ask_user / codara_name_chat from double-counting).
 const SPARK_BUILTIN_TOOLS = [...new Set([...SPARK_STUDIO_TOOLS, ...SPARK_ORCHESTRATION_TOOLS])];
 
-const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");
+const CLAUDE_USER_CONFIG = claudeUserConfigFile();
 
 export interface CodexMcpHomeOptions {
   /** Exact resolved native Codex home. Omission preserves personal-home use. */
@@ -774,7 +775,7 @@ function detectUserSparkEntry(
   const jsonCandidates = [
     CLAUDE_USER_CONFIG,
     join(homedir(), ".mcp.json"),
-    join(homedir(), ".claude", "settings.json"),
+    join(claudeConfigDir(), "settings.json"),
   ];
   if (cwd) {
     jsonCandidates.push(join(cwd, ".mcp.json"));

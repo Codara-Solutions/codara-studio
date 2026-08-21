@@ -18,11 +18,11 @@
 // for now to keep this provider focused on argv construction.
 
 import { join } from "node:path";
-import { homedir } from "node:os";
 
 import type { AgentEffortLevel, AgentRuntimeCapabilities, AgentRuntimeModel } from "@shared/types";
 
 import { resolveBinary } from "../binary-resolver";
+import { claudeConfigDir } from "../orchestration/claude-paths";
 
 import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 
@@ -78,7 +78,7 @@ export const claudeProvider: CliProvider = {
   id: "claude",
   displayName: "Claude Code",
   binaryName: "claude",
-  hookConfigPath: join(homedir(), ".claude", "settings.json"),
+  hookConfigPath: join(claudeConfigDir(), "settings.json"),
   capabilities: CLAUDE_CAPABILITIES,
   versionArgs: ["--version"],
   models: CLAUDE_MODELS,

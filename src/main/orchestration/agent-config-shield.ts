@@ -49,6 +49,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { claudeConfigDir } from "./claude-paths";
 
 // Seatbelt does NOT nest: a process already under sandbox-exec cannot apply
 // another profile. Callers must never wrap a CLI that applies Seatbelt itself —
@@ -115,8 +116,7 @@ function buildDenyReadProfile(subpaths: string[], literals: string[]): string {
 // hiding it would break the app's telemetry too. The policy/agents leak the
 // shield exists for lives in CLAUDE.md + agents/, which stay denied.
 function claudeProfile(): string {
-  const home = homedir();
-  const dot = join(home, ".claude");
+  const dot = claudeConfigDir();
   const subpaths = [
     join(dot, "agents"),
     join(dot, "hooks"),

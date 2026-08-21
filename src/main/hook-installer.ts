@@ -62,8 +62,9 @@ import { homedir, tmpdir } from "node:os";
 import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
 import { defaultSparkHome, sparkHome } from "./spark-home";
+import { claudeConfigDir } from "./orchestration/claude-paths";
 
-const CLAUDE_SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+const CLAUDE_SETTINGS_PATH = join(claudeConfigDir(), "settings.json");
 
 // Bumping this version forces the installer to re-write our hook entries on
 // the next launch (after dropping the old ones). Use when the script path

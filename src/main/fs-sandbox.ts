@@ -4,6 +4,7 @@ import os from "node:os";
 import { promises as fsp } from "node:fs";
 import { isRemotePath } from "@shared/remote";
 import { sparkHome } from "./spark-home";
+import { claudeConfigDir } from "./orchestration/claude-paths";
 
 // Read-path allowlist for fs:* IPC handlers. Defence-in-depth only — if the
 // renderer is compromised, this stops a hostile script from reading arbitrary
@@ -79,7 +80,7 @@ let staticAllowedCache: string[] | null = null;
 
 function staticAllowed(): string[] {
   staticAllowedCache ??= [
-    home(".claude"),
+    claudeConfigDir(),
     home(".codex"),
     home(".cache/spark"),
     // Cora memory files (MEMORY.md and workspaces/<id>.md) open in ordinary
