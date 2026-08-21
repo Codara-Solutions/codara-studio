@@ -83,6 +83,8 @@ import type {
 } from "@shared/types";
 import { FAN_OUT_DIRECTIVE_MARKER, normalizeGitHubOrigin } from "@shared/types";
 import {
+  isBackendFailureQuestion,
+  MANAGER_TURN_FAILURE_REASON,
   normalizeHumanRunQuestionMessages,
   resolveOpenRunQuestion as resolveOpenRunQuestionPure,
   resolveSingleUnresolvedRunQuestion,
@@ -4513,8 +4515,11 @@ async function runInitialAutopilotPlanning(
         : "Cora's manager turn failed before it could plan worker tasks. Check the run log for the backend error, then run the plan again.",
       undefined,
       {
-        reason: "The Cora manager backend could not complete the turn.",
+        reason: MANAGER_TURN_FAILURE_REASON,
         managerMode: mode,
+        // Marks the park as a failed turn, so it reports as a failure instead
+        // of claiming the top "needs you" slot on every attention surface.
+        backendFailure: true,
       },
     );
     return;
@@ -9054,6 +9059,9 @@ export interface PostRunQuestionInput {
   backendTurnId?: string;
   conversationEpoch?: number;
   autonomyRetryCount?: number;
+  /** This park is a failed-turn notice, not a decision. See
+   * RunQuestionContext.backendFailure. */
+  backendFailure?: true;
 }
 
 export interface PostRunQuestionResult {
@@ -9216,7 +9224,16 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
     throw new Error(`clientMessageId is already used by a non-question message: ${clientMessageId}`);
   }
 
-  const questionOptions = normalizeQuestionOptionsForMessage(message, input.questionOptions);
+  // A failed turn gets NO synthesized options. fallbackQuestionOptions matches
+  // on question prose, so an error string fell through to the generic
+  // safe/fast/thorough triple and produced choices like "Use the safest
+  // conservative default for this question: Cora's manager turn failed...".
+  // Offering them is what turned run-msrlghok-icf7da into four rounds of
+  // answers that each re-ran the same failing turn. The notice already says
+  // what to do: send the message again.
+  const questionOptions = input.backendFailure
+    ? []
+    : normalizeQuestionOptionsForMessage(message, input.questionOptions);
   const category = input.category ?? inferRunQuestionCategory(message, input.source);
   const reason =
     input.reason?.trim() || "Cora cannot safely continue without the user's answer.";
@@ -9229,6 +9246,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
     recommendedOptionId,
     source: input.source,
     ...(input.planValidation ? { planValidation: input.planValidation } : {}),
+    ...(input.backendFailure ? { backendFailure: true as const } : {}),
   };
   let posted = false;
   let postedBlocker: RunBlocker | undefined;
@@ -9275,6 +9293,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
         resumeStrategy: input.resumeStrategy,
         managerMode: input.managerMode,
         blockedAt: timestamp,
+        backendFailure: input.backendFailure,
       });
       draft.humanMessages.push({
         id: questionMessageId,
@@ -9283,7 +9302,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
         author: "spark",
         kind: "question",
         message,
-        questionOptions,
+        questionOptions: questionOptions.length > 0 ? questionOptions : undefined,
         questionContext,
         attachments: [],
         intent: "answer",
@@ -16050,10 +16069,13 @@ function normalizeRun(run: RunState): RunState {
         ? "queued"
         : "acknowledged";
     if (message.author === "spark" && message.kind === "question") {
-      message.questionOptions = normalizeQuestionOptionsForMessage(
-        message.message,
-        message.questionOptions,
-      );
+      // Re-synthesizing here would undo the suppression above on the next load
+      // — and it is also what heals runs parked before the flag existed: their
+      // absurd stored options are dropped the first time they are read.
+      message.questionOptions = isBackendFailureQuestion(message)
+        ? undefined
+        : normalizeQuestionOptionsForMessage(message.message, message.questionOptions);
+      if (!message.questionOptions) delete message.questionOptions;
     } else {
       delete message.questionOptions;
       delete message.questionContext;
@@ -16867,6 +16889,7 @@ async function askHumanQuestion(
     managerMode?: SparkCall["mode"];
     backendTurnId?: string;
     conversationEpoch?: number;
+    backendFailure?: true;
   },
 ): Promise<RunState> {
   const posted = await postRunQuestion({
@@ -16880,6 +16903,7 @@ async function askHumanQuestion(
     managerMode: context?.managerMode,
     backendTurnId: context?.backendTurnId,
     conversationEpoch: context?.conversationEpoch,
+    backendFailure: context?.backendFailure,
   });
   return posted.run;
 }

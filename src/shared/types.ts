@@ -2049,6 +2049,16 @@ export interface RunQuestionContext {
   source: RunQuestionSource;
   /** Present on plan_approval asks, where it is mandatory. */
   planValidation?: PlanValidation;
+  /**
+   * This "question" is a backend-failure notice, not a decision the user owes
+   * an answer to: the manager turn threw before producing one, and the park
+   * exists so the run does not idle at `running` with no driver.
+   *
+   * It cannot be expressed as a `category` — every value in that union names a
+   * PRODUCT reason to ask, and the union is also part of the prompt contract a
+   * model answers against. A failed turn is neither.
+   */
+  backendFailure?: true;
 }
 
 export interface RunBlocker {
@@ -2061,6 +2071,9 @@ export interface RunBlocker {
   /** The manager stage to re-run after a scheduled-manager answer. */
   managerMode?: SparkCall["mode"];
   blockedAt: string;
+  /** Mirrors RunQuestionContext.backendFailure so the blocker alone can say
+   * whether this park is a failure notice, without walking humanMessages. */
+  backendFailure?: true;
 }
 
 /** Durable handoff from a linked answer to the exact manager stage it must

@@ -24,6 +24,7 @@ const TOOL_LABELS = path.join(ROOT, "src", "renderer", "src", "components", "cha
 const RUN_FORMAT = path.join(ROOT, "src", "renderer", "src", "components", "runs", "run-format.ts");
 const WORKSPACE_RAIL = path.join(ROOT, "src", "renderer", "src", "components", "WorkspaceRail.tsx");
 const APP = path.join(ROOT, "src", "renderer", "src", "App.tsx");
+const RUN_STORE = path.join(ROOT, "src", "main", "orchestration", "run-store.ts");
 
 async function loadContract() {
   const out = await esbuild.build({
@@ -33,7 +34,10 @@ async function loadContract() {
         `export { waitForWorkersTaskIds } from ${JSON.stringify(TOOL_LABELS)};\n` +
         // The run graph's own projection: the chip, the chat row and the graph
         // node must agree on what counts as a running worker.
-        `export { deriveAgentStatus, attemptStatusColor } from ${JSON.stringify(RUN_FORMAT)};`,
+        `export { deriveAgentStatus, attemptStatusColor } from ${JSON.stringify(RUN_FORMAT)};
+` +
+        // The park predicate the rail and the chat header both read.
+        `export { isBackendFailurePark, MANAGER_TURN_FAILURE_REASON } from "@shared/run-questions";`,
       resolveDir: ROOT,
       loader: "ts",
     },
@@ -1534,6 +1538,111 @@ async function main() {
     const body = source.slice(start, end);
     assert.match(body, /workspaceRailTone\(wr\)/, "the rollup must delegate to workspaceRailTone");
     assert.doesNotMatch(body, /compareRunsByAttention/, "the rollup must not re-rank runs itself");
+  });
+
+  // -- Backend-failure parks ----------------------------------------------
+  //
+  // When the manager backend throws before producing a decision the run is
+  // parked on a synthetic "question" whose text is an error message. It is not
+  // answerable -- every answer re-runs the same failing stage and posts the same
+  // notice back -- yet `blocked` is the top attention tone, so the park claimed
+  // first place on every surface forever. run-msrlghok-icf7da: four answer
+  // rounds, zero steps, parked a week on a workspace with no open chat.
+  const parkQuestion = (extraContext = {}) => ({
+    id: "q-park",
+    clientMessageId: "run-question-q-park",
+    runId: "run-park",
+    author: "spark",
+    kind: "question",
+    message:
+      "Cora's manager turn failed before it could answer this chat message. " +
+      "Check the run log for the backend error, then send the message again.",
+    questionContext: {
+      category: "irreducible_product_scope",
+      reason: T.MANAGER_TURN_FAILURE_REASON,
+      source: "manager_decision",
+      ...extraContext,
+    },
+    attachments: [],
+    intent: "answer",
+    deliveryState: "acknowledged",
+    conversationEpoch: 0,
+    createdAt: at(10),
+  });
+
+  const parkedRun = ({ flagged, question }) =>
+    railRun("park", "blocked", {
+      id: "run-park",
+      blockedOn: {
+        questionMessageId: "q-park",
+        category: "irreducible_product_scope",
+        previousStatus: "running",
+        resumeStatus: "running",
+        source: "manager_decision",
+        resumeStrategy: "schedule_manager",
+        managerMode: "chat",
+        blockedAt: at(10),
+        ...(flagged ? { backendFailure: true } : {}),
+      },
+      humanMessages: [question],
+      autopilot: { status: "blocked", updatedAt: at(10), stopReason: T.MANAGER_TURN_FAILURE_REASON },
+    });
+
+  test("a backend-failure park reports as failed, not as a question", () => {
+    const run = parkedRun({ flagged: true, question: parkQuestion({ backendFailure: true }) });
+    const status = T.describeRunStatus(run);
+    assert.equal(status.tone, "failed");
+    assert.equal(status.label, "Turn failed");
+    assert.equal(status.detail, T.MANAGER_TURN_FAILURE_REASON);
+  });
+
+  test("a backend-failure park stops claiming the rail's attention dot", () => {
+    const run = parkedRun({ flagged: true, question: parkQuestion({ backendFailure: true }) });
+    assert.equal(T.isBackendFailurePark(run), true);
+    assert.equal(T.workspaceRailTone([run]), null);
+    // And it drops out of the switcher's "needs you" bucket.
+    assert.equal(T.switcherGroupForTone(T.describeRunStatus(run).tone), "done");
+  });
+
+  // Parks written before the flag existed carry only the reason string. They
+  // must heal on read -- there is no migration, and the run on the reporter's
+  // machine is one of them.
+  test("a park predating the flag is recognized by its reason string alone", () => {
+    const run = parkedRun({ flagged: false, question: parkQuestion() });
+    assert.equal(run.blockedOn.backendFailure, undefined);
+    assert.equal(T.isBackendFailurePark(run), true);
+    assert.equal(T.describeRunStatus(run).tone, "failed");
+    assert.equal(T.workspaceRailTone([run]), null);
+  });
+
+  test("a genuine question still needs you and still lights the rail", () => {
+    const question = parkQuestion();
+    question.message = "Which database should the importer write to?";
+    question.questionContext.reason = "Two schemas are equally valid and the choice is not reversible.";
+    const run = parkedRun({ flagged: false, question });
+    assert.equal(T.isBackendFailurePark(run), false);
+    const status = T.describeRunStatus(run);
+    assert.equal(status.tone, "blocked");
+    assert.equal(status.label, "Needs you");
+    assert.equal(T.workspaceRailTone([run]), "blocked");
+    assert.equal(T.switcherGroupForTone(status.tone), "needs-you");
+  });
+
+  // The park site must mark itself, and must not offer scope options for an
+  // error string -- fallbackQuestionOptions matches on prose, so the notice fell
+  // through to the generic safe/fast/thorough triple and invited the answer loop.
+  test("the park site tags the failure and synthesizes no options", () => {
+    const source = fs.readFileSync(RUN_STORE, "utf8");
+    const start = source.indexOf("Cora's manager turn failed before it could answer");
+    assert.notEqual(start, -1, "the chat-mode park notice must exist");
+    const site = source.slice(start, start + 900);
+    assert.match(site, /backendFailure: true/, "the park must mark itself as a failed turn");
+    assert.match(site, /reason: MANAGER_TURN_FAILURE_REASON/,
+      "the park must use the shared reason constant the legacy check matches on");
+    assert.match(source, /input.backendFailure\s*\? \[\]\s*: normalizeQuestionOptionsForMessage/,
+      "postRunQuestion must skip option synthesis for a failed turn");
+    assert.match(source, /isBackendFailureQuestion\(message\)\n?\s*\? undefined/,
+      "load normalization must not re-synthesize the suppressed options");
   });
 
   console.log(`\n${passed} chat timeline contract tests passed`);

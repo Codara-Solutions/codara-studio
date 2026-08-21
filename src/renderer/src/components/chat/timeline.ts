@@ -10,7 +10,7 @@ import type {
   WorkerTask,
   WorkerTaskStatus,
 } from "@shared/types";
-import { resolveOpenRunQuestion } from "@shared/run-questions";
+import { isBackendFailurePark, resolveOpenRunQuestion } from "@shared/run-questions";
 import { plannedWorkerModel } from "@shared/worker-model-roster";
 import { logicalWorkers, type LogicalWorker } from "../../lib/worker-identity";
 import { WORKER_ATTEMPT_CAP, workerModelLabel } from "../runs/run-format";
@@ -1207,8 +1207,23 @@ export function describeRunStatus(run: RunState): ChatStatus {
       const parkReason = parked ? run.autopilot?.stopReason : undefined;
       return { label: "Paused", tone: "paused", detail: parkReason ?? stepDetail };
     }
-    case "blocked":
+    case "blocked": {
+      // A park created because the manager backend threw is a dead turn, not a
+      // question: answering it re-runs the same failing stage and posts the
+      // same notice back. Reporting it as "Needs you" put it at the TOP of
+      // every attention ranking and left it there — run-msrlghok-icf7da sat
+      // blocked for a week on a workspace with no open chat to answer it in.
+      // It reads as the failure it is; the run stays answerable, it just stops
+      // asking to be looked at first.
+      if (isBackendFailurePark(run)) {
+        return {
+          label: "Turn failed",
+          tone: "failed",
+          detail: run.autopilot?.stopReason ?? "the manager backend could not complete the turn",
+        };
+      }
       return { label: "Needs you", tone: "blocked", detail: "waiting on a reply" };
+    }
     case "complete": {
       // Done-unseen surfaces in teal so a run that finished while the user
       // was elsewhere visually pops out from already-acknowledged green

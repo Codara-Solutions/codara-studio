@@ -2,6 +2,47 @@ import type { HumanRunMessage, RunState } from "./types";
 
 const NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS = 120_000;
 
+/**
+ * The durable reason string stamped on a park created because the manager
+ * backend threw before it could produce a decision.
+ *
+ * It is the ONLY marker parks written before `RunQuestionContext.backendFailure`
+ * existed carry, so isBackendFailureQuestion still matches on it. Changing this
+ * string re-arms the bug for every run already on disk; add a new marker
+ * instead.
+ */
+export const MANAGER_TURN_FAILURE_REASON =
+  "The Cora manager backend could not complete the turn.";
+
+/**
+ * Whether a spark question is a backend-failure notice rather than a real ask.
+ *
+ * These are not answerable: the text says "send the message again", and every
+ * answer just re-runs the same failing turn and posts the same notice back.
+ * run-msrlghok-icf7da is the evidence — four answer/notice rounds, zero steps,
+ * parked for a week.
+ */
+export function isBackendFailureQuestion(message: HumanRunMessage): boolean {
+  const context = message.questionContext;
+  if (!context) return false;
+  return context.backendFailure === true || context.reason === MANAGER_TURN_FAILURE_REASON;
+}
+
+/**
+ * Whether a blocked run is parked on a backend failure.
+ *
+ * Callers use this to keep a dead turn out of the "needs you" surfaces: it is a
+ * failure to report, not work the user is holding up. The blocker's own flag
+ * wins; older parks are recognized through their question message so no stored
+ * run needs migrating.
+ */
+export function isBackendFailurePark(run: RunState): boolean {
+  if (run.status !== "blocked") return false;
+  if (run.blockedOn?.backendFailure === true) return true;
+  const question = resolveOpenRunQuestion(run);
+  return question ? isBackendFailureQuestion(question) : false;
+}
+
 /** Stable identity for local answer drafts. Removing a resolved question changes
  * the key too, so another surface answering it clears stale text immediately. */
 export function runQuestionDraftScopeKey(

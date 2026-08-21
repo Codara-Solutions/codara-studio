@@ -311,6 +311,7 @@ export function createRunBlocker(input: {
   resumeStrategy: RunQuestionResumeStrategy;
   managerMode?: SparkCall["mode"];
   blockedAt: string;
+  backendFailure?: true;
 }): RunBlocker {
   const resumeStatus = input.resumeStatus ?? fallbackResumeStatus(input.currentStatus);
   return {
@@ -322,6 +323,7 @@ export function createRunBlocker(input: {
     resumeStrategy: input.resumeStrategy,
     managerMode: input.managerMode,
     blockedAt: input.blockedAt,
+    ...(input.backendFailure ? { backendFailure: true as const } : {}),
   };
 }
 
