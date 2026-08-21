@@ -11,6 +11,7 @@ export type PreviewKind =
   | "audio"
   | "docx"
   | "pptx"
+  | "spreadsheet"
   | "whiteboard"
   | "html";
 
@@ -27,6 +28,11 @@ const DOCX_EXTS = new Set(["docx", "docm", "dotx", "dotm"]);
 // Same OOXML-only rule for PowerPoint: pptx-preview reads the zip-based
 // formats, so legacy binary .ppt/.pot fall through to the binary-file guard.
 const PPTX_EXTS = new Set(["pptx", "pptm", "ppsx", "ppsm", "potx", "potm"]);
+// Excel preview follows the same OOXML boundary as Word and PowerPoint.
+// Macro-enabled workbooks are safe to inspect because we only parse cells;
+// macros are never executed. Legacy binary .xls/.xlsb and OpenDocument .ods
+// need different parsers and deliberately keep falling through for now.
+const SPREADSHEET_EXTS = new Set(["xlsx", "xlsm", "xltx", "xltm"]);
 
 export function previewKindForPath(path: string): PreviewKind | null {
   const name = path.replace(/\\/g, "/").split("/").pop() ?? "";
@@ -44,5 +50,6 @@ export function previewKindForPath(path: string): PreviewKind | null {
   if (AUDIO_EXTS.has(ext)) return "audio";
   if (DOCX_EXTS.has(ext)) return "docx";
   if (PPTX_EXTS.has(ext)) return "pptx";
+  if (SPREADSHEET_EXTS.has(ext)) return "spreadsheet";
   return null;
 }

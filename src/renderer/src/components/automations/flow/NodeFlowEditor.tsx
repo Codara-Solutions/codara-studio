@@ -666,7 +666,7 @@ function Editor({
             cursor: "default",
           }}
         >
-          <span aria-hidden style={{ color: "var(--accent)", fontSize: 13 }}>↻</span>
+          <span aria-hidden style={{ color: "var(--accent-text)", fontSize: 13 }}>↻</span>
           <span className="spark-eyebrow">Loop</span>
           <span className="spark-mono" style={{ fontSize: 10.5, color: "var(--ink-dim)" }}>
             {loopSummary(buildLoop(draft.loop))}
@@ -734,7 +734,7 @@ function Editor({
               cursor: "default",
             }}
           >
-            <span style={{ fontSize: 20, color: "var(--accent)" }}>+</span>
+            <span style={{ fontSize: 20, color: "var(--accent-text)" }}>+</span>
             <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-dim)" }}>Add first step</span>
             <span style={{ fontSize: 10.5, color: "var(--muted-2)", textAlign: "center" }}>
               Wire a Worker, Guard, or Merge after the trigger.

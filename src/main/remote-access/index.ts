@@ -6,7 +6,7 @@
 // The service takes every environment dependency (directories, workspace
 // listing, terminal creation) through RemoteAccessDeps, so the unit tests
 // and the e2e harness run the REAL lifecycle in plain Node. Production
-// wiring over sparkHome/storage/pty-manager lives in ./production, which is
+// wiring over codaraHome/storage/pty-manager lives in ./production, which is
 // the only module here allowed to import the rest of the main process.
 
 import type {
@@ -252,7 +252,7 @@ export class RemoteAccessService {
   private readonly workerTerminalControls: WorkerTerminalControlRegistry;
 
   constructor(private readonly deps: RemoteAccessDeps) {
-    this.devices = new PairedDeviceStore(deps.remoteDir, deps.log);
+    this.devices = new PairedDeviceStore(deps.remoteDir);
     this.terminalLeases = new RemoteTerminalLeaseRegistry({
       createTerminal: deps.createTerminal,
       now: deps.now,
@@ -326,6 +326,17 @@ export class RemoteAccessService {
   notifyWorkspacesChanged(): void {
     for (const sessions of this.sessions.values()) {
       for (const session of sessions) session.pushWorkspacesChanged();
+    }
+  }
+
+  // Same contract as broadcastCoraChanged: a content-free list-invalidation
+  // hint for every session that completed hello and proved liveness. The phone
+  // answers with terminal.list, which re-authorizes everything it returns.
+  notifyTerminalsChanged(): void {
+    for (const sessions of this.sessions.values()) {
+      for (const session of sessions) {
+        if (session.isProven()) session.pushTerminalsChanged();
+      }
     }
   }
 

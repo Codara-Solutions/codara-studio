@@ -1,8 +1,11 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
-import { codaraNativeCliActivePointerDir } from "./codara-managed-cli-roots";
+import {
+  codaraNativeCliActivePointerDir,
+  isCodaraManagedCliPath,
+} from "./codara-managed-cli-roots";
 
 /**
  * Removal of the retired "use the Active account in your terminal" feature.
@@ -40,6 +43,55 @@ const ENV_FILE_NAME = "env.sh";
 const SYMLINK_NAMES = ["claude", "codex"] as const;
 /** env.sh was always a few hundred bytes; anything huge is not our file. */
 const ENV_FILE_MAX_BYTES = 64 * 1024;
+
+export interface RetiredCodexHomeEnvironmentCleanupResult {
+  /** Environment keys removed. Normally this is exactly CODEX_HOME. */
+  removedKeys: string[];
+}
+
+/**
+ * Remove only CODEX_HOME values that an older Codara build injected.
+ *
+ * Account switching now swaps only auth.json inside one shared Codex home.
+ * A Studio process launched before that fix can still inherit the retired
+ * selector from its parent shell, and any direct child spawn would otherwise
+ * revive the old per-account SQLite/session index. The explicit ~/.codex case
+ * is removed too: it is already Codex's default, while exporting it makes some
+ * Codex versions classify user settings as project-local.
+ *
+ * A genuinely custom CODEX_HOME outside Codara is preserved.
+ */
+export function cleanupRetiredCodexHomeEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  options: {
+    codaraHomeDir?: string;
+    personalCodexHomeDir?: string;
+  } = {},
+): RetiredCodexHomeEnvironmentCleanupResult {
+  const personalCodexHome = resolve(
+    options.personalCodexHomeDir?.trim() || join(homedir(), ".codex"),
+  );
+  const removedKeys: string[] = [];
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() !== "CODEX_HOME") continue;
+    const value = env[key]?.trim();
+    if (!value) continue;
+    const resolvedValue = resolve(value);
+    const isPersonalDefault =
+      process.platform === "win32"
+        ? resolvedValue.toLowerCase() === personalCodexHome.toLowerCase()
+        : resolvedValue === personalCodexHome;
+    if (
+      !isPersonalDefault &&
+      !isCodaraManagedCliPath(value, options.codaraHomeDir)
+    ) {
+      continue;
+    }
+    delete env[key];
+    removedKeys.push(key);
+  }
+  return { removedKeys };
+}
 
 export interface NativeCliActivePointerCleanupResult {
   /** The directory the cleanup inspected. */

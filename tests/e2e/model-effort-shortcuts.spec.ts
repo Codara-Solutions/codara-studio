@@ -69,8 +69,9 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
     // Whatever it lands on must be a level this model actually offers, i.e. one
     // of the rows its own picker lists.
     await page.keyboard.press(modKey("n", { shift: true }));
-    const effortMenu = page.locator(".composer-thinking-menu");
+    const effortMenu = page.locator(".composer-model-thinking-menu");
     await expect(effortMenu).toBeVisible({ timeout: 10_000 });
+    await expect(effortMenu.getByText("Choose thinking depth")).toBeVisible();
     const offered = (await effortMenu.getByRole("option").allTextContents()).map((text) =>
       text.trim(),
     );
@@ -81,11 +82,15 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
 
     // ── Opening the model picker and choosing with the arrows ──────────────
     await page.keyboard.press(modKey("m", { shift: true }));
-    const modelMenu = page.locator(".composer-model-menu");
+    const modelMenu = page.locator(".composer-model-thinking-menu");
     await expect(modelMenu).toBeVisible({ timeout: 10_000 });
+    await expect(modelMenu.getByText("Choose model")).toBeVisible();
     // Focus lands inside the listbox, so the arrows have somewhere to start.
     await expect(modelMenu.getByRole("option").first()).toBeFocused();
     await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(modelMenu.getByText("Choose thinking depth")).toBeVisible();
+    await expect(modelMenu.getByRole("option", { selected: true })).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(modelMenu).toBeHidden();
 

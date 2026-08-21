@@ -4,6 +4,7 @@ import type {
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
+  CoraProfile,
   FsEntry,
   PiCatalogModel,
   RunState,
@@ -13,11 +14,12 @@ import type {
 import { makeId } from "@shared/ids";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { contextWindowForModel } from "@shared/context-window";
-import { chatContextCapacityTokens } from "@shared/context-compaction";
+import {
+  DEFAULT_PI_COMPACT_AT_TOKENS,
+  chatContextCapacityTokens,
+} from "@shared/context-compaction";
 import {
   chatModelIsOpenAi,
-  effectiveChatOneMillionContext,
-  normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
@@ -28,8 +30,8 @@ import {
 import { isUnstartedChatRun } from "./cora-view";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
-import ModelPicker from "./composer/ModelPicker";
-import ThinkingControl from "./composer/ThinkingControl";
+import ModelThinkingPicker from "./composer/ModelThinkingPicker";
+import ProfilePicker from "./composer/ProfilePicker";
 import {
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
@@ -62,7 +64,7 @@ export interface ChatComposerStartConfig {
   model?: string;
   mode?: ChatMode;
   effort?: AgentEffortLevel;
-  oneMillionContext?: boolean;
+  profileId?: string;
 }
 
 // The chat composer. One surface for two jobs:
@@ -149,7 +151,7 @@ interface ChatComposerDraftSnapshot {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
-  oneMillionContext: boolean;
+  profileId: string;
 }
 
 // Navigation-only draft cache. It intentionally lives outside React so it
@@ -180,7 +182,7 @@ export interface ChatComposerChipConfig {
   backend: ChatBackendKind;
   model: string;
   effort: AgentEffortLevel;
-  oneMillionContext: boolean;
+  profileId: string;
 }
 const liveDraftChipByKey = new Map<string, ChatComposerChipConfig>();
 
@@ -213,11 +215,10 @@ export default function ChatComposer({
   // Anchor for the portalled @-mention panel (see AnchoredMenu).
   const composerShellRef = useRef<HTMLDivElement>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
-  // Keyboard "open this dropdown" signals for the two selector pills. A
-  // counter, not a boolean: pressing the chord again while the menu is already
-  // open must still register.
+  // Both keyboard commands target one control, but effort opens directly at
+  // its second step. Counters ensure repeated chords still register.
   const [modelPickerSignal, setModelPickerSignal] = useState(0);
-  const [thinkingPickerSignal, setThinkingPickerSignal] = useState(0);
+  const [effortPickerSignal, setEffortPickerSignal] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pastingImages, setPastingImages] = useState(false);
@@ -231,6 +232,11 @@ export default function ChatComposer({
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(
     run?.chatEffort ?? restoredDraft?.effort ?? DEFAULT_CHAT_EFFORT,
   );
+  const [profiles, setProfiles] = useState<CoraProfile[]>([]);
+  const [draftCoraProfileId, setDraftCoraProfileId] = useState(
+    run?.coraProfileId ?? restoredDraft?.profileId ?? "default",
+  );
+  const profileChosenRef = useRef(Boolean(restoredDraft?.profileId || run?.coraProfileId));
   // Tracks whether the draft default has been resolved from settings + runtime
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
   // IPC round-trip returns we replace them with the actual first visible
@@ -255,9 +261,24 @@ export default function ChatComposer({
   useEffect(() => {
     void refreshPiCatalog();
   }, [refreshPiCatalog]);
-  const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(
-    run?.chat1mContext ?? restoredDraft?.oneMillionContext ?? false,
-  );
+  const refreshProfiles = useCallback(async (): Promise<void> => {
+    try {
+      const next = await window.spark.coraProfiles.list();
+      setProfiles(next);
+      if (!runRef.current && !profileChosenRef.current) {
+        const profile = next.find((item) => item.isDefault) ?? next[0];
+        if (profile) setDraftCoraProfileId(profile.id);
+      }
+    } catch {
+      /* The built-in profile remains the main-process fallback. */
+    }
+  }, []);
+  useEffect(() => {
+    void refreshProfiles();
+    const onProfilesChanged = () => void refreshProfiles();
+    window.addEventListener("spark:cora-profiles-changed", onProfilesChanged);
+    return () => window.removeEventListener("spark:cora-profiles-changed", onProfilesChanged);
+  }, [refreshProfiles]);
   // Latest model-context occupancy from chat.usage SparkEvents. This is a
   // gauge, not a billing counter: each update replaces the prior value so a
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
@@ -301,7 +322,7 @@ export default function ChatComposer({
     backend: draftChatBackend,
     model: draftChatModel,
     effort: draftChatEffort,
-    oneMillionContext: draftOneMillionContext,
+    profileId: draftCoraProfileId,
   };
   // This instance's draft state belongs to the key it restored from at mount.
   // On a chat-tab switch the parent updates draftKey one commit BEFORE the
@@ -329,7 +350,7 @@ export default function ChatComposer({
       backend: draftChatBackend,
       model: draftChatModel,
       effort: draftChatEffort,
-      oneMillionContext: draftOneMillionContext,
+      profileId: draftCoraProfileId,
     });
   }
 
@@ -343,13 +364,11 @@ export default function ChatComposer({
     if (run.chatBackend !== undefined) setDraftChatBackend(run.chatBackend);
     if (run.chatModel !== undefined) setDraftChatModel(run.chatModel);
     if (run.chatEffort !== undefined) setDraftChatEffort(run.chatEffort);
-    if (run.chat1mContext !== undefined) setDraftOneMillionContext(run.chat1mContext);
   }, [
     run?.id,
     run?.chatBackend,
     run?.chatModel,
     run?.chatEffort,
-    run?.chat1mContext,
   ]);
 
   // Focus on the global composer shortcut (App broadcasts spark:focus-composer).
@@ -371,7 +390,7 @@ export default function ChatComposer({
     let cancelled = false;
     void window.spark.agents
       .runtimes()
-      .then((diagnostics) => {
+      .then(() => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
         // A pick that landed while this was in flight outranks the default.
@@ -384,19 +403,15 @@ export default function ChatComposer({
         // tier whenever premium happens to lead the first group.
         const first = defaultChatModel(groups);
         if (!first) return;
-        const { baseId, oneMillion } = decomposeModelId(first.id);
-        const normalizedFlags = normalizeChatFeatureFlags(first.backend, {
-          chat1mContext: oneMillion,
-        });
+        const { baseId } = decomposeModelId(first.id);
         setDraftChatBackend(first.backend);
         setDraftChatModel(baseId);
-        setDraftOneMillionContext(normalizedFlags.chat1mContext);
         const allowedEfforts = effortsFor(first);
         const clamped = clampEffort(draftChatEffort, allowedEfforts);
         if (clamped && clamped !== draftChatEffort) setDraftChatEffort(clamped);
       })
       .catch(() => {
-        /* keep hardcoded defaults; ModelPicker will surface the empty state */
+        /* keep hardcoded defaults; the combined picker will surface the empty state */
       });
     return () => {
       cancelled = true;
@@ -685,8 +700,7 @@ export default function ChatComposer({
           model: latestDraft?.model ?? draftChatModel,
           mode: lockedMode ?? DEFAULT_CHAT_MODE,
           effort: latestDraft?.effort ?? draftChatEffort,
-          oneMillionContext:
-            latestDraft?.oneMillionContext ?? draftOneMillionContext,
+          profileId: latestDraft?.profileId ?? draftCoraProfileId,
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else if (openQuestion) {
@@ -934,6 +948,11 @@ export default function ChatComposer({
   const openCapabilities = () => {
     window.dispatchEvent(new CustomEvent("spark:open-capabilities"));
   };
+  const openProfileManager = () => {
+    window.dispatchEvent(
+      new CustomEvent("spark:open-capabilities", { detail: { tab: "memory" } }),
+    );
+  };
 
   const focusComposerShell = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target;
@@ -949,20 +968,17 @@ export default function ChatComposer({
   const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
-  const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
-  const activeOneMillionContext: boolean = effectiveChatOneMillionContext(activeChatBackend);
   // The active model's option pulled from the STATIC catalog; null for a model
   // discovered from the live catalog, which has no curated row (effortsFor
   // then yields the full ladder). Used only to derive the available effort
-  // cycle for the thinking pill; rendering of the model name happens inside
-  // the ModelPicker, which reads from the dynamic visible groups.
+  // cycle for the combined control; its model label resolves from the same
+  // dynamic visible groups.
   const activeChatModelOption = findOptionInCatalog(
     activeChatBackend,
     activeChatModelId,
-    activeOneMillionContext,
+    false,
   );
-  // Claude Code always runs with 1M context, represented by the Claude 1M
-  // model rows in the picker. Fast mode remains a single GLOBAL setting even
+  // Fast mode remains a single GLOBAL setting even
   // though its control now lives here: the flash button writes
   // AppSettings.openAiFastMode, and there is still no per-chat fast-mode
   // state. It shows only for an OpenAI model — Anthropic has no priority tier
@@ -981,7 +997,6 @@ export default function ChatComposer({
     chatBackend?: ChatBackendKind;
     chatModel?: string;
     chatEffort?: AgentEffortLevel;
-    chat1mContext?: boolean;
   }) => {
     setError(null);
     // Every caller is a deliberate user action (a pill click or one of the
@@ -995,41 +1010,25 @@ export default function ChatComposer({
     const snapshot = draftSnapshotRef.current;
     const baseBackend =
       pendingDesired?.chatBackend ?? snapshot?.backend ?? activeChatBackend;
-    const baseOneMillionContext =
-      pendingDesired?.chat1mContext ??
-      snapshot?.oneMillionContext ??
-      rawOneMillionContext;
     const targetBackend = changes.chatBackend ?? baseBackend;
-    const normalizedFlags = normalizeChatFeatureFlags(targetBackend, {
-      chat1mContext: changes.chat1mContext ?? baseOneMillionContext,
-    });
-    const normalizedChanges = { ...changes };
-    if (
-      changes.chat1mContext !== undefined ||
-      normalizedFlags.chat1mContext !== baseOneMillionContext
-    ) {
-      normalizedChanges.chat1mContext = normalizedFlags.chat1mContext;
-    }
-    if (normalizedChanges.chatBackend !== undefined) setDraftChatBackend(normalizedChanges.chatBackend);
-    if (normalizedChanges.chatModel !== undefined) setDraftChatModel(normalizedChanges.chatModel);
-    if (normalizedChanges.chatEffort !== undefined) setDraftChatEffort(normalizedChanges.chatEffort);
-    if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
+    if (changes.chatBackend !== undefined) setDraftChatBackend(changes.chatBackend);
+    if (changes.chatModel !== undefined) setDraftChatModel(changes.chatModel);
+    if (changes.chatEffort !== undefined) setDraftChatEffort(changes.chatEffort);
     if (!run_ || !mutationScope) return;
 
     const desired: UpdateChatBackendInput = {
       runId: run_.id,
       chatBackend: targetBackend,
       chatModel:
-        normalizedChanges.chatModel ??
+        changes.chatModel ??
         pendingDesired?.chatModel ??
         snapshot?.model ??
         activeChatModelId,
       chatEffort:
-        normalizedChanges.chatEffort ??
+        changes.chatEffort ??
         pendingDesired?.chatEffort ??
         snapshot?.effort ??
         activeChatEffort,
-      chat1mContext: normalizedFlags.chat1mContext,
     };
     const mutation = chatBackendMutationBarriers.enqueue(
       mutationScope,
@@ -1049,13 +1048,11 @@ export default function ChatComposer({
   };
 
   const onPickModel = (model: ChatModelOption) => {
-    // Virtual `:1m` ids decompose into (baseId, oneMillion=true). The
-    // backend only ever sees the real id; the 1M flag rides as
-    // chat1mContext in the same payload the legacy 1M pill used to write.
-    const { baseId, oneMillion } = decomposeModelId(model.id);
+    // Virtual `:1m` ids decompose down to the real id the backend sees.
+    const { baseId } = decomposeModelId(model.id);
     const backendChanged = model.backend !== activeChatBackend;
     // The row's own ladder when it pins one, else the full list, exactly what
-    // the thinking pill will offer for this model once the pick lands.
+    // the picker's second step offers once the model lands.
     const nextEffortLevels = effortsFor(model);
     const nextEffort: AgentEffortLevel = nextEffortLevels.includes(activeChatEffort)
       ? activeChatEffort
@@ -1066,7 +1063,6 @@ export default function ChatComposer({
       chatBackend: backendChanged ? model.backend : undefined,
       chatModel: baseId,
       chatEffort: nextEffort !== activeChatEffort ? nextEffort : undefined,
-      chat1mContext: oneMillion !== activeOneMillionContext ? oneMillion : undefined,
     });
   };
 
@@ -1074,7 +1070,7 @@ export default function ChatComposer({
     applyChatBackendChange({ chatEffort: effort });
   };
 
-  // Keyboard chords for the two selector pills (App broadcasts these; see the
+  // Keyboard chords for model and effort (App broadcasts these; see the
   // agent.* commands). They deliberately route through the same onPick*
   // handlers the dropdowns use, so a chord and a click are indistinguishable
   // downstream — draft-only state before the first send, updateChatBackend
@@ -1097,7 +1093,7 @@ export default function ChatComposer({
         (group) => group.models,
       );
       if (models.length === 0) return;
-      const currentId = composeModelId(activeChatModelId, activeOneMillionContext);
+      const currentId = composeModelId(activeChatModelId, false);
       const index = models.findIndex(
         (model) => model.backend === activeChatBackend && model.id === currentId,
       );
@@ -1130,7 +1126,7 @@ export default function ChatComposer({
     // listener down there would have every hidden tab's menu race the visible
     // one. This effect is the visibility gate.
     const onOpenModel = () => setModelPickerSignal((value) => value + 1);
-    const onOpenThinking = () => setThinkingPickerSignal((value) => value + 1);
+    const onOpenThinking = () => setEffortPickerSignal((value) => value + 1);
     window.addEventListener("spark:cycle-model", onCycleModel);
     window.addEventListener("spark:cycle-effort", onCycleEffort);
     window.addEventListener("spark:open-model-picker", onOpenModel);
@@ -1148,9 +1144,8 @@ export default function ChatComposer({
   // chat1mContext directly via applyChatBackendChange. No standalone
   // toggle handler is needed here anymore.
 
-  // Click-outside / Escape handling for the model picker lives inside the
-  // ModelPicker component itself — the thinking pill is click-to-cycle and
-  // has no popover, so no global listener is needed here anymore.
+  // Click-outside / Escape handling lives in the shared AnchoredMenu; this
+  // composer only gates the app-wide keyboard broadcasts by tab visibility.
 
   // An unstarted board-minted run still reads like a fresh chat: its first
   // send is a first message (see the isUnstartedChatRun branch in send()).
@@ -1314,19 +1309,27 @@ export default function ChatComposer({
             cannot reach inline styles. */}
         <div className="composer-toolbar">
           <div className="composer-toolbar__left">
-            <ModelPicker
+            <ModelThinkingPicker
               activeBackend={activeChatBackend}
               activeModelId={activeChatModelId}
-              activeOneMillion={activeOneMillionContext}
-              onPick={onPickModel}
-              openSignal={modelPickerSignal}
-            />
-            <ThinkingControl
               effort={visibleEffort}
               availableEfforts={availableEfforts}
-              onCycle={onPickEffort}
-              openSignal={thinkingPickerSignal}
+              onPickModel={onPickModel}
+              onPickEffort={onPickEffort}
+              openModelSignal={modelPickerSignal}
+              openEffortSignal={effortPickerSignal}
             />
+            {!run_ ? (
+              <ProfilePicker
+                profiles={profiles}
+                activeProfileId={draftCoraProfileId}
+                onPick={(profileId) => {
+                  profileChosenRef.current = true;
+                  setDraftCoraProfileId(profileId);
+                }}
+                onManage={openProfileManager}
+              />
+            ) : null}
             {fastModeAvailable && (
               <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
             )}
@@ -1360,19 +1363,12 @@ export default function ChatComposer({
           <div className="composer-toolbar__right">
             <ContextPill
               used={tokensUsed}
-              // A Pi chat never reaches its model window: Codara compacts it at
-              // ~256k first, so that is the ceiling the meter measures against.
-              // claude/codex chats drive CLIs with their own compaction and
-              // keep reading against the full window.
-              budget={chatContextCapacityTokens({
+              budget={DEFAULT_PI_COMPACT_AT_TOKENS}
+              effectiveBudget={chatContextCapacityTokens({
                 contextWindowTokens:
-                  reportedContextBudget ?? (activeOneMillionContext && activeChatBackend === "claude"
-                    ? 1_000_000
-                    : contextWindowForModel(activeChatModelId).tokens),
-                backend: activeChatBackend,
+                  reportedContextBudget ?? contextWindowForModel(activeChatModelId).tokens,
                 compactAtTokens: reportedCompactAt,
               })}
-              compactsAtBudget={activeChatBackend === "pi"}
             />
             <IconButton
               title="MCP and skills"
@@ -1800,7 +1796,7 @@ function MentionRow({
         transition: "background var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span aria-hidden style={{ color: active ? "var(--accent)" : "var(--muted)", display: "inline-flex" }}>
+      <span aria-hidden style={{ color: active ? "var(--accent-text)" : "var(--muted)", display: "inline-flex" }}>
         <FileGlyph />
       </span>
       <span style={{ minWidth: 0, display: "grid", gap: 1 }}>
@@ -1881,7 +1877,7 @@ function AttachmentChip({
         fontSize: 11,
       }}
     >
-      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex", flex: "0 0 auto" }}>
+      <span aria-hidden style={{ color: "var(--accent-text)", display: "inline-flex", flex: "0 0 auto" }}>
         <FileGlyph />
       </span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -2157,7 +2153,8 @@ function TextButton({
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [focusRing, setFocusRing] = useState(false);
-  const color = tone === "danger" ? "var(--danger)" : "var(--accent)";
+  const color = tone === "danger" ? "var(--danger)" : "var(--accent-text)";
+  const borderColor = tone === "danger" ? "var(--danger)" : "var(--accent)";
   const active = pressed && !disabled;
   return (
     <button
@@ -2176,7 +2173,7 @@ function TextButton({
       style={{
         appearance: "none",
         border: `1px solid ${
-          disabled ? "var(--rule-soft)" : "color-mix(in oklch, " + color + " 45%, transparent)"
+          disabled ? "var(--rule-soft)" : "color-mix(in oklch, " + borderColor + " 45%, transparent)"
         }`,
         borderRadius: "var(--radius-control, 7px)",
         background: hover && !disabled ? "var(--hover)" : "transparent",

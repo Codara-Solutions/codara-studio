@@ -39,10 +39,6 @@ const PROBE_TIMEOUT_MS = 3000;
 // the same set of nonexistent paths. `clearResolverCache()` flushes both.
 const cache = new Map<string, string | null>();
 
-export function clearResolverCache(): void {
-  cache.clear();
-}
-
 // On Windows, `where <name>` can return several matches for one CLI — npm, for
 // instance, installs BOTH an extensionless Unix `sh` shim and a `<name>.cmd`
 // batch shim side by side (this is exactly how `codex` lands). Not all of these
@@ -262,9 +258,6 @@ async function probeCommonDirs(name: string): Promise<string | null> {
     const localAppData =
       process.env.LOCALAPPDATA ?? join(home, "AppData", "Local");
     const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
-    const programFilesX86 =
-      process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
-
     // npm global (default prefix on Windows). `.exe` first so a native image
     // beats the cmd/sh shims — the bare shim isn't launchable under node-pty.
     for (const ext of ["exe", "cmd", "bat", "ps1", ""]) {

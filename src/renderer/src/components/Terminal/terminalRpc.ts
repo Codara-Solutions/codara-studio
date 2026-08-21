@@ -76,6 +76,12 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
   const title = readString(params, "title");
   const workspaceId = readString(params, "workspaceId");
   const workspaceCwd = readString(params, "workspaceCwd");
+  // Main pins the Claude account when it builds a phone-origin create
+  // (createRemoteTerminal resolves the Active profile and validates any
+  // --resume id against ITS state dir). Dropping the id here would let the
+  // pane's spawn re-resolve a default that may have changed since that
+  // validation, launching under a different account than main checked.
+  const nativeClaudeProfileId = readString(params, "nativeClaudeProfileId");
   const origin = readPhoneOrigin(params.origin);
   return createAgentTerminal({
     cwd: cwd ?? undefined,
@@ -83,6 +89,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
     title: title ?? undefined,
     workspaceId: workspaceId ?? undefined,
     workspaceCwd: workspaceCwd ?? undefined,
+    nativeClaudeProfileId: nativeClaudeProfileId ?? undefined,
     origin: origin ?? undefined,
   });
 }

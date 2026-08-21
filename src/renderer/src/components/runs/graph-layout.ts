@@ -175,10 +175,6 @@ const FAN_INDENT = 46;
 // so joining the two columns costs no crossings.
 const PEER_BUS_DROP = 26;
 
-export function boxCenter(box: Box): Point {
-  return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
-}
-
 function rightPort(box: Box): Point {
   return { x: box.x + box.w, y: box.y + box.h / 2 };
 }

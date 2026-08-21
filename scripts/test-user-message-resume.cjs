@@ -125,7 +125,7 @@ async function main() {
   test("addRunMessage schedules the resume for user messages", () => {
     assert.match(
       source,
-      /if \(input\.author === "user"\) \{\s*\n\s*scheduleResumeForUserMessage\(updated, recordedIntent\);/,
+      /if \(input\.author === "user"\) \{\s*\n\s*scheduleResumeForUserMessage\(updated, recordedIntent, messageId\);/,
       "the message tail must hand the recorded intent to the scheduler",
     );
   });
@@ -148,7 +148,10 @@ async function main() {
     assert.match(scheduler, /activeUserMessageResumes\.has\(run\.id\)/);
     assert.match(scheduler, /activeUserMessageResumes\.delete\(run\.id\)/);
     // Resume goes through the same entry point the Resume button calls.
-    assert.match(scheduler, /await resumeRun\(\{ runId: latest\.id \}\)/);
+    assert.match(
+      scheduler,
+      /await resumeRun\(\{ runId: latest\.id, triggerMessageId: messageId \}\)/,
+    );
     // A failed resume leaves the run paused and usable, with a journal entry.
     assert.match(scheduler, /run\.auto_resume_failed/);
     assert.doesNotMatch(

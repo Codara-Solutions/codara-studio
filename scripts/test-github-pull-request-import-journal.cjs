@@ -23,15 +23,15 @@ async function loadJournalModule() {
     format: "cjs",
     alias: { "@shared": path.join(ROOT, "src", "shared") },
     plugins: [{
-      name: "journal-spark-home-stub",
+      name: "journal-codara-home-stub",
       setup(build) {
-        build.onResolve({ filter: /^\.\/spark-home$/ }, () => ({
-          path: "spark-home",
+        build.onResolve({ filter: /^\.\/codara-home$/ }, () => ({
+          path: "codara-home",
           namespace: "stub",
         }));
         build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
           loader: "js",
-          contents: "export function sparkHome() { throw new Error('explicit test home required'); }",
+          contents: "export function codaraHome() { throw new Error('explicit test home required'); }",
         }));
       },
     }],

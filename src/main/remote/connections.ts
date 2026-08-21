@@ -10,7 +10,7 @@ import type {
   RemoteHostConfig,
 } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { getHost } from "./ssh-hosts";
 import { deleteSecret, getSecret, setSecret } from "./secret-store";
 
@@ -78,15 +78,6 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   code: number | null;
-}
-
-export class RemoteExecError extends Error {
-  constructor(
-    message: string,
-    public readonly result: ExecResult,
-  ) {
-    super(message);
-  }
 }
 
 // ── Auth prompt bridge (renderer modal) ──────────────────────────────────────
@@ -159,7 +150,7 @@ const KNOWN_HOSTS_FILE = "spark-known-hosts.json";
 
 async function readKnownHosts(): Promise<Record<string, string>> {
   try {
-    const raw = await fs.readFile(join(sparkHome(), KNOWN_HOSTS_FILE), "utf8");
+    const raw = await fs.readFile(join(codaraHome(), KNOWN_HOSTS_FILE), "utf8");
     const parsed = JSON.parse(raw) as unknown;
     return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
   } catch {
@@ -170,7 +161,7 @@ async function readKnownHosts(): Promise<Record<string, string>> {
 async function rememberHostKey(key: string, fingerprint: string): Promise<void> {
   const all = await readKnownHosts();
   all[key] = fingerprint;
-  await writeFileAtomic(join(sparkHome(), KNOWN_HOSTS_FILE), JSON.stringify(all, null, 2)).catch(
+  await writeFileAtomic(join(codaraHome(), KNOWN_HOSTS_FILE), JSON.stringify(all, null, 2)).catch(
     () => undefined,
   );
 }

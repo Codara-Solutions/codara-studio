@@ -67,7 +67,9 @@ export function sanitizeWorkerModelHint(hint: string | undefined): string | unde
 // and fallback follows. That is the whole reason this indirection exists.
 export type WorkerModelTier = "standard" | "premium";
 
-export type RosterRuntime = "claude" | "codex";
+export type RosterRuntime = "claude" | "codex" | "grok";
+
+export const WORKER_DEFAULT_GROK_MODEL = "grok-4.5" as const;
 
 export const WORKER_MODEL_ROSTER: Record<RosterRuntime, Record<WorkerModelTier, string>> = {
   claude: { standard: WORKER_DEFAULT_CLAUDE_MODEL, premium: "claude-fable-5" },
@@ -75,6 +77,7 @@ export const WORKER_MODEL_ROSTER: Record<RosterRuntime, Record<WorkerModelTier, 
   // Stated plainly rather than hidden: asking for the premium tier on the
   // codex runtime gets the frontier model, not a more expensive one.
   codex: { standard: "gpt-5.6-sol", premium: "gpt-5.6-sol" },
+  grok: { standard: WORKER_DEFAULT_GROK_MODEL, premium: WORKER_DEFAULT_GROK_MODEL },
 };
 
 /** Every model id a worker is allowed to launch on, deduped. */
@@ -101,7 +104,7 @@ export function coerceWorkerModelToRoster(
   runtime: string,
   hint: string | undefined,
 ): string | undefined {
-  if (runtime !== "claude" && runtime !== "codex") return hint;
+  if (runtime !== "claude" && runtime !== "codex" && runtime !== "grok") return hint;
   const tiers = WORKER_MODEL_ROSTER[runtime];
 
   const raw = sanitizeWorkerModelHint(hint?.trim() || undefined);

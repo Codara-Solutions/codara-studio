@@ -1,3 +1,6 @@
+import { DOCKABLE_KINDS } from "./dock";
+import type { DockableTabKind } from "./types";
+
 export const TERMINAL_PANE_DRAG_MIME = "application/x-spark-terminal-pane";
 export const TAB_REORDER_DRAG_MIME = "application/x-spark-tab-reorder";
 export const TAB_DOCK_DRAG_MIME = "application/x-spark-tab-dock";
@@ -137,7 +140,7 @@ export function peekTabReorderDrag(): TabReorderDragPayload | null {
 // reflow preview under the cursor.
 export interface TabDockDragPayload {
   tabId: string;
-  tabKind: "preview" | "editor" | "chat";
+  tabKind: DockableTabKind;
   title: string;
 }
 
@@ -151,7 +154,10 @@ export function parseTabDockDrag(dataTransfer: DataTransfer): TabDockDragPayload
     const raw = dataTransfer.getData(TAB_DOCK_DRAG_MIME);
     const parsed = JSON.parse(raw) as Partial<TabDockDragPayload>;
     if (typeof parsed.tabId !== "string") return null;
-    if (parsed.tabKind !== "preview" && parsed.tabKind !== "editor" && parsed.tabKind !== "chat") {
+    // Validated against the shared set rather than a literal list: a kind that
+    // becomes dockable must not stay silently undraggable here, which is a
+    // failure with no error — the pill just refuses to drop.
+    if (typeof parsed.tabKind !== "string" || !DOCKABLE_KINDS.has(parsed.tabKind)) {
       return null;
     }
     return {

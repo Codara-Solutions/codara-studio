@@ -11,6 +11,8 @@ import { PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
+import { resolveWorkspaceAccent } from "../lib/workspace-accent";
+import { useTheme } from "../theme/theme-context";
 import {
   PANEL_HEADER_H,
   PANEL_SECTION_KEYS,
@@ -19,7 +21,7 @@ import {
   type PanelSide,
 } from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
-import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
+import SectionHeader from "../panels/SectionHeader";
 import {
   beforeItemForVerticalPlan,
   planVerticalReorder,
@@ -1289,15 +1291,46 @@ function WorkspaceFolder({
   onDelete?: () => void;
   children: React.ReactNode;
 }) {
+  const { resolvedTheme } = useTheme();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const colorInputRef = useRef<HTMLInputElement | null>(null);
+  const committedFolderColor = useRef(normalizeHex(accent));
+  const latestOnChangeColor = useRef(onChangeColor);
   const folderMenuBtnRef = useRef<HTMLButtonElement>(null);
   const [draftName, setDraftName] = useState(name);
   const [menuOpen, setMenuOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const collapsed = group?.collapsed === true;
+  const readableAccent = React.useMemo(
+    () => resolveWorkspaceAccent(accent).readable,
+    [accent, resolvedTheme],
+  );
 
   useEffect(() => setDraftName(name), [name]);
+  useEffect(() => {
+    latestOnChangeColor.current = onChangeColor;
+  }, [onChangeColor]);
+  useEffect(() => {
+    const color = normalizeHex(accent);
+    committedFolderColor.current = color;
+    if (colorInputRef.current) colorInputRef.current.value = color;
+  }, [accent]);
+  useEffect(() => {
+    const input = colorInputRef.current;
+    if (!input) return;
+    const commitColor = () => {
+      const color = normalizeHex(input.value);
+      if (color === committedFolderColor.current) return;
+      committedFolderColor.current = color;
+      latestOnChangeColor.current?.(color);
+    };
+    // React's onChange for a color input follows the native `input` stream,
+    // which fires continuously while the picker is dragged. Updating a folder
+    // there re-shades every child and persists the whole workspace tree on
+    // every pointer sample. Native `change` is the final committed selection.
+    input.addEventListener("change", commitColor);
+    return () => input.removeEventListener("change", commitColor);
+  }, [group?.id, editing]);
   useEffect(() => {
     if (!editing) return;
     inputRef.current?.focus();
@@ -1452,7 +1485,7 @@ function WorkspaceFolder({
         ) : (
           <span style={{ width: 14 }} />
         )}
-        <FolderGlyph color={group ? accent : "var(--muted)"} open={!collapsed} />
+        <FolderGlyph color={group ? readableAccent : "var(--muted)"} open={!collapsed} />
         {editing ? (
           <input
             ref={inputRef}
@@ -1472,9 +1505,9 @@ function WorkspaceFolder({
               flex: 1,
               appearance: "none",
               background: "transparent",
-              color: accent,
+              color: readableAccent,
               border: "none",
-              borderBottom: `1px solid ${accent}`,
+              borderBottom: `1px solid ${readableAccent}`,
               outline: "none",
               padding: "1px 0",
               fontFamily: "inherit",
@@ -1492,7 +1525,7 @@ function WorkspaceFolder({
               appearance: "none",
               border: "none",
               background: "transparent",
-              color: accent,
+              color: readableAccent,
               textAlign: "left",
               padding: 0,
               fontFamily: "inherit",
@@ -1619,19 +1652,13 @@ function WorkspaceFolder({
                 </div>
                 <RowMenuItem
                   label="Custom color…"
-                  onClick={() => colorInputRef.current?.click()}
-                />
-                <input
-                  ref={colorInputRef}
-                  type="color"
-                  value={normalizeHex(accent)}
-                  onChange={(event) => {
-                    onChangeColor?.(event.currentTarget.value);
+                  onClick={() => {
+                    // The native picker is outside the portalled menu below,
+                    // so closing the menu cannot unmount its owning input and
+                    // kill the picker on the user's first interaction.
                     setMenuOpen(false);
+                    colorInputRef.current?.click();
                   }}
-                  tabIndex={-1}
-                  aria-hidden="true"
-                  style={{ position: "absolute", width: 0, height: 0, opacity: 0 }}
                 />
                 <div style={{ height: 1, margin: "3px 5px", background: "var(--rule-soft)" }} />
                 <RowMenuItem
@@ -1651,6 +1678,14 @@ function WorkspaceFolder({
                 />
               </div>
             </AnchoredMenu>
+            <input
+              ref={colorInputRef}
+              type="color"
+              defaultValue={normalizeHex(accent)}
+              tabIndex={-1}
+              aria-hidden="true"
+              style={{ position: "absolute", width: 0, height: 0, opacity: 0 }}
+            />
           </div>
         )}
       </div>

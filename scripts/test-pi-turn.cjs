@@ -43,17 +43,12 @@ function loadTypeScriptModule(sourcePath) {
   return loaded.exports;
 }
 
-const { frontierTurnHasRequiredCompletion, PiTurnAccumulator } = loadTypeScriptModule(
+const piTurnModule = loadTypeScriptModule(
   path.join(__dirname, "..", "src", "main", "orchestration", "pi-turn.ts"),
 );
-
-assert.equal(frontierTurnHasRequiredCompletion("fast", false, []), true);
-assert.equal(frontierTurnHasRequiredCompletion("frontier", true, []), true);
-assert.equal(frontierTurnHasRequiredCompletion("frontier", false, []), false);
-assert.equal(frontierTurnHasRequiredCompletion("frontier", false, [{ toolName: "codara_complete" }]), true);
-assert.equal(frontierTurnHasRequiredCompletion("frontier", false, [
-  { toolName: "mcp__codara-studio__codara_complete" },
-]), true);
+const { PiTurnAccumulator } = piTurnModule;
+// The frontier policy (and its required-completion gate) was removed 2026-08.
+assert.equal(piTurnModule.frontierTurnHasRequiredCompletion, undefined);
 
 const stream = [];
 const turn = new PiTurnAccumulator((event) => stream.push(event));

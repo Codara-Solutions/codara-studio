@@ -121,6 +121,8 @@ export function classifyWorkerSilence(input: {
  */
 export const PI_TURN_IDLE_TIMEOUT_MS = 25 * 60 * 1000;
 export const PI_TURN_ABSOLUTE_CEILING_MS = 6 * 60 * 60 * 1000;
+/** Maximum time a normal Pi tool may produce no result. */
+export const PI_TOOL_RESULT_TIMEOUT_MS = 25 * 60 * 1000;
 export const PI_LONG_POLL_TRUST_MS = 30 * 60 * 1000;
 
 export type TurnLivenessAction = "continue" | "fail";
@@ -130,15 +132,20 @@ export interface TurnLivenessVerdict {
   detail: string;
 }
 
+export interface TurnInFlightTool {
+  name: string;
+  startedAt: number;
+  longPoll: boolean;
+}
+
 export function classifyTurnLiveness(input: {
   now: number;
   startedAt: number;
   lastEventAt: number;
-  /** Epoch ms a long-poll tool call started, or null when none is in flight. */
-  longPollSince: number | null;
-  longPollName: string | null;
+  /** Every tool that emitted a start event but has not emitted its result. */
+  inFlightTools: readonly TurnInFlightTool[];
 }): TurnLivenessVerdict {
-  const { now, startedAt, lastEventAt, longPollSince, longPollName } = input;
+  const { now, startedAt, lastEventAt, inFlightTools } = input;
 
   if (now - startedAt >= PI_TURN_ABSOLUTE_CEILING_MS) {
     return {
@@ -147,14 +154,23 @@ export function classifyTurnLiveness(input: {
     };
   }
 
-  if (longPollSince !== null) {
-    const waitingFor = now - longPollSince;
-    if (waitingFor < PI_LONG_POLL_TRUST_MS) return { action: "continue", detail: "" };
+  if (inFlightTools.length > 0) {
+    const expired = inFlightTools
+      .map((tool) => ({
+        tool,
+        waitingFor: now - tool.startedAt,
+        timeout: tool.longPoll ? PI_LONG_POLL_TRUST_MS : PI_TOOL_RESULT_TIMEOUT_MS,
+      }))
+      .filter((entry) => entry.waitingFor >= entry.timeout)
+      .sort((left, right) => (left.tool.startedAt + left.timeout) - (right.tool.startedAt + right.timeout))[0];
+    if (!expired) return { action: "continue", detail: "" };
     return {
       action: "fail",
-      detail:
-        `Cora's Pi turn is stuck in ${longPollName ?? "a blocking tool"}: ` +
-        `${Math.round(waitingFor / 60_000)} min with no result, past the point that call can legally take.`,
+      detail: expired.tool.longPoll
+        ? `Cora's Pi turn is stuck in ${expired.tool.name}: ` +
+          `${Math.round(expired.waitingFor / 60_000)} min with no result, past the point that call can legally take.`
+        : `Cora's Pi turn is stuck in ${expired.tool.name}: ` +
+          `${Math.round(expired.waitingFor / 60_000)} min with no result.`,
     };
   }
 

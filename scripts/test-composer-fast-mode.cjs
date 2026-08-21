@@ -75,7 +75,7 @@ assert.match(conversation, /primary\.length === 0 && noteCount === 0 && !window/
 // Launch-time env can only apply at launch, so the value the composer wrote is
 // resolved once per turn, compared as session identity, and handed to the plan.
 assert.match(piBackend, /resolveCodaraPiFastMode\(provider\)/);
-assert.match(piBackend, /contractPromptSha256,\s*\n\s*fastMode,/);
+assert.match(piBackend, /sessionId,\s*\n\s*fastMode,/);
 assert.match(piBackend, /openAiFastMode: fastMode,/);
 assert.match(piRuntimeElectron, /export async function resolveCodaraPiFastMode\(/);
 assert.match(piRuntimeElectron, /if \(provider === "anthropic"\) return false;/);
@@ -119,9 +119,10 @@ async function main() {
       `${model} must never be offered fast mode`,
     );
   }
-  // Fast mode was never a chat feature flag and must not become one again.
-  assert.deepEqual(policy.normalizeChatFeatureFlags("pi", {}), { chat1mContext: false });
-  assert.equal(policy.effectiveChatFastMode("pi", true), false);
+  // Fast mode was never a chat feature flag and must not become one again:
+  // the per-chat flag machinery is gone from chat-policy entirely.
+  assert.equal(policy.normalizeChatFeatureFlags, undefined);
+  assert.equal(policy.effectiveChatFastMode, undefined);
 
   console.log(
     "PASS composer fast-mode toggle (OpenAI-only, global setting, session identity) and no Technical details section",

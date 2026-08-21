@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { init } from "pptx-preview";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 
@@ -6,6 +6,8 @@ interface Props {
   path: string;
   // Bumps when the file changes on disk — triggers a re-render.
   mtimeMs: number;
+  toolbarAction?: ReactNode;
+  forceLocalToolbar?: boolean;
 }
 
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
@@ -31,7 +33,7 @@ const BASE_WIDTH = 1280;
 let liveDecks = 0;
 let renderGeneration = 0;
 
-export default function PptxPreview({ path, mtimeMs }: Props) {
+export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalToolbar }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
@@ -137,7 +139,7 @@ export default function PptxPreview({ path, mtimeMs }: Props) {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <DockablePaneBar>
+      <DockablePaneBar forceLocal={forceLocalToolbar}>
         <span style={{ marginRight: "auto", whiteSpace: "nowrap" }}>
           {loading ? "Loading presentation…" : slideCount > 0 ? `${slideCount} slides` : ""}
         </span>
@@ -166,6 +168,7 @@ export default function PptxPreview({ path, mtimeMs }: Props) {
         >
           Fit
         </button>
+        {toolbarAction}
       </DockablePaneBar>
       <div
         ref={scrollRef}

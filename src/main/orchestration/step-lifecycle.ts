@@ -327,6 +327,7 @@ export function rehomeSettledStepFeedbackRetry(
     // becomes the single live claim on that session.
     followUpOfTaskId: target.id,
     resumeSessionId: target.resumeSessionId,
+    verifierBrief: target.verifierBrief,
     // Cumulative, so the fast policy's one-rework cap counts rounds of work
     // rather than rounds per task record.
     verifierFeedbackRounds: (target.verifierFeedbackRounds ?? 0) + 1,

@@ -209,7 +209,6 @@ async function main() {
     executionPolicy: "fast",
     projectPolicyMode: "trusted",
     sessionId: "session-a",
-    contractPromptSha256: null,
     fastMode: false,
   };
   assert.equal(

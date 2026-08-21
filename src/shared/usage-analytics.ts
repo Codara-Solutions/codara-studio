@@ -9,8 +9,6 @@
 
 export type UsageProviderKind = "claude" | "codex" | "cora";
 
-export const USAGE_PROVIDERS: readonly UsageProviderKind[] = ["claude", "codex", "cora"];
-
 export interface UsageTokenTotals {
   uncachedInputTokens: number;
   cachedInputTokens: number;
@@ -302,7 +300,7 @@ export function initialPiScanState(fallbackSessionId = ""): PiScanState {
 }
 
 /**
- * Parses one line of a Pi runtime session (`sparkHome()/pi-agent/sessions`).
+ * Parses one line of a Pi runtime session (`codaraHome()/pi-agent/sessions`).
  *
  * Pi computes the exact provider cost itself, so `usage.cost.total` is trusted
  * over the local price table. One writer per file and no content-block fan-out,

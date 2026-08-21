@@ -7,14 +7,14 @@ import type { GitCopyWorktreeResult, GitOpResult } from "@shared/types";
 import { errorText, readGitText, runGit } from "./git-exec";
 
 // Worktree provisioning for the "Create copy branch" workspace action. Pure
-// git + fs — NO electron import — so the path base (sparkHome) is passed in by
+// git + fs — NO electron import — so the path base (codaraHome) is passed in by
 // the caller (ipc.ts). Keep this dependency-light: the integration test bundles
 // it with esbuild and the only runtime import is ./git-exec.
 
 export interface CreateCopyWorktreeInput {
   repoCwd: string;
   // Base dir for THIS repo's worktrees, e.g. ~/.SparkAgent/worktrees/<repo>.
-  // Caller (ipc.ts) computes it from sparkHome so this module stays
+  // Caller (ipc.ts) computes it from codaraHome so this module stays
   // electron-free and testable.
   worktreesRoot: string;
   baseBranch?: string;
@@ -269,7 +269,7 @@ export async function createCheckoutWorktree(
 
 export interface CreateSandboxWorktreeInput {
   repoCwd: string;
-  // Base dir for sandbox worktrees, computed by the caller from sparkHome so
+  // Base dir for sandbox worktrees, computed by the caller from codaraHome so
   // this module stays electron-free.
   worktreesRoot: string;
   // Run checkpoint ref or sha to fork from. Omit to let createCopyWorktree

@@ -81,14 +81,14 @@
   font-style: italic;
 }
 .spark-markdown a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: none;
   text-underline-offset: 0.18em;
   transition: color var(--motion-fast) var(--ease-out);
 }
 .spark-markdown a:hover {
   text-decoration: underline;
-  color: color-mix(in oklch, var(--accent) 85%, var(--ink));
+  color: var(--accent-text);
 }
 .spark-markdown a:focus-visible {
   outline: none;

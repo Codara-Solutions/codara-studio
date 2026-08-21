@@ -111,7 +111,7 @@ export default function RunPeek({
                 style={{
                   flex: "0 0 52px",
                   paddingTop: 2,
-                  color: m.author === "user" ? "var(--muted)" : "var(--accent)",
+                  color: m.author === "user" ? "var(--muted)" : "var(--accent-text)",
                 }}
               >
                 {m.author === "user" ? "you" : "spark"}

@@ -43,8 +43,10 @@ export type CommandId =
   | "tab.cyclePrev"
   | "worker.newClaude"
   | "worker.newCodex"
+  | "worker.newGrok"
   | "worker.claudeSessions"
   | "worker.codexSessions"
+  | "worker.grokSessions"
   | "agent.cycleModel"
   | "agent.cycleEffort"
   | "agent.openModelPicker"
@@ -97,10 +99,9 @@ export const COMMANDS: Command[] = [
   },
   {
     id: "runSwitcher.open",
-    label: "Open run switcher",
+    label: "Switch Cora run",
     group: "Navigation",
-    // Mod+K — command-palette-style switcher over every run across all
-    // workspaces.
+    // Mod+K — quick access to recent Cora work in registered workspaces.
     defaultChords: [mod("k")],
   },
   {
@@ -139,7 +140,7 @@ export const COMMANDS: Command[] = [
   },
   {
     id: "session.openInspector",
-    label: "Open session inspector",
+    label: "Show run details",
     group: "General",
     // Mod+Shift+I — overlay with cost / events / context window / failure
     // tabs against the active chat run. Mod+I alone often triggers DevTools
@@ -350,6 +351,12 @@ export const COMMANDS: Command[] = [
     defaultChords: [],
   },
   {
+    id: "worker.newGrok",
+    label: "New Grok worker pane",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
     id: "worker.claudeSessions",
     label: "Open Claude worker sessions…",
     group: "Workers",
@@ -358,6 +365,12 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.codexSessions",
     label: "Open Codex worker sessions…",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.grokSessions",
+    label: "Open Grok worker sessions…",
     group: "Workers",
     defaultChords: [],
   },
@@ -407,11 +420,3 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod("v", { shift: true })],
   },
 ];
-
-const COMMAND_BY_ID = new Map<CommandId, Command>(COMMANDS.map((c) => [c.id, c]));
-
-export function getCommand(id: CommandId): Command | undefined {
-  return COMMAND_BY_ID.get(id);
-}
-
-export const COMMAND_IDS: CommandId[] = COMMANDS.map((c) => c.id);

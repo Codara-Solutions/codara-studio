@@ -31,6 +31,7 @@ function createHarness() {
     events: [],
     launches: 0,
     nextStart: null,
+    nextPromptError: null,
     // Stands in for AppSettings.openAiFastMode, which the composer's flash
     // button writes. Anthropic never sees it.
     fastMode: false,
@@ -59,9 +60,6 @@ function createHarness() {
         openAiFastMode: options.openAiFastMode,
         executionPolicy: options.executionPolicy,
         projectPolicyMode: options.projectPolicyMode,
-        frontierManifestPath: null,
-        frontierManifestSha256: null,
-        frontierAdmissionArtifactSha256: null,
         mcpConfigPath: null,
         agentSocketCapabilityId: capabilityId,
         agentSocketCapabilityExpiresAt: expiresAt,
@@ -102,10 +100,8 @@ async function loadBackend() {
     "./pi-runtime-electron": `
       const h = () => globalThis.${HARNESS_KEY};
       module.exports = {
-        archiveCodaraPiFrontierRevision: async () => null,
         cleanupPiMcpBridgeConfig: async (plan) => h().cleanupPlan(plan),
         createCodaraPiLaunchPlan: async (options) => h().createPlan(options),
-        promoteCodaraPiFrontierAdmission: async () => ({ promoted: false, reason: "test" }),
         resolveCodaraPiExecutionAccount: async (request) => h().resolveAccount(request),
         resolveCodaraPiFastMode: async (provider) => h().fastModeFor(provider),
       };`,
@@ -146,6 +142,9 @@ async function loadBackend() {
           async prompt(prompt) {
             this.prompts.push(prompt);
             h().events.push("prompt:" + this.id);
+            const error = h().nextPromptError;
+            h().nextPromptError = null;
+            if (error) throw error;
             for (const listener of [...this.listeners]) {
               listener({
                 type: "message_end",
@@ -168,7 +167,6 @@ async function loadBackend() {
       };`,
     "./pi-turn": `
       module.exports = {
-        frontierTurnHasRequiredCompletion: () => true,
         PiTurnAccumulator: class {
           constructor() { this.finalText = ""; }
           consume(event) {
@@ -191,7 +189,7 @@ async function loadBackend() {
           }
         },
       };`,
-    "./spark-agent-backend": `
+    "./agent-backend": `
       module.exports = {
         buildTalkReplyDecision: (reply) => ({ status: "reply", reply }),
       };`,
@@ -386,6 +384,29 @@ async function testFailedStartupReleasesItsClaim(backend, harness) {
   await backend.disposeChat("run-start-failure");
 }
 
+async function testFailedTurnStopsItsWholeRuntime(backend, harness) {
+  harness.nextPromptError = new Error("synthetic active-turn failure");
+  const result = await backend.requestManagerDecision(
+    requestInput("run-turn-failure"),
+  );
+  const failed = harness.clients.at(-1);
+  assert.equal(result.turnFailed, true);
+  assert.match(result.notice, /synthetic active-turn failure/);
+  assert.equal(failed.stopCalls, 1, "a failed active turn must stop its runtime");
+  assert.equal(
+    harness.isCapabilityActive(failed.plan.agentSocketCapabilityId, Date.now()),
+    false,
+    "turn failure must revoke the failed runtime before it can be retried",
+  );
+
+  const recovered = await backend.requestManagerDecision(
+    requestInput("run-turn-failure"),
+  );
+  assert.notEqual(harness.clients.at(-1), failed, "retry must launch a clean runtime");
+  assert.equal(recovered.turnFailed, undefined);
+  await backend.disposeChat("run-turn-failure");
+}
+
 async function testSupersedingRequestReclaimsPendingOwner(backend, harness) {
   const gate = deferred();
   harness.nextStart = gate;
@@ -483,6 +504,7 @@ async function main() {
   await testDisposalCannotRevivePendingStartup(backend, harness);
   await testRevokedAndExpiredOwnersAreNeverReused(backend, harness);
   await testFailedStartupReleasesItsClaim(backend, harness);
+  await testFailedTurnStopsItsWholeRuntime(backend, harness);
   await testSupersedingRequestReclaimsPendingOwner(backend, harness);
   await testFastModeIsPartOfSessionIdentity(backend, harness);
   console.log(

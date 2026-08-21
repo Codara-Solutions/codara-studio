@@ -75,7 +75,7 @@ export default function RunIdChip({
           {
             "--spark-icon-btn-size": "18px",
             fontSize: 10,
-            color: copied ? "var(--accent)" : "var(--muted-2)",
+            color: copied ? "var(--accent-text)" : "var(--muted-2)",
             // Copy must survive a cramped row: the chip holds its width
             // instead of being shrunk (or clipped) out of reach by a long
             // sibling such as a paused run's park reason.
@@ -104,7 +104,7 @@ export default function RunIdChip({
         borderRadius: 999,
         border: copied ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
         background: copied ? "var(--accent-soft)" : "var(--panel-2)",
-        color: copied ? "var(--accent)" : "var(--ink-dim)",
+        color: copied ? "var(--accent-text)" : "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         fontVariantNumeric: "tabular-nums",
@@ -119,7 +119,7 @@ export default function RunIdChip({
           "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span aria-hidden style={{ color: copied ? "var(--accent)" : "var(--muted)" }}>
+      <span aria-hidden style={{ color: copied ? "var(--accent-text)" : "var(--muted)" }}>
         id
       </span>
       <span>{copied ? "Copied" : short}</span>

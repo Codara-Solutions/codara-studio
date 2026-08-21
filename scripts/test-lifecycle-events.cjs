@@ -1,5 +1,5 @@
 // Focused executable coverage for the durable orchestration event journal.
-// Bundles the real event-log.ts with headless Electron/spark-home stubs, then
+// Bundles the real event-log.ts with headless Electron/codara-home stubs, then
 // exercises concurrent appends, atomic batches, restart high-water recovery,
 // legacy synthetic sequences, and persist-before-broadcast ordering.
 //
@@ -27,8 +27,8 @@ const plugin = {
       path: "electron-stub",
       namespace: "stub",
     }));
-    build.onResolve({ filter: /\/spark-home$/ }, () => ({
-      path: "spark-home-stub",
+    build.onResolve({ filter: /\/codara-home$/ }, () => ({
+      path: "codara-home-stub",
       namespace: "stub",
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
@@ -39,7 +39,7 @@ const plugin = {
         };
       }
       return {
-        contents: `export const sparkHome = () => ${JSON.stringify(TMP_HOME)};`,
+        contents: `export const codaraHome = () => ${JSON.stringify(TMP_HOME)};`,
         loader: "js",
       };
     });

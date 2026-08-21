@@ -20,8 +20,3 @@ export function setRecording(value: boolean): void {
 export function isRecording(): boolean {
   return recording;
 }
-
-export function subscribeRecording(listener: (value: boolean) => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}

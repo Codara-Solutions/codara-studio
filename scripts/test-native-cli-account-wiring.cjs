@@ -17,6 +17,10 @@ const settings = read("src/renderer/src/components/SettingsDialog.tsx");
 const settingsView = read("src/renderer/src/components/AccountCards.tsx");
 const app = read("src/renderer/src/App.tsx");
 const tabs = read("src/renderer/src/tabs/useTabs.ts");
+const tabBar = read("src/renderer/src/tabs/TabBar.tsx");
+const picker = read("src/renderer/src/components/WorkerSessionPicker.tsx");
+const shortcutCommands = read("src/renderer/src/shortcuts/commands.ts");
+const terminalStack = read("src/renderer/src/tabs/TerminalStack.tsx");
 const session = read(
   "src/renderer/src/components/Terminal/useTerminalSession.ts",
 );
@@ -131,12 +135,54 @@ assert.match(
 );
 assert.match(app, /cancelLogin\(\{ launchToken \}\)/);
 assert.match(app, /event\.preventDefault\(\)/);
+assert.doesNotMatch(
+  app,
+  /title:\s*`\$\{titlePrefix\}\s*·/,
+  "an account switch must keep the normal terminal tab title",
+);
+assert.match(tabBar, /workerRuntimes\.length > 1/);
+assert.match(tabBar, /<SplitAgentsMark runtimes=\{workerRuntimes\}/);
+assert.match(picker, /const \[selectedIndex, setSelectedIndex\] = useState\(-1\)/);
+assert.match(picker, /historyKeyboardArmedRef\.current = true/);
+assert.match(
+  picker,
+  /if \(!historyKeyboardArmedRef\.current \|\| !session\) \{\s*void launchNew\(\)/,
+);
+for (const [id, label, handler] of [
+  ["worker.newGrok", "New Grok worker pane", "handleNewWorkerPane(GROK_LAUNCH_COMMAND)"],
+  ["worker.grokSessions", "Open Grok worker sessions…", 'openShortcutWorkerSessions("grok")'],
+]) {
+  assert.match(shortcutCommands, new RegExp(`\\| "${id}"`));
+  assert.match(shortcutCommands, new RegExp(`id: "${id}"[\\s\\S]*?label: "${label}"`));
+  assert.ok(app.includes(`"${id}": () => ${handler}`), `${id} must have an App handler`);
+}
+assert.match(
+  app,
+  /const launchWorkerInNewTerminalTab = useCallback\([\s\S]*?tabs\.newTerminalTab\(cwd, launchCommand/,
+  "the tab-strip worker launcher must always create a terminal tab",
+);
+assert.match(
+  app,
+  /const openTabBarWorkerSessions = useCallback\([\s\S]*?launchWorkerInNewTerminalTab\(command, \{ cwd, session \}\)/,
+  "tab-strip session resumes must use the new-tab launcher too",
+);
+for (const runtime of ["claude", "codex", "grok"]) {
+  assert.ok(
+    app.includes(`() => openTabBarWorkerSessions("${runtime}")`),
+    `the tab-strip ${runtime} row must use tab scope`,
+  );
+}
+assert.match(
+  terminalStack,
+  /onOpenWorkerSessions: \(runtime\)[\s\S]*?splitRef\.current\(\s*tabId,\s*target\.paneId,\s*target\.direction,\s*command,\s*session/,
+  "the terminal-toolbar worker launcher must split inside its own tab",
+);
 
-// Settings presents one merged Accounts section: CLI sign-ins and Cora
-// connections share a single card list, and the copy still tells the user the
-// two logins are stored apart — in plain language, with no OAuth vocabulary.
+// Settings presents one merged Accounts section and explains the actual switch
+// boundary: Cora changes now, while a CLI needs a fresh process.
 assert.match(settings, /title="Accounts"/);
-assert.match(settings, /each need their own sign-in, even to the same account/);
+assert.match(settings, /Cora switches immediately/);
+assert.match(settings, /opens a fresh Studio session/);
 assert.match(settings, /<AccountCards providers=\{providerViews\}/);
 assert.ok(
   settings.indexOf("<AccountsSettings />") >= 0,
@@ -157,14 +203,24 @@ assert.match(settings, /\.\.\.\(paired \? \{ cli: cliFacet\(paired\) \} : \{\}\)
 // one case that can be merged by reconnecting, so that card — and only a
 // Cora-only card sitting beside an unmatched CLI sign-in — offers it.
 assert.match(settings, /filter\(\(profile\) => !pairedCliIds\.has\(profile\.id\)\)/);
+assert.match(
+  settings,
+  /profile\.managed \|\| profile\.status === "connected"/,
+  "an unsigned built-in CLI slot must not render as its own account card",
+);
+assert.match(settings, /unsigned built-in CLI slot is not an account/);
 assert.match(settings, /key: `cli:\$\{profile\.id\}`/);
-assert.match(settings, /that account appears twice — once for each sign-in/);
-assert.match(settings, /card\.cora && !card\.cli && cliOnlyCards\.length > 0/);
+assert.match(settings, /Only a \*signed-in\* unmatched CLI can merge/);
+assert.match(settings, /card\.cora && !card\.cli && unmatchedSignedInCli\.length > 0/);
 assert.match(settings, /pairHint: `Reconnect to Cora if this is the same account/);
+assert.match(settings, /card\.cli\?\.authState === "connected"/);
+assert.match(settings, /function accountCardShowsUsage/);
+assert.match(settings, /accountCardShowsUsage\(usage\)/);
 // The built-in CLI sign-in has no name field of its own, so its card name is a
-// Codara-side preference (nativeCliAccountLabels, keyed runtime:profileId) with
-// "Personal" as the fallback. The label is cosmetic: the unmanaged rename path
-// writes the preference and never reaches the CLI rename IPC.
+// Codara-side preference (nativeCliAccountLabels, keyed runtime:profileId),
+// then the store's "Existing … login" label, with "Personal" as last resort.
+// Using "Personal" first collided with Cora's default account name.
+assert.match(settings, /\|\| profile\.label \|\| "Personal"/);
 const prefsStore = read("src/main/preferences-store.ts");
 assert.match(shared, /nativeCliAccountLabels: Record<string, string>;/);
 assert.match(shared, /nativeCliAccountLabels: \{\},/);
@@ -177,7 +233,6 @@ assert.match(
   /label: profile\.managed\s*\? profile\.label\s*: preferences\.nativeCliAccountLabels\[/,
 );
 assert.match(settings, /\$\{descriptor\.runtime\}:\$\{profile\.id\}/);
-assert.match(settings, /\|\| "Personal"/);
 assert.match(settings, /if \(!managed\) \{/);
 assert.match(settings, /setPreference\("nativeCliAccountLabels", \{/);
 assert.match(settings, /\[`\$\{runtime\}:\$\{profileId\}`\]: label,/);
@@ -205,6 +260,13 @@ assert.match(identity, /accountUuid\.trim\(\)\.toLowerCase\(\)/);
 // sandbox can never read the real one.
 assert.match(identity, /join\(configDirEnv \?\? homeDir, "\.claude\.json"\)/);
 assert.doesNotMatch(identity, /homedir\(\)/);
+// Grok Build stores identity on a keyed-by-issuer slot, not Codex `{ tokens }`.
+// `user_id` is the same uuid Pi hashes from the xAI access token `sub`.
+assert.match(identity, /https:\/\/auth\.x\.ai::/);
+assert.match(identity, /typeof nested\.user_id === "string"/);
+assert.match(identity, /normalizeAccountEmail\(nested\.email\)/);
+assert.match(identity, /jwtSubjectClaim\(nested\.key\)/);
+assert.match(identity, /function grokAuthSlots/);
 // Read-only: the stored files are opened for reading and nothing else.
 assert.match(identity, /fs\.readFile\(path, "utf8"\)/);
 assert.doesNotMatch(
@@ -334,30 +396,23 @@ assert.match(
   /Same email address — reconnect to Cora to fully pair these sign-ins\./,
 );
 
-// Action diet on every card: at most two visible buttons (the accent primary
-// next step plus one runner-up); everything else — including Sign out and the
-// two-step Delete — lives in the "···" overflow menu on the shared spark-menu
-// surface, with the destructive group at the bottom.
-assert.match(settingsView, /const MAX_VISIBLE_CARD_ACTIONS = 2;/);
-assert.match(settingsView, /nextSteps\.slice\(0, MAX_VISIBLE_CARD_ACTIONS\)/);
+// Use-for-Cora and use-for-CLI are independently named role rows. Everything
+// else — including Sign out and the two-step Delete — lives in the "···"
+// overflow menu on the shared spark-menu surface, with the destructive group
+// at the bottom.
+assert.match(settingsView, /function AccountRoleRow\(/);
 assert.match(settingsView, /function CardOverflowMenu\(/);
 assert.match(settingsView, /groups=\{\[menuActions, destructiveActions\]\}/);
 assert.match(settingsView, /More actions for \$\{card\.label\}/);
 
-// Each card names its connections in plain language, one line per connection,
-// and a merged card carries both sides' actions and its own active wording.
+// Each card names both roles. Using is per-side, never a combined pill.
 assert.match(settingsView, /Connected to Cora/);
 assert.match(settingsView, /Not signed in to \$\{cliLabel\}/);
 assert.match(settingsView, /cli\?\.managed/);
-assert.match(settingsView, /"Active in Cora"/);
-assert.match(settingsView, /`Active in \$\{cliLabel\}`/);
-// The pill always names the side it means; plain "Active" is reserved for a
-// paired card that is the live account on both sides — a lone "Active" next to
-// "Not connected to Cora" read as a contradiction.
-assert.match(
-  settingsView,
-  /cora && cli && cora\.active && cli\.active\s*\? "Active"/,
-);
+assert.match(settingsView, /usingLabel="Using"/);
+assert.match(settingsView, /label: "Use this account for Cora"/);
+assert.match(settingsView, /label: `Use this account for \$\{cliLabel\}`/);
+assert.match(settingsView, /onCliConnect: \(card: AccountCardView\) => void;/);
 // A card with a CLI sign-in but no Cora connection leads with "Connect to
 // Cora", wired to the same add-account login flow seeded with the card's name.
 assert.match(settingsView, /onCoraConnect: \(card: AccountCardView\) => void;/);
@@ -366,11 +421,10 @@ assert.match(
   settings,
   /onCoraConnect: \(card\) => addAccount\(card\.provider, card\.label\)/,
 );
-assert.match(settingsView, /cli \? "Use this account for Cora" : "Use this account"/);
-assert.match(
-  settingsView,
-  /cora \? `Use this account for \$\{cliLabel\}` : "Use this account"/,
-);
+assert.match(settings, /onCliConnect: \(card\) => \{/);
+assert.match(settings, /spark:open-native-cli-account/);
+assert.match(app, /spark:open-native-cli-account/);
+assert.match(app, /nativeCodexProfileId: profileId/);
 assert.match(settingsView, /"Remove from Cora"/);
 assert.match(settingsView, /`Remove the \$\{cliLabel\} account`/);
 
@@ -391,22 +445,21 @@ assert.match(settingsView, /const signInHint = cliSignInHint\(cli, cliLabel\);/)
 assert.match(settingsView, /\{signInHint \? \(/);
 assert.match(settingsView, /\{signInHint\}/);
 // The hint points at a button that is guaranteed to be on screen: "Sign in to
-// <tool>" is built first in the ladder for exactly this state, so it is always
-// among the visible actions rather than hidden in the overflow menu.
+// <tool>" is the CLI role-row action for exactly this state, never hidden in
+// the overflow menu.
 assert.match(
   settingsView,
   /const cliNeedsSignIn =[\s\S]{0,200}?cli\.authState === "signed-out"/,
 );
+assert.match(settingsView, /id: "cli-sign-in"/);
 assert.match(
   settingsView,
-  /if \(cliNeedsSignIn\) \{\s*nextSteps\.push\(\{\s*id: "cli-sign-in",/,
+  /cli \? actions\.onCliSignIn\(card\) : actions\.onCliConnect\(card\)/,
 );
 // Switching the terminal to an account is only offered once that account is
 // actually signed in, so the hint never sits next to an action that would fail.
-assert.match(
-  settingsView,
-  /if \(cli\?\.authState === "connected" && !cli\.active\) \{\s*nextSteps\.push\(\{\s*id: "cli-use",/,
-);
+assert.match(settingsView, /id: "cli-use"/);
+assert.match(settingsView, /actions\.onCliUse\(card\)/);
 
 console.log(
   "PASS native CLI account IPC is sanitized, login PTY is one-shot/exact/exit-owned, transient tokens are not persisted, and Settings pairs a Cora connection with a CLI sign-in on an anonymous fingerprint while unmatched accounts keep their own cards",

@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { safeStorage } from "electron";
 import { writeFileAtomic } from "../fs-atomic";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 
 // Opt-in secret storage for SSH passwords / key passphrases, encrypted with
 // Electron safeStorage (DPAPI on Windows — OS-user-scoped, never plaintext
@@ -13,7 +13,7 @@ import { sparkHome } from "../spark-home";
 const SECRETS_FILE = "spark-remote-secrets.json";
 
 function secretsPath(): string {
-  return join(sparkHome(), SECRETS_FILE);
+  return join(codaraHome(), SECRETS_FILE);
 }
 
 async function readAll(): Promise<Record<string, string>> {

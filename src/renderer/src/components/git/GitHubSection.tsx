@@ -915,7 +915,7 @@ function MergePullRequestDialog({
                       ? "1px solid var(--accent-edge)"
                       : "1px solid var(--rule-strong)",
                   background: strategy === option ? "var(--accent-soft)" : "var(--panel-2)",
-                  color: strategy === option ? "var(--accent)" : "var(--ink-dim)",
+                  color: strategy === option ? "var(--accent-text)" : "var(--ink-dim)",
                   fontFamily: "var(--font-sans)",
                   fontSize: 11,
                   fontWeight: 700,
@@ -1006,7 +1006,7 @@ function DialogButton({
         borderRadius: 7,
         padding: "7px 11px",
         background: primary ? "var(--accent-soft)" : "transparent",
-        color: primary ? "var(--accent)" : "var(--ink-dim)",
+        color: primary ? "var(--accent-text)" : "var(--ink-dim)",
         fontFamily: "var(--font-sans)",
         fontSize: 11,
         fontWeight: 650,
@@ -1120,7 +1120,7 @@ function PullRequestView({
             flex: "0 0 auto",
             fontFamily: "var(--font-mono)",
             fontSize: 10.5,
-            color: "var(--accent)",
+            color: "var(--accent-text)",
           }}
         >
           #{pullRequest.number}
@@ -1259,7 +1259,7 @@ function ActionButton({
         borderRadius: 6,
         border: hover && !disabled ? "1px solid var(--accent-edge)" : "1px solid var(--rule-strong)",
         background: hover && !disabled ? "var(--accent-soft)" : "transparent",
-        color: hover && !disabled ? "var(--accent)" : "var(--ink-dim)",
+        color: hover && !disabled ? "var(--accent-text)" : "var(--ink-dim)",
         fontFamily: "var(--font-sans)",
         fontSize: 10.5,
         fontWeight: 650,

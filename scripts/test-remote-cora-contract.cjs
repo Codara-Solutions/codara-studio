@@ -154,32 +154,12 @@ async function main() {
       { usedTokens: 50_000, budgetTokens: 111_616 },
     );
 
-    // Claude Code is normalized to 1M context. Reading the model catalogue
-    // here instead would advertise 200k and put the phone at five times the
-    // desktop's percentage — the exact drift this projection exists to stop.
-    assert.deepEqual(
-      gauge({
-        chatBackend: "claude",
-        sparkCalls: [managerCall({ promptTokens: 200_000 })],
-      }),
-      { usedTokens: 200_000, budgetTokens: 1_000_000 },
-    );
-
-    // Codex drives its own CLI, which compacts on its own terms, so the whole
-    // catalogued window stands.
-    assert.deepEqual(
-      gauge({
-        chatBackend: "codex",
-        sparkCalls: [managerCall({ model: "gpt-5.6-sol", promptTokens: 12_000 })],
-      }),
-      { usedTokens: 12_000, budgetTokens: 400_000 },
-    );
-
     // A turn that reported a zero window reported nothing usable: fall through
-    // to the catalogue rather than dividing the gauge by zero.
+    // to the catalogue rather than dividing the gauge by zero. Pi compacts at
+    // the shared cap, so the ceiling is 256k, not the 400k catalogue window.
     assert.deepEqual(
       gauge({
-        chatBackend: "codex",
+        chatBackend: "pi",
         sparkCalls: [
           managerCall({
             model: "gpt-5.6-sol",
@@ -188,7 +168,7 @@ async function main() {
           }),
         ],
       }),
-      { usedTokens: 12_000, budgetTokens: 400_000 },
+      { usedTokens: 12_000, budgetTokens: 256_000 },
     );
 
     // A run written before chatBackend existed is a Pi chat.
@@ -214,7 +194,7 @@ async function main() {
     // like on its first turn and never move again.
     assert.deepEqual(
       gauge({
-        chatBackend: "claude",
+        chatBackend: "pi",
         sparkCalls: [
           managerCall({ promptTokens: 20_000, contextWindowTokens: 200_000 }),
           managerCall({
@@ -224,15 +204,16 @@ async function main() {
           }),
         ],
       }),
-      { usedTokens: 150_000, budgetTokens: 1_000_000 },
+      { usedTokens: 150_000, budgetTokens: 256_000 },
     );
 
     // A trailing turn that reported nothing must not shadow the last one that
     // did — and the budget has to come from THAT turn, so numerator and
-    // denominator always describe the same request.
+    // denominator always describe the same request. A 200k window is under
+    // the 256k cap, so the smaller window is the binding ceiling.
     assert.deepEqual(
       gauge({
-        chatBackend: "claude",
+        chatBackend: "pi",
         sparkCalls: [
           managerCall({ promptTokens: 90_000, contextWindowTokens: 200_000 }),
           managerCall({
@@ -242,7 +223,7 @@ async function main() {
           }),
         ],
       }),
-      { usedTokens: 90_000, budgetTokens: 200_000 },
+      { usedTokens: 90_000, budgetTokens: 200_000 - 16_384 },
     );
 
     // Zero, negative and non-finite counts are not usage.
@@ -345,16 +326,6 @@ async function main() {
           ],
         }),
         { usedTokens: 60_000, budgetTokens: 120_000 },
-      );
-      // The override never applies to a CLI backend that compacts itself.
-      assert.deepEqual(
-        gauge({
-          chatBackend: "claude",
-          sparkCalls: [
-            managerCall({ promptTokens: 60_000, contextWindowTokens: 200_000 }),
-          ],
-        }),
-        { usedTokens: 60_000, budgetTokens: 200_000 },
       );
     } finally {
       if (previousCompactAt === undefined) {

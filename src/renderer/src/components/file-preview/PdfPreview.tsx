@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 // Legacy build required: the modern build assumes Uint8Array.prototype.toHex
 // (Chromium 140+), but Electron 32 ships Chromium 128 — every document load
 // died with "a.toHex is not a function" while computing the fingerprint.
@@ -15,6 +15,8 @@ interface Props {
   path: string;
   // Bumps when the file changes on disk — triggers a re-load.
   mtimeMs: number;
+  toolbarAction?: ReactNode;
+  forceLocalToolbar?: boolean;
 }
 
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2, 3];
@@ -23,7 +25,7 @@ const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2, 3];
 // (fetch()/XHR cannot read file:// URLs from either the dev http origin or
 // the packaged file origin); pages render to canvases only when scrolled
 // near the viewport so 1000-page documents stay cheap.
-export default function PdfPreview({ path, mtimeMs }: Props) {
+export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToolbar }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +98,7 @@ export default function PdfPreview({ path, mtimeMs }: Props) {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <DockablePaneBar>
+      <DockablePaneBar forceLocal={forceLocalToolbar}>
         <span style={{ fontFamily: "var(--font-mono)", marginRight: "auto", whiteSpace: "nowrap" }}>
           {doc.numPages} page{doc.numPages === 1 ? "" : "s"}
         </span>
@@ -125,6 +127,7 @@ export default function PdfPreview({ path, mtimeMs }: Props) {
         >
           Fit
         </button>
+        {toolbarAction}
       </DockablePaneBar>
       <div
         ref={containerRef}

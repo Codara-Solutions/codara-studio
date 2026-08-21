@@ -19,6 +19,31 @@ function compile(entry, outfile) {
   return require(path.join(outDir, outfile));
 }
 
+const tabBar = fs.readFileSync(
+  path.join(root, "src/renderer/src/tabs/TabBar.tsx"),
+  "utf8",
+);
+const styles = fs.readFileSync(
+  path.join(root, "src/renderer/src/styles.css"),
+  "utf8",
+);
+assert.match(
+  tabBar,
+  /liveTerminalRuntime\(leaf\.worker\)/,
+  "the tab glyph must follow the live worker chip, not a leftover agentSession runtime",
+);
+assert.match(tabBar, /<CodaraMark size=\{11\} \/>/);
+assert.doesNotMatch(
+  tabBar,
+  /spark-tab--agent|--agent-accent/,
+  "agent activity belongs in the runtime glyph, not a full-tab tint",
+);
+assert.doesNotMatch(
+  styles,
+  /\.spark-tab--agent/,
+  "agent terminals must use the same calm selected-tab surface as every other tab",
+);
+
 const launches = compile(
   "src/renderer/src/workers/launch-commands.ts",
   "launch-commands.cjs",
@@ -76,6 +101,29 @@ for (const established of ["working", "blocked", "idle", "done", "error", "stall
 }
 assert.equal(state.mergeTerminalRuntimeState("launching", "idle"), "idle");
 assert.equal(state.mergeTerminalRuntimeState("idle", "working"), "working");
+
+const liveWorker = state.createManualAgentLaunchWorker("claude", "pane-live");
+assert.equal(state.liveTerminalRuntime(liveWorker), "claude");
+assert.equal(state.visibleWorkerChip(liveWorker)?.runtime, "claude");
+assert.equal(
+  state.liveTerminalRuntime({ ...liveWorker, agentRunning: false }),
+  null,
+  "a standing terminal must drop the Claude tab glyph once the TUI has exited",
+);
+assert.equal(
+  state.visibleWorkerChip({ ...liveWorker, agentRunning: false }),
+  null,
+);
+assert.equal(state.liveTerminalRuntime(null), null);
+assert.equal(
+  state.liveTerminalRuntime({
+    ...liveWorker,
+    source: "spark",
+    state: "done",
+    agentRunning: false,
+  }),
+  null,
+);
 
 console.log(
   "PASS terminal agent launch identity, detector-confirmed injectability, and monotonic readiness state",

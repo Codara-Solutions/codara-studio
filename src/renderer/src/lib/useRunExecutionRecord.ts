@@ -45,10 +45,17 @@ export interface RunExecutionProjection {
   result: RunResultManifest | undefined;
 }
 
-/** Subscribe-before-hydrate execution record. Live frames are buffered while
- * history loads, then merged by event id and ordered by durable sequence. A
- * generation token rejects loads that settle after the selected run changes. */
-export function useRunExecutionRecord(run: RunState | null): RunExecutionProjection {
+export interface RunEventsRecord {
+  events: SparkEvent[];
+  hydrated: boolean;
+  loading: boolean;
+  error: string | null;
+}
+
+/** Subscribe-before-hydrate raw event record. Consumers that only need the
+ * journal (such as Session Inspector) should use this instead of paying to
+ * reconstruct every provider turn and live block. */
+export function useRunEvents(run: RunState | null): RunEventsRecord {
   const [events, setEvents] = useState<SparkEvent[]>([]);
   const [hydrated, setHydrated] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -116,7 +123,19 @@ export function useRunExecutionRecord(run: RunState | null): RunExecutionProject
     };
   }, [run?.id]);
 
-  return useMemo(() => projectRunExecution(run, events, hydrated, loading, error), [run, events, hydrated, loading, error]);
+  return useMemo(
+    () => ({ events, hydrated, loading, error }),
+    [events, hydrated, loading, error],
+  );
+}
+
+/** Full execution projection for chat and run-canvas consumers. */
+export function useRunExecutionRecord(run: RunState | null): RunExecutionProjection {
+  const { events, hydrated, loading, error } = useRunEvents(run);
+  return useMemo(
+    () => projectRunExecution(run, events, hydrated, loading, error),
+    [run, events, hydrated, loading, error],
+  );
 }
 
 /** Durable journal order: sequence, then timestamp, then id. Sequences are

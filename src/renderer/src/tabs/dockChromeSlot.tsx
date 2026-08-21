@@ -78,11 +78,13 @@ const barStyle: React.CSSProperties = {
 export function DockablePaneBar({
   children,
   style,
+  forceLocal = false,
 }: {
   children: React.ReactNode;
   style?: React.CSSProperties;
+  forceLocal?: boolean;
 }) {
   const slot = useDockChromeSlot();
-  if (slot) return createPortal(children, slot);
+  if (slot && !forceLocal) return createPortal(children, slot);
   return <div style={style ? { ...barStyle, ...style } : barStyle}>{children}</div>;
 }

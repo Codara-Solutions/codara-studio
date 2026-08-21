@@ -1,24 +1,25 @@
 interface Props {
   used: number;
+  /** Cora's configured policy target (256k by default). */
   budget: number;
-  /** True when `budget` is the point this chat auto-compacts at rather than the
-   *  model's full window. Explains a denominator smaller than the model's
-   *  advertised context, which is otherwise a confusing number to read. */
-  compactsAtBudget?: boolean;
+  /** Earlier provider-safe ceiling when the selected model cannot reach the
+   * policy target. Progress follows this value; the label keeps the stable
+   * Cora target so model internals do not masquerade as product policy. */
+  effectiveBudget?: number;
 }
 
-// Token-budget pill. Tiny progress bar + numeric `used/budget` label. Pure
-// presentation — the parent computes both numbers and passes them in.
-export default function ContextPill({ used, budget, compactsAtBudget }: Props) {
-  const pct = budget > 0 ? Math.min(1, used / budget) : 0;
+export default function ContextPill({ used, budget, effectiveBudget = budget }: Props) {
+  const safeBudget = effectiveBudget > 0 ? effectiveBudget : budget;
+  const pct = safeBudget > 0 ? Math.min(1, used / safeBudget) : 0;
+  const modelCompactsEarlier = safeBudget > 0 && safeBudget < budget;
+  const title = modelCompactsEarlier
+    ? `${formatTokens(used)} used · Cora targets ${formatTokens(budget)} · this model compacts around ${formatTokens(safeBudget)} to preserve safety room`
+    : `${formatTokens(used)} / ${formatTokens(budget)} tokens before Cora compacts the chat`;
   return (
     <div
       className="composer-context"
-      title={
-        compactsAtBudget
-          ? `${formatTokens(used)} / ${formatTokens(budget)} tokens used before this chat auto-compacts`
-          : `${formatTokens(used)} / ${formatTokens(budget)} tokens used`
-      }
+      title={title}
+      aria-label={title}
     >
       <div className="composer-context-bar">
         <div style={{ width: `${pct * 100}%` }} />
@@ -31,7 +32,11 @@ export default function ContextPill({ used, budget, compactsAtBudget }: Props) {
 }
 
 function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  if (n >= 1_000_000) return `${trimDecimal(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${trimDecimal(n / 1_000)}k`;
   return String(n);
+}
+
+function trimDecimal(value: number): string {
+  return value.toFixed(1).replace(/\.0$/, "");
 }

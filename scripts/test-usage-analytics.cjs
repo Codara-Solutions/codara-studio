@@ -32,7 +32,7 @@ const harnessPlugin = {
     build.onResolve({ filter: /^@shared\// }, (args) => ({
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
-    // The scanner reaches Electron through spark-home (app.getPath) and the
+    // The scanner reaches Electron through codara-home (app.getPath) and the
     // provider-home resolvers. Nothing under test calls into it.
     build.onResolve({ filter: /^electron$/ }, () => ({ path: "electron", namespace: "stub" }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
@@ -557,7 +557,7 @@ async function main() {
 
   /* ── Scanner: cache codec, pruning, and the filesystem walk ────────────── */
 
-  // The scanner resolves its cache path through sparkHome(); point that at a
+  // The scanner resolves its cache path through codaraHome(); point that at a
   // throwaway directory so a test run can never touch the real ~/.Codara.
   const scannerHome = path.join(tmp, "home");
   fs.mkdirSync(scannerHome, { recursive: true });

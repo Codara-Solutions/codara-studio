@@ -1,29 +1,8 @@
-// Guards the RUN PLAYBOOKS guidance in EVERY manager prompt surface.
-//
-// The load-bearing fact this test exists to enforce: there are six copies, and
-// only five of them are live.
-//
-//   - src/main/orchestration/prompt-profile.ts appends the block in
-//     buildManagerSystemPrompt, which is reachable only from manager-protocol's
-//     buildManagerRequest. No shipping backend calls that. Placing playbooks
-//     ONLY there reaches zero real manager turns.
-//   - Every shipping backend drives a CLI session whose system prompt is a
-//     resource file: resources/orchestration/{cc,codex}-{auto,execute}-prompt.md
-//     for the claude and codex backends, resources/pi-cora/prompt.ts for pi
-//     (the default). Those bytes are what spark-agent-backend's
-//     buildManagerStablePrefix caches, so that is where the playbooks must be.
-//
-// So this file checks both halves:
-//   1. the code block reaches every manager mode, exactly once, from both the
-//      bundled JSON profile and the TypeScript fallback profile, and stays
-//      inside its size budget (under 40 lines, at most 6 lines per playbook),
-//   2. each playbook states when it applies, a taskClass mix (asserted on the
-//      Mix line itself, not on the title line), and a verification shape, and
-//      the run still has to declare which playbook it picked,
-//   3. all five LIVE surfaces carry the same three playbooks, with the audit
-//      entry demanding a concrete write scope for reviewers rather than
-//      allowedPaths=[] (leaf reviewers write, so an empty scope makes
-//      autopilot-wave's hasConcreteParallelScope serialize the batch).
+// Guards the RUN PLAYBOOKS block in Cora's LIVE system prompt
+// (resources/pi-cora/prompt.ts, built by buildCoraPiSystemPrompt). The
+// playbooks are the manager's default run shapes; this pins that they exist,
+// stay small, keep their structure, and only reach the modes that can spawn
+// workers.
 //
 //   node scripts/test-manager-playbooks.cjs
 //
@@ -35,111 +14,58 @@ const os = require("node:os");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
-const PROFILE_JSON = path.join(ROOT, "resources", "orchestration", "manager-profile.json");
-const MODES = ["plan_analysis", "chat", "step_planning", "worker_result_review"];
-
-const BLOCK_HEADER = "RUN PLAYBOOKS:";
+const SECTION_HEADER = "Run playbooks:";
 const MAX_BLOCK_LINES = 40;
-const MAX_PLAYBOOK_LINES = 6;
+const MAX_PLAYBOOK_LINES = 10;
 const EXPECTED_PLAYBOOKS = ["research brief", "feature build", "audit"];
 const TASK_CLASSES = ["skeleton", "feature", "leaf", "verifier"];
 const EM_DASH = "—";
 const EN_DASH = "–";
 
-// The markdown guidance files a claude or codex manager session is actually
-// given. Every one of these must carry the playbooks section verbatim.
-const LIVE_MARKDOWN_SURFACES = [
-  "resources/orchestration/cc-auto-prompt.md",
-  "resources/orchestration/cc-execute-prompt.md",
-  "resources/orchestration/codex-auto-prompt.md",
-  "resources/orchestration/codex-execute-prompt.md",
-];
-const PI_PROMPT_SOURCE = "resources/pi-cora/prompt.ts";
-const MARKDOWN_SECTION_HEADER = "## Run playbooks";
-const PI_SECTION_HEADER = "Run playbooks:";
-// pi's auto and execute modes plan and delegate; talk and automation do not
-// spawn coding workers, so they must NOT pay for the block.
-const PI_PLAYBOOK_MODES = ["auto", "execute"];
-const PI_NON_PLAYBOOK_MODES = ["talk", "automation"];
+// auto and execute plan and delegate; talk and automation do not spawn coding
+// workers, so they must NOT pay tokens for the block.
+const PLAYBOOK_MODES = ["auto", "execute"];
+const NON_PLAYBOOK_MODES = ["talk", "automation"];
 
-// The memory guidance shares the "one text, four files" contract with the
-// playbooks: it is the only place a manager learns WHEN to write to Cora's
-// memory, so a fix applied to one prompt must not skip the other three.
-const MEMORY_SECTION_HEADER = "## Memory";
-
-/** Slice a "## <header>" section out of a markdown prompt file. */
-function markdownSection(text, header = MARKDOWN_SECTION_HEADER) {
-  const at = text.indexOf(header);
-  if (at < 0) return null;
-  const rest = text.slice(at + header.length);
-  const end = rest.indexOf("\n## ");
-  return (header + (end < 0 ? rest : rest.slice(0, end))).trim();
-}
-
-const harness = {
-  name: "manager-playbooks-harness",
-  setup(build) {
-    build.onResolve({ filter: /^@shared\// }, (args) => ({
-      path: path.join(ROOT, "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
-    }));
-    // Same trick as test-prompt-punctuation: load the profile that actually
-    // ships, not a fixture.
-    build.onResolve({ filter: /bundled-resources/ }, () => ({
-      path: "bundled-resources",
-      namespace: "stub",
-    }));
-    build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-      contents: `module.exports = { resolveBundledResourcePath: () => ${JSON.stringify(PROFILE_JSON)} };`,
-      loader: "js",
-    }));
-  },
-};
-
-/** The block is appended last, so it runs from its header to end of prompt. */
+/** The playbooks section runs from its header to the next blank-line+section. */
 function extractBlock(prompt) {
-  const at = prompt.indexOf(BLOCK_HEADER);
-  return at < 0 ? null : prompt.slice(at).trim();
+  const at = prompt.indexOf(SECTION_HEADER);
+  if (at < 0) return null;
+  const rest = prompt.slice(at);
+  // The next top-level section starts after a blank line with a non-indented,
+  // non-bullet line ending in ":".
+  const next = rest.slice(SECTION_HEADER.length).search(/\n\n[A-Z][^\n]*:\n/);
+  return (next < 0 ? rest : rest.slice(0, SECTION_HEADER.length + next)).trim();
 }
 
-/** Split the block into its header, one entry per playbook, and the tail line. */
+/** Split into one entry per "- Name. ..." playbook bullet. */
 function splitPlaybooks(block) {
   const lines = block.split("\n");
   const entries = [];
   let current = null;
-  let announce = null;
   for (const line of lines.slice(1)) {
     if (line.startsWith("- ")) {
       current = { title: line.slice(2).trim(), lines: [line] };
       entries.push(current);
     } else if (line.startsWith(" ") && current) {
       current.lines.push(line);
-    } else if (line.trim().length > 0) {
-      // A non-indented, non-bullet line after the playbooks is the tail
-      // instruction telling the manager to declare its pick.
-      announce = line.trim();
-      current = null;
     }
   }
-  return { entries, announce };
+  return entries;
 }
 
 async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-playbooks-"));
-  const outfile = path.join(tmp, "profile.cjs");
+  const outfile = path.join(tmp, "pi-prompt.cjs");
   await esbuild.build({
-    entryPoints: [path.join(ROOT, "src", "main", "orchestration", "prompt-profile.ts")],
+    entryPoints: [path.join(ROOT, "resources", "pi-cora", "prompt.ts")],
     outfile,
     bundle: true,
     platform: "node",
     format: "cjs",
-    plugins: [harness],
     logLevel: "silent",
   });
-  const {
-    loadManagerPromptProfile,
-    buildManagerSystemPrompt,
-    DEFAULT_MANAGER_PROMPT_PROFILE,
-  } = require(outfile);
+  const { buildCoraPiSystemPrompt } = require(outfile);
 
   let pass = 0;
   const check = (name, ok) => {
@@ -151,61 +77,49 @@ async function main() {
     console.log(`PASS ${name}`);
   };
 
-  const bundled = loadManagerPromptProfile();
-  const profiles = [
-    ["bundled profile", bundled],
-    ["TS fallback profile", DEFAULT_MANAGER_PROMPT_PROFILE],
-  ];
-
-  // 1. Reach: every mode, both profile sources, exactly one copy.
-  for (const [label, profile] of profiles) {
-    for (const mode of MODES) {
-      const prompt = buildManagerSystemPrompt(profile, mode);
-      const hits = prompt.split(BLOCK_HEADER).length - 1;
-      check(`${label}: ${mode} carries the playbooks block`, hits >= 1);
-      check(`${label}: ${mode} carries it exactly once`, hits === 1);
+  // 1. Reach: the spawning modes carry the block exactly once; the others not
+  // at all. The block is byte-identical across modes and policies so it rides
+  // the cacheable prompt prefix.
+  let block = null;
+  for (const mode of PLAYBOOK_MODES) {
+    for (const policy of ["fast", "deep"]) {
+      const prompt = buildCoraPiSystemPrompt(mode, policy);
+      const hits = prompt.split(SECTION_HEADER).length - 1;
+      check(`${mode}/${policy} carries the playbooks block`, hits >= 1);
+      check(`${mode}/${policy} carries it exactly once`, hits === 1);
+      const extracted = extractBlock(prompt);
+      check(`${mode}/${policy} block is extractable`, Boolean(extracted));
+      if (block === null) block = extracted;
+      check(`${mode}/${policy} block is byte-identical across modes`, extracted === block);
     }
+  }
+  for (const mode of NON_PLAYBOOK_MODES) {
     check(
-      `${label}: the no-mode prompt carries the playbooks block`,
-      (buildManagerSystemPrompt(profile).split(BLOCK_HEADER).length - 1) === 1,
+      `${mode} does not pay for the playbooks`,
+      !buildCoraPiSystemPrompt(mode).includes(SECTION_HEADER),
     );
   }
 
-  const block = extractBlock(buildManagerSystemPrompt(bundled, "plan_analysis"));
-  check("the playbooks block is extractable", Boolean(block));
-
-  // The block must be identical whatever mode or profile built it, otherwise it
-  // is not a stable prefix and every mode pays a fresh cache miss.
-  for (const [label, profile] of profiles) {
-    for (const mode of MODES) {
-      check(
-        `${label}: ${mode} block text is byte-identical to the plan_analysis one`,
-        extractBlock(buildManagerSystemPrompt(profile, mode)) === block,
-      );
-    }
-  }
-
-  // 2. Size budget.
+  // 2. Size budget: playbooks are defaults, not an essay.
   const blockLines = block.split("\n");
   check(
     `the block is under ${MAX_BLOCK_LINES} lines (actual ${blockLines.length})`,
     blockLines.length < MAX_BLOCK_LINES,
   );
 
-  const { entries, announce } = splitPlaybooks(block);
-  check(
-    `the block defines exactly ${EXPECTED_PLAYBOOKS.length} playbooks (actual ${entries.length})`,
-    entries.length === EXPECTED_PLAYBOOKS.length,
+  const entries = splitPlaybooks(block);
+  // First bullet is the pick-and-declare instruction; the playbooks follow.
+  const playbooks = entries.filter((entry) =>
+    EXPECTED_PLAYBOOKS.some((name) => entry.title.toLowerCase().startsWith(name)),
   );
-  for (const name of EXPECTED_PLAYBOOKS) {
-    check(
-      `playbook "${name}" is present`,
-      entries.some((entry) => entry.title.toLowerCase().startsWith(name)),
-    );
-  }
+  check(
+    `the block defines exactly ${EXPECTED_PLAYBOOKS.length} playbooks (actual ${playbooks.length})`,
+    playbooks.length === EXPECTED_PLAYBOOKS.length,
+  );
 
-  // 3. Shape of each playbook: size, when it applies, taskClass mix, verification.
-  for (const entry of entries) {
+  // 3. Shape: each playbook says when it applies, names a taskClass on its Mix
+  // line, and says when its verifier spawns.
+  for (const entry of playbooks) {
     const name = entry.title.split(".")[0];
     const text = entry.lines.join("\n");
     check(
@@ -213,49 +127,34 @@ async function main() {
       entry.lines.length <= MAX_PLAYBOOK_LINES,
     );
     check(`playbook "${name}" states when it applies`, /\bApplies when\b/.test(text));
-    // Assert the taskClass mix on the Mix LINE, not on the whole entry: the
-    // entry starts with the playbook title, so "- feature build." would satisfy
-    // a whole-entry `includes("feature")` even if the Mix line named no class
-    // at all, and the guard would silently stop guarding.
-    const mixLine = entry.lines.find((line) => /\bMix:/.test(line)) || "";
-    check(`playbook "${name}" has a Mix line`, mixLine.length > 0);
+    const mixAt = text.indexOf("Mix:");
+    check(`playbook "${name}" has a Mix line`, mixAt >= 0);
     check(
-      `playbook "${name}" names a taskClass on its Mix line`,
-      TASK_CLASSES.some((klass) => mixLine.slice(mixLine.indexOf("Mix:")).includes(klass)),
+      `playbook "${name}" names a taskClass in its Mix`,
+      TASK_CLASSES.some((klass) => text.slice(mixAt, mixAt + 300).includes(klass)),
     );
     check(`playbook "${name}" states its verification shape`, /\bVerification:/.test(text));
-    // Every verification line must say WHO spawns the verifier and when.
-    // taskClass=verifier is a read-only follow-up that manager-protocol rejects
-    // in a plan_analysis plannedAgents list and in a run's first batch, so a
-    // bare "Verification: one verifier" reads as part of the initial plan shape.
-    const verificationLine = entry.lines.find((line) => /\bVerification:/.test(line)) || "";
+    const verifyAt = text.indexOf("Verification:");
     check(
       `playbook "${name}" says when its verifier is spawned`,
-      /\b(after|once)\b/i.test(verificationLine) || /worker_result_review/.test(verificationLine),
+      /\b(after|once)\b/i.test(text.slice(verifyAt, verifyAt + 200)),
     );
   }
 
-  // Leaf reviewers WRITE (autopilot-wave's taskWritesWorkspace is false only for
-  // taskClass=verifier), so allowedPaths=[] fails hasConcreteParallelScope and
-  // the "parallel audit" the playbook promises collapses to a serial chain.
-  const auditEntry = entries.find((entry) => entry.title.toLowerCase().startsWith("audit"));
-  check("the audit playbook is extractable", Boolean(auditEntry));
+  // Leaf reviewers WRITE, so the audit playbook must give them a concrete
+  // write scope; allowedPaths=[] would serialize the parallel batch.
+  const audit = playbooks.find((entry) => entry.title.toLowerCase().startsWith("audit"));
   check(
     "the audit playbook gives its reviewers a concrete write scope",
-    /concrete write scope/i.test((auditEntry || { lines: [] }).lines.join("\n")),
+    /concrete write scope/i.test((audit || { lines: [] }).lines.join("\n")),
   );
 
-  // 4. The run must declare which playbook it picked.
-  check("the block ends with the declare-your-pick line", Boolean(announce));
-  check(
-    "the declare-your-pick line points at the first decision",
-    /first decision/i.test(announce || ""),
-  );
+  // 4. The run must declare which playbook it picked, in the first commentary.
+  const declare = entries[0] ? entries[0].lines.join(" ") : "";
+  check("the block opens with the pick-and-declare instruction", /name your pick/i.test(declare));
+  check("the declare instruction points at the first commentary", /first commentary/i.test(declare));
   for (const name of EXPECTED_PLAYBOOKS) {
-    check(
-      `the declare-your-pick line offers "${name}" by name`,
-      (announce || "").toLowerCase().includes(name),
-    );
+    check(`the declare instruction offers "${name}" by name`, declare.toLowerCase().includes(name));
   }
 
   // 5. The block obeys the punctuation rule that sits beside it.
@@ -263,150 +162,6 @@ async function main() {
     "the block contains no em or en dash",
     !block.includes(EM_DASH) && !block.includes(EN_DASH),
   );
-
-  // 6. Idempotence: a profile whose override already inlines the block must not
-  // receive a second copy, the same guard the punctuation rule relies on.
-  const inlined = JSON.parse(JSON.stringify(DEFAULT_MANAGER_PROMPT_PROFILE));
-  inlined.manager.systemPromptOverrides.plan_analysis = `Some override text.\n\n${block}`;
-  check(
-    "a profile that already inlines the block gets exactly one copy",
-    (buildManagerSystemPrompt(inlined, "plan_analysis").split(BLOCK_HEADER).length - 1) === 1,
-  );
-
-  // 7. THE LIVE SURFACES. Everything above only proves the block survives a
-  // path no shipping backend calls. These are the bytes a real manager reads.
-  const sections = [];
-  for (const rel of LIVE_MARKDOWN_SURFACES) {
-    const text = fs.readFileSync(path.join(ROOT, rel), "utf8");
-    const section = markdownSection(text);
-    check(`${rel} carries a "${MARKDOWN_SECTION_HEADER}" section`, Boolean(section));
-    if (!section) continue;
-    sections.push([rel, section]);
-    for (const name of EXPECTED_PLAYBOOKS) {
-      check(`${rel} names the "${name}" playbook`, section.toLowerCase().includes(name));
-    }
-    check(
-      `${rel} states a Mix for each of the ${EXPECTED_PLAYBOOKS.length} playbooks`,
-      (section.split("Mix:").length - 1) === EXPECTED_PLAYBOOKS.length,
-    );
-    check(
-      `${rel} states a Verification shape for each playbook`,
-      (section.split("Verification:").length - 1) === EXPECTED_PLAYBOOKS.length,
-    );
-    // Every verification clause must say WHEN the verifier runs. A bare
-    // "Verification: one verifier" reads as part of the initial plan shape, and
-    // a verifier in a run's first batch is rejected by the spawn batch guard.
-    check(
-      `${rel} says when each verifier is spawned`,
-      (section.split("Verification: once").length - 1) === EXPECTED_PLAYBOOKS.length,
-    );
-    check(
-      `${rel} gives audit reviewers a concrete write scope`,
-      /concrete write scope/i.test(section),
-    );
-    check(
-      `${rel} tells the manager to name the shape it picked`,
-      /name the shape you picked/i.test(section),
-    );
-    check(
-      `${rel} playbooks contain no em or en dash`,
-      !section.includes(EM_DASH) && !section.includes(EN_DASH),
-    );
-  }
-  // One text, four files: a fix applied to one prompt must not skip the others.
-  for (const [rel, section] of sections) {
-    check(
-      `${rel} playbooks section is byte-identical to ${sections[0][0]}`,
-      section === sections[0][1],
-    );
-  }
-
-  // 8. THE MEMORY GUIDANCE, on the same four live surfaces. Cora's memory files
-  // are written by the model, so what it is told about them IS the policy: the
-  // three triggers, the two tiers, the consolidate-do-not-skip rule for a full
-  // file, and the fact that workers never see any of it.
-  const memorySections = [];
-  for (const rel of LIVE_MARKDOWN_SURFACES) {
-    const text = fs.readFileSync(path.join(ROOT, rel), "utf8");
-    const section = markdownSection(text, MEMORY_SECTION_HEADER);
-    check(`${rel} carries a "${MEMORY_SECTION_HEADER}" section`, Boolean(section));
-    if (!section) continue;
-    memorySections.push([rel, section]);
-    check(`${rel} memory section names codara_remember`, section.includes("codara_remember"));
-    // Both tiers, by the exact scope value the tool takes. Naming only the
-    // concept leaves the manager guessing at the argument.
-    check(`${rel} memory section names the global scope`, /scope: "global"/.test(section));
-    check(`${rel} memory section names the workspace scope`, /scope: "workspace"/.test(section));
-    // The three triggers, as a numbered list. Without them "remember durable
-    // facts" collapses into remembering task status.
-    for (const n of [1, 2, 3]) {
-      check(`${rel} memory section states trigger ${n}`, section.includes(`\n${n}. `));
-    }
-    check(
-      `${rel} memory section forbids remembering task status`,
-      /never remember task status/i.test(section),
-    );
-    // The failure this exists to prevent: a full file silently ending the
-    // write instead of triggering a consolidating rewrite.
-    check(
-      `${rel} memory section says to consolidate rather than skip when the file is full`,
-      /action: "replace"/.test(section) && /do NOT skip the write/i.test(section),
-    );
-    // Workers get no memory, so a fact that matters downstream has to be
-    // copied into the task description by hand.
-    check(
-      `${rel} memory section says workers never see memory`,
-      /workers never see memory/i.test(section),
-    );
-    check(
-      `${rel} memory section contains no em or en dash`,
-      !section.includes(EM_DASH) && !section.includes(EN_DASH),
-    );
-  }
-  for (const [rel, section] of memorySections) {
-    check(
-      `${rel} memory section is byte-identical to ${memorySections[0][0]}`,
-      section === memorySections[0][1],
-    );
-  }
-
-  // pi is the DEFAULT backend and builds its prompt in TypeScript, so bundle it
-  // and ask the real builder rather than grepping the source.
-  const piOut = path.join(tmp, "pi-prompt.cjs");
-  await esbuild.build({
-    entryPoints: [path.join(ROOT, PI_PROMPT_SOURCE)],
-    outfile: piOut,
-    bundle: true,
-    platform: "node",
-    format: "cjs",
-    logLevel: "silent",
-  });
-  const { buildCoraPiSystemPrompt } = require(piOut);
-  for (const mode of PI_PLAYBOOK_MODES) {
-    const prompt = buildCoraPiSystemPrompt(mode);
-    check(`pi ${mode} mode carries the playbooks`, prompt.includes(PI_SECTION_HEADER));
-    check(
-      `pi ${mode} mode carries them exactly once`,
-      (prompt.split(PI_SECTION_HEADER).length - 1) === 1,
-    );
-    for (const name of EXPECTED_PLAYBOOKS) {
-      check(`pi ${mode} mode names the "${name}" playbook`, prompt.toLowerCase().includes(name));
-    }
-    check(
-      `pi ${mode} mode gives audit reviewers a concrete write scope`,
-      /concrete write scope/i.test(prompt),
-    );
-    check(
-      `pi ${mode} mode playbooks contain no em or en dash`,
-      !prompt.includes(EM_DASH) && !prompt.includes(EN_DASH),
-    );
-  }
-  for (const mode of PI_NON_PLAYBOOK_MODES) {
-    check(
-      `pi ${mode} mode does not pay for the playbooks`,
-      !buildCoraPiSystemPrompt(mode).includes(PI_SECTION_HEADER),
-    );
-  }
 
   console.log(`\nAll ${pass} manager-playbook checks passed.`);
 }

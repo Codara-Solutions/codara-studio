@@ -63,13 +63,13 @@ function check(name, condition) {
   const dev = await loadResolver({ isPackaged: false, appPath: ROOT, resourcesPath: "/ignored" });
   check(
     "development resolves orchestration prompts from the application root",
-    dev("orchestration", "cc-auto-prompt.md") ===
-      path.join(ROOT, "resources", "orchestration", "cc-auto-prompt.md"),
+    dev("orchestration", "manager-profile.json") ===
+      path.join(ROOT, "resources", "orchestration", "manager-profile.json"),
   );
   check(
     "development resolution is independent of emitted chunk depth",
-    dev("claude-hooks", "spark-cc-stop.py") !==
-      path.join(appPath, "resources", "claude-hooks", "spark-cc-stop.py"),
+    dev("claude-hooks", "codara-hook.py") !==
+      path.join(appPath, "resources", "claude-hooks", "codara-hook.py"),
   );
 
   const packagedRoot = path.join(TMP, "Codara.app", "Contents", "Resources");
@@ -80,7 +80,7 @@ function check(name, condition) {
   });
   check(
     "packaged prompts match electron-builder extraResources layout",
-    packaged("orchestration", "cc-auto-prompt.md") ===
-      path.join(packagedRoot, "orchestration", "cc-auto-prompt.md"),
+    packaged("orchestration", "manager-profile.json") ===
+      path.join(packagedRoot, "orchestration", "manager-profile.json"),
   );
 })();

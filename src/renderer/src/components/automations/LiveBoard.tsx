@@ -93,7 +93,6 @@ export interface LiveBoardProps {
   // terminal visibility and the ticking clock; the board stays mounted while
   // hidden so the canvas viewport and mirror xterms survive sub-tab flips.
   shown: boolean;
-  scrollbackLineLimit: number;
   onClose: () => void;
   onOpenWorkersGrid: () => void;
   onStop: () => void;
@@ -106,7 +105,6 @@ export default function LiveBoard({
   workers,
   initialFocusWorkerId,
   shown,
-  scrollbackLineLimit,
   onClose,
   onOpenWorkersGrid,
   onStop,
@@ -947,7 +945,7 @@ interface StatusLook {
   // Steady glow tone for the actively-working states — never a scale/opacity
   // pulse (the user rejected "breathing" boxes; electricity + glow instead).
   glow: "accent" | "danger" | null;
-  badge?: { text: string; color: string };
+  badge?: { text: string; color: string; borderColor?: string };
   dashed?: boolean;
   dim?: boolean;
 }
@@ -959,7 +957,11 @@ function lookFor(status: LiveNodeStatus): StatusLook {
         border: "var(--accent-edge)",
         background: "color-mix(in oklch, var(--accent) 10%, var(--panel))",
         glow: "accent",
-        badge: { text: "running", color: "var(--accent)" },
+        badge: {
+          text: "running",
+          color: "var(--accent-text)",
+          borderColor: "var(--accent)",
+        },
       };
     case "blocked":
       return {
@@ -1013,13 +1015,13 @@ function statusShadow(look: StatusLook, docked?: boolean): string {
 }
 
 
-function NodeBadge({ badge }: { badge: { text: string; color: string } }): React.ReactElement {
+function NodeBadge({ badge }: { badge: NonNullable<StatusLook["badge"]> }): React.ReactElement {
   return (
     <span
       className="spark-badge"
       style={{
         color: badge.color,
-        borderColor: `color-mix(in oklch, ${badge.color} 32%, transparent)`,
+        borderColor: `color-mix(in oklch, ${badge.borderColor ?? badge.color} 32%, transparent)`,
       }}
     >
       {badge.text}

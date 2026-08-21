@@ -20,8 +20,9 @@ interface FileRow {
   score: number;
 }
 
-const DISPLAY_LIMIT = 500;
-const DEBOUNCE_MS = 200;
+const DISPLAY_LIMIT = 250;
+const DEBOUNCE_MS = 250;
+const FILE_LIST_CACHE_MS = 30_000;
 
 export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
   const [query, setQuery] = useState("");
@@ -38,6 +39,8 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
   const inputRef = useRef<HTMLInputElement | null>(null);
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const loadGenerationRef = useRef(0);
+  const loadedWorkspaceRef = useRef<{ cwd: string; at: number } | null>(null);
+  const keyboardMoveRef = useRef(false);
   // Deferred Enter: the keydown handler flushed the scoring debounce and
   // parked the query it wants opened; the effect below `openRow` completes
   // the open on the first render where the rows reflect exactly that query.
@@ -57,16 +60,22 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
 
   useEffect(() => {
     if (!open || !cwd) return;
+    const cached = loadedWorkspaceRef.current;
+    if (cached?.cwd === cwd && Date.now() - cached.at < FILE_LIST_CACHE_MS) return;
     const generation = loadGenerationRef.current + 1;
     loadGenerationRef.current = generation;
-    setLoading(true);
+    const refreshingCurrentWorkspace = cached?.cwd === cwd;
+    setLoading(!refreshingCurrentWorkspace);
     setError(null);
-    setFiles([]);
-    setTruncated(false);
+    if (!refreshingCurrentWorkspace) {
+      setFiles([]);
+      setTruncated(false);
+    }
 
     void window.spark.fs.listFiles(cwd).then(
       (result) => {
         if (loadGenerationRef.current !== generation) return;
+        loadedWorkspaceRef.current = { cwd, at: Date.now() };
         setFiles(result.files);
         setTruncated(result.truncated);
         setLoading(false);
@@ -92,6 +101,22 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
       .toLowerCase()
       .split(/\s+/)
       .filter(Boolean);
+
+    // The empty picker only needs a short recent/alphabetical window. Avoid
+    // normalizing all 10k possible files before the user has typed anything.
+    if (tokens.length === 0) {
+      return files.slice(0, DISPLAY_LIMIT).map((entry) => {
+        const relativePath = relativePathFrom(cwd, entry.path);
+        const directory = dirname(relativePath);
+        return {
+          entry,
+          relativePath,
+          lowerPath: relativePath.toLowerCase(),
+          directory: directory === relativePath ? "" : directory,
+          score: 0,
+        };
+      });
+    }
 
     const matched: FileRow[] = [];
     for (const entry of files) {
@@ -139,7 +164,8 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
   }, [rows.length, selectedIndex]);
 
   useEffect(() => {
-    if (!open || rows.length === 0) return;
+    if (!open || rows.length === 0 || !keyboardMoveRef.current) return;
+    keyboardMoveRef.current = false;
     virtuosoRef.current?.scrollToIndex({
       index: selectedIndex,
       align: "center",
@@ -175,11 +201,13 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
       if (e.key === "ArrowDown") {
         e.preventDefault();
         if (rows.length === 0) return;
+        keyboardMoveRef.current = true;
         setSelectedIndex((index) => Math.min(rows.length - 1, index + 1));
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
+        keyboardMoveRef.current = true;
         setSelectedIndex((index) => Math.max(0, index - 1));
         return;
       }
@@ -217,15 +245,13 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
       className="spark-fade-in"
       onMouseDown={onClose}
     >
-      {/* Scrim + dialog face come from the shared glass classes (frosted in
-          glass mode, opaque panel look otherwise) so both honor the
-          data-glass kill switch, reduced-transparency, and the user tuning. */}
-      <div className="spark-scrim" style={{ zIndex: 0 }} />
+      {/* Liquid glass belongs on the card, not across the entire workbench. */}
+      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Open file"
-        className="spark-glass--strong"
+        className="spark-glass--strong spark-overlay-surface"
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
         style={{

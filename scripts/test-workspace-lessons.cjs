@@ -33,13 +33,13 @@ function check(name, condition, detail) {
 const harness = {
   name: "workspace-lessons-harness",
   setup(build) {
-    // spark-home pulls in electron; the modules only need a home directory.
-    build.onResolve({ filter: /\/spark-home$/ }, () => ({
-      path: "spark-home-stub",
+    // codara-home pulls in electron; the modules only need a home directory.
+    build.onResolve({ filter: /\/codara-home$/ }, () => ({
+      path: "codara-home-stub",
       namespace: "stub",
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-      contents: `export const sparkHome = () => ${JSON.stringify(TMP_HOME)};`,
+      contents: `export const codaraHome = () => ${JSON.stringify(TMP_HOME)};`,
       loader: "js",
     }));
   },
@@ -338,7 +338,7 @@ async function main() {
   );
   check(
     "run-store renders Cora memory through the hash-gated per-run seam",
-    /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,?\s*\}/s.test(
+    /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,\s*profileId:\s*prepared\.coraProfileId,?\s*\}/s.test(
       runStoreSrc,
     ),
     "prepareManagerTurn no longer calls formatCoraMemoryForTurn",

@@ -708,18 +708,18 @@ check("an unflagged worker is told the mailbox is manager-only, without a peer r
     guidance.indexOf("if (!peerGroupMember)"),
     guidance.indexOf("const opening"),
   );
-  assert.match(managerOnly, /This mailbox is MANAGER-ONLY for you/);
-  assert.match(managerOnly, /You are not in a group chat with other workers/);
+  assert.match(managerOnly, /This mailbox reaches Cora only, not peer workers/);
+  assert.match(managerOnly, /Your brief is self-contained/);
   // The unflagged branch must not borrow the isolated narrative: nothing in an
   // ordinary worker's brief said its independence was the point.
   const unflaggedBranch = managerOnly.slice(managerOnly.indexOf(": ["));
   assert.ok(
-    !unflaggedBranch.includes("running INDEPENDENTLY"),
+    !unflaggedBranch.includes("Work independently"),
     "an unflagged worker must not be told it is a deliberate lone investigator",
   );
   // No roster: peer_list is not advertised, and no peer/all recipient is.
   assert.ok(!managerOnly.includes("peer_list"), "the manager-only block must not offer a roster");
-  assert.match(managerOnly, /Sending to a peer/);
+  assert.match(managerOnly, /peer_send.*manager.*only/);
   // The members' block must say the chat is partial, so a member does not try
   // to reach a sibling that was left out of it.
   const memberBlock = guidance.slice(guidance.indexOf("const opening"));
@@ -739,7 +739,7 @@ check("the prompt renderers use provisioning for the block and membership for it
   // The shared web_search quota bullet tells the worker to broadcast a
   // rate-limit heads-up to `all`, which only a chat member may do.
   const webResearch = WORKER_PROMPT.match(
-    /renderWebResearchGuidance\(\n\s*run,\n\s*task,\n\s*shouldUsePeerComms\(run, step, task\) &&/g,
+    /renderWebResearchGuidance\(\n\s*task,\n\s*shouldUsePeerComms\(run, step, task\) &&/g,
   );
   assert.equal(webResearch?.length, 2, "the peer-broadcast web-research bullet stays membership-only");
 });

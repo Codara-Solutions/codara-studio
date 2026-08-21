@@ -12,6 +12,7 @@ import {
   findOpenQuestion,
   isToolRowTicking,
   runtimeLabel,
+  resumedByMessageId,
   stepStatusColor,
   summarizeWorkerWait,
   toolDurationLabel,
@@ -185,10 +186,12 @@ export default function ChatConversation({ run }: { run: RunState }) {
   const latestUndoableCheckpoint = useMemo(() => {
     let lastUserMessageId: string | null = null;
     for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
-      if (run.humanMessages[i].author === "user") {
-        lastUserMessageId = run.humanMessages[i].id;
-        break;
-      }
+      const message = run.humanMessages[i];
+      if (message.author !== "user") continue;
+      if (message.resumeNote && resumedByMessageId(run.humanMessages, message)) continue;
+      if (message.compaction || message.boardNote) return null;
+      lastUserMessageId = message.id;
+      break;
     }
     if (!lastUserMessageId) return null;
     return (
@@ -447,56 +450,6 @@ function ConversationMinimap({
       ) : null}
     </nav>
   );
-}
-
-// Deliberately not mounted in the conversation. The manifest is the worker's
-// report to Cora, internal review machinery rather than something the reader
-// asked for, so the chat stream stays prose plus quiet activity rows. Exported
-// rather than deleted: the manifest data is untouched and a technical surface
-// can mount this as-is. The Runs inspector already renders the same manifest
-// under "Result evidence".
-export function ResultManifestCard({ manifest }: { manifest: NonNullable<RunState["resultManifest"]> }) {
-  const cwd = manifest.workspace.cwd?.replace(/[\\/]+$/, "");
-  const absolute = (path: string) =>
-    !cwd || /^(?:[A-Za-z]:[\\/]|\/)/.test(path) ? path : `${cwd}/${path}`;
-  const passed = manifest.checks.filter((check) => check.result === "passed").length;
-  return (
-    <section style={RESULT_CARD_STYLE} aria-label="Run result">
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ color: "var(--ok)", fontWeight: 800 }}>✓</span>
-        <strong style={{ color: "var(--ink)", fontSize: 13 }}>Evidence-backed result</strong>
-        <span style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 10 }}>
-          {passed}/{manifest.checks.length} checks passed
-        </span>
-      </div>
-      <div style={{ color: "var(--ink-dim)", fontSize: 12.5, lineHeight: 1.5 }}>{manifest.summary}</div>
-      {manifest.workspaceDelta.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          {manifest.workspaceDelta.slice(0, 8).map((file) => {
-            const path = absolute(file.path);
-            return (
-              <div key={file.path} style={RESULT_FILE_ROW_STYLE}>
-                <span style={{ flex: "1 1 180px", minWidth: 0, color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.path}</span>
-                <span style={{ color: file.provenance === "verified" ? "var(--ok)" : "var(--muted)", fontSize: 9, textTransform: "uppercase" }}>{file.provenance}</span>
-                <ResultAction label="Open" onClick={() => window.dispatchEvent(new CustomEvent("spark:open-file", { detail: { path } }))} />
-                {manifest.workspace.mode === "git" && <ResultAction label="Diff" onClick={() => window.dispatchEvent(new CustomEvent("spark:open-diff", { detail: { path } }))} />}
-                <ResultAction label="Reveal" onClick={() => void window.spark.fs.revealInOS(path)} />
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {(manifest.risks.length > 0 || manifest.followups.length > 0) && (
-        <div style={{ color: "var(--warn)", fontSize: 11.5 }}>
-          {[...manifest.risks, ...manifest.followups].slice(0, 3).join(" · ")}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ResultAction({ label, onClick }: { label: string; onClick: () => void }) {
-  return <button type="button" onClick={onClick} style={RESULT_ACTION_STYLE}>{label}</button>;
 }
 
 function timelineItemKey(item: ConversationItem): string {
@@ -1522,7 +1475,7 @@ function QuestionOptionButton({
         aria-hidden
         style={{
           ...QUESTION_OPTION_GO_STYLE,
-          color: recommended ? "var(--accent)" : "var(--muted)",
+          color: recommended ? "var(--accent-text)" : "var(--muted)",
           opacity: active ? 1 : 0,
           transform: active ? "translateX(0)" : "translateX(-3px)",
         }}
@@ -1575,7 +1528,7 @@ function AttachmentStrip({
             fontSize: 10.5,
           }}
         >
-          <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex", flex: "0 0 auto" }}>
+          <span aria-hidden style={{ color: "var(--accent-text)", display: "inline-flex", flex: "0 0 auto" }}>
             <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
               <path d="M4 2.5h4.2L11 5.3v6.2H4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
               <path d="M8.1 2.7v2.8h2.7" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
@@ -1615,6 +1568,14 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   const doneWorkers = item.workers.filter(
     (worker) => worker.status === "accepted",
   ).length;
+  const stepDiff = item.workers.reduce(
+    (total, worker) => ({
+      fileCount: total.fileCount + (worker.diff?.fileCount ?? 0),
+      additions: total.additions + (worker.diff?.additions ?? 0),
+      deletions: total.deletions + (worker.diff?.deletions ?? 0),
+    }),
+    { fileCount: 0, additions: 0, deletions: 0 },
+  );
   const hasBody = Boolean(item.goal) || item.workers.length > 0;
 
   return (
@@ -1637,6 +1598,13 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
         <span style={STEP_INDEX_TEXT_STYLE}>Step {item.index} ·</span>
         <span style={STEP_TITLE_STYLE}>{item.title}</span>
         <span style={STEP_GOAL_INLINE_STYLE}>{item.goal}</span>
+        {stepDiff.fileCount > 0 && (
+          <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span>{stepDiff.fileCount} {stepDiff.fileCount === 1 ? "file" : "files"}</span>
+            <span style={{ color: "var(--ok)" }}>+{stepDiff.additions}</span>
+            <span style={{ color: "var(--danger)" }}>−{stepDiff.deletions}</span>
+          </span>
+        )}
         {item.workers.length > 0 && (
           <span style={STEP_PROGRESS_STYLE}>
             {doneWorkers} of {item.workers.length} {item.workers.length === 1 ? "worker" : "workers"}
@@ -2311,6 +2279,7 @@ function trimByteNumber(value: number): string {
 // One quiet line per logical worker inside an expanded step — dot, task
 // title, muted runtime/status detail. Same language as the tool rows.
 function StepWorkerRow({ worker }: { worker: ChatWorker }) {
+  const [diffOpen, setDiffOpen] = useState(false);
   // runtimeState (from the live terminal poller) wins over the static
   // workerTask status for the dot tone, because it reflects what the agent
   // is doing *right now* — accept ("blocked" → steady red) is more urgent
@@ -2342,20 +2311,100 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         ? `attempt ${attemptCount} of ${workerAttemptDenominator(attemptCount)}`
         : null,
   ].filter(Boolean).join(" · ");
-  return (
-    <div
-      title={`${worker.title}: ${worker.status}${titleSuffix}`}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 7,
-        minHeight: 20,
-        minWidth: 0,
-      }}
-    >
+  const diff = worker.diff;
+  const hasDiff = Boolean(diff && diff.fileCount > 0);
+  const header = (
+    <>
       <StatusDot color={color} pulse={pulse} size={5} />
       <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
       <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+      {hasDiff && diff && (
+        <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
+          <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
+          <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
+        </span>
+      )}
+      {hasDiff && <Caret open={diffOpen} />}
+    </>
+  );
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        minWidth: 0,
+      }}
+    >
+      {hasDiff ? (
+        <DisclosureButton
+          baseStyle={{
+            ...TOOL_ROW_BUTTON_STYLE,
+            minHeight: 20,
+            padding: "1px 0",
+            cursor: "pointer",
+          }}
+          onClick={() => setDiffOpen((value) => !value)}
+          title={`${worker.title}: ${worker.status}${titleSuffix}. Show changed files.`}
+        >
+          {header}
+        </DisclosureButton>
+      ) : (
+        <div
+          title={`${worker.title}: ${worker.status}${titleSuffix}`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            minHeight: 20,
+            minWidth: 0,
+          }}
+        >
+          {header}
+        </div>
+      )}
+      {diffOpen && diff && (
+        <div
+          style={{
+            margin: "2px 0 4px 12px",
+            padding: "3px 0 3px 12px",
+            borderLeft: "1px solid color-mix(in oklab, var(--rule-soft) 66%, transparent)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 3,
+          }}
+        >
+          {diff.files.map((file) => (
+            <div
+              key={file.path}
+              title={file.path}
+              style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
+            >
+              <span
+                style={{
+                  color: "var(--ink-dim)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 10,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  flex: 1,
+                  minWidth: 0,
+                }}
+              >
+                {file.path}
+              </span>
+              <span style={{ ...TOOL_STATS_STYLE, color: "var(--ok)" }}>+{file.additions}</span>
+              <span style={{ ...TOOL_STATS_STYLE, color: "var(--danger)" }}>−{file.deletions}</span>
+            </div>
+          ))}
+          {diff.fileCount > diff.files.length && (
+            <span style={{ ...TOOL_INLINE_DETAIL_STYLE, flex: "none" }}>
+              +{diff.fileCount - diff.files.length} more files
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2805,7 +2854,7 @@ function RepeatChip({ count }: { count: number }) {
 function ConversationEmpty() {
   return (
     <div className="spark-empty" style={{ margin: "auto", maxWidth: 250 }}>
-      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
+      <span aria-hidden style={{ color: "var(--accent-text)", display: "inline-flex" }}>
         <SparkMark />
       </span>
       <span className="spark-eyebrow">Getting started</span>
@@ -2915,7 +2964,7 @@ function Caret({ open }: { open: boolean }) {
 
 function SparkMark() {
   return (
-    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent)" }}>
+    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent-text)" }}>
       <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
         <path
           d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"
@@ -3007,43 +3056,11 @@ const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
   border: "1px solid var(--accent-edge)",
   borderRadius: 999,
   background: "var(--panel-2)",
-  color: "var(--accent)",
+  color: "var(--accent-text)",
   boxShadow: "var(--shadow-float)",
   padding: "7px 12px",
   fontFamily: "var(--font-sans)",
   fontSize: 11,
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
-const RESULT_CARD_STYLE: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--ok) 34%, var(--rule))",
-  borderRadius: 10,
-  background: "color-mix(in oklch, var(--ok) 5%, var(--panel-2))",
-  boxShadow: "var(--lift-hi)",
-  padding: 14,
-  display: "flex",
-  flexDirection: "column",
-  gap: 10,
-};
-
-const RESULT_FILE_ROW_STYLE: React.CSSProperties = {
-  minWidth: 0,
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 6,
-  alignItems: "center",
-  padding: "5px 7px",
-  borderRadius: 6,
-  background: "color-mix(in oklab, var(--bg) 54%, transparent)",
-};
-
-const RESULT_ACTION_STYLE: React.CSSProperties = {
-  border: "none",
-  background: "transparent",
-  color: "var(--accent)",
-  padding: "2px 3px",
-  fontSize: 10,
   fontWeight: 700,
   cursor: "pointer",
 };
@@ -3335,7 +3352,7 @@ const QUESTION_OPTION_KEY_STYLE: React.CSSProperties = {
 
 const QUESTION_OPTION_KEY_REC_STYLE: React.CSSProperties = {
   background: "var(--accent-soft)",
-  color: "var(--accent)",
+  color: "var(--accent-text)",
 };
 
 // Single-line body: label, then the recommended star, then the description

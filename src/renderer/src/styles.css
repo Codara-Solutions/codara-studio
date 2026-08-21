@@ -25,25 +25,28 @@
   --rule-strong: #5a5853;
   --rule-soft: #242320;
 
-  /* Brand accent — Codara teal by default, overwritten at runtime to the
-     active workspace color. Soft variants are low-chroma derivatives for
-     backgrounds and tints. */
+  /* Workspace accent — the exact selected hex at runtime. `--accent-text` is
+     the same identity adjusted only when a small foreground needs contrast;
+     fills, edges, glows, and diagrams continue to derive from `--accent`. */
+  --workspace-accent: #2AA298;
   --accent: #2AA298;
+  --accent-text: #2AA298;
   --accent-ink: #14110d;
+  --on-accent: #14110d;
   --accent-soft: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-edge: color-mix(in oklch, var(--accent) 40%, transparent);
   --accent-glow: color-mix(in oklch, var(--accent) 28%, transparent);
 
-  /* Agent-owned surfaces — tabs a background agent created on the user's
-     behalf. A warm amber, deliberately distinct from the workspace --accent
-     (teal by default) so an agent-spawned terminal reads as "not something I
-     opened" at a glance. Named dark themes inherit this base; the light
-     palettes re-tint it darker below (as they do --automation). The edge/soft
-     derivatives track the base via color-mix, so a theme only overrides the
-     one hue. */
+  /* First-party agent brands. These never follow workspace --accent, so a
+     Claude row stays orange in a teal project and a Grok row stays lime in
+     an orange one. Light palettes re-tint them darker below. */
+  --agent-claude: oklch(0.76 0.16 52);
+  --agent-codex: oklch(0.74 0.13 175);
+  --agent-grok: oklch(0.82 0.18 128);
+
+  /* Fallback glyph color for a background-created terminal after its live
+     runtime mark is gone. Agent activity never tints the whole tab. */
   --agent-tab-accent: oklch(0.78 0.15 65);
-  --agent-tab-edge: color-mix(in oklch, var(--agent-tab-accent) 55%, transparent);
-  --agent-tab-soft: color-mix(in oklch, var(--agent-tab-accent) 12%, transparent);
 
   /* Status */
   --danger: oklch(0.70 0.20 25);
@@ -446,6 +449,9 @@
   /* Bright paper needs a darker amber so the agent-tab edge + glyph keep
      contrast (the base 0.78 amber is tuned for dark backgrounds). */
   --agent-tab-accent: oklch(0.62 0.16 60);
+  --agent-claude: oklch(0.58 0.17 50);
+  --agent-codex: oklch(0.50 0.13 175);
+  --agent-grok: oklch(0.48 0.16 128);
 }
 
 * { box-sizing: border-box; }
@@ -693,25 +699,6 @@ a { color: inherit; }
 .spark-tab--drop-target {
   outline: 1px solid var(--accent-edge);
   outline-offset: 1px;
-}
-
-/* Agent-owned tab: a background agent created this terminal. An amber edge +
-   faint amber wash mark it as not-user-opened in BOTH the inactive and active
-   states. The pill reads its accent from --agent-accent, set inline from the
-   tab's stored color token, so the tab model owns the color and the stylesheet
-   only consumes it. Each state washes over the same face its plain counterpart
-   uses (--panel resting, --panel-2 raised), so an agent chip is the ordinary
-   chip plus a tint rather than a differently-lit object. */
-.spark-tab--agent {
-  border-color: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 55%, transparent);
-  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 8%, var(--panel));
-}
-.spark-tab--agent:hover:not(.spark-tab--active) {
-  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 14%, var(--panel));
-}
-.spark-tab--agent.spark-tab--active {
-  border-color: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 65%, transparent);
-  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 12%, var(--panel-2));
 }
 
 .spark-tab__label {
@@ -979,7 +966,7 @@ a { color: inherit; }
   margin-right: 2px;
   border-radius: 999px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
@@ -987,12 +974,12 @@ a { color: inherit; }
 
 .spark-tabbar-cora:hover {
   background: color-mix(in oklab, var(--accent) 18%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .spark-tabbar-cora:active {
   background: color-mix(in oklab, var(--accent) 26%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .spark-tabbar-picker {
@@ -1078,7 +1065,7 @@ a { color: inherit; }
   margin: 0;
   transform: translate(-50%, -50%);
   overflow: hidden;
-  color: color-mix(in oklch, var(--accent) 82%, var(--ink));
+  color: var(--accent-text);
   font-family: var(--font-mono);
   font-size: clamp(6px, 1.9cqw, 14px);
   font-weight: 600;
@@ -1179,7 +1166,7 @@ a { color: inherit; }
 }
 
 .cora-worker-terminal-control.is-protected {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px var(--accent-edge);
 }
@@ -1318,7 +1305,11 @@ a { color: inherit; }
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* `safe` matters once the chat is half a split: plain centering pushes
+     overflow past BOTH edges of a scroll container, so the hero and the first
+     starter were cut off at the top with no way to scroll up to them. Safe
+     centering falls back to flex-start exactly when it no longer fits. */
+  justify-content: safe center;
   gap: 13px;
   padding: 30px 24px;
   text-align: center;
@@ -1344,7 +1335,12 @@ a { color: inherit; }
 .cora-welcome__project {
   display: flex;
   align-items: center;
-  max-width: 520px;
+  /* `100%` is the load-bearing half: .cora-welcome centers its children, so
+     they are sized fit-content and a long cwd pushed this pill past the
+     surface — which is what made the whole welcome scroll sideways (and clip
+     its own text) the moment the chat was docked into a split rather than
+     filling the workbench. */
+  max-width: min(520px, 100%);
   min-width: 0;
   gap: 7px;
   padding: 5px 9px;
@@ -1376,7 +1372,10 @@ a { color: inherit; }
 }
 .cora-welcome__starters {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* auto-fit rather than a fixed pair: the chat is as often half a split as it
+     is a whole tab, and a viewport media query cannot see that. Cards drop to
+     one column when two no longer fit the surface, at any window size. */
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
   gap: 8px;
   width: min(620px, 100%);
   margin-top: 3px;
@@ -1412,7 +1411,7 @@ a { color: inherit; }
 }
 .cora-starter:active { transform: translateY(0); }
 .cora-starter__label {
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.12em;
@@ -1437,7 +1436,7 @@ a { color: inherit; }
   transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
 }
 .cora-starter:hover .cora-starter__arrow {
-  color: var(--accent);
+  color: var(--accent-text);
   transform: translate(1px, -1px);
 }
 /* The welcome's door to Automations: one quiet full-width row under the
@@ -1486,7 +1485,7 @@ a { color: inherit; }
   flex: 0 0 16px;
   color: var(--muted);
 }
-.cora-welcome__automations.is-live .cora-welcome__automations-glyph { color: var(--accent); }
+.cora-welcome__automations.is-live .cora-welcome__automations-glyph { color: var(--accent-text); }
 .cora-welcome__automations-text {
   flex: 1;
   min-width: 0;
@@ -1502,8 +1501,11 @@ a { color: inherit; }
   color: var(--ink);
 }
 .cora-welcome__automations-sub {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 10.5px;
+  text-overflow: ellipsis;
 }
 .cora-welcome__automations-action {
   flex: 0 0 auto;
@@ -1511,7 +1513,7 @@ a { color: inherit; }
   font-weight: 600;
   color: var(--muted);
 }
-.cora-welcome__automations.is-live .cora-welcome__automations-action { color: var(--accent); }
+.cora-welcome__automations.is-live .cora-welcome__automations-action { color: var(--accent-text); }
 .cora-welcome__automations-arrow {
   flex: 0 0 auto;
   color: var(--muted-2);
@@ -1519,14 +1521,8 @@ a { color: inherit; }
   transition: transform var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .cora-welcome__automations:hover .cora-welcome__automations-arrow {
-  color: var(--accent);
+  color: var(--accent-text);
   transform: translateX(1px);
-}
-
-@media (max-width: 780px) {
-  .cora-welcome { justify-content: flex-start; padding-top: 24px; }
-  .cora-welcome__starters { grid-template-columns: 1fr; }
-  .cora-welcome__project-path { display: none; }
 }
 
 /* ── Automations ── the live machine ─────────────────────────────────────── */
@@ -1685,7 +1681,7 @@ a { color: inherit; }
   flex: 0 0 auto;
   font-size: 11px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .loom-live-strip.is-blocked .loom-live-strip__action { color: var(--danger); }
 
@@ -1829,7 +1825,7 @@ a { color: inherit; }
 }
 
 .automation-variable-chip__token {
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
@@ -1912,7 +1908,7 @@ a { color: inherit; }
   border: 1px solid var(--accent-edge);
   border-radius: 6px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-mono);
   font-size: 11px;
 }
@@ -2263,6 +2259,9 @@ a { color: inherit; }
   .composer-toolbar .composer-model:has(.composer-pill-label) {
     max-width: 38cqi;
   }
+  .composer-profile-label {
+    display: none;
+  }
 }
 
 .composer-pill {
@@ -2292,7 +2291,7 @@ a { color: inherit; }
   background: var(--press);
 }
 .composer-pill.is-active {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
@@ -2300,22 +2299,117 @@ a { color: inherit; }
 .composer-model {
   position: relative;
 }
+.composer-profile {
+  position: relative;
+  flex: 0 0 auto;
+}
+.composer-profile-trigger {
+  max-width: 150px;
+}
+.composer-profile-glyph {
+  color: var(--accent);
+  font-size: 10px;
+}
+.composer-profile-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-profile-menu {
+  width: 250px;
+  max-width: min(300px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px;
+}
+.composer-profile-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: default;
+}
+.composer-profile-option:hover,
+.composer-profile-option.is-active {
+  background: var(--hover);
+}
+.composer-profile-option.is-active {
+  border-color: var(--accent-edge);
+  background: var(--accent-soft);
+}
+.composer-profile-mark {
+  width: 12px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  text-align: center;
+}
+.composer-profile-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 650;
+}
+.composer-profile-copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-profile-manage {
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 8px;
+  border: 0;
+  border-top: 1px solid var(--rule-soft);
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-align: left;
+  cursor: default;
+}
+.composer-profile-manage:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
 /* Positioned by AnchoredMenu (fixed, portalled to <body>), so no static
    placement here, only size and material. */
-.composer-model-menu {
-  min-width: 330px;
-  max-width: min(390px, calc(100vw - 32px));
-  max-height: 360px;
-  overflow: auto;
-  /* Stop a wheel at the top/bottom of the list from chaining into the page
-     behind it: that page scroll is what dismisses the menu, so without this
-     the list flicks shut the moment you overscroll it. */
-  overscroll-behavior: contain;
-  padding: 4px;
+.composer-model-thinking-menu {
+  width: 286px;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  padding: 0;
   background: var(--panel-2);
   border: 1px solid var(--rule);
   border-radius: var(--radius-popover, 9px);
   box-shadow: var(--shadow-2);
+}
+.composer-model-thinking-list {
+  max-height: 272px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 3px 5px 5px;
+}
+.composer-model-thinking-trigger {
+  gap: 5px;
+}
+.composer-model-spark {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.composer-model-thinking-dot {
+  color: var(--muted);
 }
 .composer-model-group + .composer-model-group {
   margin-top: 4px;
@@ -2329,129 +2423,91 @@ a { color: inherit; }
   text-transform: uppercase;
   color: var(--muted);
 }
-/* The harness heading: printed once above the vendor groups, and styled as the
-   stronger of the two so the hierarchy reads "all of this is Cora on Pi, and
-   within it these come from OpenAI and these from Anthropic". */
-.composer-model-section-label {
-  padding: 6px 8px 1px;
+.composer-picker-title {
+  padding: 9px 11px 7px;
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+}
+.composer-picker-title.is-substep {
+  border-top: 1px solid var(--rule-soft);
+  border-bottom: 0;
+  color: var(--muted);
   font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
   font-weight: 600;
-  color: var(--ink-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
-/* Indented and quieter than the section above it: a subdivision, not a peer. */
-.composer-model-group-label.is-vendor {
-  padding-left: 16px;
-  color: var(--muted-2, var(--muted));
-  letter-spacing: 0.1em;
-}
-/* The vendor groups belong to one heading, so no divider between them. The
-   rule above adds a top border to every subsequent group; suppress it where
-   both sides sit under the same section. */
-.composer-model-group + .composer-model-group:not(:has(> .composer-model-section-label)) {
-  margin-top: 2px;
-  padding-top: 0;
-  border-top: none;
-}
-.composer-model-row {
+.composer-picker-back {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
   width: 100%;
-  padding: 7px 8px;
-  border-radius: var(--radius-control, 7px);
-  border: 1px solid transparent;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 12px;
   font-family: var(--font-sans);
-  cursor: default;
+  font-size: 11px;
+  font-weight: 650;
   text-align: left;
+  cursor: default;
 }
-.composer-model-row:hover {
+.composer-picker-back:hover {
   background: var(--hover);
 }
-.composer-model-row.is-active {
-  background: var(--accent-soft);
-  color: var(--ink);
-  border-color: var(--accent-edge);
-}
-.composer-model-row-copy {
-  display: flex;
-  flex: 1;
+.composer-picker-back > span:last-child {
   min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-.composer-model-row-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
-  flex: 1;
-  font-weight: 600;
 }
-.composer-model-row-description {
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.35;
-}
-.composer-model-row-badges {
-  display: inline-flex;
+.composer-picker-row {
+  display: flex;
+  width: 100%;
   align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  padding-top: 1px;
-}
-/* A row that is just a name. The base row aligns to flex-start for rows that
-   carry a description line; with no second line that reads as a top-heavy
-   row, so centre it. */
-.composer-model-row.is-compact {
-  align-items: center;
-}
-
-.composer-thinking-wrap {
-  position: relative;
-}
-.composer-thinking {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 999px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
-  border: 1px solid var(--rule-soft);
-  color: var(--ink-dim);
-  font-size: 11px;
-  cursor: default;
+  color: var(--ink);
   font-family: var(--font-sans);
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out);
+  font-size: 11px;
+  text-align: left;
+  cursor: default;
 }
-.composer-thinking.is-active {
-  color: var(--accent);
+.composer-picker-row:hover {
+  background: var(--hover);
+}
+.composer-picker-row.is-active {
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
-.composer-thinking:hover {
-  background: var(--hover-strong);
-  color: var(--ink);
+.composer-picker-row > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.composer-thinking:active {
-  background: var(--press);
+.composer-picker-row-tail {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 9px;
 }
+.composer-effort-list {
+  max-height: 260px;
+  overflow: auto;
+  padding: 0 5px 5px;
+}
+
 .composer-thinking-label {
   white-space: nowrap;
 }
-/* Glyph-only sibling of the thinking pill: same round border and accent-on
-   treatment, sized square so the row reads as [model · thinking · flash]. */
+/* Glyph-only sibling of the combined model control, sized square so fast mode
+   stays an optional modifier rather than looking like another selector. */
 .composer-fast {
   display: inline-flex;
   align-items: center;
@@ -2470,7 +2526,7 @@ a { color: inherit; }
     color var(--motion-fast) var(--ease-out);
 }
 .composer-fast.is-on {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   border-color: var(--accent-edge);
 }
@@ -2479,7 +2535,7 @@ a { color: inherit; }
   color: var(--ink);
 }
 .composer-fast.is-on:hover {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 .composer-fast:active {
@@ -2498,15 +2554,6 @@ a { color: inherit; }
   transform: translateY(-1px);
 }
 
-/* Placement is owned by AnchoredMenu, which portals these to <body> and sets
-   position/left/bottom inline. (They must escape the composer shell: it
-   carries spark-glass--strong, and a backdrop-filter ancestor is a backdrop
-   root, so a .spark-menu nested inside it frosts the shell's empty interior
-   and paints flat.) Only the intrinsic box belongs here. */
-.composer-thinking-menu {
-  width: 310px;
-  max-width: min(360px, calc(100vw - 32px));
-}
 .composer-menu-heading {
   padding: 5px 8px 7px;
   color: var(--muted);
@@ -2515,62 +2562,6 @@ a { color: inherit; }
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.composer-effort-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  width: 100%;
-  min-height: 48px;
-  padding: 7px 8px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control, 7px);
-  background: transparent;
-  color: var(--ink);
-  font-family: var(--font-sans);
-  text-align: left;
-  cursor: default;
-}
-.composer-effort-option:hover {
-  background: var(--hover);
-}
-.composer-effort-option.is-active {
-  background: var(--accent-soft);
-  border-color: var(--accent-edge);
-}
-/* Two-line label/description copy inside a composer menu row. Shared by the
-   thinking menu; the mode menu that introduced the names is gone. */
-.composer-mode-option-copy {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-.composer-mode-option-label {
-  color: var(--ink);
-  font-size: 11px;
-  font-weight: 650;
-  line-height: 1.3;
-}
-.composer-mode-option-description {
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.4;
-}
-.composer-menu-check {
-  flex: 0 0 auto;
-  padding-top: 2px;
-  color: var(--accent);
-  font-size: 11px;
-}
-.composer-effort-option {
-  align-items: center;
-}
-.composer-effort-option > svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-}
-
 .composer-context {
   display: inline-flex;
   align-items: center;
@@ -2601,16 +2592,6 @@ a { color: inherit; }
 }
 
 /* Row badge. Fixed width, sits to the right of a menu row's label. */
-.composer-badge {
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  border: 1px solid var(--rule-soft);
-  border-radius: 3px;
-  padding: 1px 4px;
-  flex: 0 0 auto;
-}
 .composer-model-empty {
   padding: 8px;
   font-size: 11px;
@@ -2727,7 +2708,7 @@ a { color: inherit; }
   background: color-mix(in oklab, var(--ink) 13%, transparent);
 }
 .spark-icon-btn.is-active {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
 }
 .spark-icon-btn:disabled,
@@ -2783,58 +2764,13 @@ a { color: inherit; }
    Full-width row for lists and menus. Hover is an ink-tint; .is-selected
    carries the accent-edge + soft fill the way active rows read across the app.
    --row-h drives the height for vertical rhythm. */
-.spark-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: var(--row-h);
-  padding: 0 9px;
-  border: 1px solid transparent;
-  /* Rows sit on the surface rung (7px) per the --radius-surface comment. */
-  border-radius: var(--radius-surface, 7px);
-  background: transparent;
-  color: var(--ink-dim);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  text-align: left;
-  cursor: default;
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    color var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out),
-    box-shadow var(--motion-fast) var(--ease-out);
-}
-.spark-row:hover {
-  background: var(--hover);
-  color: var(--ink);
-}
-.spark-row:active {
-  background: var(--hover-strong);
-}
-.spark-row.is-selected {
-  color: var(--ink);
-  background: var(--accent-soft);
-  border-color: var(--accent-edge);
-  box-shadow: var(--shadow-glow);
-}
 .spark-row.is-disabled,
-.spark-row:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
 
 /* ── Card ────────────────────────────────────────────────────────────────────
    A raised container. Square corners by default to honor the panel-container
    rule (round only interactive children); set a radius inline if the card is
    itself a floating element. Depth is tint + the 1px --lift-hi top highlight,
    not a border on everything. */
-.spark-card {
-  background: var(--panel-2);
-  border: 1px solid var(--rule-soft);
-  border-radius: 0;
-  box-shadow: var(--lift-hi);
-}
 
 /* ── Empty state ─────────────────────────────────────────────────────────────
    Calm centered hint for empty / first-run / error surfaces — never a blank
@@ -2889,18 +2825,13 @@ a { color: inherit; }
   border-color: color-mix(in oklch, var(--danger) 35%, transparent);
   background: var(--danger-soft);
 }
-.spark-badge.is-info {
-  color: var(--info);
-  border-color: color-mix(in oklch, var(--info) 35%, transparent);
-  background: var(--info-soft);
-}
 .spark-badge.is-warn {
   color: var(--warn);
   border-color: color-mix(in oklch, var(--warn) 35%, transparent);
   background: color-mix(in oklch, var(--warn) 14%, transparent);
 }
 .spark-badge.is-accent {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: var(--accent-edge);
   background: var(--accent-soft);
 }
@@ -3069,8 +3000,21 @@ a { color: inherit; }
   border: 1px solid var(--rule-soft);
   box-shadow: var(--shadow-2), var(--lift-hi);
 }
-.spark-glass--faint {
-  background: var(--panel);
+/* Toasts are the same floating material as menus and dialogs — they were the
+   one such surface left on plain blur (`.spark-backdrop-glass`), with no lens,
+   no sheen and no fresnel edge, which read as a flat card sitting right beside
+   the fully-glass "While you were away" digest. The stack lives here rather
+   than inline on the card because the glass recipe IS a box-shadow stack: an
+   inline shadow carrying the status stripe would clobber it. The card passes
+   its tone in through --toast-status instead, so this owns the whole stack. */
+.spark-toast {
+  --toast-status: inset 3px 0 0 var(--accent);
+  border: 1px solid var(--rule);
+  background: var(--notify-surface, var(--panel-2));
+  box-shadow: var(--toast-status), var(--shadow-1);
+}
+.spark-toast[data-lifted="true"] {
+  box-shadow: var(--toast-status), var(--shadow-2);
 }
 @media not (prefers-reduced-transparency: reduce) {
   html:not([data-glass="off"]) {
@@ -3106,6 +3050,28 @@ a { color: inherit; }
     background: var(--glass-bg-faint);
     -webkit-backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
+  }
+  html:not([data-glass="off"]) .spark-toast {
+    background-color: var(--glass-bg-strong);
+    background-image: var(--glass-sheen);
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    border-color: var(--glass-border);
+    box-shadow:
+      var(--toast-status),
+      var(--glass-edge-hi),
+      var(--glass-edge-lo),
+      var(--glass-bloom),
+      var(--glass-shadow);
+  }
+  html:not([data-glass="off"]) .spark-toast[data-lifted="true"] {
+    box-shadow:
+      var(--toast-status),
+      var(--glass-edge-hi),
+      var(--glass-edge-lo),
+      var(--glass-bloom),
+      var(--glass-shadow),
+      var(--shadow-2);
   }
   html:not([data-glass="off"]) .spark-backdrop-glass {
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
@@ -3166,6 +3132,20 @@ a { color: inherit; }
     -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     contain: paint;
+  }
+  /* Fast modal glass: keep the translucent fill, sheen, rim and one local
+     frost layer on the card, but never run the SVG refraction lens over a
+     large scrolling dialog. Its sibling scrim is deliberately unfiltered so
+     opening a menu does not re-rasterize the terminal-sized workbench. */
+  html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    contain: paint;
+  }
+  html:not([data-glass="off"]) .spark-scrim.spark-scrim--clear {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: color-mix(in oklab, var(--bg) 44%, transparent);
   }
   html:not([data-glass="off"]) .settings-dialog-scrim,
   html:not([data-glass="off"]) .agent-capabilities-scrim,
@@ -3333,14 +3313,6 @@ a { color: inherit; }
   margin: 0;
   align-self: stretch;
   background: var(--rule-soft);
-}
-.spark-divider:not(.is-vertical) {
-  height: 1px;
-  width: 100%;
-}
-.spark-divider.is-vertical {
-  width: 1px;
-  min-height: 100%;
 }
 
 /* ── Loom node-flow canvas (@xyflow/react) ────────────────────────────────────

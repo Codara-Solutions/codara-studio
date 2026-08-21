@@ -6,6 +6,7 @@ import type {
   RunState,
   StepStatus,
   WorkerAttempt,
+  WorkerDiffSummary,
   WorkerRuntime,
   WorkerTask,
   WorkerTaskStatus,
@@ -49,6 +50,8 @@ export interface ChatWorker {
    * predecessor's model ("Opus 5") is the one thing the row must not claim.
    */
   model?: string;
+  /** Measured Git changes from the latest attempt, refreshed while it works. */
+  diff?: WorkerDiffSummary;
   /** Set while another attempt is still owed to this worker. */
   pending?: ChatPendingAttempt;
 }
@@ -315,6 +318,73 @@ export type ChatTimelineItem =
       at: string;
     };
 
+/**
+ * Direct Cora chats hand a user message straight to a worker task rather than
+ * a manager turn. Older runs left those messages marked "queued" even after
+ * the matching task existed, which exposed impossible Send now / Unqueue
+ * controls. Treat the task creation as the durable delivery receipt. New runs
+ * are written acknowledged at dispatch; this fallback repairs old history.
+ */
+export function effectiveMessageDeliveryState(
+  run: RunState,
+  message: HumanRunMessage,
+): HumanRunMessage["deliveryState"] {
+  if (
+    run.executionMode !== "direct" ||
+    message.author !== "user" ||
+    message.deliveryState !== "queued" ||
+    message.boardNote ||
+    message.resumeNote
+  ) {
+    return message.deliveryState;
+  }
+  const text = message.message.trim();
+  const sentAt = Date.parse(message.createdAt);
+  const dispatched = run.workerTasks.some((task) => {
+    const taskAt = Date.parse(task.createdAt);
+    const description = task.description.trim();
+    return (
+      Number.isFinite(sentAt) &&
+      Number.isFinite(taskAt) &&
+      taskAt >= sentAt &&
+      (description === text || description.startsWith(`${text}\n`))
+    );
+  });
+  return dispatched ? "acknowledged" : message.deliveryState;
+}
+
+/**
+ * Return the real message whose send implicitly resumed a paused run.
+ *
+ * New runs persist the relationship explicitly. The backend-turn fallback is
+ * for existing runs written before that field existed: the genuine message
+ * and its immediately-created recovery note were claimed by the same turn.
+ */
+export function resumedByMessageId(
+  messages: HumanRunMessage[],
+  resumeMessage: HumanRunMessage,
+): string | undefined {
+  if (!resumeMessage.resumeNote) return undefined;
+  if (resumeMessage.resumesMessageId) return resumeMessage.resumesMessageId;
+  if (!resumeMessage.backendTurnId) return undefined;
+  const resumeIndex = messages.findIndex((message) => message.id === resumeMessage.id);
+  if (resumeIndex <= 0) return undefined;
+  for (let index = resumeIndex - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if ((candidate.conversationEpoch ?? 0) !== (resumeMessage.conversationEpoch ?? 0)) break;
+    if (
+      candidate.author === "user" &&
+      !candidate.compaction &&
+      !candidate.boardNote &&
+      !candidate.resumeNote &&
+      candidate.backendTurnId === resumeMessage.backendTurnId
+    ) {
+      return candidate.id;
+    }
+  }
+  return undefined;
+}
+
 // Merge the human conversation and Cora activity into one ordered stream.
 // Every item carries an ISO timestamp, so a single sort interleaves "you said
 // X" with "Cora read context", "Cora called the manager", and worker runs in
@@ -330,6 +400,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     if (message.compaction) continue;
     const text = message.message.trim();
     if (!text) continue;
+    const deliveryState = effectiveMessageDeliveryState(run, message);
     // The synthetic board-nudge note is authored "user" only so delivery
     // treats it as manager input — rendering it as the user's own bubble
     // (full of tool names) would misattribute it. Surface it like the other
@@ -353,13 +424,13 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       });
       continue;
     }
-    // The synthetic resume note's BODY is manager input (a list of attempt
-    // ids), but the resume itself is a user action the user may want to take
-    // back. Render it as the user's own compact "Resume" bubble — id kept as
-    // the message id so the user-message checkpoint recorded at resume time
-    // attaches the standard Undo control, letting the user rewind to before
-    // the resume.
+    // Sending a real message into a paused chat also resumes it. In that case
+    // the message is the complete visible interaction; the synthetic recovery
+    // note remains backend context and must not create a second "Resume"
+    // bubble underneath. A standalone press of Resume still renders as its own
+    // compact, undoable action.
     if (message.resumeNote) {
+      if (resumedByMessageId(run.humanMessages, message)) continue;
       // The note names attempts one per line and tails off into "…and N more"
       // past its cap, so the count is the named rows plus that remainder.
       const namedAttempts = (text.match(/^- (?!…)/gm) ?? []).length;
@@ -380,7 +451,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         answersMessageId: message.answersMessageId,
         attachments: [],
         intent: message.intent,
-        deliveryState: message.deliveryState,
+        deliveryState,
         targetTurnId: message.targetTurnId,
         backendTurnId: message.backendTurnId,
         conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,
@@ -403,7 +474,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       answersMessageId: message.answersMessageId,
       attachments: message.attachments ?? [],
       intent: message.intent,
-      deliveryState: message.deliveryState,
+      deliveryState,
       targetTurnId: message.targetTurnId,
       backendTurnId: message.backendTurnId,
       conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,
@@ -467,6 +538,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         runtimeState: worker.latestAttempt?.runtimeState,
         attemptCount: worker.attempts.length,
         model: workerRowModel(worker, automation),
+        diff: worker.latestAttempt?.diffSummary,
         pending: pendingAttemptFor(worker, automation) ?? undefined,
       }));
     items.push({

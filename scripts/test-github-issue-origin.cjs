@@ -208,7 +208,7 @@ async function main() {
     );
     assert.match(
       runStore,
-      /const origin = normalizeGitHubOrigin\(input\.origin\);[\s\S]*?const run: RunState = \{[\s\S]*?workspaceId:\s*input\.workspaceId,\s*origin,/,
+      /const origin = normalizeGitHubOrigin\(input\.origin\);[\s\S]*?const run: RunState = \{[\s\S]*?workspaceId:\s*input\.workspaceId,[\s\S]*?\borigin,/,
       "createRun normalizes provenance before stamping only that normalized value",
     );
     assert.match(

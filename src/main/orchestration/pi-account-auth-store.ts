@@ -3,8 +3,13 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promises as fs } from "node:fs";
 import type { PiSubscriptionProvider } from "@shared/types";
+import {
+  familyForSubscription,
+  isPiSubscriptionProvider,
+  PI_SUBSCRIPTION_PROVIDERS,
+} from "../../shared/agent-families";
 
-import { jwtEmailClaim } from "./native-cli-account-identity";
+import { jwtEmailClaim, jwtSubjectClaim } from "./native-cli-account-identity";
 import {
   PiAccountProfileProtectedError,
   PiAccountProfileRegistry,
@@ -13,7 +18,6 @@ import {
 } from "./pi-account-profiles";
 import {
   inspectPiSubscriptionAuth,
-  type PiSubscriptionAuthStatus,
 } from "./pi-runtime";
 
 export const PI_ACCOUNT_AUTH_DIRECTORY = "accounts";
@@ -21,10 +25,7 @@ export const PI_ACCOUNT_AUTH_FILE = "auth.json";
 
 const PROFILE_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const SUPPORTED_PROVIDERS: readonly PiSubscriptionProvider[] = [
-  "anthropic",
-  "openai-codex",
-];
+const SUPPORTED_PROVIDERS: readonly PiSubscriptionProvider[] = PI_SUBSCRIPTION_PROVIDERS;
 const mutationTails = new Map<string, Promise<void>>();
 
 export interface PiAccountRuntimeProfile {
@@ -125,7 +126,7 @@ export class PiOAuthLoginGate {
 }
 
 function providerFrom(value: unknown): PiSubscriptionProvider {
-  if (value === "anthropic" || value === "openai-codex") return value;
+  if (isPiSubscriptionProvider(value)) return value;
   throw new TypeError("Unsupported Pi subscription provider");
 }
 
@@ -264,16 +265,25 @@ function identityFingerprint(
   provider: PiSubscriptionProvider,
   credential: Record<string, unknown>,
 ): string | undefined {
-  if (provider !== "openai-codex") return undefined;
-  const accountId =
-    typeof credential.accountId === "string"
-      ? credential.accountId
-      : typeof credential.account_id === "string"
-        ? credential.account_id
-        : null;
-  return accountId
-    ? createHash("sha256").update(accountId).digest("hex")
-    : undefined;
+  if (provider === "openai-codex") {
+    const accountId =
+      typeof credential.accountId === "string"
+        ? credential.accountId
+        : typeof credential.account_id === "string"
+          ? credential.account_id
+          : null;
+    return accountId
+      ? createHash("sha256").update(accountId).digest("hex")
+      : undefined;
+  }
+  if (provider === "xai") {
+    const subject =
+      jwtSubjectClaim(credential.access) ??
+      (typeof credential.accountId === "string" ? credential.accountId : null) ??
+      (typeof credential.account_id === "string" ? credential.account_id : null);
+    return subject ? createHash("sha256").update(subject).digest("hex") : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -290,7 +300,7 @@ function credentialAccountEmail(
   provider: PiSubscriptionProvider,
   credential: Record<string, unknown>,
 ): string | undefined {
-  if (provider !== "openai-codex") return undefined;
+  if (provider !== "openai-codex" && provider !== "xai") return undefined;
   return (
     jwtEmailClaim(credential.idToken) ??
     jwtEmailClaim(credential.id_token) ??
@@ -329,7 +339,7 @@ export function piAccountCredentialAccountEmail(
 }
 
 function defaultProfileLabel(provider: PiSubscriptionProvider): string {
-  return provider === "anthropic" ? "Claude Pro / Max" : "ChatGPT Plus / Pro";
+  return familyForSubscription(provider).planLabel;
 }
 
 async function inspectProfileStatus(

@@ -174,24 +174,20 @@ function runAtTurnN() {
 
 async function main() {
   const backend = await bundle(
-    "spark-agent-backend",
-    path.join(ROOT, "src", "main", "orchestration", "spark-agent-backend.ts"),
+    "agent-backend",
+    path.join(ROOT, "src", "main", "orchestration", "agent-backend.ts"),
   );
   const {
     MANAGER_PROMPT_DYNAMIC_MARKER,
     assembleManagerPrompt,
     buildManagerStablePrefix,
     buildManagerTurnPrompt,
-    forgetRunManagerGuidance,
-    loadRunManagerGuidance,
   } = backend;
 
-  // The real shipped guidance, not a fixture: if a resource file ever grows a
-  // per-turn interpolation this test should be the thing that notices.
-  const guidance = fs.readFileSync(
-    path.join(ROOT, "resources", "orchestration", "cc-auto-prompt.md"),
-    "utf8",
-  );
+  // A stand-in for the manager's shipped system guidance. The retired CLI
+  // backends read markdown resource files; Pi's guidance is bundled in the
+  // harness, so the seam contract is what matters here, not the exact bytes.
+  const guidance = "You are Cora's manager.\nDelegate the work; do not code yourself.\n";
   const cwd = "/tmp/workspace";
 
   const turnOne = runAtTurnOne();
@@ -308,53 +304,6 @@ async function main() {
     buildManagerStablePrefix({ guidance, cwd }) === promptOne.stablePrefix &&
       buildManagerStablePrefix({ guidance, cwd }) === buildManagerStablePrefix({ guidance, cwd }),
   );
-
-  // Guidance is pinned per run: a resource file edited mid-conversation must
-  // not split the live prompt cache between turn N and turn N+1.
-  let reads = 0;
-  const readV1 = async () => {
-    reads += 1;
-    return "GUIDANCE V1";
-  };
-  const readV2 = async () => {
-    reads += 1;
-    return "GUIDANCE V2";
-  };
-  const first = await loadRunManagerGuidance("run-cache", "auto:/p/cc-auto-prompt.md", readV1);
-  const second = await loadRunManagerGuidance("run-cache", "auto:/p/cc-auto-prompt.md", readV2);
-  check("guidance is read once per run", reads === 1, `reads=${reads}`);
-  check("a mid-run file edit cannot change the pinned bytes", first === second && second === "GUIDANCE V1");
-
-  const afterModeFlip = await loadRunManagerGuidance(
-    "run-cache",
-    "execute:/p/cc-execute-prompt.md",
-    readV2,
-  );
-  check("a different mode re-reads its own guidance", afterModeFlip === "GUIDANCE V2" && reads === 2);
-
-  const otherRun = await loadRunManagerGuidance("run-other", "auto:/p/cc-auto-prompt.md", readV2);
-  check("a different run reads the file again", otherRun === "GUIDANCE V2" && reads === 3);
-
-  forgetRunManagerGuidance("run-cache");
-  const afterDispose = await loadRunManagerGuidance("run-cache", "auto:/p/cc-auto-prompt.md", readV2);
-  check("disposing a chat drops its pinned guidance", afterDispose === "GUIDANCE V2" && reads === 4);
-
-  // The pin is bounded, so a long-lived app cannot hold every prompt file it
-  // ever read. Eviction is least-recently-used: pin 200 idle runs, then confirm
-  // the oldest was dropped (it re-reads) while the newest is still pinned.
-  const key = "auto:/p/cc-auto-prompt.md";
-  const readMarker = async () => {
-    reads += 1;
-    return "GUIDANCE EVICTED";
-  };
-  for (let i = 0; i < 200; i += 1) {
-    await loadRunManagerGuidance(`run-bulk-${i}`, key, async () => `GUIDANCE ${i}`);
-  }
-  const evictedReads = reads;
-  const oldest = await loadRunManagerGuidance("run-bulk-0", key, readMarker);
-  check("the pin evicts the least recently used run", oldest === "GUIDANCE EVICTED" && reads === evictedReads + 1);
-  const newest = await loadRunManagerGuidance("run-bulk-199", key, readMarker);
-  check("the pin keeps the most recently used run", newest === "GUIDANCE 199" && reads === evictedReads + 1);
 
   console.log(`\nAll ${passed} manager prompt-cache checks passed.`);
 }

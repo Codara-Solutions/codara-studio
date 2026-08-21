@@ -78,7 +78,7 @@ export default function BrowsePane({
                 fontFamily: "var(--font-mono)",
               }}
             >
-              <span aria-hidden style={{ color: entry.isDir ? "var(--accent)" : "var(--muted-2)" }}>
+              <span aria-hidden style={{ color: entry.isDir ? "var(--accent-text)" : "var(--muted-2)" }}>
                 {entry.isDir ? "▸" : "·"}
               </span>
               {entry.name}

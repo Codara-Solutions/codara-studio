@@ -25,6 +25,16 @@ export const DEFAULT_COMPACT_AT_TOKENS = 256000;
 /** Pi 0.84.2 fires its own threshold compaction at contextWindow minus this. */
 export const PI_BUILTIN_COMPACT_HEADROOM_TOKENS = 16384;
 
+/** Guidance appended to Pi's summary prompt. This is the fallback for direct
+ * sessions and overflow recovery; managed chats use the same handoff shape in
+ * run-store's durable conversation cutover. */
+export const CORA_COMPACTION_INSTRUCTIONS = [
+  "Write a dense continuation handoff. Preserve the newest user intent, requirements,",
+  "decisions, exact files/symbols/commands/IDs, completed work and verification, current",
+  "state, failures, blockers, pending tasks, and next actions. Remove repetition and stale",
+  "exploration. Do not invent. Use concise structured Markdown.",
+].join(" ");
+
 /** Read the configured trigger. Absurd values (empty, 0, negative, NaN, an
  *  overflowing string) fall back to the default rather than disabling
  *  compaction or compacting on every turn. */
@@ -103,6 +113,7 @@ export function registerContextCompaction(
     compactionInFlight = true;
     try {
       ctx.compact({
+        customInstructions: CORA_COMPACTION_INSTRUCTIONS,
         onComplete: () => {
           compactionInFlight = false;
         },

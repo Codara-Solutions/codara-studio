@@ -83,11 +83,9 @@ export default function KeybindingsSection({
           <div
             style={{
               fontFamily: "var(--font-sans)",
-              fontSize: 10,
+              fontSize: 13,
               fontWeight: 700,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              color: "var(--ink-dim)",
+              color: "var(--ink)",
             }}
           >
             Keybindings
@@ -101,8 +99,8 @@ export default function KeybindingsSection({
               lineHeight: 1.45,
             }}
           >
-            Click a row to record a new chord. Press the key combination once;
-            the input captures the next keystroke. Changes apply instantly.
+            Choose Edit, press the new key combination, then press Enter.
+            Changes apply immediately.
           </div>
         </div>
         <ResetAllButton
@@ -118,17 +116,22 @@ export default function KeybindingsSection({
         return (
           <section
             key={group}
-            style={{ display: "flex", flexDirection: "column", gap: 6 }}
+            style={{
+              overflow: "hidden",
+              border: "1px solid var(--rule-soft)",
+              borderRadius: 9,
+              background: "color-mix(in oklab, var(--panel) 68%, transparent)",
+            }}
           >
             <h3
               style={{
                 margin: 0,
                 fontFamily: "var(--font-sans)",
-                fontSize: 9,
+                padding: "9px 10px",
+                borderBottom: "1px solid var(--rule-soft)",
+                fontSize: 11,
                 fontWeight: 700,
-                letterSpacing: "0.16em",
-                textTransform: "uppercase",
-                color: "var(--muted)",
+                color: "var(--ink-dim)",
               }}
             >
               {group}
@@ -201,8 +204,8 @@ function Row({
         alignItems: "center",
         justifyContent: "space-between",
         gap: 12,
-        padding: "8px 0",
-        borderBottom: "1px solid var(--rule-soft)",
+        padding: "9px 10px",
+        borderTop: "1px solid var(--rule-soft)",
         minHeight: 38,
       }}
     >
@@ -220,7 +223,7 @@ function Row({
               style={{
                 marginLeft: 8,
                 fontSize: 10,
-                color: "var(--accent)",
+                color: "var(--accent-text)",
                 letterSpacing: "0.08em",
                 textTransform: "uppercase",
               }}

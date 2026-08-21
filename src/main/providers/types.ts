@@ -68,7 +68,7 @@ export interface ResumeOpts extends SpawnOpts {
  * `src/main/providers/<id>.ts` and are aggregated by `providers/index.ts`.
  */
 export interface CliProvider {
-  /** Stable identifier matching `AgentRuntimeKind` ("claude" | "codex"). */
+  /** Stable identifier matching `AgentRuntimeKind`. */
   id: AgentRuntimeKind;
   /** Human-readable label shown in UI ("Claude Code"). */
   displayName: string;

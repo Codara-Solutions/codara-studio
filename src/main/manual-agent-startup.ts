@@ -4,7 +4,7 @@ const SAFE_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/;
 const SAFE_EFFORT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 export interface ManualAgentStartup {
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   /** Complete child argv, including argv[0]. */
   childArgv: string[];
 }
@@ -31,6 +31,9 @@ export function parseManualAgentStartupCommand(
   }
   if (tokens[0] === "codex" && validCodexArgs(tokens.slice(1))) {
     return { runtime: "codex", childArgv: tokens };
+  }
+  if (tokens[0] === "grok" && validGrokArgs(tokens.slice(1))) {
+    return { runtime: "grok", childArgv: tokens };
   }
   return null;
 }
@@ -109,6 +112,42 @@ function validCodexArgs(args: string[]): boolean {
         return false;
       }
       seen.add(flag);
+      continue;
+    }
+    return false;
+  }
+  return sawYolo;
+}
+
+function validGrokArgs(args: string[]): boolean {
+  let sawYolo = false;
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index];
+    if (flag === "--yolo" || flag === "--always-approve") {
+      if (sawYolo) return false;
+      sawYolo = true;
+      continue;
+    }
+    if (flag === "-m" || flag === "--model") {
+      if (seen.has("model")) return false;
+      const value = args[++index];
+      if (!value || !SAFE_VALUE.test(value)) return false;
+      seen.add("model");
+      continue;
+    }
+    if (flag === "--effort" || flag === "--reasoning-effort") {
+      if (seen.has("effort")) return false;
+      const value = args[++index];
+      if (!value || !SAFE_EFFORT.test(value)) return false;
+      seen.add("effort");
+      continue;
+    }
+    if (flag === "--resume" || flag === "-r" || flag === "--session-id" || flag === "-s") {
+      if (seen.has("session")) return false;
+      const value = args[++index];
+      if (!value || !SAFE_VALUE.test(value)) return false;
+      seen.add("session");
       continue;
     }
     return false;

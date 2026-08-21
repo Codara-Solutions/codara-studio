@@ -75,10 +75,3 @@ export function useSelectionRouting(): SelectionRoutingApi {
   }
   return ctx;
 }
-
-// Read the routing API without throwing when no provider is present. Used
-// by the overlays so they can keep rendering inside isolated test harnesses
-// or storybook hosts that never set up the provider.
-export function useOptionalSelectionRouting(): SelectionRoutingApi | null {
-  return useContext(SelectionRoutingContext);
-}

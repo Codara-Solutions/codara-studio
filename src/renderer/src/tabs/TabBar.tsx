@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
-import { canDockTab } from "./dock";
-import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon, SparkIcon } from "../components/icons";
+import { buildDockIndex, canDockTab } from "./dock";
+import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import AutomationsStripButton from "../components/automations/AutomationsStripButton";
-import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
+import { CodaraMark, RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
+import { agentBrandTone } from "../lib/agent-brand";
+import { liveTerminalRuntime } from "./terminalAgentState";
 import { collectLeaves } from "./paneTree";
 import {
   TAB_DOCK_DRAG_MIME,
@@ -66,6 +68,7 @@ interface Props {
   // worker or resumes (or deletes) an earlier session.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
+  onNewGrokWorker: () => void;
   // Starts a new draft Cora chat — the ✦ Cora button's action (identical to
   // the chat.new chord). The new-chat welcome surface is Cora's landing page.
   onNewChat: () => void;
@@ -77,8 +80,10 @@ interface Props {
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
   // "Open in split" from a pill's context menu — the keyboard/menu route to
-  // the same thing dragging a pill into the grid does.
-  onDockTab: (tabId: TabId, hostTabId: TabId) => void;
+  // the same thing dragging a pill into the grid does. The host is resolved
+  // downstream (useTabs.openTabInSplit): the strip knows which tab was picked,
+  // not which grid should take it.
+  onOpenInSplit: (tabId: TabId) => void;
   // Resolved keybinding hints for the "+" picker rows, derived in App from the
   // effective binding table so they reflect the user's actual (possibly
   // rebound) chords and the right platform glyphs. A field is undefined when
@@ -131,13 +136,14 @@ function TabBar({
   onNewPreview,
   onNewClaudeWorker,
   onNewCodexWorker,
+  onNewGrokWorker,
   onNewChat,
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
-  onDockTab,
+  onOpenInSplit,
   pickerHints,
   closeOnMiddleClick,
   workspaceId,
@@ -809,21 +815,23 @@ function TabBar({
         const menuTab = tabs.find((t) => t.id === tabMenu.id);
         if (!menuTab) return null;
         const path = menuTab.kind === "editor" ? menuTab.path : null;
-        // "Open in split" needs somewhere to dock INTO: the active terminal
-        // tab, else the most recent one.
-        const host =
-          [...tabs].reverse().find((t) => t.kind === "terminal" && t.id === activeId) ??
-          [...tabs].reverse().find((t) => t.kind === "terminal");
-        const canDock = canDockTab(menuTab) && !!host;
+        // No host lookup here: openTabInSplit finds (or mints) the grid. The
+        // only thing the strip still decides is whether the entry is offered
+        // at all — a second chat can't be docked while one already is, and an
+        // item that silently does nothing is worse than no item.
+        const chatDockTaken =
+          menuTab.kind === "chat" &&
+          [...buildDockIndex(tabs).keys()].some(
+            (id) => id !== menuTab.id && tabs.find((t) => t.id === id)?.kind === "chat",
+          );
+        const canDock = canDockTab(menuTab) && !chatDockTaken;
         if (!path && !canDock) return null;
         return (
           <TabContextMenu
             path={path}
             x={tabMenu.x}
             y={tabMenu.y}
-            onOpenInSplit={
-              canDock ? () => onDockTab(menuTab.id, host!.id) : undefined
-            }
+            onOpenInSplit={canDock ? () => onOpenInSplit(menuTab.id) : undefined}
             onDismiss={() => setTabMenu(null)}
           />
         );
@@ -837,7 +845,7 @@ function TabBar({
         title="Cora: start a new chat"
         aria-label="New Cora chat"
       >
-        <SparkIcon size={11} />
+        <CodaraMark size={11} />
         <span>Cora</span>
       </button>
       {/* Icon-only Automations door, a first-class neighbor of ✦ Cora rather
@@ -902,6 +910,15 @@ function TabBar({
               onClick={() => {
                 setPickerOpen(false);
                 onNewCodexWorker();
+              }}
+            />
+            <PickerItem
+              label="Grok worker"
+              glyph={<RuntimeGlyph runtime="grok" />}
+              accent="grok"
+              onClick={() => {
+                setPickerOpen(false);
+                onNewGrokWorker();
               }}
             />
           </div>
@@ -980,20 +997,15 @@ const TabItem = React.memo(function TabItem({
     tab.kind === "terminal" &&
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
 
-  // Terminals a background agent spawned carry an opaque color token; tint the
-  // pill edge + wash so the user can tell an agent owns the tab. The token is
-  // fed to the CSS as a local custom property the .spark-tab--agent rules read.
-  const agentColor = tab.kind === "terminal" ? tab.color : undefined;
   const tabClass = [
     "spark-tab",
     active && "spark-tab--active",
     dragging && "spark-tab--dragging",
     (dropActive || paneDragHover) && "spark-tab--drop-target",
-    agentColor && "spark-tab--agent",
   ]
     .filter(Boolean)
     .join(" ");
-  const tabStyle = tabStyleFor(agentColor, dragOffset);
+  const tabStyle = tabStyleFor(dragOffset);
 
   return (
     <div
@@ -1229,7 +1241,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
       aria-selected={active}
       data-tab-id={tab.id}
       className={className}
-      style={tabStyleFor(undefined, dragOffset)}
+      style={tabStyleFor(dragOffset)}
       // Not draggable while renaming: the text selection inside the input has
       // to win over the tab gesture.
       draggable={!editing}
@@ -1275,8 +1287,8 @@ const ChatTabItem = React.memo(function ChatTabItem({
       }}
       title={tab.title}
     >
-      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
-        <SparkIcon size={13} />
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
+        <CodaraMark size={13} />
       </span>
       {editing ? (
         <input
@@ -1353,21 +1365,12 @@ const ChatTabItem = React.memo(function ChatTabItem({
   );
 });
 
-// Inline style for a tab row: the agent tint (a CSS custom property the
-// .spark-tab--agent rules consume) and the reorder preview's slide. translate3d
-// keeps the slide on the compositor — the strip never reflows mid-drag, which
-// is what makes the motion smooth instead of a per-frame layout pass.
-// undefined (not an empty object) when neither applies, so the common case
-// hands React the same "no style" it had before.
-function tabStyleFor(
-  agentColor: string | undefined,
-  dragOffset: number,
-): React.CSSProperties | undefined {
-  if (!agentColor && !dragOffset) return undefined;
-  const style: React.CSSProperties = {};
-  if (agentColor) (style as Record<string, string>)["--agent-accent"] = agentColor;
-  if (dragOffset) style.transform = `translate3d(${dragOffset}px, 0, 0)`;
-  return style;
+// Keep reorder motion on the compositor so the strip never reflows mid-drag.
+// The normal case returns no style object at all.
+function tabStyleFor(dragOffset: number): React.CSSProperties | undefined {
+  return dragOffset
+    ? { transform: `translate3d(${dragOffset}px, 0, 0)` }
+    : undefined;
 }
 
 function PencilGlyph() {
@@ -1392,8 +1395,8 @@ function PencilGlyph() {
 function KindIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "chat") {
     return (
-      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
-        <SparkIcon size={13} />
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
+        <CodaraMark size={13} />
       </span>
     );
   }
@@ -1422,9 +1425,21 @@ function KindIcon({ tab }: { tab: Tab }) {
         </span>
       );
     }
-    return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent)"} />;
+    const workerRuntimes = terminalWorkerRuntimes(tab);
+    if (workerRuntimes.length > 1) {
+      return <SplitAgentsMark runtimes={workerRuntimes} />;
+    }
+    const workerRuntime = workerRuntimes[0];
+    if (workerRuntime) {
+      return (
+        <span style={{ display: "inline-flex", flex: "0 0 14px", color: `var(--agent-${workerRuntime})` }}>
+          <RuntimeMark runtime={workerRuntime} size={13} />
+        </span>
+      );
+    }
+    return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent-text)"} />;
   }
-  if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
+  if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent-text)" />;
   if (tab.kind === "automations") {
     return (
       <span
@@ -1435,7 +1450,7 @@ function KindIcon({ tab }: { tab: Tab }) {
           justifyContent: "center",
           width: 14,
           flex: "0 0 14px",
-          color: "var(--accent)",
+          color: "var(--accent-text)",
         }}
       >
         <AutomationsGlyph size={12} />
@@ -1452,7 +1467,7 @@ function KindIcon({ tab }: { tab: Tab }) {
           justifyContent: "center",
           width: 14,
           flex: "0 0 14px",
-          color: "var(--accent)",
+          color: "var(--accent-text)",
         }}
       >
         {/* Three ascending bars — the daily-usage chart in miniature. */}
@@ -1472,7 +1487,7 @@ function KindIcon({ tab }: { tab: Tab }) {
   }
   if (tab.kind === "whiteboard") {
     return (
-      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
         <svg
           aria-hidden
           width="12"
@@ -1491,8 +1506,8 @@ function KindIcon({ tab }: { tab: Tab }) {
       </span>
     );
   }
-  if (tab.kind === "diff") return <GlyphIcon glyph="±" color="var(--accent)" />;
-  return <GlyphIcon glyph="◆" color="var(--accent)" />;
+  if (tab.kind === "diff") return <GlyphIcon glyph="±" color="var(--accent-text)" />;
+  return <GlyphIcon glyph="◆" color="var(--accent-text)" />;
 }
 
 function GlyphIcon({ glyph, color }: { glyph: string; color: string }) {
@@ -1607,7 +1622,7 @@ function PickerItem({
         background: "transparent",
         border: "none",
         padding: "8px 12px",
-        color: primary ? "var(--accent)" : "var(--ink)",
+        color: primary ? "var(--accent-text)" : "var(--ink)",
         fontFamily: "var(--font-sans)",
         fontSize: 12,
         fontWeight: primary ? 600 : 500,
@@ -1648,7 +1663,7 @@ function PickerItem({
   );
 }
 
-type PickerAccent = "shell" | "claude" | "codex";
+type PickerAccent = "shell" | "claude" | "codex" | "grok";
 
 // Same three tints the pane toolbar's add-pane menu uses, so a Claude row
 // reads identically whether it is spawned from the strip or from a pane.
@@ -1657,25 +1672,51 @@ function pickerItemTone(accent: PickerAccent): {
   background: string;
   border: string;
 } {
-  if (accent === "claude") {
-    return {
-      color: "var(--accent)",
-      background: "color-mix(in oklch, var(--accent) 14%, transparent)",
-      border: "color-mix(in oklch, var(--accent) 30%, transparent)",
-    };
+  return agentBrandTone(accent);
+}
+
+function terminalWorkerRuntimes(tab: TerminalTab): BrandRuntime[] {
+  const runtimes: BrandRuntime[] = [];
+  for (const leaf of collectLeaves(tab.root)) {
+    // Only while the agent TUI is actually in the pane. A durable
+    // agentSession pointer is kept for resume after Claude exits, and must
+    // not keep the Claude mark on a shell tab.
+    const runtime = liveTerminalRuntime(leaf.worker);
+    if (runtime && !runtimes.includes(runtime)) runtimes.push(runtime);
   }
-  if (accent === "codex") {
-    return {
-      color: "var(--info)",
-      background: "color-mix(in oklch, var(--info) 14%, transparent)",
-      border: "color-mix(in oklch, var(--info) 30%, transparent)",
-    };
-  }
-  return {
-    color: "var(--ink-dim)",
-    background: "color-mix(in oklab, var(--ink) 7%, transparent)",
-    border: "color-mix(in oklab, var(--rule-soft) 90%, transparent)",
-  };
+  return runtimes;
+}
+
+/** A tiny split-grid mark for a tab hosting more than one live agent family. */
+function SplitAgentsMark({ runtimes }: { runtimes: BrandRuntime[] }) {
+  return (
+    <span
+      aria-label={`${runtimes.length} agent types in split terminal`}
+      title={runtimes.map((runtime) => runtime[0].toUpperCase() + runtime.slice(1)).join(" + ")}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(2, 5px)",
+        gridAutoRows: 5,
+        gap: 1.5,
+        width: 12,
+        height: 12,
+        flex: "0 0 14px",
+        alignContent: "center",
+      }}
+    >
+      {runtimes.slice(0, 4).map((runtime) => (
+        <span
+          key={runtime}
+          aria-hidden
+          style={{
+            borderRadius: 1.5,
+            background: `var(--agent-${runtime})`,
+            boxShadow: "inset 0 0 0 1px color-mix(in oklch, white 22%, transparent)",
+          }}
+        />
+      ))}
+    </span>
+  );
 }
 
 function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {
@@ -1763,7 +1804,7 @@ function NewTabDropZone() {
       style={{
         pointerEvents: "none",
         flex: "0 0 auto",
-        color: "var(--accent)",
+        color: "var(--accent-text)",
         border: "1px dashed var(--accent-edge)",
         background: "var(--accent-soft)",
         fontSize: 11,

@@ -1,6 +1,5 @@
-import type { ChatStreamHandler } from "./spark-agent-backend";
+import type { ChatStreamHandler } from "./agent-backend";
 import type { PiRpcEvent } from "./pi-rpc-client";
-import type { CoraExecutionPolicy } from "@shared/types";
 import { resolveCompactAtTokens } from "@shared/context-compaction";
 
 export interface PiTurnToolCall {
@@ -31,21 +30,6 @@ export interface PiTurnResult {
   contextWindowTokens: number | null;
   failure: string | null;
   settled: boolean;
-}
-
-/** A Frontier Execute turn is not complete merely because the model stopped
- * after final-safe. The Codara completion tool must itself have succeeded;
- * otherwise run-store would apply a synthetic complete decision even though
- * the live orchestration seam rejected the completion. Contract blockers are
- * the sole intentional no-completion terminal outcome. */
-export function frontierTurnHasRequiredCompletion(
-  policy: CoraExecutionPolicy,
-  contractBlocked: boolean,
-  successfulToolCalls: readonly Pick<PiTurnToolCall, "toolName">[],
-): boolean {
-  if (policy !== "frontier" || contractBlocked) return true;
-  return successfulToolCalls.some((call) => call.toolName === "codara_complete" ||
-    call.toolName === "mcp__codara-studio__codara_complete");
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

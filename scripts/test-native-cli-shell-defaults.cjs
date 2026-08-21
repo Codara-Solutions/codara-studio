@@ -2,8 +2,10 @@
 "use strict";
 
 // Plain Studio shells follow the Active native CLI accounts: a terminal tab
-// with no Studio startup command still hands a hand-typed `claude` / `codex`
-// the default profile's home. This suite drives the selector resolution that
+// with no Studio startup command still hands a hand-typed Claude/Grok CLI the
+// default profile's home. Codex is intentionally absent: account switching is
+// auth-only inside the one ~/.codex home. This suite drives the remaining
+// selector resolution that
 // pty-manager consumes, with injected resolvers so no real store, filesystem,
 // or CLI is touched. The invariants:
 //
@@ -51,19 +53,19 @@ const managedClaude = {
   connected: true,
   env: { PATH: "/safe/bin", CLAUDE_CONFIG_DIR: "/codara/claude-cli/accounts/a" },
 };
-const personalCodex = {
+const personalGrok = {
   profileId: "personal",
-  label: "Existing Codex login",
+  label: "Existing Grok login",
   managed: false,
   connected: true,
   env: { PATH: "/safe/bin" },
 };
-const managedCodex = {
-  profileId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-  label: "Work",
+const managedGrok = {
+  profileId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  label: "Grok Work",
   managed: true,
   connected: true,
-  env: { PATH: "/safe/bin", CODEX_HOME: "/codara/codex-cli/accounts/b" },
+  env: { PATH: "/safe/bin", GROK_HOME: "/codara/grok-cli/accounts/c" },
 };
 
 async function main() {
@@ -71,7 +73,7 @@ async function main() {
   assert.equal(
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => personalClaude,
-      resolveCodex: async () => personalCodex,
+      resolveGrok: async () => personalGrok,
     }),
     null,
     "personal defaults must resolve to null so the shell env is not rebuilt",
@@ -82,33 +84,22 @@ async function main() {
   assert.deepEqual(
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => managedClaude,
-      resolveCodex: async () => personalCodex,
+      resolveGrok: async () => personalGrok,
     }),
     { claudeConfigDir: "/codara/claude-cli/accounts/a" },
     "a managed Claude default must contribute exactly its config dir",
   );
   console.log("PASS managed Claude default contributes its config dir");
 
-  // Managed Codex only.
-  assert.deepEqual(
-    await resolvePlainShellAccountSelectors({
-      resolveClaude: async () => personalClaude,
-      resolveCodex: async () => managedCodex,
-    }),
-    { codexHome: "/codara/codex-cli/accounts/b" },
-    "a managed Codex default must contribute exactly its home",
-  );
-  console.log("PASS managed Codex default contributes its home");
-
-  // Both managed.
+  // Claude and Grok managed.
   assert.deepEqual(
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => managedClaude,
-      resolveCodex: async () => managedCodex,
+      resolveGrok: async () => managedGrok,
     }),
     {
       claudeConfigDir: "/codara/claude-cli/accounts/a",
-      codexHome: "/codara/codex-cli/accounts/b",
+      grokHome: "/codara/grok-cli/accounts/c",
     },
     "both managed defaults must contribute both selectors",
   );
@@ -120,10 +111,10 @@ async function main() {
       resolveClaude: async () => {
         throw new Error("store corrupt");
       },
-      resolveCodex: async () => managedCodex,
+      resolveGrok: async () => managedGrok,
     }),
-    { codexHome: "/codara/codex-cli/accounts/b" },
-    "a failing Claude resolver must not block the Codex selector",
+    { grokHome: "/codara/grok-cli/accounts/c" },
+    "a failing Claude resolver must not block the Grok selector",
   );
   console.log("PASS one failing resolver does not block the other");
 
@@ -133,7 +124,7 @@ async function main() {
       resolveClaude: async () => {
         throw new Error("store corrupt");
       },
-      resolveCodex: async () => {
+      resolveGrok: async () => {
         throw new Error("store corrupt");
       },
     }),
@@ -146,7 +137,7 @@ async function main() {
   assert.equal(
     await resolvePlainShellAccountSelectors({
       resolveClaude: async () => ({ ...managedClaude, env: { PATH: "/safe/bin" } }),
-      resolveCodex: async () => personalCodex,
+      resolveGrok: async () => personalGrok,
     }),
     null,
     "a managed profile without its selector must be skipped, not applied empty",
@@ -163,11 +154,12 @@ async function main() {
     "pty-manager must consult the plain-shell selectors",
   );
   for (const guard of [
-    "plainShellCodexHome",
     "plainShellClaudeConfigDir",
+    "plainShellGrokHome",
     'hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID")',
     'hasOwnProperty.call(opts.env ?? {}, "CLAUDE_CONFIG_DIR")',
     'hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME")',
+    'hasOwnProperty.call(opts.env ?? {}, "GROK_HOME")',
   ]) {
     assert.ok(
       pty.includes(guard),

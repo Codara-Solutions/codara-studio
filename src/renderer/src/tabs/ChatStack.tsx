@@ -24,10 +24,15 @@ interface Props {
   // A chat docked into a terminal tab's split grid is positioned by that grid
   // instead of filling the workbench (see dockGeometry.ts).
   dockIndex: ReadonlyMap<TabId, DockRef>;
+  // The chat's own sub-navigation (Chat / Kanban / Runs / Terminal), rendered
+  // above the panel for the DOCKED chat only. The workbench-level strip keys
+  // off the active tab, which a docked chat never is, so it has to travel into
+  // the cell with the surface it belongs to. Built by App (which owns every
+  // input it needs) and passed through as a node.
+  dockedStrip?: React.ReactNode;
   runs: RunState[];
   runsWorkspaceId: string | null;
   activeRunId: string | null;
-  terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode, lifted into App so the inner tab strip can
   // drive it without ChatPanel keeping a duplicate state.
   chatView: CoraView;
@@ -53,10 +58,10 @@ function ChatStack({
   tabsWorkspaceId,
   validWorkspaceIds,
   dockIndex,
+  dockedStrip,
   runs,
   runsWorkspaceId,
   activeRunId,
-  terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
   onOpenBoardCardRun,
@@ -176,13 +181,13 @@ function ChatStack({
                 : null),
             }}
           >
+            {docked ? dockedStrip : null}
             <OrchestrationSidebar
               workspace={entry.workspace}
               runs={entry.runs}
               activeRunId={entry.activeRunId}
               composerDraftKey={`${workspaceId}:${entry.tab.id}`}
               suspendGlobalEvents={!visible}
-              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               chatView={chatView}
               onChatViewChange={onChatViewChange}
               onOpenBoardCardRun={onOpenBoardCardRun}

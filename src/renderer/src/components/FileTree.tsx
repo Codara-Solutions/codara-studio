@@ -1601,7 +1601,7 @@ export default function FileTree({
             style={{
               fontFamily: "var(--font-mono)",
               fontSize: 10,
-              color: selectedEntries.length > 1 ? "var(--accent)" : "var(--muted)",
+              color: selectedEntries.length > 1 ? "var(--accent-text)" : "var(--muted)",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -2589,7 +2589,7 @@ const Row = React.memo(function Row({
             fontSize: 8,
             fontWeight: 800,
             letterSpacing: "0.1em",
-            color: "var(--accent)",
+            color: "var(--accent-text)",
             background: "color-mix(in oklch, var(--accent) 13%, transparent)",
             boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--accent) 28%, transparent)",
           }}
@@ -2831,7 +2831,7 @@ function RunPlanMenuItem({
           width: "100%",
           border: "none",
           background: hovered || open ? "var(--panel)" : "transparent",
-          color: "var(--accent)",
+          color: "var(--accent-text)",
           borderRadius: 6,
           padding: "7px 8px",
           textAlign: "left",
@@ -2852,7 +2852,7 @@ function RunPlanMenuItem({
             width: 18,
             height: 18,
             borderRadius: 999,
-            color: "var(--accent)",
+            color: "var(--accent-text)",
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
@@ -2961,7 +2961,7 @@ function MenuButton({
             height: 18,
             border: "1px solid transparent",
             borderRadius: 999,
-            color: danger ? "var(--danger)" : accent ? "var(--accent)" : "var(--muted)",
+            color: danger ? "var(--danger)" : accent ? "var(--accent-text)" : "var(--muted)",
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
@@ -3420,4 +3420,3 @@ function DropIcon() {
     </svg>
   );
 }
-

@@ -19,6 +19,7 @@
 
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
 import type { PiSubscriptionProvider, PiCatalogModel } from "@shared/types";
 
 import { codaraPiPaths, resolveCodaraPiRuntime } from "./pi-runtime-electron";
@@ -30,7 +31,7 @@ const CACHE_TTL_MS = 10 * 60_000;
 const FAILURE_CACHE_TTL_MS = 30_000;
 const CREATE_TIMEOUT_MS = 10_000;
 
-const PROVIDERS: readonly PiSubscriptionProvider[] = ["anthropic", "openai-codex"];
+const PROVIDERS: readonly PiSubscriptionProvider[] = PI_SUBSCRIPTION_PROVIDERS;
 
 interface PiModelLike {
   id?: unknown;

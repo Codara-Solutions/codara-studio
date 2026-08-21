@@ -2,7 +2,7 @@ import * as nodePty from "node-pty";
 import { spawn as spawnChild } from "node:child_process";
 import { promises as fsp, chmodSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { WebContents } from "electron";
 import type {
@@ -16,17 +16,24 @@ import { isRemotePath, parseRemotePath } from "@shared/remote";
 import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { getConnection, shQuote } from "./remote/connections";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
-import { buildCodexCliProfileEnvironment } from "./orchestration/codex-cli-profile-execution";
+import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
+import { isCodaraManagedCliPath } from "./orchestration/codara-managed-cli-roots";
+import { buildGrokCliProfileEnvironment } from "./orchestration/grok-cli-profile-execution";
 import { buildClaudeCliProfileEnvironment } from "./orchestration/claude-cli-profile-environment";
 import {
   acquireNativeCodexProfileLease,
   resolveFrozenNativeCodexProfile,
   resolveNewNativeCodexProfile,
 } from "./orchestration/native-codex-profile-runtime";
+import {
+  acquireNativeGrokProfileLease,
+  resolveFrozenNativeGrokProfile,
+  resolveNewNativeGrokProfile,
+} from "./orchestration/native-grok-profile-runtime";
 import {
   acquireNativeClaudeProfileLease,
   resolveFrozenNativeClaudeProfile,
@@ -74,6 +81,13 @@ interface Session {
   // taps (the agent-TUI sniffer) and the writer writes/exit waiters.
   webContents: WebContents | null;
   dataChannel: string;
+  // Out-of-band "the next N bytes on dataChannel are HISTORY, not live output"
+  // marker. Replayed bytes (the raw-tail reattach frame, the post-sleep backlog
+  // drain) deliberately travel the live data channel so the renderer's onData
+  // listener applies them in arrival order — but the renderer also runs
+  // heuristics on that stream (the dev-server URL sniffer), and those must not
+  // treat hours-old output as something that just happened. See announceReplay.
+  replayChannel: string;
   exitChannel: string;
   pendingChunks: Buffer[];
   pendingBytes: number;
@@ -141,6 +155,8 @@ interface Session {
   releaseNativeCodexProfileLease?: () => void;
   nativeClaudeProfileId?: string;
   releaseNativeClaudeProfileLease?: () => void;
+  nativeGrokProfileId?: string;
+  releaseNativeGrokProfileLease?: () => void;
 }
 
 const sessions = new Map<string, Session>();
@@ -190,8 +206,8 @@ const sessionSpawnLocks = new Map<string, Promise<void>>();
 // When a PTY is killed while a renderer's webContents is bound to its
 // sessionId — and a fresh PTY spawns at the same id within a short window —
 // preserve the renderer binding across the gap so the xterm in the UI follows
-// the new process instead of going silent. The mode-flip respawn flow in
-// claude-backend kills + respawns at the same sessionId ~150ms apart; without
+// the new process instead of going silent. A kill + respawn at the same
+// sessionId ~150ms apart is a real flow; without
 // this stash the new PTY would be created with webContents:null (headless
 // cli-session passes null) and the renderer's Terminal tab would stay
 // attached to a dead pid forever. 10-second TTL means a delayed respawn (e.g.
@@ -262,6 +278,30 @@ function tailSnapshot(s: Session): Buffer | null {
     s.tail.slice(s.tailHead).filter((c): c is Buffer => c !== null),
     s.tailBytes,
   );
+}
+
+// Tell the renderer that the NEXT `byteLength` bytes on this session's data
+// channel are replayed history (a reattach frame or a post-sleep backlog),
+// not output the child just produced. Sent immediately before the replay
+// itself; Electron delivers a single sender's messages to a webContents in
+// send order, so the marker always lands first and the renderer can attribute
+// exactly that many bytes to the replay.
+//
+// Why this exists: the renderer sniffs the byte stream for dev-server URLs and
+// (when the user opted in) auto-opens a preview tab for one. Without the
+// marker, a `Local: http://localhost:3000` line that a dev server printed
+// hours before the laptop slept re-arrives verbatim on wake and reads exactly
+// like a server that just came up — so Studio opens a preview onto a port
+// nothing is listening on any more.
+function announceReplay(s: Session, byteLength: number): void {
+  if (byteLength <= 0) return;
+  if (!s.webContents || s.webContents.isDestroyed()) return;
+  try {
+    s.webContents.send(s.replayChannel, { bytes: byteLength });
+  } catch {
+    /* webContents may die between the guard and the send; the replay below
+       is still correct, it just isn't tagged. */
+  }
 }
 // Per-session cap for bytes held while the renderer is detached (workspace
 // switched away or the host is locked/asleep). 16 MB covers long tool output
@@ -350,6 +390,10 @@ export interface SpawnOptions {
   nativeCodexHome?: string;
   /** Main-process-only lease ownership transferred to the spawned session. */
   releaseNativeCodexProfileLease?: () => void;
+  /** Frozen native Grok Build account for a resume/worker pane. */
+  nativeGrokProfileId?: string;
+  nativeGrokHome?: string;
+  releaseNativeGrokProfileLease?: () => void;
   /** Frozen native Claude account for a resume/worker/manual pane. */
   nativeClaudeProfileId?: string;
   /** Main-process-only exact selector. Null preserves legacy unset. */
@@ -364,8 +408,8 @@ export interface SpawnOptions {
    * account is Active at restore time. Set by spawn() itself, never accepted
    * over IPC.
    */
-  plainShellCodexHome?: string;
   plainShellClaudeConfigDir?: string;
+  plainShellGrokHome?: string;
   /**
    * Main-process-only exact child environment. When present, pty-manager does
    * not inherit, enrich, or append Studio/provider variables. Renderer IPC
@@ -515,6 +559,7 @@ export async function spawn(
   attached?: boolean;
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
 }> {
   ensureSpawnHelperExecutable();
   // Mirror attach (see SpawnOptions.mirror): observe-only. Checked FIRST so a
@@ -541,6 +586,14 @@ export async function spawn(
         `mirror attach: pty session '${opts.id}' is pinned to another native Claude account`,
       );
     }
+    if (
+      opts.nativeGrokProfileId !== undefined &&
+      opts.nativeGrokProfileId !== target.nativeGrokProfileId
+    ) {
+      throw new Error(
+        `mirror attach: pty session '${opts.id}' is pinned to another native Grok account`,
+      );
+    }
     // attached: the session pre-existed, so an unhandled startupCommand here
     // means "a live shell/TUI already owns this pty", not "shell can't take
     // startup commands" — callers use the distinction to decide whether a
@@ -552,6 +605,7 @@ export async function spawn(
       attached: true,
       nativeCodexProfileId: target.nativeCodexProfileId,
       nativeClaudeProfileId: target.nativeClaudeProfileId,
+      nativeGrokProfileId: target.nativeGrokProfileId,
     };
   }
 
@@ -571,6 +625,7 @@ async function spawnWithSessionLock(
   attached?: boolean;
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
 }> {
   const pending = pendingKills.get(opts.id);
   if (pending) {
@@ -597,6 +652,14 @@ async function spawnWithSessionLock(
     ) {
       throw new Error(
         `pty session '${opts.id}' is already pinned to another native Claude account`,
+      );
+    }
+    if (
+      opts.nativeGrokProfileId !== undefined &&
+      opts.nativeGrokProfileId !== existing.nativeGrokProfileId
+    ) {
+      throw new Error(
+        `pty session '${opts.id}' is already pinned to another native Grok account`,
       );
     }
     // A late-attaching webContents (e.g. ChatPanel's backend-terminal tab
@@ -641,6 +704,7 @@ async function spawnWithSessionLock(
       const snapshot = tailSnapshot(existing);
       if (snapshot) {
         try {
+          announceReplay(existing, snapshot.byteLength);
           opts.webContents.send(existing.dataChannel, snapshot);
         } catch {
           /* webContents may have been destroyed before we got here; OK */
@@ -662,6 +726,7 @@ async function spawnWithSessionLock(
       attached: true,
       nativeCodexProfileId: existing.nativeCodexProfileId,
       nativeClaudeProfileId: existing.nativeClaudeProfileId,
+      nativeGrokProfileId: existing.nativeGrokProfileId,
     };
   }
 
@@ -709,10 +774,7 @@ async function spawnWithSessionLock(
       opts.nativeCodexProfileId === undefined
         ? await resolveNewNativeCodexProfile()
         : await resolveFrozenNativeCodexProfile(opts.nativeCodexProfileId);
-    const nativeCodexHome = execution.env.CODEX_HOME;
-    if (!nativeCodexHome) {
-      throw new Error("Resolved native Codex profile has no CODEX_HOME.");
-    }
+    const nativeCodexHome = execution.stateHome;
     const releaseNativeCodexProfileLease = acquireNativeCodexProfileLease(
       execution.profileId,
       `terminal:${opts.id}`,
@@ -751,42 +813,55 @@ async function spawnWithSessionLock(
       releaseNativeClaudeProfileLease,
     };
   }
+  if (
+    opts.nativeGrokProfileId !== undefined ||
+    parsedStartup?.runtime === "grok"
+  ) {
+    const execution =
+      opts.nativeGrokProfileId === undefined
+        ? await resolveNewNativeGrokProfile()
+        : await resolveFrozenNativeGrokProfile(opts.nativeGrokProfileId);
+    const nativeGrokHome = execution.env.GROK_HOME;
+    if (!nativeGrokHome) {
+      throw new Error("Resolved native Grok profile has no GROK_HOME.");
+    }
+    const releaseNativeGrokProfileLease = acquireNativeGrokProfileLease(
+      execution.profileId,
+      `terminal:${opts.id}`,
+    );
+    preparedOpts = {
+      ...preparedOpts,
+      nativeGrokProfileId: execution.profileId,
+      nativeGrokHome,
+      releaseNativeGrokProfileLease,
+    };
+  }
   // A plain user shell — no Studio startup command, no worker run, no frozen
-  // account, no caller-selected home — follows the Active accounts too, so a
-  // hand-typed `claude` or `codex` signs in as the account Settings marks
-  // Active. Managed accounts share every user-state surface with the personal
-  // home (native-cli-shared-state.ts), so this changes the sign-in and
-  // nothing else; a PERSONAL default leaves the shell environment exactly as
-  // inherited. Best-effort because a shell must always open. Deliberately no
-  // lease and no persistence: an idle shell tab must not block account
-  // operations, and a restored shell should follow whatever account is
-  // Active at restore time rather than a login pinned before the restart.
+  // account, no caller-selected home — follows the Active Claude and Grok
+  // accounts. Codex is intentionally omitted because its account selector
+  // swaps auth.json in one shared state home. Best-effort because a shell must
+  // always open. Deliberately no lease and no persistence: an idle shell tab
+  // must not block account operations, and a restored shell should follow the
+  // account that is Active at restore time.
   if (
     parsedStartup === null &&
     !opts.startupCommand &&
     opts.nativeCodexProfileId === undefined &&
     opts.nativeClaudeProfileId === undefined &&
+    opts.nativeGrokProfileId === undefined &&
     !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID") &&
     !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CLAUDE_CONFIG_DIR") &&
-    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME")
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME") &&
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "GROK_HOME")
   ) {
     const selectors = await resolvePlainShellAccountSelectors().catch(() => null);
     if (selectors) {
-      if (selectors.codexHome) {
-        // Same courtesy agent panes get: seed workspace trust so the first
-        // hand-typed `codex` here doesn't stall on the trust prompt.
-        await ensureCodexProjectTrust(opts.cwd, selectors.codexHome).catch(
-          () => undefined,
-        );
-      }
       preparedOpts = {
         ...preparedOpts,
-        ...(selectors.codexHome
-          ? { plainShellCodexHome: selectors.codexHome }
-          : {}),
         ...(selectors.claudeConfigDir
           ? { plainShellClaudeConfigDir: selectors.claudeConfigDir }
           : {}),
+        ...(selectors.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
       };
     }
   }
@@ -924,6 +999,7 @@ async function doSpawnRemote(
     pty: handle,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
     dataChannel: `pty:data:${opts.id}`,
+    replayChannel: `pty:replay:${opts.id}`,
     exitChannel: `pty:exit:${opts.id}`,
     pendingChunks: [],
     pendingBytes: 0,
@@ -1116,6 +1192,7 @@ function doSpawn(
   startupCommandHandled?: boolean;
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
 } {
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
@@ -1171,6 +1248,19 @@ function doSpawn(
       if (typeof v === "string") env[k] = v;
     }
   }
+  // Older Codara builds selected accounts by exporting CODEX_HOME. OpenAI
+  // treats that variable as the root for every Codex setting and session, so
+  // carrying our retired selector into a new shell both split state and made
+  // user-level keys appear project-local. Remove only Codara's known values;
+  // an unrelated custom CODEX_HOME remains the user's choice.
+  const inheritedCodexHome = env.CODEX_HOME?.trim();
+  if (
+    inheritedCodexHome &&
+    (isCodaraManagedCliPath(inheritedCodexHome) ||
+      resolve(inheritedCodexHome) === resolve(join(homedir(), ".codex")))
+  ) {
+    delete env.CODEX_HOME;
+  }
   // Hook RPC env (big-bet "Hook contract for sub-agents to self-report").
   // Layered LAST so the values main process owns (URL, token) can't be
   // accidentally overridden by a caller — every worker pty sees the same
@@ -1187,7 +1277,7 @@ function doSpawn(
   // Keep hook scripts and MCP children agreeing with the app about where the
   // home dir lives (hooks fall back to ~/.Codara when unset; an app running
   // under any override would otherwise write markers the app never sees).
-  if (!env.SPARK_HOME_DIR) env.SPARK_HOME_DIR = sparkHome();
+  if (!env.SPARK_HOME_DIR) env.SPARK_HOME_DIR = codaraHome();
 
   // Agent-socket handshake. Every pty we spawn — user panes and worker panes
   // alike — gets SPARK_AGENT_SOCKET + SPARK_AGENT_TOKEN so any sub-agent CLI
@@ -1204,10 +1294,7 @@ function doSpawn(
     env.SPARK_AGENT_PANE_ID = opts.id;
   }
   if (opts.nativeCodexHome) {
-    const selectedEnv = buildCodexCliProfileEnvironment(
-      env,
-      opts.nativeCodexHome,
-    );
+    const selectedEnv = buildCodexCliSharedEnvironment(env);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;
@@ -1227,11 +1314,8 @@ function doSpawn(
   // frozen-profile fields above). Same builders, applied late on the enriched
   // env, so the child sees exactly one selected home per CLI with that CLI's
   // credential-override routes stripped while Studio's own variables survive.
-  if (opts.plainShellCodexHome) {
-    const selectedEnv = buildCodexCliProfileEnvironment(
-      env,
-      opts.plainShellCodexHome,
-    );
+  if (opts.nativeGrokHome) {
+    const selectedEnv = buildGrokCliProfileEnvironment(env, opts.nativeGrokHome);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;
@@ -1242,6 +1326,13 @@ function doSpawn(
       env,
       opts.plainShellClaudeConfigDir,
     );
+    for (const key of Object.keys(env)) delete env[key];
+    for (const [key, value] of Object.entries(selectedEnv)) {
+      if (typeof value === "string") env[key] = value;
+    }
+  }
+  if (opts.plainShellGrokHome) {
+    const selectedEnv = buildGrokCliProfileEnvironment(env, opts.plainShellGrokHome);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;
@@ -1302,6 +1393,7 @@ function doSpawn(
     pty,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
     dataChannel: `pty:data:${opts.id}`,
+    replayChannel: `pty:replay:${opts.id}`,
     exitChannel: `pty:exit:${opts.id}`,
     pendingChunks: [],
     pendingBytes: 0,
@@ -1321,6 +1413,8 @@ function doSpawn(
     releaseNativeCodexProfileLease: opts.releaseNativeCodexProfileLease,
     nativeClaudeProfileId: opts.nativeClaudeProfileId,
     releaseNativeClaudeProfileLease: opts.releaseNativeClaudeProfileLease,
+    nativeGrokProfileId: opts.nativeGrokProfileId,
+    releaseNativeGrokProfileLease: opts.releaseNativeGrokProfileLease,
   };
 
   // Capture the local session reference so we can identity-gate this closure.
@@ -1442,6 +1536,7 @@ function doSpawn(
     startupCommandHandled,
     nativeCodexProfileId: session.nativeCodexProfileId,
     nativeClaudeProfileId: session.nativeClaudeProfileId,
+    nativeGrokProfileId: session.nativeGrokProfileId,
   };
 }
 
@@ -1647,6 +1742,7 @@ export function resume(id: string): void {
       s.detachedBacklog.length === 1
         ? s.detachedBacklog[0]
         : Buffer.concat(s.detachedBacklog, total);
+    announceReplay(s, merged.byteLength);
     s.webContents.send(
       s.dataChannel,
       new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength),
@@ -1827,6 +1923,10 @@ export function nativeCodexProfileId(id: string): string | undefined {
 
 export function nativeClaudeProfileId(id: string): string | undefined {
   return sessions.get(id)?.nativeClaudeProfileId;
+}
+
+export function nativeGrokProfileId(id: string): string | undefined {
+  return sessions.get(id)?.nativeGrokProfileId;
 }
 
 export function write(id: string, data: string): void {
@@ -2296,7 +2396,7 @@ function killNow(id: string): void {
   // through enqueueData → sessions.get(id) → land in the next same-id session.
   s.disposed = true;
   // Stash the renderer-attached webContents so a fast respawn at the same id
-  // (mode-flip in claude-backend) can re-bind it; otherwise the xterm tab in
+  // can re-bind it; otherwise the xterm tab in
   // the UI silently goes deaf to the new process.
   stashWebContents(id, s);
   // Capture the exact slave tty and its root-descendant identities while the

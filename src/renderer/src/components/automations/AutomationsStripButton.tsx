@@ -56,7 +56,7 @@ export default function AutomationsStripButton({
         border: "1px solid transparent",
         borderRadius: 999,
         background: "var(--accent-soft)",
-        color: blocked ? "var(--danger)" : "var(--accent)",
+        color: blocked ? "var(--danger)" : "var(--accent-text)",
         fontFamily: "var(--font-sans)",
         fontSize: 11,
         fontWeight: 600,

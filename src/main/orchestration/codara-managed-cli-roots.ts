@@ -20,6 +20,7 @@ import { join, resolve, sep } from "node:path";
 
 export const CODARA_CLAUDE_CLI_DIRNAME = "claude-cli";
 export const CODARA_CODEX_CLI_DIRNAME = "codex-cli";
+export const CODARA_GROK_CLI_DIRNAME = "grok-cli";
 export const NATIVE_CLI_ACTIVE_DIRNAME = "active";
 
 export function codaraHomeDir(): string {
@@ -43,6 +44,7 @@ export function codaraManagedCliRoots(
   return [
     join(home, CODARA_CLAUDE_CLI_DIRNAME),
     join(home, CODARA_CODEX_CLI_DIRNAME),
+    join(home, CODARA_GROK_CLI_DIRNAME),
     codaraNativeCliActivePointerDir(home),
   ];
 }

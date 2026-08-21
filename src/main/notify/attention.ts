@@ -26,10 +26,6 @@ export function setAttention(snapshot: Partial<UiAttentionSnapshot> | null | und
   };
 }
 
-export function getAttention(): UiAttentionSnapshot {
-  return current;
-}
-
 // Window focus is queried live from Electron rather than trusted from the
 // renderer snapshot: BrowserWindow knows synchronously, while the renderer's
 // report can lag an IPC turn behind an alt-tab.

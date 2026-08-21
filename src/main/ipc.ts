@@ -6,18 +6,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
 import { browseRemoteDir } from "./remote/browse";
-import {
-  listKeys as listSshKeys,
-  generateKey as generateSshKey,
-  importKey as importSshKey,
-  deleteKey as deleteSshKey,
-} from "./remote/ssh-keys";
-import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import {
   answerAuthPrompt,
   disconnectHost,
@@ -28,7 +21,6 @@ import {
 } from "./remote/connections";
 import { isRemotePath } from "@shared/remote";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
-import { detectRemoteAgents, type RemoteAgentAvailability } from "./remote/remote-agents";
 import type {
   RemoteAuthPromptAnswer,
   RemoteBrowseResult,
@@ -51,12 +43,13 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
   }
 }
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
-import { sparkHome } from "./spark-home";
+import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
+import { isLoopbackPreviewServerUp } from "./preview-navigation";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { remoteStreamGrep } from "./remote/remote-search";
@@ -70,6 +63,15 @@ import {
 } from "./orchestration/claude-paths";
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
 import { resolveCodexTranscriptPath } from "./orchestration/codex-home";
+import {
+  discoverGrokSessionForCwd,
+  grokSessionTranscriptPath,
+  resolveSafeGrokTranscriptPath,
+} from "./orchestration/grok-sessions";
+import {
+  resolveFrozenNativeGrokProfile,
+  resolveNewNativeGrokProfile,
+} from "./orchestration/native-grok-profile-runtime";
 import { latestSessionStart } from "./agent-session-registry";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
@@ -226,12 +228,6 @@ async function getRunStore(): Promise<typeof import("./orchestration/run-store")
   return runStoreMod;
 }
 
-let runQueueMod: typeof import("./orchestration/run-queue") | undefined;
-async function getRunQueue(): Promise<typeof import("./orchestration/run-queue")> {
-  runQueueMod ??= await import("./orchestration/run-queue");
-  return runQueueMod;
-}
-
 let schedulerMod: typeof import("./orchestration/scheduler") | undefined;
 async function getScheduler(): Promise<typeof import("./orchestration/scheduler")> {
   schedulerMod ??= await import("./orchestration/scheduler");
@@ -324,7 +320,6 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
-  EnqueueRunInput,
   FileListResult,
   FsEntry,
   FsFileContent,
@@ -339,10 +334,8 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
-  GitSmartMergeResult,
   GitStashList,
   GitStatus,
-  InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   RunBoard,
@@ -350,6 +343,8 @@ import type {
   RunBoardUpdateResult,
   CoraMemoryScope,
   CoraMemoryStatus,
+  CoraProfile,
+  CoraProfileCreateInput,
   MemoryClearInput,
   MemorySetEnabledInput,
   MemoryStatusInput,
@@ -358,7 +353,6 @@ import type {
   ExportCoraWhiteboardFileInput,
   ExportFileDialogInput,
   ImportedCoraWhiteboardFile,
-  PauseRunInput,
   NativeCliAccountCancelLoginInput,
   NativeCliAccountCreateInput,
   NativeCliAccountDeleteResult,
@@ -380,13 +374,9 @@ import type {
   PreferencesChange,
   PrepareWorkerTaskInput,
   NotificationCenterEntry,
-  QueuedRun,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
-  PlanFile,
-  RunArtifactPaths,
-  RunQueueState,
   RunState,
   RuntimeState,
   ScheduledJob,
@@ -402,19 +392,17 @@ import type {
   UiAttentionSnapshot,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
-  UpdateRunStatusInput,
   UpdateScheduledJobInput,
-  UpdateStepInput,
-  UpdateWorkerTaskInput,
   DeleteWorkerSessionInput,
   DeleteWorkerSessionResult,
   WorkerSessionRuntime,
   WorkerSessionSummary,
 } from "@shared/types";
+import { isPiSubscriptionProvider } from "../shared/agent-families";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
-  if (value === "claude" || value === "codex") return value;
-  throw new TypeError("Native CLI account runtime must be Claude or Codex.");
+  if (value === "claude" || value === "codex" || value === "grok") return value;
+  throw new TypeError("Native CLI account runtime must be Claude, Codex, or Grok.");
 }
 
 function nativeCliAccountProfileIdFromIpc(value: unknown): string {
@@ -608,7 +596,7 @@ const PI_ACCOUNT_IN_USE_MESSAGE =
   "This account is still in use by an active Cora run or worker. Finish or cancel that work before deleting it.";
 
 function piSubscriptionProviderFromIpc(value: unknown): PiSubscriptionProvider {
-  if (value === "anthropic" || value === "openai-codex") return value;
+  if (isPiSubscriptionProvider(value)) return value;
   throw new TypeError("Unsupported Pi subscription provider");
 }
 
@@ -806,7 +794,7 @@ export function registerIpc(): void {
     return loadState();
   });
 
-  handle("state:save", async (event, state: AppState): Promise<void> => {
+  handle("state:save", async (_event, state: AppState): Promise<void> => {
     // Persisting workspaces re-seeds the fs sandbox allowlist (below), so this
     // channel can widen readable roots. It is gated to the trusted renderer by
     // default via handle() (see the sender-gating section above).
@@ -827,19 +815,6 @@ export function registerIpc(): void {
 
   handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
     return saveSettings(settings);
-  });
-
-  handle("cora-cli:status", async () => {
-    const { inspectCoraCliInstall } = await import("./cora-cli-install");
-    return inspectCoraCliInstall();
-  });
-  handle("cora-cli:install", async () => {
-    const { installCoraCli } = await import("./cora-cli-install");
-    return installCoraCli();
-  });
-  handle("cora-cli:uninstall", async () => {
-    const { uninstallCoraCli } = await import("./cora-cli-install");
-    return uninstallCoraCli();
   });
 
   handle(
@@ -1108,7 +1083,7 @@ export function registerIpc(): void {
   );
   handle(
     "agents:installAsset",
-    async (_e, input: { id: string; target: "claude" | "codex" }) => {
+    async (_e, input: { id: string; target: "claude" | "codex" | "grok" }) => {
       const { installAgentAssetToRuntime } = await getAgentSync();
       return installAgentAssetToRuntime({ id: input.id, target: input.target });
     },
@@ -1153,11 +1128,12 @@ export function registerIpc(): void {
       detectAgentRuntimes(false),
       loadSettings(),
     ]);
-    const isAvailable = (kind: "claude" | "codex") =>
+    const isAvailable = (kind: "claude" | "codex" | "grok") =>
       runtimes.some((r) => r.kind === kind && r.installed);
     return getSparkBuiltinStatus({
       claudeRuntimeAvailable: isAvailable("claude"),
       codexRuntimeAvailable: isAvailable("codex"),
+      grokRuntimeAvailable: isAvailable("grok"),
       autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
   });
@@ -1183,7 +1159,7 @@ export function registerIpc(): void {
   handle(
     "preferences:set",
     async <K extends PrefKey>(
-      event: Electron.IpcMainInvokeEvent,
+      _event: Electron.IpcMainInvokeEvent,
       args: { key: K; value: AppPreferences[K] },
     ): Promise<AppPreferences> => {
       const next = await setPreference(args.key, args.value);
@@ -1219,7 +1195,8 @@ export function registerIpc(): void {
     async (_e, input: MemorySetEnabledInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
       const { setMemoryEnabled } = coraMemory;
-      await setMemoryEnabled(input.scope, workspaceId, input.enabled);
+      const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+      await setMemoryEnabled(input.scope, workspaceId, input.enabled, resolveCoraProfile().id);
       return readMemoryStatus(input.workspaceId ?? null);
     },
   );
@@ -1229,10 +1206,39 @@ export function registerIpc(): void {
     async (_e, input: MemoryClearInput): Promise<CoraMemoryStatus> => {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
       const { clearMemory } = coraMemory;
+      const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
       // The user's own lines survive unless the caller opted in explicitly:
       // a missing flag must never be read as permission to delete them.
-      await clearMemory(input.scope, workspaceId, input.includeUserLines === true);
+      await clearMemory(
+        input.scope,
+        workspaceId,
+        input.includeUserLines === true,
+        resolveCoraProfile().id,
+      );
       return readMemoryStatus(input.workspaceId ?? null);
+    },
+  );
+
+  handle("cora-profiles:list", async (): Promise<CoraProfile[]> => {
+    const { listCoraProfiles } = await import("./orchestration/cora-profiles");
+    return listCoraProfiles();
+  });
+
+  handle(
+    "cora-profiles:create",
+    async (_e, input: CoraProfileCreateInput): Promise<CoraProfile[]> => {
+      const { createCoraProfile, listCoraProfiles } = await import("./orchestration/cora-profiles");
+      await createCoraProfile(input);
+      return listCoraProfiles();
+    },
+  );
+
+  handle(
+    "cora-profiles:use",
+    async (_e, reference: string): Promise<CoraProfile[]> => {
+      const { listCoraProfiles, setDefaultCoraProfile } = await import("./orchestration/cora-profiles");
+      await setDefaultCoraProfile(reference);
+      return listCoraProfiles();
     },
   );
 
@@ -1285,21 +1291,6 @@ export function registerIpc(): void {
     return result.filePaths[0];
   });
 
-  handle("dialog:openImages", async (e, defaultPath?: string): Promise<string[]> => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const result = await dialog.showOpenDialog(win!, {
-      properties: ["openFile", "multiSelections"],
-      defaultPath: defaultPath || app.getPath("pictures") || app.getPath("home"),
-      filters: [
-        {
-          name: "Images",
-          extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
-        },
-      ],
-    });
-    if (result.canceled) return [];
-    return result.filePaths;
-  });
 
   handle("dialog:openSshKey", async (e): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -1509,10 +1500,6 @@ export function registerIpc(): void {
     },
   );
 
-  handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
-    await assertAllowedReadPathResolved(root);
-    return listMarkdownFiles(root);
-  });
 
   handle(
     "fs:statFile",
@@ -1530,7 +1517,7 @@ export function registerIpc(): void {
   handle(
     "fs:writeText",
     async (
-      event,
+      _event,
       args: { path: string; content: string; expectedMtimeMs?: number },
     ): Promise<FsWriteResult> => {
       // Write/create/delete/rename/import/move take arbitrary destination paths
@@ -1544,11 +1531,11 @@ export function registerIpc(): void {
     },
   );
 
-  handle("fs:renameFile", async (event, args: RenameFileInput): Promise<FsEntry> => {
+  handle("fs:renameFile", async (_event, args: RenameFileInput): Promise<FsEntry> => {
     return renameFile(args.path, args.newName);
   });
 
-  handle("fs:deleteFile", async (event, path: string): Promise<void> => {
+  handle("fs:deleteFile", async (_event, path: string): Promise<void> => {
     await deleteFile(path);
   });
 
@@ -1556,13 +1543,13 @@ export function registerIpc(): void {
   // of the OS trash, so fs:undoDelete can restore it. Evicted/stale stash
   // entries end up in the OS trash via fs:purgeDeleteStash (and the startup
   // sweep below), so delete still ultimately means "goes to trash".
-  handle("fs:deleteToStash", async (event, path: string) => {
+  handle("fs:deleteToStash", async (_event, path: string) => {
     return deleteToStash(path);
   });
 
   handle(
     "fs:undoDelete",
-    async (event, args: { token: string; originalPath: string }) => {
+    async (_event, args: { token: string; originalPath: string }) => {
       if (typeof args?.token !== "string" || typeof args?.originalPath !== "string") {
         throw new Error("Invalid undo request.");
       }
@@ -1570,7 +1557,7 @@ export function registerIpc(): void {
     },
   );
 
-  handle("fs:purgeDeleteStash", async (event, tokens: string[]): Promise<void> => {
+  handle("fs:purgeDeleteStash", async (_event, tokens: string[]): Promise<void> => {
     const list = Array.isArray(tokens)
       ? tokens.filter((t): t is string => typeof t === "string")
       : [];
@@ -1581,11 +1568,11 @@ export function registerIpc(): void {
   // that was never consumed) move on to the OS trash at startup.
   void purgeDeleteStash().catch(() => undefined);
 
-  handle("fs:createFile", async (event, args: CreateEntryInput): Promise<FsEntry> => {
+  handle("fs:createFile", async (_event, args: CreateEntryInput): Promise<FsEntry> => {
     return createFile(args.parentPath, args.name);
   });
 
-  handle("fs:createFolder", async (event, args: CreateEntryInput): Promise<FsEntry> => {
+  handle("fs:createFolder", async (_event, args: CreateEntryInput): Promise<FsEntry> => {
     return createFolder(args.parentPath, args.name);
   });
 
@@ -1595,7 +1582,7 @@ export function registerIpc(): void {
   // (that's the whole point of importing them in).
   handle(
     "fs:importEntries",
-    async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+    async (_event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing import destination.");
       await assertAllowedReadPathResolved(destDir);
@@ -1614,7 +1601,7 @@ export function registerIpc(): void {
   // already sit inside an allowed workspace root.
   handle(
     "fs:moveEntries",
-    async (event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+    async (_event, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
       const destDir = typeof args?.destDir === "string" ? args.destDir : "";
       if (!destDir) throw new Error("Missing move destination.");
       await assertAllowedReadPathResolved(destDir);
@@ -1697,7 +1684,7 @@ export function registerIpc(): void {
   // The renderer is authoritative about which workspaces are open, but the
   // sandbox lives in main. Renderer pushes the cwd list whenever it changes;
   // main treats the list as the source of truth for read-path checks.
-  handle("ui:setAllowedRoots", async (event, roots: unknown): Promise<void> => {
+  handle("ui:setAllowedRoots", async (_event, roots: unknown): Promise<void> => {
     // This directly sets the fs read-sandbox allowlist, so only the trusted
     // renderer may call it.
     if (!Array.isArray(roots)) return;
@@ -1950,11 +1937,6 @@ export function registerIpc(): void {
     return fetchRemote(cwd);
   });
 
-  handle("git:prepareSmartMerge", async (_e, cwd: string): Promise<GitSmartMergeResult> => {
-    const { prepareSmartMerge } = await getGitOps();
-    return prepareSmartMerge(cwd);
-  });
-
   handle("git:undoLastCommit", async (_e, cwd: string): Promise<GitOpResult> => {
     const { undoLastCommit } = await getGitOps();
     return undoLastCommit(cwd);
@@ -2052,7 +2034,7 @@ export function registerIpc(): void {
         createCheckoutWorktree,
         managedWorktreesRoot,
       } = await getGitWorktrees();
-      const worktreesRoot = managedWorktreesRoot(sparkHome(), input.repoCwd);
+      const worktreesRoot = managedWorktreesRoot(codaraHome(), input.repoCwd);
       const result = input.checkoutBranch
         ? await createCheckoutWorktree({
             repoCwd: input.repoCwd,
@@ -2220,15 +2202,7 @@ export function registerIpc(): void {
     return listEvents(runId);
   });
 
-  handle("orchestration:getArtifactPaths", async (_e, runId: string): Promise<RunArtifactPaths> => {
-    const { getRunArtifactPaths } = await getRunStore();
-    return getRunArtifactPaths(runId);
-  });
 
-  handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
-    const { appendTestEvent } = await getRunStore();
-    return appendTestEvent(args.runId, args.message);
-  });
 
   handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
     assertLocalWorkspace(input.cwd, "Automations and autopilot");
@@ -2236,15 +2210,7 @@ export function registerIpc(): void {
     return startAutopilot(input);
   });
 
-  handle("orchestration:pauseRun", async (_e, input: PauseRunInput): Promise<RunState> => {
-    const { pauseRun } = await getRunStore();
-    return pauseRun(input);
-  });
 
-  handle("orchestration:pauseRunAfterCurrentWorkers", async (_e, input: PauseRunInput): Promise<RunState> => {
-    const { pauseRunAfterCurrentWorkers } = await getRunStore();
-    return pauseRunAfterCurrentWorkers(input);
-  });
 
   handle("orchestration:forcePauseRun", async (_e, runId: string): Promise<RunState> => {
     const { forcePauseRun } = await getRunStore();
@@ -2301,18 +2267,6 @@ export function registerIpc(): void {
     },
   );
 
-  handle(
-    "orchestration:interruptRunWithMessage",
-    async (_e, input: InterruptRunWithMessageInput): Promise<RunState> => {
-      const { interruptRunWithMessage } = await getRunStore();
-      return interruptRunWithMessage(input);
-    },
-  );
-
-  handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
-    const { updateRunStatus } = await getRunStore();
-    return updateRunStatus(input);
-  });
 
   handle("orchestration:markRunSeen", async (_e, input: MarkRunSeenInput): Promise<RunState> => {
     const { markRunSeen } = await getRunStore();
@@ -2345,20 +2299,12 @@ export function registerIpc(): void {
     return createStep(input);
   });
 
-  handle("orchestration:updateStep", async (_e, input: UpdateStepInput): Promise<RunState> => {
-    const { updateStep } = await getRunStore();
-    return updateStep(input);
-  });
 
   handle("orchestration:createWorkerTask", async (_e, input: CreateWorkerTaskInput): Promise<RunState> => {
     const { createWorkerTask } = await getRunStore();
     return createWorkerTask(input);
   });
 
-  handle("orchestration:updateWorkerTask", async (_e, input: UpdateWorkerTaskInput): Promise<RunState> => {
-    const { updateWorkerTask } = await getRunStore();
-    return updateWorkerTask(input);
-  });
 
   handle("orchestration:prepareWorkerTask", async (_e, input: PrepareWorkerTaskInput) => {
     const { prepareWorkerTask } = await getRunStore();
@@ -2383,46 +2329,6 @@ export function registerIpc(): void {
   handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
     const { deleteRun } = await getRunStore();
     await deleteRun(runId);
-  });
-
-  // ── Overnight queue ─────────────────────────────────────────────────────
-  // Thin IPC over the run-queue module (src/main/orchestration/run-queue.ts).
-  // The queue persists its own JSON state and drains pending runs through
-  // run-store's startAutopilot; these channels just expose CRUD + a manual
-  // burn-down trigger so the renderer Queue panel can enqueue/list. run-queue.ts
-  // imports RunQueueState/QueuedRun/EnqueueRunInput from @shared/types, so these
-  // handlers return its values directly — the shapes are the IPC contract.
-  handle("queue:list", async (): Promise<RunQueueState> => {
-    const { loadQueue } = await getRunQueue();
-    return loadQueue();
-  });
-
-  handle("queue:enqueue", async (_e, input: EnqueueRunInput): Promise<QueuedRun> => {
-    const { enqueue, burnDown } = await getRunQueue();
-    const queued = await enqueue(input);
-    // Fire-and-forget: kick the drain so a free slot starts this run without
-    // making the renderer wait on autopilot. Errors are logged, not surfaced.
-    void burnDown().catch((err: unknown) =>
-      console.error("[queue] burnDown after enqueue failed", err),
-    );
-    return queued;
-  });
-
-  handle("queue:dequeue", async (_e, id: string): Promise<RunQueueState> => {
-    const { dequeue } = await getRunQueue();
-    return dequeue(id);
-  });
-
-  handle("queue:setConcurrency", async (_e, n: number): Promise<RunQueueState> => {
-    const { setConcurrency } = await getRunQueue();
-    return setConcurrency(n);
-  });
-
-  // burnDown() drains in place and resolves with the post-drain queue snapshot,
-  // which is exactly what the renderer wants back from this channel.
-  handle("queue:burnDown", async (): Promise<RunQueueState> => {
-    const { burnDown } = await getRunQueue();
-    return burnDown();
   });
 
   // ── Cora Board ──────────────────────────────────────────────────────────
@@ -2568,6 +2474,7 @@ export function registerIpc(): void {
         startupCommand?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
         nativeCliLoginToken?: string;
         mirror?: boolean;
         preserveSizeOnAttach?: boolean;
@@ -2603,6 +2510,7 @@ export function registerIpc(): void {
         projectPolicyMode,
         nativeCodexProfileId: args.nativeCodexProfileId,
         nativeClaudeProfileId: args.nativeClaudeProfileId,
+        nativeGrokProfileId: args.nativeGrokProfileId,
         mirror: args.mirror,
         preserveSizeOnAttach: args.preserveSizeOnAttach,
         webContents: e.sender,
@@ -2661,8 +2569,8 @@ export function registerIpc(): void {
 
   // Probe for an existing session. Used by ChatPanel's backend-terminal tab
   // to decide whether to mount a TerminalPane (which would try to spawn —
-  // and fail with ENOENT — if the session hasn't been spawned yet by the
-  // headless cli-session). Cheap: just a Map.has() check.
+  // and fail with ENOENT — if the session hasn't been spawned yet in main).
+  // Cheap: just a Map.has() check.
   handle("pty:exists", async (_e, args: { id: string }) => {
     return pty.exists(args.id);
   });
@@ -2689,6 +2597,15 @@ export function registerIpc(): void {
     pty.detach(args.id);
   });
 
+  // Is a local dev server actually listening at this URL? The renderer asks
+  // before auto-opening a preview tab for a URL it sniffed on a terminal, so a
+  // banner line that arrives as replayed history (or one a resumed agent CLI
+  // reprints from an old transcript) can't spawn a tab onto a dead port.
+  handle("preview:probeLocalServer", async (_e, args: { url: string }): Promise<boolean> => {
+    if (!args || typeof args.url !== "string" || !args.url.trim()) return false;
+    return isLoopbackPreviewServerUp(args.url);
+  });
+
   // ── Agent session restore (manual Claude/Codex terminal panes) ──────────
   handle(
     "agentSession:list",
@@ -2699,9 +2616,15 @@ export function registerIpc(): void {
         cwd: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
       },
     ): Promise<WorkerSessionSummary[]> => {
-      if (!args || (args.runtime !== "claude" && args.runtime !== "codex")) return [];
+      if (
+        !args ||
+        (args.runtime !== "claude" && args.runtime !== "codex" && args.runtime !== "grok")
+      ) {
+        return [];
+      }
       if (typeof args.cwd !== "string" || !args.cwd.trim()) return [];
       assertLocalWorkspace(args.cwd, "Worker session history");
       if (args.runtime === "claude") {
@@ -2720,6 +2643,19 @@ export function registerIpc(): void {
           nativeClaudeProfileId: execution.profileId,
         }));
       }
+      if (args.runtime === "grok") {
+        const execution =
+          args.nativeGrokProfileId === undefined
+            ? await resolveNewNativeGrokProfile()
+            : await resolveFrozenNativeGrokProfile(args.nativeGrokProfileId);
+        const items = await listWorkerSessions(args.runtime, args.cwd, {
+          grokHome: execution.env.GROK_HOME,
+        });
+        return items.map((item) => ({
+          ...item,
+          nativeGrokProfileId: execution.profileId,
+        }));
+      }
       const execution =
         args.nativeCodexProfileId === undefined
           ? await resolveNewNativeCodexProfile()
@@ -2727,7 +2663,7 @@ export function registerIpc(): void {
               args.nativeCodexProfileId,
             );
       const items = await listWorkerSessions(args.runtime, args.cwd, {
-        codexHome: execution.env.CODEX_HOME,
+        codexHome: execution.stateHome,
       });
       return items.map((item) => ({
         ...item,
@@ -2739,19 +2675,23 @@ export function registerIpc(): void {
   handle(
     "agentSession:listAll",
     async (): Promise<WorkerSessionSummary[]> => {
-      const [execution, claudeExecution] = await Promise.all([
+      const [execution, claudeExecution, grokExecution] = await Promise.all([
         resolveNewNativeCodexProfile(),
         resolveNewNativeClaudeProfile(),
+        resolveNewNativeGrokProfile(),
       ]);
       const items = await listAllWorkerSessions({
-        codexHome: execution.env.CODEX_HOME,
+        codexHome: execution.stateHome,
         claudeStateDir:
           claudeExecution.env.CLAUDE_CONFIG_DIR ?? null,
+        grokHome: grokExecution.env.GROK_HOME,
       });
       return items.map((item) =>
         item.runtime === "codex"
           ? { ...item, nativeCodexProfileId: execution.profileId }
-          : { ...item, nativeClaudeProfileId: claudeExecution.profileId },
+          : item.runtime === "grok"
+            ? { ...item, nativeGrokProfileId: grokExecution.profileId }
+            : { ...item, nativeClaudeProfileId: claudeExecution.profileId },
       );
     },
   );
@@ -2771,11 +2711,19 @@ export function registerIpc(): void {
             execution.env.CLAUDE_CONFIG_DIR ?? null,
         });
       }
+      if (input.runtime === "grok") {
+        const execution = await resolveFrozenNativeGrokProfile(
+          input.nativeGrokProfileId,
+        );
+        return deleteWorkerSession(input, {
+          grokHome: execution.env.GROK_HOME,
+        });
+      }
       const execution = await resolveFrozenNativeCodexProfile(
         input.nativeCodexProfileId,
       );
       return deleteWorkerSession(input, {
-        codexHome: execution.env.CODEX_HOME,
+        codexHome: execution.stateHome,
       });
     },
   );
@@ -2792,10 +2740,11 @@ export function registerIpc(): void {
     async (
       _e,
       args: {
-        runtime: "claude" | "codex";
+        runtime: "claude" | "codex" | "grok";
         paneId?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
         cwd: string;
         sinceMs: number;
         // Session ids already bound to OTHER panes. Two agents launched in the
@@ -2809,6 +2758,7 @@ export function registerIpc(): void {
       transcriptPath: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
+      nativeGrokProfileId?: string;
     } | null> => {
       const since = args.sinceMs;
       const spawnDate = new Date(since);
@@ -2834,12 +2784,22 @@ export function registerIpc(): void {
         args.runtime === "claude"
           ? await resolveFrozenNativeClaudeProfile(nativeClaudeProfileId)
           : null;
+      const nativeGrokProfileId =
+        args.runtime === "grok"
+          ? args.nativeGrokProfileId ??
+            (args.paneId ? pty.nativeGrokProfileId(args.paneId) : undefined)
+          : undefined;
+      const nativeGrokExecution =
+        args.runtime === "grok"
+          ? await resolveFrozenNativeGrokProfile(nativeGrokProfileId)
+          : null;
       for (;;) {
         let found: {
           sessionId: string;
           transcriptPath: string;
           nativeCodexProfileId?: string;
           nativeClaudeProfileId?: string;
+          nativeGrokProfileId?: string;
         } | null = null;
         if (args.runtime === "claude") {
           const discovered = await discoverClaudeSessionForCwd(
@@ -2854,6 +2814,19 @@ export function registerIpc(): void {
                 nativeClaudeProfileId: nativeClaudeExecution?.profileId,
               }
             : null;
+        } else if (args.runtime === "grok") {
+          const discovered = await discoverGrokSessionForCwd(
+            args.cwd,
+            since,
+            exclude,
+            nativeGrokExecution?.env.GROK_HOME ?? null,
+          ).catch(() => null);
+          found = discovered
+            ? {
+                ...discovered,
+                nativeGrokProfileId: nativeGrokExecution?.profileId,
+              }
+            : null;
         } else {
           // strict: an unmatched-cwd fallback here would bind the pane to some
           // OTHER session's rollout. This poll loop retries for 15s, so a
@@ -2861,7 +2834,7 @@ export function registerIpc(): void {
           const path = await discoverRolloutForCwd(since, spawnDate, args.cwd, {
             strict: true,
             excludeSessionIds: exclude,
-            codexHome: nativeCodexExecution?.env.CODEX_HOME,
+            codexHome: nativeCodexExecution?.stateHome,
           }).catch(() => null);
           if (path) {
             const sessionId = extractSessionUuid(path);
@@ -2884,7 +2857,7 @@ export function registerIpc(): void {
 
   // Persistent trail of restore decisions (fire-and-forget from the renderer).
   // "Some panes resume, some don't" is undebuggable without knowing what each
-  // pane decided at boot — this lands every decision in <sparkHome>/logs/main.log.
+  // pane decided at boot — this lands every decision in <codaraHome>/logs/main.log.
   ipcMain.on("agentSession:logRestore", (e, line: string) => {
     if (!isTrustedOnSender(e, "agentSession:logRestore")) return;
     if (typeof line === "string" && line.length < 2048) logMain("restore", line);
@@ -2912,15 +2885,39 @@ export function registerIpc(): void {
     async (
       _e,
       args: {
-        runtime: "claude" | "codex";
+        runtime: "claude" | "codex" | "grok";
         sessionId: string;
         cwd: string;
         transcriptPath?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
+        nativeGrokProfileId?: string;
       },
     ): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> => {
       if (!args.sessionId) return { exists: false };
+      if (args.runtime === "grok") {
+        const execution = await resolveFrozenNativeGrokProfile(
+          args.nativeGrokProfileId,
+        );
+        const expectedPath = grokSessionTranscriptPath(
+          args.cwd,
+          args.sessionId,
+          execution.env.GROK_HOME ?? null,
+        );
+        const path = await resolveSafeGrokTranscriptPath(
+          args.cwd,
+          args.sessionId,
+          execution.env.GROK_HOME ?? null,
+        ).catch(() => null);
+        if (!path) return { exists: false, transcriptPath: expectedPath };
+        const stat = await fs.stat(path).catch(() => null);
+        if (!stat) return { exists: false, transcriptPath: path };
+        return {
+          exists: true,
+          resumable: stat.size >= 64,
+          transcriptPath: path,
+        };
+      }
       if (args.runtime === "claude") {
         const execution = await resolveFrozenNativeClaudeProfile(
           args.nativeClaudeProfileId,
@@ -2972,7 +2969,7 @@ export function registerIpc(): void {
         );
         const safePath = resolveCodexTranscriptPath(
           path,
-          execution.env.CODEX_HOME,
+          execution.stateHome,
         );
         const stat = await fs.stat(safePath).catch(() => null);
         if (stat) {
@@ -3001,7 +2998,7 @@ export function registerIpc(): void {
           );
     await ensureCodexProjectTrust(
       args.cwd,
-      execution.env.CODEX_HOME,
+      execution.stateHome,
     ).catch(() => undefined);
   });
 
@@ -3119,12 +3116,6 @@ export function registerIpc(): void {
   // Hide the window to the system tray (close-to-tray) without quitting. On
   // win32 we also drop the taskbar button so the hidden window doesn't linger
   // there — mirrors the close-to-tray path in main's window `close` handler.
-  handle("window:hide-to-tray", async (e): Promise<void> => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (!win) return;
-    win.hide();
-    if (process.platform === "win32") win.setSkipTaskbar(true);
-  });
 
   handle(
     "window:setTitleBarTheme",
@@ -3294,39 +3285,8 @@ export function registerIpc(): void {
     answerAuthPrompt(answer);
   });
   handle(
-    "remote:detectAgents",
-    async (_e, hostIdOrPath: string): Promise<RemoteAgentAvailability> =>
-      detectRemoteAgents(hostIdOrPath),
-  );
-
-  // SSH key management for the SSH manager's Keys tab. Confined to ~/.ssh by
-  // the module itself; the renderer never passes paths for list/generate/delete.
-  handle("sshKeys:list", async (): Promise<SshKeyInfo[]> => listSshKeys());
-  handle(
-    "sshKeys:generate",
-    async (
-      _e,
-      opts: { name: string; passphrase?: string; comment?: string },
-    ): Promise<SshKeyInfo> => generateSshKey(opts),
-  );
-  handle(
-    "sshKeys:import",
-    async (_e, sourcePath: string): Promise<SshKeyImportResult> => importSshKey(sourcePath),
-  );
-  handle("sshKeys:delete", async (_e, name: string): Promise<void> => deleteSshKey(name));
-
-  // ── Remote Access (phone pairing + listener) ───────────────────────────
-  // Settings' "Remote access" section. Distinct from the remote:* channels
-  // above, which are the SSH remote-workspace feature. The renderer only
-  // ever sees status, device summaries, the pairing state, and the QR
-  // payload string; key material and pairing secret internals stay in main.
-  handle("remoteAccess:getStatus", async (event): Promise<RemoteAccessStatus> => {
-    const service = await getRemoteAccess();
-    return service.getStatus();
-  });
-  handle(
     "remoteAccess:setEnabled",
-    async (event, enabled: boolean): Promise<RemoteAccessStatus> => {
+    async (_event, enabled: boolean): Promise<RemoteAccessStatus> => {
       const on = enabled === true;
       // Persist first so a crash mid-start still remembers the intent, then
       // fan the preference out exactly like the preferences:set handler.
@@ -3336,21 +3296,21 @@ export function registerIpc(): void {
       return service.setEnabled(on);
     },
   );
-  handle("remoteAccess:startPairing", async (event): Promise<RemotePairingSession> => {
+  handle("remoteAccess:startPairing", async (_event): Promise<RemotePairingSession> => {
     const service = await getRemoteAccess();
     return service.startPairing();
   });
-  handle("remoteAccess:cancelPairing", async (event): Promise<void> => {
+  handle("remoteAccess:cancelPairing", async (_event): Promise<void> => {
     const service = await getRemoteAccess();
     service.cancelPairing();
   });
-  handle("remoteAccess:listDevices", async (event): Promise<RemotePairedDevice[]> => {
+  handle("remoteAccess:listDevices", async (_event): Promise<RemotePairedDevice[]> => {
     const service = await getRemoteAccess();
     return service.listPairedDevices();
   });
   handle(
     "remoteAccess:revokeDevice",
-    async (event, publicKey: string): Promise<RemotePairedDevice[]> => {
+    async (_event, publicKey: string): Promise<RemotePairedDevice[]> => {
       const service = await getRemoteAccess();
       // Awaited: the renderer's list must not repaint as "revoked" until the
       // removal is durable, so the UI can never claim a revocation that a
@@ -3362,11 +3322,11 @@ export function registerIpc(): void {
   // Approving is what actually writes a device into the trust store, so it is
   // gated like the rest: only the real renderer's top frame can decide, never
   // a navigated-away document or a preview guest.
-  handle("remoteAccess:approvePairing", async (event): Promise<void> => {
+  handle("remoteAccess:approvePairing", async (_event): Promise<void> => {
     const service = await getRemoteAccess();
     service.approvePairing();
   });
-  handle("remoteAccess:denyPairing", async (event): Promise<void> => {
+  handle("remoteAccess:denyPairing", async (_event): Promise<void> => {
     const service = await getRemoteAccess();
     service.denyPairing();
   });
@@ -3457,9 +3417,11 @@ export function registerIpc(): void {
 // workspace tier to report, so say so instead of inventing one.
 async function readMemoryStatus(workspaceId: string | null): Promise<CoraMemoryStatus> {
   const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = coraMemory;
-  const status = await getMemoryStatus(workspaceId ?? "");
+  const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+  const status = await getMemoryStatus(workspaceId ?? "", resolveCoraProfile().id);
   if (workspaceId) return status;
   return {
+    profile: status.profile,
     global: status.global,
     workspace: {
       enabled: false,

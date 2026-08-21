@@ -8,12 +8,12 @@ import type {
 } from "@shared/types";
 import { writeFileAtomic } from "../fs-atomic";
 import { getPreferenceCached } from "../preferences-store";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { activeWindow } from "./deliver";
 
 // Notification-center history: a newest-first ring buffer of every recorded
 // NotifyEvent (delivered, watching-suppressed, or DND-muted), persisted to
-// sparkHome()/notifications.json with debounced atomic writes. The renderer
+// codaraHome()/notifications.json with debounced atomic writes. The renderer
 // bell reads it via notify:* IPC and tracks unread through the
 // "notify:center-updated" summary push. The macOS dock badge mirrors the
 // unread count (the old per-alert unseen counter cleared on focus; the badge
@@ -29,7 +29,7 @@ let persistTimer: NodeJS.Timeout | null = null;
 let writing: Promise<void> = Promise.resolve();
 
 function centerPath(): string {
-  return join(sparkHome(), CENTER_FILE);
+  return join(codaraHome(), CENTER_FILE);
 }
 
 function sanitizeEntry(raw: unknown): NotificationCenterEntry | null {

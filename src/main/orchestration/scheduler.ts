@@ -23,20 +23,18 @@ import {
 } from "@shared/model-catalog";
 import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import { appendEvent } from "./event-log";
 // run-store is heavy (it transitively loads the manager backends + agent-sync).
 // Importing scheduler at boot to arm timers must NOT drag run-store into cold
-// start, so we lazy-import startAutopilot only when a job actually fires
-// (runJobNow below; fireJob goes through run-queue, also lazily).
+// start, so firing lazily imports the automation loop driver only when a job
+// actually fires.
 
 // Automation scheduler ─────────────────────────────────────────────────────────
 // A registry of saved automations. Each one pins a StartAutopilotInput and a
-// trigger (cron / interval / folder-watch); when the trigger fires we enqueue
-// that input onto the overnight run-queue and kick a drain. Firing happens in
-// the Electron main process, so it only runs WHILE THE APP IS OPEN — true
-// fire-while-closed survives the daemon split (docs/daemon-split-PLAN.md). Until
-// then this is a real, working in-app scheduler.
+// trigger (cron / interval / folder-watch); when the trigger fires we hand the
+// input to the automation loop driver (automation-loop.ts). Firing happens in
+// the Electron main process, so it only runs WHILE THE APP IS OPEN.
 //
 // Persisted as a single JSON file next to spark-state.json / spark-settings.json.
 // The on-disk shape is versioned-by-convention via the `jobs` envelope so a
@@ -57,7 +55,7 @@ let writing: Promise<void> = Promise.resolve();
 const armed = new Map<string, () => void>();
 
 function schedulerPath(): string {
-  return join(sparkHome(), SCHEDULER_FILE);
+  return join(codaraHome(), SCHEDULER_FILE);
 }
 
 // Read-time migration seam. Tolerates (1) legacy jobs that stored a bare `cron`
@@ -208,7 +206,9 @@ function migrateWorker(
     effort = typeof worker.effort === "string" ? worker.effort : undefined;
     timeoutMinutes = worker.timeoutMinutes;
   } else {
-    const legacy = input?.chatBackend;
+    // Pre-worker jobs could pin the retired claude/codex manager backends;
+    // read the persisted value as data, not as the (now Pi-only) type.
+    const legacy = input?.chatBackend as string | undefined;
     if (legacy === "claude" || legacy === "codex") {
       engine = legacy;
       model = input?.chatModel?.trim() || undefined;

@@ -5,15 +5,16 @@
 
 export const CLAUDE_LAUNCH_COMMAND = "claude --dangerously-skip-permissions";
 export const CODEX_LAUNCH_COMMAND = "codex --yolo";
+export const GROK_LAUNCH_COMMAND = "grok --yolo";
 
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
-export type AgentSessionRuntime = "claude" | "codex";
+export type AgentSessionRuntime = "claude" | "codex" | "grok";
 
 // Fresh Claude launch with a Codara-minted session id. Forcing `--session-id`
 // makes the transcript path deterministic (~/.claude/projects/<enc-cwd>/<id>.jsonl)
 // and lets a pane record its resume pointer synchronously at launch — no fragile
 // post-hoc "newest .jsonl by mtime" discovery, which mis-binds when several Claude
-// sessions share one cwd. Mirrors the chat backend (claude-backend.ts:828-833).
+// sessions share one cwd.
 // Codex has no `--session-id`, so it keeps the bare command + disk discovery.
 export function buildClaudeLaunch(): { command: string; sessionId: string } {
   const sessionId = crypto.randomUUID();
@@ -34,6 +35,9 @@ export function runtimeFromAgentSessionLaunchCommand(
   if (!cmd) return null;
   if (cmd.startsWith(CLAUDE_LAUNCH_COMMAND)) return "claude";
   if (cmd.startsWith(CODEX_LAUNCH_COMMAND) || cmd.startsWith("codex resume ")) return "codex";
+  if (cmd.startsWith(GROK_LAUNCH_COMMAND) || cmd.startsWith("grok --resume ") || cmd.startsWith("grok -r ")) {
+    return "grok";
+  }
   return null;
 }
 
@@ -53,11 +57,23 @@ export function buildCodexResumeCommand(sessionId: string): string {
   return `codex resume ${sessionId} --yolo`;
 }
 
+export function buildGrokLaunch(): { command: string; sessionId: string } {
+  const sessionId = crypto.randomUUID();
+  return {
+    command: `${GROK_LAUNCH_COMMAND} --session-id ${sessionId}`,
+    sessionId,
+  };
+}
+
+export function buildGrokResumeCommand(sessionId: string): string {
+  return `${GROK_LAUNCH_COMMAND} --resume ${sessionId}`;
+}
+
 export function buildAgentResumeCommand(session: {
   runtime: AgentSessionRuntime;
   sessionId: string;
 }): string {
-  return session.runtime === "claude"
-    ? buildClaudeResumeCommand(session.sessionId)
-    : buildCodexResumeCommand(session.sessionId);
+  if (session.runtime === "claude") return buildClaudeResumeCommand(session.sessionId);
+  if (session.runtime === "grok") return buildGrokResumeCommand(session.sessionId);
+  return buildCodexResumeCommand(session.sessionId);
 }

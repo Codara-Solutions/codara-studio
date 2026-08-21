@@ -50,6 +50,7 @@ const {
   PI_WORKER_STALL_FAIL_MS,
   PI_TURN_IDLE_TIMEOUT_MS,
   PI_TURN_ABSOLUTE_CEILING_MS,
+  PI_TOOL_RESULT_TIMEOUT_MS,
   PI_LONG_POLL_TRUST_MS,
 } = liveness;
 
@@ -191,7 +192,7 @@ check("a known provider error surfaces far sooner than bare silence", () => {
 
 // ── Manager turn liveness ─────────────────────────────────────────────────
 
-const base = { startedAt: 0, lastEventAt: 0, longPollSince: null, longPollName: null };
+const base = { startedAt: 0, lastEventAt: 0, inFlightTools: [] };
 
 check("the exact turn the old 90-minute cap killed now survives", () => {
   // run-msamjw8y-tnthy2: the manager had been driving for 90 minutes and was
@@ -200,8 +201,7 @@ check("the exact turn the old 90-minute cap killed now survives", () => {
     ...base,
     now: 90 * MIN,
     lastEventAt: 88 * MIN,
-    longPollSince: 88 * MIN,
-    longPollName: "codara_wait_for_workers",
+    inFlightTools: [{ name: "codara_wait_for_workers", startedAt: 88 * MIN, longPoll: true }],
   });
   assert.equal(verdict.action, "continue", "a turn blocked on workers is waiting, not wedged");
 });
@@ -234,8 +234,7 @@ check("a long poll cannot suppress the idle clock forever", () => {
   const healthy = classifyTurnLiveness({
     ...base,
     now: 21 * MIN,
-    longPollSince: 0,
-    longPollName: "codara_wait_for_workers",
+    inFlightTools: [{ name: "codara_wait_for_workers", startedAt: 0, longPoll: true }],
   });
   assert.equal(healthy.action, "continue");
 
@@ -244,11 +243,42 @@ check("a long poll cannot suppress the idle clock forever", () => {
   const wedged = classifyTurnLiveness({
     ...base,
     now: PI_LONG_POLL_TRUST_MS,
-    longPollSince: 0,
-    longPollName: "codara_wait_for_workers",
+    inFlightTools: [{ name: "codara_wait_for_workers", startedAt: 0, longPoll: true }],
   });
   assert.equal(wedged.action, "fail");
   assert.match(wedged.detail, /stuck in codara_wait_for_workers/);
+});
+
+check("an unresolved normal tool is named accurately and bounded", () => {
+  const healthy = classifyTurnLiveness({
+    ...base,
+    now: PI_TOOL_RESULT_TIMEOUT_MS - 1,
+    inFlightTools: [{ name: "bash", startedAt: 0, longPoll: false }],
+  });
+  assert.equal(healthy.action, "continue");
+
+  const wedged = classifyTurnLiveness({
+    ...base,
+    now: PI_TOOL_RESULT_TIMEOUT_MS,
+    inFlightTools: [{ name: "bash", startedAt: 0, longPoll: false }],
+  });
+  assert.equal(wedged.action, "fail");
+  assert.match(wedged.detail, /stuck in bash/);
+  assert.match(wedged.detail, /with no result/);
+  assert.doesNotMatch(wedged.detail, /no tool call in flight/);
+});
+
+check("one tool result does not clear another parallel in-flight tool", () => {
+  const verdict = classifyTurnLiveness({
+    ...base,
+    now: PI_TOOL_RESULT_TIMEOUT_MS,
+    inFlightTools: [
+      { name: "completed-elsewhere", startedAt: PI_TOOL_RESULT_TIMEOUT_MS - MIN, longPoll: false },
+      { name: "bash", startedAt: 0, longPoll: false },
+    ],
+  });
+  assert.equal(verdict.action, "fail");
+  assert.match(verdict.detail, /bash/);
 });
 
 check("the absolute ceiling still bounds everything, even mid-long-poll", () => {
@@ -256,8 +286,11 @@ check("the absolute ceiling still bounds everything, even mid-long-poll", () => 
     ...base,
     now: PI_TURN_ABSOLUTE_CEILING_MS,
     lastEventAt: PI_TURN_ABSOLUTE_CEILING_MS,
-    longPollSince: PI_TURN_ABSOLUTE_CEILING_MS,
-    longPollName: "codara_wait_for_workers",
+    inFlightTools: [{
+      name: "codara_wait_for_workers",
+      startedAt: PI_TURN_ABSOLUTE_CEILING_MS,
+      longPoll: true,
+    }],
   });
   assert.equal(verdict.action, "fail");
   assert.match(verdict.detail, /ceiling/);

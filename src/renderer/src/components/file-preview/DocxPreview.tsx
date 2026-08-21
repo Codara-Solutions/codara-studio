@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { renderAsync } from "docx-preview";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
 
@@ -6,6 +6,8 @@ interface Props {
   path: string;
   // Bumps when the file changes on disk — triggers a re-render.
   mtimeMs: number;
+  toolbarAction?: ReactNode;
+  forceLocalToolbar?: boolean;
 }
 
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
@@ -17,7 +19,7 @@ const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2];
 // the CSS `zoom` property (Chromium-only, fine since this is Electron) rather
 // than `transform: scale`, so the scroll container's layout height tracks the
 // zoomed size instead of reserving the unscaled box.
-export default function DocxPreview({ path, mtimeMs }: Props) {
+export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalToolbar }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
@@ -79,7 +81,7 @@ export default function DocxPreview({ path, mtimeMs }: Props) {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <DockablePaneBar>
+      <DockablePaneBar forceLocal={forceLocalToolbar}>
         {loading && <span style={{ marginRight: "auto", whiteSpace: "nowrap" }}>Loading document…</span>}
         <button type="button" className="spark-btn" style={zoomBtnStyle} onClick={zoomOut} title="Zoom out">
           −
@@ -106,6 +108,7 @@ export default function DocxPreview({ path, mtimeMs }: Props) {
         >
           100%
         </button>
+        {toolbarAction}
       </DockablePaneBar>
       <div
         ref={scrollRef}

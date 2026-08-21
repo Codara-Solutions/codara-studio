@@ -154,20 +154,6 @@ export async function stopHookRpc(): Promise<void> {
   });
 }
 
-// Returns the env block to layer onto a worker pty. Throws if startHookRpc
-// hasn't been called yet — calling pty-manager.spawn before the RPC is up is
-// a startup-ordering bug and we want to surface it loudly.
-export function getHookRpcEnv(paneId: string): HookRpcEnv {
-  if (!active) {
-    throw new Error("[hook-rpc] getHookRpcEnv called before startHookRpc");
-  }
-  return {
-    SPARK_HOOK_URL: `http://127.0.0.1:${active.port}`,
-    SPARK_HOOK_TOKEN: active.token,
-    SPARK_PANE_ID: paneId,
-  };
-}
-
 // Soft variant used by callers that may spawn ptys before the RPC has had a
 // chance to start (e.g. headless eval boot). Returns null when the server
 // isn't up yet so the caller can spawn without hook env injection instead of
@@ -179,13 +165,6 @@ export function getHookRpcEnvSafe(paneId: string): HookRpcEnv | null {
     SPARK_HOOK_TOKEN: active.token,
     SPARK_PANE_ID: paneId,
   };
-}
-
-// Test/diagnostic helper. Returns the bound port + token so renderer dev tools
-// (or a future "what's my hook url" IPC) can show them.
-export function getHookRpcInfo(): { port: number; token: string } | null {
-  if (!active) return null;
-  return { port: active.port, token: active.token };
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {

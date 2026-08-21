@@ -23,7 +23,6 @@ import {
   runtimeFromCommandLine,
   sniffLiveRuntime,
   sniffOsc633CommandRuntime,
-  sniffRuntime,
   stripAnsi,
   unescapeOsc633,
   CLAUDE_RESUME_FAILED_RE,
@@ -35,6 +34,7 @@ import { formatPaneExitLine } from "@shared/pane-format";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
+import { createReplayTracker } from "./replayTracker";
 import {
   registerCwdHandler,
   registerPromptTracker,
@@ -45,6 +45,7 @@ import { buildTerminalTheme } from "./terminalTheme";
 import {
   buildAgentResumeCommand,
   buildClaudeLaunch,
+  buildGrokLaunch,
   isAgentSessionLaunchCommand,
 } from "../../workers/launch-commands";
 import type { TerminalAgentSession } from "../../tabs/types";
@@ -58,6 +59,7 @@ import {
 } from "./resume-policy";
 import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
+import { preserveTerminalViewport } from "./terminalViewport";
 
 export type { SparkOpenInput };
 
@@ -135,7 +137,7 @@ const autoResumeAttempts = new Map<string, number[]>();
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
 
-// Persistent diagnostic trail for restore decisions (<sparkHome>/logs/main.log
+// Persistent diagnostic trail for restore decisions (<codaraHome>/logs/main.log
 // via main). "Some panes resume, some don't" is undebuggable from memory alone.
 function logRestore(line: string): void {
   try {
@@ -193,6 +195,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       transcriptPath: restore.transcriptPath ?? undefined,
       nativeCodexProfileId: restore.nativeCodexProfileId,
       nativeClaudeProfileId: restore.nativeClaudeProfileId,
+      nativeGrokProfileId: restore.nativeGrokProfileId,
     })
     .catch(() => ({ exists: false as const }));
   const decision = decideResume(probe as ResumeProbe, restore.runtime);
@@ -230,6 +233,22 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     };
   }
   if (decision.kind === "fresh") {
+    if (restore.runtime === "grok") {
+      const fresh = buildGrokLaunch();
+      return {
+        resumeCommand: fresh.command,
+        resumeIsFreshFallback: true,
+        fallbackNotice: "previous Grok session couldn't be resumed — starting a fresh one",
+        fallbackSession: {
+          runtime: "grok",
+          sessionId: fresh.sessionId,
+          cwd: restore.cwd,
+          nativeGrokProfileId: restore.nativeGrokProfileId,
+          capturedAt: new Date().toISOString(),
+          active: true,
+        },
+      };
+    }
     // Claude self-heal: the transcript is gone or stillborn. Launch a FRESH
     // forced-id Claude in the same cwd so the pane is immediately useful, and
     // hand the owner the replacement pointer to persist.
@@ -242,6 +261,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
         runtime: "claude",
         sessionId: fresh.sessionId,
         cwd: restore.cwd,
+        nativeClaudeProfileId: restore.nativeClaudeProfileId,
         capturedAt: new Date().toISOString(),
         active: true,
       },
@@ -261,7 +281,10 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
 // running in main. Stashing the full buffer here and replaying it on the next
 // mount preserves same-process workspace continuity. Cold app hydration
 // deliberately ignores persisted scrollback.
-const MAX_XTERM_BUFFER_SNAPSHOTS = 64;
+const MAX_XTERM_BUFFER_SNAPSHOTS = 16;
+const MAX_XTERM_SNAPSHOT_TEXT_CHARS = 512 * 1024;
+const MAX_XTERM_SNAPSHOT_PENDING_BYTES = 1024 * 1024;
+const MAX_XTERM_SNAPSHOT_CACHE_BYTES = 16 * 1024 * 1024;
 // A snapshot is the xterm buffer text captured at unmount PLUS any raw bytes
 // that arrived while the pane was hidden (and therefore never reached xterm,
 // so `captureXtermBuffer` by construction can't see them). On the next mount
@@ -271,21 +294,54 @@ const MAX_XTERM_BUFFER_SNAPSHOTS = 64;
 interface XtermBufferSnapshot {
   text: string;
   pendingBytes: Uint8Array | null;
+  viewportFromBottom: number;
 }
 const xtermBufferSnapshots = new Map<string, XtermBufferSnapshot>();
+let xtermBufferSnapshotBytes = 0;
+
+function xtermBufferSnapshotSize(snapshot: XtermBufferSnapshot): number {
+  // V8 commonly stores JS strings as one- or two-byte strings. Count two so
+  // the cache remains bounded even when terminal output contains non-Latin
+  // text, then add the typed-array payload exactly.
+  return snapshot.text.length * 2 + (snapshot.pendingBytes?.byteLength ?? 0);
+}
+
+function forgetXtermBufferSnapshot(sessionId: string): void {
+  const previous = xtermBufferSnapshots.get(sessionId);
+  if (!previous) return;
+  xtermBufferSnapshotBytes = Math.max(
+    0,
+    xtermBufferSnapshotBytes - xtermBufferSnapshotSize(previous),
+  );
+  xtermBufferSnapshots.delete(sessionId);
+}
 
 function rememberXtermBufferSnapshot(
   sessionId: string,
   snapshot: XtermBufferSnapshot,
 ): void {
-  // Keep the cache finite across many closed/switched panes. Each snapshot is
-  // already line-limited; this caps the number of sessions that can retain one.
-  xtermBufferSnapshots.delete(sessionId);
-  xtermBufferSnapshots.set(sessionId, snapshot);
-  while (xtermBufferSnapshots.size > MAX_XTERM_BUFFER_SNAPSHOTS) {
+  // A line limit alone is not a memory limit: a tool can print a single
+  // multi-megabyte JSON line. Cap both halves of a snapshot before retaining
+  // it, then enforce a process-wide byte budget as well as an entry count.
+  const text = snapshot.text.length > MAX_XTERM_SNAPSHOT_TEXT_CHARS
+    ? snapshot.text.slice(-MAX_XTERM_SNAPSHOT_TEXT_CHARS)
+    : snapshot.text;
+  const pendingBytes =
+    snapshot.pendingBytes &&
+    snapshot.pendingBytes.byteLength > MAX_XTERM_SNAPSHOT_PENDING_BYTES
+      ? snapshot.pendingBytes.slice(-MAX_XTERM_SNAPSHOT_PENDING_BYTES)
+      : snapshot.pendingBytes;
+  const bounded = { ...snapshot, text, pendingBytes };
+  forgetXtermBufferSnapshot(sessionId);
+  xtermBufferSnapshots.set(sessionId, bounded);
+  xtermBufferSnapshotBytes += xtermBufferSnapshotSize(bounded);
+  while (
+    xtermBufferSnapshots.size > MAX_XTERM_BUFFER_SNAPSHOTS ||
+    xtermBufferSnapshotBytes > MAX_XTERM_SNAPSHOT_CACHE_BYTES
+  ) {
     const oldest = xtermBufferSnapshots.keys().next().value;
     if (!oldest) break;
-    xtermBufferSnapshots.delete(oldest);
+    forgetXtermBufferSnapshot(oldest);
   }
 }
 // Matches dev-server-style local URLs (vite, next dev, webpack, ...). Anchors
@@ -339,8 +395,8 @@ interface Options {
   initialExternalCols?: number;
   initialExternalRows?: number;
   // Raw-tail reattach mode. Opt-in, default off — used by the hosts that attach
-  // an xterm onto a live Ink TUI (Claude/Codex): ChatPanel's backend terminal,
-  // ChatBackendTerminalStack, and the automation Workers panes. Such a TUI
+  // an xterm onto a live Ink TUI (Claude/Codex): the automation Workers panes.
+  // Such a TUI
   // repaints with cursor-relative sequences assuming its own prior frame is on
   // screen. In this mode every re-attach is made to behave exactly like the
   // known-good FIRST attach: on unmount we call pty.detach (not pty.pause) so
@@ -361,7 +417,13 @@ interface Options {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
-  onDetectedLocalUrl?: (url: string) => void;
+  // A dev-server-style local URL appeared on this pane's byte stream.
+  // `meta.replayed` is true when the bytes carrying it were history main
+  // re-sent (post-sleep backlog drain, raw-tail reattach frame) rather than
+  // fresh child output — the difference between "a server just started" and
+  // "a server started before the laptop slept", which callers that act on the
+  // URL (auto-opening a preview tab) must not confuse.
+  onDetectedLocalUrl?: (url: string, meta?: { replayed?: boolean }) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
   // Fires on every PTY data chunk (input or output activity). Used by the
   // orchestration claim logic to decide whether a pane is "doing nothing"
@@ -403,6 +465,7 @@ interface Options {
   /** Frozen profile while capture has not produced agentSession yet. */
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
+  nativeGrokProfileId?: string;
   nativeCliLoginToken?: string;
   // One-shot boot-restore marker, minted on the leaf ONLY at hydration
   // (useTabs.loadPersisted) when the persisted pointer was `active` (agent
@@ -474,6 +537,7 @@ export function useTerminalSession({
   agentSession,
   nativeCodexProfileId,
   nativeClaudeProfileId,
+  nativeGrokProfileId,
   nativeCliLoginToken,
   bootResume,
   onResumeUnavailable,
@@ -574,11 +638,15 @@ export function useTerminalSession({
     const externalGrid = externalGridRef.current;
     if (externalSizeOwnerRef.current && externalGrid) {
       if (term.cols !== externalGrid.cols || term.rows !== externalGrid.rows) {
-        term.resize(externalGrid.cols, externalGrid.rows);
+        preserveTerminalViewport(term, () => {
+          term.resize(externalGrid.cols, externalGrid.rows);
+        });
       }
       return;
     }
-    fitRef.current?.fit();
+    const fit = fitRef.current;
+    if (!fit) return;
+    preserveTerminalViewport(term, () => fit.fit());
   }, []);
   useEffect(() => {
     if (
@@ -1426,7 +1494,7 @@ export function useTerminalSession({
         ? null
         : xtermBufferSnapshots.get(sessionId);
       if (rawTailReattachRef.current) {
-        xtermBufferSnapshots.delete(sessionId);
+        forgetXtermBufferSnapshot(sessionId);
       }
       if (liveSnapshot) {
         // Replay the cached buffer, then any bytes that arrived while the pane
@@ -1445,7 +1513,20 @@ export function useTerminalSession({
         replayPending = true;
         const finishReplay = () => {
           replayPending = false;
-          xtermBufferSnapshots.delete(sessionId);
+          forgetXtermBufferSnapshot(sessionId);
+          const frame = window.requestAnimationFrame(() => {
+            try {
+              const buffer = term.buffer.active;
+              const target = Math.max(
+                0,
+                buffer.baseY - liveSnapshot.viewportFromBottom,
+              );
+              term.scrollToLine(target);
+            } catch {
+              /* the pane may have unmounted again before replay finished */
+            }
+          });
+          cleanups.push(() => window.cancelAnimationFrame(frame));
         };
         if (replay) {
           term.write(`${normalizeForTerminalReplay(replay)}\r\n`, () => {
@@ -2358,6 +2439,15 @@ export function useTerminalSession({
         }
       };
 
+      // Replayed history main is about to re-send on the live data channel
+      // (reattach frame, post-sleep backlog). Only the URL sniffer consults
+      // this — replayed bytes must still reach xterm exactly like live ones.
+      const replayTracker = createReplayTracker();
+      const offReplay =
+        window.spark.pty.onReplay?.(sessionId, ({ bytes }) => {
+          replayTracker.announce(bytes);
+        }) ?? (() => undefined);
+
       const offData = window.spark.pty.onData(sessionId, (data) => {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
@@ -2366,6 +2456,12 @@ export function useTerminalSession({
           data instanceof Uint8Array
             ? data
             : new TextEncoder().encode(String(data));
+
+        // Attribute this chunk to the announced replay before anything
+        // downstream reads the flag — including the hidden-pane early returns,
+        // which must still consume the bytes or the replay would leak its
+        // "history" marking onto the live output that follows.
+        const isReplayedChunk = replayTracker.consume(bytes.length);
 
         // Keep the agent lifecycle sniffer running even while the pane is
         // hidden. Some hosts defer hidden xterm writes, so byte-level detection
@@ -2433,7 +2529,12 @@ export function useTerminalSession({
             const url = stripTrailingPunct(matches[matches.length - 1]);
             if (url && url !== detectedRef.current) {
               detectedRef.current = url;
-              onDetectedRef.current(url);
+              // `replayed` tells the owner this URL was scraped out of history
+              // main just re-sent (post-sleep backlog, reattach frame), not out
+              // of something the child printed just now. The URL is still real —
+              // it still earns the click-to-open chip — but it is not evidence
+              // that a server came up, so nothing may auto-open from it.
+              onDetectedRef.current(url, { replayed: isReplayedChunk });
             }
           }
         }
@@ -2611,7 +2712,7 @@ export function useTerminalSession({
           void respawnWithResume();
         }, 400);
       });
-      cleanups.push(offData, offExit);
+      cleanups.push(offData, offReplay, offExit);
 
       const inputDisposable = term.onData((data) => {
         // Read-only / mirror panes must not forward keystrokes — the
@@ -2759,6 +2860,10 @@ export function useTerminalSession({
             agentSessionRef.current?.nativeClaudeProfileId ??
             agentSession?.nativeClaudeProfileId ??
             nativeClaudeProfileId,
+          nativeGrokProfileId:
+            agentSessionRef.current?.nativeGrokProfileId ??
+            agentSession?.nativeGrokProfileId ??
+            nativeGrokProfileId,
           nativeCliLoginToken: preparedNativeCliLoginToken,
           // Read-only mirror panes attach to a session whose canonical xterm
           // lives elsewhere. The mirror flag makes main's existing-session
@@ -2790,7 +2895,11 @@ export function useTerminalSession({
         // normal poller promotes this launching state to working/idle/blocked.
         if (resumeCommand !== null && startupCommandHandled) {
           const restoredRuntime = agentSessionRef.current?.runtime ?? agentSession?.runtime;
-          if (restoredRuntime === "claude" || restoredRuntime === "codex") {
+          if (
+            restoredRuntime === "claude" ||
+            restoredRuntime === "codex" ||
+            restoredRuntime === "grok"
+          ) {
             setAgentRunning(restoredRuntime);
           }
         }
@@ -3245,7 +3354,12 @@ export function useTerminalSession({
             scrollbackLineLimitRef.current,
           );
           if (text.length > 0 || (pendingBytes && pendingBytes.length > 0)) {
-            rememberXtermBufferSnapshot(sessionId, { text, pendingBytes });
+            const buffer = dyingTerm.buffer.active;
+            rememberXtermBufferSnapshot(sessionId, {
+              text,
+              pendingBytes,
+              viewportFromBottom: Math.max(0, buffer.baseY - buffer.viewportY),
+            });
           }
         } catch {
           /* best-effort; an inaccessible buffer just means no scrollback restore */
@@ -3279,10 +3393,25 @@ export function useTerminalSession({
   // those were previously on React's pre-paint path, and a few busy panes with
   // multi-megabyte backlogs made workspace clicks visibly stall.
   const prevVisibleRef = useRef<boolean | null>(null);
+  const viewportBeforeHideRef = useRef<{ line: number; atBottom: boolean } | null>(null);
   useLayoutEffect(() => {
     const prev = prevVisibleRef.current;
     prevVisibleRef.current = visible;
     if (!visible) {
+      const term = termRef.current;
+      if (term) {
+        const buffer = term.buffer.active;
+        viewportBeforeHideRef.current = {
+          line: buffer.viewportY,
+          atBottom: buffer.viewportY >= buffer.baseY,
+        };
+      } else if (!viewportBeforeHideRef.current) {
+        // A pane can mount for the first time underneath an inactive tab or a
+        // background workspace. It has no visible viewport to capture yet, but
+        // its xterm may already be receiving a Codex/Claude startup frame.
+        // First reveal should follow that live output, not expose row zero.
+        viewportBeforeHideRef.current = { line: 0, atBottom: true };
+      }
       hiddenReplayPendingRef.current = false;
       return;
     }
@@ -3347,6 +3476,7 @@ export function useTerminalSession({
 
   useLayoutEffect(() => {
     if (!visible) return;
+    const savedViewport = viewportBeforeHideRef.current;
     try {
       resizeXtermForOwner();
     } catch {
@@ -3365,19 +3495,39 @@ export function useTerminalSession({
     // The host can finish expanding one paint later when it sits inside a
     // flex/absolute stack or a tab transition. Re-fit on the next frame so
     // xterm doesn't stay pinned to the smaller first-pass row count.
-    const raf = window.requestAnimationFrame(() => {
+    // scheduleFitRetry deliberately runs for three animation frames because a
+    // flex/absolute terminal host can report an intermediate size. FitAddon can
+    // reset xterm's viewport on ANY of those frames, so restoring scroll only
+    // after frame one still left Codex at the top. Restore after each matching
+    // frame; the last callback wins after the final fit while the whole sequence
+    // remains under ~50 ms.
+    let raf: number | null = null;
+    let remainingRestoreFrames = 3;
+    let rendererRecovered = false;
+    const restoreAfterFit = () => {
+      raf = null;
       try {
         resizeXtermForOwner();
       } catch {
         /* ignore late layout churn */
       }
-      // After the final fit (rows settled), force a full repaint and reload the
-      // WebGL context if it was lost while hidden. Without this the pane can
-      // return from a tab switch rendering all black — the WebGL canvas
-      // (preserveDrawingBuffer:false) composites black until a draw, and xterm
-      // only repaints dirtied rows. Runs once per re-activation, not on typing.
-      recoverRendererRef.current?.();
-    });
+      if (!rendererRecovered) {
+        rendererRecovered = true;
+        // Force a full repaint and recreate a lost WebGL context before
+        // restoring the viewport into the final renderer.
+        recoverRendererRef.current?.();
+      }
+      const term = termRef.current;
+      if (term && savedViewport) {
+        if (savedViewport.atBottom) term.scrollToBottom();
+        else term.scrollToLine(savedViewport.line);
+      }
+      remainingRestoreFrames -= 1;
+      if (remainingRestoreFrames > 0) {
+        raf = window.requestAnimationFrame(restoreAfterFit);
+      }
+    };
+    raf = window.requestAnimationFrame(restoreAfterFit);
     // Read-only mirrors and input-blocked watch panes don't grab keyboard
     // focus on reveal: they drop every keystroke, so stealing focus from e.g.
     // a blocked-worker answer input would silently eat the user's typing. An
@@ -3387,7 +3537,9 @@ export function useTerminalSession({
     if (!readOnlyRef.current && !inputBlockedRef.current && !modalDialogIsOpen()) {
       termRef.current?.focus();
     }
-    return () => window.cancelAnimationFrame(raf);
+    return () => {
+      if (raf !== null) window.cancelAnimationFrame(raf);
+    };
   }, [resizeXtermForOwner, visible]);
 
   // System sleep does not necessarily toggle React's `visible` prop, so the

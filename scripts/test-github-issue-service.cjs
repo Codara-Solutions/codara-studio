@@ -25,7 +25,7 @@ async function loadService() {
     "./git-worktrees",
     "./orchestration/run-store",
     "./preferences-store",
-    "./spark-home",
+    "./codara-home",
     "./storage",
   ]);
   await esbuild.build({
@@ -61,7 +61,7 @@ async function loadService() {
             ],
             "./orchestration/run-store": ["listRuns", "startAutopilot"],
             "./preferences-store": ["loadPreferences"],
-            "./spark-home": ["sparkHome"],
+            "./codara-home": ["codaraHome"],
             "./storage": ["loadState", "updateState"],
           }[args.path] || [];
           return {

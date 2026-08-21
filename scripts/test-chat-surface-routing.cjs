@@ -293,6 +293,11 @@ async function main() {
       /const handleActivateWorkspace = useCallback\(\(id: string\) => \{\s*pendingCrossWorkspaceRunSelectionRef\.current = null;\s*runSelectionGenerationRef\.current \+= 1;/,
       "explicit workspace navigation must invalidate a pending run selection",
     );
+    assert.match(
+      appSource,
+      /const runScopeReady =[\s\S]*tabs\.tabsWorkspaceId === workspace\?\.id[\s\S]*runsWorkspaceId === workspace\?\.id;[\s\S]*if \(!runScopeReady\) return;[\s\S]*setActiveTab\(effectiveActiveId\)/,
+      "workspace return must not repair its active tab using stale run state from the workspace being left",
+    );
   });
 
   await test("automation routes prune only their digest origin", async () => {

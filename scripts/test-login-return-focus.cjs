@@ -7,6 +7,7 @@ const read = (relativePath) =>
   fs.readFileSync(path.join(ROOT, relativePath), "utf8");
 
 const focus = read("src/main/window-focus.ts");
+const background = read("src/main/e2e-background.ts");
 const ipc = read("src/main/ipc.ts");
 const subscriptionAuth = read("src/main/orchestration/pi-subscription-auth.ts");
 const callbackPage = read("src/main/orchestration/pi-oauth-callback-page.ts");
@@ -22,12 +23,14 @@ const callbackServer = read("src/main/orchestration/pi-oauth-callback-server.ts"
 assert.match(focus, /export function focusStudioWindow\(owner\?: WebContents \| null\): void/);
 assert.match(focus, /BrowserWindow\.getAllWindows\(\)/);
 assert.match(focus, /BrowserWindow\.fromWebContents\(owner\)/);
-assert.match(focus, /if \(target\.isMinimized\(\)\) target\.restore\(\);/);
-assert.match(focus, /if \(!target\.isVisible\(\)\) target\.show\(\);/);
-assert.match(focus, /target\.focus\(\);/);
+assert.match(focus, /import \{ E2E_BACKGROUND, revealWindow \} from "\.\/e2e-background";/);
+assert.match(focus, /revealWindow\(target\);/);
+assert.match(background, /if \(target\.isMinimized\(\)\) target\.restore\(\);/);
+assert.match(background, /if \(!target\.isVisible\(\)\) target\.show\(\);/);
+assert.match(background, /target\.focus\(\);/);
 assert.match(
   focus,
-  /if \(process\.platform === "darwin"\) app\.focus\(\{ steal: true \}\);/,
+  /if \(process\.platform === "darwin" && !E2E_BACKGROUND\) app\.focus\(\{ steal: true \}\);/,
 );
 
 // Pi subscription connect: focus on success and on a real failure, never on a

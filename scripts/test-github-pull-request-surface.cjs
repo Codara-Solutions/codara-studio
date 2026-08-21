@@ -74,8 +74,13 @@ function main() {
   );
   assert.match(
     queue,
-    /const QUEUE_VISIBLE_REFRESH_MS = 60_000;/,
-    "the visible-only auto refresh must be a modest 60s",
+    /const QUEUE_FALLBACK_REFRESH_MS = 300_000;/,
+    "the visible-only fallback refresh must be a modest five minutes",
+  );
+  assert.match(
+    queue,
+    /const RESUME_REFRESH_MIN_INTERVAL_MS = 60_000;/,
+    "focus and visibility resumes share a one-minute stale-data throttle",
   );
   assert.match(
     queue,
@@ -89,17 +94,17 @@ function main() {
   );
   assert.match(
     queue,
-    /timer = window\.setInterval\(\(\) => \{\s*if \(shown\(\)\) void load\(true\);\s*else stop\(\);\s*\}, QUEUE_VISIBLE_REFRESH_MS\);/,
+    /timer = window\.setInterval\(\(\) => \{\s*if \(shown\(\)\) refreshSilently\(\);\s*else stop\(\);\s*\}, QUEUE_FALLBACK_REFRESH_MS\);/,
     "the interval must stop itself as soon as the surface is hidden",
-  );
-  assert.doesNotMatch(
-    queue,
-    /addEventListener\("focus"/,
-    "window focus must not trigger a background GitHub read",
   );
   assert.match(
     queue,
-    /void load\(refreshKey > 0\)/,
+    /const handleFocus = resume;[\s\S]*addEventListener\("focus", handleFocus\)/,
+    "window focus may refresh only through the shared stale-data throttle",
+  );
+  assert.match(
+    queue,
+    /void load\(\{ refresh: refreshKey > 0, silent: false \}\)/,
     "a bumped refresh key must force a fresh read",
   );
   const unified = source(
@@ -107,9 +112,10 @@ function main() {
   );
   assert.match(
     unified,
-    /title="Refresh GitHub"[\s\S]{0,80}onClick=\{onRefresh\}/,
+    /title="Refresh GitHub issues and pull requests"/,
     "the unified GitHub block must keep one explicit refresh control",
   );
+  assert.match(unified, /onClick=\{\(\) => \{[\s\S]{0,120}onRefresh\(\);/);
 
   console.log(
     "PASS desktop pinned-PR IPC, queue action, navigation, error retention, and stale-revision labels",

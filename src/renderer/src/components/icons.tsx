@@ -124,22 +124,6 @@ export function PlusIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-export function MinusIcon({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-    >
-      <line x1="3" y1="7" x2="11" y2="7" />
-    </svg>
-  );
-}
-
 export function CloseIcon({ size = 14 }: { size?: number }) {
   return (
     <svg
@@ -322,30 +306,6 @@ export function DrawIcon({ size = 14 }: { size?: number }) {
       <path d="M9 2.5 L11.5 5 L5.5 11 H3 V8.5 Z" />
       <path d="M8.2 3.3 L10.7 5.8" />
       <path d="M2.5 12.5 H6" />
-    </svg>
-  );
-}
-
-export function BroadcastIcon({ size = 14 }: { size?: number }) {
-  // A radiating-arc transmitter — reads as "send to many". Used on the
-  // Swarm header's Broadcast button: pressing it opens a textarea that
-  // pipes one prompt into every live worker PTY in the swarm.
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <circle cx="7" cy="7" r="1.4" />
-      <path d="M4 4.2 A 4 4 0 0 0 4 9.8" />
-      <path d="M10 4.2 A 4 4 0 0 1 10 9.8" />
-      <path d="M2.2 2.6 A 6.4 6.4 0 0 0 2.2 11.4" />
-      <path d="M11.8 2.6 A 6.4 6.4 0 0 1 11.8 11.4" />
     </svg>
   );
 }

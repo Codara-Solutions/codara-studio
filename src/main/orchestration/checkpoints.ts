@@ -64,12 +64,6 @@ async function refSha(cwd: string, ref: string): Promise<string | null> {
   }
 }
 
-// The shadow ref a run's checkpoints live on. Exposed so a sandbox worktree can
-// fork off the run's checkpoint instead of the user's working branch.
-export function runCheckpointRef(runId: string): string {
-  return shadowRef(runId);
-}
-
 // Resolve the commit sha at the tip of the run's checkpoint shadow ref, or null
 // when the run has no checkpoint yet. Lets a caller choose between forking a
 // sandbox worktree off the checkpoint vs. the default branch.

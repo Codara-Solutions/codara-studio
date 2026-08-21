@@ -23,7 +23,6 @@ import {
   resolveClaudeCliExecutionProfile,
 } from "./claude-cli-profile-execution";
 import {
-  CODEX_CLI_AUTH_FILE,
   CODEX_CLI_PERSONAL_PROFILE_ID,
   codexCliManagedProfilePaths,
   CodexCliAccountProfileLeasedError,
@@ -41,8 +40,27 @@ import {
   resolveCodexCliExecutionProfile,
 } from "./codex-cli-profile-execution";
 import {
+  GROK_CLI_AUTH_FILE,
+  GROK_CLI_PERSONAL_PROFILE_ID,
+  grokCliManagedProfilePaths,
+  GrokCliAccountProfileLeasedError,
+  GrokCliAccountProfileNotFoundError,
+  GrokCliAccountProfileSafetyError,
+  GrokCliAccountProfilesCorruptError,
+  GrokCliAccountProfileStore,
+  GrokCliDefaultProfileDeletionError,
+  normalizeGrokCliProfileId,
+  type GrokCliProfileConnection,
+  type GrokCliProfileId,
+} from "./grok-cli-account-profiles";
+import {
+  GrokCliProfileLeaseRegistry,
+  resolveGrokCliExecutionProfile,
+} from "./grok-cli-profile-execution";
+import {
   readClaudeCliAccountIdentity,
   readCodexCliAccountIdentity,
+  readGrokCliAccountIdentity,
   type NativeCliAccountIdentity,
 } from "./native-cli-account-identity";
 import {
@@ -53,8 +71,17 @@ import {
   nativeCodexProfileLeases,
   nativeCodexProfileStore,
 } from "./native-codex-profile-runtime";
+import {
+  nativeGrokProfileLeases,
+  nativeGrokProfileStore,
+} from "./native-grok-profile-runtime";
+import { isAgentRuntimeKind } from "../../shared/agent-families";
+import {
+  activateCodexCliAccount,
+  ensureCodexCliAuthVault,
+} from "./codex-cli-auth-selector";
 
-export type NativeCliAccountRuntime = "claude" | "codex";
+export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
 
 export type NativeCliAccountConnectionStatus =
   | "connected"
@@ -231,7 +258,7 @@ export type NativeCliAccountErrorCode =
 
 const SAFE_ERROR_MESSAGES: Record<NativeCliAccountErrorCode, string> = {
   NATIVE_CLI_ACCOUNT_INVALID_RUNTIME:
-    "Native CLI account runtime must be Claude or Codex",
+    "Native CLI account runtime must be Claude, Codex, or Grok",
   NATIVE_CLI_ACCOUNT_NOT_FOUND: "Native CLI account was not found",
   NATIVE_CLI_ACCOUNT_NOT_CONNECTED: "Native CLI account is not connected",
   NATIVE_CLI_ACCOUNT_ACTIVE:
@@ -317,7 +344,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 function normalizeRuntime(value: unknown): NativeCliAccountRuntime {
-  if (value === "claude" || value === "codex") return value;
+  if (isAgentRuntimeKind(value)) return value;
   throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_INVALID_RUNTIME");
 }
 
@@ -325,13 +352,16 @@ function isPersonalProfile(
   runtime: NativeCliAccountRuntime,
   profileId: string,
 ): boolean {
-  return runtime === "claude"
-    ? profileId === CLAUDE_CLI_PERSONAL_PROFILE_ID
-    : profileId === CODEX_CLI_PERSONAL_PROFILE_ID;
+  if (runtime === "claude") return profileId === CLAUDE_CLI_PERSONAL_PROFILE_ID;
+  if (runtime === "grok") return profileId === GROK_CLI_PERSONAL_PROFILE_ID;
+  return profileId === CODEX_CLI_PERSONAL_PROFILE_ID;
 }
 
 function connectionStatus(
-  connection: ClaudeCliProfileConnection | CodexCliProfileConnection,
+  connection:
+    | ClaudeCliProfileConnection
+    | CodexCliProfileConnection
+    | GrokCliProfileConnection,
 ): NativeCliAccountConnectionStatus {
   if (connection.connected) return "connected";
   if (connection.error === "Sign in required") return "sign_in_required";
@@ -346,7 +376,10 @@ function connectionStatus(
 
 function sanitizeConnection(
   runtime: NativeCliAccountRuntime,
-  connection: ClaudeCliProfileConnection | CodexCliProfileConnection,
+  connection:
+    | ClaudeCliProfileConnection
+    | CodexCliProfileConnection
+    | GrokCliProfileConnection,
   reservedByLogin: boolean,
   identity: NativeCliAccountIdentity | undefined,
 ): NativeCliAccountProfile {
@@ -432,14 +465,19 @@ export function runNativeCliAccountProcess(
 export interface NativeCliAccountServiceOptions {
   claudeStore?: ClaudeCliAccountProfileStore;
   codexStore?: CodexCliAccountProfileStore;
+  grokStore?: GrokCliAccountProfileStore;
   claudeLeases?: ClaudeCliProfileLeaseRegistry;
   codexLeases?: CodexCliProfileLeaseRegistry;
+  grokLeases?: GrokCliProfileLeaseRegistry;
   claudeExecutable?: string;
   codexExecutable?: string;
+  grokExecutable?: string;
   baseEnv?: () => NodeJS.ProcessEnv;
   processRunner?: NativeCliAccountProcessRunner;
   /** Test seam. Production reads the Codex credential's account id and email. */
   codexIdentityReader?: NativeCliAccountIdentityReader;
+  /** Test seam. Production reads the Grok Build credential's account id and email. */
+  grokIdentityReader?: NativeCliAccountIdentityReader;
   /** Test seam. Production reads the Claude Code config's account uuid and email. */
   claudeIdentityReader?: ClaudeCliAccountIdentityReader;
   processTimeoutMs?: number;
@@ -447,24 +485,34 @@ export interface NativeCliAccountServiceOptions {
   loginPlanTtlMs?: number;
   tokenFactory?: () => string;
   now?: () => number;
+  /** Test seam. Production swaps only auth.json in the one shared Codex home. */
+  codexAuthSelector?: (profileId: string) => Promise<unknown>;
+  /** Test seam for the one-time migration of the historical personal login. */
+  codexAuthVaultInitializer?: () => Promise<unknown>;
 }
 
 export class NativeCliAccountService {
   private readonly claudeStore: ClaudeCliAccountProfileStore;
   private readonly codexStore: CodexCliAccountProfileStore;
+  private readonly grokStore: GrokCliAccountProfileStore;
   private readonly claudeLeases: ClaudeCliProfileLeaseRegistry;
   private readonly codexLeases: CodexCliProfileLeaseRegistry;
+  private readonly grokLeases: GrokCliProfileLeaseRegistry;
   private readonly claudeExecutable: string;
   private readonly codexExecutable: string;
+  private readonly grokExecutable: string;
   private readonly baseEnv: () => NodeJS.ProcessEnv;
   private readonly processRunner: NativeCliAccountProcessRunner;
   private readonly codexIdentityReader: NativeCliAccountIdentityReader;
+  private readonly grokIdentityReader: NativeCliAccountIdentityReader;
   private readonly claudeIdentityReader: ClaudeCliAccountIdentityReader;
   private readonly processTimeoutMs: number;
   private readonly processMaxBufferBytes: number;
   private readonly loginPlanTtlMs: number;
   private readonly tokenFactory: () => string;
   private readonly now: () => number;
+  private readonly codexAuthSelector: (profileId: string) => Promise<unknown>;
+  private readonly codexAuthVaultInitializer: () => Promise<unknown>;
   private readonly pendingLoginPlans = new Map<string, PendingLoginPlan>();
   private readonly expiredLoginTokens = new Map<string, number>();
   private readonly mutationTails = new Map<
@@ -489,17 +537,46 @@ export class NativeCliAccountService {
         "Custom native Codex store and lease registry must be supplied together",
       );
     }
+    if (
+      (options.grokStore && !options.grokLeases) ||
+      (!options.grokStore && options.grokLeases)
+    ) {
+      throw new TypeError(
+        "Custom native Grok store and lease registry must be supplied together",
+      );
+    }
     this.claudeStore = options.claudeStore ?? nativeClaudeProfileStore;
     this.codexStore = options.codexStore ?? nativeCodexProfileStore;
+    this.grokStore = options.grokStore ?? nativeGrokProfileStore;
     this.claudeLeases = options.claudeLeases ?? nativeClaudeProfileLeases;
     this.codexLeases = options.codexLeases ?? nativeCodexProfileLeases;
+    this.grokLeases = options.grokLeases ?? nativeGrokProfileLeases;
     this.claudeExecutable =
       options.claudeExecutable?.trim() || "claude";
     this.codexExecutable = options.codexExecutable?.trim() || "codex";
+    this.grokExecutable = options.grokExecutable?.trim() || "grok";
     this.baseEnv = options.baseEnv ?? (() => process.env);
     this.processRunner = options.processRunner ?? runNativeCliAccountProcess;
     this.codexIdentityReader =
       options.codexIdentityReader ?? readCodexCliAccountIdentity;
+    this.codexAuthSelector =
+      options.codexAuthSelector ??
+      (options.codexStore
+        ? async () => undefined
+        : (profileId) => activateCodexCliAccount(this.codexStore, profileId));
+    this.codexAuthVaultInitializer =
+      options.codexAuthVaultInitializer ??
+      (options.codexStore
+        ? async () => undefined
+        : async () => {
+            const active = await ensureCodexCliAuthVault(this.codexStore);
+            const { defaultProfileId } = await this.codexStore.snapshot();
+            if (active !== defaultProfileId) {
+              await activateCodexCliAccount(this.codexStore, defaultProfileId);
+            }
+          });
+    this.grokIdentityReader =
+      options.grokIdentityReader ?? readGrokCliAccountIdentity;
     this.claudeIdentityReader =
       options.claudeIdentityReader ?? readClaudeCliAccountIdentity;
     this.processTimeoutMs =
@@ -542,9 +619,9 @@ export class NativeCliAccountService {
     value: unknown,
   ): string {
     try {
-      return runtime === "claude"
-        ? normalizeClaudeCliProfileId(value)
-        : normalizeCodexCliProfileId(value);
+      if (runtime === "claude") return normalizeClaudeCliProfileId(value);
+      if (runtime === "grok") return normalizeGrokCliProfileId(value);
+      return normalizeCodexCliProfileId(value);
     } catch {
       throw new NativeCliAccountError(
         "NATIVE_CLI_ACCOUNT_NOT_FOUND",
@@ -622,11 +699,38 @@ export class NativeCliAccountService {
           authFile = profile.managed
             ? codexCliManagedProfilePaths(this.codexStore.rootDir, profile.id)
                 .authFile
-            : join(this.codexStore.personalHomeDir, CODEX_CLI_AUTH_FILE);
+            : this.codexStore.personalAuthFile;
         } catch {
           return;
         }
         const identity = await this.codexIdentityReader(authFile).catch(
+          () => undefined,
+        );
+        if (identity?.fingerprint || identity?.email) {
+          identities.set(profile.id, identity);
+        }
+      }),
+    );
+    return identities;
+  }
+
+  private async grokAccountIdentities(
+    profiles: readonly GrokCliProfileConnection[],
+  ): Promise<Map<string, NativeCliAccountIdentity>> {
+    const identities = new Map<string, NativeCliAccountIdentity>();
+    await Promise.all(
+      profiles.map(async (profile) => {
+        if (!profile.connected) return;
+        let authFile: string;
+        try {
+          authFile = profile.managed
+            ? grokCliManagedProfilePaths(this.grokStore.rootDir, profile.id)
+                .authFile
+            : join(this.grokStore.personalHomeDir, GROK_CLI_AUTH_FILE);
+        } catch {
+          return;
+        }
+        const identity = await this.grokIdentityReader(authFile).catch(
           () => undefined,
         );
         if (identity?.fingerprint || identity?.email) {
@@ -659,10 +763,13 @@ export class NativeCliAccountService {
           ),
         };
       }
-      const inspection = await this.codexStore.inspect();
-      const identities = await this.codexAccountIdentities(
-        inspection.profiles,
-      );
+      const store = runtime === "grok" ? this.grokStore : this.codexStore;
+      if (runtime === "codex") await this.codexAuthVaultInitializer();
+      const inspection = await store.inspect();
+      const identities =
+        runtime === "grok"
+          ? await this.grokAccountIdentities(inspection.profiles)
+          : await this.codexAccountIdentities(inspection.profiles);
       return {
         runtime,
         defaultProfileId: inspection.defaultProfileId,
@@ -687,11 +794,12 @@ export class NativeCliAccountService {
       const runtime = normalizeRuntime(rawRuntime);
       return { runtimes: [await this.inspectRuntime(runtime)] };
     }
-    const [claude, codex] = await Promise.all([
+    const [claude, codex, grok] = await Promise.all([
       this.inspectRuntime("claude"),
       this.inspectRuntime("codex"),
+      this.inspectRuntime("grok"),
     ]);
-    return { runtimes: [claude, codex] };
+    return { runtimes: [claude, codex, grok] };
   }
 
   private async requireProfile(
@@ -743,6 +851,12 @@ export class NativeCliAccountService {
           operation,
         );
       }
+      if (runtime === "grok") {
+        return await this.grokLeases.runWhileUnleased(
+          profileId as GrokCliProfileId,
+          operation,
+        );
+      }
       return await this.codexLeases.runWhileUnleased(
         profileId as CodexCliProfileId,
         operation,
@@ -753,9 +867,9 @@ export class NativeCliAccountService {
   }
 
   private executableFor(runtime: NativeCliAccountRuntime): string {
-    return runtime === "claude"
-      ? this.claudeExecutable
-      : this.codexExecutable;
+    if (runtime === "claude") return this.claudeExecutable;
+    if (runtime === "grok") return this.grokExecutable;
+    return this.codexExecutable;
   }
 
   private loginArgs(runtime: NativeCliAccountRuntime): readonly string[] {
@@ -776,6 +890,15 @@ export class NativeCliAccountService {
       if (runtime === "claude") {
         return (
           await resolveClaudeCliExecutionProfile(this.claudeStore, {
+            profileId,
+            requireConnected,
+            baseEnv,
+          })
+        ).env;
+      }
+      if (runtime === "grok") {
+        return (
+          await resolveGrokCliExecutionProfile(this.grokStore, {
             profileId,
             requireConnected,
             baseEnv,
@@ -823,7 +946,9 @@ export class NativeCliAccountService {
         const created =
           runtime === "claude"
             ? await this.claudeStore.createProfile({ label: input.label })
-            : await this.codexStore.createProfile({ label: input.label });
+            : runtime === "grok"
+              ? await this.grokStore.createProfile({ label: input.label })
+              : await this.codexStore.createProfile({ label: input.label });
         const inspection = await this.inspectRuntime(runtime);
         return {
           profile: this.profileFromInspection(inspection, created.profile.id),
@@ -850,6 +975,8 @@ export class NativeCliAccountService {
       try {
         if (runtime === "claude") {
           await this.claudeStore.renameProfile(profileId, input.label);
+        } else if (runtime === "grok") {
+          await this.grokStore.renameProfile(profileId, input.label);
         } else {
           await this.codexStore.renameProfile(profileId, input.label);
         }
@@ -880,8 +1007,21 @@ export class NativeCliAccountService {
       try {
         if (runtime === "claude") {
           await this.claudeStore.setDefaultProfile(profileId);
+        } else if (runtime === "grok") {
+          await this.grokStore.setDefaultProfile(profileId);
         } else {
           await this.codexStore.setDefaultProfile(profileId);
+          try {
+            await this.codexAuthSelector(profileId);
+          } catch (error) {
+            await this.codexStore
+              .setDefaultProfile(before.inspection.defaultProfileId)
+              .catch(() => undefined);
+            await this.codexAuthSelector(before.inspection.defaultProfileId).catch(
+              () => undefined,
+            );
+            throw error;
+          }
         }
         const inspection = await this.inspectRuntime(runtime);
         return {
@@ -1203,7 +1343,9 @@ export class NativeCliAccountService {
         const result =
           runtime === "claude"
             ? await this.claudeStore.deleteProfile(profileId)
-            : await this.codexStore.deleteProfile(profileId);
+            : runtime === "grok"
+              ? await this.grokStore.deleteProfile(profileId)
+              : await this.codexStore.deleteProfile(profileId);
         return { runtime, profileId, deleted: result.deleted };
       } catch (error) {
         throw this.sanitizeStoreError(runtime, profileId, error);
@@ -1219,7 +1361,8 @@ export class NativeCliAccountService {
     if (error instanceof NativeCliAccountError) return error;
     if (
       error instanceof ClaudeCliAccountProfileLeasedError ||
-      error instanceof CodexCliAccountProfileLeasedError
+      error instanceof CodexCliAccountProfileLeasedError ||
+      error instanceof GrokCliAccountProfileLeasedError
     ) {
       return new NativeCliAccountError("NATIVE_CLI_ACCOUNT_ACTIVE", {
         runtime,
@@ -1228,7 +1371,8 @@ export class NativeCliAccountService {
     }
     if (
       error instanceof ClaudeCliDefaultProfileDeletionError ||
-      error instanceof CodexCliDefaultProfileDeletionError
+      error instanceof CodexCliDefaultProfileDeletionError ||
+      error instanceof GrokCliDefaultProfileDeletionError
     ) {
       return new NativeCliAccountError("NATIVE_CLI_ACCOUNT_DEFAULT", {
         runtime,
@@ -1237,7 +1381,8 @@ export class NativeCliAccountService {
     }
     if (
       error instanceof ClaudeCliAccountProfileNotFoundError ||
-      error instanceof CodexCliAccountProfileNotFoundError
+      error instanceof CodexCliAccountProfileNotFoundError ||
+      error instanceof GrokCliAccountProfileNotFoundError
     ) {
       return new NativeCliAccountError("NATIVE_CLI_ACCOUNT_NOT_FOUND", {
         runtime,
@@ -1246,7 +1391,8 @@ export class NativeCliAccountService {
     }
     if (
       error instanceof ClaudeCliAccountProfileSafetyError ||
-      error instanceof CodexCliAccountProfileSafetyError
+      error instanceof CodexCliAccountProfileSafetyError ||
+      error instanceof GrokCliAccountProfileSafetyError
     ) {
       return new NativeCliAccountError("NATIVE_CLI_ACCOUNT_STORE_UNSAFE", {
         runtime,
@@ -1255,7 +1401,8 @@ export class NativeCliAccountService {
     }
     if (
       error instanceof ClaudeCliAccountProfilesCorruptError ||
-      error instanceof CodexCliAccountProfilesCorruptError
+      error instanceof CodexCliAccountProfilesCorruptError ||
+      error instanceof GrokCliAccountProfilesCorruptError
     ) {
       return new NativeCliAccountError("NATIVE_CLI_ACCOUNT_STORE_CORRUPT", {
         runtime,

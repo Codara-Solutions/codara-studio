@@ -6,18 +6,15 @@ import type {
   RunState,
   Workspace,
 } from "@shared/types";
-import { backendPtySessionId } from "@shared/backend-pty";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { CloseIcon, HistoryIcon } from "../icons";
 import RunIdChip from "../RunIdChip";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
-import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "./timeline";
 import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
-import { BACKEND_TERMINAL_SHELL } from "./backend-terminal-shell";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
@@ -42,7 +39,6 @@ interface Props {
   activeRun: RunState | null;
   composerDraftKey?: string;
   suspendGlobalEvents?: boolean;
-  terminalScrollbackLineLimit: number;
   error: string | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -93,7 +89,6 @@ export default function ChatPanel({
   activeRun,
   composerDraftKey,
   suspendGlobalEvents,
-  terminalScrollbackLineLimit,
   error,
   collapsed,
   onToggleCollapse,
@@ -109,9 +104,8 @@ export default function ChatPanel({
   onSelectChat,
   onDeleteChat,
 }: Props) {
-  // Per-chat view toggle. "chat" → ChatConversation (default). "terminal" →
-  // raw xterm pane attached to the headless CC/Codex PTY this chat is
-  // driving. The hoisted inner tab strip is the source of truth when it
+  // Per-chat view toggle. "chat" → ChatConversation (default). The hoisted
+  // inner tab strip is the source of truth when it
   // provides chatViewProp + onChatViewChange. Local state is the fallback
   // for callers that have not lifted the toggle (kept so the component
   // stays usable in isolation, e.g. tests).
@@ -132,70 +126,6 @@ export default function ChatPanel({
   useEffect(() => {
     if (!usingHoistedChatView) setLocalChatView("chat");
   }, [activeRun?.id, usingHoistedChatView]);
-
-  // Pi chats have no PTY to attach to, force back to Chat view if
-  // the backend doesn't support the terminal tab. Local-state path only: in
-  // the hoisted path chatView is shared across every retained workspace
-  // panel and App owns this reset for the ACTIVE run — a hidden panel with a
-  // PTY-less chat firing it would bounce the visible workspace out of its
-  // Terminal sub-view on every pass.
-  const backendSessionId = activeRun
-    ? backendPtySessionId(activeRun.id, activeRun.chatBackend)
-    : null;
-  useEffect(() => {
-    if (!usingHoistedChatView && !backendSessionId && chatView === "terminal") {
-      setChatView("chat");
-    }
-  }, [backendSessionId, chatView, usingHoistedChatView]);
-
-  // Poll for the backend PTY's existence. Mounting TerminalPane before the
-  // cli-session has spawned the PTY triggers a renderer-side pty.spawn for
-  // the placeholder "noop" shell, which fails with "File not found". Three
-  // common cases where this matters:
-  //   1. Fresh chat with chip=Claude/Codex — PTY doesn't exist yet
-  //   2. After Codara restart — chatSessionUuid is persisted but the actual
-  //      in-memory PTY is gone until the next turn re-spawns it
-  //   3. Mid-chat backend switch — old PTY may still be alive, new isn't
-  // Once the PTY exists, render TerminalPane; otherwise show a placeholder.
-  const [backendPtyExists, setBackendPtyExists] = useState(false);
-  useEffect(() => {
-    // In the hoisted path the inline TerminalPane is never mounted (the
-    // App-level ChatBackendTerminalStack owns the pane and runs its own
-    // existence poll), so this poll's result is unreachable — skip it rather
-    // than fire another concurrent pty.exists IPC every second.
-    if (!backendSessionId || chatView !== "terminal" || usingHoistedChatView) {
-      setBackendPtyExists(false);
-      return;
-    }
-    let disposed = false;
-    const check = async () => {
-      try {
-        const exists = await window.spark.pty.exists(backendSessionId);
-        if (!disposed) setBackendPtyExists(exists);
-      } catch {
-        if (!disposed) setBackendPtyExists(false);
-      }
-    };
-    void check();
-    // 1s poll is cheap (Map.has() in main) and covers the gap between user
-    // sending the first message and the cli-session resolving its spawn — but
-    // only while the window is visible; a hidden window would otherwise burn a
-    // round-trip per second forever. Refocus checks immediately so the
-    // placeholder flips to the real pane without waiting for the next tick.
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
-      void check();
-    }, 1000);
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") void check();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [backendSessionId, chatView, usingHoistedChatView]);
 
   // The Cora Board sub-view. Per-chat: each run owns its board (a draft chat
   // shows an empty local board whose first card mints the run). Unlike the
@@ -256,9 +186,6 @@ export default function ChatPanel({
       />
       {!collapsed && (
         <>
-          {activeRun && backendSessionId && !usingHoistedChatView && (
-            <ChatViewTabStrip view={chatView} onChange={setChatView} />
-          )}
           {error && <ErrorBar message={error} />}
           {activeRun ? (
             // Both views stack absolutely so each ALWAYS has real
@@ -304,71 +231,6 @@ export default function ChatPanel({
                   />
                 )}
               </div>
-              {backendSessionId && (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    flexDirection: "column",
-                    padding: 4,
-                    background: "var(--bg)",
-                    visibility: chatView === "terminal" ? undefined : "hidden",
-                    pointerEvents: chatView === "terminal" ? undefined : "none",
-                  }}
-                >
-                  {backendPtyExists && !usingHoistedChatView ? (
-                    // LEGACY (non-hoisted) path only. When the inner tab strip
-                    // is hoisted into App (the real app — chatView flows in as a
-                    // prop, so usingHoistedChatView is true), the backend
-                    // terminal is NOT mounted here. Instead App renders it in a
-                    // persistent App-level layer (ChatBackendTerminalStack) that
-                    // survives ChatStack unmounting this whole panel on a tab
-                    // switch. That is what keeps a live Ink TUI's xterm — and its
-                    // scrollback — ALIVE across tab/sub-view switches: replaying
-                    // main's bounded raw tail into a fresh xterm can only
-                    // reproduce the frame while the whole session still fits the
-                    // 64KB tail; once it has streamed past that (Claude/Codex
-                    // print the transcript once via Ink <Static> and then only
-                    // repaint the small live region), the tail holds nothing but
-                    // incremental repaints and a remount renders blank. Mounting
-                    // here too would double-attach two xterms to one PTY session
-                    // (they fight over main's single webContents sink), so the
-                    // hoisted path defers entirely to the App layer and shows the
-                    // placeholder beneath it.
-                    <TerminalPane
-                      // Keyed on sessionId so a backend switch (which changes
-                      // the id) remounts the pane cleanly against the new
-                      // PTY and discards xterm state from the old backend.
-                      key={`backend-term:${backendSessionId}`}
-                      sessionId={backendSessionId}
-                      shell={BACKEND_TERMINAL_SHELL}
-                      visible={chatView === "terminal"}
-                      scrollbackLineLimit={terminalScrollbackLineLimit}
-                      initialCwd={workspace?.cwd}
-                      // inputBlocked (not readOnly): no keystrokes forwarded
-                      // so the user can't collide with our bracketed paste +
-                      // submit Enter, but pty.resize IS allowed so CC's Ink
-                      // REPL paints into the actual visible cols/rows.
-                      inputBlocked
-                      // rawTailReattach: this xterm attaches onto a live Ink
-                      // TUI (Claude/Codex). Switching to another tab and back
-                      // unmounts/remounts this pane; without raw-tail mode the
-                      // unmount captures a flattened-text snapshot that, replayed
-                      // under the TUI's cursor-relative repaints, garbles the
-                      // screen (scattered transcript, detached input box). Raw
-                      // mode makes every remount replay main's RAW pty tail —
-                      // exactly like the first attach, which always renders
-                      // cleanly. See useTerminalSession.ts for the invariant.
-                      rawTailReattach
-                    />
-                  ) : (
-                    <BackendTerminalPlaceholder
-                      backend={activeRun.chatBackend ?? null}
-                    />
-                  )}
-                </div>
-              )}
               <div
                 style={{
                   position: "absolute",
@@ -613,7 +475,7 @@ export function ChatHistoryButton({
               : hover
                 ? "var(--hover-strong)"
                 : "transparent",
-          color: open ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
+          color: open ? "var(--accent-text)" : hover ? "var(--ink)" : "var(--ink-dim)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -807,7 +669,7 @@ function ChatHistoryRow({
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
             fontSize: 12,
-            color: active ? "var(--accent)" : "var(--ink)",
+            color: active ? "var(--accent-text)" : "var(--ink)",
           }}
         >
           {run.title || "Untitled chat"}
@@ -1173,97 +1035,6 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
   );
 }
 
-function BackendTerminalPlaceholder({ backend }: { backend: string | null }) {
-  const label = backend === "codex" ? "Codex" : "Claude Code";
-  return (
-    <div className="spark-empty" style={{ flex: 1, minHeight: 0 }}>
-      <div className="spark-eyebrow">Terminal idle</div>
-      <div className="spark-empty__body">
-        {label} hasn't been spawned for this chat yet. Send a message to start
-        the session — its terminal will appear here.
-      </div>
-    </div>
-  );
-}
-
-function ChatViewTabStrip({
-  view,
-  onChange,
-}: {
-  view: CoraView;
-  onChange: (view: CoraView) => void;
-}) {
-  return (
-    <div
-      role="tablist"
-      style={{
-        flex: "0 0 auto",
-        display: "flex",
-        gap: 2,
-        padding: "4px 8px",
-        borderBottom: "1px solid var(--rule-soft)",
-        background: "transparent",
-      }}
-    >
-      <ChatViewTab label="Chat" active={view === "chat"} onClick={() => onChange("chat")} />
-      <ChatViewTab
-        label="Terminal"
-        active={view === "terminal"}
-        onClick={() => onChange("terminal")}
-        title="Live xterm attached to the backend Claude/Codex PTY for this chat — read-only."
-      />
-    </div>
-  );
-}
-
-function ChatViewTab({
-  label,
-  active,
-  onClick,
-  title,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-  title?: string;
-}) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={title ?? label}
-      style={{
-        appearance: "none",
-        padding: "4px 10px",
-        fontSize: 11,
-        // Weight held constant across active/inactive so selection never
-        // reflows the strip; accent fill + border + color carry selection.
-        fontWeight: 600,
-        fontFamily: "var(--font-sans)",
-        background: active
-          ? "var(--accent-soft)"
-          : hover
-            ? "var(--hover)"
-            : "transparent",
-        color: active ? "var(--accent)" : hover ? "var(--ink-dim)" : "var(--muted)",
-        border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
-        borderRadius: "var(--radius-control, 7px)",
-        // No inline box-shadow, so the global :focus-visible ring renders.
-        cursor: "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
 function ErrorBar({ message }: { message: string }) {
   return (
     <div
@@ -1285,7 +1056,7 @@ function ErrorBar({ message }: { message: string }) {
 
 function SparkMark({ size = 13 }: { size?: number }) {
   return (
-    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent)" }}>
+    <span aria-hidden style={{ display: "inline-flex", color: "var(--accent-text)" }}>
       <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
         <path
           d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"

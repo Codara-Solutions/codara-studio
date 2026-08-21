@@ -74,9 +74,9 @@ function createController() {
       const selected = profileId ?? controller.currentDefaultProfileId;
       return {
         profileId: selected,
+        stateHome: "/shared/.codex",
         env: {
           ...process.env,
-          CODEX_HOME: `/profiles/${selected}`,
         },
       };
     },
@@ -172,7 +172,7 @@ function stubPlugin() {
     "./env-sanitize": "export function sanitizeNestedAgentEnv() {}",
     "./path-reconstruction": "export function injectEnrichedPath() {}",
     "./hook-rpc": "export function getHookRpcEnvSafe() { return null; }",
-    "./spark-home": "export function sparkHome() { return '/tmp/codara-pty-test'; }",
+    "./codara-home": "export function codaraHome() { return '/tmp/codara-pty-test'; }",
     "./orchestration/native-codex-profile-runtime": `
       export function resolveNewNativeCodexProfile() {
         return Promise.resolve(globalThis.__codaraPtySpawnHarness.resolveProfile());
@@ -196,14 +196,13 @@ function stubPlugin() {
       }
     `,
     "./orchestration/codex-cli-profile-execution": `
-      export function buildCodexCliProfileEnvironment(baseEnv, codexHome) {
+      export function buildCodexCliSharedEnvironment(baseEnv) {
         const env = {};
         for (const [key, value] of Object.entries(baseEnv)) {
           const upper = key.toUpperCase();
           if (upper === "CODEX_HOME" || upper === "OPENAI_API_KEY" || upper === "CODEX_API_KEY") continue;
           if (typeof value === "string") env[key] = value;
         }
-        env.CODEX_HOME = codexHome;
         return env;
       }
     `,
@@ -395,23 +394,24 @@ async function main() {
     assert.ok(replacement.pid > 0);
 
     // A fresh manual Codex pane resolves the configured default once, pins the
-    // exact home into its shell, and retains that identity on same-id attach
-    // even after the default changes.
+    // one shared state home into its shell and retains the existing process on
+    // same-id attach even after the default changes.
     process.env.OPENAI_API_KEY = "must-not-leak";
     const firstProfile = controller.currentDefaultProfileId;
     const codexFirst = await pty.spawn(localCodexOptions("codex-frozen"));
     const firstCodexSpawn = controller.localSpawnCalls.at(-1);
     assert.equal(codexFirst.nativeCodexProfileId, firstProfile);
-    assert.equal(firstCodexSpawn.options.env.CODEX_HOME, `/profiles/${firstProfile}`);
+    assert.equal(firstCodexSpawn.options.env.CODEX_HOME, undefined);
     assert.equal(firstCodexSpawn.options.env.OPENAI_API_KEY, undefined);
     assert.equal(controller.activeProfileLeases.get("terminal:codex-frozen"), firstProfile);
     controller.currentDefaultProfileId =
       "00000000-0000-4000-8000-000000000002";
+    const spawnCountBeforeAttach = controller.localSpawnCalls.length;
     const codexAttach = await pty.spawn(localCodexOptions("codex-frozen"));
     assert.equal(codexAttach.nativeCodexProfileId, firstProfile);
     assert.equal(
-      controller.localSpawnCalls.filter((call) => call.options.env?.CODEX_HOME === `/profiles/${firstProfile}`).length,
-      1,
+      controller.localSpawnCalls.length,
+      spawnCountBeforeAttach,
       "default changes must not respawn or reroute an existing pane",
     );
     pty.killImmediate("codex-frozen");

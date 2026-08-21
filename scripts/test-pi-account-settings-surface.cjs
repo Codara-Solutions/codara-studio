@@ -11,6 +11,7 @@ const ipc = read("src/main/ipc.ts");
 const preload = read("src/preload/index.ts");
 const settings = read("src/renderer/src/components/SettingsDialog.tsx");
 const cards = read("src/renderer/src/components/AccountCards.tsx");
+const usageUi = read("src/renderer/src/components/SubscriptionUsage.tsx");
 
 const channels = [
   "pi-subscriptions:add-account",
@@ -34,6 +35,11 @@ for (const compatibilityChannel of [
   assert.ok(preload.includes(`ipcRenderer.invoke("${compatibilityChannel}"`));
 }
 
+assert.match(ipc, /isPiSubscriptionProvider\(value\)/);
+assert.doesNotMatch(
+  ipc,
+  /value === "anthropic" \|\| value === "openai-codex"/,
+);
 assert.match(ipc, /startPiSubscriptionProfileLogin/);
 assert.match(ipc, /renamePiAccountProfile/);
 assert.match(ipc, /setDefaultPiAccountProfile/);
@@ -79,8 +85,8 @@ for (const action of [
   assert.ok(cards.includes(action), `${action} action must render`);
 }
 assert.ok(
-  cards.includes("Active"),
-  "the account Cora is running on must be marked active",
+  cards.includes("Using"),
+  "the account Cora or the CLI is running on must be marked Using",
 );
 assert.match(cards, /aria-haspopup="menu"/);
 assert.match(cards, /role="menuitem"/);
@@ -93,16 +99,17 @@ assert.match(cards, /className="spark-menu"/);
 assert.match(cards, /className="spark-menu-item"/);
 assert.doesNotMatch(cards, /role="menuitem"\s+className="spark-btn"/);
 assert.doesNotMatch(cards, /className="spark-btn"\s+disabled=\{choice\.disabled\}/);
-// Action diet: a card renders at most two buttons — the most useful next step
-// (accent primary) plus one runner-up — and every other action waits behind a
-// "···" menu on the same spark-menu surface. A state that is already true
-// never gets a button, so a healthy active card shows only the menu.
-assert.match(cards, /const MAX_VISIBLE_CARD_ACTIONS = 2;/);
-assert.match(cards, /nextSteps\.slice\(0, MAX_VISIBLE_CARD_ACTIONS\)/);
-assert.match(cards, /nextSteps\.slice\(MAX_VISIBLE_CARD_ACTIONS\)/);
+// Each card has two independently switchable roles. Use-for-Cora and
+// use-for-CLI are always named, never a combined "Use this account". Rename,
+// reconnect, sign out, and delete wait behind the "···" menu.
+assert.match(cards, /function AccountRoleRow\(/);
+assert.match(cards, /<CodaraMark size=\{13\} \/>/);
+assert.match(read("src/renderer/src/components/BrandMarks.tsx"), /export function CodaraMark/);
+assert.match(cards, /Use this account for Cora/);
+assert.match(cards, /Use this account for \$\{cliLabel\}/);
 assert.match(cards, /function CardOverflowMenu\(/);
 assert.match(cards, /More actions for \$\{card\.label\}/);
-assert.match(cards, /primary=\{index === 0\}/);
+assert.match(cards, /onCliConnect/);
 // The destructive block (Sign out, Delete) sits in its own bottom menu group,
 // and Delete keeps its two-step arming inside the menu: the first click arms
 // ("Confirm delete") and returns false so the menu stays open.
@@ -113,9 +120,9 @@ assert.match(cards, /setDeleteArmed\("cli"\);\s*return false;/);
 assert.ok(cards.includes("Confirm delete"));
 // Closing the menu in any way disarms a half-armed delete.
 assert.match(cards, /onClose=\{\(\) => setDeleteArmed\(null\)\}/);
-// Selection wash stays subtle: an accent hairline + faint ring + ≤4% accent
-// fill. The old accent-soft (18%) fill read as a warning tint.
-assert.match(cards, /color-mix\(in oklch, var\(--accent\) 3%, transparent\)/);
+// Selection wash follows the agent brand, not the workspace accent, so a
+// Claude card stays orange in a teal project.
+assert.match(cards, /agentBrandColor\(runtime\)/);
 assert.doesNotMatch(cards, /background: active\s*\? "var\(--accent-soft\)"/);
 // Each card says which login it is, and a CLI-only card says why it shows no
 // usage bars rather than showing none. Nothing is fetched for that card: Codara
@@ -165,8 +172,9 @@ assert.match(settings, /onCoraReconnect:/);
 assert.match(settings, /onCoraRename:/);
 assert.match(settings, /onCoraUse:/);
 assert.match(settings, /onCoraDelete:/);
+assert.match(settings, /onCliConnect:/);
 assert.match(settings, /active: profile\.isDefault/);
-assert.match(cards, /border: active \? "1px solid var\(--accent-edge\)"/);
+assert.match(cards, /inset 2px 0 0 \$\{brand\}/);
 assert.match(settings, /connected: profile\.connected/);
 assert.match(settings, /expired: profile\.expired/);
 
@@ -186,7 +194,8 @@ assert.match(piAuth, /\.\.\.\(accountFingerprint \? \{ accountFingerprint \} : \
 assert.match(piAuth, /profile\.accountEmail \?\? status\?\.accountEmail/);
 assert.match(piAuth, /\.\.\.\(email \? \{ email \} : \{\}\)/);
 assert.match(piStore, /jwtEmailClaim\(credential\.access\)/);
-assert.match(piStore, /if \(provider !== "openai-codex"\) return undefined;/);
+assert.match(piStore, /if \(provider === "openai-codex"\)/);
+assert.match(piStore, /if \(provider === "xai"\)/);
 assert.match(piStore, /createHash\("sha256"\)\.update\(accountId\)\.digest\("hex"\)/);
 assert.match(shared, /accountFingerprint\?: string;/);
 assert.match(settings, /Identity pairing/);
@@ -211,10 +220,23 @@ assert.match(
   settings,
   /Same email address — reconnect to Cora to fully pair these sign-ins\./,
 );
-// Unmatched accounts — every Anthropic one, since Pi's Anthropic credential
-// carries no account id — still get their own card and their own copy.
+// Unmatched accounts still get their own card and clear copy explaining why.
 assert.match(settings, /filter\(\(profile\) => !pairedCliIds\.has\(profile\.id\)\)/);
-assert.match(settings, /that account appears twice — once for each sign-in/);
+assert.match(
+  settings,
+  /profile\.managed \|\| profile\.status === "connected"/,
+  "an unsigned built-in CLI slot must not render as its own account card",
+);
+assert.match(settings, /unsigned built-in CLI slot is not an account/);
+assert.match(settings, /Only a \*signed-in\* unmatched CLI can merge/);
+
+assert.match(settings, /function accountCardShowsUsage/);
+assert.match(usageUi, /connected && usage\.windows\.length === 0 && !usage\.limitReached/);
+assert.doesNotMatch(
+  usageUi,
+  /This provider reported no usage windows\./,
+  "providers with no quota API must not render a red empty-windows error",
+);
 
 const connectionDtoStart = shared.indexOf(
   "export interface PiSubscriptionProfileConnection",
@@ -310,27 +332,29 @@ assert.match(anchored, /addEventListener\("mousedown", onPointerDown, true\)/);
 assert.match(anchored, /removeEventListener\("mousedown", onPointerDown, true\)/);
 
 // The "···" trigger is anchored at the card's top-right, in the header row
-// beside the Active pill (pill first, dots outermost) — never in the action
-// row, which carries only the ≤2 primary/secondary buttons and disappears
-// entirely when there is nothing to show. A card with no visible actions still
-// gets its menu, because the header is now its only home.
-const headerPillIndex = cards.indexOf("{activeLabel}");
+// — never on a role row. Use-for-Cora and use-for-CLI live on those rows, so
+// a card with both sides already Using still has its menu.
 const overflowIndex = cards.indexOf("<CardOverflowMenu");
-const connectionLinesIndex = cards.indexOf("<ConnectionLine state={coraConnectionState(cora)}");
-assert.ok(headerPillIndex >= 0 && overflowIndex >= 0 && connectionLinesIndex >= 0);
+const roleRowIndex = cards.indexOf("<AccountRoleRow");
+assert.ok(overflowIndex >= 0 && roleRowIndex >= 0);
 assert.ok(
-  headerPillIndex < overflowIndex && overflowIndex < connectionLinesIndex,
-  "the overflow menu must render in the card header, after the Active pill and before the card body",
+  overflowIndex < roleRowIndex,
+  "the overflow menu must render in the card header, before the Cora / CLI role rows",
 );
 assert.equal(
   (cards.match(/<CardOverflowMenu/g) ?? []).length,
   1,
-  "the overflow menu renders once, in the header — not again in the action row",
+  "the overflow menu renders once, in the header",
 );
-assert.match(
+assert.equal(
+  (cards.match(/<AccountRoleRow/g) ?? []).length,
+  2,
+  "each card has one Cora row and one CLI row",
+);
+assert.doesNotMatch(
   cards,
-  /\) : visibleActions\.length > 0 \? \(/,
-  "the action row must render only when it has buttons to show",
+  /visibleActions\.length > 0/,
+  "use actions live on the role rows, not a leftover action ladder",
 );
 
 console.log(

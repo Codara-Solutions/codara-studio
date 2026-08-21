@@ -191,7 +191,7 @@ function Head({
         borderBottom: "1px solid var(--rule)",
       }}
     >
-      <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, borderRadius: 7, background: "color-mix(in oklch, var(--accent) 14%, var(--panel-2))", color: "var(--accent)", fontSize: 14 }}>
+      <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, borderRadius: 7, background: "color-mix(in oklch, var(--accent) 14%, var(--panel-2))", color: "var(--accent-text)", fontSize: 14 }}>
         ↻
       </span>
       <span style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>

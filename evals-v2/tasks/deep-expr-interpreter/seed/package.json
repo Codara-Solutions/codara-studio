@@ -1,7 +1,0 @@
-{
-  "name": "calclang",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Arithmetic expression-language interpreter (build target for Spark deep-chain eval).",
-  "license": "MIT"
-}

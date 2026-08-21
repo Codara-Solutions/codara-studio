@@ -14,7 +14,7 @@
 //      commit (the store is the only place the current revision is
 //      authoritative).
 //   3. Legacy adoption: reading the retired per-WORKSPACE board files under
-//      sparkHome()/boards so a chat opening its empty board can adopt the old
+//      codaraHome()/boards so a chat opening its empty board can adopt the old
 //      cards exactly once. The legacy files are never rewritten; a sidecar
 //      `<file>.adopted.json` marks which run took them.
 //
@@ -26,7 +26,7 @@ import { promises as fs } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { BoardCard, BoardCardStatus, RunBoard } from "@shared/types";
 import { writeFileAtomic } from "../fs-atomic";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 
 // Caps on card text and volume so one runaway write can't bloat run.json into
 // something the renderer chokes on.
@@ -346,12 +346,12 @@ export function composeBoardNudgeMessage(cards: BoardCard[]): string {
 
 // ── Legacy workspace-board adoption ─────────────────────────────────────────
 // The retired board engine kept one JSON file per workspace under
-// sparkHome()/boards. Those files stay on disk untouched; the first chat that
+// codaraHome()/boards. Those files stay on disk untouched; the first chat that
 // opens an empty board in that workspace adopts the cards ONCE, marked by a
 // sidecar file so a second chat doesn't adopt them again.
 
 function boardsRoot(): string {
-  return join(sparkHome(), "boards");
+  return join(codaraHome(), "boards");
 }
 
 // Mirrors the retired store's file naming exactly so the legacy files resolve.

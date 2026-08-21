@@ -115,6 +115,89 @@ function srgbChannelToLinear(channel: number): number {
     : ((value + 0.055) / 1.055) ** 2.4;
 }
 
+function relativeLuminance([red, green, blue]: [number, number, number]): number {
+  return (
+    0.2126 * srgbChannelToLinear(red) +
+    0.7152 * srgbChannelToLinear(green) +
+    0.0722 * srgbChannelToLinear(blue)
+  );
+}
+
+function rgbToHex([red, green, blue]: [number, number, number]): string {
+  return `#${[red, green, blue]
+    .map((channel) => Math.round(channel).toString(16).padStart(2, "0"))
+    .join("")}`.toUpperCase();
+}
+
+function mixRgb(
+  source: [number, number, number],
+  target: [number, number, number],
+  amount: number,
+): [number, number, number] {
+  return source.map(
+    (channel, index) => channel + (target[index] - channel) * amount,
+  ) as [number, number, number];
+}
+
+/** WCAG contrast ratio between two hex colors. Invalid values return 1. */
+export function workspaceColorContrast(left: string, right: string): number {
+  const leftRgb = parseHexColor(left);
+  const rightRgb = parseHexColor(right);
+  if (!leftRgb || !rightRgb) return 1;
+  const lighter = Math.max(relativeLuminance(leftRgb), relativeLuminance(rightRgb));
+  const darker = Math.min(relativeLuminance(leftRgb), relativeLuminance(rightRgb));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * Keep a workspace's chosen hue, but move it only as far toward the theme ink
+ * as needed for small UI text. This lets arbitrary custom colors remain useful
+ * identifiers without allowing near-black blue on a dark theme (or pale yellow
+ * on a light theme) to make buttons and labels disappear.
+ */
+export function readableWorkspaceAccent(
+  value: string,
+  surface: string,
+  themeInk: string,
+  minimumContrast = 4.5,
+): string {
+  const source = parseHexColor(value);
+  const background = parseHexColor(surface);
+  const preferredTarget = parseHexColor(themeInk);
+  if (!source || !background) return normalizeWorkspaceColor(value) ?? WORKSPACE_COLORS[0];
+
+  const normalized = rgbToHex(source);
+  if (workspaceColorContrast(normalized, rgbToHex(background)) >= minimumContrast) {
+    return normalized;
+  }
+
+  const black: [number, number, number] = [0, 0, 0];
+  const white: [number, number, number] = [255, 255, 255];
+  const target = preferredTarget && workspaceColorContrast(rgbToHex(preferredTarget), rgbToHex(background)) >= minimumContrast
+    ? preferredTarget
+    : workspaceColorContrast("#000000", rgbToHex(background)) >=
+        workspaceColorContrast("#FFFFFF", rgbToHex(background))
+      ? black
+      : white;
+
+  // One-percent steps are visually finer than a color-picker adjustment and
+  // avoid a binary-search result falling below the ratio after hex rounding.
+  for (let step = 1; step <= 100; step += 1) {
+    const candidate = rgbToHex(mixRgb(source, target, step / 100));
+    if (workspaceColorContrast(candidate, rgbToHex(background)) >= minimumContrast) {
+      return candidate;
+    }
+  }
+  return rgbToHex(target);
+}
+
+/** Text color for controls whose fill is the resolved accessible accent. */
+export function workspaceAccentInk(value: string): "#10100E" | "#FFFFFF" {
+  return workspaceColorContrast(value, "#10100E") >= workspaceColorContrast(value, "#FFFFFF")
+    ? "#10100E"
+    : "#FFFFFF";
+}
+
 // OKLab is deliberately used for scoring rather than RGB/HSL distance: equal
 // numerical steps track perceived color difference much more closely, which
 // keeps a crowded rail from collapsing into several nearly identical greens.

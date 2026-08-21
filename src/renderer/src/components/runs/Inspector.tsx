@@ -683,7 +683,7 @@ function RunSummary({
               <StatusDot status={liveStep.status} size={6} />
               <span
                 style={{
-                  color: "var(--accent)",
+                  color: "var(--accent-text)",
                   fontFamily: "var(--font-sans)",
                   fontSize: 10,
                   fontWeight: 600,
@@ -1520,7 +1520,7 @@ function TaskBrief({ text }: { text: string }) {
             alignSelf: "flex-start",
             border: 0,
             background: "transparent",
-            color: "var(--accent)",
+            color: "var(--accent-text)",
             padding: 0,
             fontFamily: "var(--font-sans)",
             fontSize: 10.5,
@@ -1654,7 +1654,7 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
         <ReportGroup label={`Files changed · ${report.filesChanged.length}`}>
           {report.filesChanged.slice(0, fileCap).map((file, i) => (
             <div key={i} style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, lineHeight: 1.5, wordBreak: "break-word" }}>
-              <span style={{ color: "var(--accent)" }}>{file.path}</span>
+              <span style={{ color: "var(--accent-text)" }}>{file.path}</span>
               {file.reason && <span style={{ color: "var(--muted)" }}> — {file.reason}</span>}
             </div>
           ))}

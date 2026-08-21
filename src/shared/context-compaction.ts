@@ -13,8 +13,6 @@
 // copy of these two numbers. scripts/test-pi-cora-extension.cjs asserts all
 // three copies (here, orchestration/pi-runtime.ts, and the extension) agree.
 
-import type { ChatBackendKind } from "./types";
-
 /** Codara's default early-compaction trigger, in context tokens. */
 export const DEFAULT_PI_COMPACT_AT_TOKENS = 256_000;
 
@@ -52,19 +50,14 @@ export function effectiveCompactionCapTokens(
 
 /**
  * The capacity a chat's context meter and auto-compaction trigger both measure
- * against.
- *
- * Only Pi-backed chats load Codara's compaction extension. The claude and
- * codex manager backends drive the real CLIs, which compact on their own terms,
- * so those chats keep reading against the model's full window.
+ * against. Every chat is Pi-backed and loads Codara's compaction extension,
+ * so the ceiling is always the compaction cap, never the raw model window.
  */
 export function chatContextCapacityTokens(input: {
   contextWindowTokens: number;
-  backend: ChatBackendKind;
   /** The stamped CODARA_PI_COMPACT_AT_TOKENS for this session, when known. */
   compactAtTokens?: number | null;
 }): number {
-  if (input.backend !== "pi") return input.contextWindowTokens;
   const threshold =
     typeof input.compactAtTokens === "number" && input.compactAtTokens > 0
       ? input.compactAtTokens

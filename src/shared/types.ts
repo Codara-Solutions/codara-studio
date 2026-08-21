@@ -1,3 +1,11 @@
+import type {
+  AgentRuntimeKind as AgentFamilyRuntime,
+  NativeCliAccountRuntime as NativeCliAccountFamily,
+  PiSubscriptionProvider as PiSubscriptionFamily,
+  SparkBuiltinRuntime as SparkBuiltinFamily,
+  WorkerSessionRuntime as WorkerSessionFamily,
+} from "./agent-families";
+
 export type ShellId = string;
 
 export interface ShellInfo {
@@ -601,7 +609,7 @@ export interface AppSettings {
 // runtime. Subscription credentials deliberately live outside AppSettings in
 // Pi's private auth.json; these shapes expose status and the interactive OAuth
 // ceremony without ever crossing IPC with access or refresh tokens.
-export type PiSubscriptionProvider = "anthropic" | "openai-codex";
+export type PiSubscriptionProvider = PiSubscriptionFamily;
 
 export interface PiSubscriptionConnection {
   provider: PiSubscriptionProvider;
@@ -704,7 +712,7 @@ export interface PiSubscriptionOverview {
 // accountFingerprint digest and the account's own email address below — never
 // as a raw account id, and never onto a phone: the remote projections in
 // src/main/remote-access strip the email.
-export type NativeCliAccountRuntime = "claude" | "codex";
+export type NativeCliAccountRuntime = NativeCliAccountFamily;
 
 export type NativeCliAccountConnectionStatus =
   | "connected"
@@ -1293,7 +1301,7 @@ export interface TerminalAgentStatePayload {
   workspaceId: string;
   tabId: string;
   paneId: string;
-  runtime: "claude" | "codex" | null;
+  runtime: AgentFamilyRuntime | null;
   state: RuntimeState;
 }
 
@@ -1421,9 +1429,9 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
   value: AppPreferences[K];
 }
 
-export type AgentRuntimeKind = "claude" | "codex";
+export type AgentRuntimeKind = AgentFamilyRuntime;
 
-export type WorkerSessionRuntime = "claude" | "codex";
+export type WorkerSessionRuntime = WorkerSessionFamily;
 
 // Lightweight metadata read from the CLI-owned transcript stores for the
 // manual-worker session picker. The transcript itself never crosses IPC.
@@ -1433,6 +1441,8 @@ export interface WorkerSessionSummary {
   nativeClaudeProfileId?: string;
   /** Frozen native Codex account home. Undefined is legacy/personal. */
   nativeCodexProfileId?: string;
+  /** Frozen native Grok Build account home. Undefined is legacy/personal. */
+  nativeGrokProfileId?: string;
   sessionId: string;
   title: string;
   // First real user question, set when `title` is Claude Code's generated
@@ -1453,6 +1463,8 @@ export interface DeleteWorkerSessionInput {
   nativeClaudeProfileId?: string;
   /** Home that owns transcriptPath. Undefined is legacy/personal. */
   nativeCodexProfileId?: string;
+  /** Frozen native Grok Build account. Undefined is legacy/personal. */
+  nativeGrokProfileId?: string;
   sessionId: string;
   cwd: string;
   transcriptPath: string;
@@ -1499,11 +1511,6 @@ export interface AgentRuntimeCapabilities {
   systemPromptInjection: boolean;
   defaultContextWindowSize: number;
 }
-
-export type AgentRuntimeCapability = keyof Omit<
-  AgentRuntimeCapabilities,
-  "defaultContextWindowSize"
->;
 
 export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
@@ -1558,9 +1565,9 @@ export interface AgentSyncResult {
 }
 
 export type AgentAssetKind = "mcp" | "skill";
-export type AgentAssetRuntime = "claude" | "codex" | "shared";
+export type AgentAssetRuntime = AgentFamilyRuntime | "shared";
 export type AgentAssetScope = "user" | "workspace";
-export type AgentAssetCompatibility = "both" | "claude" | "codex" | "unknown";
+export type AgentAssetCompatibility = "both" | "claude" | "codex" | "grok" | "unknown";
 
 export interface AgentAssetInventoryItem {
   id: string;
@@ -1655,7 +1662,7 @@ export interface AgentAssetInstallResult {
 // third-party MCPs the user wires up — with per-runtime install controls.
 
 export type SparkBuiltinMcpId = "codara-studio";
-export type SparkBuiltinRuntime = "claude" | "codex";
+export type SparkBuiltinRuntime = SparkBuiltinFamily;
 
 // Per-runtime install state for a built-in:
 //  - "installed":    a Codara-managed entry is present (we can uninstall it).
@@ -1690,6 +1697,7 @@ export interface SparkBuiltinMcpStatus {
   autoManaged: boolean;
   claude: SparkBuiltinRuntimeStatus;
   codex: SparkBuiltinRuntimeStatus;
+  grok: SparkBuiltinRuntimeStatus;
 }
 
 export interface SparkBuiltinActionResult {
@@ -1868,34 +1876,6 @@ export type GitCopyWorktreeResult =
 /** Result of asking the subscription-backed Pi one-shot to draft a commit message. */
 export type GitCommitMessageResult =
   | { ok: true; message: string }
-  | { ok: false; error: string };
-
-export interface GitSmartMergeContext {
-  fetchedAt: string;
-  repositoryRoot: string;
-  branch?: string;
-  upstream?: string;
-  detached: boolean;
-  head: string;
-  ahead: number;
-  behind: number;
-  stagedCount: number;
-  unstagedCount: number;
-  hasConflicts: boolean;
-  hasWorkingChanges: boolean;
-  workingFiles: string[];
-  localCommitFiles: string[];
-  remoteChangedFiles: string[];
-  overlappingFiles: string[];
-  statusShort: string;
-  localOnlyCommits: string;
-  remoteOnlyCommits: string;
-  mergeBase?: string;
-  recommendedStrategy: string;
-}
-
-export type GitSmartMergeResult =
-  | { ok: true; context: GitSmartMergeContext }
   | { ok: false; error: string };
 
 // ── Branches ──────────────────────────────────────────────────────────────────
@@ -2122,20 +2102,21 @@ export interface RunAssumption {
 }
 
 // Which Cora manager backend drives this chat's manager decisions and (in Talk
-// mode) chat replies. Every member runs a real agent process on the user's own
-// subscription auth, never a metered API key: "pi" is the pinned Pi runtime
-// (driven over RPC, no terminal), while "claude"/"codex" spawn a real `claude`
-// or `codex` process under node-pty and drive it for the chat surface. "pi" is
-// the default, when the chat-level field is unset on a RunState, callers treat
-// it as "pi", and a persisted legacy "openrouter" value (from when Cora could
-// be routed through an OpenRouter API key) migrates to "pi" on read.
-export type ChatBackendKind = "claude" | "codex" | "pi";
+// mode) chat replies. Pi — the pinned runtime driven over RPC on the user's
+// own subscription auth, never a metered API key — is the only member left:
+// the "claude"/"codex" manager backends (which spawned a real CLI under
+// node-pty) were retired in 2026-08, and persisted runs stamped with them
+// migrate to "pi" on read exactly like the even older "openrouter" value
+// (from when Cora could be routed through an OpenRouter API key). When the
+// chat-level field is unset on a RunState, callers treat it as "pi".
+export type ChatBackendKind = "pi";
 
 // Cora's Pi execution depth is a first-class, per-chat policy rather than a
 // model alias. Fast minimizes coordination overhead; Deep adds explicit
-// contract mapping and falsification; Frontier uses the strongest bounded
-// evidence contract and is the only route eligible for audited-state reuse.
-export type CoraExecutionPolicy = "fast" | "deep" | "frontier";
+// contract mapping and falsification. (A third "frontier" tier was removed
+// in 2026-08; persisted values migrate to "deep" on read.)
+export type CoraExecutionPolicy = "fast" | "deep";
+export type CoraExecutionStrategy = "auto" | "direct" | "managed";
 
 // Manager behaviour mode chosen per chat:
 //   auto    — Cora routes each message herself: answer directly, spawn workers,
@@ -2179,7 +2160,7 @@ export type StepStatus =
 // replan downstream steps using prior worker reports as evidence.
 export type StepKind = "worker_batch" | "brake";
 
-export type WorkerRuntime = "claude" | "codex" | "shell" | "manual";
+export type WorkerRuntime = AgentFamilyRuntime | "shell" | "manual";
 
 export type WorkerTaskStatus =
   | "created"
@@ -2254,7 +2235,7 @@ export type RuntimeState =
 // pointers are deactivated only for confirmed exits; heuristic loss still
 // clears the cosmetic worker chip but must not disable restart restoration.
 export interface TerminalAgentForegroundState {
-  runtime: "claude" | "codex" | null;
+  runtime: AgentFamilyRuntime | null;
   running: boolean;
   exitConfirmed?: boolean;
 }
@@ -2335,6 +2316,9 @@ export interface ManagerTurnRecovery {
 export interface RunState {
   id: string;
   workspaceId: string;
+  /** Named Cora identity and isolated memory namespace. Missing on legacy runs
+   * means the built-in `default` profile. Frozen for the life of the run. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   /**
    * Missing on legacy ordinary runs and therefore interpreted as "trusted".
@@ -2487,23 +2471,21 @@ export interface RunState {
   verificationRounds?: number;
   /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
-   * treated as "pi" by the dispatch layer. A run persisted with the retired
-   * "openrouter" backend is rewritten to "pi" by normalizeRun on read (its
-   * chatModel is dropped with it, that slug meant nothing to any surviving
-   * backend), so pre-feature chats keep working.
+   * treated as "pi" by the dispatch layer. A run persisted with a retired
+   * backend ("openrouter", "claude", "codex") is rewritten to "pi" by
+   * normalizeRun on read (its chatModel and session UUID are dropped with it;
+   * those meant nothing to the surviving backend), so old chats keep working.
    */
   chatBackend?: ChatBackendKind;
   /**
-   * Model id passed to the chosen backend, in that backend's own naming: for
-   * Pi a runtime-catalog model id; for Claude one of "claude-opus-5" /
-   * "claude-sonnet-5"; for Codex one of the GPT-5.6 Sol/Terra/Luna model ids.
-   * When undefined the backend picks its registered default.
+   * Pi runtime-catalog model id. When undefined the backend picks its
+   * registered default.
    */
   chatModel?: string;
   /** Execute = Codara spawns workers; Talk = pure conversational backend chat. */
   chatMode?: ChatMode;
-  /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
-   * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
+  /** Reasoning-effort level forwarded to the backend. Undefined leaves it at
+   * the backend default. */
   chatEffort?: AgentEffortLevel;
   /**
    * Opaque Pi account-profile UUID this run was pinned to at launch, resolved
@@ -2532,9 +2514,9 @@ export interface RunState {
   nativeClaudeProfileId?: string;
   /** Pinned Pi orchestration depth. NOT user-selectable: the effective policy
    * is derived from taskComplexity by effectiveRunExecutionPolicy in main.
-   * This field survives for pre-picker runs and for non-UI callers (frontier
-   * smoke scripts, automations) that pin a policy deliberately. Undefined
-   * migrates to Fast. Non-Pi backends persist it but ignore it. */
+   * This field survives for pre-picker runs and for non-UI callers
+   * (automations) that pin a policy deliberately. Undefined migrates to
+   * Fast; retired "frontier" values migrate to Deep. */
   coraExecutionPolicy?: CoraExecutionPolicy;
   /**
    * Provider-side session UUID for the CC/Codex CLI backing this chat. Stored
@@ -2562,8 +2544,9 @@ export interface RunState {
    */
   chatFastMode?: boolean;
   /**
-   * 1M-context toggle. Claude Code is normalized to true. Codex and Pi
-   * normalize it to false because they do not use this toggle.
+   * LEGACY, READ-ONLY. The retired Claude Code manager backend's 1M-context
+   * toggle. Nothing writes or reads it any more; declared so an existing
+   * run.json that carries it still parses.
    */
   chat1mContext?: boolean;
   /**
@@ -2767,6 +2750,23 @@ export interface WorkspaceMemoryLedger {
  */
 export type CoraMemoryScope = "global" | "workspace";
 
+/** A named Cora identity. Each profile owns its own global and per-workspace
+ * memory files; the built-in `default` profile keeps the legacy paths. */
+export interface CoraProfile {
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  identityPath: string;
+  createdAt: string;
+}
+
+export interface CoraProfileCreateInput {
+  name: string;
+  description?: string;
+  instructions?: string;
+}
+
 /** One memory file's live state, as reported to the renderer. */
 export interface MemoryTierStatus {
   /** Whether this tier is read into prompts and writable by `codara_remember`. */
@@ -2790,6 +2790,7 @@ export interface MemoryTierStatus {
 /** Both tiers at once: every memory IPC resolves to this pair, including the
  *  mutations, so the renderer never has to re-read after a change. */
 export interface CoraMemoryStatus {
+  profile: Pick<CoraProfile, "id" | "name" | "identityPath" | "isDefault">;
   global: MemoryTierStatus;
   workspace: MemoryTierStatus;
 }
@@ -2844,10 +2845,7 @@ export interface UndoToCheckpointInput {
   scope: "chat" | "chat+code";
 }
 
-// IPC payload for the composer's backend/model/mode/effort selector chip.
-// Feature flags are normalized by backend: Claude Code always uses 1M context,
-// and fast mode is Codex-only. Sending `chatBackend` flips the backend; the
-// dispatch layer in run-store starts a fresh CLI session next message.
+// IPC payload for the composer's model/mode/effort selector chip.
 export interface UpdateChatBackendInput {
   runId: string;
   chatBackend?: ChatBackendKind;
@@ -2855,7 +2853,6 @@ export interface UpdateChatBackendInput {
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
   coraExecutionPolicy?: CoraExecutionPolicy;
-  chat1mContext?: boolean;
 }
 
 export interface UndoToCheckpointResult {
@@ -2864,40 +2861,6 @@ export interface UndoToCheckpointResult {
    * can prefill the composer with it. Null when the checkpoint was a run-start
    * baseline (no associated user message). */
   restoredText: string | null;
-}
-
-export interface RunWorkerGroupStats {
-  id: string;
-  stepId?: string;
-  title: string;
-  workerTaskIds: string[];
-  attemptIds: string[];
-  runtimes: WorkerRuntime[];
-  startedAt?: string;
-  finishedAt?: string;
-  durationSeconds: number;
-  totalWorkerRuntimeSeconds: number;
-  verifierCount: number;
-  outcome: "idle" | "running" | "succeeded" | "failed" | "mixed";
-}
-
-export interface RunStats {
-  runId: string;
-  workspaceId: string;
-  status: RunStatus;
-  startedAt?: string;
-  finishedAt?: string;
-  durationSeconds: number;
-  retryCount: number;
-  workerCount: number;
-  attemptCount: number;
-  managerCallCount: number;
-  humanInterventions: number;
-  timeToFirstWorkerSeconds: number | null;
-  totalWorkerRuntimeSeconds: number;
-  estimatedCriticalPathSeconds: number;
-  parallelEfficiency: number;
-  workerGroups: RunWorkerGroupStats[];
 }
 
 export type AutopilotStatus = "idle" | "running" | "paused" | "blocked" | "complete" | "failed" | "cancelled";
@@ -3026,6 +2989,10 @@ export interface HumanRunMessage {
    *  only so delivery treats it as manager input — like `boardNote`, it is not
    *  the user's own words, so attribution and intent heuristics skip it. */
   resumeNote?: true;
+  /** The real user message whose send also resumed the paused run. When set,
+   *  the synthetic resume note is backend-only context and UI surfaces fold it
+   *  into this message instead of showing a second, fake user turn. */
+  resumesMessageId?: string;
 }
 
 export interface RunArtifactPaths {
@@ -3049,6 +3016,24 @@ export interface WorkerArtifactPaths {
   stderrLog: string;
   rawLog: string;
   finalReportJson: string;
+  diffPatch: string;
+  /** Pre-launch copy of declared files for truthful diffs outside Git repos. */
+  diffBaselineDir: string;
+}
+
+export interface WorkerDiffFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  binary?: true;
+}
+
+export interface WorkerDiffSummary {
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  /** Capped detail list; fileCount remains the truthful total. */
+  files: WorkerDiffFile[];
 }
 
 export interface StepState {
@@ -3314,6 +3299,19 @@ export interface WorkerTask {
    */
   verifierFeedbackRounds?: number;
   /**
+   * Declared-at-spawn verification: the manager attached this verifier brief
+   * when it spawned the implementation worker. The harness auto-spawns a
+   * verifier task with this brief the moment the worker's report is accepted,
+   * without waking the manager (mechanical end-game).
+   */
+  verifierBrief?: string;
+  /**
+   * Set on auto-spawned verifier tasks: the implementation task whose
+   * verifierBrief created this verifier. wait_for_workers follows this link so
+   * a manager waiting on the implementation also waits on its verifier.
+   */
+  autoVerifierForTaskId?: string;
+  /**
    * Looms v2.5: which graph node (LoomNodeDef.id) this task executes within a
    * loom pass. Stamped by run-store's node launcher; undefined on managed runs
    * and on pre-graph direct runs. For a degenerate single-node loom this is the
@@ -3423,6 +3421,8 @@ export interface WorkerAttempt {
   nativeCodexProfileId?: string;
   /** Concrete native Claude CLI account for a native Claude attempt. */
   nativeClaudeProfileId?: string;
+  /** Concrete native Grok Build account for a native Grok attempt. */
+  nativeGrokProfileId?: string;
   command?: string;
   cwd: string;
   status: WorkerAttemptStatus;
@@ -3436,6 +3436,9 @@ export interface WorkerAttempt {
   workpadPath?: string;
   finalReportPath?: string;
   diffPath?: string;
+  /** Measured against this attempt's pre-worker Git checkpoint. Refreshed
+   *  while Pi edits and persisted when the attempt settles. */
+  diffSummary?: WorkerDiffSummary;
   /**
    * Sandbox worktree fields. Set only for sandboxed unattended attempts
    * (AppSettings.autopilotSandbox on + an autopilot caller), undefined for
@@ -3465,6 +3468,11 @@ export interface WorkerAttempt {
    * `estimatedWorkerCostUsd` placeholder estimate.
    */
   costUsd?: number;
+  /** Provider usage for this attempt. Absent on legacy/non-structured workers. */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   /**
    * Classification of `error`, written whenever an attempt is recorded as
    * failed. Purely additive: absent for successful attempts, for runs written
@@ -3539,6 +3547,8 @@ export interface WorkerTaskEnvelope {
   nativeCodexProfileId?: string;
   /** Frozen native Claude account for CLI/SDK-backed attempts. */
   nativeClaudeProfileId?: string;
+  /** Frozen native Grok Build account for CLI-backed attempts. */
+  nativeGrokProfileId?: string;
   cwd: string;
   executionDisabled: true;
   task: WorkerTask;
@@ -3680,6 +3690,8 @@ export interface SparkCall {
   nativeCodexProfileId?: string;
   /** Frozen native Claude CLI profile for this manager call. */
   nativeClaudeProfileId?: string;
+  /** Frozen native Grok Build CLI profile for this manager call. */
+  nativeGrokProfileId?: string;
   status: "started" | "completed" | "failed";
   /** Ordered user-message ids frozen onto this manager turn before startup. */
   inputMessageIds?: string[];
@@ -3733,17 +3745,6 @@ export interface SparkCall {
 
 export type SparkManagerMode = "plan_analysis" | "chat" | "step_planning" | "worker_result_review";
 
-export interface ContextPacket {
-  id: string;
-  runId: string;
-  decisionType: SparkCall["mode"];
-  included: Array<{ label: string; reason: string; tokenEstimate?: number }>;
-  excluded: Array<{ label: string; reason: string }>;
-  tokenBudget: number;
-  tokenEstimate: number;
-  createdAt: string;
-}
-
 export interface SparkEvent {
   id: string;
   timestamp: string;
@@ -3766,6 +3767,8 @@ export interface CreateRunInput {
   workspaceId: string;
   workspaceName: string;
   cwd: string;
+  /** Named Cora profile. Omitted selects the user's current default profile. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
   title?: string;
@@ -3780,7 +3783,6 @@ export interface CreateRunInput {
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
   coraExecutionPolicy?: CoraExecutionPolicy;
-  chat1mContext?: boolean;
   // Looms v2: stamp automation ownership + direct execution at creation so
   // the renderer can suppress tabs synchronously from the very first event.
   automationId?: string;
@@ -4075,6 +4077,9 @@ export interface CreateWorkerTaskInput {
   // execute-mode spawn handler after its session-reuse gate passed.
   followUpOfTaskId?: string;
   resumeSessionId?: string;
+  // Declared-at-spawn verification; thread onto the created WorkerTask.
+  verifierBrief?: string;
+  autoVerifierForTaskId?: string;
 }
 
 export interface UpdateWorkerTaskInput {
@@ -4114,9 +4119,18 @@ export interface StartAutopilotInput {
   workspaceId: string;
   workspaceName: string;
   cwd: string;
+  /** Named Cora profile. Omitted selects the current default for a new run. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
   runId?: string;
+  /**
+   * auto: direct for bounded work in a small workspace, managed otherwise.
+   * direct/managed are explicit overrides used by the CLI and advanced flows.
+   */
+  executionStrategy?: CoraExecutionStrategy;
+  /** Optional explicit title. Ordinary chats still derive one from the prompt. */
+  title?: string;
   planPath?: string;
   planTitle?: string;
   planText?: string;
@@ -4154,7 +4168,7 @@ export interface StartAutopilotInput {
 // ── Daemon split scaffold ───────────────────────────────────────────────────
 // Cross-boundary handshake descriptor for the detached orchestration daemon
 // (docs/daemon-split-PLAN.md). The daemon host writes this JSON to
-// sparkHome()/<handshake file> on startup — the same loopback-HTTP + bearer
+// codaraHome()/<handshake file> on startup — the same loopback-HTTP + bearer
 // pattern agent-socket.ts uses (see writeHandshakeFile there); out-of-process
 // clients (and, in a later phase, the renderer) read it to discover the
 // 127.0.0.1 RPC endpoint and per-launch token. Shape mirrors the agent-socket
@@ -4176,6 +4190,8 @@ export interface PauseRunInput {
 
 export interface ResumeRunInput {
   runId: string;
+  /** Internal linkage used when sending a message implicitly presses Resume. */
+  triggerMessageId?: string;
 }
 
 export interface CancelRunInput {
@@ -4203,6 +4219,8 @@ export interface AddRunMessageInput {
    *  their own question — an unlinked affirmative ("yes" to some other
    *  question, a casual "ok" note) must never approve a pending change. */
   answersMessageId?: string;
+  /** Internal recursion guard used while addDirectIteration records its note. */
+  skipDirectDispatch?: true;
 }
 
 export interface CancelQueuedMessageInput {
@@ -4293,55 +4311,6 @@ export interface SearchSummary {
 
 export interface StartSearchResponse {
   searchId: string;
-}
-
-// ── Overnight queue + scheduler ─────────────────────────────────────────────
-// Shared shapes for the overnight RunQueue (run-queue.ts) and the cron-style
-// scheduler registry (scheduler.ts), both living in src/main/orchestration and
-// driving the existing startAutopilot(input: StartAutopilotInput) from
-// run-store.ts. SCAFFOLD per docs/overnight-queue-PLAN.md: queue persistence is
-// a single JSON file and cron firing is stubbed (see the modules' TODOs); these
-// types are the stable contract the main process, IPC/preload bridge, and the
-// renderer Queue panel all share. Timestamps are ISO strings, matching RunState.
-
-// Lifecycle of a single queued run. Mirrors the manager run lifecycle but is
-// owned by the queue: an item is `queued` until the scheduler claims it,
-// `running` while its underlying autopilot run is live, then terminal as
-// `done` / `failed` / `cancelled`.
-export type QueuedRunStatus = "queued" | "running" | "done" | "failed" | "cancelled";
-
-// One entry in the overnight queue. `input` is the exact StartAutopilotInput
-// that will be handed to startAutopilot when this item is dequeued; `runId` is
-// filled in once the run is actually created so the panel can link to it.
-export interface QueuedRun {
-  id: string;
-  title: string;
-  status: QueuedRunStatus;
-  input: StartAutopilotInput;
-  // Set once the queue starts the run via startAutopilot. Absent while queued.
-  runId?: string;
-  // Populated when status is `failed` with the failure reason.
-  error?: string;
-  enqueuedAt: string; // ISO timestamp
-  startedAt?: string; // ISO timestamp; set when status flips to `running`
-  finishedAt?: string; // ISO timestamp; set on a terminal status
-}
-
-// Payload the renderer sends to enqueue a run. Title is optional — the queue
-// derives one from the input (e.g. plan title) when omitted.
-export interface EnqueueRunInput {
-  title?: string;
-  input: StartAutopilotInput;
-}
-
-// Snapshot of the whole queue. A single queue instance for now (`id`), with a
-// `concurrency` cap on simultaneously-running items and a `running` flag for
-// whether the queue is actively draining. SCAFFOLD: persisted as one JSON file.
-export interface RunQueueState {
-  id: string;
-  concurrency: number;
-  running: boolean;
-  items: QueuedRun[];
 }
 
 // Automations ─────────────────────────────────────────────────────────────────
@@ -4605,20 +4574,12 @@ export interface AutomationWorkerInfo {
    *  leaves them undefined, which renders identically to today). */
   nodeId?: string;
   nodeLabel?: string;
-  /** Transport running this worker: "pi-rpc" (the bundled Pi harness, the
-   *  only production path) or the legacy structured transports kept for the
-   *  e2e escape hatch (SPARK_E2E_LEGACY_WORKER_HARNESS). */
+  /** Transport running this worker: always "pi-rpc" (the bundled Pi
+   *  harness); retired legacy transport values may survive in old logs. */
   transport?: "pi-rpc" | "agent-sdk" | "app-server";
   /** Ordered human-readable activity and raw provider event logs. */
   stdoutLogPath?: string;
   rawLogPath?: string;
-}
-
-/** SparkEvent "automation.worker" payload (broadcast-only, not journaled —
- *  same pattern as "automation.iteration"). */
-export interface AutomationWorkerEventPayload {
-  phase: "spawned" | "blocked" | "unblocked" | "exited";
-  worker: AutomationWorkerInfo;
 }
 
 /** run-store.startDirectWorkerRun input — first iteration / isolate mode. */
@@ -4626,11 +4587,15 @@ export interface StartDirectWorkerRunInput {
   workspaceId: string;
   workspaceName?: string;
   cwd: string;
+  /** Frozen named Cora profile for memory and identity on this run. */
+  coraProfileId?: string;
   origin?: GitHubOrigin;
   projectPolicyMode?: ProjectPolicyMode;
-  automationId: string;
+  /** Present for a Loom-owned run; omitted for a direct Cora chat. */
+  automationId?: string;
   title: string; // `Loom: ${name} — pass ${n}`
   prompt: string; // fully rendered loop prompt
+  clientMessageId?: string;
   model: string; // provider-native id; selects the Pi provider (claude-*/gpt-*)
   effort?: AgentEffortLevel;
   /** Looms v2.5: the graph node this pass's single worker executes (its prompt
@@ -4780,10 +4745,6 @@ export interface AutomationState {
   pendingAgentSignal?: AgentLoopSignal;
 }
 
-// A scheduled job is idle between firings and running while its enqueued run is
-// in flight. (Superseded by AutomationState.status; kept for back-compat.)
-export type ScheduledJobStatus = "idle" | "running";
-
 // An "automation" / loom. ScheduledJob's field set is a strict superset of the
 // legacy shape — loop/prompt/state/history are backfilled by normalizeJob.
 export interface ScheduledJob {
@@ -4856,13 +4817,6 @@ export interface AutomationDetail {
 
 // Broadcast-only live ping (rides SparkEvent; not journaled — same pattern as
 // "automation.updated"). Lets the Hub do fine-grained per-iteration refreshes.
-export interface AutomationIterationEventPayload {
-  automationId: string;
-  iteration: number;
-  runId?: string;
-  status: AutomationStatus;
-}
-
 // Engine constants (exported so the test harness + UI can reference them).
 export const DEFAULT_AGENT_MAX_ITERATIONS = 20;
 export const AUTOMATION_HISTORY_CAP = 50;

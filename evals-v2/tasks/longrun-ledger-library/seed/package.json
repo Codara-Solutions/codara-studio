@@ -1,7 +1,0 @@
-{
-  "name": "ledger-library",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Personal-finance ledger library (build target for Spark long-run eval).",
-  "license": "MIT"
-}

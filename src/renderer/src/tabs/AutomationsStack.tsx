@@ -1,6 +1,8 @@
 import React, { useMemo } from "react";
 import AutomationsPage from "../components/automations/AutomationsPage";
 import type { Workspace } from "@shared/types";
+import DockedSurface from "./DockedSurface";
+import type { DockRef } from "./dock";
 import type { AutomationsTab, Tab, TabId } from "./types";
 
 // AutomationsStack mirrors RunsStack: a single AutomationsPage mounted
@@ -12,8 +14,11 @@ import type { AutomationsTab, Tab, TabId } from "./types";
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
+  // Automations docked into a terminal tab's split grid is positioned by that
+  // grid rather than filling the workbench (see dockGeometry.ts) — handy beside
+  // the shells an automation's workers are running in.
+  dockIndex: ReadonlyMap<TabId, DockRef>;
   workspace: Workspace | null;
-  terminalScrollbackLineLimit: number;
   // Opens a run's chat surface (chat tab + chat sub-view). Used by the page's
   // "Open chat" on an automation's creator run.
   onOpenRunChat?: (runId: string) => void;
@@ -25,8 +30,8 @@ interface Props {
 function AutomationsStack({
   tabs,
   activeId,
+  dockIndex,
   workspace,
-  terminalScrollbackLineLimit,
   onOpenRunChat,
 }: Props) {
   // Memoize the filtered list so it isn't reallocated on every render.
@@ -40,29 +45,21 @@ function AutomationsStack({
     // absorb clicks meant for whichever stack is paint-order below it. The
     // active inner wrapper re-enables pointer-events:auto.
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      {automationsTabs.map((t) => {
-        const visible = t.id === activeId;
-        return (
-          <div
-            key={t.id}
-            aria-hidden={!visible}
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              flexDirection: "column",
-              visibility: visible ? "visible" : "hidden",
-              pointerEvents: visible ? "auto" : "none",
-            }}
-          >
-            {workspace ? (
+      {automationsTabs.map((t) => (
+        <DockedSurface
+          key={t.id}
+          tabId={t.id}
+          docked={dockIndex.has(t.id)}
+          active={t.id === activeId}
+        >
+          {(visible) =>
+            workspace ? (
               <AutomationsPage
                 key={workspace.id}
                 workspaceId={workspace.id}
                 workspaceName={workspace.name}
                 cwd={workspace.cwd}
                 active={visible}
-                terminalScrollbackLineLimit={terminalScrollbackLineLimit}
                 onOpenRunChat={onOpenRunChat}
               />
             ) : (
@@ -80,10 +77,10 @@ function AutomationsStack({
               >
                 No active workspace.
               </div>
-            )}
-          </div>
-        );
-      })}
+            )
+          }
+        </DockedSurface>
+      ))}
     </div>
   );
 }

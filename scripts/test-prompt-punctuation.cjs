@@ -1,13 +1,9 @@
 // Guards the "no em dashes" rule at both ends: the rule must REACH every
-// manager prompt, and no prompt surface may itself contain the character.
-//
-// This exists because the rule silently died twice. First it was added to
-// manager-profile.json but not to the TypeScript default that the JSON
-// overrides, so it vanished whenever the default was in force. Then it was
-// added to `manager.identity` in both, which reaches nothing: a per-mode
-// `systemPromptOverrides` entry REPLACES identity + coreOperatingModel + rules
-// wholesale, and every mode defines one. The rule is now appended in
-// buildManagerSystemPrompt, and this test pins that it survives for each mode.
+// prompt a model receives (the live manager system prompt, the worker brief,
+// and the verifier brief), and no prompt surface may itself contain the
+// character. It exists because the rule silently died twice in earlier
+// profile plumbing; asserting on the strings the model actually receives is
+// the only durable guard.
 //
 //   node scripts/test-prompt-punctuation.cjs
 //
@@ -20,7 +16,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const PROFILE_JSON = path.join(ROOT, "resources", "orchestration", "manager-profile.json");
-const MODES = ["plan_analysis", "chat", "step_planning", "worker_result_review"];
+const PI_MODES = ["talk", "auto", "execute", "automation"];
 
 // Every file whose text reaches a model: system prompts, worker prompts, and
 // MCP tool descriptions (which are injected into the model's tool schema).
@@ -31,11 +27,6 @@ const PROMPT_SURFACES = [
   // model's tool results, so it must obey the same punctuation rule.
   "src/main/agent-socket.ts",
   "resources/orchestration/manager-profile.json",
-  "resources/orchestration/cc-auto-prompt.md",
-  "resources/orchestration/cc-execute-prompt.md",
-  "resources/orchestration/cc-automation-prompt.md",
-  "resources/orchestration/codex-auto-prompt.md",
-  "resources/orchestration/codex-execute-prompt.md",
   "resources/codara-studio-mcp/server.js",
   "resources/pi-cora/prompt.ts",
   "resources/pi-cora/worker.ts",
@@ -81,9 +72,18 @@ async function main() {
   });
   const {
     loadManagerPromptProfile,
-    buildManagerSystemPrompt,
     DEFAULT_MANAGER_PROMPT_PROFILE,
   } = require(outfile);
+  const piOutfile = path.join(tmp, "pi-prompt.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "resources", "pi-cora", "prompt.ts")],
+    outfile: piOutfile,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    logLevel: "silent",
+  });
+  const { buildCoraPiSystemPrompt } = require(piOutfile);
 
   let pass = 0;
   const check = (name, ok) => {
@@ -95,30 +95,29 @@ async function main() {
     console.log(`PASS ${name}`);
   };
 
-  const marker = /PUNCTUATION: never write an em dash/g;
+  const marker = /PUNCTUATION: never write an em dash/;
 
-  // The rule must reach every mode, including the ones with a full override.
-  const bundled = loadManagerPromptProfile();
-  for (const mode of MODES) {
-    const prompt = buildManagerSystemPrompt(bundled, mode);
-    const hits = (prompt.match(marker) || []).length;
-    check(`bundled profile: ${mode} carries the punctuation rule`, hits >= 1);
-    check(`bundled profile: ${mode} carries it exactly once`, hits === 1);
-  }
-  check(
-    "bundled profile: the no-mode prompt carries the rule",
-    marker.test(buildManagerSystemPrompt(bundled)),
-  );
-
-  // The TypeScript default is the fallback whenever the bundled JSON cannot be
-  // read. It must satisfy the same contract, which is the failure mode that
-  // started all of this.
-  const fallback = DEFAULT_MANAGER_PROMPT_PROFILE;
-  for (const mode of MODES) {
-    const prompt = buildManagerSystemPrompt(fallback, mode);
+  // The rule must reach every live manager mode.
+  for (const mode of PI_MODES) {
     check(
-      `TS fallback profile: ${mode} carries the punctuation rule`,
-      (prompt.match(marker) || []).length === 1,
+      `pi ${mode} prompt carries the punctuation rule`,
+      marker.test(buildCoraPiSystemPrompt(mode, "fast")),
+    );
+  }
+
+  // ...and both worker briefs, from the bundled JSON and the TS fallback.
+  const bundled = loadManagerPromptProfile();
+  for (const [label, profile] of [
+    ["bundled profile", bundled],
+    ["TS fallback profile", DEFAULT_MANAGER_PROMPT_PROFILE],
+  ]) {
+    check(
+      `${label}: the worker opening carries the punctuation rule`,
+      profile.workerPrompt.opening.some((line) => marker.test(line)),
+    );
+    check(
+      `${label}: the verifier opening carries the punctuation rule`,
+      profile.workerPrompt.verifierOpening.some((line) => marker.test(line)),
     );
   }
 

@@ -4,9 +4,8 @@
 //   ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 // organized by DATE, not by cwd — so a session's working directory is only
 // recoverable by reading the file's leading `session_meta` entry, not from the
-// path. These primitives (originally private to codex-backend.ts) are shared so
-// both the managed chat backend and the manual-terminal session-restore feature
-// can find and identify a rollout after spawning `codex`.
+// path. These primitives let the manual-terminal session-restore feature find
+// and identify a rollout after spawning `codex`.
 
 import { promises as fs } from "node:fs";
 import type { Dirent } from "node:fs";
@@ -140,45 +139,6 @@ export async function discoverRolloutPath(
   return candidates.length > 0 ? candidates[0].path : null;
 }
 
-/**
- * Snapshot the rollout files that already exist immediately before Codara
- * spawns a fresh Codex manager. A currently-open personal Codex session keeps
- * changing its mtime, so mtime alone can never prove that a file belongs to
- * the process we just launched. Excluding this snapshot gives fresh sessions
- * an important ownership boundary: only a newly-created rollout may attach.
- */
-export async function snapshotRolloutPaths(
-  spawnDate: Date,
-  explicitHome?: string | null,
-): Promise<Set<string>> {
-  resolveCodexHomePaths(explicitHome);
-  const paths = new Set<string>();
-  for (const dir of candidateDirs(spawnDate, new Date(), explicitHome)) {
-    const safeDir = resolveCodexSessionDirectoryPath(dir, explicitHome);
-    let entries: Dirent[];
-    try {
-      entries = await fs.readdir(safeDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (
-        !entry.isFile() ||
-        !entry.name.startsWith("rollout-") ||
-        !entry.name.endsWith(".jsonl")
-      ) {
-        continue;
-      }
-      const candidate = join(safeDir, entry.name);
-      resolveCodexTranscriptPath(candidate, explicitHome, {
-        requireExisting: true,
-      });
-      paths.add(candidate);
-    }
-  }
-  return paths;
-}
-
 function extractCwd(entry: unknown): string | null {
   if (!entry || typeof entry !== "object") return null;
   const rec = entry as Record<string, unknown>;
@@ -249,15 +209,6 @@ export async function readRolloutMetadata(
   } finally {
     if (handle) await handle.close().catch(() => undefined);
   }
-}
-
-// Read only the cwd for existing callers (manual-terminal capture). Keeping
-// this wrapper avoids making those call sites care about rollout timestamps.
-export async function readRolloutCwd(
-  path: string,
-  explicitHome?: string | null,
-): Promise<string | null> {
-  return (await readRolloutMetadata(path, explicitHome)).cwd;
 }
 
 // Compare paths case-insensitively with separators unified so a Windows

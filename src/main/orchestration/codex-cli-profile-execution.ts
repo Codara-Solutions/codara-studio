@@ -4,7 +4,6 @@ import type {
 } from "./codex-cli-account-profiles";
 import { isAbsolute, resolve } from "node:path";
 import {
-  CODEX_CLI_PERSONAL_PROFILE_ID,
   CodexCliAccountProfileLeasedError,
   CodexCliAccountProfileStore,
   normalizeCodexCliProfileId,
@@ -29,8 +28,29 @@ export interface CodexCliExecutionProfile {
   label: string;
   managed: boolean;
   connected: boolean;
+  /** Codex state root used for sessions/trust; not necessarily exported. */
+  stateHome: string;
   /** Exact child environment. This object never aliases process.env. */
   env: NodeJS.ProcessEnv;
+}
+
+/** One shared Codex state home: strip account selectors and credential routes. */
+export function buildCodexCliSharedEnvironment(
+  baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (typeof value !== "string") continue;
+    const upper = key.toUpperCase();
+    if (
+      upper === "CODEX_HOME" ||
+      CODEX_CLI_CREDENTIAL_OVERRIDE_ENV_NAMES.has(upper)
+    ) {
+      continue;
+    }
+    env[key] = value;
+  }
+  return env;
 }
 
 export interface ResolveCodexCliExecutionInput {
@@ -84,6 +104,7 @@ export async function resolveCodexCliExecutionProfile(
     label: resolved.label,
     managed: resolved.managed,
     connected: resolved.connected,
+    stateHome: resolved.homeDir,
     env: buildCodexCliProfileEnvironment(
       input.baseEnv ?? process.env,
       resolved.homeDir,
@@ -220,10 +241,4 @@ let defaultLeases: CodexCliProfileLeaseRegistry | null = null;
 export function defaultCodexCliProfileLeases(): CodexCliProfileLeaseRegistry {
   defaultLeases ??= new CodexCliProfileLeaseRegistry();
   return defaultLeases;
-}
-
-export function isPersonalCodexCliProfile(
-  profileId: CodexCliProfileId,
-): profileId is typeof CODEX_CLI_PERSONAL_PROFILE_ID {
-  return profileId === CODEX_CLI_PERSONAL_PROFILE_ID;
 }

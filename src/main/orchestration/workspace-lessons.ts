@@ -193,7 +193,7 @@ export async function recordRunLessons(
     const evidence = await gatherAttemptEvidence(run, readReport);
     const texts = deriveRunLessons(run, evidence);
     if (texts.length === 0) return;
-    await appendAutoMemories(run.workspaceId, texts, run.id);
+    await appendAutoMemories(run.workspaceId, texts, run.id, run.coraProfileId);
   } catch (err) {
     console.warn("[workspace-lessons] failed to record run lessons:", err);
   }

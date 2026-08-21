@@ -113,13 +113,6 @@ type NodeStatus = "pending" | "skipped" | "running" | "succeeded" | "failed" | "
 // guard's pass/fail edges are live; absent on workers/merges.
 type NodeStateLike = { status: NodeStatus; output?: string; branchResult?: "pass" | "fail" };
 
-const SETTLED: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
-  "succeeded",
-  "failed",
-  "blocked",
-  "skipped",
-]);
-
 /** Forward-edge parents of a node (edges whose `to` is this node, ignoring
  *  back-edges and edges touching unknown nodes — the same edge filter
  *  planLoomLayers uses). The set the executor feeds a launching node as its

@@ -17,7 +17,6 @@ import type {
 } from "@shared/types";
 import type { Edge, Node } from "@xyflow/react";
 import { DEFAULT_WORKER_EFFORT, DEFAULT_WORKER_MODEL } from "../worker-models";
-import type { LoomPreset } from "./presets";
 
 // The node-flow editor's data model. The TRIGGER + LOOP live OFF the graph
 // (job.trigger / job.loop); the graph holds the worker/guard/merge pipeline.
@@ -26,8 +25,6 @@ import type { LoomPreset } from "./presets";
 
 // ── legacy linear-node kinds (still used by validateNode + the trigger form) ──
 export type LoomNodeKind = "trigger" | "loop" | "worker";
-export const NODE_ORDER: LoomNodeKind[] = ["trigger", "loop", "worker"];
-
 export interface TriggerDraft {
   kind: AutomationTrigger["kind"];
   cronExpr: string;
@@ -171,41 +168,6 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
   d.worker.timeoutMin =
     job.worker?.timeoutMinutes !== undefined ? String(job.worker.timeoutMinutes) : "";
   return d;
-}
-
-export function applyPresetToDraft(
-  draft: LoomDraft,
-  preset: LoomPreset,
-  cwd: string,
-): LoomDraft {
-  const pw = workerDraftFrom(preset.worker);
-  const next: LoomDraft = {
-    ...draft,
-    trigger: { ...draft.trigger, kind: preset.trigger.kind },
-    loop: { ...draft.loop, kind: preset.loop.kind },
-    worker: {
-      model: pw.model,
-      effort: pw.effort,
-      timeoutMin: preset.worker.timeoutMinutes !== undefined ? String(preset.worker.timeoutMinutes) : "",
-    },
-  };
-  if (preset.trigger.kind === "cron") {
-    next.trigger.cronExpr = preset.trigger.expr;
-    next.trigger.cronTz = preset.trigger.tz ?? "";
-  }
-  if (preset.trigger.kind === "folder") {
-    next.trigger.folderPath = preset.trigger.path || cwd;
-  }
-  if (typeof preset.loop.stop.maxIterations === "number") {
-    next.loop.maxIters = String(preset.loop.stop.maxIterations);
-  }
-  if (typeof preset.loop.stop.budgetUsd === "number") {
-    next.loop.budget = String(preset.loop.stop.budgetUsd);
-  }
-  next.loop.untilTests = Boolean(preset.loop.stop.untilTestsPass);
-  if (preset.loop.stop.testCommand) next.loop.testCommand = preset.loop.stop.testCommand;
-  next.loop.template = preset.promptHint;
-  return next;
 }
 
 // ── draft → persisted shapes ─────────────────────────────────────────────────

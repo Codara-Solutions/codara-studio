@@ -7,6 +7,7 @@ import type {
   AppSettings,
   CoraMemoryScope,
   CoraMemoryStatus,
+  CoraProfile,
   MemoryTierStatus,
   SparkBuiltinInstallState,
   SparkBuiltinMcpId,
@@ -36,12 +37,13 @@ interface Props {
   /** Identifies the workspace memory tier. Null when no workspace is active,
    *  which leaves that tier reported as unavailable rather than guessed. */
   workspaceId: string | null;
+  initialTab?: CapabilityTab;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
 }
 
 type CapabilityKind = "mcp" | "skill";
-type RuntimeColumn = "claude" | "codex" | "shared";
+type RuntimeColumn = "claude" | "codex" | "grok" | "shared";
 type CapabilityTab = "mcp" | "skills" | "memory" | "policy";
 
 const TABS: { id: CapabilityTab; label: string }[] = [
@@ -83,18 +85,20 @@ interface EditorState {
 // Which config files a remove touches: one runtime column, or all of them.
 type RemoveScope = RuntimeColumn | "all";
 
-const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "shared"];
+const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "grok", "shared"];
 const PAGE_SIZE = 40;
 const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
   claude: "Claude",
   codex: "Codex",
+  grok: "Grok",
   shared: "Shared",
 };
-// What the user calls the two external tools. RUNTIME_LABEL names the config
+// What the user calls the external tools. RUNTIME_LABEL names the config
 // column (and reads right in "Removed X from Claude"); this names the app.
-const CLI_LABEL: Record<"claude" | "codex", string> = {
+const CLI_LABEL: Record<"claude" | "codex" | "grok", string> = {
   claude: "Claude CLI",
   codex: "Codex CLI",
+  grok: "Grok Build",
 };
 const MCP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -182,10 +186,11 @@ export default function AgentCapabilitiesDialog({
   settings,
   workspaceCwd,
   workspaceId,
+  initialTab = "mcp",
   onClose,
   onSave,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<CapabilityTab>("mcp");
+  const [activeTab, setActiveTab] = useState<CapabilityTab>(initialTab);
   // Selecting a section should acknowledge the click before the inventory it
   // holds builds its DOM. The nav follows activeTab immediately while React
   // renders the section body at deferred priority. Mirrors SettingsDialog.
@@ -213,6 +218,10 @@ export default function AgentCapabilitiesDialog({
   // object and no follow-up read is needed.
   const [memory, setMemory] = useState<CoraMemoryStatus | null>(null);
   const [memoryBusy, setMemoryBusy] = useState<CoraMemoryScope | null>(null);
+  const [profiles, setProfiles] = useState<CoraProfile[]>([]);
+  const [profileName, setProfileName] = useState("");
+  const [profileDescription, setProfileDescription] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
   // Whether the form is still mounted when an async save settles. A save that
@@ -255,10 +264,12 @@ export default function AgentCapabilitiesDialog({
 
   useEffect(() => {
     let cancelled = false;
-    void window.spark.memory
-      .get(workspaceId)
-      .then((next) => {
-        if (!cancelled) setMemory(next);
+    void Promise.all([window.spark.memory.get(workspaceId), window.spark.coraProfiles.list()])
+      .then(([nextMemory, nextProfiles]) => {
+        if (!cancelled) {
+          setMemory(nextMemory);
+          setProfiles(nextProfiles);
+        }
       })
       .catch((err) => {
         if (!cancelled) setStatus((err as Error).message);
@@ -367,6 +378,41 @@ export default function AgentCapabilitiesDialog({
     runMemoryAction(scope, () => window.spark.memory.clear(scope, workspaceId, includeUserLines));
   };
 
+  const useProfile = (reference: string) => {
+    setProfileBusy(true);
+    setStatus(null);
+    void window.spark.coraProfiles
+      .use(reference)
+      .then(async (nextProfiles) => {
+        setProfiles(nextProfiles);
+        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
+        setMemory(await window.spark.memory.get(workspaceId));
+      })
+      .catch((err) => setStatus((err as Error).message))
+      .finally(() => setProfileBusy(false));
+  };
+
+  const createProfile = (event: React.FormEvent) => {
+    event.preventDefault();
+    const name = profileName.trim();
+    if (!name) return;
+    setProfileBusy(true);
+    setStatus(null);
+    void window.spark.coraProfiles
+      .create({ name, description: profileDescription.trim() || undefined })
+      .then(async () => {
+        const nextProfiles = await window.spark.coraProfiles.use(name);
+        setProfiles(nextProfiles);
+        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
+        setMemory(await window.spark.memory.get(workspaceId));
+        setProfileName("");
+        setProfileDescription("");
+        setStatus(`${name} is now the default profile for new Cora chats.`);
+      })
+      .catch((err) => setStatus((err as Error).message))
+      .finally(() => setProfileBusy(false));
+  };
+
   // The listener lives in App.tsx and owns the editor tabs, so opening a file
   // from a modal is a window event rather than a threaded-through callback.
   // The dialog deliberately stays up: closing it here would discard whatever
@@ -430,11 +476,14 @@ export default function AgentCapabilitiesDialog({
     })();
   };
 
-  const installToRuntime = (group: NameGroup, target: "claude" | "codex") => {
-    // Prefer a shared source, then the opposite runtime's install.
+  const installToRuntime = (group: NameGroup, target: "claude" | "codex" | "grok") => {
+    // Prefer a shared source, then whichever other CLI config already carries
+    // the entry, then any discovered copy of it.
     const source =
       group.installs.shared[0] ??
-      (target === "claude" ? group.installs.codex[0] : group.installs.claude[0]) ??
+      RUNTIME_COLUMNS.filter((rt) => rt !== target && rt !== "shared")
+        .map((rt) => group.installs[rt][0])
+        .find(Boolean) ??
       group.any;
     setBusyKey(`${group.sessionKey}:${target}`);
     void window.spark.agents
@@ -664,7 +713,7 @@ export default function AgentCapabilitiesDialog({
                     <div style={{ minWidth: 0 }}>
                       <h2 style={sectionTitleStyle}>MCP servers</h2>
                       <p style={sectionDetailStyle}>
-                        Cora and Workers control what agents inside Codara can use. The Claude and Codex
+                        Cora and Workers control what agents inside Codara can use. The Claude, Codex, and Grok
                         columns show which external CLI configs on this machine carry the server.
                       </p>
                     </div>
@@ -690,7 +739,7 @@ export default function AgentCapabilitiesDialog({
                     {visibleBuiltins.length > 0 || visibleMcp.length > 0 ? (
                       <TableHeader
                         template={MCP_GRID}
-                        labels={["Server", "Cora", "Workers", "Claude", "Codex", ""]}
+                        labels={["Server", "Cora", "Workers", "Claude", "Codex", "Grok", ""]}
                       />
                     ) : null}
                     {visibleBuiltins.map((builtin) => (
@@ -793,12 +842,80 @@ export default function AgentCapabilitiesDialog({
                     <div style={{ minWidth: 0 }}>
                       <h2 style={sectionTitleStyle}>Cora memory</h2>
                       <p style={sectionDetailStyle}>
-                        Two plain markdown files Cora reads at the start of every session and
-                        appends to when it learns something durable. Edit them like any other
-                        file; this only reports on them.
+                        Profile {memory?.profile.name ?? "Cora"} has isolated global and workspace
+                        memory. Cora reads these plain markdown files at session start and appends
+                        durable lessons; edit them like any other file.
                       </p>
                     </div>
                   </div>
+
+                  <div style={profilePickerStyle}>
+                    <label style={{ ...profileFieldStyle, flexBasis: "100%" }}>
+                      <span style={fieldLabelStyle}>Cora used by default</span>
+                      <select
+                        className="spark-input"
+                        value={memory?.profile.id ?? "default"}
+                        disabled={profileBusy || profiles.length === 0}
+                        onChange={(event) => useProfile(event.target.value)}
+                      >
+                        {profiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name}
+                          </option>
+                        ))}
+                      </select>
+                      <span style={profileHintStyle}>
+                        Every new chat also has a profile picker, so this is only the starting choice.
+                      </span>
+                    </label>
+                    {memory && memory.profile.id !== "default" ? (
+                      <button
+                        type="button"
+                        className="spark-btn"
+                        style={smallBtnStyle}
+                        onClick={() => openMemoryFile(memory.profile.identityPath)}
+                      >
+                        Edit {memory.profile.name}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <form style={profileCreatorStyle} onSubmit={createProfile}>
+                    <div style={profileCreatorHeadingStyle}>
+                      <strong>Make another Cora</strong>
+                      <span>Its identity and memories stay isolated from every other profile.</span>
+                    </div>
+                    <label style={profileFieldStyle}>
+                      <span style={fieldLabelStyle}>Name</span>
+                      <input
+                        className="spark-input"
+                        value={profileName}
+                        maxLength={80}
+                        placeholder="Reviewer, Designer, Release Cora…"
+                        disabled={profileBusy}
+                        onChange={(event) => setProfileName(event.target.value)}
+                      />
+                    </label>
+                    <label style={{ ...profileFieldStyle, flex: "2 1 260px" }}>
+                      <span style={fieldLabelStyle}>Purpose <span style={profileOptionalStyle}>optional</span></span>
+                      <input
+                        className="spark-input"
+                        value={profileDescription}
+                        maxLength={300}
+                        placeholder="What should this Cora focus on?"
+                        disabled={profileBusy}
+                        onChange={(event) => setProfileDescription(event.target.value)}
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      className="spark-btn"
+                      style={smallBtnStyle}
+                      disabled={profileBusy || profileName.trim().length === 0}
+                    >
+                      {profileBusy ? "Creating…" : "Create & use"}
+                    </button>
+                  </form>
 
                   <div className="agent-capability-list" style={listStyle}>
                     <MemoryRow
@@ -1100,7 +1217,7 @@ function McpRow({
   onTogglePiScope: (group: NameGroup, scope: "cora" | "worker", assigned: boolean) => void;
   onEdit: (group: NameGroup) => void;
   onRemove: (group: NameGroup, scope: RemoveScope) => void;
-  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
+  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
 }) {
   const transport = group.any.mcpTransport ?? "stdio";
   const summary = group.any.mcpSummary ?? group.any.path;
@@ -1141,6 +1258,7 @@ function McpRow({
       </Cell>
       <CliCell group={group} runtime="claude" busyKey={busyKey} onInstall={onInstall} />
       <CliCell group={group} runtime="codex" busyKey={busyKey} onInstall={onInstall} />
+      <CliCell group={group} runtime="grok" busyKey={busyKey} onInstall={onInstall} />
       <div style={rowActionsStyle}>
         <button type="button" className="spark-btn" style={smallBtnStyle} onClick={() => onEdit(group)}>
           Edit
@@ -1189,9 +1307,9 @@ function CliCell({
   onInstall,
 }: {
   group: NameGroup;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   busyKey: string | null;
-  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
+  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
 }) {
   const noun = group.kind === "mcp" ? "server" : "skill";
   const direct = group.installs[runtime];
@@ -1287,7 +1405,9 @@ function SkillRow({
   enabled: boolean;
   onToggle: (group: NameGroup, enabled: boolean) => void;
   onRemove: (group: NameGroup, scope: RemoveScope) => void;
-  onInstall: (group: NameGroup, target: "claude" | "codex") => void;
+  // Skills only ever render the Claude and Codex columns; Grok Build has no
+  // skill root, so the wide union here is the shared handler's, not an offer.
+  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
 }) {
   return (
     <div
@@ -1522,7 +1642,7 @@ function MemoryClearControl({
 
 type ShareState = { kind: "covered" } | { kind: "ready" } | { kind: "blocked"; reason: string };
 
-function shareState(group: NameGroup, target: "claude" | "codex"): ShareState {
+function shareState(group: NameGroup, target: "claude" | "codex" | "grok"): ShareState {
   if (group.installs.shared.length > 0 || group.installs[target].length > 0) return { kind: "covered" };
   const source = RUNTIME_COLUMNS.some((rt) => group.installs[rt].length > 0);
   if (!source) return { kind: "covered" };
@@ -1532,7 +1652,11 @@ function shareState(group: NameGroup, target: "claude" | "codex"): ShareState {
       reason: group.any.compatibilityReason ?? `This entry cannot be copied to ${RUNTIME_LABEL[target]}.`,
     };
   }
-  if (group.any.compatibility === (target === "claude" ? "codex" : "claude")) {
+  // An entry pinned to one runtime cannot be copied into another. A remote
+  // server carrying request headers is "claude", which blocks both TOML
+  // configs (Codex and Grok Build) rather than only Codex.
+  const only = group.any.compatibility;
+  if (only !== "both" && only !== "unknown" && only !== target) {
     return {
       kind: "blocked",
       reason: group.any.compatibilityReason ?? `This entry does not work under ${RUNTIME_LABEL[target]}.`,
@@ -1670,15 +1794,15 @@ function BuiltinRow({
   onInstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
   onUninstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
 }) {
-  const runtimes: SparkBuiltinRuntime[] = ["claude", "codex"];
+  const runtimes: SparkBuiltinRuntime[] = ["claude", "codex", "grok"];
   return (
     <div className="agent-capability-row" style={mcpRowStyle}>
       <div style={{ minWidth: 0 }}>
-        <div style={rowNameStyle}>
+        {/* Same trap McpRow documents: rowNameStyle is nowrap + ellipsis inside
+            the narrow Server column, so a badge parked on the name line gets
+            sliced. The badges ride the wrapping meta row instead. */}
+        <div style={rowNameStyle} title="Codara Studio tools">
           Codara Studio tools
-          <span className="spark-badge is-accent" style={flagBadgeStyle}>
-            built in
-          </span>
         </div>
         <div style={rowMetaStyle}>
           <span style={rowSummaryStyle} title={builtin.detail}>
@@ -1687,6 +1811,9 @@ function BuiltinRow({
         </div>
         <div style={rowMetaStyle}>
           <span style={rowScopeStyle}>{builtin.name}</span>
+          <span className="spark-badge is-accent" style={flagBadgeStyle}>
+            built in
+          </span>
           <span className="spark-badge" style={flagBadgeStyle} title={builtin.tools.join(", ")}>
             {builtin.tools.length} tools
           </span>
@@ -2294,7 +2421,7 @@ function groupByName(items: AgentAssetInventoryItem[], kind: CapabilityKind): Na
         kind,
         name: item.name,
         sessionKey: item.sessionKey,
-        installs: { claude: [], codex: [], shared: [] },
+        installs: { claude: [], codex: [], grok: [], shared: [] },
         any: item,
       };
       map.set(key, group);
@@ -2572,7 +2699,7 @@ const listStyle: React.CSSProperties = {
 // a "Copy" micro button) because every pixel here comes out of the Server
 // column: at the 860px breakpoint the pane is ~575px and the fixed columns plus
 // gaps and padding take ~442px of it.
-const MCP_GRID = "minmax(0, 1fr) 52px 60px 64px 64px 124px";
+const MCP_GRID = "minmax(0, 1fr) 52px 60px 56px 56px 56px 116px";
 const SKILL_GRID = "minmax(0, 1fr) 60px 64px 64px 124px";
 
 const tableHeadStyle: React.CSSProperties = {
@@ -2717,6 +2844,50 @@ const memoryDetailStyle: React.CSSProperties = {
   fontSize: 11,
   lineHeight: 1.45,
   marginTop: 3,
+};
+
+const profilePickerStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 10,
+  alignItems: "end",
+  padding: 12,
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 10,
+  background: "color-mix(in oklab, var(--panel) 72%, transparent)",
+};
+
+const profileCreatorStyle: React.CSSProperties = {
+  ...profilePickerStyle,
+  marginTop: 10,
+};
+
+const profileCreatorHeadingStyle: React.CSSProperties = {
+  display: "grid",
+  flex: "1 0 100%",
+  gap: 3,
+  color: "var(--ink)",
+  fontSize: 12,
+};
+
+const profileHintStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 10,
+  lineHeight: 1.35,
+};
+
+const profileOptionalStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontWeight: 400,
+  textTransform: "none",
+  letterSpacing: 0,
+};
+
+const profileFieldStyle: React.CSSProperties = {
+  display: "grid",
+  flex: "1 1 190px",
+  gap: 5,
+  minWidth: 0,
 };
 
 const memoryMeterStyle: React.CSSProperties = {

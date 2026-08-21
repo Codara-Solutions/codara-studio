@@ -6,5 +6,6 @@ import type { CoraExecutionPolicy } from "./types";
 export const DEFAULT_CORA_EXECUTION_POLICY: CoraExecutionPolicy = "fast";
 
 export function normalizeCoraExecutionPolicy(value: unknown): CoraExecutionPolicy {
-  return value === "deep" || value === "frontier" ? value : DEFAULT_CORA_EXECUTION_POLICY;
+  // "frontier" was removed 2026-08; persisted values collapse to "deep".
+  return value === "deep" || value === "frontier" ? "deep" : DEFAULT_CORA_EXECUTION_POLICY;
 }

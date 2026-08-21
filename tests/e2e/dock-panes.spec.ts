@@ -147,6 +147,15 @@ test("a browser preview docks beside a terminal without reloading its guest", as
       )
       .toBe(true);
 
+    // The content starts BELOW the cell's controls rather than under them.
+    // Overlaid, the two headers drew through each other: the cell's undock /
+    // zoom / close row landed on the top-right controls every dockable surface
+    // already has (an address bar, the chat's ✦ CORA header, a file row).
+    const controls = page.locator('button[title="Undock to tab"]').first();
+    const controlsBox = (await controls.boundingBox())!;
+    const contentBox = (await frame.boundingBox())!;
+    expect(contentBox.y).toBeGreaterThanOrEqual(controlsBox.y + controlsBox.height - 4);
+
     // ...and the guest really is inside that cell.
     const cellBox0 = (await cell.boundingBox())!;
     const viewBox0 = (await page.locator("webview").boundingBox())!;
@@ -366,6 +375,20 @@ test("a chat docks into the grid and keeps its surface on screen", async () => {
     await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
     await expect(page.locator('[data-dock-cell-id][data-dock-tab-id]')).toHaveCount(1);
 
+    // The chat keeps its OWN sub-navigation in the cell. The workbench-level
+    // strip keys off the active tab, which a docked chat never is, so docking
+    // used to strip Chat / Kanban / Runs / Terminal off it and leave the
+    // conversation as the only reachable surface.
+    const strip = page.locator('[data-dock-content-id] [role="tablist"]').first();
+    await expect(strip).toBeVisible({ timeout: 15_000 });
+    await expect(strip.getByText("Chat", { exact: true })).toBeVisible();
+
+    // ...and the shell beside it says what it is. A grid where the docked cell
+    // announces itself and the terminal stays anonymous reads as unfinished.
+    await expect(
+      page.locator(".spark-terminal-pane:visible").getByText("Terminal", { exact: true }),
+    ).toBeVisible();
+
     // The chat composer is really rendered inside that cell.
     const composer = page.locator(".spark-chat-composer, textarea").first();
     await expect(composer).toBeVisible({ timeout: 15_000 });
@@ -373,6 +396,131 @@ test("a chat docks into the grid and keeps its surface on screen", async () => {
     const composerBox = (await composer.boundingBox())!;
     expect(composerBox.x).toBeGreaterThanOrEqual(cellBox.x - 2);
     expect(composerBox.x + composerBox.width).toBeLessThanOrEqual(cellBox.x + cellBox.width + 2);
+
+    // ...and it LAYS OUT for the half-width surface it is now in. The welcome
+    // reflowed on the window's width alone, so a docked chat in a wide window
+    // kept a two-column card grid and a full-length cwd: the surface scrolled
+    // sideways and sliced its own text. Nothing inside may overflow the
+    // horizontal axis (deliberate ellipses live on leaf spans, which have no
+    // scrollable box of their own).
+    const overflowing = await page.evaluate(() => {
+      const root = document.querySelector(".cora-welcome") as HTMLElement | null;
+      if (!root) return ["no welcome surface"];
+      const out: string[] = [];
+      const walk = (el: HTMLElement) => {
+        if (el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1 && el.children.length > 0) {
+          out.push(`${el.tagName}.${String(el.className).slice(0, 40)}`);
+        }
+        for (const child of Array.from(el.children)) walk(child as HTMLElement);
+      };
+      walk(root);
+      return out;
+    });
+    expect(overflowing).toEqual([]);
+
+    // Safe centering: the top of the welcome must be reachable, not clipped
+    // above the scroll container's origin.
+    const heroTop = await page.evaluate(() => {
+      const root = document.querySelector(".cora-welcome") as HTMLElement | null;
+      const hero = root?.firstElementChild as HTMLElement | null;
+      if (!root || !hero) return null;
+      return hero.getBoundingClientRect().top - root.getBoundingClientRect().top;
+    });
+    expect(heroTop).not.toBeNull();
+    expect(heroTop!).toBeGreaterThanOrEqual(0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("Open in split pairs the two surfaces on screen, with no shell between them", async () => {
+  test.setTimeout(120_000);
+  const { app, page, workspaceDir } = await launch();
+  try {
+    // Two non-terminal surfaces, nothing else in play: a chat and an editor.
+    // The split grid lives on terminal tabs, so this pairing used to be
+    // impossible — "Open in split" hunted for a terminal tab and threw the
+    // editor into it, nowhere near the chat the user was reading.
+    const filePath = join(workspaceDir, "notes.txt");
+    const fileRow = page.locator(`[data-fs-path="${filePath.replace(/\\/g, "\\\\")}"]`);
+    await expect(fileRow).toBeVisible({ timeout: 30_000 });
+    await fileRow.dispatchEvent("click");
+    const editorPill = page.getByRole("tab", { name: /notes\.txt/i }).first();
+    await expect(editorPill).toBeVisible({ timeout: 15_000 });
+
+    // Look at the chat, then split the editor in beside it.
+    const chatPill = page.getByRole("tab", { name: /chat|cora/i }).first();
+    await chatPill.dispatchEvent("click");
+    const pillBox = (await editorPill.boundingBox())!;
+    await editorPill.dispatchEvent("contextmenu", {
+      clientX: Math.round(pillBox.x + pillBox.width / 2),
+      clientY: Math.round(pillBox.y + pillBox.height / 2),
+    });
+    await page.getByText("Open in split", { exact: true }).dispatchEvent("click");
+
+    // Both surfaces are now cells in one grid — and that grid holds no shell
+    // the user never asked for.
+    const cells = page.locator("[data-dock-cell-id]");
+    await expect(cells).toHaveCount(2, { timeout: 15_000 });
+    await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: /^split/i })).toBeVisible();
+
+    // Both are really rendered, side by side, inside their own cells.
+    await expect(page.locator(".cm-content")).toContainText("docked editor fixture", {
+      timeout: 15_000,
+    });
+    const composer = page.locator(".spark-chat-composer, textarea").first();
+    await expect(composer).toBeVisible({ timeout: 15_000 });
+    const boxes = await cells.evaluateAll((nodes) =>
+      nodes.map((n) => n.getBoundingClientRect()).map((r) => ({ x: r.x, y: r.y, w: r.width, h: r.height })),
+    );
+    // Disjoint cells (a split, not two stacked full-tab surfaces).
+    const [a, b] = boxes;
+    expect(a.x + a.w <= b.x + 2 || b.x + b.w <= a.x + 2 || a.y + a.h <= b.y + 2 || b.y + b.h <= a.y + 2).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a whiteboard splits like every other workspace surface", async () => {
+  test.setTimeout(120_000);
+  const { app, page } = await launch();
+  try {
+    await openTerminalTab(page);
+
+    // Whiteboards, diffs, usage and automations were not dockable at all: the
+    // pill's context menu simply had nothing on it. Any surface that can fill
+    // the workbench can now take half of it instead.
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeAttached();
+    const mod = process.platform === "darwin" ? "Meta" : "Control";
+    await page.keyboard.press(`${mod}+Shift+W`);
+    const boardPill = page.getByRole("tab", { name: /Untitled whiteboard/i }).first();
+    await expect(boardPill).toBeVisible({ timeout: 20_000 });
+
+    const pillBox = (await boardPill.boundingBox())!;
+    await boardPill.dispatchEvent("contextmenu", {
+      clientX: Math.round(pillBox.x + pillBox.width / 2),
+      clientY: Math.round(pillBox.y + pillBox.height / 2),
+    });
+    await page.getByText("Open in split", { exact: true }).dispatchEvent("click");
+
+    // Docked beside the shell it was split against, labelled for what it is.
+    const cell = page.locator("[data-dock-cell-id]");
+    await expect(cell).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
+    // Scoped to the cell's chrome: terminal panes share the label class now
+    // (that is the point — one visual language for every cell in the grid).
+    await expect(page.locator(".spark-dock-chrome .spark-dock-chrome__label")).toHaveText(
+      "Whiteboard",
+    );
+
+    // The canvas is live inside the cell, not an empty husk.
+    const board = page.getByTestId("cora-whiteboard-file-editor");
+    await expect(board).toBeVisible({ timeout: 15_000 });
+    const cellBox = (await cell.boundingBox())!;
+    const boardBox = (await board.boundingBox())!;
+    expect(boardBox.x).toBeGreaterThanOrEqual(cellBox.x - 2);
+    expect(boardBox.x + boardBox.width).toBeLessThanOrEqual(cellBox.x + cellBox.width + 2);
   } finally {
     await app.close();
   }

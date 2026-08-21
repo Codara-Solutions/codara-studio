@@ -1,5 +1,5 @@
 // Production wiring for Remote Access: builds the RemoteAccessService's
-// dependencies from the real main process (sparkHome, storage, pty-manager,
+// dependencies from the real main process (codaraHome, storage, pty-manager,
 // shells) and owns the process-wide singleton. This is the only module in
 // remote-access/ allowed to import the rest of the main process; everything
 // else stays plain Node so tests and the e2e harness can run it directly.
@@ -12,6 +12,7 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
+import { subscriptionForModelId } from "../../shared/agent-families";
 import { makeId } from "@shared/ids";
 import type {
   GitHubMarkReadyInput,
@@ -86,7 +87,6 @@ import {
 } from "../orchestration/run-store";
 import { inspectPiAccountProfileAuthStore } from "../orchestration/pi-account-auth-store";
 import { inspectPiModelCatalog } from "../orchestration/pi-model-catalog";
-import { PiAccountProfileRegistry } from "../orchestration/pi-account-profiles";
 import { inspectCachedPiSubscriptionUsageProfiles } from "../orchestration/pi-subscription-usage";
 import { nativeCliAccounts } from "../orchestration/native-cli-accounts";
 import { BOARD_MAX_CARDS } from "../orchestration/board-store";
@@ -112,7 +112,7 @@ import {
 } from "./phone-notify";
 import { getPreferenceCached, getPreferenceSync } from "../preferences-store";
 import * as pty from "../pty-manager";
-import { sparkHome } from "../spark-home";
+import { codaraHome } from "../codara-home";
 import {
   loadSettings,
   loadState,
@@ -120,7 +120,10 @@ import {
   saveSettings,
   saveState,
 } from "../storage";
-import { requestTerminalOp } from "../terminal-bridge";
+import {
+  onStudioTerminalInventoryChanged,
+  requestTerminalOp,
+} from "../terminal-bridge";
 import {
   deleteWorkerSession as deleteLocalWorkerSession,
   listWorkerSessions as listLocalWorkerSessions,
@@ -227,6 +230,7 @@ import { projectRemoteSubscriptionProfiles } from "./subscription-profile-projec
 
 let singleton: RemoteAccessService | null = null;
 let stateSavedSubscriptionInstalled = false;
+let terminalInventorySubscriptionInstalled = false;
 let coraSendReceiptCleanupInstalled = false;
 let coraSendReceiptIndexPromise: Promise<CoraSendReceiptIndex> | null = null;
 let workspaceMutation: Promise<void> = Promise.resolve();
@@ -236,7 +240,6 @@ let workspaceMutation: Promise<void> = Promise.resolve();
 const coraRunMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
 let lastRemoteImagePruneAt = 0;
-let accountProfileRegistry: PiAccountProfileRegistry | null = null;
 
 // DTO budgets deliberately leave generous headroom under the 1 MiB frame
 // ceiling for JSON escaping and the response envelope.
@@ -286,7 +289,7 @@ const NATIVE_CLI_PROFILE_ID_PATTERN =
 export function getRemoteAccessService(): RemoteAccessService {
   if (!singleton) {
     singleton = new RemoteAccessService({
-      remoteDir: join(sparkHome(), "remote"),
+      remoteDir: join(codaraHome(), "remote"),
       deviceName: hostname(),
       appVersion: app.getVersion(),
       listWorkspaces: listWorkspacesForRemote,
@@ -343,7 +346,9 @@ export function getRemoteAccessService(): RemoteAccessService {
       registerNotifications: registerNotificationsForRemote,
       beginImageUpload: beginImageUploadForRemote,
       attachWorkerTerminal: attachRemoteWorkerTerminal,
-      studioTerminalLeases: new StudioTerminalShareStore(),
+      studioTerminalLeases: new StudioTerminalShareStore({
+        onTerminalsChanged: scheduleTerminalsChangedPush,
+      }),
       createTerminal: createRemoteTerminal,
       log: (line) => logMain("remote-access", line),
     });
@@ -351,6 +356,10 @@ export function getRemoteAccessService(): RemoteAccessService {
   if (!stateSavedSubscriptionInstalled) {
     stateSavedSubscriptionInstalled = true;
     onStateSaved(() => singleton?.notifyWorkspacesChanged());
+  }
+  if (!terminalInventorySubscriptionInstalled) {
+    terminalInventorySubscriptionInstalled = true;
+    onStudioTerminalInventoryChanged(scheduleTerminalsChangedPush);
   }
   if (!coraSendReceiptCleanupInstalled) {
     coraSendReceiptCleanupInstalled = true;
@@ -362,9 +371,27 @@ export function getRemoteAccessService(): RemoteAccessService {
   return singleton;
 }
 
+// Trailing window for terminal-list invalidations, mirroring the Cora changed
+// coalescer: the renderer pings on every shareable-inventory change (a closed
+// split fires once per pane) and each phone answers a push with a full
+// terminal.list, so a burst must collapse into one broadcast. The delay also
+// gives a freshly minted pane time to spawn its PTY — the share store skips
+// panes with no live PTY, and a list taken in that gap would miss the terminal
+// until the next hint.
+const TERMINALS_CHANGED_COALESCE_MS = 500;
+let terminalsChangedTimer: NodeJS.Timeout | null = null;
+function scheduleTerminalsChangedPush(): void {
+  if (terminalsChangedTimer) return;
+  terminalsChangedTimer = setTimeout(() => {
+    terminalsChangedTimer = null;
+    singleton?.notifyTerminalsChanged();
+  }, TERMINALS_CHANGED_COALESCE_MS);
+  terminalsChangedTimer.unref?.();
+}
+
 function getCoraSendReceiptIndex(): Promise<CoraSendReceiptIndex> {
   coraSendReceiptIndexPromise ??= CoraSendReceiptIndex.open({
-    rootDir: join(sparkHome(), "remote"),
+    rootDir: join(codaraHome(), "remote"),
     log: (line) => logMain("remote-access", line),
   });
   return coraSendReceiptIndexPromise;
@@ -415,16 +442,6 @@ async function getFleetOverviewForRemote(): Promise<RemoteFleetOverviewProjectio
     listJobs(),
   ]);
   return projectRemoteFleetOverview(workspaces, runs, automations);
-}
-
-function getAccountProfileRegistry(): PiAccountProfileRegistry {
-  // Metadata sits beside Pi's app-owned configuration, never in the remote
-  // directory or a phone-readable auth store. The registry itself rejects
-  // token-shaped/unknown fields and exposes only opaque ids + labels.
-  accountProfileRegistry ??= new PiAccountProfileRegistry(
-    join(sparkHome(), "pi-agent"),
-  );
-  return accountProfileRegistry;
 }
 
 async function listSubscriptionProfilesForRemote(): Promise<
@@ -519,10 +536,7 @@ async function listNativeCliAccountsForRemote(): Promise<
 }
 
 function providerForRemoteModel(model: string | undefined): RemoteSubscriptionProvider | null {
-  const normalized = model?.trim().toLowerCase();
-  if (normalized?.startsWith("claude-")) return "anthropic";
-  if (normalized?.startsWith("gpt-")) return "openai-codex";
-  return null;
+  return model ? subscriptionForModelId(model) : null;
 }
 
 async function resumeCoraRunForRemote(input: {
@@ -543,17 +557,21 @@ async function resumeCoraRunForRemote(input: {
           reason: "Automation runs are resumed from Automations.",
         };
       }
+      // The wire type still admits "native-cli" so an older phone build can
+      // ask; Studio retired the claude/codex manager backends, so the only
+      // answer left for that selection is incompatible.
+      if (input.account && input.account.kind !== "subscription") {
+        return {
+          outcome: "account-incompatible",
+          recoveryId: input.recoveryId,
+          reason: "Direct-CLI accounts can no longer resume a Cora manager turn; pick a subscription account.",
+        };
+      }
       const account = input.account
-        ? input.account.kind === "subscription"
-          ? {
-              kind: "subscription" as const,
-              profileId: input.account.profileId,
-            }
-          : {
-              kind: "native-cli" as const,
-              backend: input.account.runtime,
-              profileId: input.account.profileId,
-            }
+        ? {
+            kind: "subscription" as const,
+            profileId: input.account.profileId,
+          }
         : undefined;
       const result = await resumeManagerTurnRecovery({
         runId: run.id,
@@ -2323,22 +2341,7 @@ function toRemoteRun(
     ACCOUNT_PROFILE_ID_PATTERN.test(run.chatAccountProfileId)
       ? run.chatAccountProfileId
       : undefined;
-  const backend =
-    run.chatBackend === "claude" || run.chatBackend === "codex"
-      ? run.chatBackend
-      : run.chatBackend === "pi" || run.chatBackend === undefined
-        ? "pi"
-        : undefined;
-  const nativeAccountProfileId =
-    backend === "claude" &&
-    typeof run.nativeClaudeProfileId === "string" &&
-    NATIVE_CLI_PROFILE_ID_PATTERN.test(run.nativeClaudeProfileId)
-      ? run.nativeClaudeProfileId
-      : backend === "codex" &&
-          typeof run.nativeCodexProfileId === "string" &&
-          NATIVE_CLI_PROFILE_ID_PATTERN.test(run.nativeCodexProfileId)
-        ? run.nativeCodexProfileId
-        : undefined;
+  const backend = "pi" as const;
   const recoverySummary = remoteCoraRecoverySummary(run);
   const failedRecoveryAccount = run.managerTurnRecovery?.failedAccountProfileId;
   const recovery =
@@ -2397,9 +2400,8 @@ function toRemoteRun(
   return {
     ...summary,
     messages,
-    ...(backend ? { backend } : {}),
-    ...(backend === "pi" && accountProfileId ? { accountProfileId } : {}),
-    ...(nativeAccountProfileId ? { nativeAccountProfileId } : {}),
+    backend,
+    ...(accountProfileId ? { accountProfileId } : {}),
     ...(recovery ? { recovery } : {}),
     ...(workers.length > 0 ? { workers } : {}),
     ...(isRemoteCoraIdentity(run.currentStepId)
@@ -2428,12 +2430,28 @@ function toRemoteRun(
   };
 }
 
+// The phone's picker, the delete flow, and createRemoteTerminal's --resume
+// validation must all read the SAME Claude state dir. With a managed Active
+// account the default ~/.claude would offer sessions the create then refuses
+// as "no longer resumable" — a picker full of unresumable entries.
+async function nativeClaudeSessionOptions(
+  runtime: "claude" | "codex" | "grok",
+): Promise<{ claudeStateDir?: string | null }> {
+  if (runtime !== "claude") return {};
+  const execution = await resolveNewNativeClaudeProfile();
+  return { claudeStateDir: execution.env.CLAUDE_CONFIG_DIR ?? null };
+}
+
 async function listWorkerSessionsForRemote(input: {
   workspaceId: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
 }): Promise<RemoteWorkerSessionInfo[]> {
   const { root } = await requireLocalWorkspace(input.workspaceId);
-  const sessions = await listLocalWorkerSessions(input.runtime, root);
+  const sessions = await listLocalWorkerSessions(
+    input.runtime,
+    root,
+    await nativeClaudeSessionOptions(input.runtime),
+  );
   return sessions.slice(0, MAX_REMOTE_WORKER_SESSIONS).map((session) => ({
     runtime: session.runtime,
     sessionId: session.sessionId,
@@ -2444,7 +2462,7 @@ async function listWorkerSessionsForRemote(input: {
 
 async function deleteWorkerSessionForRemote(input: {
   workspaceId: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "grok";
   sessionId: string;
   memoryScope: WorkerSessionMemoryScope;
 }): Promise<RemoteWorkerSessionDeleteResult> {
@@ -2460,7 +2478,12 @@ async function deleteWorkerSessionForRemote(input: {
   return fileMutations.run(
     JSON.stringify(["workerSession.delete", input.workspaceId, input.runtime]),
     async () => {
-      const sessions = await listLocalWorkerSessions(input.runtime, root);
+      const sessionOptions = await nativeClaudeSessionOptions(input.runtime);
+      const sessions = await listLocalWorkerSessions(
+        input.runtime,
+        root,
+        sessionOptions,
+      );
       const match = sessions.find(
         (session) => session.sessionId === input.sessionId,
       );
@@ -2469,13 +2492,16 @@ async function deleteWorkerSessionForRemote(input: {
           "That session is no longer in this workspace's history.",
         );
       }
-      const result = await deleteLocalWorkerSession({
-        runtime: match.runtime,
-        sessionId: match.sessionId,
-        cwd: match.cwd,
-        transcriptPath: match.transcriptPath,
-        memoryScope: input.memoryScope,
-      });
+      const result = await deleteLocalWorkerSession(
+        {
+          runtime: match.runtime,
+          sessionId: match.sessionId,
+          cwd: match.cwd,
+          transcriptPath: match.transcriptPath,
+          memoryScope: input.memoryScope,
+        },
+        sessionOptions,
+      );
       return {
         deleted: result.deleted,
         memoryDeleted: result.memoryDeleted,
@@ -3040,7 +3066,7 @@ const MAX_HANDLED_PHONE_NOTIFY_EVENT_IDS = 4_096;
 
 function getPhoneNotifyStore(): PhoneNotificationStore {
   phoneNotifyStore ??= new PhoneNotificationStore(
-    join(sparkHome(), "remote"),
+    join(codaraHome(), "remote"),
     (line) => logMain("remote-access", line),
   );
   return phoneNotifyStore;

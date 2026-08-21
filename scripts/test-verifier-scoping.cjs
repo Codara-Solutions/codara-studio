@@ -317,13 +317,14 @@ async function main() {
     results.push("a superseded FEEDBACK does not block the next round");
   }
 
-  check("the split policy reaches every complexity tier", () => {
-    const protocol = read("src/main/orchestration/manager-protocol.ts");
-    assert.equal((protocol.match(/VERIFIER_SCOPE_SPLIT_POLICY/g) ?? []).length, 4);
-    assert.match(protocol, /spawn 2-4 verifiers in ONE batch with canRunParallel true/);
-    assert.match(protocol, /Split by scope, never by duplicating the same brief/);
+  check("the split policy reaches the live manager prompt (auto + execute)", () => {
+    // The policy lives in resources/pi-cora/prompt.ts (the live system prompt)
+    // since the dead structured-decision protocol was deleted.
+    const prompt = read("resources/pi-cora/prompt.ts");
+    assert.match(prompt, /spawn 2-4 verifiers\s+in ONE batch/);
+    assert.match(prompt, /Split by scope, never by duplicating the same brief/);
     // It must not read as a way to dodge a hard verdict.
-    assert.match(protocol, /Every shard must pass/);
+    assert.match(prompt, /Every shard\s+must pass/);
   });
 
   check("the collector is actually wired into the verifier prompt", () => {

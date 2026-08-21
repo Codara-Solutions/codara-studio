@@ -13,6 +13,7 @@ import type {
   PiSubscriptionProvider,
 } from "@shared/types";
 
+import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS, isPiSubscriptionProvider } from "../../shared/agent-families";
 import { resolveCodaraPiRuntime } from "./pi-runtime-electron";
 import { CODARA_PI_VERSION } from "./pi-runtime";
 import { installPinnedPiRuntime, isPinnedPiRuntimeInstalling } from "./pi-runtime-install";
@@ -71,8 +72,10 @@ interface OAuthAuth {
   }): Promise<OAuthCredential>;
   /** Exchange the refresh token for a fresh credential. Network call; throws on
    * failure. Pi's own runtime calls this under the auth-store lock, and so must
-   * we — see refreshPiSubscriptionCredential. */
-  refresh?(credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredential>;
+   * we — see refreshPiSubscriptionCredential. The signal is deliberately NOT
+   * optional here: Anthropic's module feeds it straight to AbortSignal.any,
+   * which rejects undefined, so the type keeps that mistake from returning. */
+  refresh?(credential: OAuthCredential, signal: AbortSignal): Promise<OAuthCredential>;
 }
 
 interface AuthStorageInstance {
@@ -120,18 +123,27 @@ const PROVIDER_META: Record<
   { label: string; model: string; oauthModule: string; exportName: string }
 > = {
   "openai-codex": {
-    label: "ChatGPT Plus / Pro",
+    label: familyForSubscription("openai-codex").planLabel,
     model: "GPT-5.6 Sol",
     oauthModule: "openai-codex.js",
     exportName: "openaiCodexOAuth",
   },
   anthropic: {
-    label: "Claude Pro / Max",
+    label: familyForSubscription("anthropic").planLabel,
     model: "Fable 5",
     oauthModule: "anthropic.js",
     exportName: "anthropicOAuth",
   },
+  xai: {
+    label: familyForSubscription("xai").planLabel,
+    model: "Grok 4.5",
+    oauthModule: "xai.js",
+    exportName: "xaiOAuth",
+  },
 };
+
+/** Ceiling for a background token refresh. Pi's own resolver uses 15s. */
+const REFRESH_TIMEOUT_MS = 15_000;
 
 const activeFlows = new Map<string, ActiveFlow>();
 const oauthLoginGate = new PiOAuthLoginGate();
@@ -145,7 +157,7 @@ function nonEmptyString(value: unknown): value is string {
 }
 
 function providerFrom(value: unknown): PiSubscriptionProvider {
-  if (value === "anthropic" || value === "openai-codex") return value;
+  if (isPiSubscriptionProvider(value)) return value;
   throw new Error("Unsupported Pi subscription provider");
 }
 
@@ -302,10 +314,9 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
       ...(email ? { email } : {}),
     };
   });
-  const connections = [
-    compatibilityConnection("openai-codex", profiles),
-    compatibilityConnection("anthropic", profiles),
-  ];
+  const connections = PI_SUBSCRIPTION_PROVIDERS.map((provider) =>
+    compatibilityConnection(provider, profiles),
+  );
   return {
     runtimeInstalled: runtimeResult.installed,
     runtimeVersion: runtimeResult.version,
@@ -316,9 +327,6 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     profiles,
   };
 }
-
-/** Stable sanitized read for Settings/IPC. Credentials and auth paths never leave main. */
-export const inspectPiSubscriptionProfiles = inspectPiSubscriptions;
 
 /**
  * Install the pinned Pi runtime for a Settings window, streaming npm's
@@ -740,7 +748,12 @@ export async function refreshPiSubscriptionProfileCredential(
       return undefined;
     }
     if (!nonEmptyString(credential.refresh)) return undefined;
-    const next = await oauth.refresh!(credential);
+    // The signal is REQUIRED, not optional. Pi's Anthropic module combines it
+    // with its own deadline through AbortSignal.any([signal, ...]), which
+    // throws ERR_INVALID_ARG_TYPE on undefined before it ever reaches the
+    // network — so omitting it failed every Claude refresh, which then read as
+    // "session expired" and locked the account out of routing entirely.
+    const next = await oauth.refresh!(credential, AbortSignal.timeout(REFRESH_TIMEOUT_MS));
     access = nonEmptyString(next.access) ? next.access : null;
     return next;
   });
@@ -773,18 +786,6 @@ export async function deletePiSubscriptionProfile(
   invalidatePiModelCatalogCache();
   broadcastSubscriptionsChanged(profile.provider);
   return inspectPiSubscriptions();
-}
-
-/** Compatibility delete: remove the provider default profile. */
-export async function disconnectPiSubscription(rawProvider: unknown): Promise<PiSubscriptionOverview> {
-  const provider = providerFrom(rawProvider);
-  const inspection = await inspectPiAccountProfileAuthStore();
-  const defaultId = inspection.snapshot.defaults[provider];
-  const profile =
-    inspection.snapshot.profiles.find((entry) => entry.id === defaultId) ??
-    inspection.snapshot.profiles.find((entry) => entry.provider === provider);
-  if (!profile) return inspectPiSubscriptions();
-  return deletePiSubscriptionProfile(profile.id);
 }
 
 export { renamePiAccountProfile, setDefaultPiAccountProfile };

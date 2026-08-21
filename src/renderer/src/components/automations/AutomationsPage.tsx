@@ -55,7 +55,6 @@ export interface Props {
   // Whether the Automations tab is the active top-level tab (drives the
   // workers poll + activity-stream visibility).
   active: boolean;
-  terminalScrollbackLineLimit: number;
   // Opens a run's ordinary chat surface, used by "Open chat" on an
   // automation's creator run.
   onOpenRunChat?: (runId: string) => void;
@@ -80,7 +79,6 @@ export default function AutomationsPage({
   workspaceName,
   cwd,
   active,
-  terminalScrollbackLineLimit,
   onOpenRunChat,
 }: Props): React.ReactElement {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
@@ -586,7 +584,6 @@ export default function AutomationsPage({
               <WorkersView
                 workers={workspaceWorkers}
                 jobs={jobs}
-                scrollbackLineLimit={terminalScrollbackLineLimit}
                 visible={active && subTab === "workers"}
                 onStopLoom={stopAutomation}
                 onSelectLoom={openDetail}
@@ -728,7 +725,6 @@ export default function AutomationsPage({
                 workers={boardWorkers}
                 initialFocusWorkerId={boardFocusWorkerId}
                 shown={active && boardShowing}
-                scrollbackLineLimit={terminalScrollbackLineLimit}
                 onClose={closeLiveBoard}
                 onOpenWorkersGrid={() => switchSubTab("workers")}
                 onStop={() => stopAutomation(selected.id)}
@@ -933,7 +929,12 @@ const AutomationRow = React.memo(function AutomationRow({
           </span>
           <span
             className="spark-mono"
-            style={{ flex: "0 0 auto", fontSize: 9.5, color: st.color, letterSpacing: "0.04em" }}
+            style={{
+              flex: "0 0 auto",
+              fontSize: 9.5,
+              color: st.kind === "running" ? "var(--accent-text)" : st.color,
+              letterSpacing: "0.04em",
+            }}
           >
             {st.label}
           </span>
@@ -1095,7 +1096,7 @@ function AutomationDetail({
               className="spark-badge"
               style={{
                 flex: "0 0 auto",
-                color: st.color,
+                color: st.kind === "running" ? "var(--accent-text)" : st.color,
                 borderColor: `color-mix(in oklch, ${st.color} 32%, transparent)`,
                 background: `color-mix(in oklch, ${st.color} 8%, transparent)`,
               }}
@@ -1134,7 +1135,7 @@ function AutomationDetail({
         >
           {running ? (
             <>
-              <span aria-hidden style={{ color: "var(--accent)", marginRight: 6 }}>
+              <span aria-hidden style={{ color: "var(--accent-text)", marginRight: 6 }}>
                 ●
               </span>
               Live board

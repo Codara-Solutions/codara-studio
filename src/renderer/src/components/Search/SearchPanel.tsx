@@ -25,8 +25,8 @@ interface Props {
   onOpenFile: (entry: FsEntry, location: { line: number; column: number }) => void;
 }
 
-const HIT_CAP = 2000;
-const DEBOUNCE_MS = 200;
+const HIT_CAP = 1000;
+const DEBOUNCE_MS = 300;
 
 interface FileGroup {
   path: string;
@@ -292,15 +292,14 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
       className="spark-fade-in"
       onMouseDown={onClose}
     >
-      {/* Scrim + dialog face come from the shared glass classes (frosted in
-          glass mode, opaque panel look otherwise) so both honor the
-          data-glass kill switch, reduced-transparency, and the user tuning. */}
-      <div className="spark-scrim" style={{ zIndex: 0 }} />
+      {/* The card is liquid glass; the full-window scrim is a plain tint so
+          search never asks Chromium to blur the live workbench. */}
+      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Search in files"
-        className="spark-glass--strong"
+        className="spark-glass--strong spark-overlay-surface"
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Escape") {

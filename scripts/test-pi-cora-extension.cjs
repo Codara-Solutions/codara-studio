@@ -32,6 +32,14 @@ const extension = loadTypeScriptModule(
 const policies = loadTypeScriptModule(
   path.join(__dirname, "..", "src", "shared", "cora-execution-policy.ts"),
 );
+const browserPolicy = loadTypeScriptModule(
+  path.join(__dirname, "..", "resources", "pi-cora", "studio-browser-policy.ts"),
+);
+const managerExtensionSource = fs.readFileSync(
+  path.join(__dirname, "..", "resources", "pi-cora", "index.ts"),
+  "utf8",
+);
+assert.match(managerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
 process.env.SPARK_MCP_MODE = "talk";
 const studioBridge = require(path.join(
   __dirname,
@@ -46,7 +54,6 @@ const auto = extension.buildCoraPiSystemPrompt("auto");
 const execute = extension.buildCoraPiSystemPrompt("execute");
 const automation = extension.buildCoraPiSystemPrompt("automation");
 const deep = extension.buildCoraPiSystemPrompt("execute", "deep");
-const frontier = extension.buildCoraPiSystemPrompt("execute", "frontier");
 
 assert.match(talk, /This is Talk mode/);
 assert.match(talk, /do not claim that workers were spawned/);
@@ -58,20 +65,25 @@ assert.match(auto, /Never call codara_complete merely to end a conversational tu
 assert.match(execute, /This is Execute mode/);
 assert.match(execute, /Call codara_complete only after/);
 assert.match(execute, /Treat worker reports as claims/);
+const orchestration = execute.slice(
+  execute.indexOf("How you orchestrate:"),
+  execute.indexOf("Effort calibration:"),
+);
+assert.ok(orchestration.length < 3500, `orchestration prompt stays compact (${orchestration.length} chars)`);
 assert.match(automation, /This is Automation mode/);
 assert.match(automation, /Do not spawn coding workers/);
 assert.doesNotMatch(automation, /Call codara_complete/);
 assert.match(deep, /Deep execution policy/);
 assert.match(deep, /actively seek a counterexample/);
-assert.match(frontier, /Frontier execution policy/);
-assert.match(frontier, /content-addressed\s+exact-state artifact/);
-assert.match(frontier, /falsify every changed\s+hunk/);
 assert.match(execute, /codara_whiteboard_update/);
+assert.match(execute, /Codara Studio's built-in Browser tab/);
+assert.match(execute, /codara_preview_\*/);
 const studioToolNames = new Set(studioBridge.listTools().map((tool) => tool.name));
 assert.equal(studioToolNames.has("codara_whiteboard_get"), true);
 assert.equal(studioToolNames.has("codara_whiteboard_update"), true);
 assert.equal(policies.normalizeCoraExecutionPolicy("deep"), "deep");
-assert.equal(policies.normalizeCoraExecutionPolicy("frontier"), "frontier");
+// Retired frontier policy values migrate to deep on read.
+assert.equal(policies.normalizeCoraExecutionPolicy("frontier"), "deep");
 assert.equal(policies.normalizeCoraExecutionPolicy("invalid"), "fast");
 // The picker is gone: the policy is derived in main from taskComplexity, so
 // the shared module keeps normalization only.
@@ -83,7 +95,7 @@ assert.equal(policies.CORA_EXECUTION_POLICIES, undefined);
 // it must reach every orchestrating mode and must NOT leak into Talk.
 assert.match(auto, /Task complexity contract/);
 assert.match(execute, /Task complexity contract/);
-assert.match(execute, /Set taskComplexity on codara_spawn_workers/);
+assert.match(execute, /Set taskComplexity on the first codara_spawn_workers/);
 assert.match(execute, /do not bid for budget/);
 assert.doesNotMatch(talk, /Task complexity contract/);
 assert.doesNotMatch(automation, /Task complexity contract/);
@@ -101,6 +113,25 @@ const studioBridgePath = path.join(
 process.env.SPARK_MCP_MODE = "execute";
 delete require.cache[require.resolve(studioBridgePath)];
 const executeBridge = require(studioBridgePath);
+const executeToolNames = new Set(executeBridge.listTools().map((tool) => tool.name));
+for (const browserTool of [
+  "codara_preview_list",
+  "codara_preview_navigate",
+  "codara_preview_snapshot",
+  "codara_preview_screenshot",
+  "codara_preview_mouse",
+  "codara_preview_scroll",
+  "codara_preview_hover",
+  "codara_preview_drag",
+  "codara_preview_key",
+  "codara_preview_upload",
+  "codara_preview_console",
+  "codara_preview_network",
+  "codara_preview_resize",
+  "codara_preview_run",
+]) {
+  assert.equal(executeToolNames.has(browserTool), true, `execute mode exposes ${browserTool}`);
+}
 const spawnTool = executeBridge.listTools().find((tool) => tool.name === "codara_spawn_workers");
 assert.ok(spawnTool, "codara_spawn_workers is not exposed in execute mode");
 assert.deepEqual(spawnTool.inputSchema.properties.taskComplexity.enum, [
@@ -108,6 +139,49 @@ assert.deepEqual(spawnTool.inputSchema.properties.taskComplexity.enum, [
   "standard",
   "complex",
 ]);
+assert.equal(spawnTool.inputSchema.properties.workers.items.properties.verifier.type, "string");
+assert.ok(
+  spawnTool.inputSchema.properties.workers.items.properties.verifier.description.length < 500,
+  "declared-verifier tool guidance stays compact",
+);
+
+// Browser computer-use has one home: Codara Studio's mounted Browser webview.
+// The shell remains useful for code and HTTP, but cannot open a parallel GUI
+// browser that the user cannot see or control from the Studio tab.
+for (const command of [
+  "open https://example.com",
+  "/usr/bin/open -a 'Google Chrome' https://example.com",
+  "env FOO=1 xdg-open https://example.com",
+  "/usr/bin/gio open https://example.com",
+  `osascript -e 'open location "https://example.com"'`,
+  "google-chrome https://example.com",
+  "/usr/bin/firefox https://example.com",
+  '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" https://example.com',
+  "cmd.exe /c start https://example.com",
+  "powershell Start-Process https://example.com",
+  "python3 -m webbrowser https://example.com",
+  "python3 -c 'import webbrowser; webbrowser.open(\"https://example.com\")'",
+  "npx playwright open https://example.com",
+]) {
+  assert.equal(browserPolicy.launchesExternalBrowser(command), true, `blocks external browser: ${command}`);
+  assert.equal(
+    browserPolicy.studioBrowserOnlyDecision("bash", { command })?.block,
+    true,
+    `bash guard blocks: ${command}`,
+  );
+}
+for (const command of [
+  "curl https://example.com",
+  "git grep 'open https'",
+  "printf 'open https://example.com'",
+  "npm run build",
+]) {
+  assert.equal(browserPolicy.launchesExternalBrowser(command), false, `allows non-GUI shell work: ${command}`);
+}
+assert.equal(
+  browserPolicy.studioBrowserOnlyDecision("read", { path: "open https://example.com" }),
+  undefined,
+);
 
 // ── Worker policy (resources/pi-cora/worker-policy.ts): roster + fence ──────
 // The pure policy behind worker.ts: which bridge tools a worker registers and
@@ -115,6 +189,18 @@ assert.deepEqual(spawnTool.inputSchema.properties.taskComplexity.enum, [
 const policy = loadTypeScriptModule(
   path.join(__dirname, "..", "resources", "pi-cora", "worker-policy.ts"),
 );
+const workerExtensionSource = fs.readFileSync(
+  path.join(__dirname, "..", "resources", "pi-cora", "worker.ts"),
+  "utf8",
+);
+assert.match(workerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
+assert.match(workerExtensionSource, /const SCRATCHPAD_MAX_CHARS = 4_000/);
+assert.match(workerExtensionSource, /name: "scratchpad"/);
+assert.match(workerExtensionSource, /if \(!untrustedPullRequest\) registerScratchpadTool\(pi\)/);
+assert.match(workerExtensionSource, /never hidden reasoning/);
+assert.match(workerExtensionSource, /For greetings, opinions, and questions/);
+assert.match(workerExtensionSource, /The result summary\s+is shown to the user verbatim/);
+assert.match(workerExtensionSource, /Do not inspect the repository or say "acknowledged"/);
 
 // Automation detection is the SPARK_AUTOMATION_ID stamp.
 assert.equal(policy.isAutomationWorker({}), false);
@@ -439,39 +525,29 @@ const noInput = {};
   // The chat capacity the meter renders.
   const capacity = shared.chatContextCapacityTokens;
   assert.equal(
-    capacity({ contextWindowTokens: 400_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 400_000 }),
     256_000,
     "a gpt-5 Pi chat reads against 256k, not its 400k window",
   );
   assert.equal(
-    capacity({ contextWindowTokens: 1_000_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 1_000_000 }),
     256_000,
     "a 1M-window Pi chat reads against 256k",
   );
   assert.equal(
-    capacity({ contextWindowTokens: 400_000, backend: "codex" }),
-    400_000,
-    "a codex CLI chat keeps its own window: the extension does not run there",
-  );
-  assert.equal(
-    capacity({ contextWindowTokens: 1_000_000, backend: "claude" }),
-    1_000_000,
-    "a claude CLI chat keeps its own window",
-  );
-  assert.equal(
-    capacity({ contextWindowTokens: 1_000_000, backend: "pi", compactAtTokens: 120_000 }),
+    capacity({ contextWindowTokens: 1_000_000, compactAtTokens: 120_000 }),
     120_000,
     "a stamped override drives the meter",
   );
   // A window smaller than the cap can never reach it, so it shows its own
   // (smaller) effective ceiling rather than a 256k promise it cannot keep.
   assert.equal(
-    capacity({ contextWindowTokens: 128_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 128_000 }),
     128_000 - shared.PI_BUILTIN_COMPACT_HEADROOM_TOKENS,
     "a sub-threshold window reports Pi's own earlier trigger",
   );
   assert.equal(
-    capacity({ contextWindowTokens: 8_000, backend: "pi" }),
+    capacity({ contextWindowTokens: 8_000 }),
     8_000,
     "a window below even the headroom never exceeds itself",
   );
@@ -530,6 +606,14 @@ const noInput = {};
   usage = { tokens: 1500, contextWindow: 1000000 };
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "crossing the override threshold compacts");
+  assert.equal(
+    lastOptions.customInstructions,
+    compaction.CORA_COMPACTION_INSTRUCTIONS,
+    "automatic compaction uses Cora's continuation handoff prompt",
+  );
+  assert.match(lastOptions.customInstructions, /newest user intent/);
+  assert.match(lastOptions.customInstructions, /exact files\/symbols\/commands\/IDs/);
+  assert.match(lastOptions.customInstructions, /pending tasks/);
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "an in-flight compaction suppresses a second request");
 

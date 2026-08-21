@@ -243,7 +243,9 @@ export function syncTerminalNotifyPanes(input: {
       existing.tabTitle = String(entry.tabTitle ?? "Terminal");
       existing.excluded = Boolean(entry.excluded);
       existing.runtimeHint =
-        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+        entry.runtimeHint === "claude" ||
+        entry.runtimeHint === "codex" ||
+        entry.runtimeHint === "grok"
           ? entry.runtimeHint
           : null;
       if (!existing.runtime && existing.runtimeHint) existing.runtime = existing.runtimeHint;
@@ -265,11 +267,15 @@ export function syncTerminalNotifyPanes(input: {
       ring: "",
       carry: "",
       runtime:
-        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+        entry.runtimeHint === "claude" ||
+        entry.runtimeHint === "codex" ||
+        entry.runtimeHint === "grok"
           ? entry.runtimeHint
           : null,
       runtimeHint:
-        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+        entry.runtimeHint === "claude" ||
+        entry.runtimeHint === "codex" ||
+        entry.runtimeHint === "grok"
           ? entry.runtimeHint
           : null,
       state: "idle",
@@ -454,7 +460,7 @@ function ensureSweep(): void {
       // still flip off "working" the instant the stream goes quiet — this is
       // the core fix for the stuck-on-WORKING banner when the pane is hidden.
       emitPaneState(w, "idle");
-      if (!workedLongEnough(w)) continue;
+      if (!w.userTurnArmed || !workedLongEnough(w)) continue;
       if (now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) continue;
       deliver(w, "done", null);
       w.userTurnArmed = false;
@@ -651,9 +657,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   }
   if (launchedRuntime) {
     // A shell command marker is stronger than heuristic output: the user has
-    // explicitly launched an agent in this pane. Arm startup prompts and clear
-    // any prior turn's completion guard.
-    w.userTurnArmed = true;
+    // launched an agent in this pane. It identifies the runtime, but launching
+    // a TUI is not an agent turn and must not produce a ready/trust toast. Real
+    // prompt submission is armed by noteTerminalUserInput().
+    w.userTurnArmed = false;
     if (w.state !== "working") {
       w.workingSince = 0;
       w.lastWorkingAt = 0;
@@ -764,7 +771,11 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           if (w.state !== "blocked") emitPaneState(w, "working");
           continue;
         }
-        if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+        if (
+          w.state === "working" &&
+          w.userTurnArmed &&
+          now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
+        ) {
           deliver(w, "done", null);
         }
         if (w.state === "working") w.state = "idle";
@@ -808,7 +819,11 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           if (w.state !== "blocked") emitPaneState(w, "working");
           continue;
         }
-        if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+        if (
+          w.state === "working" &&
+          w.userTurnArmed &&
+          now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
+        ) {
           deliver(w, "done", null);
         }
         w.state = "idle";
@@ -874,6 +889,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.teammatesActive = 0;
       if (
         w.state === "working" &&
+        w.userTurnArmed &&
         workedLongEnough(w) &&
         now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
       ) {
@@ -902,6 +918,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       tanLog(`pane=${w.paneId} agent exited (prompt marker / alt-screen leave); state was ${w.state}`);
       if (
         w.state === "working" &&
+        w.userTurnArmed &&
         workedLongEnough(w) &&
         now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
       ) {
@@ -966,7 +983,6 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
     if (w.state !== "blocked") emitPaneState(w, "working");
     return;
   }
-  w.lastOscNotifyAt = now;
   // The program announced the stop itself; stand the heuristic down so the
   // quiet-window sweep doesn't re-alert the same turn end.
   if (kind === "blocked") {
@@ -987,6 +1003,17 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   // input → "idle"; an "approval/permission" announcement → "blocked". The TUI
   // is still up (this is not a process exit), so we never emit "done" here.
   emitPaneState(w, kind === "blocked" ? "blocked" : "idle");
+  // Agent CLIs may emit a ready/waiting OSC notification while their opening
+  // screen is still painting. A launch is not completed work: keep the chip
+  // accurate but stay quiet until an actual prompt has been submitted.
+  if (
+    !w.userTurnArmed &&
+    (w.runtime !== null || /\b(?:claude|codex|grok)\b/i.test(message))
+  ) {
+    tanLog(`pane=${w.paneId} startup notification suppressed`);
+    return;
+  }
+  w.lastOscNotifyAt = now;
   // An explicit OSC notification is the program authoritatively announcing its
   // current state — it is never the previous turn's heuristic footer tail — so
   // it stands the policy's completion guard down and always toasts, exactly
