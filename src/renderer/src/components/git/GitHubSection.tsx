@@ -57,7 +57,9 @@ export default function GitHubSection({
 }: Props): React.ReactElement {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  // Collapsed until asked for: the block is a secondary read of a remote, and
+  // Source Control's own status is what the panel is opened for.
+  const [collapsed, setCollapsed] = useState(true);
   const [helpOpen, setHelpOpen] = useState(false);
   const [headerHover, setHeaderHover] = useState(false);
   const [refreshHover, setRefreshHover] = useState(false);
@@ -88,9 +90,9 @@ export default function GitHubSection({
     [],
   );
 
-  // A new workspace context starts the block fresh.
+  // A new workspace context starts the block fresh — back to collapsed.
   useEffect(() => {
-    setCollapsed(false);
+    setCollapsed(true);
     setHelpOpen(false);
     setQueueSummary({ loading: false, total: null });
   }, [cwd]);
@@ -144,13 +146,18 @@ export default function GitHubSection({
     [cwd],
   );
 
-  // A new workspace or branch has no snapshot yet, so that read is loud.
+  // A new workspace or branch has no snapshot yet, so that read is loud. It
+  // waits for the block to be opened: each read is a `gh` subprocess tree, and
+  // the block now starts collapsed, so an eager read would spend that on a
+  // section nobody has asked to see. Expanding re-runs this effect, which is
+  // also what picks up a branch that moved while the block was closed.
   useEffect(() => {
+    if (collapsed) return;
     loadStatus(false);
     return () => {
       requestId.current += 1;
     };
-  }, [loadStatus, currentBranch]);
+  }, [collapsed, loadStatus, currentBranch]);
 
   // Both keys are watched together: the panel's own refresh bumps the user key
   // and the git version at once, and this must be one read, not two. A read the
@@ -169,14 +176,16 @@ export default function GitHubSection({
     // resume path's clock instead of firing per save. Nothing is lost by
     // waiting: focus, the fallback timer, or the user's own refresh all catch
     // up, and a branch change is handled loudly by the effect above.
+    // A collapsed block shows nothing a silent read could update, and opening
+    // it reads loudly anyway — so only the user's own refresh gets through.
     if (
       !loud &&
-      Date.now() - lastReadAt.current < RESUME_REFRESH_MIN_INTERVAL_MS
+      (collapsed || Date.now() - lastReadAt.current < RESUME_REFRESH_MIN_INTERVAL_MS)
     ) {
       return;
     }
     loadStatus(!loud);
-  }, [loadStatus, refreshKey, userRefreshKey]);
+  }, [collapsed, loadStatus, refreshKey, userRefreshKey]);
 
   // Coming back to the window is the strongest signal that GitHub may have
   // moved on without us; the slow interval only covers a window left open.
