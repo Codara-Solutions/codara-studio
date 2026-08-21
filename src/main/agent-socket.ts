@@ -22,7 +22,7 @@ import {
 } from "./agent-terminal-lifecycle";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
-import { loadState, saveState } from "./storage";
+import { loadSettings, loadState, saveState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
 import {
   detectWorkerAssignableRuntimes,
@@ -76,7 +76,12 @@ import {
   CODEX_MODEL_CATALOG,
   normalizeCodexModelId,
 } from "@shared/model-catalog";
-import { ALLOWED_WORKER_MODELS, rosterModelFor } from "./orchestration/worker-model-hint";
+import {
+  ALLOWED_WORKER_MODELS,
+  enabledWorkerModelFor,
+  rosterModelFor,
+} from "./orchestration/worker-model-hint";
+import { availableCoraWorkerModels } from "./openrouter-config";
 import {
   constrainedRuntimesForHeadroom,
   headroomForRuntime,
@@ -2005,6 +2010,34 @@ function crossProviderPeerModel(
   return rosterModelFor(runtime, /fable/.test(model) ? "premium" : "standard");
 }
 
+function runtimeForEnabledWorkerModel(
+  model: string,
+  fallback: OrchestratorWorkerInput["runtimePreference"],
+): "claude" | "codex" | "grok" {
+  const id = model.toLowerCase();
+  if (id.startsWith("claude-")) return "claude";
+  if (id.startsWith("gpt-")) return "codex";
+  if (id.startsWith("grok-")) return "grok";
+  // OpenRouter models still run in the autonomous Pi worker path. Preserve a
+  // manager's family hint for display/fallback semantics when possible.
+  return fallback === "claude" || fallback === "codex" || fallback === "grok"
+    ? fallback
+    : "codex";
+}
+
+function hasEnabledNativeWorkerForRuntime(
+  enabledModels: readonly string[],
+  runtime: "claude" | "codex" | "grok",
+): boolean {
+  return enabledModels.some((model) => {
+    const id = model.trim().toLowerCase();
+    if (id.includes("/")) return false;
+    if (runtime === "claude") return id.startsWith("claude-");
+    if (runtime === "codex") return id.startsWith("gpt-");
+    return id.startsWith("grok-");
+  });
+}
+
 function runtimeHadEnvironmentalFailure(
   run: RunState,
   runtime: "claude" | "codex" | "grok",
@@ -2295,6 +2328,16 @@ async function handleOrchestratorSpawnWorkers(
     (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
       Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
   );
+  const enabledWorkerModels = untrustedPullRequest
+    ? [...ALLOWED_WORKER_MODELS]
+    : availableCoraWorkerModels(await loadSettings());
+  if (!untrustedPullRequest && enabledWorkerModels.length === 0) {
+    return errorResponse(
+      id,
+      ERR_FORBIDDEN,
+      "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
+    );
+  }
   const liveFeedbackRetries = [
     ...new Map(
       workerEntries
@@ -2477,6 +2520,7 @@ async function handleOrchestratorSpawnWorkers(
         AGENT_FAMILY_IDS.filter(
           (runtime) =>
             runtime !== latestImplementation.runtimePreference &&
+            hasEnabledNativeWorkerForRuntime(enabledWorkerModels, runtime) &&
             isWorkerAssignable(runtimes, runtime) &&
             !runtimeHadEnvironmentalFailure(run, runtime) &&
             !runtimeLimitReached(headroomSummary, runtime),
@@ -2530,6 +2574,7 @@ async function handleOrchestratorSpawnWorkers(
     if (anyReroutableWorker) {
       const detected = await detectWorkerAssignableRuntimes();
       const preferredUsable =
+        hasEnabledNativeWorkerForRuntime(enabledWorkerModels, headroomPreferredRuntime) &&
         isWorkerAssignable(detected, headroomPreferredRuntime) &&
         !runtimeHadEnvironmentalFailure(run, headroomPreferredRuntime);
       if (preferredUsable) {
@@ -2660,7 +2705,11 @@ async function handleOrchestratorSpawnWorkers(
           isAgentRuntimeKind(effectiveRuntime) ? effectiveRuntime : "claude",
           "standard",
         )
-      : runStore.sanitizeWorkerModelHint(effectiveModelHint);
+      : enabledWorkerModelFor(effectiveRuntime, effectiveModelHint, enabledWorkerModels);
+    if (!sanitizedModel) continue;
+    if (!untrustedPullRequest) {
+      effectiveRuntime = runtimeForEnabledWorkerModel(sanitizedModel, effectiveRuntime);
+    }
     const updated = await runStore.createWorkerTask({
       runId,
       stepId: synthStepId,

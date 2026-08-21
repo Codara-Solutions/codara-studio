@@ -517,6 +517,9 @@ async function main() {
     );
 
     globalThis.__piCommitResponse = null;
+    globalThis.__commitSettings = { commitMessageModel: "auto" };
+    globalThis.__openRouterCommitResponse = null;
+    globalThis.__openRouterCommitRequest = null;
     const generator = await bundle(
       path.join(ROOT, "src", "main", "git-commit-message.ts"),
       path.join(temporaryRoot, "generator.cjs"),
@@ -533,7 +536,14 @@ async function main() {
           ["git-exec", `module.exports = {
             readGitText: async (_cwd, args) => args[0] === "log" ? "Add prior feature\\nFix prior bug\\nRefactor prior code" : "synthetic diff",
           };`],
-          ["storage", `module.exports = { loadSettings: async () => ({ commitMessageModel: "auto" }) };`],
+          ["storage", `module.exports = { loadSettings: async () => globalThis.__commitSettings };`],
+          ["inline-ai", `module.exports = {
+            runInlineAiChatCompletion: async (request) => {
+              globalThis.__openRouterCommitRequest = request;
+              if (globalThis.__openRouterCommitResponse instanceof Error) throw globalThis.__openRouterCommitResponse;
+              return globalThis.__openRouterCommitResponse;
+            },
+          };`],
           ["orchestration/pi-commit-one-shot", `module.exports = {
             runSessionlessPiCommitMessage: async () => {
               if (globalThis.__piCommitResponse instanceof Error) throw globalThis.__piCommitResponse;
@@ -542,7 +552,7 @@ async function main() {
           };`],
         ]);
         build.onResolve(
-          { filter: /^(\.\/git-ops|\.\/git-exec|\.\/storage|\.\/orchestration\/pi-commit-one-shot)$/ },
+          { filter: /^(\.\/git-ops|\.\/git-exec|\.\/storage|\.\/inline-ai|\.\/orchestration\/pi-commit-one-shot)$/ },
           (args) => ({ path: args.path.slice(2), namespace: "commit-stub" }),
         );
         build.onLoad({ filter: /.*/, namespace: "commit-stub" }, (args) => ({
@@ -565,9 +575,26 @@ async function main() {
       ok: true,
       message: "Update widget",
     });
+    globalThis.__commitSettings = {
+      commitMessageModel: "openrouter",
+      openRouterModel: "google/gemini-flash-latest",
+    };
+    globalThis.__openRouterCommitResponse = { text: "feat: OpenRouter commit draft", error: null };
+    assert.deepEqual(await generator.generateCommitMessage(ROOT), {
+      ok: true,
+      message: "feat: OpenRouter commit draft",
+    });
+    assert.equal(
+      globalThis.__openRouterCommitRequest.modelId,
+      "google/gemini-flash-latest",
+    );
 
     const settingsSource = fs.readFileSync(
       path.join(ROOT, "src", "renderer", "src", "components", "SettingsDialog.tsx"),
+      "utf8",
+    );
+    const capabilitySource = fs.readFileSync(
+      path.join(ROOT, "src", "renderer", "src", "components", "AgentCapabilitiesDialog.tsx"),
       "utf8",
     );
     assert.match(
@@ -578,7 +605,12 @@ async function main() {
     assert.match(settingsSource, /Automatic \(OpenAI first\)/);
     assert.match(settingsSource, /gpt-5\.6-luna/);
     assert.match(settingsSource, /claude-sonnet-5/);
-    assert.match(settingsSource, /OpenRouter.*editor's inline AI/s);
+    assert.match(settingsSource, /Inline edit and commit model/);
+    assert.match(settingsSource, /Models for Cora/);
+    assert.match(settingsSource, /Check key and models/);
+    assert.doesNotMatch(settingsSource, /Cora worker models/);
+    assert.match(capabilitySource, /Cora worker models/);
+    assert.match(settingsSource, /OpenRouter, \$\{draft\.openRouterModel/);
     assert.doesNotMatch(
       settingsSource,
       /Ghost-text autocomplete and git commit-message drafts share/,
@@ -590,8 +622,8 @@ async function main() {
     );
     assert.doesNotMatch(commitComposerSource, /Generate commit message with Inline AI/);
     assert.ok(
-      commitComposerSource.includes('title="Draft a commit message with your Pi subscription"'),
-      "CommitComposer must keep the exact Pi subscription tooltip",
+      commitComposerSource.includes('title="Draft a commit message with your configured model"'),
+      "CommitComposer must describe both subscription and OpenRouter generation",
     );
 
     const orchestrationSmokeSource = fs.readFileSync(
@@ -599,8 +631,8 @@ async function main() {
       "utf8",
     );
     assert.ok(
-      orchestrationSmokeSource.includes('page.getByLabel("Model", { exact: true })'),
-      "OpenRouter model must use the exact visible label locator",
+      orchestrationSmokeSource.includes('page.getByLabel("Inline edit and commit model")'),
+      "OpenRouter utility model must use its visible settings label",
     );
     assert.ok(
       orchestrationSmokeSource.includes(

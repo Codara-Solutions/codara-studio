@@ -38,6 +38,7 @@ export type NativeCliAccountBusyAction =
  */
 export interface AccountCoraFacet {
   profileId: string;
+  accountFingerprint?: string;
   connected: boolean;
   expired: boolean;
   active: boolean;

@@ -34,7 +34,7 @@ import type {
   TerminalSplit,
   TerminalTab,
 } from "./types";
-import { BackIcon, CloseIcon, DragHandleIcon, GlobeIcon, LockIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
+import { BackIcon, CloseIcon, DragHandleIcon, LockIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
 import { workerModelLabel } from "../components/runs/run-format";
 import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { agentBrandColor, agentBrandRuntime, agentBrandTone } from "../lib/agent-brand";
@@ -143,11 +143,6 @@ interface Props {
     },
   ) => void;
   onClosePane: (tabId: TabId, paneId: string) => void;
-  // Open a browser preview as a docked cell beside the given pane.
-  onAddBrowserPane: (
-    tabId: TabId,
-    target: { paneId: string; direction: TerminalSplit["direction"] } | null,
-  ) => void;
   // A tab pill was dropped into this tab's grid at the given edge intent.
   onDockTabDrop: (
     tabId: TabId,
@@ -209,8 +204,6 @@ type Bundle = {
   onSplitRight: () => void;
   onSplitDown: () => void;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
-  // Open a browser preview docked beside this pane, rather than as a tab.
-  onAddBrowserPane: () => void;
   onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onClose: () => void;
   onToggleZoom: () => void;
@@ -243,7 +236,6 @@ function TerminalStack({
   onOpenWorkerSessionPicker,
   onMovePane,
   onClosePane,
-  onAddBrowserPane,
   onDockTabDrop,
   onUndockTab,
   onCloseDockedTab,
@@ -280,7 +272,6 @@ function TerminalStack({
   const openWorkerSessionPickerRef = useRef(onOpenWorkerSessionPicker);
   const moveRef = useRef(onMovePane);
   const closeRef = useRef(onClosePane);
-  const addBrowserRef = useRef(onAddBrowserPane);
   const dockDropRef = useRef(onDockTabDrop);
   const undockRef = useRef(onUndockTab);
   const closeDockedRef = useRef(onCloseDockedTab);
@@ -306,7 +297,6 @@ function TerminalStack({
     openWorkerSessionPickerRef.current = onOpenWorkerSessionPicker;
     moveRef.current = onMovePane;
     closeRef.current = onClosePane;
-    addBrowserRef.current = onAddBrowserPane;
     dockDropRef.current = onDockTabDrop;
     undockRef.current = onUndockTab;
     closeDockedRef.current = onCloseDockedTab;
@@ -322,7 +312,7 @@ function TerminalStack({
     resumeUnavailableRef.current = onPaneResumeUnavailable;
     resumeFallbackRef.current = onPaneResumeFallback;
     bootResumeConsumedRef.current = onPaneBootResumeConsumed;
-  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onOpenWorkerSessionPicker, onMovePane, onClosePane, onAddBrowserPane, onDockTabDrop, onUndockTab, onCloseDockedTab, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
+  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onOpenWorkerSessionPicker, onMovePane, onClosePane, onDockTabDrop, onUndockTab, onCloseDockedTab, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
 
   // Stable identities for the dock chrome: TerminalTabPane is memoized, and a
   // fresh callback identity here would re-render every tab (and with it every
@@ -419,7 +409,6 @@ function TerminalStack({
           onSplitRight: () => splitRef.current(tabId, paneId, "horizontal"),
           onSplitDown: () => splitRef.current(tabId, paneId, "vertical"),
           onSmartAdd: (autorun, agentSession) => smartAddInTab(tabId, autorun, agentSession),
-          onAddBrowserPane: () => addBrowserRef.current(tabId, smartAddTargetInTab(tabId)),
           onOpenWorkerSessions: (runtime) => {
             const target = smartAddTargetInTab(tabId);
             if (!target) return;
@@ -1308,7 +1297,6 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
                 onSmartAdd={bundle.onSmartAdd}
-                onAddBrowserPane={bundle.onAddBrowserPane}
                 onOpenWorkerSessions={bundle.onOpenWorkerSessions}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
@@ -2313,7 +2301,6 @@ function ResizeIntersectionGrip({
 interface PaneToolbarProps {
   dragPayload: TerminalPaneDragPayload;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
-  onAddBrowserPane: () => void;
   onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
@@ -2326,7 +2313,6 @@ interface PaneToolbarProps {
 function PaneToolbar({
   dragPayload,
   onSmartAdd,
-  onAddBrowserPane,
   onOpenWorkerSessions,
   onSplitRight,
   onSplitDown,
@@ -2485,7 +2471,6 @@ function PaneToolbar({
           onPick={(kind) => {
             setMenuOpen(false);
             if (kind === "shell") onSmartAdd();
-            else if (kind === "browser") onAddBrowserPane();
             else onOpenWorkerSessions(kind);
           }}
         />,
@@ -2558,7 +2543,7 @@ export function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }
   );
 }
 
-type AddPaneKind = "shell" | "claude" | "codex" | "grok" | "browser";
+type AddPaneKind = "shell" | "claude" | "codex" | "grok";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
 // default smart-add behavior (split the most spacious leaf); the two worker
@@ -2606,13 +2591,6 @@ const AddPaneMenu = React.forwardRef<
       command: GROK_LAUNCH_COMMAND,
       accent: "grok",
       glyph: <RuntimeGlyph runtime="grok" />,
-    },
-    {
-      kind: "browser",
-      title: "Browser pane",
-      hint: "preview",
-      accent: "shell",
-      glyph: <GlobeIcon size={13} />,
     },
   ];
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import type { ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
+import SystemMeters from "./SystemMeters";
 import UsageMeters from "./UsageMeters";
 import type { NavigateTo } from "../notifications/routing";
 
@@ -318,6 +319,7 @@ function WindowChrome({
           alignItems: "stretch",
         }}
       >
+        <SystemMeters />
         <UsageMeters onOpenUsage={onOpenUsage} />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
         <NotificationCenter

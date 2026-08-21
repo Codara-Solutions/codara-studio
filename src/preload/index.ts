@@ -90,11 +90,14 @@ import type {
   NativeCliAccountCancelLoginInput,
   NativeCliAccountCreateInput,
   NativeCliAccountDeleteResult,
+  NativeCliAccountLoginInput,
   NativeCliAccountLoginPreparation,
   NativeCliAccountMutationResult,
   NativeCliAccountProfileInput,
   NativeCliAccountRenameInput,
   NativeCliAccountsInspection,
+  OpenRouterValidationInput,
+  OpenRouterValidationResult,
   NotificationCenterEntry,
   NotificationCenterSummary,
   NotificationSoundKind,
@@ -123,6 +126,7 @@ import type {
   PrepareWorkerTaskInput,
   PtyExitInfo,
   PtyResourceSnapshot,
+  SystemResourceSnapshot,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
@@ -240,6 +244,11 @@ const api = {
       return () => ipcRenderer.off("settings:changed", listener);
     },
   },
+  openRouter: {
+    validate: (input: OpenRouterValidationInput): Promise<OpenRouterValidationResult> =>
+      ipcRenderer.invoke("openrouter:validate", input),
+    coraModels: (): Promise<string[]> => ipcRenderer.invoke("openrouter:cora-models"),
+  },
   // READ-ONLY leftover check for the retired "Use the Active account in your
   // terminal" feature. Codara never writes to shell startup files; this only
   // reports a block the removed feature left behind so the user can delete it.
@@ -263,7 +272,7 @@ const api = {
     ): Promise<NativeCliAccountMutationResult> =>
       ipcRenderer.invoke("native-cli-accounts:set-default", input),
     prepareLogin: (
-      input: NativeCliAccountProfileInput,
+      input: NativeCliAccountLoginInput,
     ): Promise<NativeCliAccountLoginPreparation> =>
       ipcRenderer.invoke("native-cli-accounts:prepare-login", input),
     cancelLogin: (
@@ -282,6 +291,13 @@ const api = {
       const listener = () => handler();
       ipcRenderer.on("native-cli-accounts:changed", listener);
       return () => ipcRenderer.off("native-cli-accounts:changed", listener);
+    },
+    onLoginError: (handler: (message: string) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, message: unknown) => {
+        if (typeof message === "string") handler(message);
+      };
+      ipcRenderer.on("native-cli-accounts:login-error", listener);
+      return () => ipcRenderer.off("native-cli-accounts:login-error", listener);
     },
   },
   piSubscriptions: {
@@ -987,6 +1003,10 @@ const api = {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
+  },
+  system: {
+    resourceSnapshot: (): Promise<SystemResourceSnapshot> =>
+      ipcRenderer.invoke("system:resourceSnapshot"),
   },
   // Manual Claude/Codex terminal-pane session restore. Capture a launched
   // session's id, probe whether it still exists before resuming, and pre-seed

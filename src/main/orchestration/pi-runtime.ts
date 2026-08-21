@@ -41,6 +41,7 @@ export function resolvePiCompactAtTokens(
 }
 
 export type { PiSubscriptionProvider };
+export type PiProvider = PiSubscriptionProvider | "openrouter";
 export type PiManagerMode = "talk" | "execute" | "automation";
 export type PiThinkingLevel =
   | "off"
@@ -68,7 +69,10 @@ export interface PiSubscriptionAuthStatus {
 
 export interface PiManagerLaunchOptions {
   runtime: PiRuntimeLocation;
-  provider: PiSubscriptionProvider;
+  provider: PiProvider;
+  /** OpenRouter is the one metered API provider accepted here. The key is
+   * process-local and never written into a Pi auth store or launch artifact. */
+  apiKey?: string;
   configDir: string;
   /** Opaque account profile whose private configDir was selected. */
   accountProfileId?: string;
@@ -120,7 +124,7 @@ export interface PiManagerLaunchPlan {
   args: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
-  provider: PiSubscriptionProvider;
+  provider: PiProvider;
   /** Opaque account profile that owns this process; no credential material. */
   accountProfileId?: string;
   model: string;
@@ -139,13 +143,14 @@ export interface PiManagerLaunchPlan {
   agentSocketCapabilityExpiresAt?: number;
 }
 
-const DEFAULT_MODELS: Record<PiSubscriptionProvider, string> = {
+const DEFAULT_MODELS: Record<PiProvider, string> = {
   // Never make the premium tier an implicit fallback. Callers that passed the
   // user's explicit Fable selection keep it; missing model choices land on
   // Opus so the Settings gate cannot be bypassed by a provider default.
   anthropic: "claude-opus-5",
   "openai-codex": "gpt-5.6-sol",
-  xai: "grok-4.5",
+  xai: "grok-4.6",
+  openrouter: "openrouter/auto",
 };
 
 const API_CREDENTIAL_NAMES = new Set([
@@ -178,7 +183,13 @@ function assertSafeSegment(value: string, label: string): void {
   }
 }
 
-function validateProviderModel(provider: PiSubscriptionProvider, model: string): void {
+function validateProviderModel(provider: PiProvider, model: string): void {
+  if (provider === "openrouter") {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._/:+-]*$/.test(model)) {
+      throw new Error(`OpenRouter model id must use the provider/model form: ${model}`);
+    }
+    return;
+  }
   const family = familyForModelId(model);
   if (!family || familyForSubscription(provider).runtime !== family) {
     throw new Error(`Model ${model} is not compatible with Pi provider ${provider}`);
@@ -386,6 +397,11 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     options.configDir,
     options.sessionDir,
   );
+  if (options.provider === "openrouter") {
+    const apiKey = options.apiKey?.trim();
+    if (!apiKey) throw new Error("OpenRouter API key is not configured");
+    env.OPENROUTER_API_KEY = apiKey;
+  }
   env.SPARK_MCP_MODE = options.mode;
   env.SPARK_RUN_ID = options.runId;
   env.CODARA_PI_CHAT_MODE = options.chatMode ?? options.mode;
@@ -406,7 +422,11 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   // Anthropic plan never carries the flag at all, which is the first of the
   // two places that guarantee Anthropic can never run a priority tier.
   env.CODARA_PI_PROVIDER = options.provider;
-  if (options.openAiFastMode === true && options.provider !== "anthropic") {
+  if (
+    options.openAiFastMode === true &&
+    options.provider !== "anthropic" &&
+    options.provider !== "openrouter"
+  ) {
     env.CODARA_PI_FAST_MODE = "1";
   }
   // Both names or neither: a half-configured bridge would leave the extension

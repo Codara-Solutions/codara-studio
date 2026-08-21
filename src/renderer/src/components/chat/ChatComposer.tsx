@@ -12,6 +12,7 @@ import type {
   UpdateChatBackendInput,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { contextWindowForModel } from "@shared/context-window";
 import {
@@ -250,10 +251,15 @@ export default function ChatComposer({
   // refreshed in the background: the chord must resolve the next model
   // synchronously, and this IPC can sit pending when Pi is unreachable.
   const piCatalogRef = useRef<PiCatalogModel[]>([]);
+  const openRouterModelsRef = useRef<string[]>([]);
   const refreshPiCatalog = useCallback(async (): Promise<void> => {
     try {
-      const models = await window.spark.piSubscriptions.catalog();
+      const [models, openRouterModels] = await Promise.all([
+        window.spark.piSubscriptions.catalog(),
+        window.spark.openRouter.coraModels(),
+      ]);
       if (Array.isArray(models)) piCatalogRef.current = models;
+      if (Array.isArray(openRouterModels)) openRouterModelsRef.current = openRouterModels;
     } catch {
       /* keep the last snapshot; the curated rows always remain available */
     }
@@ -430,8 +436,38 @@ export default function ChatComposer({
   useEffect(() => {
     if (suspendGlobalEvents) return;
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ text?: unknown; replace?: unknown }>).detail;
+      const detail = (
+        event as CustomEvent<{ text?: unknown; replace?: unknown; attachments?: unknown }>
+      ).detail;
       const text = typeof detail?.text === "string" ? detail.text : "";
+      // Image attachments can ride along with the text (Unqueue restores a
+      // queued message's pasted screenshots this way). Files referenced by
+      // @mentions re-resolve from the restored text at send time, so only
+      // image-kind attachments need explicit state restoration here.
+      const restoredImages: AddRunMessageAttachmentInput[] = Array.isArray(detail?.attachments)
+        ? (detail.attachments as Array<Record<string, unknown>>).filter(
+            (item): item is { sourcePath: string; name?: string } =>
+              Boolean(item) &&
+              typeof item.sourcePath === "string" &&
+              item.sourcePath.length > 0 &&
+              (item.kind === undefined || item.kind === "image"),
+          ).map((item) => ({
+            sourcePath: item.sourcePath,
+            ...(typeof item.name === "string" && item.name ? { name: item.name } : {}),
+            kind: "image" as const,
+          }))
+        : [];
+      if (!text && restoredImages.length === 0) return;
+      if (restoredImages.length > 0) {
+        setImages((current) => {
+          const seen = new Set(current.map((image) => image.sourcePath));
+          const merged = [
+            ...current,
+            ...restoredImages.filter((image) => !seen.has(image.sourcePath)),
+          ];
+          return merged.slice(0, MAX_IMAGE_ATTACHMENTS);
+        });
+      }
       if (!text) return;
       const replace = detail?.replace === true;
       setDraft((current) => {
@@ -1089,7 +1125,10 @@ export default function ChatComposer({
       // cache), which turned the chord into a dead key. The menu has the same
       // contract — it paints the curated rows immediately and folds the live
       // catalog in whenever it lands.
-      const models = buildVisibleGroups({ piCatalog: piCatalogRef.current }).flatMap(
+      const models = buildVisibleGroups({
+        piCatalog: piCatalogRef.current,
+        openRouterModels: openRouterModelsRef.current,
+      }).flatMap(
         (group) => group.models,
       );
       if (models.length === 0) return;
@@ -1244,11 +1283,10 @@ export default function ChatComposer({
             }}
           >
             {images.map((image) => (
-              <AttachmentChip
+              <ImageAttachmentThumb
                 key={image.sourcePath}
-                kind="image"
+                sourcePath={image.sourcePath}
                 name={image.name || basename(image.sourcePath)}
-                title={image.sourcePath}
                 onRemove={() => removeImage(image.sourcePath)}
               />
             ))}
@@ -1843,6 +1881,81 @@ function MentionEmpty({ text }: { text: string }) {
     >
       {text}
     </div>
+  );
+}
+
+// A pasted/dropped image shows as a small square thumbnail (not a filename
+// chip): the pixels ARE the information. The remove control overlays the
+// corner; a broken file:// load degrades to the plain filename chip.
+function ImageAttachmentThumb({
+  sourcePath,
+  name,
+  onRemove,
+}: {
+  sourcePath: string;
+  name: string;
+  onRemove: () => void;
+}) {
+  const [removeHover, setRemoveHover] = useState(false);
+  const [broken, setBroken] = useState(false);
+  if (broken) {
+    return (
+      <AttachmentChip kind="image" name={name} title={sourcePath} onRemove={onRemove} />
+    );
+  }
+  return (
+    <span
+      title={name}
+      style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}
+    >
+      <img
+        src={pathToFileUrl(sourcePath)}
+        alt={name}
+        onError={() => setBroken(true)}
+        style={{
+          width: 46,
+          height: 46,
+          objectFit: "cover",
+          display: "block",
+          borderRadius: "var(--radius-control, 7px)",
+          border: "1px solid var(--rule-soft)",
+          boxShadow: "var(--lift-hi)",
+          background: "color-mix(in oklab, var(--ink) 4%, transparent)",
+        }}
+      />
+      <button
+        type="button"
+        onClick={onRemove}
+        onMouseEnter={() => setRemoveHover(true)}
+        onMouseLeave={() => setRemoveHover(false)}
+        title="Remove image"
+        aria-label={`Remove image ${name}`}
+        style={{
+          appearance: "none",
+          position: "absolute",
+          top: -5,
+          right: -5,
+          width: 16,
+          height: 16,
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 999,
+          background: removeHover ? "var(--danger-soft)" : "var(--panel, var(--bg))",
+          color: removeHover ? "var(--danger)" : "var(--muted)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 0,
+          cursor: "default",
+          boxShadow: "var(--shadow-1)",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        <svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden>
+          <path d="M2 2l4 4M6 2 2 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      </button>
+    </span>
   );
 }
 

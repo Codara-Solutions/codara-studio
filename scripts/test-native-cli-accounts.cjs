@@ -686,6 +686,7 @@ async function main() {
   const preparation = await service.prepareLogin({
     runtime: "claude",
     profileId: claudeCreated.profile.id,
+    activateOnSuccess: true,
   });
   assert.deepEqual(Object.keys(preparation).sort(), [
     "expiresAt",
@@ -748,10 +749,134 @@ async function main() {
   assert.equal(loginSpec.shell, false);
   assertSanitizedEnv(loginSpec.env, "claude", claudeManagedDir);
   assert.equal(claudeLeases.isLeased(claudeCreated.profile.id), false);
+  assert.equal(
+    (await service.inspect("claude")).runtimes[0].defaultProfileId,
+    claudeCreated.profile.id,
+    "a Cora-card login must switch the CLI account in the same operation",
+  );
+  await service.setDefault({ runtime: "claude", profileId: "personal" });
   await expectCode(
     () => service.launchPreparedLogin(preparation.launchToken, async () => successResult()),
     "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID",
   );
+
+  // A Cora-card login is account-bound. Claude's browser can reuse another
+  // active Anthropic session, so pre-fill the selected address, verify the
+  // account uuid after login, and remove only the temporary managed slot when
+  // the browser still returns the wrong account.
+  const mismatchCreated = await service.create({
+    runtime: "claude",
+    label: "Expected account",
+  });
+  const mismatchDir = path.join(
+    claudeRoot,
+    "accounts",
+    mismatchCreated.profile.id,
+  );
+  const EXPECTED_OTHER_FINGERPRINT = crypto
+    .createHash("sha256")
+    .update("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    .digest("hex");
+  const mismatchPlan = await service.prepareLogin({
+    runtime: "claude",
+    profileId: mismatchCreated.profile.id,
+    expectedAccountFingerprint: EXPECTED_OTHER_FINGERPRINT,
+    expectedEmail: "chosen@example.com",
+    removeProfileOnMismatch: true,
+  });
+  await expectCode(
+    () =>
+      service.launchPreparedLogin(mismatchPlan.launchToken, async (spec) => {
+        assert.deepEqual(spec.args, [
+          "auth",
+          "login",
+          "--email",
+          "chosen@example.com",
+        ]);
+        privateFile(
+          path.join(mismatchDir, ".claude.json"),
+          JSON.stringify({
+            oauthAccount: {
+              accountUuid: ANTHROPIC_ACCOUNT_UUID,
+              emailAddress: "someone@example.com",
+            },
+          }),
+        );
+        claudeConnected.add(mismatchDir);
+        return successResult();
+      }),
+    "NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH",
+  );
+  assert.equal(
+    (await service.inspect("claude")).runtimes[0].profiles.some(
+      (profile) => profile.id === mismatchCreated.profile.id,
+    ),
+    false,
+    "a mismatched browser login must not leave a third account card",
+  );
+  assert.equal(fs.existsSync(mismatchDir), false);
+
+  // Closing or failing the browser terminal must also remove a slot created
+  // solely for that attempt. Otherwise every retry becomes another empty card.
+  const failedCreated = await service.create({
+    runtime: "claude",
+    label: "Retry account",
+  });
+  const failedDir = path.join(
+    claudeRoot,
+    "accounts",
+    failedCreated.profile.id,
+  );
+  const failedPlan = await service.prepareLogin({
+    runtime: "claude",
+    profileId: failedCreated.profile.id,
+    removeProfileOnFailure: true,
+  });
+  await expectCode(
+    () =>
+      service.launchPreparedLogin(failedPlan.launchToken, async () => ({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        spawnFailed: false,
+      })),
+    "NATIVE_CLI_ACCOUNT_LOGIN_FAILED",
+  );
+  assert.equal(
+    (await service.inspect("claude")).runtimes[0].profiles.some(
+      (profile) => profile.id === failedCreated.profile.id,
+    ),
+    false,
+    "a failed new login must not leave an empty account card",
+  );
+  assert.equal(fs.existsSync(failedDir), false);
+
+  const cancelledCreated = await service.create({
+    runtime: "claude",
+    label: "Cancelled account",
+  });
+  const cancelledDir = path.join(
+    claudeRoot,
+    "accounts",
+    cancelledCreated.profile.id,
+  );
+  const cancelledPlan = await service.prepareLogin({
+    runtime: "claude",
+    profileId: cancelledCreated.profile.id,
+    removeProfileOnFailure: true,
+  });
+  assert.equal(
+    await service.cancelPreparedLogin(cancelledPlan.launchToken),
+    true,
+  );
+  assert.equal(
+    (await service.inspect("claude")).runtimes[0].profiles.some(
+      (profile) => profile.id === cancelledCreated.profile.id,
+    ),
+    false,
+    "cancelling before the login terminal opens must not leave an empty card",
+  );
+  assert.equal(fs.existsSync(cancelledDir), false);
 
   const codexSuccessPlan = await service.prepareLogin({
     runtime: "codex",

@@ -52,7 +52,7 @@ const CODEX_CAPABILITIES: AgentRuntimeCapabilities = {
 };
 
 const CODEX_INSTALL_HINT =
-  "Install with: npm i -g @openai/codex-cli  (then run `codex` once to log in)";
+  "Install with: npm i -g @openai/codex  (then run `codex` once to log in)";
 
 export const codexProvider: CliProvider = {
   id: "codex",

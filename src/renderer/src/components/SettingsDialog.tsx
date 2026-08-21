@@ -27,13 +27,11 @@ import type {
 import {
   APP_THEME_IDS,
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
-  DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   EDITOR_THEME_IDS,
   TERMINAL_SCROLLBACK_LINE_LIMIT_MAX,
   TERMINAL_SCROLLBACK_LINE_LIMIT_MIN,
   AUTOSAVE_DELAY_PRESETS,
   INLINE_AI_DELAY_PRESETS,
-  INLINE_AI_MODEL_PRESETS,
 } from "@shared/types";
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
@@ -267,7 +265,7 @@ interface SettingsDialogProps {
   onOpenWorkerSession: (
     runtime: WorkerSessionRuntime,
     cwd: string,
-    session: WorkerSessionSummary | null,
+    session: WorkerSessionSummary,
   ) => void;
 }
 
@@ -464,7 +462,6 @@ export default function SettingsDialog({
             )}
             {renderedTab === "sessions" && (
               <SessionsSettings
-                workspaceCwd={workspaceCwd}
                 onOpenWorkerSession={onOpenWorkerSession}
               />
             )}
@@ -814,23 +811,102 @@ function ApiSettings({
   draft: AppSettings;
   onChange: (settings: AppSettings) => void;
 }) {
+  const [checking, setChecking] = useState(false);
+  const [checkMessage, setCheckMessage] = useState<{
+    tone: "ok" | "error";
+    text: string;
+  } | null>(null);
+  const coraModels = draft.openRouterCoraModels.length > 0
+    ? draft.openRouterCoraModels
+    : [""];
+
+  const replaceCoraModel = (index: number, value: string) => {
+    const previous = draft.openRouterCoraModels[index]?.trim();
+    const models = draft.openRouterCoraModels.length > 0
+      ? [...draft.openRouterCoraModels]
+      : [""];
+    models[index] = value;
+    const nextWorkerModels = draft.coraWorkerModels.filter((id) => id !== previous);
+    if (value.trim()) nextWorkerModels.push(value.trim());
+    setCheckMessage(null);
+    onChange({
+      ...draft,
+      openRouterCoraModels: models,
+      openRouterVerifiedKeyHash: "",
+      coraWorkerModels: [...new Set(nextWorkerModels)],
+    });
+  };
+
+  const removeCoraModel = (index: number) => {
+    const removed = draft.openRouterCoraModels[index]?.trim();
+    const models = draft.openRouterCoraModels.filter((_, itemIndex) => itemIndex !== index);
+    setCheckMessage(null);
+    onChange({
+      ...draft,
+      openRouterCoraModels: models,
+      openRouterVerifiedKeyHash: "",
+      coraWorkerModels: removed
+        ? draft.coraWorkerModels.filter((id) => id !== removed)
+        : draft.coraWorkerModels,
+    });
+  };
+
+  const checkOpenRouter = async () => {
+    setChecking(true);
+    setCheckMessage(null);
+    try {
+      const result = await window.spark.openRouter.validate({
+        apiKey: draft.openRouterApiKey,
+        coraModelIds: draft.openRouterCoraModels,
+      });
+      if (!result.ok || !result.keyHash) {
+        onChange({ ...draft, openRouterVerifiedKeyHash: "" });
+        setCheckMessage({ tone: "error", text: result.error || "OpenRouter check failed." });
+        return;
+      }
+      onChange({ ...draft, openRouterVerifiedKeyHash: result.keyHash });
+      const count = result.models?.length ?? 0;
+      setCheckMessage({
+        tone: "ok",
+        text: count > 0
+          ? `Connected. ${count} Cora model${count === 1 ? "" : "s"} verified.`
+          : "Connected. Add a Cora model below to show it in the model picker.",
+      });
+    } catch (error) {
+      onChange({ ...draft, openRouterVerifiedKeyHash: "" });
+      setCheckMessage({
+        tone: "error",
+        text: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setChecking(false);
+    }
+  };
+
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="OpenRouter"
-        detail="Powers only the editor's inline AI. Cora and git commit drafts use subscription-backed Pi."
+        detail="One key for inline edits, optional commit drafts, and your favorite Cora models."
       />
       <Label text="OpenRouter API key">
         <input
           className="spark-input"
           type="password"
           value={draft.openRouterApiKey}
-          onChange={(event) => onChange({ ...draft, openRouterApiKey: event.currentTarget.value })}
+          onChange={(event) => {
+            setCheckMessage(null);
+            onChange({
+              ...draft,
+              openRouterApiKey: event.currentTarget.value,
+              openRouterVerifiedKeyHash: "",
+            });
+          }}
           placeholder="sk-or-..."
           style={inputShellStyle}
         />
       </Label>
-      <Label text="Model">
+      <Label text="Inline edit and commit model">
         <input
           className="spark-input spark-mono"
           type="text"
@@ -840,16 +916,85 @@ function ApiSettings({
           style={inputShellStyle}
         />
       </Label>
+      <div style={{ display: "grid", gap: 7 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <span className="spark-eyebrow" style={{ fontSize: 11 }}>Models for Cora</span>
+          <button
+            type="button"
+            className="spark-btn spark-btn-secondary"
+            onClick={() => onChange({
+              ...draft,
+              openRouterCoraModels: draft.openRouterCoraModels.length > 0
+                ? [...draft.openRouterCoraModels, ""]
+                : [""],
+              openRouterVerifiedKeyHash: "",
+            })}
+            style={{ minHeight: 28, padding: "4px 9px" }}
+          >
+            + Add model
+          </button>
+        </div>
+        {coraModels.map((modelId, index) => (
+          <div
+            key={`${index}:${draft.openRouterCoraModels.length}`}
+            style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 7 }}
+          >
+            <input
+              className="spark-input spark-mono"
+              aria-label={`OpenRouter Cora model ${index + 1}`}
+              type="text"
+              value={modelId}
+              onChange={(event) => replaceCoraModel(index, event.currentTarget.value)}
+              placeholder="anthropic/claude-sonnet-4.5"
+              style={inputShellStyle}
+            />
+            <button
+              type="button"
+              className="spark-btn spark-btn-secondary"
+              aria-label={`Remove OpenRouter Cora model ${index + 1}`}
+              onClick={() => removeCoraModel(index)}
+              style={{ minHeight: 34, padding: "4px 10px" }}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <span style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.45 }}>
+          Verified entries appear under OpenRouter in Cora's model selector.
+        </span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="spark-btn spark-btn-secondary"
+          disabled={checking || !draft.openRouterApiKey.trim()}
+          onClick={() => void checkOpenRouter()}
+        >
+          {checking ? "Checking…" : "Check key and models"}
+        </button>
+        {checkMessage ? (
+          <span
+            role={checkMessage.tone === "error" ? "alert" : "status"}
+            style={{
+              color: checkMessage.tone === "error" ? "var(--danger)" : "var(--success, #43c59e)",
+              fontSize: 11,
+            }}
+          >
+            {checkMessage.text}
+          </span>
+        ) : null}
+      </div>
       <hr className="spark-divider" style={{ margin: "6px 0" }} />
       <SectionTitle
         title="Git commit messages"
-        detail="Runs a private, sessionless Pi one-shot with no tools. Automatic prefers an available OpenAI subscription, then Anthropic."
+        detail="Automatic uses a subscription. OpenRouter uses the inline edit and commit model above."
       />
       <Label text="Commit message model">
         <CustomSelect
           value={draft.commitMessageModel}
           options={[
             { value: "auto", label: "Automatic (OpenAI first)" },
+            { value: "openrouter", label: `OpenRouter, ${draft.openRouterModel || "model above"}` },
             { value: "gpt-5.6-luna", label: "OpenAI, gpt-5.6-luna" },
             { value: "claude-sonnet-5", label: "Anthropic, claude-sonnet-5" },
           ]}
@@ -1368,49 +1513,6 @@ function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
   );
 }
 
-// The "reset to recommended model" button. When the field already holds the
-// default it reads as accent-lit selected; otherwise it's a quiet ghost button.
-// Press + focus-visible compose into the inline box-shadow so the click is
-// tactile and the keyboard ring renders.
-function DefaultModelButton({ active, onClick }: { active: boolean; onClick: () => void }) {
-  const { hover, focus, pressed, handlers } = useInteractive();
-  const restShadow = active ? "var(--lift-hi)" : undefined;
-  return (
-    <button
-      type="button"
-      aria-label="Use default Inline AI model"
-      aria-pressed={active}
-      onClick={onClick}
-      title="Use the recommended Inline AI model"
-      {...handlers}
-      style={{
-        ...inputStyle,
-        width: "auto",
-        padding: "8px 10px",
-        fontSize: 10,
-        fontWeight: 700,
-        letterSpacing: "0.1em",
-        textTransform: "uppercase",
-        color: active ? "var(--ink)" : "var(--muted)",
-        // Default arrow cursor, matching the .spark-* utility classes.
-        cursor: "default",
-        whiteSpace: "nowrap",
-        borderColor: active ? "var(--accent-edge)" : "var(--rule)",
-        background: active
-          ? "var(--accent-soft)"
-          : pressed
-            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
-            : hover
-              ? "var(--hover)"
-              : "var(--bg)",
-        boxShadow: withFocusRing(restShadow, focus),
-      }}
-    >
-      Default
-    </button>
-  );
-}
-
 function EditorSettings() {
   const { preferences, hydrated, setPreference } = usePreferences();
   if (!hydrated) {
@@ -1426,19 +1528,6 @@ function EditorSettings() {
       </div>
     );
   }
-  const currentInlineModelId = preferences.inlineAutocompleteModelId.trim();
-  const currentInlinePreset = INLINE_AI_MODEL_PRESETS.find(
-    (preset) => preset.id === currentInlineModelId,
-  );
-  const setInlineModel = (modelId: string) => {
-    void setPreference("inlineAutocompleteModelId", modelId);
-  };
-  const normalizeInlineModelInput = () => {
-    const next = preferences.inlineAutocompleteModelId.trim() || DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID;
-    if (next !== preferences.inlineAutocompleteModelId) {
-      setInlineModel(next);
-    }
-  };
   const currentInlineDelayMs = Math.max(
     0,
     Math.min(2_000, Math.round(preferences.inlineAutocompleteDelayMs)),
@@ -1611,74 +1700,9 @@ function EditorSettings() {
           </span>
         </div>
       </div>
-      <div style={{ display: "grid", gap: 7 }}>
-        <span id="inline-ai-model-label" className="spark-eyebrow" style={{ fontSize: 11 }}>
-          Inline AI model
-        </span>
-        <div
-          role="group"
-          aria-label="Inline AI model presets"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-            gap: 8,
-          }}
-        >
-          {INLINE_AI_MODEL_PRESETS.map((preset) => (
-            <ModelPresetCard
-              key={preset.id}
-              label={preset.label}
-              modelId={preset.id}
-              hint={preset.hint}
-              detail={preset.detail}
-              badge={preset.badge}
-              active={currentInlineModelId === preset.id}
-              onClick={() => setInlineModel(preset.id)}
-            />
-          ))}
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) auto",
-            gap: 8,
-            alignItems: "center",
-          }}
-        >
-          <input
-            className="spark-input spark-mono"
-            aria-labelledby="inline-ai-model-label"
-            type="text"
-            spellCheck={false}
-            autoComplete="off"
-            value={preferences.inlineAutocompleteModelId}
-            onChange={(e) =>
-              void setPreference("inlineAutocompleteModelId", e.target.value)
-            }
-            onBlur={normalizeInlineModelInput}
-            placeholder={DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID}
-            style={inputShellStyle}
-          />
-          <DefaultModelButton
-            active={currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID}
-            onClick={() => setInlineModel(DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID)}
-          />
-        </div>
-        <div
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            lineHeight: 1.45,
-          }}
-        >
-          {currentInlinePreset
-            ? `${currentInlinePreset.label} is selected.`
-            : currentInlineModelId
-              ? "Custom OpenRouter model selected."
-              : "No model selected."}{" "}
-          Paste any OpenRouter model id to override the presets.
-        </div>
+      <div style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.45 }}>
+        The model is configured once in <strong>API and model</strong>, where it
+        is also available for OpenRouter commit drafts.
       </div>
     </div>
   );
@@ -2045,13 +2069,37 @@ function AccountsSettings() {
   );
 
   const signInCli = useCallback(
-    async (runtime: NativeCliAccountRuntime, profileId: string, label: string) => {
+    async (
+      runtime: NativeCliAccountRuntime,
+      profileId: string,
+      label: string,
+      expected?: {
+        accountFingerprint?: string;
+        email?: string;
+        removeProfileOnMismatch?: boolean;
+        removeProfileOnFailure?: boolean;
+        activateOnSuccess?: boolean;
+      },
+    ) => {
       setCliBusy({ runtime, profileId, action: "signing-in" });
       setCliError(null);
       try {
         const prepared = await window.spark.nativeCliAccounts.prepareLogin({
           runtime,
           profileId,
+          ...(expected?.accountFingerprint
+            ? { expectedAccountFingerprint: expected.accountFingerprint }
+            : {}),
+          ...(expected?.email ? { expectedEmail: expected.email } : {}),
+          ...(expected?.removeProfileOnMismatch
+            ? { removeProfileOnMismatch: true }
+            : {}),
+          ...(expected?.removeProfileOnFailure
+            ? { removeProfileOnFailure: true }
+            : {}),
+          ...(expected?.activateOnSuccess
+            ? { activateOnSuccess: true }
+            : {}),
         });
         const runtimeLabel = familyForRuntime(runtime).cliLabel;
         const event = new CustomEvent("spark:open-native-cli-login", {
@@ -2212,6 +2260,9 @@ function AccountsSettings() {
               : {}),
             cora: {
               profileId: profile.id,
+              ...(profile.accountFingerprint
+                ? { accountFingerprint: profile.accountFingerprint }
+                : {}),
               connected: profile.connected,
               // Claude access tokens last about an hour and are renewed
               // silently from the refresh token, so a lapsed one is the normal
@@ -2328,13 +2379,39 @@ function AccountsSettings() {
     // that in. Pairing folds the new sign-in back onto this card.
     onCliConnect: (card) => {
       const runtime = cliRuntimeForProvider(card.provider);
-      const unsignedPersonal = cliInspection?.runtimes
-        .find((entry) => entry.runtime === runtime)
-        ?.profiles.find(
-          (profile) => !profile.managed && profile.status === "sign_in_required",
-        );
+      const runtimeInspection = cliInspection?.runtimes.find(
+        (entry) => entry.runtime === runtime,
+      );
+      const unsignedPersonal = runtimeInspection?.profiles.find(
+        (profile) => !profile.managed && profile.status === "sign_in_required",
+      );
       if (unsignedPersonal) {
-        void signInCli(runtime, unsignedPersonal.id, card.label);
+        void signInCli(runtime, unsignedPersonal.id, card.label, {
+          accountFingerprint: card.cora?.accountFingerprint,
+          email: card.email,
+          activateOnSuccess: true,
+        });
+        return;
+      }
+      // If an earlier browser flow was cancelled, reuse its empty named slot
+      // instead of creating another identical card on every retry.
+      const normalizedLabel = card.label.trim().toLowerCase();
+      const reusableManaged = runtimeInspection?.profiles.find(
+        (profile) =>
+          profile.managed &&
+          !profile.isDefault &&
+          !profile.inUse &&
+          profile.status === "sign_in_required" &&
+          profile.label.trim().toLowerCase() === normalizedLabel,
+      );
+      if (reusableManaged) {
+        void signInCli(runtime, reusableManaged.id, card.label, {
+          accountFingerprint: card.cora?.accountFingerprint,
+          email: card.email,
+          removeProfileOnMismatch: true,
+          removeProfileOnFailure: true,
+          activateOnSuccess: true,
+        });
         return;
       }
       void (async () => {
@@ -2346,7 +2423,13 @@ function AccountsSettings() {
             label: card.label.trim() || "Personal",
           });
           await refreshCli();
-          await signInCli(runtime, created.profile.id, card.label);
+          await signInCli(runtime, created.profile.id, card.label, {
+            accountFingerprint: card.cora?.accountFingerprint,
+            email: card.email,
+            removeProfileOnMismatch: true,
+            removeProfileOnFailure: true,
+            activateOnSuccess: true,
+          });
         } catch (err) {
           setCliError(
             (err as Error).message || "Could not start the command-line sign-in.",
@@ -3108,14 +3191,12 @@ type PendingSessionDelete =
   | { kind: "many"; sessions: WorkerSessionSummary[] };
 
 function SessionsSettings({
-  workspaceCwd,
   onOpenWorkerSession,
 }: {
-  workspaceCwd?: string | null;
   onOpenWorkerSession: (
     runtime: WorkerSessionRuntime,
     cwd: string,
-    session: WorkerSessionSummary | null,
+    session: WorkerSessionSummary,
   ) => void;
 }) {
   const { preferences, setPreference, hydrated } = usePreferences();
@@ -3217,11 +3298,6 @@ function SessionsSettings({
     });
   };
 
-  const startNew = async (runtime: WorkerSessionRuntime) => {
-    const cwd = await window.spark.dialog.openDirectory(workspaceCwd ?? undefined);
-    if (cwd) onOpenWorkerSession(runtime, cwd, null);
-  };
-
   const confirmSingleDelete = async (session: WorkerSessionSummary) => {
     const deleteSession = (
       window.spark.agentSession as Partial<typeof window.spark.agentSession>
@@ -3321,7 +3397,7 @@ function SessionsSettings({
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="Agent sessions"
-        detail="Start or resume Claude and Codex sessions from any local project. Opening a session switches to its workspace, or creates the workspace in Codara first."
+        detail="Browse and resume Claude and Codex sessions from any local project. Opening a session switches to its workspace, or creates the workspace in Codara first."
       />
 
       {hydrated ? (
@@ -3333,16 +3409,7 @@ function SessionsSettings({
         />
       ) : null}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <FooterButton primary disabled={bulkBusy} onClick={() => void startNew("claude")}>
-          <RuntimeMark runtime="claude" size={12} />
-          New Claude
-        </FooterButton>
-        <FooterButton primary disabled={bulkBusy} onClick={() => void startNew("codex")}>
-          <RuntimeMark runtime="codex" size={12} />
-          New Codex
-        </FooterButton>
-        <div style={{ flex: 1 }} />
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <FooterButton disabled={bulkBusy} onClick={() => void refresh()}>Refresh</FooterButton>
       </div>
 
@@ -4631,140 +4698,6 @@ function TimingPresetButton({
         }}
       >
         {hint}
-      </span>
-    </button>
-  );
-}
-
-function ModelPresetCard({
-  label,
-  modelId,
-  hint,
-  detail,
-  badge,
-  active,
-  onClick,
-}: {
-  label: string;
-  modelId: string;
-  hint: string;
-  detail: string;
-  badge?: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  const { hover, focus, pressed, handlers } = useInteractive();
-  const restShadow = active ? "var(--lift-hi)" : undefined;
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      aria-label={`Use ${label} for Inline AI`}
-      onClick={onClick}
-      {...handlers}
-      style={{
-        appearance: "none",
-        textAlign: "left",
-        // Single accent cue: accent-edge border + accent-soft fill.
-        border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
-        borderRadius: "var(--radius-surface, 7px)",
-        background: active
-          ? "var(--accent-soft)"
-          : pressed
-            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
-            : hover
-              ? "var(--hover)"
-              : "color-mix(in oklab, var(--ink) 2%, transparent)",
-        color: "var(--ink)",
-        padding: "9px 11px",
-        // Default arrow cursor, matching the .spark-* utility classes.
-        cursor: "default",
-        display: "grid",
-        gridTemplateColumns: "10px minmax(0, 1fr)",
-        gap: 12,
-        alignItems: "center",
-        boxShadow: withFocusRing(restShadow, focus),
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <AccentDot active={active} />
-      <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
-        <span
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            minWidth: 0,
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              fontWeight: 600,
-              color: "var(--ink)",
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {label}
-          </span>
-          {badge && (
-            <span
-              style={{
-                color: active ? "var(--accent-text)" : "var(--muted)",
-                border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
-                borderRadius: 999,
-                padding: "1px 6px",
-                fontFamily: "var(--font-sans)",
-                fontSize: 9,
-                fontWeight: 700,
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-                flex: "0 0 auto",
-              }}
-            >
-              {badge}
-            </span>
-          )}
-        </span>
-        <span
-          title={modelId}
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            minWidth: 0,
-          }}
-        >
-          {modelId}
-        </span>
-        <span
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            lineHeight: 1.4,
-          }}
-        >
-          {hint}
-        </span>
-        <span
-          style={{
-            color: "var(--muted-2)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            lineHeight: 1.35,
-          }}
-        >
-          {detail}
-        </span>
       </span>
     </button>
   );

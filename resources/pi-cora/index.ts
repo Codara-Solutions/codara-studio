@@ -69,6 +69,23 @@ function activeExecutionPolicy(
   return "fast";
 }
 
+function workerModelContract(value = process.env.CODARA_PI_WORKER_MODELS): string {
+  if (!value) return "";
+  try {
+    const models = JSON.parse(value);
+    if (!Array.isArray(models)) return "";
+    const ids = models
+      .filter((model): model is string => typeof model === "string" && model.trim().length > 0)
+      .map((model) => model.trim());
+    if (ids.length === 0) {
+      return "\n\nWorker model availability:\n- No worker models are enabled. Do not call codara_spawn_workers; answer directly or explain that the user must enable one in Settings.";
+    }
+    return `\n\nWorker model availability:\n- You may spawn workers only on these exact model ids: ${ids.join(", ")}.\n- Set modelHint to one of these ids. This user allowlist overrides cross-provider and tier preferences.`;
+  } catch {
+    return "";
+  }
+}
+
 function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string {
   const texts = (result.content ?? [])
     .map((block) => block.type === "text" && typeof block.text === "string" ? block.text.trim() : "")
@@ -112,7 +129,7 @@ Imported pull-request security contract:
     return {
       systemPrompt: `${event.systemPrompt}
 
-${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy())}
+${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy())}${workerModelContract()}
 ${untrustedContract}
 ${mcp?.promptSuffix() ?? ""}`,
     };

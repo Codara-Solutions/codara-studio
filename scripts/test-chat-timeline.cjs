@@ -1217,9 +1217,9 @@ async function main() {
     const activity = T.deriveComposerWorkerActivity(pausedRunWithQueuedWorker());
     assert.deepEqual(activity, {
       state: "queued",
-      // The task asked for Sonnet; the spawn chokepoint coerces it onto the
-      // roster, so the strip names the model that will actually run.
-      engines: ["Opus 5"],
+      // Sonnet is now an explicit worker-capable roster choice, so a prepared
+      // task keeps that model instead of being silently relabelled as Opus.
+      engines: ["Sonnet 5"],
       titles: ["Research Spain news today"],
       runPaused: true,
     });
@@ -1263,7 +1263,7 @@ async function main() {
     state.workerTasks.find((entry) => entry.id === "task-s2").status = "retry_queued";
     const activity = T.deriveComposerWorkerActivity(state);
     assert.equal(activity.state, "queued");
-    assert.deepEqual(activity.engines, ["Opus 5"]);
+    assert.deepEqual(activity.engines, ["Sonnet 5"]);
   });
 
   test("a finished run stops advertising work it will never launch", () => {
@@ -1327,7 +1327,7 @@ async function main() {
     const row = rowFor(T.buildChatTimeline(state), "Research Spain news today");
     assert.equal(row.status, "queued");
     assert.equal(row.tone, "queued");
-    assert.equal(row.detail, "Opus 5 · queued");
+    assert.equal(row.detail, "Sonnet 5 · queued");
     assert.equal(T.isToolRowTicking(row), false);
     // 3. the graph node + the inspector's attempt dot
     assert.equal(T.deriveAgentStatus(task, prepared, "ready"), "queued");
@@ -1348,13 +1348,13 @@ async function main() {
     assert.equal(T.attemptStatusColor("finishing"), "var(--accent)");
   });
 
-  test("a queued worker row names the model the spawn will coerce it onto", () => {
+  test("a queued worker row names its allowed roster model", () => {
     const state = pausedRunWithQueuedWorker();
     const timeline = T.buildChatTimeline(state);
     const row = rowFor(timeline, "Research Spain news today");
-    assert.equal(row.meta.find((meta) => meta.label === "Model").value, "Opus 5");
+    assert.equal(row.meta.find((meta) => meta.label === "Model").value, "Sonnet 5");
     const step = timeline.filter((item) => item.kind === "step").find((item) => item.id === "step-2");
-    assert.equal(step.workers[0].model, "claude-opus-5");
+    assert.equal(step.workers[0].model, "claude-sonnet-5");
   });
 
   // ── Awaiting-answer manager turns (run-msafk7yu-zkudx6) ───────────────────

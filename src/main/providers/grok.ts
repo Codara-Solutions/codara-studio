@@ -21,23 +21,11 @@ import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 
 const GROK_MODELS: AgentRuntimeModel[] = [
   {
-    id: "grok-4.5",
-    label: "Grok 4.5",
-    effortLevels: ["low", "medium", "high"],
-    isDefault: true,
-    tier: "top",
-  },
-  {
     id: "grok-4.6",
     label: "Grok 4.6",
     effortLevels: ["low", "medium", "high"],
+    isDefault: true,
     tier: "top",
-  },
-  {
-    id: "grok-build",
-    label: "Grok Build",
-    effortLevels: ["low", "medium", "high"],
-    tier: "mid",
   },
 ];
 

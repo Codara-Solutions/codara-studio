@@ -49,6 +49,11 @@ import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
+import { systemResourceSnapshot } from "./system-metrics";
+import {
+  configuredOpenRouterCoraModels,
+  validateOpenRouterConfiguration,
+} from "./openrouter-config";
 import { isLoopbackPreviewServerUp } from "./preview-navigation";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
@@ -356,11 +361,14 @@ import type {
   NativeCliAccountCancelLoginInput,
   NativeCliAccountCreateInput,
   NativeCliAccountDeleteResult,
+  NativeCliAccountLoginInput,
   NativeCliAccountLoginPreparation,
   NativeCliAccountMutationResult,
   NativeCliAccountProfileInput,
   NativeCliAccountRenameInput,
   NativeCliAccountsInspection,
+  OpenRouterValidationInput,
+  OpenRouterValidationResult,
   NativeCliAccountRuntime,
   PiSubscriptionAddAccountInput,
   PiSubscriptionDeleteAccountInput,
@@ -450,6 +458,60 @@ function nativeCliAccountProfileInputFromIpc(
   return {
     runtime: nativeCliAccountRuntimeFromIpc(input.runtime),
     profileId: nativeCliAccountProfileIdFromIpc(input.profileId),
+  };
+}
+
+function nativeCliAccountLoginInputFromIpc(
+  value: unknown,
+): NativeCliAccountLoginInput {
+  const base = nativeCliAccountProfileInputFromIpc(value);
+  const input = value as Partial<NativeCliAccountLoginInput>;
+  const expectedAccountFingerprint = input.expectedAccountFingerprint;
+  if (
+    expectedAccountFingerprint !== undefined &&
+    (typeof expectedAccountFingerprint !== "string" ||
+      !/^[0-9a-f]{64}$/.test(expectedAccountFingerprint))
+  ) {
+    throw new TypeError("Expected native CLI account fingerprint is invalid.");
+  }
+  const expectedEmail = input.expectedEmail?.trim().toLowerCase();
+  if (
+    expectedEmail !== undefined &&
+    (!expectedEmail ||
+      expectedEmail.length > 320 ||
+      /[\u0000-\u001f\u007f]/.test(expectedEmail))
+  ) {
+    throw new TypeError("Expected native CLI account email is invalid.");
+  }
+  if (
+    input.removeProfileOnMismatch !== undefined &&
+    typeof input.removeProfileOnMismatch !== "boolean"
+  ) {
+    throw new TypeError("Native CLI mismatch cleanup flag is invalid.");
+  }
+  if (
+    input.removeProfileOnFailure !== undefined &&
+    typeof input.removeProfileOnFailure !== "boolean"
+  ) {
+    throw new TypeError("Native CLI failure cleanup flag is invalid.");
+  }
+  if (
+    input.activateOnSuccess !== undefined &&
+    typeof input.activateOnSuccess !== "boolean"
+  ) {
+    throw new TypeError("Native CLI activation flag is invalid.");
+  }
+  return {
+    ...base,
+    ...(expectedAccountFingerprint ? { expectedAccountFingerprint } : {}),
+    ...(expectedEmail ? { expectedEmail } : {}),
+    ...(input.removeProfileOnMismatch === true
+      ? { removeProfileOnMismatch: true }
+      : {}),
+    ...(input.removeProfileOnFailure === true
+      ? { removeProfileOnFailure: true }
+      : {}),
+    ...(input.activateOnSuccess === true ? { activateOnSuccess: true } : {}),
   };
 }
 
@@ -573,6 +635,14 @@ async function spawnPreparedNativeCliLogin(
             : new Error("Native CLI account login failed."),
         );
         if (!isNativeCliLoginCancellation(error)) focusStudioWindow(sender);
+        if (!isNativeCliLoginCancellation(error) && !sender.isDestroyed()) {
+          sender.send(
+            "native-cli-accounts:login-error",
+            error instanceof Error
+              ? error.message
+              : "Native CLI account login failed.",
+          );
+        }
       },
     )
     .finally(() => {
@@ -818,6 +888,27 @@ export function registerIpc(): void {
   });
 
   handle(
+    "openrouter:validate",
+    async (
+      _event,
+      input: OpenRouterValidationInput,
+    ): Promise<OpenRouterValidationResult> => {
+      const apiKey = typeof input?.apiKey === "string" ? input.apiKey.slice(0, 512) : "";
+      const coraModelIds = Array.isArray(input?.coraModelIds)
+        ? input.coraModelIds
+            .filter((id): id is string => typeof id === "string")
+            .map((id) => id.slice(0, 240))
+            .slice(0, 12)
+        : [];
+      return validateOpenRouterConfiguration({ apiKey, coraModelIds });
+    },
+  );
+
+  handle("openrouter:cora-models", async (): Promise<string[]> => {
+    return configuredOpenRouterCoraModels(await loadSettings());
+  });
+
+  handle(
     "native-cli-accounts:inspect",
     async (): Promise<NativeCliAccountsInspection> => {
       return nativeCliAccounts.inspect();
@@ -871,10 +962,10 @@ export function registerIpc(): void {
     "native-cli-accounts:prepare-login",
     async (
       _event,
-      rawInput: Partial<NativeCliAccountProfileInput> | null,
+      rawInput: Partial<NativeCliAccountLoginInput> | null,
     ): Promise<NativeCliAccountLoginPreparation> => {
       return nativeCliAccounts.prepareLogin(
-        nativeCliAccountProfileInputFromIpc(rawInput),
+        nativeCliAccountLoginInputFromIpc(rawInput),
       );
     },
   );
@@ -2576,6 +2667,9 @@ export function registerIpc(): void {
   });
   handle("pty:resourceSnapshot", async () => {
     return pty.resourceSnapshot();
+  });
+  handle("system:resourceSnapshot", async () => {
+    return systemResourceSnapshot();
   });
 
   // Pause / resume the live byte stream while the renderer-side TerminalPane

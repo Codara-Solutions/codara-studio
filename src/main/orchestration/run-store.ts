@@ -294,6 +294,7 @@ import {
   buildManagerTurnPrompt,
   isCheckpointJobCurrent,
   isManagerTurnCurrent,
+  renderBundledManagerInput,
   resolveChatBackendConfig,
   shouldIncludeCanonicalReplay,
   type ChatBackendConfig,
@@ -307,7 +308,12 @@ import {
   resolveCodaraPiExecutionAccount,
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
-import type { PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
+import type { PiProvider, PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
+import {
+  availableCoraWorkerModels,
+  configuredOpenRouterCoraModels,
+  hasVerifiedOpenRouterKey,
+} from "../openrouter-config";
 import {
   normalizePiAccountProfileId,
   preserveFrozenPiAccountProfileId,
@@ -341,17 +347,20 @@ import {
   releaseRunQuestionBlocker,
 } from "./run-question-policy";
 
-function piProviderForManagerModel(model: string): PiSubscriptionProvider {
+function piProviderForManagerModel(model: string): PiSubscriptionProvider | null {
   if (model.startsWith("claude-")) return "anthropic";
   if (model.startsWith("gpt-")) return "openai-codex";
-  throw new Error(`Pi subscription backend does not support model ${model}`);
+  if (model.startsWith("grok-")) return "xai";
+  return null;
 }
 
 async function freezeManagerExecutionAccount(
   chat: ChatBackendConfig,
 ): Promise<ChatBackendConfig> {
+  const provider = piProviderForManagerModel(chat.model);
+  if (!provider) return { ...chat, accountProfileId: undefined };
   const account = await resolveCodaraPiExecutionAccount({
-    provider: piProviderForManagerModel(chat.model),
+    provider,
     preferredAccountProfileId: chat.accountProfileId,
   });
   return {
@@ -372,6 +381,7 @@ async function pinImplicitPiManagerAccount(
     return run;
   }
   const provider = piProviderForManagerModel(initial.model);
+  if (!provider) return run;
   const candidate = await selectImplicitPiAccount(provider, initial.model);
   if (!candidate) return run;
 
@@ -1119,7 +1129,7 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
 }
 
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
-  if (
+  const directExecutionRequested =
     !input.runId &&
     (await shouldUseDirectExecution({
       strategy: input.executionStrategy,
@@ -1130,7 +1140,17 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       hasAttachments: Boolean(input.initialAttachments?.length),
       hasFanOut: Boolean(input.fanOut),
       hasCouncil: Boolean(input.council),
-    }))
+    }));
+  // A direct Cora turn is implemented as one worker. If the user disabled the
+  // entire worker roster, keep the request on the manager path: the manager's
+  // injected contract tells it to answer directly or ask the user to enable a
+  // worker, instead of creating a run that can never launch.
+  const canLaunchDirectWorker = directExecutionRequested
+    ? availableCoraWorkerModels(await loadSettings()).length > 0
+    : false;
+  if (
+    !input.runId &&
+    canLaunchDirectWorker
   ) {
     return startDirectWorkerRun({
       workspaceId: input.workspaceId,
@@ -1707,21 +1727,59 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
       freshPass: input.freshPass,
     });
   }
-  run = await addRunMessage({
-    runId: run.id,
-    clientMessageId: input.clientMessageId,
-    author: "user",
-    kind: "note",
-    message: input.prompt,
-    deliveryState: "acknowledged",
-    skipDirectDispatch: true,
-  });
+  const requestedQueuedIds = [...new Set(input.queuedMessageIds ?? [])];
+  let directInputMessageIds: string[] = [];
+  if (requestedQueuedIds.length === 0) {
+    const priorMessageIds = new Set(run.humanMessages.map((message) => message.id));
+    run = await addRunMessage({
+      runId: run.id,
+      clientMessageId: input.clientMessageId,
+      author: "user",
+      kind: "note",
+      message: input.prompt,
+      attachments: input.attachments,
+      deliveryState: "acknowledged",
+      skipDirectDispatch: true,
+    });
+    directInputMessageIds = run.humanMessages
+      .filter(
+        (message) =>
+          message.author === "user" &&
+          (!priorMessageIds.has(message.id) ||
+            (Boolean(input.clientMessageId) && message.clientMessageId === input.clientMessageId)),
+      )
+      .map((message) => message.id);
+  }
   const passNumber = run.steps.length + 1;
+  let claimedQueuedMessageIds: string[] = [];
   run = await commitRunChange(run, {
     type: "direct_run.iteration_started",
     message: `Loom iteration ${passNumber} started`,
-    payload: { model: input.model ?? null, effort: input.effort ?? null },
+    payload: {
+      model: input.model ?? null,
+      effort: input.effort ?? null,
+      queuedMessageIds: requestedQueuedIds.length > 0 ? requestedQueuedIds : null,
+      hasAttachments: Boolean(input.attachments?.length),
+    },
     mutate: (draft, timestamp) => {
+      if (requestedQueuedIds.length > 0) {
+        const requested = new Set(requestedQueuedIds);
+        const epoch = conversationEpoch(draft);
+        const claimable = draft.humanMessages.filter(
+          (message) =>
+            requested.has(message.id) &&
+            message.author === "user" &&
+            (message.conversationEpoch ?? 0) === epoch &&
+            message.deliveryState === "queued" &&
+            !message.backendTurnId,
+        );
+        if (claimable.length === 0) return false;
+        claimedQueuedMessageIds = claimable.map((message) => message.id);
+        for (const message of claimable) {
+          message.deliveryState = "acknowledged";
+          message.targetTurnId = `direct:${passNumber}`;
+        }
+      }
       draft.status = "running";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -1734,13 +1792,26 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
       draft.updatedAt = timestamp;
     },
   });
+  if (requestedQueuedIds.length > 0) {
+    if (claimedQueuedMessageIds.length === 0) {
+      throw new Error("The queued direct-run message was removed before Cora could resume it.");
+    }
+    directInputMessageIds = claimedQueuedMessageIds;
+  }
+  const directInputMessages = directInputMessageIds
+    .map((messageId) => run.humanMessages.find((message) => message.id === messageId))
+    .filter((message): message is HumanRunMessage => Boolean(message));
+  const directPrompt =
+    directInputMessages.length > 0
+      ? renderBundledManagerInput(directInputMessages)
+      : input.prompt;
   const cwd = workspaceCwdFromRun(run);
   if (!cwd) throw new Error(`Direct run has no workspace cwd: ${input.runId}`);
   return launchDirectIterationTask({
     runId: run.id,
     cwd,
     passNumber,
-    prompt: input.prompt,
+    prompt: directPrompt,
     model: input.model,
     effort: input.effort,
     loomNodeId: input.loomNodeId,
@@ -9703,8 +9774,10 @@ async function resolveManagerRecoveryAccount(
     );
     if (!profileId) throw new Error("A concrete subscription account is required.");
     const config = resolveChatBackendConfig(run);
+    const provider = piProviderForManagerModel(config.model);
+    if (!provider) throw new Error("OpenRouter chats do not use a subscription account profile.");
     const resolved = await resolveCodaraPiExecutionAccount({
-      provider: piProviderForManagerModel(config.model),
+      provider,
       preferredAccountProfileId: profileId,
     });
     if (resolved.accountProfileId !== profileId) {
@@ -10090,6 +10163,23 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   if (blockingQuestion) {
     throw new Error(`Run is blocked on question ${blockingQuestion.id}. Answer it to resume.`);
   }
+  const queuedDirectMessages = queuedManagerInputMessages(run);
+  if (
+    run.executionMode === "direct" &&
+    !run.automationId &&
+    isTerminalRunStatus(run.status) &&
+    queuedDirectMessages.length > 0
+  ) {
+    return addDirectIteration({
+      runId: run.id,
+      prompt: renderBundledManagerInput(queuedDirectMessages),
+      model: run.chatModel?.trim() || "gpt-5.6-sol",
+      effort: run.chatEffort ?? "medium",
+      queuedMessageIds: queuedDirectMessages.map((message) => message.id),
+      access: "full",
+      freshPass: true,
+    });
+  }
   if (run.managerTurnRecovery) {
     if (run.managerTurnRecovery.state === "resuming") return run;
     return (
@@ -10463,10 +10553,9 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     run.executionMode === "direct" &&
     input.author === "user" &&
     input.kind === "note" &&
-    (input.attachments?.length ?? 0) === 0 &&
     isTerminalRunStatus(run.status)
   ) {
-    const prompt = input.message.trim();
+    const prompt = input.message.trim() || fallbackMessageForAttachments(input.attachments);
     if (!prompt) throw new Error("Message is required.");
     return addDirectIteration({
       runId: run.id,
@@ -10474,6 +10563,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       model: run.chatModel?.trim() || "gpt-5.6-sol",
       effort: run.chatEffort ?? "medium",
       clientMessageId: input.clientMessageId,
+      attachments: input.attachments,
       access: "full",
       freshPass: true,
     });
@@ -10751,6 +10841,7 @@ export async function cancelQueuedMessage(
     throw new Error(`Queued message not found: ${input.messageId}`);
   }
   let cancelledText: string | null = null;
+  let cancelledAttachments: RunMessageAttachment[] = [];
   const updated = await commitRunChange(run, {
     type: "run.queued_message_cancelled",
     message: "Queued user message unqueued before delivery",
@@ -10767,6 +10858,7 @@ export async function cancelQueuedMessage(
         return false;
       }
       cancelledText = target.message;
+      cancelledAttachments = target.attachments ?? [];
       draft.humanMessages.splice(index, 1);
       draft.updatedAt = timestamp;
     },
@@ -10774,7 +10866,22 @@ export async function cancelQueuedMessage(
   if (cancelledText === null) {
     throw new Error("Cora already picked this message up; it can no longer be unqueued.");
   }
-  return { run: updated, restoredText: cancelledText };
+  // Hand the persisted attachment files back as re-attachable inputs: the
+  // files themselves stay in the run's attachment store (the cancel only
+  // removed the message row), so a resend re-ingests them from those paths.
+  return {
+    run: updated,
+    restoredText: cancelledText,
+    ...(cancelledAttachments.length > 0
+      ? {
+          restoredAttachments: cancelledAttachments.map((attachment) => ({
+            sourcePath: attachment.path,
+            name: attachment.name,
+            kind: attachment.kind,
+          })),
+        }
+      : {}),
+  };
 }
 
 /**
@@ -12731,7 +12838,19 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     task.runtimePreference === "claude" ||
     task.runtimePreference === "codex" ||
     task.runtimePreference === "grok";
-  const piWorkerModel = isPiWorker ? piModelForWorker(task, isAutomationRun) : undefined;
+  const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
+  const piWorkerModel = isPiWorker
+    ? piModelForWorker(
+        task,
+        isAutomationRun,
+        workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
+      )
+    : undefined;
+  if (isPiWorker && !piWorkerModel) {
+    throw new Error(
+      "Cora has no enabled worker model. Enable at least one model in Settings > API and model.",
+    );
+  }
   const command = isPiWorker
     ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
     : "pwsh (manual)";
@@ -12873,6 +12992,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           cwd: attempt.cwd,
           promptText,
           command,
+          model: piWorkerModel!,
         })
       : await runWorkerSession({
           run,
@@ -18416,7 +18536,9 @@ async function readWorkerReportWithWorkspaceShadowRecovery(
   return { report: shadowReport, relocatedFrom: shadowPath };
 }
 
-function piProviderForWorker(task: WorkerTask): PiSubscriptionProvider {
+function piProviderForWorker(task: WorkerTask, model: string | undefined): PiProvider {
+  if (model?.includes("/")) return "openrouter";
+  if (task.runtimePreference === "grok") return "xai";
   return task.runtimePreference === "claude" ? "anthropic" : "openai-codex";
 }
 
@@ -18429,13 +18551,17 @@ function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
   return "high";
 }
 
-function piModelForWorker(task: WorkerTask, isAutomationRun = false): string | undefined {
+function piModelForWorker(
+  task: WorkerTask,
+  isAutomationRun = false,
+  enabledModels?: readonly string[],
+): string | undefined {
   // One answer, shared with the renderer: plannedWorkerModel holds both the
   // automation passthrough (a pinned/handoff model the automation validation
   // layer already vetted) and the roster coercion Cora-spawned workers get.
   // The renderer prints the same value on queued worker rows, so a row can
   // never advertise a model this chokepoint will not launch.
-  return plannedWorkerModel(task, { isAutomationRun });
+  return plannedWorkerModel(task, { isAutomationRun, enabledModels });
 }
 
 function piWorkerToolLabel(value: unknown): string {
@@ -18841,6 +18967,7 @@ async function runPiWorkerSession({
   cwd,
   promptText,
   command,
+  model,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -18849,6 +18976,7 @@ async function runPiWorkerSession({
   cwd: string;
   promptText: string;
   command: string;
+  model: string;
 }): Promise<{
   exitCode: number;
   error?: string;
@@ -18865,10 +18993,9 @@ async function runPiWorkerSession({
   await ensurePiWorkerDisplayPty(attemptId, cwd);
   await pty.waitForResize(attemptId, 5_000);
 
-  const provider = piProviderForWorker(task);
-  const model = piModelForWorker(task, isAutomationRun);
+  const provider = piProviderForWorker(task, model);
   const thinking = piThinkingForWorker(task);
-  const modelLabel = model ?? (provider === "anthropic" ? "Claude subscription default" : "Codex subscription default");
+  const modelLabel = model;
   pty.publishOutput(
     attemptId,
     `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
@@ -18980,42 +19107,56 @@ async function runPiWorkerSession({
     const persistedAttempt = run.workerAttempts.find(
       (item) => item.id === attemptId,
     );
-    const managerChat = resolveChatBackendConfig(run);
-    let workerAccountProfileId = selectPiWorkerAccountProfile({
-      persistedAttemptProfileId: persistedAttempt?.accountProfileId,
-      runManagerProfileId: managerChat.accountProfileId,
-      runManagerProvider:
-        managerChat.backend === "pi"
-          ? piProviderForManagerModel(managerChat.model)
-          : null,
-      workerProvider: provider,
-    });
-    if (!workerAccountProfileId) {
-      workerAccountProfileId = (
-        await rankImplicitPiAccounts(provider, model)
-      )[0]?.accountProfileId;
+    const settings = provider === "openrouter" ? await loadSettings() : null;
+    if (settings && (
+      !hasVerifiedOpenRouterKey(settings) ||
+      !configuredOpenRouterCoraModels(settings).includes(model)
+    )) {
+      throw new Error(
+        `OpenRouter worker model ${model} is not verified for Cora. Check it in Settings > API and model.`,
+      );
     }
-    const resolvedWorkerAccount = await resolveCodaraPiExecutionAccount({
-      provider,
-      ...(workerAccountProfileId
-        ? { preferredAccountProfileId: workerAccountProfileId }
-        : {}),
-    });
-    await stampAttemptAccountProfile(
-      run.id,
-      task.id,
-      attemptId,
-      resolvedWorkerAccount.accountProfileId,
-    );
+    const managerChat = resolveChatBackendConfig(run);
+    let workerAccountProfileId: string | undefined;
+    let resolvedWorkerAccount: Awaited<ReturnType<typeof resolveCodaraPiExecutionAccount>> | undefined;
+    if (provider !== "openrouter") {
+      workerAccountProfileId = selectPiWorkerAccountProfile({
+        persistedAttemptProfileId: persistedAttempt?.accountProfileId,
+        runManagerProfileId: managerChat.accountProfileId,
+        runManagerProvider:
+          managerChat.backend === "pi"
+            ? piProviderForManagerModel(managerChat.model)
+            : null,
+        workerProvider: provider,
+      });
+      if (!workerAccountProfileId) {
+        workerAccountProfileId = (
+          await rankImplicitPiAccounts(provider, model)
+        )[0]?.accountProfileId;
+      }
+      resolvedWorkerAccount = await resolveCodaraPiExecutionAccount({
+        provider,
+        ...(workerAccountProfileId
+          ? { preferredAccountProfileId: workerAccountProfileId }
+          : {}),
+      });
+      await stampAttemptAccountProfile(
+        run.id,
+        task.id,
+        attemptId,
+        resolvedWorkerAccount.accountProfileId,
+      );
+    }
     const plan = await createCodaraPiWorkerLaunchPlan({
       provider,
+      ...(provider === "openrouter" ? { apiKey: settings?.openRouterApiKey } : {}),
       runId: run.id,
       attemptId,
       cwd,
       model,
       thinking,
       sessionName: task.title,
-      accountProfileId: resolvedWorkerAccount.accountProfileId,
+      accountProfileId: resolvedWorkerAccount?.accountProfileId,
       resolvedAccount: resolvedWorkerAccount,
       executionPolicy: effectiveRunExecutionPolicy(run),
       projectPolicyMode: runProjectPolicyMode(run),
@@ -19068,7 +19209,10 @@ async function runPiWorkerSession({
     mcpConfigPath = plan.mcpConfigPath;
     agentSocketCapabilityId = plan.agentSocketCapabilityId;
     piSessionId = plan.sessionId;
-    if (plan.accountProfileId !== resolvedWorkerAccount.accountProfileId) {
+    if (
+      provider !== "openrouter" &&
+      plan.accountProfileId !== resolvedWorkerAccount?.accountProfileId
+    ) {
       throw new Error("Pi worker plan changed its frozen account identity");
     }
     client = new PiRpcClient(plan, {

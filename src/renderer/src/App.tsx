@@ -189,7 +189,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: "google/gemini-flash-latest",
+  openRouterCoraModels: [],
+  openRouterVerifiedKeyHash: "",
   commitMessageModel: "auto",
+  coraWorkerModels: ["claude-opus-5", "claude-fable-5", "gpt-5.6-sol", "grok-4.6"],
   agentMcpSyncEnabled: true,
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
@@ -459,7 +462,7 @@ export default function App() {
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const [capabilitiesInitialTab, setCapabilitiesInitialTab] = useState<
-    "mcp" | "skills" | "memory" | "policy"
+    "mcp" | "skills" | "memory" | "workers" | "policy"
   >("mcp");
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [workerSessionPicker, setWorkerSessionPicker] =
@@ -787,6 +790,14 @@ export default function App() {
         handleNativeCliLogin,
       );
   }, [home, newTerminalTab]);
+
+  useEffect(
+    () =>
+      window.spark.nativeCliAccounts.onLoginError((message) => {
+        emitLocalToast("CLI account was not switched", message, "danger");
+      }),
+    [],
+  );
 
   // Choosing a different CLI account cannot mutate a process that is already
   // running. Settings therefore opens one fresh, explicitly selected session
@@ -2931,7 +2942,7 @@ export default function App() {
   const handleOpenCapabilities = useCallback((event?: Event) => {
     const requested = (event as CustomEvent<{ tab?: unknown }> | undefined)?.detail?.tab;
     setCapabilitiesInitialTab(
-      requested === "skills" || requested === "memory" || requested === "policy"
+      requested === "skills" || requested === "memory" || requested === "workers" || requested === "policy"
         ? requested
         : "mcp",
     );
@@ -4266,43 +4277,34 @@ export default function App() {
     workspaceId: string;
     runtime: WorkerSessionRuntime;
     cwd: string;
-    session: WorkerSessionSummary | null;
+    session: WorkerSessionSummary;
   } | null>(null);
 
   const launchSettingsSession = useCallback(
     async (request: {
       runtime: WorkerSessionRuntime;
       cwd: string;
-      session: WorkerSessionSummary | null;
+      session: WorkerSessionSummary;
     }) => {
       if (request.runtime === "codex") {
         await window.spark.agentSession
           .ensureCodexTrust(
             request.cwd,
-            request.session?.nativeCodexProfileId,
+            request.session.nativeCodexProfileId,
           )
           .catch(() => undefined);
       }
-      const pointer: TerminalAgentSession | null = request.session
-        ? {
-            runtime: request.runtime,
-            nativeCodexProfileId:
-              request.session.nativeCodexProfileId,
-            nativeGrokProfileId: request.session.nativeGrokProfileId,
-            sessionId: request.session.sessionId,
-            cwd: request.cwd,
-            transcriptPath: request.session.transcriptPath,
-            capturedAt: new Date().toISOString(),
-            active: false,
-          }
-        : null;
-      const command = pointer
-        ? buildAgentResumeCommand(pointer)
-        : request.runtime === "claude"
-          ? CLAUDE_LAUNCH_COMMAND
-          : request.runtime === "grok"
-            ? GROK_LAUNCH_COMMAND
-            : CODEX_LAUNCH_COMMAND;
+      const pointer: TerminalAgentSession = {
+        runtime: request.runtime,
+        nativeCodexProfileId: request.session.nativeCodexProfileId,
+        nativeGrokProfileId: request.session.nativeGrokProfileId,
+        sessionId: request.session.sessionId,
+        cwd: request.cwd,
+        transcriptPath: request.session.transcriptPath,
+        capturedAt: new Date().toISOString(),
+        active: false,
+      };
+      const command = buildAgentResumeCommand(pointer);
       tabsRef.current.newTerminalTab(request.cwd, command, {
         agentSession: pointer,
         manualAgentRuntime: request.runtime,
@@ -4316,7 +4318,7 @@ export default function App() {
     async (
       runtime: WorkerSessionRuntime,
       cwd: string,
-      session: WorkerSessionSummary | null,
+      session: WorkerSessionSummary,
     ) => {
       const normalized = (value: string) => {
         const path = value.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -7042,23 +7044,6 @@ const Workspace = React.memo(function Workspace({
     }
     return fn;
   };
-  // "+ → Browser pane": create the preview and dock it into the same grid in
-  // one batch. The empty URL is the same starting point the top-strip picker
-  // uses (tabs.newPreviewTab("")), so the pane opens on the address bar.
-  const handleAddBrowserPane = useCallback(
-    (
-      hostTabId: string,
-      target: { paneId: string; direction: "horizontal" | "vertical" } | null,
-    ) => {
-      const previewId = tabs.newPreviewTab("", { focus: false });
-      dockTabInTerminal(
-        previewId,
-        hostTabId,
-        target ? { ...target, position: "after", mode: "split" } : undefined,
-      );
-    },
-    [tabs, dockTabInTerminal],
-  );
   const handleDockTabDrop = useCallback(
     (
       dockedTabId: string,
@@ -7300,7 +7285,6 @@ const Workspace = React.memo(function Workspace({
                 onSplitPane={isActive ? handleSplitPane : noopTerminalCb}
                 onMovePane={isActive ? handleMovePane : noopTerminalCb}
                 onClosePane={isActive ? handleClosePane : noopTerminalCb}
-                onAddBrowserPane={isActive ? handleAddBrowserPane : noopTerminalCb}
                 onDockTabDrop={isActive ? handleDockTabDrop : noopTerminalCb}
                 onUndockTab={isActive ? handleUndockTab : noopTerminalCb}
                 onCloseDockedTab={isActive ? handleCloseDockedTab : noopTerminalCb}

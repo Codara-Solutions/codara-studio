@@ -306,7 +306,8 @@ export interface AgentBackend {
  * backend sees a fully-populated config.
  *
  * Defaults:
- *   - backend: Pi (the bundled, subscription-only Cora harness — the only one)
+ *   - backend: Pi (the bundled Cora harness — the only one; it also carries
+ *     verified OpenRouter API models)
  *   - model:   GPT-5.6 Sol, the Codex runtime's default
  *   - mode:    auto for every chat except an Automations loom (effectiveChatMode)
  *   - effort:  medium (coordination stays quick; workers choose task effort)

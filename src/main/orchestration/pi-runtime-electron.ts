@@ -15,6 +15,11 @@ import {
 } from "../agent-socket-capabilities";
 import { codaraHome } from "../codara-home";
 import { loadSettings } from "../storage";
+import {
+  availableCoraWorkerModels,
+  configuredOpenRouterCoraModels,
+  hasVerifiedOpenRouterKey,
+} from "../openrouter-config";
 import { managedPiRuntimeNodeModules } from "./pi-runtime-install";
 import { writeFileAtomic } from "../fs-atomic";
 import {
@@ -29,6 +34,7 @@ import {
   resolvePinnedPiRuntime,
   resolvePiWebSearchExtension,
   type PiManagerLaunchPlan,
+  type PiProvider,
   type PiSubscriptionProvider,
   type PiThinkingLevel,
   type PiRuntimeLocation,
@@ -51,7 +57,8 @@ export interface CodaraPiPaths {
 }
 
 export interface CreateCodaraPiLaunchOptions {
-  provider: PiSubscriptionProvider;
+  provider: PiProvider;
+  apiKey?: string;
   runId: string;
   mode: "talk" | "execute" | "automation";
   chatMode?: ChatMode;
@@ -121,9 +128,9 @@ async function openAiFastModeEnabled(): Promise<boolean> {
  * never disagree about a setting the user flipped mid-turn.
  */
 export async function resolveCodaraPiFastMode(
-  provider: PiSubscriptionProvider,
+  provider: PiProvider,
 ): Promise<boolean> {
-  if (provider === "anthropic") return false;
+  if (provider === "anthropic" || provider === "openrouter") return false;
   return openAiFastModeEnabled();
 }
 
@@ -149,6 +156,19 @@ export async function resolveCodaraPiExecutionAccount(
     },
     selection,
   );
+}
+
+export async function resolveCodaraOpenRouterApiKey(model: string): Promise<string> {
+  const settings = await loadSettings();
+  if (
+    !hasVerifiedOpenRouterKey(settings) ||
+    !configuredOpenRouterCoraModels(settings).includes(model)
+  ) {
+    throw new Error(
+      `OpenRouter model ${model} is not verified for Cora. Check the key and model in Settings > API and model.`,
+    );
+  }
+  return settings.openRouterApiKey.trim();
 }
 
 // The extension requires the SDK's CJS client build by absolute path: Pi loads
@@ -307,21 +327,26 @@ export async function resolveCodaraPiWebSearchExtension(): Promise<string | null
 export async function createCodaraPiLaunchPlan(
   options: CreateCodaraPiLaunchOptions,
 ): Promise<PiManagerLaunchPlan> {
+  const isOpenRouter = options.provider === "openrouter";
   const accountRequest = {
-    provider: options.provider,
+    provider: options.provider as PiSubscriptionProvider,
     ...(options.accountProfileId
       ? { preferredAccountProfileId: options.accountProfileId }
       : {}),
   };
-  const account = options.resolvedAccount
-    ? normalizePiExecutionAccount(accountRequest, options.resolvedAccount)
-    : await resolveCodaraPiExecutionAccount(accountRequest);
+  const account = isOpenRouter
+    ? { configDir: codaraPiPaths().configDir }
+    : options.resolvedAccount
+      ? normalizePiExecutionAccount(accountRequest, options.resolvedAccount)
+      : await resolveCodaraPiExecutionAccount(accountRequest);
   const paths = codaraPiPaths(account.configDir);
   const untrustedPullRequest =
     options.projectPolicyMode === "untrusted-pull-request";
-  const [runtime, auth, webSearchExtensionPath, mcp] = await Promise.all([
+  const [runtime, auth, webSearchExtensionPath, mcp, settings] = await Promise.all([
     resolveCodaraPiRuntime(),
-    inspectPiSubscriptionAuth(paths.authFile, options.provider),
+    isOpenRouter
+      ? Promise.resolve(null)
+      : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider),
     resolveCodaraPiWebSearchExtension(),
     untrustedPullRequest
       ? Promise.resolve(null)
@@ -331,8 +356,9 @@ export async function createCodaraPiLaunchPlan(
           cwd: options.cwd,
           mcpConfigDir: paths.mcpConfigDir,
         }),
+    loadSettings(),
   ]);
-  if (auth.expired && !auth.canRefresh) {
+  if (auth?.expired && !auth.canRefresh) {
     throw new Error(`Pi provider ${options.provider} OAuth session expired and cannot refresh`);
   }
   await Promise.all([
@@ -342,6 +368,7 @@ export async function createCodaraPiLaunchPlan(
   const plan = buildPiManagerLaunchPlan({
     runtime,
     provider: options.provider,
+    apiKey: options.apiKey,
     accountProfileId: account.accountProfileId,
     openAiFastMode:
       options.openAiFastMode ?? (await resolveCodaraPiFastMode(options.provider)),
@@ -371,6 +398,7 @@ export async function createCodaraPiLaunchPlan(
     codaraHomeDir: codaraHome(),
     processExecutable: electronAsNodeInterpreter(),
   });
+  plan.env.CODARA_PI_WORKER_MODELS = JSON.stringify(availableCoraWorkerModels(settings));
   return untrustedPullRequest
     ? attachUntrustedSocketCapability(plan, {
         audience: "untrusted-pi-manager",
@@ -380,7 +408,8 @@ export async function createCodaraPiLaunchPlan(
 }
 
 export interface CreateCodaraPiWorkerLaunchOptions {
-  provider: PiSubscriptionProvider;
+  provider: PiProvider;
+  apiKey?: string;
   runId: string;
   attemptId: string;
   cwd: string;
@@ -444,27 +473,32 @@ export interface CreateCodaraPiWorkerLaunchOptions {
 export async function createCodaraPiWorkerLaunchPlan(
   options: CreateCodaraPiWorkerLaunchOptions,
 ): Promise<PiManagerLaunchPlan> {
+  const isOpenRouter = options.provider === "openrouter";
   const untrustedPullRequest =
     options.projectPolicyMode === "untrusted-pull-request";
   const accountRequest = {
-    provider: options.provider,
+    provider: options.provider as PiSubscriptionProvider,
     ...(options.accountProfileId
       ? { preferredAccountProfileId: options.accountProfileId }
       : {}),
   };
-  const account = options.resolvedAccount
-    ? normalizePiExecutionAccount(
-        accountRequest,
-        options.resolvedAccount,
-      )
-    : await resolveCodaraPiExecutionAccount(accountRequest);
+  const account = isOpenRouter
+    ? { configDir: codaraPiPaths().configDir }
+    : options.resolvedAccount
+      ? normalizePiExecutionAccount(
+          accountRequest,
+          options.resolvedAccount,
+        )
+      : await resolveCodaraPiExecutionAccount(accountRequest);
   const paths = codaraPiPaths(account.configDir);
   const [runtime, auth, webSearchExtensionPath] = await Promise.all([
     resolveCodaraPiRuntime(),
-    inspectPiSubscriptionAuth(paths.authFile, options.provider),
+    isOpenRouter
+      ? Promise.resolve(null)
+      : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider),
     resolveCodaraPiWebSearchExtension(),
   ]);
-  if (auth.expired && !auth.canRefresh) {
+  if (auth?.expired && !auth.canRefresh) {
     throw new Error(`Pi provider ${options.provider} OAuth session expired and cannot refresh`);
   }
   await Promise.all([
@@ -496,6 +530,7 @@ export async function createCodaraPiWorkerLaunchPlan(
     const plan = buildPiManagerLaunchPlan({
       runtime,
       provider: options.provider,
+      apiKey: options.apiKey,
       accountProfileId: account.accountProfileId,
       openAiFastMode: await openAiFastModeEnabled(),
       configDir: paths.configDir,

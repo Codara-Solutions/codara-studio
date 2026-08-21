@@ -5,12 +5,12 @@ import type {
 } from "@shared/types";
 import type {
   PiManagerMode,
-  PiSubscriptionProvider,
+  PiProvider,
   PiThinkingLevel,
 } from "./pi-runtime";
 
 export interface PiBackendSessionIdentity {
-  provider: PiSubscriptionProvider;
+  provider: PiProvider;
   accountProfileId?: string;
   model: string;
   thinking: PiThinkingLevel;

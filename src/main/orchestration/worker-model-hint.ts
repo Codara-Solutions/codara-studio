@@ -9,6 +9,8 @@
 export {
   ALLOWED_WORKER_MODELS,
   coerceWorkerModelToRoster,
+  enabledWorkerModelFor,
+  isOpenRouterModelId,
   plannedWorkerModel,
   rosterModelFor,
   sanitizeWorkerModelHint,

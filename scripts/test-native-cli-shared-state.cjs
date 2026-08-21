@@ -470,10 +470,18 @@ async function testCodexStoreWiring() {
   });
   const created = await store.createProfile({ label: "Shared" });
   const { homeDir, authFile } = codexStores.codexCliManagedProfilePaths(storeRoot, created.profile.id);
-  assert.ok(isLinkTo(path.join(homeDir, "sessions"), path.join(personal, "sessions")));
-  assert.ok(isLinkTo(path.join(homeDir, "config.toml"), path.join(personal, "config.toml")));
+  assert.deepEqual(
+    fs.readdirSync(homeDir),
+    [],
+    "a managed Codex slot is an auth vault, never another session home",
+  );
+  assert.equal(
+    fs.existsSync(path.join(homeDir, "sessions")),
+    false,
+    "session state must stay exclusively under the personal ~/.codex home",
+  );
   assert.equal(fs.existsSync(authFile), false, "creation must not invent an auth.json");
-  console.log("PASS codex store wiring: a fresh managed home is created linked");
+  console.log("PASS codex store wiring: a fresh managed slot cannot split session state");
 }
 
 async function main() {

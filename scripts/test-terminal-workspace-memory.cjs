@@ -160,6 +160,11 @@ async function main() {
   const stackSource = fs.readFileSync(TERMINAL_STACK, "utf8");
   const appSource = fs.readFileSync(APP, "utf8");
   check(
+    "the terminal plus menu omits the browser pane shortcut",
+    !stackSource.includes('title: "Browser pane"') &&
+      !stackSource.includes('kind: "browser"'),
+  );
+  check(
     "running agent TUIs bypass the warm-workspace cap",
     appSource.includes("function hasLiveAgentTerminal") &&
       appSource.includes("leaf.agentSession?.active === true") &&

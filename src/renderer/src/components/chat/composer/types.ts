@@ -73,8 +73,8 @@ const PI_MODELS: ChatModelOption[] = [
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
   },
   {
-    id: "grok-4.5",
-    label: "Grok 4.5",
+    id: "grok-4.6",
+    label: "Grok 4.6",
     backend: "pi",
     effortLevels: ["low", "medium", "high"],
   },
@@ -202,15 +202,18 @@ export function clampEffort(
   return best;
 }
 
-// Build the visible groups for the model dropdown. Cora runs on Pi only, so
-// every row is a Pi model; the list is split into two groups by model family.
+// Build the visible groups for the model dropdown. Cora runs on one Pi harness
+// for both subscription providers and the user's verified OpenRouter models.
 export function buildVisibleGroups({
   piCatalog = [],
+  openRouterModels = [],
 }: {
   /** Models Pi reports as usable by the connected subscriptions right now.
    * Merged under the curated rows so a model released after this build is
    * selectable without a code change. */
   piCatalog?: PiCatalogModel[];
+  /** User-verified OpenRouter favorites from Settings. */
+  openRouterModels?: string[];
 }): ChatBackendGroup[] {
   const groups: ChatBackendGroup[] = [];
   // Pi is bundled and version-pinned with Studio. OAuth readiness is checked
@@ -250,6 +253,21 @@ export function buildVisibleGroups({
     label: AGENT_FAMILIES.grok.vendorLabel,
     models: sortByRank(modelsFor("grok")),
   });
+  const openRouterRows = [...new Set(openRouterModels.map((id) => id.trim()).filter(Boolean))]
+    .map((id) => withModelRank({
+      id,
+      label: id,
+      backend: "pi" as const,
+    }));
+  if (openRouterRows.length > 0) {
+    groups.push({
+      key: "pi-openrouter",
+      backend: "pi",
+      section: "OpenRouter API",
+      label: "OpenRouter",
+      models: sortByRank(openRouterRows),
+    });
+  }
   return groups;
 }
 
@@ -379,7 +397,11 @@ function keepCurrentGeneration(
   provider: "anthropic" | "openai" | "xai",
 ): ChatModelOption[] {
   if (models.length === 0) return models;
-  if (provider === "xai") return models;
+  if (provider === "xai") {
+    return models.filter(
+      (model) => decomposeModelId(model.id).baseId.toLowerCase() === "grok-4.6",
+    );
+  }
 
   if (provider === "openai") {
     let newest: number[] | null = null;

@@ -262,7 +262,7 @@ test("spark chat renders as a workbench tab", async () => {
   }
 });
 
-test("settings dialog saves default terminal, OpenRouter, commit, and inline model settings", async () => {
+test("settings dialog saves default terminal, OpenRouter, commit, and inline settings", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-settings-e2e-");
   const piAuthDir = join(userDataDir, "pi-agent");
   await mkdir(piAuthDir, { recursive: true });
@@ -355,14 +355,12 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline mod
     // The Accounts section explainer, then each provider group's header line —
     // which is where the model Cora runs on is now named ("Cora runs on
     // {model} · {counts}", SettingsDialog.tsx).
-    await expect(page.getByText(/each need their own sign-in/)).toBeVisible();
+    await expect(page.getByText(/Each account keeps its own private sign-in/)).toBeVisible();
     await expect(page.getByText(/Cora runs on Fable 5 ·/)).toBeVisible();
     await expect(page.getByText(/Cora runs on GPT-5\.6 Sol ·/)).toBeVisible();
-    // The migrated profiles carry the unexpired credentials written above, so
-    // both cards report a live Cora connection. Only the Cora side is asserted:
-    // the CLI line beside it reflects whichever Claude Code / Codex CLI sign-in
-    // this Mac happens to have, which no throwaway user-data dir isolates.
-    await expect(page.getByText("Connected to Cora", { exact: true }).first()).toBeVisible();
+    // The fake OAuth strings deliberately cannot pass the current provider
+    // probe. The profile labels/header counts above prove migration without
+    // pretending these synthetic credentials are a live Cora connection.
     const serializedSubscriptionStatus = await page.evaluate(async () => {
       const spark = (window as unknown as { spark: any }).spark;
       return JSON.stringify(await spark.piSubscriptions.status());
@@ -381,18 +379,7 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline mod
     await expect(restoreSessions).toHaveAttribute("aria-checked", "true");
 
     await clickAttached(page.getByRole("button", { name: "Editor" }));
-    const inlineModelInput = page.getByRole("textbox", { name: "Inline AI model" });
-    await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
-    await expect(page.getByRole("button", { name: "Use Gemini 3.5 Flash for Inline AI" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    await clickAttached(page.getByRole("button", { name: "Use Gemini 3.5 Flash Nitro for Inline AI" }));
-    await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash:nitro");
-    await clickAttached(page.getByRole("button", { name: "Use GLM-4.7 Nitro for Inline AI" }));
-    await expect(inlineModelInput).toHaveValue("z-ai/glm-4.7:nitro");
-    await clickAttached(page.getByRole("button", { name: "Use default Inline AI model" }));
-    await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
+    await expect(page.getByRole("textbox", { name: "Inline AI model" })).toHaveCount(0);
     const inlineWaitInput = page.getByLabel("Inline AI wait time");
     await expect(inlineWaitInput).toHaveValue("0");
     await clickAttached(page.getByRole("button", { name: /After pause/ }));
@@ -405,7 +392,7 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline mod
 
     await clickAttached(page.getByRole("button", { name: "API and model" }));
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
-    await page.getByLabel("Model", { exact: true }).fill("test/settings-model");
+    await page.getByLabel("Inline edit and commit model").fill("test/settings-model");
     await clickAttached(page.getByLabel("Commit message model"));
     await clickAttached(page.getByRole("option", { name: "Anthropic, claude-sonnet-5" }));
     await clickButton(page, "Save");

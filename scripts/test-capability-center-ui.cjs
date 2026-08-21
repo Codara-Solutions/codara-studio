@@ -17,6 +17,18 @@ const source = fs.readFileSync(
   ),
   "utf8",
 );
+const settings = fs.readFileSync(
+  path.join(
+    __dirname,
+    "..",
+    "src",
+    "renderer",
+    "src",
+    "components",
+    "SettingsDialog.tsx",
+  ),
+  "utf8",
+);
 const composer = fs.readFileSync(
   path.join(__dirname, "..", "src", "renderer", "src", "components", "chat", "ChatComposer.tsx"),
   "utf8",
@@ -27,6 +39,14 @@ const sidebar = fs.readFileSync(
 );
 const preload = fs.readFileSync(path.join(__dirname, "..", "src", "preload", "index.ts"), "utf8");
 const agentSync = fs.readFileSync(path.join(__dirname, "..", "src", "main", "agent-sync.ts"), "utf8");
+
+// Worker routing is a Cora capability, not an API/model preference. Keep the
+// editor and its persisted AppSettings draft in this dialog only.
+assert.match(source, /\{ id: "workers", label: "Worker models" \}/);
+assert.match(source, /renderedTab === "workers"/);
+assert.match(source, /aria-label="Cora worker models"/);
+assert.match(source, /setDraft\(\(current\) => \{/);
+assert.doesNotMatch(settings, /Cora worker models/);
 
 // The point of this file: what an agent inside Codara may use is a different
 // question from which external CLI config carries the entry, and the dialog has

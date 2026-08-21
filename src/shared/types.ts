@@ -564,20 +564,36 @@ export function trimTerminalScrollbackLines(value: string, maxLines: number): st
   return lines.slice(-limit).join("\n");
 }
 
-export type CommitMessageModel = "auto" | "gpt-5.6-luna" | "claude-sonnet-5";
+export type CommitMessageModel =
+  | "auto"
+  | "openrouter"
+  | "gpt-5.6-luna"
+  | "claude-sonnet-5";
 
 export const DEFAULT_COMMIT_MESSAGE_MODEL: CommitMessageModel = "auto";
 
 export interface AppSettings {
   defaultShellId: string | null;
   terminalScrollbackLineLimit: number;
-  // OpenRouter stays dedicated to the code editor's inline AI. Commit drafts
-  // use the separate subscription-backed Pi selection below.
+  // OpenRouter API access. `openRouterModel` is the inexpensive utility model
+  // shared by editor inline AI and git commit drafts when OpenRouter is picked
+  // below. Cora models are kept separately so changing the editor model never
+  // silently changes a chat's manager model.
   openRouterApiKey: string;
   openRouterModel: string;
+  openRouterCoraModels: string[];
+  // SHA-256 of the exact key that last passed OpenRouter's authenticated
+  // /api/v1/key probe together with the configured Cora model lookups. It is
+  // not a credential. Editing the key or model list clears it in Settings.
+  openRouterVerifiedKeyHash: string;
   // Auto prefers OpenAI when its subscription is usable, then Anthropic.
-  // Either concrete model is an explicit provider override.
+  // Either concrete model is an explicit provider override; "openrouter"
+  // uses openRouterModel above.
   commitMessageModel: CommitMessageModel;
+  // Exact model ids Cora may launch for implementation and verification
+  // workers. The launch chokepoint enforces this list even when a manager
+  // emits an unavailable or stale model hint.
+  coraWorkerModels: string[];
   agentMcpSyncEnabled: boolean;
   agentSkillSyncEnabled: boolean;
   agentDisabledMcpIds: string[];
@@ -603,6 +619,18 @@ export interface AppSettings {
   // Anthropic sessions are unaffected and can never run a fast/priority tier;
   // resources/pi-cora/service-tier.ts strips one structurally.
   openAiFastMode: boolean;
+}
+
+export interface OpenRouterValidationInput {
+  apiKey: string;
+  coraModelIds: string[];
+}
+
+export interface OpenRouterValidationResult {
+  ok: boolean;
+  keyHash?: string;
+  error?: string;
+  models?: Array<{ id: string; label: string }>;
 }
 
 // Cora runs its manager and implementation workers through one pinned Pi
@@ -755,6 +783,23 @@ export interface NativeCliAccountsInspection {
 export interface NativeCliAccountProfileInput {
   runtime: NativeCliAccountRuntime;
   profileId: string;
+}
+
+/**
+ * Binds a CLI browser login to the Cora account whose card started it. The
+ * fingerprint is an anonymous main-process digest; the email is only used to
+ * pre-fill providers that support it and as a fallback for older connections.
+ */
+export interface NativeCliAccountLoginInput
+  extends NativeCliAccountProfileInput {
+  expectedAccountFingerprint?: string;
+  expectedEmail?: string;
+  /** Remove a just-created managed slot when the browser returns another account. */
+  removeProfileOnMismatch?: boolean;
+  /** Remove a just-created managed slot when sign-in is cancelled or fails. */
+  removeProfileOnFailure?: boolean;
+  /** Make the verified sign-in the CLI default as part of the same operation. */
+  activateOnSuccess?: boolean;
 }
 
 export interface NativeCliAccountCreateInput {
@@ -1352,6 +1397,17 @@ export interface PtyResourceSnapshot {
     detachedBacklogBytes: number;
     pendingBytes: number;
   };
+}
+
+/** Whole-machine activity shown in the title-bar system monitor. */
+export interface SystemResourceSnapshot {
+  sampledAt: number;
+  cpuPercent: number;
+  cpuLogicalCores: number;
+  gpuPercent: number | null;
+  ramPercent: number;
+  ramUsedBytes: number;
+  ramTotalBytes: number;
 }
 
 export type NotificationSoundKind = "needs-you" | "done";
@@ -4232,6 +4288,10 @@ export interface CancelQueuedMessageResult {
   run: RunState;
   /** The unqueued message's text, for prefilling the composer. */
   restoredText: string;
+  /** The unqueued message's attachments (already persisted in the run's
+   * attachment store), so the composer can restore pasted images alongside
+   * the text instead of silently dropping them. */
+  restoredAttachments?: AddRunMessageAttachmentInput[];
 }
 
 export interface AnswerRunQuestionInput {
@@ -4655,6 +4715,13 @@ export interface AddDirectIterationInput {
   prompt: string;
   model: string; // provider-native id; selects the Pi provider (claude-*/gpt-*)
   effort?: AgentEffortLevel;
+  /** Attachments on an ordinary direct-chat follow-up. They are persisted on
+   *  the user message before the worker launches, then rendered into its prompt
+   *  as readable absolute paths exactly like managed-manager input. */
+  attachments?: AddRunMessageAttachmentInput[];
+  /** Internal recovery/chaining seam: consume these already-persisted queued
+   *  user messages instead of appending a duplicate note. */
+  queuedMessageIds?: string[];
   /** `loom-${jobId}-${iter}` — reuses addRunMessage's dedupe machinery. */
   clientMessageId?: string;
   /** Looms v2.5: the graph node this chained pass's worker executes. See

@@ -48,6 +48,7 @@ async function main() {
     WORKER_DEFAULT_CLAUDE_MODEL,
     ALLOWED_WORKER_MODELS,
     coerceWorkerModelToRoster,
+    enabledWorkerModelFor,
     rosterModelFor,
   } = mod;
 
@@ -84,22 +85,29 @@ async function main() {
   eq("suffixed -legacy sonnet id stays untouched", sanitizeWorkerModelHint("claude-sonnet-4-6-legacy"), "claude-sonnet-4-6-legacy");
 
   // ── the worker roster ──
-  // Three models, and only three. If this count changes, the planner prompts
-  // in prompt-profile.ts / claude-backend.ts / manager-protocol.ts enumerate
-  // the roster verbatim and must be updated in the same change.
-  eq("roster exposes four models including Grok", ALLOWED_WORKER_MODELS.length, 4);
-  for (const id of ["claude-opus-5", "gpt-5.6-sol", "claude-fable-5"]) {
+  // The recommended tier mapping stays small, while the picker/launch boundary
+  // also offers the providers' current opt-in models.
+  eq("roster exposes seven native worker choices", ALLOWED_WORKER_MODELS.length, 7);
+  for (const id of [
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "grok-4.6",
+  ]) {
     check(`roster contains ${id}`, ALLOWED_WORKER_MODELS.includes(id));
   }
   eq("claude standard tier is Opus", rosterModelFor("claude", "standard"), "claude-opus-5");
   eq("claude premium tier is Fable", rosterModelFor("claude", "premium"), "claude-fable-5");
-  eq("codex has a single allowed model", rosterModelFor("codex", "premium"), "gpt-5.6-sol");
+  eq("codex tier default remains Sol", rosterModelFor("codex", "premium"), "gpt-5.6-sol");
 
   // Coercion never rejects, an off-roster hint lands on the nearest allowed
   // model so a bad planner hint degrades instead of failing the spawn.
-  eq("sonnet coerces to Opus", coerceWorkerModelToRoster("claude", "claude-sonnet-5"), "claude-opus-5");
-  eq("terra coerces to Sol", coerceWorkerModelToRoster("codex", "gpt-5.6-terra"), "gpt-5.6-sol");
-  eq("luna coerces to Sol", coerceWorkerModelToRoster("codex", "gpt-5.6-luna"), "gpt-5.6-sol");
+  eq("Sonnet survives opt-in coercion", coerceWorkerModelToRoster("claude", "claude-sonnet-5"), "claude-sonnet-5");
+  eq("Terra survives opt-in coercion", coerceWorkerModelToRoster("codex", "gpt-5.6-terra"), "gpt-5.6-terra");
+  eq("Luna survives opt-in coercion", coerceWorkerModelToRoster("codex", "gpt-5.6-luna"), "gpt-5.6-luna");
   eq("haiku coerces to Opus", coerceWorkerModelToRoster("claude", "claude-haiku-4-5"), "claude-opus-5");
   eq("an omitted hint pins the standard tier", coerceWorkerModelToRoster("claude", undefined), "claude-opus-5");
   eq("an omitted codex hint pins Sol", coerceWorkerModelToRoster("codex", undefined), "gpt-5.6-sol");
@@ -109,7 +117,7 @@ async function main() {
   eq("fable survives coercion", coerceWorkerModelToRoster("claude", "claude-fable-5"), "claude-fable-5");
   eq("fable keeps @effort", coerceWorkerModelToRoster("claude", "claude-fable-5@max"), "claude-fable-5@max");
   eq("sol keeps @effort", coerceWorkerModelToRoster("codex", "gpt-5.6-sol@high"), "gpt-5.6-sol@high");
-  eq("a coerced hint keeps @effort", coerceWorkerModelToRoster("claude", "claude-sonnet-5@low"), "claude-opus-5@low");
+  eq("an optional hint keeps @effort", coerceWorkerModelToRoster("claude", "claude-sonnet-5@low"), "claude-sonnet-5@low");
   // A bare "fable" ask is honoured on claude; codex has no premium tier to
   // honour it with, so it lands on the frontier model rather than failing.
   eq("bare fable ask resolves to Fable 5", coerceWorkerModelToRoster("claude", "fable"), "claude-fable-5");
@@ -117,12 +125,37 @@ async function main() {
   // Legacy ids normalize BEFORE coercion, so a stale session's id still lands
   // on the roster rather than being treated as unknown.
   eq("legacy gpt-5.5 coerces to Sol", coerceWorkerModelToRoster("codex", "gpt-5.5"), "gpt-5.6-sol");
-  eq("superseded sonnet coerces to Opus", coerceWorkerModelToRoster("claude", "sonnet-4-6"), "claude-opus-5");
+  eq("superseded sonnet coerces to current Sonnet", coerceWorkerModelToRoster("claude", "sonnet-4-6"), "claude-sonnet-5");
   // The previous standard tier must still land on the roster: runs and configs
   // persisted before the roster moved to Opus 5 still carry the old id.
   eq("the superseded Opus id coerces onto the current roster", coerceWorkerModelToRoster("claude", "claude-opus-4-8"), "claude-opus-5");
   // Runtimes with no model roster (shell/manual) pass through untouched.
   eq("shell runtime passes its hint through", coerceWorkerModelToRoster("shell", "whatever"), "whatever");
+
+  // The user-controlled list is the final launch boundary. Exact favorites
+  // win, unavailable native hints stay in-family when possible, and a sole
+  // OpenRouter favorite receives every worker regardless of the old hint.
+  eq(
+    "enabled exact OpenRouter hint survives",
+    enabledWorkerModelFor("codex", "google/gemini-2.5-pro", ["google/gemini-2.5-pro"]),
+    "google/gemini-2.5-pro",
+  );
+  eq(
+    "OpenRouter favorites do not inherit Pi @effort suffixes",
+    enabledWorkerModelFor("codex", "google/gemini-2.5-pro@high", ["google/gemini-2.5-pro"]),
+    "google/gemini-2.5-pro",
+  );
+  eq(
+    "disabled Claude hint falls back to enabled Claude model",
+    enabledWorkerModelFor("claude", "claude-fable-5", ["claude-opus-5", "gpt-5.6-sol"]),
+    "claude-opus-5",
+  );
+  eq(
+    "sole OpenRouter favorite handles a native hint",
+    enabledWorkerModelFor("claude", "claude-opus-5", ["google/gemini-flash-latest"]),
+    "google/gemini-flash-latest",
+  );
+  eq("empty enabled list rejects a worker", enabledWorkerModelFor("codex", undefined, []), undefined);
 
   console.log(`\nAll ${pass} worker-model-hint checks passed.`);
 }

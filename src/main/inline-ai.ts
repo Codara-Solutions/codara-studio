@@ -197,9 +197,12 @@ export async function runInlineAiChatCompletion(
   if (!apiKey) {
     return { text: "", error: "OpenRouter API key not set" };
   }
-  const modelId = req.modelId.trim();
+  // The API-and-model setting is the single source for utility completions.
+  // The request field remains for rolling renderer compatibility, but an
+  // explicitly configured setting wins for inline edit and commit drafting.
+  const modelId = settings.openRouterModel.trim() || req.modelId.trim();
   if (!modelId) {
-    return { text: "", error: "No inline-AI model configured" };
+    return { text: "", error: "No OpenRouter utility model configured" };
   }
 
   const controller = new AbortController();

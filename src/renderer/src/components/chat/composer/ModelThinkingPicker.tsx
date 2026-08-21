@@ -53,19 +53,23 @@ export default function ModelThinkingPicker({
   const [open, setOpen] = useState(false);
   const [effortStep, setEffortStep] = useState<EffortStep | null>(null);
   const [piCatalog, setPiCatalog] = useState<PiCatalogModel[]>([]);
+  const [openRouterModels, setOpenRouterModels] = useState<string[]>([]);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const groups: ChatBackendGroup[] = buildVisibleGroups({ piCatalog });
+  const groups: ChatBackendGroup[] = buildVisibleGroups({ piCatalog, openRouterModels });
   const activeCompoundId = composeModelId(activeModelId, false);
   const activeOption = groups
-    .find((group) => group.backend === activeBackend)
-    ?.models.find((model) => model.id === activeCompoundId);
+    .filter((group) => group.backend === activeBackend)
+    .flatMap((group) => group.models)
+    .find((model) => model.id === activeCompoundId);
 
   useEffect(() => {
     void window.spark.piSubscriptions.catalog().then((models) => setPiCatalog(models ?? []));
+    void window.spark.openRouter.coraModels().then((models) => setOpenRouterModels(models ?? []));
   }, []);
   useEffect(() => {
     if (!open) return;
     void window.spark.piSubscriptions.catalog().then((models) => setPiCatalog(models ?? []));
+    void window.spark.openRouter.coraModels().then((models) => setOpenRouterModels(models ?? []));
   }, [open]);
   useEffect(() => {
     if (!openModelSignal) return;
@@ -179,7 +183,7 @@ function ModelPicker({
       <div className="composer-model-thinking-list" role="listbox" aria-label="Model">
         {!hasModels ? (
           <div className="composer-model-empty">
-            No models available. Connect a subscription in Settings.
+            No models available. Connect a subscription or OpenRouter in Settings.
           </div>
         ) : null}
         {groups.map((group) => (

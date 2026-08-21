@@ -136,7 +136,7 @@ const PROVIDER_META: Record<
   },
   xai: {
     label: familyForSubscription("xai").planLabel,
-    model: "Grok 4.5",
+    model: "Grok 4.6",
     oauthModule: "xai.js",
     exportName: "xaiOAuth",
   },

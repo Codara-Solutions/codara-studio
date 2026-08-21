@@ -1995,6 +1995,23 @@ a { color: inherit; }
   color: var(--ink-dim);
 }
 
+.cora-worker-diff-file {
+  background: transparent;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.cora-worker-diff-file:hover {
+  background: var(--hover);
+}
+
+.cora-worker-diff-file:focus-visible {
+  background: var(--hover);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .cora-assistant-turn__meta {
   min-height: 22px;
   display: flex;
@@ -4497,18 +4514,29 @@ a { color: inherit; }
    lane's identity color arrives as --lane-tint from the column spec. */
 .spark-board-lane {
   flex: 1 1 0;
-  min-width: 168px;
-  max-width: 340px;
+  min-width: 188px;
+  max-width: 330px;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-radius: var(--radius-surface, 7px);
-  border: 1px solid var(--rule-soft, var(--rule));
-  background: var(--panel-2, var(--bg));
+  border-radius: var(--radius-popover, 12px);
+  border: 1px solid color-mix(in oklab, var(--rule-soft, var(--rule)) 78%, transparent);
+  background: color-mix(in oklab, var(--ink) 2.5%, transparent);
   transition:
     border-color var(--motion-fast) var(--ease-out),
     background var(--motion-fast) var(--ease-out),
     box-shadow var(--motion-fast) var(--ease-out);
+}
+
+/* Faint lane-tinted wash along the top so each column carries its identity
+   color even when empty, without painting whole panels. */
+.spark-board-lane::before {
+  content: "";
+  flex: 0 0 auto;
+  height: 2px;
+  margin: 0 12px;
+  border-radius: 0 0 2px 2px;
+  background: color-mix(in oklch, var(--lane-tint, var(--accent)) 38%, transparent);
 }
 
 /* Drop highlight in the LANE'S own tint, so which lane will take the card is
@@ -4523,12 +4551,13 @@ a { color: inherit; }
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-surface, 7px);
-  background: var(--bg);
+  gap: 7px;
+  padding: 9px 11px 8px;
+  border: 1px solid var(--rule-soft, var(--rule));
+  border-radius: 10px;
+  background: var(--panel, var(--bg));
   box-shadow: var(--shadow-1);
+  cursor: grab;
   transition:
     transform var(--motion-fast) var(--ease-out),
     box-shadow var(--motion-fast) var(--ease-out),
@@ -4540,6 +4569,10 @@ a { color: inherit; }
   transform: translateY(-1px);
   border-color: color-mix(in oklab, var(--ink) 18%, var(--rule));
   box-shadow: var(--shadow-2);
+}
+
+.spark-board-card:active {
+  cursor: grabbing;
 }
 
 /* The drag source stays in place, dimmed and slightly shrunk — the browser's
@@ -4609,6 +4642,35 @@ a { color: inherit; }
   .spark-board-card:hover { transform: none; }
 }
 
+/* "+ New card" trigger: a quiet full-width ghost row at the foot of a lane
+   (the composer opens exactly where the new card will land). */
+.spark-board-add {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 550;
+  padding: 7px 9px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.spark-board-add:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+
 /* Card composer / inline card editor: one card-shaped form — borderless
    fields separated by hairlines instead of nested boxy inputs, and a quiet
    footer. No heavy focus ring; the container itself tints on focus. */
@@ -4616,16 +4678,22 @@ a { color: inherit; }
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius-surface, 7px);
-  background: var(--bg);
-  box-shadow: var(--shadow-1);
+  min-width: 0;
+  border: 1px solid var(--rule-soft, var(--rule));
+  border-radius: 10px;
+  background: var(--panel, var(--bg));
+  box-shadow: var(--shadow-2);
   overflow: hidden;
-  transition: border-color var(--motion-fast) var(--ease-out);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
 }
 
 .spark-board-composer:focus-within {
   border-color: color-mix(in oklch, var(--accent) 45%, var(--rule));
+  box-shadow:
+    var(--shadow-2),
+    0 0 0 1px color-mix(in oklch, var(--accent) 22%, transparent);
 }
 
 .spark-board-composer__title,
@@ -4643,15 +4711,15 @@ a { color: inherit; }
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
-  padding: 8px 10px 6px;
+  padding: 9px 11px 7px;
 }
 
 .spark-board-composer__desc {
   font-size: 11px;
   line-height: 1.45;
-  padding: 6px 10px;
+  padding: 6px 11px 7px;
   resize: none;
-  border-top: 1px solid var(--rule-soft, var(--rule));
+  border-top: 1px solid color-mix(in oklab, var(--rule-soft, var(--rule)) 60%, transparent);
 }
 
 .spark-board-composer__title::placeholder,
@@ -4713,10 +4781,236 @@ a { color: inherit; }
 
 .spark-board-composer__hint {
   margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 9.5px;
   color: var(--muted);
   white-space: nowrap;
   opacity: 0.8;
+}
+
+/* Title-bar system activity. Three quiet live dials share one glass capsule;
+   the expanded surface keeps the numbers legible without making the 30px
+   chrome itself busy. */
+.system-meters-root {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-left: 7px;
+  -webkit-app-region: no-drag;
+}
+
+.system-meters-pill {
+  appearance: none;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in oklab, var(--ink) 18%, transparent);
+  border-radius: 999px;
+  background:
+    linear-gradient(110deg, color-mix(in oklab, var(--accent) 7%, transparent), transparent 44%),
+    color-mix(in oklab, var(--panel-2) 58%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ink) 7%, transparent);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+.system-meters-pill:hover,
+.system-meters-pill[aria-expanded="true"] {
+  border-color: color-mix(in oklab, var(--accent) 42%, var(--rule));
+  background:
+    linear-gradient(110deg, color-mix(in oklab, var(--accent) 13%, transparent), transparent 52%),
+    var(--hover);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, var(--ink) 10%, transparent),
+    0 0 12px color-mix(in oklab, var(--accent) 11%, transparent);
+}
+
+.system-meters-pill:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.system-meter-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 42px;
+  white-space: nowrap;
+}
+
+.system-meter-mini + .system-meter-mini {
+  position: relative;
+  padding-left: 7px;
+}
+
+.system-meter-mini + .system-meter-mini::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 1px;
+  height: 9px;
+  background: var(--rule-soft);
+}
+
+.system-meter-mini-label {
+  color: var(--muted);
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.system-meter-mini-value {
+  min-width: 17px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  text-align: right;
+}
+
+.system-meter-popover {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  font-family: var(--font-sans);
+}
+
+.system-meter-popover-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.system-meter-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--ok) 58%, transparent);
+  animation: system-meter-breathe 2.4s ease-in-out infinite;
+}
+
+.system-meter-live-label {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.system-meter-popover-rows {
+  display: grid;
+  gap: 7px;
+}
+
+.system-meter-popover-row {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-surface);
+  background: color-mix(in oklab, var(--ink) 3%, transparent);
+}
+
+.system-meter-popover-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.system-meter-popover-mark {
+  display: flex;
+}
+
+.system-meter-popover-label {
+  color: var(--ink-dim);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.system-meter-popover-value {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.system-meter-popover-graph {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.system-meter-popover-track {
+  flex: 1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ink) 11%, transparent);
+}
+
+.system-meter-popover-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width 420ms var(--ease-out);
+}
+
+.system-meter-sparkline {
+  width: 72px;
+  height: 22px;
+  opacity: 0.88;
+}
+
+.system-meter-popover-detail,
+.system-meter-popover-footnote {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+}
+
+.system-meter-popover-footnote {
+  text-align: center;
+}
+
+@keyframes system-meter-breathe {
+  0%, 100% { opacity: 0.62; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+@media (max-width: 1320px) {
+  .system-meter-mini {
+    min-width: 27px;
+  }
+
+  .system-meter-mini-label {
+    display: none;
+  }
+}
+
+@media (max-width: 960px) {
+  .system-meters-root {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .system-meter-live-dot {
+    animation: none;
+  }
 }
 
 /* Docked panes: a preview/editor/chat tab borrowing a cell in a terminal

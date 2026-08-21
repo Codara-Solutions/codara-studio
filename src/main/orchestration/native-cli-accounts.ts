@@ -137,6 +137,15 @@ export interface NativeCliAccountProfileInput {
   profileId: string;
 }
 
+export interface NativeCliAccountLoginInput
+  extends NativeCliAccountProfileInput {
+  expectedAccountFingerprint?: string;
+  expectedEmail?: string;
+  removeProfileOnMismatch?: boolean;
+  removeProfileOnFailure?: boolean;
+  activateOnSuccess?: boolean;
+}
+
 export interface NativeCliAccountCreateInput {
   runtime: NativeCliAccountRuntime;
   label: string;
@@ -250,6 +259,7 @@ export type NativeCliAccountErrorCode =
   | "NATIVE_CLI_ACCOUNT_LOGIN_TIMEOUT"
   | "NATIVE_CLI_ACCOUNT_LOGIN_SIGNAL"
   | "NATIVE_CLI_ACCOUNT_LOGIN_FAILED"
+  | "NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH"
   | "NATIVE_CLI_ACCOUNT_LOGOUT_SPAWN_FAILED"
   | "NATIVE_CLI_ACCOUNT_LOGOUT_TIMEOUT"
   | "NATIVE_CLI_ACCOUNT_LOGOUT_SIGNAL"
@@ -279,6 +289,8 @@ const SAFE_ERROR_MESSAGES: Record<NativeCliAccountErrorCode, string> = {
   NATIVE_CLI_ACCOUNT_LOGIN_SIGNAL:
     "Native CLI account login ended unexpectedly",
   NATIVE_CLI_ACCOUNT_LOGIN_FAILED: "Native CLI account login failed",
+  NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH:
+    "The CLI signed in to a different account than the selected Cora account. The extra sign-in was removed; try again and choose the account shown in Settings.",
   NATIVE_CLI_ACCOUNT_LOGOUT_SPAWN_FAILED:
     "Could not start the native CLI account logout",
   NATIVE_CLI_ACCOUNT_LOGOUT_TIMEOUT: "Native CLI account logout timed out",
@@ -318,6 +330,11 @@ interface PendingLoginPlan {
   launchToken: string;
   expiresAt: number;
   state: "prepared" | "launching";
+  expectedAccountFingerprint?: string;
+  expectedEmail?: string;
+  removeProfileOnMismatch: boolean;
+  removeProfileOnFailure: boolean;
+  activateOnSuccess: boolean;
   releaseGuard: () => void;
   guardDone: Promise<void>;
   expiryTimer: NodeJS.Timeout;
@@ -872,8 +889,15 @@ export class NativeCliAccountService {
     return this.codexExecutable;
   }
 
-  private loginArgs(runtime: NativeCliAccountRuntime): readonly string[] {
-    return runtime === "claude" ? ["auth", "login"] : ["login"];
+  private loginArgs(
+    runtime: NativeCliAccountRuntime,
+    expectedEmail?: string,
+  ): readonly string[] {
+    return runtime === "claude" && expectedEmail
+      ? ["auth", "login", "--email", expectedEmail]
+      : runtime === "claude"
+        ? ["auth", "login"]
+        : ["login"];
   }
 
   private logoutArgs(runtime: NativeCliAccountRuntime): readonly string[] {
@@ -1068,21 +1092,74 @@ export class NativeCliAccountService {
     }
   }
 
+  private async removeEmptyFailedLoginProfile(
+    plan: PendingLoginPlan,
+  ): Promise<void> {
+    if (!plan.removeProfileOnFailure) return;
+    try {
+      const inspection = await this.inspectRuntime(plan.runtime);
+      const profile = inspection.profiles.find(
+        (entry) => entry.id === plan.profileId,
+      );
+      // A browser login can finish just as its terminal is closed. Never
+      // remove credentials that actually landed; cleanup is only for the
+      // still-empty slot created for this attempt.
+      if (profile && !profile.connected) {
+        await this.delete({
+          runtime: plan.runtime,
+          profileId: plan.profileId,
+        });
+      }
+    } catch {
+      // Cleanup is deliberately best-effort. A remaining empty slot is visible
+      // and recoverable; deleting the wrong profile is not.
+    }
+  }
+
   private expireLoginPlan(plan: PendingLoginPlan): void {
     if (this.pendingLoginPlans.get(plan.launchToken) !== plan) return;
     this.pendingLoginPlans.delete(plan.launchToken);
     this.rememberExpiredToken(plan.launchToken);
     clearTimeout(plan.expiryTimer);
     plan.releaseGuard();
-    void plan.guardDone.catch(() => undefined);
+    void plan.guardDone
+      .catch(() => undefined)
+      .then(() => this.removeEmptyFailedLoginProfile(plan));
   }
 
   async prepareLogin(
-    input: NativeCliAccountProfileInput,
+    input: NativeCliAccountLoginInput,
   ): Promise<NativeCliAccountLoginPreparation> {
     const runtime = normalizeRuntime(input.runtime);
     const profileId = this.normalizeProfileId(runtime, input.profileId);
-    await this.requireProfile(runtime, profileId);
+    const expectedAccountFingerprint = input.expectedAccountFingerprint;
+    if (
+      expectedAccountFingerprint !== undefined &&
+      !/^[0-9a-f]{64}$/.test(expectedAccountFingerprint)
+    ) {
+      throw new TypeError("Expected native CLI account fingerprint is invalid");
+    }
+    const expectedEmail = input.expectedEmail?.trim().toLowerCase();
+    if (
+      expectedEmail !== undefined &&
+      (!expectedEmail ||
+        expectedEmail.length > 320 ||
+        /[\u0000-\u001f\u007f]/.test(expectedEmail))
+    ) {
+      throw new TypeError("Expected native CLI account email is invalid");
+    }
+    const removeProfileOnMismatch = input.removeProfileOnMismatch === true;
+    const removeProfileOnFailure = input.removeProfileOnFailure === true;
+    const activateOnSuccess = input.activateOnSuccess === true;
+    const { profile } = await this.requireProfile(runtime, profileId);
+    if (
+      (removeProfileOnMismatch || removeProfileOnFailure) &&
+      (!profile.managed || profile.isDefault || profile.connected)
+    ) {
+      throw new TypeError(
+        "Only a new signed-out managed CLI account can be removed after an unsuccessful login",
+      );
+    }
     const launchToken = this.allocateLoginToken();
     const expiresAt = this.now() + this.loginPlanTtlMs;
     const guardEntered = deferred<void>();
@@ -1119,6 +1196,11 @@ export class NativeCliAccountService {
       launchToken,
       expiresAt,
       state: "prepared" as const,
+      ...(expectedAccountFingerprint ? { expectedAccountFingerprint } : {}),
+      ...(expectedEmail ? { expectedEmail } : {}),
+      removeProfileOnMismatch,
+      removeProfileOnFailure,
+      activateOnSuccess,
       releaseGuard,
       guardDone,
       expiryTimer: undefined as unknown as NodeJS.Timeout,
@@ -1139,6 +1221,7 @@ export class NativeCliAccountService {
     clearTimeout(plan.expiryTimer);
     plan.releaseGuard();
     await plan.guardDone.catch(() => undefined);
+    await this.removeEmptyFailedLoginProfile(plan);
     return true;
   }
 
@@ -1170,6 +1253,8 @@ export class NativeCliAccountService {
     }
     plan.state = "launching";
     clearTimeout(plan.expiryTimer);
+    let failure: unknown;
+    let accountMismatch = false;
     try {
       const env = await this.executionEnvironment(
         plan.runtime,
@@ -1182,7 +1267,7 @@ export class NativeCliAccountService {
           runtime: plan.runtime,
           profileId: plan.profileId,
           executable: this.executableFor(plan.runtime),
-          args: this.loginArgs(plan.runtime),
+          args: this.loginArgs(plan.runtime, plan.expectedEmail),
           env,
           shell: false,
         });
@@ -1193,12 +1278,47 @@ export class NativeCliAccountService {
         );
       }
       this.assertProcessSucceeded("login", plan.runtime, plan.profileId, result);
-      return { runtime: plan.runtime, profileId: plan.profileId };
+      if (plan.expectedAccountFingerprint || plan.expectedEmail) {
+        const inspection = await this.inspectRuntime(plan.runtime);
+        const signedIn = this.profileFromInspection(inspection, plan.profileId);
+        accountMismatch = plan.expectedAccountFingerprint
+          ? signedIn.accountFingerprint !== plan.expectedAccountFingerprint
+          : signedIn.email?.trim().toLowerCase() !== plan.expectedEmail;
+      }
+    } catch (error) {
+      failure = error;
     } finally {
       this.pendingLoginPlans.delete(launchToken);
       plan.releaseGuard();
       await plan.guardDone.catch(() => undefined);
     }
+    if (accountMismatch) {
+      try {
+        if (plan.removeProfileOnMismatch) {
+          await this.delete({ runtime: plan.runtime, profileId: plan.profileId });
+        } else {
+          await this.logout({ runtime: plan.runtime, profileId: plan.profileId });
+        }
+      } catch {
+        // Keep the useful identity error if the CLI already cleared its auth
+        // or another safe cleanup guard won the race.
+      }
+      throw new NativeCliAccountError(
+        "NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH",
+        { runtime: plan.runtime, profileId: plan.profileId },
+      );
+    }
+    if (failure) {
+      await this.removeEmptyFailedLoginProfile(plan);
+      throw failure;
+    }
+    if (plan.activateOnSuccess) {
+      await this.setDefault({
+        runtime: plan.runtime,
+        profileId: plan.profileId,
+      });
+    }
+    return { runtime: plan.runtime, profileId: plan.profileId };
   }
 
   private assertProcessSucceeded(

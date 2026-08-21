@@ -787,25 +787,26 @@ function BoardColumn({
           flex: "0 0 auto",
           display: "flex",
           alignItems: "center",
-          gap: 6,
-          padding: "8px 10px 6px",
+          gap: 7,
+          padding: "10px 12px 7px",
         }}
       >
         <span
           aria-hidden
           style={{
-            width: 6,
-            height: 6,
+            width: 7,
+            height: 7,
             flex: "0 0 auto",
             borderRadius: 999,
             background: LANE_TINT[column.key],
+            boxShadow: `0 0 7px color-mix(in oklch, ${LANE_TINT[column.key]} 45%, transparent)`,
           }}
         />
         <span
           style={{
             fontSize: 10.5,
-            fontWeight: 600,
-            letterSpacing: "0.07em",
+            fontWeight: 650,
+            letterSpacing: "0.08em",
             textTransform: "uppercase",
             color: "var(--ink-dim)",
             whiteSpace: "nowrap",
@@ -819,14 +820,16 @@ function BoardColumn({
           <span
             style={{
               marginLeft: "auto",
-              minWidth: 16,
+              minWidth: 17,
               textAlign: "center",
-              padding: "0 4px",
+              padding: "0.5px 5px",
               borderRadius: 999,
-              fontSize: 10,
+              fontSize: 9.5,
               fontFamily: "var(--font-mono)",
-              color: "var(--ink-dim)",
-              background: "color-mix(in oklab, var(--ink) 7%, transparent)",
+              fontWeight: 600,
+              color: `color-mix(in oklch, ${LANE_TINT[column.key]} 78%, var(--ink))`,
+              background: `color-mix(in oklch, ${LANE_TINT[column.key]} 12%, transparent)`,
+              border: `1px solid color-mix(in oklch, ${LANE_TINT[column.key]} 20%, transparent)`,
             }}
           >
             {cards.length}
@@ -846,9 +849,6 @@ function BoardColumn({
           padding: "0 7px 7px",
         }}
       >
-        {column.composer && ready && (
-          <AddCardComposer columnLabel={column.label} onAdd={onAddCard} onError={onNoticeError} />
-        )}
         {cards.map((card, index) => (
           <React.Fragment key={card.id}>
             {dropIndex === index && <DropLine />}
@@ -871,16 +871,22 @@ function BoardColumn({
             aria-hidden
             style={{
               flex: "0 0 auto",
-              padding: "10px 6px",
+              padding: "14px 10px",
               color: "var(--muted)",
               fontSize: 10.5,
-              lineHeight: 1.5,
+              lineHeight: 1.55,
               textAlign: "center",
-              opacity: 0.75,
+              opacity: 0.65,
             }}
           >
             {LANE_HINTS[column.key]}
           </div>
+        )}
+        {/* The composer lives at the BOTTOM of the lane — exactly where a new
+            card is appended — so adding never teleports the card away from
+            the form that created it. */}
+        {column.composer && ready && (
+          <AddCardComposer columnLabel={column.label} onAdd={onAddCard} onError={onNoticeError} />
         )}
       </div>
     </div>
@@ -1321,6 +1327,12 @@ function CardEditor({
         rows={3}
         spellCheck={false}
         onChange={(event) => setDescription(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            save();
+          }
+        }}
       />
       <div className="spark-board-composer__footer">
         <button
@@ -1475,24 +1487,19 @@ function AddCardComposer({
     return (
       <button
         type="button"
+        className="spark-board-add"
         onClick={() => setOpen(true)}
-        style={{
-          appearance: "none",
-          flex: "0 0 auto",
-          textAlign: "left",
-          border: "1px dashed var(--rule)",
-          borderRadius: "var(--radius-surface, 7px)",
-          background: "transparent",
-          color: "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          padding: "6px 10px",
-          cursor: "default",
-        }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = "var(--ink)")}
-        onMouseLeave={(e) => (e.currentTarget.style.color = "var(--muted)")}
+        aria-label={`Add a card to ${columnLabel}`}
       >
-        + Add card
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path
+            d="M6 2.2v7.6M2.2 6h7.6"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
+        </svg>
+        New card
       </button>
     );
   }
@@ -1507,13 +1514,19 @@ function AddCardComposer({
           setOpen(false);
         }
       }}
+      onBlur={(event) => {
+        // Clicking away from an untouched composer just closes it — no modal
+        // ceremony. Anything typed or pasted keeps the form open.
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        if (!title.trim() && !description.trim() && imagePaths.length === 0) setOpen(false);
+      }}
     >
       <input
         ref={titleRef}
         className="spark-board-composer__title"
         autoFocus
         value={title}
-        placeholder={`New card in ${columnLabel}`}
+        placeholder="What should Cora build?"
         onChange={(event) => setTitle(event.target.value)}
         onPaste={onPaste}
         onKeyDown={(event) => {
@@ -1526,14 +1539,22 @@ function AddCardComposer({
       <textarea
         className="spark-board-composer__desc"
         value={description}
-        placeholder="Details (optional) — screenshots paste here"
+        placeholder="Details — paste screenshots right here (optional)"
         rows={2}
         spellCheck={false}
         onChange={(event) => setDescription(event.target.value)}
         onPaste={onPaste}
+        onKeyDown={(event) => {
+          // Enter in the details field writes a newline; ⌘/Ctrl+Enter adds
+          // the card, mirroring every other multi-line composer in the app.
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            submit();
+          }
+        }}
       />
       {imagePaths.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: "0 10px 6px" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "2px 11px 8px" }}>
           {imagePaths.map((path) => (
             <span key={path} style={{ position: "relative", display: "inline-flex" }}>
               <img
@@ -1541,11 +1562,12 @@ function AddCardComposer({
                 alt=""
                 title={path}
                 style={{
-                  width: 38,
-                  height: 38,
+                  width: 44,
+                  height: 44,
                   objectFit: "cover",
-                  borderRadius: 4,
-                  border: "1px solid var(--rule)",
+                  borderRadius: 6,
+                  border: "1px solid var(--rule-soft, var(--rule))",
+                  display: "block",
                 }}
               />
               <button
@@ -1559,8 +1581,8 @@ function AddCardComposer({
                   position: "absolute",
                   top: -5,
                   right: -5,
-                  width: 14,
-                  height: 14,
+                  width: 15,
+                  height: 15,
                   display: "grid",
                   placeItems: "center",
                   border: "1px solid var(--rule)",
@@ -1586,11 +1608,12 @@ function AddCardComposer({
           disabled={!title.trim() || pasting}
           onClick={submit}
         >
-          Add
+          Add card
         </button>
         <button
           type="button"
           className="spark-board-composer__cancel"
+          aria-label="Close the card composer"
           onClick={() => {
             reset();
             setOpen(false);
@@ -1599,7 +1622,7 @@ function AddCardComposer({
           Cancel
         </button>
         <span className="spark-board-composer__hint">
-          {pasting ? "Adding image…" : "Enter to add"}
+          {pasting ? "Adding image…" : "⏎ adds · esc closes"}
         </span>
       </div>
     </div>

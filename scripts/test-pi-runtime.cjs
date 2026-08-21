@@ -300,6 +300,47 @@ async function main() {
   assert.ok(anthropicPlan.args.includes(runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT));
   assert.equal(anthropicPlan.args.includes("--api-key"), false);
 
+  const openRouterPlan = runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "openrouter",
+    apiKey: "verified-openrouter-key",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-openrouter",
+    runId: "run-openrouter",
+    mode: "execute",
+    cwd: "/workspace",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+    model: "google/gemini-flash-latest",
+    openAiFastMode: true,
+    baseEnv: { OPENROUTER_API_KEY: "stale-inherited-key" },
+  });
+  assert.equal(openRouterPlan.provider, "openrouter");
+  assert.equal(openRouterPlan.model, "google/gemini-flash-latest");
+  assert.equal(openRouterPlan.env.OPENROUTER_API_KEY, "verified-openrouter-key");
+  assert.equal(openRouterPlan.env.CODARA_PI_FAST_MODE, undefined);
+  assert.ok(openRouterPlan.args.includes("openrouter"));
+  assert.ok(openRouterPlan.args.includes("google/gemini-flash-latest"));
+  assert.equal(openRouterPlan.args.includes("verified-openrouter-key"), false);
+  assert.throws(
+    () => runtime.buildPiManagerLaunchPlan({
+      runtime: fakeRuntime,
+      provider: "openrouter",
+      configDir: "/config",
+      sessionDir: "/sessions",
+      sessionId: "session-openrouter-missing-key",
+      runId: "run-openrouter-missing-key",
+      mode: "execute",
+      cwd: "/workspace",
+      bridgePath: "/bridge/server.js",
+      extensionPaths: ["/extensions/cora.ts"],
+      model: "google/gemini-flash-latest",
+      baseEnv: {},
+    }),
+    /OpenRouter API key is not configured/,
+  );
+
   // Compaction trigger: default, user override, and absurd-value fallback. The
   // launcher stamps it once here because buildPiSubscriptionEnvironment strips
   // CODARA_PI_* out of the inherited environment.

@@ -12,12 +12,13 @@ import {
 import {
   cleanupPiMcpBridgeConfig,
   createCodaraPiLaunchPlan,
+  resolveCodaraOpenRouterApiKey,
   resolveCodaraPiExecutionAccount,
   resolveCodaraPiFastMode,
 } from "./pi-runtime-electron";
 import {
   type PiManagerLaunchPlan,
-  type PiSubscriptionProvider,
+  type PiProvider,
   type PiThinkingLevel,
 } from "./pi-runtime";
 import { PiRpcClient } from "./pi-rpc-client";
@@ -45,7 +46,7 @@ interface PiProcessOwner {
 }
 
 interface PiBackendSession extends PiProcessOwner {
-  provider: PiSubscriptionProvider;
+  provider: PiProvider;
   accountProfileId?: string;
   model: string;
   thinking: PiThinkingLevel;
@@ -77,10 +78,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export function piProviderForModel(model: string): PiSubscriptionProvider {
+export function piProviderForModel(model: string): PiProvider {
   const provider = subscriptionForModelId(model);
-  if (!provider) throw new Error(`Pi subscription backend does not support model ${model}`);
-  return provider;
+  if (provider) return provider;
+  if (model.includes("/")) return "openrouter";
+  throw new Error(`Cora's Pi backend does not support model ${model}`);
 }
 
 // resolveChatBackendConfig already collapses every chat to auto or automation,
@@ -105,7 +107,7 @@ function safeSessionId(input: ManagerRequestInput): string {
 
 function sessionMatches(
   session: PiBackendSession,
-  provider: PiSubscriptionProvider,
+  provider: PiProvider,
   accountProfileId: string | undefined,
   model: string,
   thinking: PiThinkingLevel,
@@ -201,16 +203,21 @@ async function ensureSession(
   const mode = piModeForChat(input.chat.mode);
   const executionPolicy = input.chat.executionPolicy;
   const projectPolicyMode = runProjectPolicyMode(input.run);
-  const [account, fastMode] = await Promise.all([
-    resolveCodaraPiExecutionAccount({
-      provider,
-      preferredAccountProfileId: input.chat.accountProfileId,
-    }),
-    // Fast mode reaches the runtime only as launch-time env, so a session
-    // launched under the other value cannot be reused: resolve it here, match
-    // on it below, and hand the SAME value to the launch plan.
-    resolveCodaraPiFastMode(provider),
-  ]);
+  const openRouterApiKey = provider === "openrouter"
+    ? await resolveCodaraOpenRouterApiKey(model)
+    : undefined;
+  const [account, fastMode] = provider === "openrouter"
+    ? [{ accountProfileId: undefined, configDir: "" }, false] as const
+    : await Promise.all([
+        resolveCodaraPiExecutionAccount({
+          provider,
+          preferredAccountProfileId: input.chat.accountProfileId,
+        }),
+        // Fast mode reaches the runtime only as launch-time env, so a session
+        // launched under the other value cannot be reused: resolve it here,
+        // match on it below, and hand the SAME value to the launch plan.
+        resolveCodaraPiFastMode(provider),
+      ]);
   if ((GENERATIONS.get(runId) ?? 0) !== observedGeneration) {
     throw supersededStartupError();
   }
@@ -238,6 +245,7 @@ async function ensureSession(
   }
   const plan = await createCodaraPiLaunchPlan({
     provider,
+    ...(openRouterApiKey ? { apiKey: openRouterApiKey } : {}),
     accountProfileId: account.accountProfileId,
     resolvedAccount: account,
     openAiFastMode: fastMode,

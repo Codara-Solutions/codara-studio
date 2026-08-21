@@ -3,6 +3,8 @@ import { computeGitStatus, readUntrackedAsDiff } from "./git-ops";
 import { readGitText } from "./git-exec";
 import { runSessionlessPiCommitMessage } from "./orchestration/pi-commit-one-shot";
 import { loadSettings } from "./storage";
+import { runInlineAiChatCompletion } from "./inline-ai";
+import { randomUUID } from "node:crypto";
 
 // Drafts an editable commit message from the current changes using an
 // isolated, subscription-backed Pi one-shot. The model does the real
@@ -333,12 +335,24 @@ export async function generateCommitMessage(cwd: string): Promise<GitCommitMessa
       untrackedDiff,
     });
 
-    const generated = await runSessionlessPiCommitMessage({
-      cwd,
-      modelSelection: settings.commitMessageModel,
-      systemPrompt: SYSTEM_PROMPT,
-      prompt,
-    }).catch(() => null);
+    const generated = settings.commitMessageModel === "openrouter"
+      ? await runInlineAiChatCompletion({
+          modelId: settings.openRouterModel,
+          requestId: `git-commit-${randomUUID()}`,
+          maxTokens: 700,
+          temperature: 0.2,
+          reasoningEffort: "low",
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: prompt },
+          ],
+        }).then((result) => result.error ? null : result).catch(() => null)
+      : await runSessionlessPiCommitMessage({
+          cwd,
+          modelSelection: settings.commitMessageModel,
+          systemPrompt: SYSTEM_PROMPT,
+          prompt,
+        }).catch(() => null);
     let message = sanitize(generated?.text ?? "");
     if (!message || looksWeak(message)) {
       message = buildFallbackMessage(files, recentSubjects);

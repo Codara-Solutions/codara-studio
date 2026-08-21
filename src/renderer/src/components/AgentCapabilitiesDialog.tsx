@@ -14,6 +14,12 @@ import type {
   SparkBuiltinMcpStatus,
   SparkBuiltinRuntime,
 } from "@shared/types";
+import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
+import { AGENT_FAMILIES, familyForModelId } from "@shared/agent-families";
+import {
+  CORA_WORKER_MODEL_CHOICES,
+  WORKER_MODEL_ROSTER,
+} from "@shared/worker-model-roster";
 
 // codara-studio ships inside Codara itself. It stays at the top of the MCP list
 // with its own install controls and is hidden from the discovered inventory so
@@ -44,12 +50,13 @@ interface Props {
 
 type CapabilityKind = "mcp" | "skill";
 type RuntimeColumn = "claude" | "codex" | "grok" | "shared";
-type CapabilityTab = "mcp" | "skills" | "memory" | "policy";
+type CapabilityTab = "mcp" | "skills" | "memory" | "workers" | "policy";
 
 const TABS: { id: CapabilityTab; label: string }[] = [
   { id: "mcp", label: "MCP servers" },
   { id: "skills", label: "Skills" },
   { id: "memory", label: "Memory" },
+  { id: "workers", label: "Worker models" },
   { id: "policy", label: "Policy" },
 ];
 
@@ -310,6 +317,30 @@ export default function AgentCapabilitiesDialog({
     () => new Set(draft.agentMcpPiWorkerIds),
     [draft.agentMcpPiWorkerIds],
   );
+  const workerChoices = useMemo(
+    () => [
+      ...new Set([
+        ...CORA_WORKER_MODEL_CHOICES,
+        ...draft.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
+        ...draft.coraWorkerModels.map((id) => id.trim()).filter(Boolean),
+      ]),
+    ],
+    [draft.coraWorkerModels, draft.openRouterCoraModels],
+  );
+  // The roster mixes three native families with OpenRouter favorites, so the
+  // tab divides it by source instead of interleaving them in one flat list.
+  const workerModelGroups = useMemo(() => {
+    const buckets = new Map<string, string[]>();
+    for (const modelId of workerChoices) {
+      const group = workerModelGroupFor(modelId);
+      const bucket = buckets.get(group);
+      if (bucket) bucket.push(modelId);
+      else buckets.set(group, [modelId]);
+    }
+    return WORKER_MODEL_GROUP_ORDER.filter((label) => buckets.has(label)).map(
+      (label) => ({ label, models: buckets.get(label)! }),
+    );
+  }, [workerChoices]);
 
   const mcpGroups = useMemo(() => groupByName(mcp, "mcp"), [mcp]);
   const skillGroups = useMemo(() => groupByName(skills, "skill"), [skills]);
@@ -376,6 +407,18 @@ export default function AgentCapabilitiesDialog({
 
   const clearMemory = (scope: CoraMemoryScope, includeUserLines: boolean) => {
     runMemoryAction(scope, () => window.spark.memory.clear(scope, workspaceId, includeUserLines));
+  };
+
+  const toggleWorkerModel = (modelId: string) => {
+    setDraft((current) => {
+      const enabled = current.coraWorkerModels.includes(modelId);
+      return {
+        ...current,
+        coraWorkerModels: enabled
+          ? current.coraWorkerModels.filter((id) => id !== modelId)
+          : [...current.coraWorkerModels, modelId],
+      };
+    });
   };
 
   const useProfile = (reference: string) => {
@@ -625,7 +668,13 @@ export default function AgentCapabilitiesDialog({
   // never reports an empty workspace while it is still being walked. The MCP
   // count has to include the pinned built-ins: they are rows in the same list,
   // and counting only the discovered groups reports one fewer than is on screen.
+  const enabledWorkerCount = workerChoices.filter((model) =>
+    draft.coraWorkerModels.includes(model),
+  ).length;
   const tabCount = (tab: CapabilityTab): string | null => {
+    if (tab === "workers") {
+      return `${enabledWorkerCount}/${workerChoices.length}`;
+    }
     if (assets === null) return null;
     if (tab === "mcp") return String(mcpGroups.length + (builtins?.length ?? 0));
     if (tab === "skills") return `${activeSkillCount}/${skillGroups.length}`;
@@ -944,6 +993,39 @@ export default function AgentCapabilitiesDialog({
                 </section>
               ) : null}
 
+              {renderedTab === "workers" ? (
+                <section style={sectionStyle}>
+                  <div style={sectionHeadStyle}>
+                    <div style={{ minWidth: 0 }}>
+                      <h2 style={sectionTitleStyle}>Cora worker models</h2>
+                      <p style={sectionDetailStyle}>
+                        Choose the models Cora may delegate implementation and verification to.
+                        Changes are enforced when the next worker launches.
+                      </p>
+                    </div>
+                  </div>
+                  <div role="group" aria-label="Cora worker models" style={policyListStyle}>
+                    {workerModelGroups.map((group) => (
+                      <div
+                        key={group.label}
+                        role="group"
+                        aria-label={`${group.label} worker models`}
+                      >
+                        <div style={workerModelGroupLabelStyle}>{group.label}</div>
+                        {group.models.map((modelId) => (
+                          <WorkerModelRow
+                            key={modelId}
+                            modelId={modelId}
+                            checked={draft.coraWorkerModels.includes(modelId)}
+                            onToggle={() => toggleWorkerModel(modelId)}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
               {renderedTab === "policy" ? (
                 <section style={sectionStyle}>
                   <div style={sectionHeadStyle}>
@@ -1150,6 +1232,14 @@ function NavIcon({ tab }: { tab: CapabilityTab }) {
           <path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v18H6.5A1.5 1.5 0 0 1 5 19.5z" />
           <path d="M5 17.5h14" />
           <path d="M9 7h6" />
+        </svg>
+      );
+    case "workers": // agent face
+      return (
+        <svg {...common}>
+          <path d="M9 7V4h6v3" />
+          <rect x="5" y="7" width="14" height="12" rx="3" />
+          <path d="M9 12h.01M15 12h.01M9 16h6" />
         </svg>
       );
     case "policy": // sliders
@@ -2230,6 +2320,95 @@ function SwitchCell({
   );
 }
 
+// The list divides by model source, not one flat roster: the three native
+// families under the names the rest of the app uses (Claude, Codex, Grok),
+// then the user's OpenRouter favorites. "Other" only exists so an id with an
+// unrecognized shape stays visible and toggleable instead of vanishing.
+const WORKER_MODEL_GROUP_ORDER = ["Claude", "Codex", "Grok", "OpenRouter", "Other"] as const;
+
+function workerModelGroupFor(modelId: string): string {
+  // OpenRouter ids are vendor/model paths; native Pi ids never contain "/".
+  if (modelId.includes("/")) return "OpenRouter";
+  const family = familyForModelId(modelId);
+  return family ? AGENT_FAMILIES[family].displayName : "Other";
+}
+
+// Presentation is derived from the id alone: a friendly label for scanning
+// and a premium flag for the one roster entry that is materially more
+// expensive. Attribution comes from the group heading the row renders under.
+// The EXACT id always renders beside the label in mono — the id, not the
+// label, is what the spawn path enforces.
+function workerModelPresentation(modelId: string): {
+  label: string;
+  premium: boolean;
+} {
+  const isOpenRouter = modelId.includes("/");
+  const codexEntry = CODEX_MODEL_CATALOG.find((entry) => entry.id === modelId);
+  const slug = (isOpenRouter ? modelId.split("/").at(-1) : modelId) ?? modelId;
+  const label =
+    codexEntry?.label ??
+    slug
+      .split(/[-_]/)
+      .filter(Boolean)
+      .map((part) =>
+        part.toLowerCase() === "gpt" ? "GPT" : `${part.charAt(0).toUpperCase()}${part.slice(1)}`,
+      )
+      .join(" ");
+  return { label, premium: modelId === WORKER_MODEL_ROSTER.claude.premium };
+}
+
+// One compact de-boxed row per model, same shell as PolicyToggle so the tab
+// reads like the rest of the dialog: the whole row is the switch, and the
+// group heading above carries the provider attribution.
+function WorkerModelRow({
+  modelId,
+  checked,
+  onToggle,
+}: {
+  modelId: string;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  const { hover, focus, pressed, handlers } = useInteractive();
+  const model = workerModelPresentation(modelId);
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={`${model.label} (${modelId})`}
+      title={modelId}
+      onClick={onToggle}
+      {...handlers}
+      style={{
+        ...workerModelRowStyle,
+        background: pressed ? "var(--press)" : hover ? "var(--hover)" : "transparent",
+        boxShadow: withFocusRing(undefined, focus),
+      }}
+    >
+      <span style={workerModelNameCellStyle}>
+        <span
+          style={{
+            ...workerModelLabelStyle,
+            // Off rows dim their label so the enabled set pops at a glance;
+            // the switch remains the authoritative state indicator.
+            color: checked ? "var(--ink)" : "var(--muted)",
+          }}
+        >
+          {model.label}
+        </span>
+        {model.premium ? (
+          <span className="spark-badge" style={workerModelTierStyle}>
+            Premium
+          </span>
+        ) : null}
+        <span style={workerModelIdStyle}>{modelId}</span>
+      </span>
+      <SwitchTrack checked={checked} />
+    </button>
+  );
+}
+
 function PolicyToggle({
   title,
   detail,
@@ -3082,6 +3261,62 @@ const policyDetailStyle: React.CSSProperties = {
   fontSize: 11,
   lineHeight: 1.45,
   marginTop: 2,
+};
+
+// Worker-model rows reuse the de-boxed policy-row shell. Single-line rows
+// keep the tab compact; the source heading above each cluster carries the
+// provider, so the row itself is just name, id, and switch.
+const workerModelRowStyle: React.CSSProperties = {
+  ...policyRowStyle,
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  gap: 12,
+  padding: "8px 8px",
+};
+
+// The source heading over each cluster: Claude, Codex, Grok, OpenRouter.
+const workerModelGroupLabelStyle: React.CSSProperties = {
+  padding: "12px 8px 3px",
+  fontSize: 10,
+  fontWeight: 650,
+  letterSpacing: "0.07em",
+  textTransform: "uppercase",
+  color: "var(--muted-2)",
+};
+
+const workerModelNameCellStyle: React.CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  alignItems: "baseline",
+  flexWrap: "wrap",
+  columnGap: 8,
+  rowGap: 2,
+};
+
+const workerModelLabelStyle: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 600,
+  transition: "color var(--motion-fast) var(--ease-out)",
+};
+
+// The exact model id, always visible: it is the value that persists and that
+// run-store enforces at spawn, so it must be copy-checkable at a glance.
+const workerModelIdStyle: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10.5,
+  color: "var(--muted-2)",
+};
+
+const workerModelTierStyle: React.CSSProperties = {
+  alignSelf: "center",
+  flex: "0 0 auto",
+  padding: "1px 5px",
+  fontSize: 8.5,
+  fontWeight: 650,
+  letterSpacing: "0.04em",
 };
 
 const footerStyle: React.CSSProperties = {

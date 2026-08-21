@@ -50,16 +50,17 @@ export function sanitizeWorkerModelHint(hint: string | undefined): string | unde
 
 // ── The worker model roster ─────────────────────────────────────────────────
 //
-// Cora may route a worker to exactly three models:
+// Cora enables the recommended native models below by default:
 //
 //   claude-opus-5   standard   Anthropic's workhorse
 //   gpt-5.6-sol       standard   OpenAI's frontier
 //   claude-fable-5    premium    strongest, materially more expensive
 //
-// Excluded on purpose, and coerced away below rather than merely discouraged
-// in a prompt:
-//   gpt-5.6-terra, gpt-5.6-luna   below the bar for autonomous worker runs
-//   claude-sonnet-*               too token-hungry for what it returns
+// The Capability Center also offers the providers' other current worker-capable
+// models. They stay opt-in for existing/fresh settings, but once the user
+// enables one it is a real launch target rather than a decorative checkbox:
+//   gpt-5.6-terra, gpt-5.6-luna
+//   claude-sonnet-5
 //
 // TIERS ARE THE CONTRACT; IDS ARE A DETAIL. Nothing downstream should ever
 // hardcode "sol" or "opus", when a provider ships its next frontier model,
@@ -69,7 +70,7 @@ export type WorkerModelTier = "standard" | "premium";
 
 export type RosterRuntime = "claude" | "codex" | "grok";
 
-export const WORKER_DEFAULT_GROK_MODEL = "grok-4.5" as const;
+export const WORKER_DEFAULT_GROK_MODEL = "grok-4.6" as const;
 
 export const WORKER_MODEL_ROSTER: Record<RosterRuntime, Record<WorkerModelTier, string>> = {
   claude: { standard: WORKER_DEFAULT_CLAUDE_MODEL, premium: "claude-fable-5" },
@@ -80,12 +81,77 @@ export const WORKER_MODEL_ROSTER: Record<RosterRuntime, Record<WorkerModelTier, 
   grok: { standard: WORKER_DEFAULT_GROK_MODEL, premium: WORKER_DEFAULT_GROK_MODEL },
 };
 
-/** Every model id a worker is allowed to launch on, deduped. */
-export const ALLOWED_WORKER_MODELS: readonly string[] = [
+/** Recommended fresh-install selection, deduped. */
+export const DEFAULT_CORA_WORKER_MODELS: readonly string[] = [
   ...new Set(
     Object.values(WORKER_MODEL_ROSTER).flatMap((tiers) => Object.values(tiers)),
   ),
 ];
+
+/** Optional native choices shown in the Capability Center but disabled until
+ * the user selects them. Keep this list aligned with the provider catalogs. */
+export const OPTIONAL_CORA_WORKER_MODELS = [
+  "claude-sonnet-5",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+] as const;
+
+/** Every native model id a Cora worker is allowed to launch on. */
+export const ALLOWED_WORKER_MODELS: readonly string[] = [
+  ...new Set([...DEFAULT_CORA_WORKER_MODELS, ...OPTIONAL_CORA_WORKER_MODELS]),
+];
+
+/** Complete native picker roster. Named separately from the default selection
+ * so adding a visible opt-in model never silently enables it for every user. */
+export const CORA_WORKER_MODEL_CHOICES: readonly string[] = ALLOWED_WORKER_MODELS;
+
+function modelBase(id: string): string {
+  const at = id.indexOf("@");
+  return (at >= 0 ? id.slice(0, at) : id).trim().toLowerCase();
+}
+
+/** OpenRouter ids are vendor/model paths, unlike the native Pi ids. */
+export function isOpenRouterModelId(id: string | undefined): boolean {
+  const base = modelBase(id ?? "");
+  return /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/:+-]*$/i.test(base);
+}
+
+/**
+ * Resolve a manager hint against the user's enabled worker list.
+ *
+ * Exact enabled hints win. Otherwise stay on the requested native family when
+ * possible, then fall back to the first enabled model. This makes the setting
+ * a real launch boundary rather than a prompt-only preference.
+ */
+export function enabledWorkerModelFor(
+  runtime: string,
+  hint: string | undefined,
+  enabledModels: readonly string[],
+): string | undefined {
+  const enabled = [...new Set(enabledModels.map((id) => id.trim()).filter(Boolean))];
+  if (enabled.length === 0) return undefined;
+
+  const raw = sanitizeWorkerModelHint(hint?.trim() || undefined);
+  const requestedBase = modelBase(raw ?? "");
+  const exact = enabled.find((id) => modelBase(id) === requestedBase);
+  if (exact) {
+    // `@effort` is Pi's native-model shorthand, not part of an OpenRouter
+    // favorite. OpenRouter thinking is already sent through --thinking.
+    const suffix = !isOpenRouterModelId(exact) && raw && raw.includes("@")
+      ? raw.slice(raw.indexOf("@"))
+      : "";
+    return `${exact}${suffix}`;
+  }
+
+  const sameRuntime = enabled.find((id) => {
+    const base = modelBase(id);
+    if (runtime === "claude") return base.startsWith("claude-");
+    if (runtime === "codex") return base.startsWith("gpt-");
+    if (runtime === "grok") return base.startsWith("grok-");
+    return false;
+  });
+  return sameRuntime ?? enabled[0];
+}
 
 export function rosterModelFor(runtime: RosterRuntime, tier: WorkerModelTier): string {
   return WORKER_MODEL_ROSTER[runtime][tier];
@@ -113,7 +179,13 @@ export function coerceWorkerModelToRoster(
   const base = (at >= 0 ? raw.slice(0, at) : raw).trim().toLowerCase();
   const suffix = at >= 0 ? raw.slice(at) : "";
 
-  if (base === tiers.standard || base === tiers.premium) return `${base}${suffix}`;
+  const allowedForRuntime = ALLOWED_WORKER_MODELS.find((id) => {
+    if (modelBase(id) !== base) return false;
+    if (runtime === "claude") return base.startsWith("claude-");
+    if (runtime === "codex") return base.startsWith("gpt-");
+    return base.startsWith("grok-");
+  });
+  if (allowedForRuntime) return `${allowedForRuntime}${suffix}`;
   // Fable is the only premium tier, and it is Anthropic-only. Honour an
   // explicit ask for it on the claude runtime; on codex there is nothing to
   // honour it with, so the frontier model stands in.
@@ -135,10 +207,17 @@ export function coerceWorkerModelToRoster(
  */
 export function plannedWorkerModel(
   task: { runtimePreference: string; modelHint?: string },
-  options: { isAutomationRun?: boolean } = {},
+  options: { isAutomationRun?: boolean; enabledModels?: readonly string[] } = {},
 ): string | undefined {
   if (options.isAutomationRun) {
     return sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
+  }
+  if (options.enabledModels) {
+    return enabledWorkerModelFor(
+      task.runtimePreference,
+      task.modelHint,
+      options.enabledModels,
+    );
   }
   // For Cora-spawned workers the roster is enforced at the spawn chokepoint,
   // not only in the planner's prompt. A manager session keeps the system

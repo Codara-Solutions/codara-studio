@@ -199,7 +199,7 @@ export default function CommitComposer({
         type="button"
         disabled={!canGenerateMessage || anyBusy}
         onClick={onGenerateMessage}
-        title="Draft a commit message with your Pi subscription"
+        title="Draft a commit message with your configured model"
         style={{
           appearance: "none",
           display: "flex",

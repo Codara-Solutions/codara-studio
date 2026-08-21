@@ -12,6 +12,14 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const ENTRY = path.join(ROOT, "src", "main", "worker-sessions.ts");
+const SETTINGS = path.join(
+  ROOT,
+  "src",
+  "renderer",
+  "src",
+  "components",
+  "SettingsDialog.tsx",
+);
 
 async function main() {
   const outfile = path.join(os.tmpdir(), "codara-worker-sessions-test.cjs");
@@ -42,6 +50,14 @@ async function main() {
     if (!condition) failures += 1;
     console.log(`${condition ? "PASS" : "FAIL"} ${name}`);
   };
+  const settingsSource = fs.readFileSync(SETTINGS, "utf8");
+  check(
+    "Sessions settings is resume-only and has no new-session controls",
+    !settingsSource.includes("New Claude") &&
+      !settingsSource.includes("New Codex") &&
+      !settingsSource.includes("const startNew =") &&
+      !settingsSource.includes("session: WorkerSessionSummary | null"),
+  );
   const jsonl = (...records) => records.map((record) => JSON.stringify(record)).join("\n");
 
   const claude = parseClaudeSessionHead(jsonl(

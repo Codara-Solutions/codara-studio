@@ -422,6 +422,10 @@ assert.match(
   /onCoraConnect: \(card\) => addAccount\(card\.provider, card\.label\)/,
 );
 assert.match(settings, /onCliConnect: \(card\) => \{/);
+assert.match(settings, /const reusableManaged = runtimeInspection\?\.profiles\.find/);
+assert.match(settings, /profile\.status === "sign_in_required"/);
+assert.match(settings, /removeProfileOnFailure: true/);
+assert.match(settings, /activateOnSuccess: true/);
 assert.match(settings, /spark:open-native-cli-account/);
 assert.match(app, /spark:open-native-cli-account/);
 assert.match(app, /nativeCodexProfileId: profileId/);

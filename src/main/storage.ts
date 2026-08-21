@@ -15,10 +15,11 @@ import { isRemotePath } from "@shared/remote";
 import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
+import { DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
 
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
-// Legacy OpenRouter setting retained for editor inline AI only.
+// Shared inexpensive utility model for editor inline AI and optional commit drafts.
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
 
 const EMPTY: AppState = {
@@ -32,7 +33,10 @@ const EMPTY_SETTINGS: AppSettings = {
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
+  openRouterCoraModels: [],
+  openRouterVerifiedKeyHash: "",
   commitMessageModel: DEFAULT_COMMIT_MESSAGE_MODEL,
+  coraWorkerModels: [...DEFAULT_CORA_WORKER_MODELS],
   agentMcpSyncEnabled: true,
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
@@ -226,13 +230,24 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.openRouterModel === "string" && settings.openRouterModel.trim()
         ? settings.openRouterModel.trim()
         : DEFAULT_OPENROUTER_MODEL,
+    openRouterCoraModels: normalizeStringArray(settings.openRouterCoraModels),
+    openRouterVerifiedKeyHash:
+      typeof settings.openRouterVerifiedKeyHash === "string" &&
+      /^[0-9a-f]{64}$/i.test(settings.openRouterVerifiedKeyHash.trim())
+        ? settings.openRouterVerifiedKeyHash.trim().toLowerCase()
+        : "",
     // Existing settings files have no commitMessageModel. They migrate to auto
     // without changing the preserved OpenRouter key or editor model.
     commitMessageModel:
+      settings.commitMessageModel === "openrouter" ||
       settings.commitMessageModel === "gpt-5.6-luna" ||
       settings.commitMessageModel === "claude-sonnet-5"
         ? settings.commitMessageModel
         : DEFAULT_COMMIT_MESSAGE_MODEL,
+    coraWorkerModels:
+      settings.coraWorkerModels === undefined
+        ? [...DEFAULT_CORA_WORKER_MODELS]
+        : normalizeStringArray(settings.coraWorkerModels),
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled !== false,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled !== false,
     agentDisabledMcpIds: normalizeStringArray(settings.agentDisabledMcpIds),

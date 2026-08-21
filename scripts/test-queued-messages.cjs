@@ -39,6 +39,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const RUN_STORE_TS = path.join(ROOT, "src", "main", "orchestration", "run-store.ts");
+const SHARED_TYPES_TS = path.join(ROOT, "src", "shared", "types.ts");
 const AGENT_SOCKET_TS = path.join(ROOT, "src", "main", "agent-socket.ts");
 const CHAT_COMPOSER_TSX = path.join(
   ROOT,
@@ -376,14 +377,25 @@ async function main() {
   });
   const resumeB = runStore.resumeRun({ runId: runB });
   check("the unqueue scenario's turn dispatched", await gateOpened(turnBEntered));
+  const queuedImageSource = path.join(HOME, "queued-reference.png");
+  fs.writeFileSync(queuedImageSource, "queued image fixture");
   await runStore.addRunMessage({
     runId: runB,
     author: "user",
     kind: "note",
     message: QUEUED_B,
+    attachments: [{ sourcePath: queuedImageSource, name: "reference.png", kind: "image" }],
   });
   const queuedB = readRun(runB).humanMessages.find((message) => message.message === QUEUED_B);
   check("the message queued behind the live turn", queuedB?.deliveryState === "queued");
+  const persistedQueuedImage = queuedB?.attachments?.[0]?.path;
+  check(
+    "the queued image is persisted with its message",
+    queuedB?.attachments?.[0]?.kind === "image" &&
+      typeof persistedQueuedImage === "string" &&
+      fs.existsSync(persistedQueuedImage),
+    JSON.stringify(queuedB?.attachments),
+  );
   let cancelResultB = null;
   let cancelErrorB = null;
   try {
@@ -396,6 +408,14 @@ async function main() {
     "the cancel returns the message text for the composer",
     cancelResultB?.restoredText === QUEUED_B,
     cancelResultB?.restoredText,
+  );
+  check(
+    "the cancel returns a re-attachable image and keeps its persisted source alive",
+    cancelResultB?.restoredAttachments?.[0]?.kind === "image" &&
+      cancelResultB?.restoredAttachments?.[0]?.name === "reference.png" &&
+      cancelResultB?.restoredAttachments?.[0]?.sourcePath === persistedQueuedImage &&
+      fs.existsSync(cancelResultB.restoredAttachments[0].sourcePath),
+    JSON.stringify(cancelResultB?.restoredAttachments),
   );
   const cancelledB = readRun(runB).humanMessages.find((message) => message.message === QUEUED_B);
   check(
@@ -571,6 +591,31 @@ async function main() {
     "cancelQueuedMessage re-checks the queue state inside the commit mutate",
     /export async function cancelQueuedMessage/.test(storeSource) &&
       /\(target\.deliveryState \?\? "queued"\) !== "queued" \|\|\s*\n\s*target\.backendTurnId/.test(storeSource),
+  );
+  const terminalDirectDispatch = storeSource.slice(
+    storeSource.indexOf("export async function addRunMessage("),
+    storeSource.indexOf("if (input.author === \"user\" && activeConversationRewinds", storeSource.indexOf("export async function addRunMessage(")),
+  );
+  check(
+    "terminal direct-chat sends dispatch attachments through the same iteration path as text",
+    terminalDirectDispatch.includes("attachments: input.attachments") &&
+      !terminalDirectDispatch.includes("(input.attachments?.length ?? 0) === 0"),
+  );
+  check(
+    "Resume drains a persisted queued direct-chat turn instead of duplicating it",
+    /queuedDirectMessages = queuedManagerInputMessages\(run\)/.test(storeSource) &&
+      /queuedMessageIds: queuedDirectMessages\.map/.test(storeSource) &&
+      /renderBundledManagerInput\(directInputMessages\)/.test(storeSource),
+  );
+  const sharedTypesSource = fs.readFileSync(SHARED_TYPES_TS, "utf8");
+  const directIterationInput = sharedTypesSource.slice(
+    sharedTypesSource.indexOf("export interface AddDirectIterationInput"),
+    sharedTypesSource.indexOf("// Live lifecycle", sharedTypesSource.indexOf("export interface AddDirectIterationInput")),
+  );
+  check(
+    "the direct-iteration contract carries new attachments and persisted queue identity",
+    directIterationInput.includes("attachments?: AddRunMessageAttachmentInput[]") &&
+      directIterationInput.includes("queuedMessageIds?: string[]"),
   );
 
   const composerSource = fs.readFileSync(CHAT_COMPOSER_TSX, "utf8");

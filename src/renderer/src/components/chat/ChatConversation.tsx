@@ -1591,7 +1591,10 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
         onClick={() => {
           if (hasBody) setOpen((value) => !value);
         }}
-        baseStyle={TOOL_ROW_BUTTON_STYLE}
+        baseStyle={{
+          ...TOOL_ROW_BUTTON_STYLE,
+          cursor: hasBody ? "pointer" : "default",
+        }}
         title={item.goal || item.title}
       >
         <StatusDot color={color} pulse={live} size={6} />
@@ -2276,10 +2279,10 @@ function trimByteNumber(value: number): string {
   return value >= 10 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, "");
 }
 
-// One quiet line per logical worker inside an expanded step — dot, task
-// title, muted runtime/status detail. Same language as the tool rows.
+// One quiet worker section inside the step's single disclosure. Changed files
+// stay exposed with the worker detail so opening a step never leads to a
+// second nested dropdown.
 function StepWorkerRow({ worker }: { worker: ChatWorker }) {
-  const [diffOpen, setDiffOpen] = useState(false);
   // runtimeState (from the live terminal poller) wins over the static
   // workerTask status for the dot tone, because it reflects what the agent
   // is doing *right now* — accept ("blocked" → steady red) is more urgent
@@ -2313,21 +2316,6 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   ].filter(Boolean).join(" · ");
   const diff = worker.diff;
   const hasDiff = Boolean(diff && diff.fileCount > 0);
-  const header = (
-    <>
-      <StatusDot color={color} pulse={pulse} size={5} />
-      <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
-      <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
-      {hasDiff && diff && (
-        <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
-          <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
-          <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
-          <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
-        </span>
-      )}
-      {hasDiff && <Caret open={diffOpen} />}
-    </>
-  );
   return (
     <div
       style={{
@@ -2336,34 +2324,29 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         minWidth: 0,
       }}
     >
-      {hasDiff ? (
-        <DisclosureButton
-          baseStyle={{
-            ...TOOL_ROW_BUTTON_STYLE,
-            minHeight: 20,
-            padding: "1px 0",
-            cursor: "pointer",
-          }}
-          onClick={() => setDiffOpen((value) => !value)}
-          title={`${worker.title}: ${worker.status}${titleSuffix}. Show changed files.`}
-        >
-          {header}
-        </DisclosureButton>
-      ) : (
-        <div
-          title={`${worker.title}: ${worker.status}${titleSuffix}`}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            minHeight: 20,
-            minWidth: 0,
-          }}
-        >
-          {header}
-        </div>
-      )}
-      {diffOpen && diff && (
+      <div
+        title={`${worker.title}: ${worker.status}${titleSuffix}`}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          minHeight: 20,
+          minWidth: 0,
+          padding: "1px 0",
+        }}
+      >
+        <StatusDot color={color} pulse={pulse} size={5} />
+        <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
+        <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+        {hasDiff && diff && (
+          <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
+            <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
+            <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
+          </span>
+        )}
+      </div>
+      {hasDiff && diff && (
         <div
           style={{
             margin: "2px 0 4px 12px",
@@ -2375,10 +2358,18 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
           }}
         >
           {diff.files.map((file) => (
-            <div
+            <button
+              type="button"
               key={file.path}
-              title={file.path}
-              style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
+              className="cora-worker-diff-file"
+              title={`Open changes for ${file.path}`}
+              aria-label={`Open changes for ${file.path}`}
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent("spark:open-diff", { detail: { path: file.path } }),
+                );
+              }}
+              style={WORKER_DIFF_FILE_BUTTON_STYLE}
             >
               <span
                 style={{
@@ -2396,7 +2387,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
               </span>
               <span style={{ ...TOOL_STATS_STYLE, color: "var(--ok)" }}>+{file.additions}</span>
               <span style={{ ...TOOL_STATS_STYLE, color: "var(--danger)" }}>−{file.deletions}</span>
-            </div>
+            </button>
           ))}
           {diff.fileCount > diff.files.length && (
             <span style={{ ...TOOL_INLINE_DETAIL_STYLE, flex: "none" }}>
@@ -2528,11 +2519,13 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
       window.dispatchEvent(
         new CustomEvent("spark:run-snapshot", { detail: { run: result.run } }),
       );
-      if (result.restoredText) {
+      const restoredAttachments = result.restoredAttachments ?? [];
+      if (result.restoredText || restoredAttachments.length > 0) {
         // Append (no replace): a draft the user is mid-typing must survive.
+        // Attachments ride along so pasted images come back with the text.
         window.dispatchEvent(
           new CustomEvent("spark:prefill-composer", {
-            detail: { text: result.restoredText },
+            detail: { text: result.restoredText, attachments: restoredAttachments },
           }),
         );
       }
@@ -3646,6 +3639,21 @@ const TOOL_STATS_STYLE: React.CSSProperties = {
   fontVariantNumeric: "tabular-nums",
   flex: "0 0 auto",
   whiteSpace: "nowrap",
+};
+
+const WORKER_DIFF_FILE_BUTTON_STYLE: React.CSSProperties = {
+  appearance: "none",
+  width: "100%",
+  border: "none",
+  borderRadius: "var(--radius-control, 7px)",
+  color: "inherit",
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  minWidth: 0,
+  padding: "3px 6px",
+  cursor: "pointer",
+  textAlign: "left",
 };
 
 const TOOL_DETAILS_STYLE: React.CSSProperties = {

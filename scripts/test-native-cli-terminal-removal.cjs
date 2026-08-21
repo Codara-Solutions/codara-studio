@@ -132,6 +132,23 @@ async function main() {
     }
   });
 
+  await check("Codara never installs, updates, or uninstalls native CLI binaries", () => {
+    const directPackageManagerMutation =
+      /\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*["'`](?:npm|pnpm|yarn|bun|brew)["'`][\s\S]{0,400}?\b(?:install|add|update|upgrade|uninstall|remove)\b/;
+    const shellPackageManagerMutation =
+      /\b(?:exec|execSync)\s*\(\s*["'`][^\n"'`]*(?:npm|pnpm|yarn|bun|brew)\s+(?:install|add|update|upgrade|uninstall|remove)\b/;
+    for (const file of sources) {
+      const code = fs
+        .readFileSync(file, "utf8")
+        .replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+      assert.ok(
+        !directPackageManagerMutation.test(code) &&
+          !shellPackageManagerMutation.test(code),
+        `${path.relative(ROOT, file)} attempts to manage a native CLI package`,
+      );
+    }
+  });
+
   await check("no source resolves a home-directory shell startup file to write it", () => {
     // A path like join(<home>, ".zshrc") is the user's own dotfile. Only the
     // read-only leftover detection may build one; shell-init.ts materializes
