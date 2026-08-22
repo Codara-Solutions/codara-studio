@@ -369,6 +369,12 @@ async function waitForSettled(settled: Promise<void>, liveness: PiTurnLiveness):
   }
 }
 
+const EMPTY_FINAL_REPROMPT = [
+  "Your tool work settled, but your final assistant message was empty.",
+  "Reply now with the concise user-facing result: outcome first, what changed, verification, and any remaining issue.",
+  "Do not call tools unless that is required to correct a failed check.",
+].join(" ");
+
 async function requestPiDecision(
   input: ManagerRequestInput,
   onStream?: ChatStreamHandler,
@@ -419,14 +425,25 @@ async function requestPiDecision(
         turnAborted: true,
       };
     }
-    const turn = new PiTurnAccumulator(onStream);
-    let settle!: () => void;
-    const settled = new Promise<void>((resolve) => { settle = resolve; });
-    session.settleActiveTurn = settle;
+    const turn = new PiTurnAccumulator(onStream, {
+      // Pi's native model catalog also reports API-equivalent prices for
+      // subscription models. Those are not an OpenRouter charge and must not
+      // enter the chat cost pill or run budget.
+      captureCost: session.provider === "openrouter",
+    });
+    let settle: () => void = () => undefined;
     const liveness: PiTurnLiveness = {
       lastEventAt: Date.now(),
       inFlightTools: new Map(),
     };
+    const armSettlement = (): Promise<void> => {
+      liveness.lastEventAt = Date.now();
+      liveness.inFlightTools.clear();
+      const next = new Promise<void>((resolve) => { settle = resolve; });
+      session.settleActiveTurn = settle;
+      return next;
+    };
+    let settled = armSettlement();
     unsubscribe = session.client.onEvent((event) => {
       liveness.lastEventAt = Date.now();
       if (
@@ -469,11 +486,35 @@ async function requestPiDecision(
       };
     }
 
-    const accumulated = turn.result();
+    let accumulated = turn.result();
+    // A model can finish its tool loop with an explicit empty assistant
+    // message. Never promote earlier progress prose into a fake successful
+    // answer. Give it one hidden, tightly-scoped chance to produce the result
+    // users should have received.
+    if (!accumulated.failure && accumulated.assistantMessageCount > 0 && !accumulated.finalText) {
+      settled = armSettlement();
+      await session.client.prompt(EMPTY_FINAL_REPROMPT);
+      await waitForSettled(settled, liveness);
+      if (session.interrupted || GENERATIONS.get(runId) !== generation) {
+        return {
+          decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          accountProfileId: session.accountProfileId,
+          turnAborted: true,
+        };
+      }
+      accumulated = turn.result();
+    }
+
+    // costUsd is an OpenRouter catalog-priced estimate for the whole turn.
+    // Native subscription sessions never capture it, even when Pi's catalog
+    // supplies an API-equivalent number.
     const cumulativeUsage = {
       inputTokens: accumulated.usage.inputTokens,
       outputTokens: accumulated.usage.outputTokens,
       cacheReadTokens: accumulated.usage.cacheReadTokens,
+      ...(accumulated.usage.costUsd > 0 ? { costUsd: accumulated.usage.costUsd } : {}),
     };
     // Context occupancy is a gauge, so it is the newest request's prompt size
     // rather than a sum over the turn. promptTokens is the field run-store
@@ -489,7 +530,9 @@ async function requestPiDecision(
       ? { providerResponseIds: accumulated.providerResponseIds }
       : {};
     let finalText = accumulated.finalText;
-    if (!finalText) {
+    if (!finalText && accumulated.assistantMessageCount === 0) {
+      // Compatibility fallback for an RPC stream that missed every assistant
+      // event. Never use it after observing an explicit empty completion.
       const last = asRecord(await session.client.request({ type: "get_last_assistant_text" }));
       if (typeof last?.text === "string") finalText = last.text.trim();
     }
@@ -514,7 +557,23 @@ async function requestPiDecision(
         turnFailed: true,
       };
     }
-    const reply = finalText || "Cora finished the Pi turn without a visible message.";
+    if (!finalText) {
+      const detail = "Cora finished its tool work without a final response after one retry.";
+      return {
+        decision: buildTalkReplyDecision(detail),
+        decisionAlreadyApplied: liveDecisionApplied || undefined,
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+        newSessionUuid: session.sessionId,
+        ...cumulativeUsage,
+        accountProfileId: session.accountProfileId,
+        ...contextUsage,
+        ...providerDiagnostics,
+        notice: detail,
+        turnFailed: true,
+      };
+    }
+    const reply = finalText;
     return {
       decision: executes
         ? buildExecuteDecisionFromToolCalls(accumulated.successfulToolCalls, reply)

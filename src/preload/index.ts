@@ -60,6 +60,7 @@ import type {
   CoraMemoryStatus,
   CoraProfile,
   CoraProfileCreateInput,
+  CoraProfileDeleteResult,
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
@@ -469,6 +470,8 @@ const api = {
       ipcRenderer.invoke("cora-profiles:create", input),
     use: (reference: string): Promise<CoraProfile[]> =>
       ipcRenderer.invoke("cora-profiles:use", reference),
+    delete: (reference: string): Promise<CoraProfileDeleteResult> =>
+      ipcRenderer.invoke("cora-profiles:delete", reference),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),

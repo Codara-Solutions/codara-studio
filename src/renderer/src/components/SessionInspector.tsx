@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import type { RunState, SparkCall, SparkEvent } from "@shared/types";
+import { isOpenRouterModelId } from "@shared/worker-model-roster";
 import { useRunEvents } from "../lib/useRunExecutionRecord";
 
 // A renderer-only diagnostic overlay over the active run. Pure presentation —
@@ -285,7 +286,7 @@ type CostBearingCall = SparkCall & {
 function hasCostData(call: SparkCall): boolean {
   const c = call as CostBearingCall;
   return (
-    typeof c.costUsd === "number" ||
+    (isOpenRouterModelId(call.model) && typeof c.costUsd === "number") ||
     typeof c.inputTokens === "number" ||
     typeof c.outputTokens === "number" ||
     typeof c.cacheReadTokens === "number"
@@ -335,14 +336,15 @@ function CostsTab({ run }: { run: RunState }) {
       totalCacheReadTokens: 0,
       callCount: 0,
     };
-    bucket.totalCostUsd += c.costUsd ?? 0;
+    const openRouterCost = isOpenRouterModelId(call.model) ? (c.costUsd ?? 0) : 0;
+    bucket.totalCostUsd += openRouterCost;
     bucket.totalInputTokens += c.inputTokens ?? 0;
     bucket.totalOutputTokens += c.outputTokens ?? 0;
     bucket.totalCacheReadTokens += c.cacheReadTokens ?? 0;
     bucket.callCount += 1;
     byMode.set(call.mode, bucket);
 
-    totalCostUsd += c.costUsd ?? 0;
+    totalCostUsd += openRouterCost;
     totalInputTokens += c.inputTokens ?? 0;
     totalOutputTokens += c.outputTokens ?? 0;
     totalCacheReadTokens += c.cacheReadTokens ?? 0;
@@ -358,7 +360,7 @@ function CostsTab({ run }: { run: RunState }) {
     <div style={{ padding: "16px 20px 20px", overflow: "auto", flex: 1 }}>
       <SectionTitle
         title="Manager usage"
-        detail="Cost and token usage grouped by the kind of manager call."
+        detail="OpenRouter cost and provider token usage grouped by the kind of manager call."
       />
       <div
         role="table"
@@ -377,7 +379,7 @@ function CostsTab({ run }: { run: RunState }) {
         }}
       >
         <HeaderCell>Mode</HeaderCell>
-        <HeaderCell align="right">Cost (USD)</HeaderCell>
+        <HeaderCell align="right">OpenRouter USD</HeaderCell>
         <HeaderCell align="right">Input</HeaderCell>
         <HeaderCell align="right">Output</HeaderCell>
         <HeaderCell align="right">Cache read</HeaderCell>

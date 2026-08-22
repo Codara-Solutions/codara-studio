@@ -346,7 +346,7 @@ async function main() {
   const externalReferences = sourceFiles.filter((file) => {
     if (path.basename(file).startsWith("claude-cli-")) return false;
     const text = fs.readFileSync(file, "utf8");
-    return /claude-cli-(?:account-profiles|profile-execution|profile-environment)/.test(
+    return /(?:from\s+|import\s*\(\s*)["'][^"']*claude-cli-(?:account-profiles|profile-execution|profile-environment)[^"']*["']/.test(
       text,
     );
   });

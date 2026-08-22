@@ -179,10 +179,11 @@ assert.match(
 );
 
 // Settings presents one merged Accounts section and explains the actual switch
-// boundary: Cora changes now, while a CLI needs a fresh process.
+// boundary: every session for that runtime closes before credentials change.
 assert.match(settings, /title="Accounts"/);
 assert.match(settings, /Cora switches immediately/);
-assert.match(settings, /opens a fresh Studio session/);
+assert.match(settings, /safely closes that CLI's running sessions/);
+assert.match(settings, /opens a fresh session/);
 assert.match(settings, /<AccountCards providers=\{providerViews\}/);
 assert.ok(
   settings.indexOf("<AccountsSettings />") >= 0,
@@ -411,7 +412,7 @@ assert.match(settingsView, /Not signed in to \$\{cliLabel\}/);
 assert.match(settingsView, /cli\?\.managed/);
 assert.match(settingsView, /usingLabel="Using"/);
 assert.match(settingsView, /label: "Use this account for Cora"/);
-assert.match(settingsView, /label: `Use this account for \$\{cliLabel\}`/);
+assert.match(settingsView, /: `Use this account for \$\{cliLabel\}`/);
 assert.match(settingsView, /onCliConnect: \(card: AccountCardView\) => void;/);
 // A card with a CLI sign-in but no Cora connection leads with "Connect to
 // Cora", wired to the same add-account login flow seeded with the card's name.
@@ -464,6 +465,26 @@ assert.match(
 // actually signed in, so the hint never sits next to an action that would fail.
 assert.match(settingsView, /id: "cli-use"/);
 assert.match(settingsView, /actions\.onCliUse\(card\)/);
+assert.match(settingsView, /`Confirm & close \$\{cliLabel\}`/);
+assert.match(settingsView, /const \[cliSwitchArmed, setCliSwitchArmed\] = useState\(false\)/);
+
+// The main process owns the shutdown boundary. Codara PTYs get a graceful
+// close first, external terminals are then quiesced, and the account service
+// does not mutate the selected account until that callback resolves.
+assert.match(ipc, /nativeCliAccounts\.setSessionShutdown\(async \(runtime\) =>/);
+assert.match(ipc, /pty\.disposeNativeCliRuntimeGraceful\(runtime\)/);
+assert.match(ipc, /shutdownExternalNativeCliProcesses\(runtime\)/);
+const nativeAccounts = read("src/main/orchestration/native-cli-accounts.ts");
+assert.match(nativeAccounts, /const shutdown = await this\.sessionShutdown\(runtime\)/);
+const setDefaultSource = nativeAccounts.slice(
+  nativeAccounts.indexOf("async setDefault("),
+  nativeAccounts.indexOf("private allocateLoginToken", nativeAccounts.indexOf("async setDefault(")),
+);
+assert.ok(
+  setDefaultSource.indexOf("await this.sessionShutdown(runtime)") <
+    setDefaultSource.indexOf("await this.claudeStore.setDefaultProfile(profileId)"),
+  "session shutdown must finish before the account store changes its default",
+);
 
 console.log(
   "PASS native CLI account IPC is sanitized, login PTY is one-shot/exact/exit-owned, transient tokens are not persisted, and Settings pairs a Cora connection with a CLI sign-in on an anonymous fingerprint while unmatched accounts keep their own cards",

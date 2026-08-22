@@ -154,10 +154,10 @@ async function main() {
   check("unknown: 103k/128k triggers", 103_000 / unknown >= RATIO);
 
   // A Pi chat never reaches its model window: Codara's bundled extension
-  // compacts it at ~256k first, so both the trigger and the composer meter
-  // measure against that cap. Without this the trigger would wait for 80% of
+  // compacts it at ~256k first, so the trigger measures against that cap.
+  // Without this the trigger would wait for 80% of
   // 400k (320k) on a gpt chat that already compacted at 256k, and the meter
-  // would show a denominator the conversation can never approach.
+  // auto-summary trigger would miss the extension's earlier cutoff.
   const compaction = await bundle(
     "context-compaction",
     path.join(SHARED_DIR, "context-compaction.ts"),
@@ -188,28 +188,19 @@ async function main() {
   );
   check("a sub-threshold window never exceeds itself", piSmall < unknown);
 
-  // CODARA_PI_COMPACT_AT_TOKENS override: the trigger and the meter must land
-  // on the SAME capacity. They read it by different routes (the trigger
-  // resolves process.env directly, the composer takes the value pi-turn stamps
-  // onto the usage stream), so an override is exactly where they could drift.
-  // Below ~204.8k a trigger still pricing off 256k would never fire at all;
-  // above 256k it would fire at 204.8k while the meter advertised more.
+  // CODARA_PI_COMPACT_AT_TOKENS override: every trigger route must land on the
+  // same capacity.
+  // Below ~204.8k a trigger still pricing off 256k would never fire at all.
   for (const override of ["120000", "400000", "80000"]) {
     const resolved = compaction.resolveCompactAtTokens(override);
-    const meter = capacity({
-      contextWindowTokens: gpt,
-      backend: "pi",
-      compactAtTokens: resolved,
-    });
     const trigger = capacity({
       contextWindowTokens: gpt,
-      backend: "pi",
-      compactAtTokens: compaction.resolveCompactAtTokens(override),
+      compactAtTokens: resolved,
     });
     check(
-      `override ${override}: trigger and meter agree`,
-      meter === trigger && meter === Math.min(resolved, gpt - compaction.PI_BUILTIN_COMPACT_HEADROOM_TOKENS),
-      `${meter} vs ${trigger}`,
+      `override ${override}: trigger uses the configured capacity`,
+      trigger === Math.min(resolved, gpt - compaction.PI_BUILTIN_COMPACT_HEADROOM_TOKENS),
+      String(trigger),
     );
     check(
       `override ${override}: the ratio trigger still precedes compaction`,
@@ -239,8 +230,7 @@ async function main() {
     ),
   );
 
-  // Both consumers must go through the shared helper, or they drift apart the
-  // way the 200k-vs-1M Claude bug did.
+  // The main-process trigger must go through the shared helper.
   const runStore = fs.readFileSync(
     path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
     "utf8",
@@ -254,12 +244,32 @@ async function main() {
     "utf8",
   );
   check(
-    "the composer meter measures against the shared capacity helper",
-    /effectiveBudget=\{chatContextCapacityTokens\(\{/.test(composer),
-  );
-  check(
     "the composer labels Cora's stable 256k target",
     /budget=\{DEFAULT_PI_COMPACT_AT_TOKENS\}/.test(composer),
+  );
+  const meter = await bundle(
+    "context-meter",
+    path.join(
+      ROOT,
+      "src",
+      "renderer",
+      "src",
+      "components",
+      "chat",
+      "composer",
+      "context-meter.ts",
+    ),
+  );
+  check(
+    "the context bar uses the same 256k denominator as its label",
+    Math.abs(meter.contextMeterRatio(97_000, 256_000) - 97_000 / 256_000) < Number.EPSILON,
+  );
+  check("the context bar clamps overflow", meter.contextMeterRatio(300_000, 256_000) === 1);
+  check("the context bar rejects invalid counters", meter.contextMeterRatio(97_000, 0) === 0);
+  check(
+    "image attachments retry blocked file URLs through byte IPC",
+    /window\.spark\.fs[\s\S]{0,80}\.readFileBytes\(sourcePath\)/.test(composer) &&
+      /URL\.createObjectURL/.test(composer),
   );
   check(
     "the composer resets its meter when the conversation epoch changes",

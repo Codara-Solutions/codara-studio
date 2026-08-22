@@ -12,10 +12,18 @@ export interface PiTurnUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  /** OpenRouter catalog-priced estimate for every request in this turn,
+   *  summed. Captured only for an OpenRouter-backed session; native
+   *  subscription sessions intentionally remain 0 even if Pi's catalog
+   *  supplies an API-equivalent cost. */
+  costUsd: number;
 }
 
 export interface PiTurnResult {
   finalText: string;
+  /** Number of distinct assistant messages observed. This lets the backend
+   *  distinguish a missed event stream from an explicitly empty final. */
+  assistantMessageCount: number;
   toolCalls: PiTurnToolCall[];
   successfulToolCalls: PiTurnToolCall[];
   /** Provider response ids observed during this turn. Persisted on the
@@ -42,6 +50,14 @@ function finiteCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : 0;
+}
+
+/** Pi normalizes provider usage to `{ input, output, cacheRead, cacheWrite,
+ *  total }` under `usage.cost`. Only the summed `total` survives to Codara;
+ *  the split is provider-specific and unused here. */
+function costTotalFrom(usage: Record<string, unknown> | null): number {
+  const cost = asRecord(usage?.cost);
+  return finiteCount(cost?.total);
 }
 
 /** A positive count, or null when the field is absent or unusable. Distinct
@@ -126,6 +142,7 @@ function toolOutput(resultValue: unknown): string {
  */
 export class PiTurnAccumulator {
   private readonly onStream?: ChatStreamHandler;
+  private readonly captureCost: boolean;
   private readonly toolCalls: PiTurnToolCall[] = [];
   private readonly toolIds = new Set<string>();
   private readonly completedToolIds = new Set<string>();
@@ -135,7 +152,7 @@ export class PiTurnAccumulator {
   private readonly assistantOrder: string[] = [];
   private assistantSequence = 0;
   private currentAssistantId: string | null = null;
-  private usage: PiTurnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  private usage: PiTurnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 };
   // Context occupancy is a gauge, not a counter: the newest assistant message
   // carries the whole conversation so far, so a tool loop's later rounds
   // supersede the earlier ones instead of adding to them.
@@ -149,8 +166,12 @@ export class PiTurnAccumulator {
   private readonly providerResponseIds = new Set<string>();
   private settled = false;
 
-  constructor(onStream?: ChatStreamHandler) {
+  constructor(
+    onStream?: ChatStreamHandler,
+    options: { captureCost?: boolean } = {},
+  ) {
     this.onStream = onStream;
+    this.captureCost = options.captureCost === true;
   }
 
   consume(event: PiRpcEvent): void {
@@ -176,8 +197,10 @@ export class PiTurnAccumulator {
       const message = asRecord(event.message);
       if (message?.role !== "assistant") return;
       const messageId = this.ensureAssistant(message);
-      const complete = assistantText(message);
-      if (complete) this.completedText.set(messageId, complete);
+      // Store even an empty completion. An explicit empty final is materially
+      // different from a message_end event that was never observed, and must
+      // not fall back to earlier streamed progress text.
+      this.completedText.set(messageId, assistantText(message));
       const usage = asRecord(message.usage);
       this.usage = {
         inputTokens: this.usage.inputTokens + finiteCount(usage?.input),
@@ -185,6 +208,7 @@ export class PiTurnAccumulator {
         cacheReadTokens: this.usage.cacheReadTokens + finiteCount(
           usage?.cacheRead ?? usage?.cache_read ?? usage?.cached,
         ),
+        costUsd: this.usage.costUsd + (this.captureCost ? costTotalFrom(usage) : 0),
       };
       const context = contextTokensFrom(usage);
       if (context > 0) this.contextTokens = context;
@@ -209,9 +233,13 @@ export class PiTurnAccumulator {
         this.usage.inputTokens + this.usage.outputTokens + this.usage.cacheReadTokens > 0 ||
         this.contextTokens > 0
       ) {
+        const { costUsd, ...tokenUsage } = this.usage;
         this.onStream?.({
           kind: "usage",
-          ...this.usage,
+          ...tokenUsage,
+          // Turn-cumulative OpenRouter catalog estimate. Emitted only once it
+          // is positive; native subscription chats never capture this field.
+          ...(costUsd > 0 ? { costUsd } : {}),
           ...(this.contextTokens > 0 ? { contextTokens: this.contextTokens } : {}),
           ...(this.contextWindowTokens !== null
             ? { contextWindowTokens: this.contextWindowTokens }
@@ -281,12 +309,17 @@ export class PiTurnAccumulator {
   }
 
   result(): PiTurnResult {
-    const finalText = this.assistantOrder
-      .map((id) => (this.completedText.get(id) ?? this.streamedText.get(id) ?? "").trim())
-      .filter(Boolean)
-      .join("\n\n");
+    const finalAssistantId = this.assistantOrder[this.assistantOrder.length - 1];
+    const finalText = finalAssistantId
+      ? (
+          this.completedText.has(finalAssistantId)
+            ? this.completedText.get(finalAssistantId)
+            : this.streamedText.get(finalAssistantId)
+        )?.trim() ?? ""
+      : "";
     return {
       finalText,
+      assistantMessageCount: this.assistantOrder.length,
       toolCalls: this.toolCalls.map((call) => ({ ...call })),
       successfulToolCalls: this.toolCalls
         .filter((call) => this.completedToolIds.has(call.toolUseId) && !this.failedToolIds.has(call.toolUseId))

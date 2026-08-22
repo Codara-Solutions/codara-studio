@@ -14,11 +14,7 @@ import type {
 import { makeId } from "@shared/ids";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import AnchoredMenu from "./composer/AnchoredMenu";
-import { contextWindowForModel } from "@shared/context-window";
-import {
-  DEFAULT_PI_COMPACT_AT_TOKENS,
-  chatContextCapacityTokens,
-} from "@shared/context-compaction";
+import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
 import {
   chatModelIsOpenAi,
 } from "@shared/chat-policy";
@@ -271,9 +267,20 @@ export default function ChatComposer({
     try {
       const next = await window.spark.coraProfiles.list();
       setProfiles(next);
-      if (!runRef.current && !profileChosenRef.current) {
+      if (!runRef.current) {
         const profile = next.find((item) => item.isDefault) ?? next[0];
-        if (profile) setDraftCoraProfileId(profile.id);
+        if (profile) {
+          setDraftCoraProfileId((current) => {
+            // A Capability Center deletion can invalidate a deliberately
+            // selected draft profile. Falling back here prevents the next send
+            // from failing with "Unknown Cora profile".
+            if (!next.some((item) => item.id === current)) {
+              profileChosenRef.current = false;
+              return profile.id;
+            }
+            return profileChosenRef.current ? current : profile.id;
+          });
+        }
       }
     } catch {
       /* The built-in profile remains the main-process fallback. */
@@ -290,10 +297,6 @@ export default function ChatComposer({
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
   // millions/billions of tokens.
   const [tokensUsed, setTokensUsed] = useState(0);
-  const [reportedContextBudget, setReportedContextBudget] = useState<number | null>(null);
-  // The ceiling this chat compacts at, as stamped onto the live Pi session.
-  // Null until a turn streams; the shared default covers that gap.
-  const [reportedCompactAt, setReportedCompactAt] = useState<number | null>(null);
   // Read by the run-change seed below, which must see the run being switched TO
   // without taking `run` as a dependency (that would re-seed on every snapshot
   // and stomp the live gauge mid-turn).
@@ -534,14 +537,6 @@ export default function ChatComposer({
           item.promptTokens > 0,
       );
     setTokensUsed(call?.promptTokens ?? 0);
-    setReportedContextBudget(
-      typeof call?.contextWindowTokens === "number" && call.contextWindowTokens > 0
-        ? call.contextWindowTokens
-        : null,
-    );
-    // Not persisted on the SparkCall: it is an app-wide launch value, so a
-    // reopened chat falls back to the shared default until its next turn.
-    setReportedCompactAt(null);
   }, [run?.id, run?.conversationEpoch]);
 
   // Track the latest live context gauge. Modern backends provide
@@ -556,8 +551,6 @@ export default function ChatComposer({
       if (event.runId !== runId) return;
       if (event.type === "run.conversation_compacted") {
         setTokensUsed(0);
-        setReportedContextBudget(null);
-        setReportedCompactAt(null);
         return;
       }
       if (event.type !== "chat.usage") return;
@@ -572,14 +565,6 @@ export default function ChatComposer({
       // counts, and accepting it wiped the gauge to 0/256.0k. Compaction is
       // the only legitimate reset, handled above via run.conversation_compacted.
       if (value > 0) setTokensUsed(value);
-      const rawBudget = payload.contextWindowTokens;
-      if (typeof rawBudget === "number" && Number.isFinite(rawBudget) && rawBudget > 0) {
-        setReportedContextBudget(rawBudget);
-      }
-      const rawCompactAt = payload.compactAtTokens;
-      if (typeof rawCompactAt === "number" && Number.isFinite(rawCompactAt) && rawCompactAt > 0) {
-        setReportedCompactAt(rawCompactAt);
-      }
     });
     return off;
   }, [run?.id, run?.conversationEpoch]);
@@ -1402,11 +1387,6 @@ export default function ChatComposer({
             <ContextPill
               used={tokensUsed}
               budget={DEFAULT_PI_COMPACT_AT_TOKENS}
-              effectiveBudget={chatContextCapacityTokens({
-                contextWindowTokens:
-                  reportedContextBudget ?? contextWindowForModel(activeChatModelId).tokens,
-                compactAtTokens: reportedCompactAt,
-              })}
             />
             <IconButton
               title="MCP and skills"
@@ -1884,9 +1864,10 @@ function MentionEmpty({ text }: { text: string }) {
   );
 }
 
-// A pasted/dropped image shows as a small square thumbnail (not a filename
-// chip): the pixels ARE the information. The remove control overlays the
-// corner; a broken file:// load degrades to the plain filename chip.
+// A pasted/dropped image shows as an actual preview, not a filename chip. A
+// direct file:// source is cheap in the packaged renderer; dev servers block
+// that protocol, so the first load error retries through the existing bounded
+// fs IPC and a temporary blob URL. Only an unreadable image degrades to a chip.
 function ImageAttachmentThumb({
   sourcePath,
   name,
@@ -1897,10 +1878,52 @@ function ImageAttachmentThumb({
   onRemove: () => void;
 }) {
   const [removeHover, setRemoveHover] = useState(false);
+  const [directLoadFailed, setDirectLoadFailed] = useState(false);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    if (!directLoadFailed) return;
+    let cancelled = false;
+    let createdUrl: string | null = null;
+    void window.spark.fs
+      .readFileBytes(sourcePath)
+      .then((bytes) => {
+        createdUrl = URL.createObjectURL(
+          new Blob([bytes.buffer as ArrayBuffer], { type: imageMimeType(sourcePath) }),
+        );
+        if (cancelled) {
+          URL.revokeObjectURL(createdUrl);
+          return;
+        }
+        setBlobUrl(createdUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setBroken(true);
+      });
+    return () => {
+      cancelled = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [directLoadFailed, sourcePath]);
+
   if (broken) {
     return (
       <AttachmentChip kind="image" name={name} title={sourcePath} onRemove={onRemove} />
+    );
+  }
+  if (directLoadFailed && !blobUrl) {
+    return (
+      <span
+        aria-label={`Loading preview for ${name}`}
+        style={{
+          width: 112,
+          height: 64,
+          borderRadius: "var(--radius-control, 7px)",
+          border: "1px solid var(--rule-soft)",
+          background: "color-mix(in oklab, var(--ink) 4%, transparent)",
+        }}
+      />
     );
   }
   return (
@@ -1909,13 +1932,18 @@ function ImageAttachmentThumb({
       style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}
     >
       <img
-        src={pathToFileUrl(sourcePath)}
+        src={blobUrl ?? pathToFileUrl(sourcePath)}
         alt={name}
-        onError={() => setBroken(true)}
+        onError={() => {
+          if (blobUrl) setBroken(true);
+          else setDirectLoadFailed(true);
+        }}
         style={{
-          width: 46,
-          height: 46,
-          objectFit: "cover",
+          width: "auto",
+          height: "auto",
+          maxWidth: 220,
+          maxHeight: 104,
+          objectFit: "contain",
           display: "block",
           borderRadius: "var(--radius-control, 7px)",
           border: "1px solid var(--rule-soft)",
@@ -1957,6 +1985,25 @@ function ImageAttachmentThumb({
       </button>
     </span>
   );
+}
+
+function imageMimeType(path: string): string {
+  const extension = path.toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/)?.[1];
+  switch (extension) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "avif":
+      return "image/avif";
+    case "svg":
+      return "image/svg+xml";
+    default:
+      return "image/png";
+  }
 }
 
 function AttachmentChip({

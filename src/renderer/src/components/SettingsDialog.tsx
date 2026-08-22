@@ -2523,9 +2523,17 @@ function AccountsSettings() {
       if (!card.cli) return;
       const { runtime, profileId } = card.cli;
       void (async () => {
+        let closedSessionCount = 0;
         const changed = await mutateCli(
           { runtime, profileId, action: "setting-default" },
-          () => window.spark.nativeCliAccounts.setDefault({ runtime, profileId }),
+          async () => {
+            const result = await window.spark.nativeCliAccounts.setDefault({
+              runtime,
+              profileId,
+            });
+            closedSessionCount = result.closedSessionCount ?? 0;
+            return result;
+          },
         );
         if (!changed) return;
         const cliLabel = familyForRuntime(runtime).cliLabel;
@@ -2534,14 +2542,16 @@ function AccountsSettings() {
           detail: { runtime, profileId, label: card.label },
         });
         const opened = !window.dispatchEvent(event);
+        const closedCopy =
+          closedSessionCount > 0
+            ? ` Closed ${closedSessionCount} running ${cliLabel} ${
+                closedSessionCount === 1 ? "session" : "sessions"
+              } first.`
+            : "";
         setCliNotice(
-          runtime === "codex"
-            ? opened
-              ? `Opened ${cliLabel} with ${card.label}. New terminal sessions use this account too; existing Codex processes keep their current sign-in.`
-              : `${card.label} will be used by new ${cliLabel} and terminal sessions. Existing Codex processes keep their current sign-in.`
-            : opened
-              ? `Opened a new ${cliLabel} session with ${card.label}. Existing sessions keep their current sign-in.`
-              : `${card.label} will be used by new Studio ${cliLabel} sessions. Existing sessions keep their current sign-in.`,
+          opened
+            ? `Switched ${cliLabel} to ${card.label}.${closedCopy} Opened a fresh session.`
+            : `Switched ${cliLabel} to ${card.label}.${closedCopy}`,
         );
       })();
     },
@@ -2558,7 +2568,7 @@ function AccountsSettings() {
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="Accounts"
-        detail="Each account can be the one Cora uses, the one the terminal uses, or both. Cora switches immediately. A CLI switch opens a fresh Studio session; already-running processes keep their sign-in. Verified matches share one card."
+        detail="Each account can be the one Cora uses, the one the terminal uses, or both. Cora switches immediately. A CLI switch safely closes that CLI's running sessions before changing accounts, then opens a fresh session. Verified matches share one card."
       />
       <div style={{ display: "grid", gap: 10 }}>
         {overview?.profiles || cliInspection ? (

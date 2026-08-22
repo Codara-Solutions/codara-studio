@@ -24,6 +24,7 @@ function createController() {
     activeProfileLeases: new Map(),
     currentDefaultProfileId: "00000000-0000-4000-8000-000000000001",
     currentDefaultClaudeProfileId: "10000000-0000-4000-8000-000000000001",
+    currentDefaultGrokProfileId: "20000000-0000-4000-8000-000000000001",
     failNextLocalSpawn: false,
     gates: [],
     channels: [],
@@ -88,6 +89,16 @@ function createController() {
           ...process.env,
           CLAUDE_CONFIG_DIR:
             selected === "personal" ? undefined : `/claude-profiles/${selected}`,
+        },
+      };
+    },
+    resolveGrokProfile(profileId) {
+      const selected = profileId ?? controller.currentDefaultGrokProfileId;
+      return {
+        profileId: selected,
+        env: {
+          ...process.env,
+          GROK_HOME: `/grok-profiles/${selected}`,
         },
       };
     },
@@ -195,6 +206,17 @@ function stubPlugin() {
         return globalThis.__codaraPtySpawnHarness.acquireProfile(profileId, ownerId);
       }
     `,
+    "./orchestration/native-grok-profile-runtime": `
+      export function resolveNewNativeGrokProfile() {
+        return Promise.resolve(globalThis.__codaraPtySpawnHarness.resolveGrokProfile());
+      }
+      export function resolveFrozenNativeGrokProfile(profileId) {
+        return Promise.resolve(globalThis.__codaraPtySpawnHarness.resolveGrokProfile(profileId ?? "personal"));
+      }
+      export function acquireNativeGrokProfileLease(profileId, ownerId) {
+        return globalThis.__codaraPtySpawnHarness.acquireProfile(profileId, ownerId);
+      }
+    `,
     "./orchestration/codex-cli-profile-execution": `
       export function buildCodexCliSharedEnvironment(baseEnv) {
         const env = {};
@@ -225,6 +247,18 @@ function stubPlugin() {
           if (typeof value === "string") env[key] = value;
         }
         if (configDir !== null) env.CLAUDE_CONFIG_DIR = configDir;
+        return env;
+      }
+    `,
+    "./orchestration/grok-cli-profile-execution": `
+      export function buildGrokCliProfileEnvironment(baseEnv, grokHome) {
+        const env = {};
+        for (const [key, value] of Object.entries(baseEnv)) {
+          const upper = key.toUpperCase();
+          if (upper === "GROK_HOME" || upper === "XAI_API_KEY") continue;
+          if (typeof value === "string") env[key] = value;
+        }
+        env.GROK_HOME = grokHome;
         return env;
       }
     `,
@@ -291,6 +325,12 @@ const localClaudeOptions = (id, nativeClaudeProfileId) => ({
   ...localOptions(id),
   startupCommand: "claude --dangerously-skip-permissions",
   nativeClaudeProfileId,
+});
+
+const localGrokOptions = (id, nativeGrokProfileId) => ({
+  ...localOptions(id),
+  startupCommand: "grok --yolo",
+  nativeGrokProfileId,
 });
 
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
@@ -508,6 +548,29 @@ async function main() {
     delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
     delete process.env.CLAUDE_CODE_HOST_CREDS_FILE;
 
+    // Account activation closes exactly one CLI family through the same
+    // graceful PTY path used at app quit. Other agent families stay alive and
+    // every closed pane releases its account lease before selection changes.
+    const closeCodex = await pty.spawn(localCodexOptions("switch-codex"));
+    const keepClaude = await pty.spawn(localClaudeOptions("switch-claude"));
+    const closeGrok = await pty.spawn(localGrokOptions("switch-grok"));
+    const codexClosed = await pty.disposeNativeCliRuntimeGraceful("codex", 0);
+    assert.equal(codexClosed.closedSessionCount, 1);
+    assert.equal(pty.exists(closeCodex.id), false);
+    assert.equal(pty.exists(keepClaude.id), true);
+    assert.equal(pty.exists(closeGrok.id), true);
+    assert.equal(
+      controller.activeProfileLeases.has("terminal:switch-codex"),
+      false,
+    );
+    const grokClosed = await pty.disposeNativeCliRuntimeGraceful("grok", 0);
+    assert.equal(grokClosed.closedSessionCount, 1);
+    assert.equal(pty.exists(closeGrok.id), false);
+    assert.equal(pty.exists(keepClaude.id), true);
+    const claudeClosed = await pty.disposeNativeCliRuntimeGraceful("claude", 0);
+    assert.equal(claudeClosed.closedSessionCount, 1);
+    assert.equal(pty.exists(keepClaude.id), false);
+
     // Failure must release the id. The queued caller retries the complete
     // transaction and is allowed to create the session.
     const failed = pty.spawn(remoteOptions("recover-id", "recover-host"));
@@ -564,6 +627,7 @@ async function main() {
     console.log("PASS same-id local profile-loading spawns create one process");
     console.log("PASS failed spawns release queued same-id callers");
     console.log("PASS native Codex terminal profiles freeze defaults, sanitize env, and release leases");
+    console.log("PASS account switching gracefully closes exactly one native CLI family");
     console.log("PASS PTY resource snapshots fence same-id replacements by generation");
     console.log("PASS different session ids remain concurrent");
   } finally {

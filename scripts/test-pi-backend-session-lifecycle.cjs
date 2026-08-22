@@ -32,6 +32,8 @@ function createHarness() {
     launches: 0,
     nextStart: null,
     nextPromptError: null,
+    promptReplies: [],
+    turnOptions: [],
     // Stands in for AppSettings.openAiFastMode, which the composer's flash
     // button writes. Anthropic never sees it.
     fastMode: false,
@@ -102,6 +104,7 @@ async function loadBackend() {
       module.exports = {
         cleanupPiMcpBridgeConfig: async (plan) => h().cleanupPlan(plan),
         createCodaraPiLaunchPlan: async (options) => h().createPlan(options),
+        resolveCodaraOpenRouterApiKey: async () => "test-openrouter-key",
         resolveCodaraPiExecutionAccount: async (request) => h().resolveAccount(request),
         resolveCodaraPiFastMode: async (provider) => h().fastModeFor(provider),
       };`,
@@ -145,12 +148,16 @@ async function loadBackend() {
             const error = h().nextPromptError;
             h().nextPromptError = null;
             if (error) throw error;
+            const reply = h().promptReplies.length > 0
+              ? h().promptReplies.shift()
+              : "ok";
             for (const listener of [...this.listeners]) {
               listener({
                 type: "message_end",
                 message: {
                   role: "assistant",
-                  content: [{ type: "text", text: "ok" }],
+                  id: "assistant-" + this.prompts.length,
+                  content: reply ? [{ type: "text", text: reply }] : [],
                 },
               });
               listener({ type: "agent_settled" });
@@ -166,21 +173,28 @@ async function loadBackend() {
           Object.entries(expected).every(([key, value]) => session[key] === value),
       };`,
     "./pi-turn": `
+      const h = () => globalThis.${HARNESS_KEY};
       module.exports = {
         PiTurnAccumulator: class {
-          constructor() { this.finalText = ""; }
+          constructor(_onStream, options) {
+            h().turnOptions.push(options ?? {});
+            this.finalText = "";
+            this.assistantIds = new Set();
+          }
           consume(event) {
             if (event.type === "message_end") {
+              this.assistantIds.add(event.message?.id ?? "assistant-unknown");
               this.finalText = event.message?.content?.[0]?.text ?? "";
             }
           }
           result() {
             return {
               finalText: this.finalText,
+              assistantMessageCount: this.assistantIds.size,
               toolCalls: [],
               successfulToolCalls: [],
               providerResponseIds: [],
-              usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
+              usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 },
               contextTokens: 0,
               contextWindowTokens: null,
               failure: null,
@@ -497,6 +511,54 @@ async function testFastModeIsPartOfSessionIdentity(backend, harness) {
   await backend.disposeChat("run-fast-mode-anthropic");
 }
 
+async function testEmptyFinalGetsOneRecoveryPrompt(backend, harness) {
+  harness.promptReplies.push("", "Recovered final response");
+  const result = await backend.requestManagerDecision(
+    requestInput("run-empty-final-recovery"),
+  );
+  const client = harness.clients.at(-1);
+  assert.equal(client.prompts.length, 2, "an explicit empty final gets exactly one retry");
+  assert.match(client.prompts[1], /final assistant message was empty/);
+  assert.equal(result.turnFailed, undefined);
+  assert.equal(result.decision.reply, "Recovered final response");
+  await backend.disposeChat("run-empty-final-recovery");
+}
+
+async function testRepeatedEmptyFinalFailsClearly(backend, harness) {
+  harness.promptReplies.push("", "");
+  const result = await backend.requestManagerDecision(
+    requestInput("run-empty-final-failure"),
+  );
+  const client = harness.clients.at(-1);
+  assert.equal(client.prompts.length, 2, "empty-final recovery must not loop forever");
+  assert.equal(result.turnFailed, true);
+  assert.match(result.notice, /without a final response after one retry/);
+  assert.match(result.decision.reply, /without a final response after one retry/);
+  await backend.disposeChat("run-empty-final-failure");
+}
+
+async function testCostCaptureUsesProviderBoundary(backend, harness) {
+  await backend.requestManagerDecision(
+    requestInput("run-native-cost-boundary", "gpt-5.6-sol"),
+  );
+  assert.equal(
+    harness.turnOptions.at(-1)?.captureCost,
+    false,
+    "a native subscription model must not capture catalog cost",
+  );
+  await backend.disposeChat("run-native-cost-boundary");
+
+  await backend.requestManagerDecision(
+    requestInput("run-openrouter-cost-boundary", "stealth/ox-alpha"),
+  );
+  assert.equal(
+    harness.turnOptions.at(-1)?.captureCost,
+    true,
+    "an OpenRouter model must capture its provider-priced usage",
+  );
+  await backend.disposeChat("run-openrouter-cost-boundary");
+}
+
 async function main() {
   const harness = createHarness();
   globalThis[HARNESS_KEY] = harness;
@@ -507,8 +569,11 @@ async function main() {
   await testFailedTurnStopsItsWholeRuntime(backend, harness);
   await testSupersedingRequestReclaimsPendingOwner(backend, harness);
   await testFastModeIsPartOfSessionIdentity(backend, harness);
+  await testEmptyFinalGetsOneRecoveryPrompt(backend, harness);
+  await testRepeatedEmptyFinalFailsClearly(backend, harness);
+  await testCostCaptureUsesProviderBoundary(backend, harness);
   console.log(
-    "PASS Pi pending ownership, revoke-before-stop, stale-start rejection, lease rotation, and fast-mode identity",
+    "PASS Pi ownership, lease rotation, fast-mode identity, and empty-final recovery",
   );
 }
 

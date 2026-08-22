@@ -228,7 +228,10 @@ export default function AgentCapabilitiesDialog({
   const [profiles, setProfiles] = useState<CoraProfile[]>([]);
   const [profileName, setProfileName] = useState("");
   const [profileDescription, setProfileDescription] = useState("");
-  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileOperation, setProfileOperation] = useState<
+    "switching" | "creating" | "deleting" | null
+  >(null);
+  const profileBusy = profileOperation !== null;
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
   // Whether the form is still mounted when an async save settles. A save that
@@ -422,7 +425,7 @@ export default function AgentCapabilitiesDialog({
   };
 
   const useProfile = (reference: string) => {
-    setProfileBusy(true);
+    setProfileOperation("switching");
     setStatus(null);
     void window.spark.coraProfiles
       .use(reference)
@@ -432,14 +435,14 @@ export default function AgentCapabilitiesDialog({
         setMemory(await window.spark.memory.get(workspaceId));
       })
       .catch((err) => setStatus((err as Error).message))
-      .finally(() => setProfileBusy(false));
+      .finally(() => setProfileOperation(null));
   };
 
   const createProfile = (event: React.FormEvent) => {
     event.preventDefault();
     const name = profileName.trim();
     if (!name) return;
-    setProfileBusy(true);
+    setProfileOperation("creating");
     setStatus(null);
     void window.spark.coraProfiles
       .create({ name, description: profileDescription.trim() || undefined })
@@ -453,7 +456,26 @@ export default function AgentCapabilitiesDialog({
         setStatus(`${name} is now the default profile for new Cora chats.`);
       })
       .catch((err) => setStatus((err as Error).message))
-      .finally(() => setProfileBusy(false));
+      .finally(() => setProfileOperation(null));
+  };
+
+  const deleteProfile = (profile: Pick<CoraProfile, "id" | "name">) => {
+    if (profile.id === "default") return;
+    setProfileOperation("deleting");
+    setStatus(null);
+    void window.spark.coraProfiles
+      .delete(profile.id)
+      .then(async (result) => {
+        setProfiles(result.profiles);
+        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
+        setMemory(await window.spark.memory.get(workspaceId));
+        const movedChats = result.reassignedRunCount > 0
+          ? ` ${result.reassignedRunCount} existing chat${result.reassignedRunCount === 1 ? " was" : "s were"} moved to built-in Cora.`
+          : "";
+        setStatus(`${result.deletedProfile.name} was deleted.${movedChats}`);
+      })
+      .catch((err) => setStatus((err as Error).message))
+      .finally(() => setProfileOperation(null));
   };
 
   // The listener lives in App.tsx and owns the editor tabs, so opening a file
@@ -918,14 +940,24 @@ export default function AgentCapabilitiesDialog({
                       </span>
                     </label>
                     {memory && memory.profile.id !== "default" ? (
-                      <button
-                        type="button"
-                        className="spark-btn"
-                        style={smallBtnStyle}
-                        onClick={() => openMemoryFile(memory.profile.identityPath)}
-                      >
-                        Edit {memory.profile.name}
-                      </button>
+                      <div style={profileActionsStyle}>
+                        <button
+                          type="button"
+                          className="spark-btn"
+                          style={smallBtnStyle}
+                          disabled={profileBusy}
+                          onClick={() => openMemoryFile(memory.profile.identityPath)}
+                        >
+                          Edit {memory.profile.name}
+                        </button>
+                        <ConfirmRemoveButton
+                          busy={profileBusy}
+                          disabled={false}
+                          label={`Delete ${memory.profile.name}`}
+                          title={`Delete ${memory.profile.name} and move its identity and memories to Trash`}
+                          onConfirm={() => deleteProfile(memory.profile)}
+                        />
+                      </div>
                     ) : null}
                   </div>
 
@@ -962,7 +994,7 @@ export default function AgentCapabilitiesDialog({
                       style={smallBtnStyle}
                       disabled={profileBusy || profileName.trim().length === 0}
                     >
-                      {profileBusy ? "Creating…" : "Create & use"}
+                      {profileOperation === "creating" ? "Creating…" : "Create & use"}
                     </button>
                   </form>
 
@@ -3039,6 +3071,13 @@ const profilePickerStyle: React.CSSProperties = {
 const profileCreatorStyle: React.CSSProperties = {
   ...profilePickerStyle,
   marginTop: 10,
+};
+
+const profileActionsStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 8,
 };
 
 const profileCreatorHeadingStyle: React.CSSProperties = {

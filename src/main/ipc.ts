@@ -93,6 +93,7 @@ import {
   nativeCliAccounts,
   NativeCliAccountError,
 } from "./orchestration/native-cli-accounts";
+import { shutdownExternalNativeCliProcesses } from "./orchestration/native-cli-process-shutdown";
 import { focusStudioWindow } from "./window-focus";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
@@ -350,6 +351,7 @@ import type {
   CoraMemoryStatus,
   CoraProfile,
   CoraProfileCreateInput,
+  CoraProfileDeleteResult,
   MemoryClearInput,
   MemorySetEnabledInput,
   MemoryStatusInput,
@@ -860,6 +862,19 @@ function handleOpen(channel: string, listener: InvokeListener): void {
 void handleOpen;
 
 export function registerIpc(): void {
+  // Account selection is a runtime-wide transaction. First give every
+  // Codara-owned terminal the normal PTY close path so transcripts flush,
+  // then close matching CLI sessions started in other local terminals. Only
+  // after both stages settle may native-cli-accounts change the selection.
+  nativeCliAccounts.setSessionShutdown(async (runtime) => {
+    const studio = await pty.disposeNativeCliRuntimeGraceful(runtime);
+    const external = await shutdownExternalNativeCliProcesses(runtime);
+    return {
+      closedSessionCount:
+        studio.closedSessionCount + external.closedProcessCount,
+    };
+  });
+
   handle("state:load", async (): Promise<AppState> => {
     return loadState();
   });
@@ -1330,6 +1345,52 @@ export function registerIpc(): void {
       const { listCoraProfiles, setDefaultCoraProfile } = await import("./orchestration/cora-profiles");
       await setDefaultCoraProfile(reference);
       return listCoraProfiles();
+    },
+  );
+
+  handle(
+    "cora-profiles:delete",
+    async (_e, reference: string): Promise<CoraProfileDeleteResult> => {
+      const {
+        DEFAULT_CORA_PROFILE_ID,
+        deleteCoraProfile,
+        listCoraProfiles,
+        resolveCoraProfile,
+      } = await import("./orchestration/cora-profiles");
+      const target = resolveCoraProfile(reference);
+      if (target.id === DEFAULT_CORA_PROFILE_ID) {
+        throw new Error("The built-in Cora profile cannot be deleted.");
+      }
+
+      const runStore = await getRunStore();
+      const firstPass = await runStore.reassignCoraProfileRuns(
+        target.id,
+        DEFAULT_CORA_PROFILE_ID,
+      );
+      const deleted = await deleteCoraProfile(target.id);
+      // A run may have started after the first list but before profiles.json
+      // committed. Now that the id cannot be selected, one final pass closes
+      // that race before the isolated data directory leaves the machine.
+      const secondPass = await runStore.reassignCoraProfileRuns(
+        target.id,
+        DEFAULT_CORA_PROFILE_ID,
+      );
+      await coraMemory.deleteProfileMemoryState(target.id);
+      if (deleted.stagedDataPath) {
+        try {
+          await shell.trashItem(deleted.stagedDataPath);
+        } catch (err) {
+          // The registry and runs are already safe. Preserve the staged folder
+          // for manual recovery/cleanup rather than reporting that the profile
+          // still exists or permanently deleting it as a fallback.
+          console.warn("[cora-profiles] could not move deleted profile data to trash", err);
+        }
+      }
+      return {
+        profiles: listCoraProfiles(),
+        deletedProfile: { id: deleted.profile.id, name: deleted.profile.name },
+        reassignedRunCount: firstPass + secondPass,
+      };
     },
   );
 

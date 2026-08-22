@@ -8,12 +8,8 @@
  * byte-contract test bundles this module and runs the real table instead.
  */
 
-import {
-  chatContextCapacityTokens,
-  resolveCompactAtTokens,
-} from "@shared/context-compaction";
-import { contextWindowForModel } from "@shared/context-window";
-import type { ChatBackendKind, SparkCall } from "@shared/types";
+import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
+import type { SparkCall } from "@shared/types";
 
 /** Occupancy and the ceiling it is measured against, both in context tokens. */
 export interface RemoteCoraRunContextGauge {
@@ -23,7 +19,6 @@ export interface RemoteCoraRunContextGauge {
 
 /** Exactly the run fields the gauge reads; RunState satisfies it structurally. */
 export interface RemoteCoraRunContextSource {
-  chatBackend?: ChatBackendKind;
   sparkCalls: readonly SparkCall[];
 }
 
@@ -46,26 +41,18 @@ const MANAGER_TURN_MODES = new Set<SparkCall["mode"]>([
  * estimate when the backend reported none. Same preference RunsView's context
  * readout uses.
  *
- * Denominator: `chatContextCapacityTokens`, i.e. the EFFECTIVE ceiling the
- * conversation actually reaches (Pi's early-compaction cap, Claude's 1M
- * normalization), not the raw model window. The inputs mirror ChatComposer's
- * ContextPill and maybeAutoCompactConversation exactly.
+ * Denominator: Cora's visible 256k product target, exactly matching the
+ * desktop ContextPill. Provider-specific safety ceilings remain operational
+ * details for auto-compaction; using one here while labelling the desktop
+ * gauge 256k made identical usage render as two different percentages.
  *
- * `compactAtTokens` is persisted nowhere: it is the app-wide
- * CODARA_PI_COMPACT_AT_TOKENS launch value that the composer only learns from a
- * live chat.usage event, so a reopened chat has nothing on the run or the
- * SparkCall to read it back from. This runs inside the very main process that
- * stamps the Pi session, so it resolves the override from the environment the
- * way the auto-compaction trigger does rather than guessing from a field.
- *
- * Undefined when no turn reported usage or the capacity is unusable — a remote
- * client then shows no gauge, exactly as it would against an older Studio.
+ * Undefined when no turn reported usage — a remote client then shows no gauge,
+ * exactly as it would against an older Studio.
  */
 export function remoteCoraRunContext(
   run: RemoteCoraRunContextSource,
 ): RemoteCoraRunContextGauge | undefined {
   let usedTokens: number | undefined;
-  let call: SparkCall | undefined;
   for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
     const entry = run.sparkCalls[index];
     // The auto-compaction summarize call runs against the OUTGOING session, so
@@ -82,26 +69,9 @@ export function remoteCoraRunContext(
       reported > 0
     ) {
       usedTokens = Math.floor(reported);
-      call = entry;
       break;
     }
   }
-  if (usedTokens === undefined || !call) return undefined;
-  const budgetTokens = chatContextCapacityTokens({
-    // The window the SAME turn reported, so numerator and denominator always
-    // describe one request. Only when it reported none does the model's
-    // catalogued window stand in.
-    contextWindowTokens:
-      typeof call.contextWindowTokens === "number" &&
-      call.contextWindowTokens > 0
-        ? call.contextWindowTokens
-        : contextWindowForModel(call.model).tokens,
-    compactAtTokens: resolveCompactAtTokens(
-      process.env.CODARA_PI_COMPACT_AT_TOKENS,
-    ),
-  });
-  // Defensive: no catalogued window is zero, so this only guards a future
-  // capacity rule that could return one. A zero denominator would divide.
-  if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return undefined;
-  return { usedTokens, budgetTokens: Math.floor(budgetTokens) };
+  if (usedTokens === undefined) return undefined;
+  return { usedTokens, budgetTokens: DEFAULT_PI_COMPACT_AT_TOKENS };
 }

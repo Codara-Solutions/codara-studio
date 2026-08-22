@@ -39,6 +39,15 @@ const sidebar = fs.readFileSync(
 );
 const preload = fs.readFileSync(path.join(__dirname, "..", "src", "preload", "index.ts"), "utf8");
 const agentSync = fs.readFileSync(path.join(__dirname, "..", "src", "main", "agent-sync.ts"), "utf8");
+const ipc = fs.readFileSync(path.join(__dirname, "..", "src", "main", "ipc.ts"), "utf8");
+const profiles = fs.readFileSync(
+  path.join(__dirname, "..", "src", "main", "orchestration", "cora-profiles.ts"),
+  "utf8",
+);
+const runStore = fs.readFileSync(
+  path.join(__dirname, "..", "src", "main", "orchestration", "run-store.ts"),
+  "utf8",
+);
 
 // Worker routing is a Cora capability, not an API/model preference. Keep the
 // editor and its persisted AppSettings draft in this dialog only.
@@ -141,6 +150,19 @@ assert.match(source, /description: profileDescription\.trim\(\) \|\| undefined/)
 assert.match(composer, /<ProfilePicker/);
 assert.match(composer, /profileId: latestDraft\?\.profileId \?\? draftCoraProfileId/);
 assert.match(sidebar, /coraProfileId: chatConfig\?\.profileId/);
+
+// Named profiles have a confirmed delete path at every layer. Built-in Cora
+// stays protected, existing chats are reassigned, and a draft picker that held
+// the removed id falls back instead of failing its next send.
+assert.match(source, /label=\{`Delete \$\{memory\.profile\.name\}`\}/);
+assert.match(source, /<ConfirmRemoveButton[\s\S]{0,350}?deleteProfile\(memory\.profile\)/);
+assert.match(preload, /delete: \(reference: string\): Promise<CoraProfileDeleteResult>/);
+assert.match(ipc, /"cora-profiles:delete"/);
+assert.match(ipc, /reassignCoraProfileRuns\([\s\S]{0,120}?target\.id/);
+assert.match(ipc, /shell\.trashItem\(deleted\.stagedDataPath\)/);
+assert.match(profiles, /The built-in Cora profile cannot be deleted\./);
+assert.match(runStore, /export async function reassignCoraProfileRuns/);
+assert.match(composer, /if \(!next\.some\(\(item\) => item\.id === current\)\)/);
 
 console.log(
   "PASS Capability Center separates Codara access from external CLI configuration",

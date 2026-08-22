@@ -1,5 +1,5 @@
-// Shared user-state surfaces between the personal CLI home (~/.claude /
-// ~/.codex) and every Codara-managed account directory.
+// Shared user-state surfaces between the personal CLI homes used by Claude
+// and Grok and every Codara-managed account directory.
 //
 // A managed account used to be a born-empty, fully isolated config dir, so
 // switching the Active account meant an empty /resume, no settings, and no
@@ -28,7 +28,7 @@ import { promises as fs } from "node:fs";
 import type { Stats } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-export type NativeCliSharedStateRuntime = "claude" | "codex" | "grok";
+export type NativeCliSharedStateRuntime = "claude" | "grok";
 
 /**
  * How one shared name is established/healed:
@@ -120,35 +120,6 @@ export const CLAUDE_CLI_PRIVATE_STATE_NAMES: readonly string[] = [
   "statusline-command.sh",
 ];
 
-/**
- * Codex state shared with the personal home. `memories` is the DIRECTORY
- * only — the top-level *.sqlite databases (and their -wal/-shm journals)
- * remain per-account in v1: concurrent writers from two accounts aliasing
- * one database file is a corruption risk the flat JSONL surfaces don't have.
- */
-export const CODEX_CLI_SHARED_STATE: readonly NativeCliSharedStateName[] = [
-  { name: "sessions", kind: "dir", heal: "link" },
-  { name: "archived_sessions", kind: "dir", heal: "link" },
-  { name: "prompts", kind: "dir", heal: "link" },
-  { name: "skills", kind: "dir", heal: "link" },
-  { name: "plugins", kind: "dir", heal: "link" },
-  { name: "memories", kind: "dir", heal: "link" },
-  { name: "generated_images", kind: "dir", heal: "link" },
-  { name: "visualizations", kind: "dir", heal: "link" },
-  { name: "session_index.jsonl", kind: "file", heal: "line-union" },
-  { name: "history.jsonl", kind: "file", heal: "line-union" },
-  { name: "config.toml", kind: "file", heal: "newest-wins" },
-  { name: "AGENTS.md", kind: "file", heal: "newest-wins" },
-  { name: "ssh-config.toml", kind: "file", heal: "newest-wins" },
-];
-
-/**
- * Codex names that deliberately stay per-account. auth.json is the
- * credential; browser/ and computer-use/ carry auth-adjacent browser state.
- * Like the Claude list, this only informs the log — privacy is the default.
- * (.codex-global-state.json, .personality_migration, .sandbox_migration and
- * config.toml.bak* are covered by the dot-prefix/backup-suffix rules.)
- */
 export const GROK_CLI_SHARED_STATE: readonly NativeCliSharedStateName[] = [
   { name: "sessions", kind: "dir", heal: "link" },
   { name: "skills", kind: "dir", heal: "link" },
@@ -170,28 +141,6 @@ export const GROK_CLI_PRIVATE_STATE_NAMES: readonly string[] = [
   "version.json",
 ];
 
-export const CODEX_CLI_PRIVATE_STATE_NAMES: readonly string[] = [
-  "auth.json",
-  "log",
-  "ipc",
-  "tmp",
-  "installation_id",
-  "version.json",
-  "models_cache.json",
-  "cache",
-  "shell_snapshots",
-  "browser",
-  "computer-use",
-  "mcp-oauth-locks",
-  "node_repl",
-  "pets",
-  "process_manager",
-  "recovery_backups",
-  "sqlite",
-  "vendor_imports",
-  "chrome-native-hosts-v2.json",
-];
-
 export const CLAUDE_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
   CLAUDE_CLI_SHARED_STATE.filter((entry) => entry.kind === "dir").map((entry) => entry.name),
 );
@@ -205,9 +154,9 @@ export const GROK_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
   GROK_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
 );
 export interface EnsureSharedCliStateInput {
-  /** A Codara-managed account directory (CLAUDE_CONFIG_DIR / CODEX_HOME). */
+  /** A Codara-managed account directory (CLAUDE_CONFIG_DIR / GROK_HOME). */
   managedDir: string;
-  /** The personal home the state is shared with (~/.claude / ~/.codex). */
+  /** The personal home the state is shared with (~/.claude / ~/.grok). */
   personalDir: string;
   runtime: NativeCliSharedStateRuntime;
 }
@@ -267,8 +216,7 @@ function sharedStateSpec(
   runtime: NativeCliSharedStateRuntime,
 ): readonly NativeCliSharedStateName[] {
   if (runtime === "claude") return CLAUDE_CLI_SHARED_STATE;
-  if (runtime === "grok") return GROK_CLI_SHARED_STATE;
-  return CODEX_CLI_SHARED_STATE;
+  return GROK_CLI_SHARED_STATE;
 }
 
 function isRecognizedPersonalName(
@@ -277,12 +225,9 @@ function isRecognizedPersonalName(
 ): boolean {
   if (name.startsWith(".")) return true; // dot-prefixed misc (.DS_Store, .last-*, migrations)
   if (sharedStateSpec(runtime).some((entry) => entry.name === name)) return true;
-  const privateNames =
-    runtime === "claude"
-      ? CLAUDE_CLI_PRIVATE_STATE_NAMES
-      : runtime === "grok"
-        ? GROK_CLI_PRIVATE_STATE_NAMES
-        : CODEX_CLI_PRIVATE_STATE_NAMES;
+  const privateNames = runtime === "claude"
+    ? CLAUDE_CLI_PRIVATE_STATE_NAMES
+    : GROK_CLI_PRIVATE_STATE_NAMES;
   if (privateNames.includes(name)) return true;
   if (name.includes(".sqlite") || isSqliteArtifactName(name)) return true;
   // Backup copies users, tools, and this module leave beside the originals.

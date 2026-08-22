@@ -2,10 +2,11 @@
 "use strict";
 
 // Guard for the shared CLI state layer (native-cli-shared-state.ts): managed
-// Claude/Codex accounts share the user-state surfaces (chats, settings,
-// history) with the personal home via symlinks, keeping only credentials and
-// identity per-account. Runs entirely against temp dirs — never the real
-// ~/.claude, ~/.codex, or ~/.Codara.
+// Claude/Grok accounts share explicitly allowlisted user-state surfaces with
+// the personal home via symlinks, keeping credentials and identity
+// per-account. Codex deliberately is not part of this layer: its managed slots
+// are auth-only vaults and every launch uses the ordinary ~/.codex home. Runs
+// entirely against temp dirs — never the real CLI homes or ~/.Codara.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -221,31 +222,7 @@ async function testJsonlLineUnion() {
     .filter(Boolean);
   assert.deepEqual(lines, ['{"line":"A"}', '{"line":"B"}', '{"line":"C"}', '{"line":"D"}']);
 
-  // The codex session index gets the same lossless union: a compacted side
-  // never erases the other side's exclusive lines.
-  const codexPersonal = path.join(TMP, "codex-index", "personal");
-  const codexManaged = path.join(TMP, "codex-index", "managed");
-  fs.mkdirSync(codexPersonal, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(codexManaged, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(codexPersonal, "session_index.jsonl"), '{"id":"X"}\n');
-  fs.writeFileSync(path.join(codexManaged, "session_index.jsonl"), '{"id":"X"}\n{"id":"Y"}\n');
-  const codexResult = await shared.ensureSharedCliState({
-    managedDir: codexManaged,
-    personalDir: codexPersonal,
-    runtime: "codex",
-  });
-  assert.equal(outcomeOf(codexResult, "session_index.jsonl"), "healed-file");
-  assert.ok(
-    isLinkTo(
-      path.join(codexManaged, "session_index.jsonl"),
-      path.join(codexPersonal, "session_index.jsonl"),
-    ),
-  );
-  assert.equal(
-    fs.readFileSync(path.join(codexPersonal, "session_index.jsonl"), "utf8"),
-    '{"id":"X"}\n{"id":"Y"}\n',
-  );
-  console.log("PASS history.jsonl and session_index.jsonl heal as a lossless line union");
+  console.log("PASS history.jsonl heals as a lossless line union");
 }
 
 async function testRealDirectoryMigration() {
@@ -306,67 +283,6 @@ async function testInterruptedMigrationRecovery() {
   );
   assert.equal(fs.existsSync(stage), false, "the recovered stage must be cleaned up");
   console.log("PASS an interrupted migration stage is recovered on the next heal");
-}
-
-async function testCodexFreshAndDeepMerge() {
-  const personal = path.join(TMP, "codex", "personal");
-  const managed = path.join(TMP, "codex", "managed");
-  fs.mkdirSync(personal, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(managed, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(personal, "config.toml"), 'model = "personal"\n', { mode: 0o600 });
-  fs.writeFileSync(path.join(personal, "auth.json"), "PERSONAL_CODEX_CREDENTIAL", { mode: 0o600 });
-  fs.mkdirSync(path.join(personal, "sessions", "2026", "08", "04"), { recursive: true });
-  fs.writeFileSync(
-    path.join(personal, "sessions", "2026", "08", "04", "rollout-personal.jsonl"),
-    "personal rollout\n",
-  );
-  fs.writeFileSync(path.join(managed, "auth.json"), "MANAGED_CODEX_CREDENTIAL", { mode: 0o600 });
-  // Pre-feature managed sessions nest by DATE: the merge must recurse past
-  // one level or a whole month of transcripts would be stashed on collision.
-  fs.mkdirSync(path.join(managed, "sessions", "2026", "08", "04"), { recursive: true });
-  fs.writeFileSync(
-    path.join(managed, "sessions", "2026", "08", "04", "rollout-managed.jsonl"),
-    "managed rollout\n",
-  );
-  // SQLite artifacts inside a shared dir must never land on the personal
-  // side — the database itself included, not just its journals.
-  fs.mkdirSync(path.join(managed, "memories"), { recursive: true });
-  fs.writeFileSync(path.join(managed, "memories", "note.md"), "managed memory\n");
-  fs.writeFileSync(path.join(managed, "memories", "db.sqlite"), "DATABASE");
-  fs.writeFileSync(path.join(managed, "memories", "db.sqlite-wal"), "JOURNAL");
-  fs.writeFileSync(path.join(managed, "memories", "db.sqlite-shm"), "JOURNAL");
-
-  const result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "codex" });
-  assert.equal(outcomeOf(result, "sessions"), "merged-dir");
-  assert.ok(isLinkTo(path.join(managed, "sessions"), path.join(personal, "sessions")));
-  assert.ok(isLinkTo(path.join(managed, "config.toml"), path.join(personal, "config.toml")));
-  for (const name of ["archived_sessions", "prompts", "skills", "plugins", "generated_images", "visualizations"]) {
-    assert.ok(isLinkTo(path.join(managed, name), path.join(personal, name)), `${name} must be a link`);
-  }
-  assert.equal(outcomeOf(result, "session_index.jsonl"), "skipped-missing");
-  const day = path.join(personal, "sessions", "2026", "08", "04");
-  assert.deepEqual(fs.readdirSync(day).sort(), ["rollout-managed.jsonl", "rollout-personal.jsonl"]);
-  // The memories DIRECTORY is shared, its regular content merged, but the
-  // SQLite artifacts were stashed on the managed side, never moved over.
-  assert.ok(isLinkTo(path.join(managed, "memories"), path.join(personal, "memories")));
-  assert.equal(fs.readFileSync(path.join(personal, "memories", "note.md"), "utf8"), "managed memory\n");
-  for (const name of ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"]) {
-    assert.equal(fs.existsSync(path.join(personal, "memories", name)), false);
-  }
-  const stashRoots = stashRootsIn(managed);
-  for (const name of ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"]) {
-    assert.ok(
-      stashRoots.some((root) =>
-        fs.existsSync(path.join(managed, root, "memories", name)),
-      ),
-      `${name} must be stashed, not merged`,
-    );
-  }
-  // Credentials never move, never link, never leak across the boundary.
-  assert.equal(fs.readFileSync(path.join(managed, "auth.json"), "utf8"), "MANAGED_CODEX_CREDENTIAL");
-  assert.equal(fs.lstatSync(path.join(managed, "auth.json")).isSymbolicLink(), false);
-  assert.equal(fs.readFileSync(path.join(personal, "auth.json"), "utf8"), "PERSONAL_CODEX_CREDENTIAL");
-  console.log("PASS codex managed home links its share set, deep-merges date-nested sessions, and quarantines sqlite journals");
 }
 
 async function testGuards() {
@@ -490,7 +406,6 @@ async function main() {
   await testJsonlLineUnion();
   await testRealDirectoryMigration();
   await testInterruptedMigrationRecovery();
-  await testCodexFreshAndDeepMerge();
   await testGuards();
   await testClaudeStoreWiring();
   await testCodexStoreWiring();

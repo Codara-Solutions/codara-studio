@@ -1,7 +1,6 @@
 // The ceiling a Cora conversation actually reaches before something compacts
-// it. Shared by main and the renderer so the composer's context meter, the
-// manager-level auto-compaction trigger, and the Pi launch plan cannot drift
-// apart.
+// it. Shared by the operational auto-compaction paths so the manager-level
+// trigger and the Pi launch plan cannot drift apart.
 //
 // Cora's Pi sessions compact far earlier than Pi's own trigger. Pi compacts at
 // contextWindow - 16384, which is ~984k on the 1M-window models; the bundled
@@ -49,9 +48,9 @@ export function effectiveCompactionCapTokens(
 }
 
 /**
- * The capacity a chat's context meter and auto-compaction trigger both measure
- * against. Every chat is Pi-backed and loads Codara's compaction extension,
- * so the ceiling is always the compaction cap, never the raw model window.
+ * The operational capacity an auto-compaction trigger measures against. Every
+ * chat is Pi-backed and loads Codara's compaction extension, so the ceiling is
+ * always the compaction cap, never the raw model window.
  */
 export function chatContextCapacityTokens(input: {
   contextWindowTokens: number;

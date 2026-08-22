@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { codaraHome } from "../codara-home";
 import { writeFileAtomic } from "../fs-atomic";
@@ -185,6 +186,59 @@ export async function setDefaultCoraProfile(reference: string): Promise<CoraProf
     registry.defaultProfileId = profile.id;
     return materializeProfile(profile, profile.id);
   });
+}
+
+export interface DeletedCoraProfile {
+  profile: CoraProfile;
+  /** Renamed out of the live profile path before the registry commit. The IPC
+   * layer moves this exact directory to the OS trash after dependent runs have
+   * been reassigned. */
+  stagedDataPath?: string;
+}
+
+export async function deleteCoraProfile(reference: string): Promise<DeletedCoraProfile> {
+  let stagedDataPath: string | undefined;
+  let originalDataPath: string | undefined;
+  try {
+    return await mutateRegistry(async (registry) => {
+      const needle = reference.trim().toLowerCase();
+      if (!needle || normalizeCoraProfileId(needle) === DEFAULT_CORA_PROFILE_ID) {
+        throw new Error("The built-in Cora profile cannot be deleted.");
+      }
+      const index = registry.profiles.findIndex(
+        (profile) =>
+          profile.id === normalizeCoraProfileId(needle) ||
+          profile.name.toLowerCase() === needle,
+      );
+      if (index < 0) throw new Error(`Unknown Cora profile: ${reference}`);
+      const [stored] = registry.profiles.splice(index, 1);
+
+      // Move the whole isolated identity+memory tree out of its live location
+      // before committing profiles.json. If that commit fails, the outer catch
+      // restores it so a listed profile is never left without its data.
+      originalDataPath = coraProfileRoot(stored.id);
+      stagedDataPath = `${originalDataPath}.deleted-${randomUUID()}`;
+      try {
+        await rename(originalDataPath, stagedDataPath);
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        stagedDataPath = undefined;
+      }
+
+      if (registry.defaultProfileId === stored.id) {
+        registry.defaultProfileId = DEFAULT_CORA_PROFILE_ID;
+      }
+      return {
+        profile: materializeProfile(stored, registry.defaultProfileId),
+        stagedDataPath,
+      };
+    });
+  } catch (err) {
+    if (stagedDataPath && originalDataPath) {
+      await rename(stagedDataPath, originalDataPath).catch(() => undefined);
+    }
+    throw err;
+  }
 }
 
 export function formatCoraProfileForTurn(profileId: string): string | null {

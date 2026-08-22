@@ -31,6 +31,7 @@ import {
   toolCallHeadline,
   waitForWorkersTaskIds,
 } from "./tool-labels";
+import { toolFileDiff, type ToolFileChange } from "./tool-file-diff";
 import {
   useRunExecutionRecord,
   type ExecutionBlock,
@@ -966,6 +967,17 @@ function LiveEllipsis() {
 function LiveToolRow({ call }: { call: LiveToolCall }) {
   const finished = call.output !== undefined;
   const failed = finished && call.isError === true;
+  // File-mutating calls (edit/write) carry enough payload to reconstruct a
+  // GitHub-style change view locally; everything else yields null and the
+  // row stays as it was.
+  const fileDiff = useMemo(
+    () => toolFileDiff(call.toolName, call.input),
+    [call.toolName, call.input],
+  );
+  // Input describes what the model attempted, not what reached disk. Render
+  // a change preview only after the tool confirms success; otherwise a failed
+  // edit is visually indistinguishable from an applied one.
+  const appliedFileDiff = finished && !failed ? fileDiff : null;
   // Tool payloads are evidence, not the conversation's visual hierarchy.
   // Keep even failures collapsed initially; the clean headline carries the
   // useful cause and raw JSON remains available on demand.
@@ -1018,9 +1030,16 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "var(--danger)" : undefined }}>
           {inlineDetail}
         </span>
+        {appliedFileDiff && (
+          <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span style={{ color: "var(--ok)" }}>+{appliedFileDiff.additions}</span>
+            <span style={{ color: "var(--danger)" }}>−{appliedFileDiff.deletions}</span>
+          </span>
+        )}
         {finished && <ToolOutcomeGlyph failed={failed} />}
         <Caret open={open} />
       </DisclosureButton>
+      {appliedFileDiff && <ToolFileDiffPreview change={appliedFileDiff} />}
       {open && (
         <div style={TOOL_DETAILS_STYLE}>
           {formatToolPayload(call.input).length > 0 && (
@@ -1050,6 +1069,88 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
   );
 }
 
+
+// GitHub-style changed-lines preview for one manager edit/write call, shown
+// directly under the tool row (the same treatment worker rows give their
+// measured file lists). The path opens the working-tree diff tab; the line
+// rows are colored exactly like a GitHub hunk. Capped so a whole-file
+// rewrite stays a preview, not a wall.
+const TOOL_DIFF_PREVIEW_LINES = 8;
+
+function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
+  const visible = change.lines.slice(0, TOOL_DIFF_PREVIEW_LINES);
+  const remaining = change.additions + change.deletions - visible.length;
+  return (
+    <div
+      style={{
+        margin: "2px 0 4px 12px",
+        padding: "3px 0 3px 12px",
+        borderLeft: "1px solid color-mix(in oklab, var(--rule-soft) 66%, transparent)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+      }}
+    >
+      <button
+        type="button"
+        className="cora-worker-diff-file"
+        title={`Open changes for ${change.path}`}
+        aria-label={`Open changes for ${change.path}`}
+        onClick={() => {
+          window.dispatchEvent(
+            new CustomEvent("spark:open-diff", { detail: { path: change.path } }),
+          );
+        }}
+        style={WORKER_DIFF_FILE_BUTTON_STYLE}
+      >
+        <span
+          style={{
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
+          {change.path}
+        </span>
+        <span style={{ ...TOOL_STATS_STYLE, color: "var(--ok)" }}>+{change.additions}</span>
+        <span style={{ ...TOOL_STATS_STYLE, color: "var(--danger)" }}>−{change.deletions}</span>
+      </button>
+      {visible.map((line, index) => (
+        <div
+          key={`${index}:${line.kind}`}
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            lineHeight: 1.45,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            borderRadius: 3,
+            padding: "0 5px",
+            color: line.kind === "add" ? "var(--ok)" : "var(--danger)",
+            background:
+              line.kind === "add"
+                ? "color-mix(in oklch, var(--ok) 9%, transparent)"
+                : "color-mix(in oklch, var(--danger) 8%, transparent)",
+          }}
+        >
+          {line.kind === "add" ? "+ " : "− "}
+          {line.text}
+        </div>
+      ))}
+      {remaining > 0 && (
+        <span style={TOOL_INLINE_DETAIL_STYLE}>
+          {remaining} more changed {remaining === 1 ? "line" : "lines"}
+          {change.truncated ? " · preview capped" : " · expand the row for the full payload"}
+        </span>
+      )}
+    </div>
+  );
+}
 
 // Tiny check / cross at the row's trailing edge once a call settles — status
 // as a glyph, not a text chip, so the line stays quiet. The title carries the
@@ -1832,8 +1933,8 @@ function ManagerActivityDisclosure({
 // The in-flight assistant turn, rendered as a first-class chat turn rather
 // than a disclosure. Streamed prose is full-size Markdown identical to the
 // final persisted message (so completion causes no visual jump); tool calls
-// appear as quiet single lines in provider order, with earlier calls of a
-// burst folded behind a "+N earlier actions" toggle. Backend/system notes are
+// appear as quiet single lines in provider order, with every call visible as
+// it happens. Backend/system notes are
 // kept in the run record but are never rendered: they are runtime bookkeeping
 // ("Cora Pi session ready · …"), not conversation. The slim "Working for Ns"
 // header hands off to the completed disclosure's "Worked for Ns" line in the
@@ -1973,8 +2074,12 @@ function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
             </div>
           );
         }
-        if (segment.kind === "tools") {
-          return <ToolCluster key={segment.id} calls={segment.calls} />;
+        if (segment.kind === "tool") {
+          return (
+            <div key={segment.id} data-execution-kind="tool">
+              <LiveToolRow call={segment.call} />
+            </div>
+          );
         }
         return (
           <div key={segment.id} role="alert" data-execution-kind="error" style={LIVE_ERROR_STYLE}>
@@ -1988,11 +2093,11 @@ function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
 
 type LiveTurnSegment =
   | { kind: "text"; id: string; text: string }
-  | { kind: "tools"; id: string; calls: Array<Extract<ExecutionBlock, { kind: "tool" }>> }
+  | { kind: "tool"; id: string; call: Extract<ExecutionBlock, { kind: "tool" }> }
   | { kind: "error"; id: string; message: string };
 
-// Provider order, with consecutive tool calls merged into one cluster so a
-// burst of file reads renders as one place in the turn instead of a wall.
+// Preserve provider order exactly. Every tool row remains visible while the
+// turn is live, matching the CLI transcript instead of hiding earlier work.
 function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
   const segments: LiveTurnSegment[] = [];
   for (const block of blocks) {
@@ -2006,42 +2111,9 @@ function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
       segments.push({ kind: "error", id: block.id, message: block.message });
       continue;
     }
-    const prev = segments[segments.length - 1];
-    if (prev?.kind === "tools") prev.calls.push(block);
-    else segments.push({ kind: "tools", id: block.id, calls: [block] });
+    segments.push({ kind: "tool", id: block.id, call: block });
   }
   return segments;
-}
-
-// A burst of consecutive tool calls: only the most recent line shows while
-// the turn streams; the earlier ones sit behind one quiet "+N earlier
-// actions" toggle. The toggle is two-way — once expanded it becomes
-// "Show fewer", collapsing the burst back down to the latest line.
-function ToolCluster({ calls }: { calls: Array<Extract<ExecutionBlock, { kind: "tool" }>> }) {
-  const [showAll, setShowAll] = useState(false);
-  const visible = showAll ? calls : calls.slice(-1);
-  const hiddenCount = calls.length - visible.length;
-  const foldable = calls.length > 1;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-      {foldable && (
-        <button
-          type="button"
-          onClick={() => setShowAll((value) => !value)}
-          style={TOOL_CLUSTER_TOGGLE_STYLE}
-        >
-          {showAll
-            ? "Show fewer"
-            : `+${hiddenCount} earlier ${hiddenCount === 1 ? "action" : "actions"}`}
-        </button>
-      )}
-      {visible.map((call) => (
-        <div key={call.toolUseId} data-execution-kind="tool">
-          <LiveToolRow call={call} />
-        </div>
-      ))}
-    </div>
-  );
 }
 
 // Ticks " for 12s" onto the Working header without re-rendering the turn each
@@ -3729,22 +3801,6 @@ const WORKING_LINE_STYLE: React.CSSProperties = {
   alignItems: "center",
   gap: 7,
   minHeight: 22,
-};
-
-// The "+N earlier actions" fold inside a live tool burst — a quiet text
-// affordance, not a boxed control.
-const TOOL_CLUSTER_TOGGLE_STYLE: React.CSSProperties = {
-  appearance: "none",
-  alignSelf: "flex-start",
-  border: "none",
-  background: "transparent",
-  color: "var(--muted)",
-  padding: "2px 7px 2px 19px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 10.5,
-  fontWeight: 600,
-  cursor: "default",
-  textAlign: "left",
 };
 
 const ISSUE_PIP_STYLE: React.CSSProperties = {

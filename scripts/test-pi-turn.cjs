@@ -96,15 +96,43 @@ turn.consume({ type: "agent_settled" });
 
 assert.deepEqual(turn.result(), {
   finalText: "Hello world",
+  assistantMessageCount: 1,
   toolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
   successfulToolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
   providerResponseIds: [],
-  usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 },
+  usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80, costUsd: 0 },
   contextTokens: 180,
   contextWindowTokens: null,
   failure: null,
   settled: true,
 });
+
+// Only the newest assistant message is the final answer. Progress prose from
+// an earlier tool-loop round must never be promoted when the actual final
+// completion is explicitly empty.
+{
+  const emptyFinal = new PiTurnAccumulator();
+  emptyFinal.consume({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      id: "progress",
+      content: [{ type: "text", text: "I am checking the files." }],
+      usage: { input: 5, output: 4 },
+    },
+  });
+  emptyFinal.consume({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      id: "final",
+      content: [],
+      usage: { input: 7, output: 0 },
+    },
+  });
+  assert.equal(emptyFinal.result().assistantMessageCount, 2);
+  assert.equal(emptyFinal.result().finalText, "");
+}
 // The context gauge is the newest request's prompt (uncached input + cached
 // reads), and a second round replaces the first rather than adding to it,
 // while the billing counters keep accumulating.
@@ -126,7 +154,7 @@ gauge.consume({
     usage: { input: 40, output: 7, cacheRead: 300, contextWindow: 200000 },
   },
 });
-assert.deepEqual(gauge.result().usage, { inputTokens: 140, outputTokens: 12, cacheReadTokens: 320 });
+assert.deepEqual(gauge.result().usage, { inputTokens: 140, outputTokens: 12, cacheReadTokens: 320, costUsd: 0 });
 assert.equal(gauge.result().contextTokens, 340);
 assert.equal(gauge.result().contextWindowTokens, 200000);
 // A production-shaped stream (no contextWindow anywhere) must leave the

@@ -1115,6 +1115,25 @@ export async function setMemoryEnabled(
   });
 }
 
+/** Remove toggle records owned by a deleted named profile. Its markdown tree
+ * is trashed separately by the profile deletion IPC. */
+export async function deleteProfileMemoryState(profileId: string): Promise<void> {
+  const id = normalizeCoraProfileId(profileId);
+  if (id === DEFAULT_CORA_PROFILE_ID) {
+    throw new Error("The built-in Cora memory state cannot be deleted.");
+  }
+  await withPathLock(statePath(), async () => {
+    const state = readState();
+    delete state.profileGlobals[id];
+    const prefix = `profile:${id}:workspace:`;
+    for (const key of Object.keys(state.workspaces)) {
+      if (key.startsWith(prefix)) delete state.workspaces[key];
+    }
+    await mkdir(memoryRoot(), { recursive: true });
+    await writeFileAtomic(statePath(), `${JSON.stringify(state, null, 2)}\n`);
+  });
+}
+
 /**
  * Default: remove only Cora's [auto]/[cora] lines, keeping every user line.
  * includeUserLines rewrites the file to the fresh template (the one action

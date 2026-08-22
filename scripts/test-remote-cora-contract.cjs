@@ -132,8 +132,7 @@ async function main() {
     });
     const gauge = (run) => runContext.remoteCoraRunContext(run);
 
-    // Pi compacts long before the model's window runs out, so the ceiling is
-    // the compaction cap even when the turn reported a 1M window.
+    // The visible product gauge is a stable 256k on every model.
     assert.deepEqual(
       gauge({
         chatBackend: "pi",
@@ -144,14 +143,13 @@ async function main() {
       { usedTokens: 141_312, budgetTokens: 256_000 },
     );
 
-    // No window on the turn: the model catalogue stands in, and a window
-    // SMALLER than the compaction cap becomes the binding ceiling.
+    // Provider window details do not silently change the visible denominator.
     assert.deepEqual(
       gauge({
         chatBackend: "pi",
         sparkCalls: [managerCall({ model: "gpt-4o", promptTokens: 50_000 })],
       }),
-      { usedTokens: 50_000, budgetTokens: 111_616 },
+      { usedTokens: 50_000, budgetTokens: 256_000 },
     );
 
     // A turn that reported a zero window reported nothing usable: fall through
@@ -208,9 +206,7 @@ async function main() {
     );
 
     // A trailing turn that reported nothing must not shadow the last one that
-    // did — and the budget has to come from THAT turn, so numerator and
-    // denominator always describe the same request. A 200k window is under
-    // the 256k cap, so the smaller window is the binding ceiling.
+    // did. The visible budget remains the stable product target.
     assert.deepEqual(
       gauge({
         chatBackend: "pi",
@@ -223,7 +219,7 @@ async function main() {
           }),
         ],
       }),
-      { usedTokens: 90_000, budgetTokens: 200_000 - 16_384 },
+      { usedTokens: 90_000, budgetTokens: 256_000 },
     );
 
     // Zero, negative and non-finite counts are not usage.
@@ -312,9 +308,8 @@ async function main() {
       );
     }
 
-    // compactAtTokens is persisted nowhere: it is the app-wide launch override
-    // the Pi session was stamped with, so the projection resolves it from the
-    // environment exactly as the auto-compaction trigger does.
+    // Operational compaction overrides must not silently relabel the product
+    // gauge or make remote and desktop percentages disagree.
     const previousCompactAt = process.env.CODARA_PI_COMPACT_AT_TOKENS;
     process.env.CODARA_PI_COMPACT_AT_TOKENS = "120000";
     try {
@@ -325,7 +320,7 @@ async function main() {
             managerCall({ promptTokens: 60_000, contextWindowTokens: 1_000_000 }),
           ],
         }),
-        { usedTokens: 60_000, budgetTokens: 120_000 },
+        { usedTokens: 60_000, budgetTokens: 256_000 },
       );
     } finally {
       if (previousCompactAt === undefined) {

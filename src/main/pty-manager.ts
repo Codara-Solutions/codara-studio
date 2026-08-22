@@ -2300,19 +2300,47 @@ export function disposeAll(): void {
 // still alive get the taskkill sledgehammer. The grace polls actual pid
 // liveness, so an all-processes-exited quit proceeds in one poll tick; the
 // worst case stays well inside index.ts's 5s before-quit hard-exit budget.
-export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
-  for (const t of pendingKills.values()) clearTimeout(t);
-  pendingKills.clear();
+type NativeCliSessionRuntime = "claude" | "codex" | "grok";
+
+export interface NativeCliRuntimeDisposeResult {
+  closedSessionCount: number;
+}
+
+function sessionUsesNativeCliRuntime(
+  session: Session,
+  runtime: NativeCliSessionRuntime,
+): boolean {
+  if (runtime === "claude") return session.nativeClaudeProfileId !== undefined;
+  if (runtime === "grok") return session.nativeGrokProfileId !== undefined;
+  return session.nativeCodexProfileId !== undefined;
+}
+
+/**
+ * Gracefully closes an exact subset of Codara-owned PTYs. Account switching
+ * uses the runtime-filtered variant below; app quit uses the all-session
+ * variant. Keeping both on this one teardown path ensures a switch gives the
+ * CLI the same transcript-flush grace as a clean Studio quit.
+ */
+async function disposeSessionsGraceful(
+  ids: readonly string[],
+  maxWaitMs: number,
+): Promise<void> {
+  for (const id of ids) {
+    const timer = pendingKills.get(id);
+    if (!timer) continue;
+    clearTimeout(timer);
+    pendingKills.delete(id);
+  }
   const pids: number[] = [];
   const posixTrees: PosixPtyTreeTarget[] = [];
-  for (const id of [...sessions.keys()]) {
+  for (const id of ids) {
     const s = sessions.get(id);
     if (!s) continue;
     // Same teardown bookkeeping as killNow, minus the immediate taskkill.
     s.disposed = true;
-    // App quit is the most sanctioned teardown there is: the exit events this
-    // loop produces reach a still-alive renderer, and before this flag they
-    // repainted every live agent pane as crashed on the way out.
+    // A deliberate account switch or app quit is sanctioned teardown: the
+    // exit events can reach a still-alive renderer and must not repaint these
+    // panes as crashed while they are being closed on purpose.
     s.sanctioned = true;
     stashWebContents(id, s);
     const pid = s.pty.pid;
@@ -2380,6 +2408,29 @@ export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
       /* ignore */
     }
   }
+}
+
+/**
+ * Close every Studio PTY pinned to one native CLI runtime before its account
+ * selection changes. Other shells and other agent families remain running.
+ */
+export async function disposeNativeCliRuntimeGraceful(
+  runtime: NativeCliSessionRuntime,
+  maxWaitMs = 1500,
+): Promise<NativeCliRuntimeDisposeResult> {
+  const ids = [...sessions.entries()]
+    .filter(([, session]) => sessionUsesNativeCliRuntime(session, runtime))
+    .map(([id]) => id);
+  await disposeSessionsGraceful(ids, maxWaitMs);
+  return { closedSessionCount: ids.length };
+}
+
+export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
+  // Preserve disposeAllGraceful's process-wide timer cleanup even if a stale
+  // delayed-kill entry has outlived the session it originally belonged to.
+  for (const timer of pendingKills.values()) clearTimeout(timer);
+  pendingKills.clear();
+  await disposeSessionsGraceful([...sessions.keys()], maxWaitMs);
 }
 
 function killNow(id: string): void {

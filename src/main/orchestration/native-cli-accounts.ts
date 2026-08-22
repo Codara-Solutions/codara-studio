@@ -159,6 +159,8 @@ export interface NativeCliAccountRenameInput
 export interface NativeCliAccountMutationResult {
   profile: NativeCliAccountProfile;
   inspection: NativeCliAccountRuntimeInspection;
+  /** Sessions closed before an account activation; absent for other mutations. */
+  closedSessionCount?: number;
 }
 
 export interface NativeCliAccountDeleteResult {
@@ -223,6 +225,16 @@ export type NativeCliAccountProcessRunner = (
   | NativeCliAccountProcessResult
   | Promise<NativeCliAccountProcessResult>;
 
+export interface NativeCliAccountSessionShutdownResult {
+  closedSessionCount: number;
+}
+
+export type NativeCliAccountSessionShutdown = (
+  runtime: NativeCliAccountRuntime,
+) =>
+  | NativeCliAccountSessionShutdownResult
+  | Promise<NativeCliAccountSessionShutdownResult>;
+
 /**
  * Read-only account-identity probe. It receives a main-process-only credential
  * path and returns a digest and email or nothing; it must never write, refresh,
@@ -264,6 +276,7 @@ export type NativeCliAccountErrorCode =
   | "NATIVE_CLI_ACCOUNT_LOGOUT_TIMEOUT"
   | "NATIVE_CLI_ACCOUNT_LOGOUT_SIGNAL"
   | "NATIVE_CLI_ACCOUNT_LOGOUT_FAILED"
+  | "NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED"
   | "NATIVE_CLI_ACCOUNT_OPERATION_FAILED";
 
 const SAFE_ERROR_MESSAGES: Record<NativeCliAccountErrorCode, string> = {
@@ -297,6 +310,8 @@ const SAFE_ERROR_MESSAGES: Record<NativeCliAccountErrorCode, string> = {
   NATIVE_CLI_ACCOUNT_LOGOUT_SIGNAL:
     "Native CLI account logout ended unexpectedly",
   NATIVE_CLI_ACCOUNT_LOGOUT_FAILED: "Native CLI account logout failed",
+  NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED:
+    "Could not safely close every running CLI session; the account was not changed",
   NATIVE_CLI_ACCOUNT_OPERATION_FAILED: "Native CLI account operation failed",
 };
 
@@ -323,6 +338,11 @@ export class NativeCliAccountError extends Error {
 export const NATIVE_CLI_ACCOUNT_PROCESS_TIMEOUT_MS = 10_000;
 export const NATIVE_CLI_ACCOUNT_PROCESS_MAX_BUFFER_BYTES = 16 * 1024;
 export const NATIVE_CLI_ACCOUNT_LOGIN_PLAN_TTL_MS = 60_000;
+// Codara's Codex profiles are owner-only auth-file vaults. Scope this official
+// Codex setting to login/logout subprocesses instead of editing config.toml;
+// otherwise `auto` may choose one OS-keyring entry that cannot represent
+// multiple accounts and a successful browser login leaves no profile auth.json.
+const CODEX_FILE_AUTH_OVERRIDE = 'cli_auth_credentials_store="file"';
 
 interface PendingLoginPlan {
   runtime: NativeCliAccountRuntime;
@@ -506,6 +526,8 @@ export interface NativeCliAccountServiceOptions {
   codexAuthSelector?: (profileId: string) => Promise<unknown>;
   /** Test seam for the one-time migration of the historical personal login. */
   codexAuthVaultInitializer?: () => Promise<unknown>;
+  /** Close every live session for a runtime before its account changes. */
+  sessionShutdown?: NativeCliAccountSessionShutdown;
 }
 
 export class NativeCliAccountService {
@@ -530,6 +552,7 @@ export class NativeCliAccountService {
   private readonly now: () => number;
   private readonly codexAuthSelector: (profileId: string) => Promise<unknown>;
   private readonly codexAuthVaultInitializer: () => Promise<unknown>;
+  private sessionShutdown: NativeCliAccountSessionShutdown;
   private readonly pendingLoginPlans = new Map<string, PendingLoginPlan>();
   private readonly expiredLoginTokens = new Map<string, number>();
   private readonly mutationTails = new Map<
@@ -592,6 +615,8 @@ export class NativeCliAccountService {
               await activateCodexCliAccount(this.codexStore, defaultProfileId);
             }
           });
+    this.sessionShutdown =
+      options.sessionShutdown ?? (async () => ({ closedSessionCount: 0 }));
     this.grokIdentityReader =
       options.grokIdentityReader ?? readGrokCliAccountIdentity;
     this.claudeIdentityReader =
@@ -629,6 +654,14 @@ export class NativeCliAccountService {
         "Native CLI account login plan TTL must be a positive integer",
       );
     }
+  }
+
+  /** Main-process wiring seam; never exposed through IPC or the preload. */
+  setSessionShutdown(shutdown: NativeCliAccountSessionShutdown): void {
+    if (typeof shutdown !== "function") {
+      throw new TypeError("Native CLI session shutdown must be a function");
+    }
+    this.sessionShutdown = shutdown;
   }
 
   private normalizeProfileId(
@@ -897,11 +930,17 @@ export class NativeCliAccountService {
       ? ["auth", "login", "--email", expectedEmail]
       : runtime === "claude"
         ? ["auth", "login"]
-        : ["login"];
+        : runtime === "codex"
+          ? ["login", "--config", CODEX_FILE_AUTH_OVERRIDE]
+          : ["login"];
   }
 
   private logoutArgs(runtime: NativeCliAccountRuntime): readonly string[] {
-    return runtime === "claude" ? ["auth", "logout"] : ["logout"];
+    if (runtime === "claude") return ["auth", "logout"];
+    if (runtime === "codex") {
+      return ["logout", "--config", CODEX_FILE_AUTH_OVERRIDE];
+    }
+    return ["logout"];
   }
 
   private async executionEnvironment(
@@ -1028,6 +1067,29 @@ export class NativeCliAccountService {
           { runtime, profileId },
         );
       }
+      if (before.inspection.defaultProfileId === profileId) {
+        return {
+          profile: before.profile,
+          inspection: before.inspection,
+          closedSessionCount: 0,
+        };
+      }
+      let closedSessionCount = 0;
+      try {
+        const shutdown = await this.sessionShutdown(runtime);
+        if (
+          !Number.isSafeInteger(shutdown.closedSessionCount) ||
+          shutdown.closedSessionCount < 0
+        ) {
+          throw new TypeError("Native CLI session shutdown returned an invalid count");
+        }
+        closedSessionCount = shutdown.closedSessionCount;
+      } catch {
+        throw new NativeCliAccountError(
+          "NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED",
+          { runtime, profileId },
+        );
+      }
       try {
         if (runtime === "claude") {
           await this.claudeStore.setDefaultProfile(profileId);
@@ -1051,6 +1113,7 @@ export class NativeCliAccountService {
         return {
           profile: this.profileFromInspection(inspection, profileId),
           inspection,
+          closedSessionCount,
         };
       } catch (error) {
         throw this.sanitizeStoreError(runtime, profileId, error);

@@ -110,6 +110,46 @@ async function main() {
   check("memory status identifies its profile", status.profile.id === coder.id, JSON.stringify(status.profile));
   check("memory status reports both isolated files", status.global.bytesUsed > 0 && status.workspace.bytesUsed > 0);
 
+  await memory.setMemoryEnabled("global", "", false, coder.id);
+  await memory.setMemoryEnabled("workspace", "ws-a", false, coder.id);
+  await memory.deleteProfileMemoryState(coder.id);
+  const memoryState = JSON.parse(
+    fs.readFileSync(path.join(HOME, "memory", "memory-state.json"), "utf8"),
+  );
+  check(
+    "deleting profile memory state removes its global toggle",
+    memoryState.profileGlobals?.[coder.id] === undefined,
+  );
+  check(
+    "deleting profile memory state removes its workspace toggles",
+    !Object.keys(memoryState.workspaces ?? {}).some((key) =>
+      key.startsWith(`profile:${coder.id}:workspace:`),
+    ),
+  );
+
+  let builtInDeleteError = "";
+  try {
+    await profiles.deleteCoraProfile("default");
+  } catch (error) {
+    builtInDeleteError = error.message;
+  }
+  check(
+    "the built-in profile cannot be deleted",
+    /built-in Cora profile cannot be deleted/i.test(builtInDeleteError),
+    builtInDeleteError,
+  );
+
+  const deleted = await profiles.deleteCoraProfile(coder.id);
+  check("named profile is removed from the registry", !profiles.listCoraProfiles().some((profile) => profile.id === coder.id));
+  check("deleting the current default falls back to built-in Cora", profiles.resolveCoraProfile().id === "default");
+  check("the live profile directory is removed", !fs.existsSync(path.dirname(coder.identityPath)));
+  check(
+    "profile data is staged for recoverable OS-trash deletion",
+    Boolean(deleted.stagedDataPath && fs.existsSync(deleted.stagedDataPath)),
+    deleted.stagedDataPath,
+  );
+  if (deleted.stagedDataPath) fs.rmSync(deleted.stagedDataPath, { recursive: true, force: true });
+
   if (failures) process.exit(1);
   console.log("\nCora profile isolation: all assertions passed");
 }

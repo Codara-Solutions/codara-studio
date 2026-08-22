@@ -876,6 +876,13 @@ function AccountCard({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [deleteArmed, setDeleteArmed] = useState<"cora" | "cli" | null>(null);
+  const [cliSwitchArmed, setCliSwitchArmed] = useState(false);
+
+  useEffect(() => {
+    if (!cliSwitchArmed) return;
+    const timer = window.setTimeout(() => setCliSwitchArmed(false), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [cliSwitchArmed]);
 
   const cora = card.cora;
   const cli = card.cli;
@@ -883,14 +890,16 @@ function AccountCard({
   const cliBusy = Boolean(cli?.busyAction);
   const coraFacetBusy = Boolean(cora?.busy);
   const brand = agentBrandColor(runtime);
-  // Cora switches immediately. A CLI default is used by the next process:
-  // an already-running CLI cannot have its environment changed underneath it.
+  // Cora switches immediately. CLI activation closes the runtime's live
+  // sessions first because an already-running process cannot have its account
+  // environment or cached credentials changed safely underneath it.
   const coraUsing = Boolean(cora?.connected && !cora.expired && cora.active);
   const cliUsing = Boolean(cli?.authState === "connected" && cli.active);
   const active = coraUsing || cliUsing;
   const coraControlsDisabled = coraDisabled || coraBusy;
   const cliControlsDisabled =
     cliDisabled || cliBusy || Boolean(cli?.inUse);
+  const cliSwitchDisabled = cliDisabled || cliBusy;
   const cliNeedsSignIn =
     !cli ||
     cli.authState === "signed-out" ||
@@ -950,9 +959,18 @@ function AccountCard({
     if (cli && !cli.active) {
       return {
         id: "cli-use",
-        label: `Use this account for ${cliLabel}`,
-        disabled: cliControlsDisabled,
-        run: () => actions.onCliUse(card),
+        label: cliSwitchArmed
+          ? `Confirm & close ${cliLabel}`
+          : `Use this account for ${cliLabel}`,
+        disabled: cliSwitchDisabled,
+        run: () => {
+          if (!cliSwitchArmed) {
+            setCliSwitchArmed(true);
+            return;
+          }
+          setCliSwitchArmed(false);
+          actions.onCliUse(card);
+        },
       };
     }
     return undefined;

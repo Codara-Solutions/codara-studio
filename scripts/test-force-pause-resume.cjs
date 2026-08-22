@@ -621,9 +621,9 @@ async function main() {
   );
   check(`post-resume driver invariant holds with no prior work (${bareInvariant.why})`, bareInvariant.ok);
 
-  // Sending a message is also Resume, but it remains one visible interaction:
-  // the synthetic manager note links to the genuine message so renderers can
-  // fold it away without guessing from timestamps or prose.
+  // Sending a message is also Resume, but the genuine queued turn is already
+  // all the manager input it needs. A generic synthetic resume note would
+  // duplicate that request in the same prompt.
   const messageResumeId = writeRun(
     forcePausedRun("run-message-resume", {
       steps: [],
@@ -649,13 +649,18 @@ async function main() {
     runId: messageResumeId,
     triggerMessageId: "msg-message-resume",
   });
-  const linkedResume = readRun(messageResumeId).humanMessages.find(
-    (message) => message.resumeNote === true,
+  const messageResumePersisted = readRun(messageResumeId);
+  const messageResumePrompt = callsFor(messageResumeId)[0]?.prompt ?? "";
+  check(
+    "message-triggered Resume does not add a synthetic duplicate turn",
+    resumeNotes(messageResumePersisted).length === 0,
+    JSON.stringify(resumeNotes(messageResumePersisted)),
   );
   check(
-    "message-triggered Resume links its internal note to the real user turn",
-    linkedResume?.resumesMessageId === "msg-message-resume",
-    JSON.stringify(linkedResume),
+    "message-triggered Resume delivers the genuine user request once",
+    (messageResumePrompt.match(/continue with the browser/g) ?? []).length === 1 &&
+      !messageResumePrompt.includes("The user resumed this run"),
+    messageResumePrompt.slice(0, 500),
   );
 
   // ── 3b. a run paused with its manager turn still in flight keeps that turn ──

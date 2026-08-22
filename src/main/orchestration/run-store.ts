@@ -246,7 +246,7 @@ import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
-import { resolveCoraProfile } from "./cora-profiles";
+import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
 import {
   describeHeadroomForPrompt,
   readSubscriptionHeadroomSummary,
@@ -270,6 +270,7 @@ import { readGitText } from "../git-exec";
 import { codaraHome } from "../codara-home";
 import { defaultShell } from "../shells";
 import {
+  isOpenRouterModelId,
   plannedWorkerModel,
   rosterModelFor,
   sanitizeWorkerModelHint,
@@ -1071,6 +1072,32 @@ export async function listRuns(workspaceId?: string): Promise<RunState[]> {
     .filter((run): run is RunState => Boolean(run))
     .filter((run) => !workspaceId || run.workspaceId === workspaceId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Keep persisted chats resumable when a named Cora profile is deleted. New
+ * runs cannot acquire the removed id after the registry commit; a second pass
+ * from the IPC closes the tiny create-vs-delete race around that commit. */
+export async function reassignCoraProfileRuns(
+  profileId: string,
+  replacementProfileId = DEFAULT_CORA_PROFILE_ID,
+): Promise<number> {
+  const replacement = resolveCoraProfile(replacementProfileId).id;
+  const candidates = (await listRuns()).filter((run) => run.coraProfileId === profileId);
+  let reassigned = 0;
+  for (const run of candidates) {
+    const updated = await commitRunChange(run, {
+      type: "cora_profile.reassigned",
+      message: "Deleted Cora profile replaced with built-in Cora",
+      payload: { deletedProfileId: profileId, replacementProfileId: replacement },
+      mutate: (draft, timestamp) => {
+        if (draft.coraProfileId !== profileId) return false;
+        draft.coraProfileId = replacement;
+        draft.updatedAt = timestamp;
+      },
+    });
+    if (updated.coraProfileId === replacement) reassigned += 1;
+  }
+  return reassigned;
 }
 
 export async function getRunArtifactPaths(runId: string): Promise<RunArtifactPaths> {
@@ -3735,7 +3762,7 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
     // context meter re-seeds from exactly those fields, so a restart showed
     // 0/256.0k after a 36-minute turn. The journal still holds every
     // chat.usage event; replay the last reading per orphaned call.
-    const gaugeByCallId = new Map<string, { contextTokens: number; contextWindowTokens: number }>();
+    const gaugeByCallId = new Map<string, { contextTokens: number; contextWindowTokens: number; costUsd: number }>();
     try {
       for (const event of await listEvents(run.id)) {
         if (event.type !== "chat.usage" || !event.sparkCallId) continue;
@@ -3750,11 +3777,19 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
           typeof payload.contextWindowTokens === "number" && payload.contextWindowTokens > 0
             ? payload.contextWindowTokens
             : 0;
+        // chat.usage carries the turn-cumulative OpenRouter catalog estimate,
+        // so the last reading per call is the best recoverable value after a
+        // crash. Historical native events are filtered again below.
+        const costUsd =
+          typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd) && payload.costUsd > 0
+            ? payload.costUsd
+            : 0;
         const prior = gaugeByCallId.get(event.sparkCallId);
         gaugeByCallId.set(event.sparkCallId, {
           contextTokens: contextTokens > 0 ? contextTokens : (prior?.contextTokens ?? 0),
           contextWindowTokens:
             contextWindowTokens > 0 ? contextWindowTokens : (prior?.contextWindowTokens ?? 0),
+          costUsd: costUsd > 0 ? costUsd : (prior?.costUsd ?? 0),
         });
       }
     } catch (error) {
@@ -3889,6 +3924,13 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
             ) {
               call.contextWindowTokens = gauge.contextWindowTokens;
               call.contextWindowSource = "known";
+            }
+            if (
+              isOpenRouterModelId(call.model) &&
+              !(typeof call.costUsd === "number" && call.costUsd > 0) &&
+              gauge.costUsd > 0
+            ) {
+              call.costUsd = roundCost(gauge.costUsd);
             }
           }
           changed = true;
@@ -10267,10 +10309,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
           )
           ? input.triggerMessageId
           : undefined;
-        // Every chat-route resume writes manager context. Standalone Resume is
-        // a visible, undoable action; when sending a real message caused the
-        // resume, the note links back to that turn and stays UI-internal.
-        if (!noteAlreadyDeliverable) {
+        // Only interrupted worker attempts need synthetic manager context.
+        // The genuine queued user turn already says what to do, and adding a
+        // generic "the user resumed" message beside it duplicated the input.
+        if (!noteAlreadyDeliverable && interrupted.length > 0) {
           draft.humanMessages.push({
             id: resumeMessageId,
             runId: draft.id,
@@ -10284,10 +10326,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
             // turn. Keep this recovery instruction as manager-only context;
             // a standalone Resume (no trigger id) remains its own UI action.
             ...(resumesMessageId ? { resumesMessageId } : {}),
-            message:
-              interrupted.length > 0
-                ? composeResumeInterruptedNote(interrupted)
-                : "The user resumed this run. Continue from the current durable state of the plan and conversation.",
+            message: composeResumeInterruptedNote(interrupted),
             intent: "turn",
             // "queued" (not acknowledged) is what makes the chat turn dispatched
             // below consume this as its input — see queuedManagerInputMessages.
@@ -13425,21 +13464,18 @@ async function maybeAutoCompactConversation(
     if (!isManagerTurnCurrent(run, callId, call.conversationEpoch ?? 0)) return;
     const contextTokens = typeof call.promptTokens === "number" ? call.promptTokens : 0;
     if (contextTokens <= 0) return;
-    // Capacity MUST mirror the composer's ContextPill budget (ChatComposer.tsx
-    // feeds the same chatContextCapacityTokens helper). For a Pi chat the
-    // ceiling is the compaction cap, not the raw window, so this summary pass
-    // runs before the Pi extension's own compaction.
+    // This is the operational compaction ceiling, not the composer's product
+    // gauge. For a Pi chat the ceiling is the compaction cap, not the raw
+    // window, so this summary pass runs before the Pi extension's own
+    // compaction.
     const windowTokens = chatContextCapacityTokens({
       contextWindowTokens:
         typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0
           ? call.contextWindowTokens
           : contextWindowForModel(call.model).tokens,
-      // Same env override the Pi session was stamped with and the composer
-      // meter reads back off the usage stream (pi-turn emits it as
-      // compactAtTokens). Resolving it here too is what keeps this trigger and
-      // the ContextPill measuring the same ceiling: without it, an override
-      // below ~204.8k would silently disable this summary pass, and one above
-      // 256k would fire it at 204.8k while the meter advertised more.
+      // Same env override the Pi session was stamped with. Resolving it here
+      // keeps the summary trigger aligned with the extension: without it, an
+      // override below ~204.8k would silently disable this summary pass.
       compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
     });
     if (contextTokens / windowTokens < AUTO_COMPACTION_CONTEXT_RATIO) return;
@@ -16345,11 +16381,11 @@ function normalizeRun(run: RunState): RunState {
 }
 
 /**
- * Sum every priced SparkCall on a run and stamp `totalCostUsd` on the run
- * record (always) and each step record that owns at least one priced call.
- * Calls without a `costUsd` field contribute nothing; the rollup only writes
- * a number when at least one call had one — leaves the field undefined
- * otherwise so the UI can keep its "no data" path distinct from "$0.00".
+ * Sum every OpenRouter-priced SparkCall on a run and stamp `totalCostUsd` on
+ * the run record and each step that owns one. Native subscription catalog
+ * prices are deliberately ignored, including historical values written by a
+ * buggy build. Calls without an OpenRouter model and `costUsd` contribute
+ * nothing, leaving "no data" distinct from "$0.00".
  */
 function recomputeRunCostRollups(run: RunState): void {
   let runTotal = 0;
@@ -16357,6 +16393,7 @@ function recomputeRunCostRollups(run: RunState): void {
   const stepTotals = new Map<string, number>();
   const stepHasAny = new Set<string>();
   for (const call of run.sparkCalls ?? []) {
+    if (!isOpenRouterModelId(call.model)) continue;
     const cost = typeof call.costUsd === "number" && Number.isFinite(call.costUsd) ? call.costUsd : null;
     if (cost === null) continue;
     runTotal += cost;
@@ -18645,12 +18682,6 @@ function piWorkerToolDetail(event: PiRpcEvent): string {
 // into a single giant wrapped line and threw away the tail, where the actual
 // error usually is. Callers that want a one-line preview still use
 // piWorkerSafeText.
-// Tool-result text with its ORIGINAL line structure intact. The pane folds it
-// by line (formatPaneCollapsedBlock) instead of the former flatten-to-one-line
-// then cut-at-700-characters, which squashed a failed command's usage dump
-// into a single giant wrapped line and threw away the tail, where the actual
-// error usually is. Callers that want a one-line preview still use
-// piWorkerSafeText.
 function piWorkerResultRaw(result: unknown): string {
   if (typeof result === "string") return result;
   if (!result || typeof result !== "object") return "";
@@ -18673,10 +18704,6 @@ function piWorkerResultRaw(result: unknown): string {
   }
 }
 
-// Terminal frame painted after final-report.json lands: the report facts plus
-// the deterministic review outcome, so the worker pane does not dead-end at
-// "Cora is reviewing the evidence" with the verdict visible only in the run
-// log. Facts first, one quiet line per item.
 // Terminal frame painted after final-report.json lands: the report facts plus
 // the deterministic review outcome, so the worker pane does not dead-end at
 // "Cora is reviewing the evidence" with the verdict visible only in the run
@@ -18754,12 +18781,9 @@ function piWorkerEventFailure(event: PiRpcEvent): string | null {
 // Per-turn provider usage from a Pi message_end event, using the same field
 // fallbacks as pi-turn.ts: `input` EXCLUDES what came from cache; reads and
 // writes are reported apart. Returns null when the event carried no usage.
-// Per-turn provider usage from a Pi message_end event, using the same field
-// fallbacks as pi-turn.ts: `input` EXCLUDES what came from cache; reads and
-// writes are reported apart. Returns null when the event carried no usage.
 function piWorkerMessageUsage(
   event: PiRpcEvent,
-): { input: number; output: number; cacheRead: number; cacheWrite: number } | null {
+): { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | null {
   if (event.type !== "message_end") return null;
   const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
     ? event.message as Record<string, unknown>
@@ -18770,21 +18794,21 @@ function piWorkerMessageUsage(
   if (!usage) return null;
   const count = (value: unknown): number =>
     typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+  const cost = usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
+    ? usage.cost as Record<string, unknown>
+    : null;
   return {
     input: count(usage.input ?? usage.inputTokens ?? usage.input_tokens),
     output: count(usage.output ?? usage.outputTokens ?? usage.output_tokens),
     cacheRead: count(usage.cacheRead ?? usage.cache_read ?? usage.cached),
     cacheWrite: count(usage.cacheWrite ?? usage.cache_write ?? usage.cacheCreation),
+    // Pi prices each request from its model catalog. The caller accepts this
+    // field only for OpenRouter sessions; native subscription catalog prices
+    // are API-equivalent estimates, not charges on the user's plan.
+    cost: count(cost?.total),
   };
 }
 
-// Warm follow-up resume, restricted to the task's FIRST attempt. A retry or a
-// verifier-FEEDBACK rework of the same task launches cold on a fresh
-// per-attempt id instead: the prior attempt's Pi process may be hung rather
-// than dead and still hold the session file, and an unbounded rework loop must
-// not keep growing one transcript past the gate that admitted it. Verifiers
-// are re-fenced on principle; independence of verification is an invariant,
-// not a spawn-handler courtesy.
 // Warm follow-up resume, restricted to the task's FIRST attempt. A retry or a
 // verifier-FEEDBACK rework of the same task launches cold on a fresh
 // per-attempt id instead: the prior attempt's Pi process may be hung rather
@@ -18807,9 +18831,6 @@ function piWorkerResumeSessionId(
 // Forward-compatibility only, mirroring pi-turn.ts contextWindowFrom: the
 // pinned Pi 0.82 never reports a context window on message_end, so the reuse
 // gate falls back to contextWindowForModel(attempt.model) while this is null.
-// Forward-compatibility only, mirroring pi-turn.ts contextWindowFrom: the
-// pinned Pi 0.82 never reports a context window on message_end, so the reuse
-// gate falls back to contextWindowForModel(attempt.model) while this is null.
 function piWorkerMessageContextWindow(event: PiRpcEvent): number | null {
   if (event.type !== "message_end") return null;
   const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
@@ -18826,15 +18847,6 @@ function piWorkerMessageContextWindow(event: PiRpcEvent): number | null {
   );
 }
 
-/**
- * Drive one Pi worker turn to completion.
- *
- * Ends on `agent_settled` (the happy path), on runtime death, on SILENCE (see
- * the constants above), or on the ceiling. `onStallChange` reports the
- * non-terminal middle ground — Cora has heard nothing for a while but the
- * process is alive — so the pane and the run timeline can say so instead of
- * showing a pulsing "working" over a worker nobody can hear.
- */
 /**
  * Drive one Pi worker turn to completion.
  *
@@ -19006,11 +19018,13 @@ async function runPiWorkerSession({
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
-  // Real provider token usage summed across the session's message_end events,
-  // priced at the end so the attempt records a MEASURED cost and the run's
-  // rollup can skip its placeholder estimate.
+  // Real provider token usage summed across the session's message_end events.
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawUsage = false;
+  // OpenRouter provider-catalog cost summed across message_end events. Native
+  // subscription catalog prices are deliberately excluded because they are
+  // not money charged through OpenRouter.
+  let measuredCostTotal = 0;
   // Session identity + final context occupancy, persisted on the attempt so a
   // later follow_up_of spawn can gate warm session reuse. The gauge follows
   // pi-turn.ts semantics: the newest message carries the whole conversation,
@@ -19034,8 +19048,9 @@ async function runPiWorkerSession({
           cacheWriteTokens: usageTotals.cacheWrite,
         }
       : {};
-  const measuredPiCostUsd = (): number =>
-    sawUsage
+  const resolvedPiCostUsd = (): number => {
+    if (measuredCostTotal > 0) return roundCost(measuredCostTotal);
+    return sawUsage
       ? estimateWorkerCostUsd({
           runtime: task.runtimePreference,
           modelHint: model ?? task.modelHint,
@@ -19050,6 +19065,7 @@ async function runPiWorkerSession({
           },
         })
       : 0;
+  };
   // Mode-600 MCP roster written for this attempt; removed with the session.
   let mcpConfigPath: string | null = null;
   let agentSocketCapabilityId: string | undefined;
@@ -19348,6 +19364,7 @@ async function runPiWorkerSession({
           usageTotals.output += usage.output;
           usageTotals.cacheRead += usage.cacheRead;
           usageTotals.cacheWrite += usage.cacheWrite;
+          if (provider === "openrouter") measuredCostTotal += usage.cost;
           // Context gauge for the reuse gate: what the newest request occupied.
           const gauge = usage.input + usage.cacheRead + usage.cacheWrite;
           if (gauge > 0) lastContextTokens = gauge;
@@ -19403,7 +19420,7 @@ async function runPiWorkerSession({
     applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
     paintPiWorkerReportOutcome(paint, report);
     await logQueue.catch(() => undefined);
-    const successCost = measuredPiCostUsd();
+    const successCost = resolvedPiCostUsd();
     return { exitCode: 0, ...(successCost > 0 ? { costUsd: successCost } : {}), ...usageCapture(), ...sessionCapture() };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -19420,14 +19437,14 @@ async function runPiWorkerSession({
         paint(`\r\n\x1b[33m  !  Late worker error ignored (final report already written): ${piWorkerSafeText(message, 700)}\x1b[0m\r\n`);
         paintPiWorkerReportOutcome(paint, report);
         await logQueue.catch(() => undefined);
-        const preservedCost = measuredPiCostUsd();
+        const preservedCost = resolvedPiCostUsd();
         return { exitCode: 0, ...(preservedCost > 0 ? { costUsd: preservedCost } : {}), ...usageCapture(), ...sessionCapture() };
       }
     }
     applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
     paint(`\r\n\x1b[31m  ×  PI WORKER STOPPED\x1b[0m\r\n  ${message}\r\n`);
     await logQueue.catch(() => undefined);
-    const failureCost = measuredPiCostUsd();
+    const failureCost = resolvedPiCostUsd();
     return { exitCode: 1, error: message, ...(failureCost > 0 ? { costUsd: failureCost } : {}), ...usageCapture(), ...sessionCapture() };
   } finally {
     unsubscribe?.();

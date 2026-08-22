@@ -814,6 +814,8 @@ export interface NativeCliAccountRenameInput extends NativeCliAccountProfileInpu
 export interface NativeCliAccountMutationResult {
   profile: NativeCliAccountProfile;
   inspection: NativeCliAccountRuntimeInspection;
+  /** Number of live CLI sessions closed before an account activation. */
+  closedSessionCount?: number;
 }
 
 export interface NativeCliAccountDeleteResult {
@@ -2821,6 +2823,13 @@ export interface CoraProfileCreateInput {
   name: string;
   description?: string;
   instructions?: string;
+}
+
+export interface CoraProfileDeleteResult {
+  profiles: CoraProfile[];
+  deletedProfile: Pick<CoraProfile, "id" | "name">;
+  /** Existing chats that were moved to built-in Cora so they remain resumable. */
+  reassignedRunCount: number;
 }
 
 /** One memory file's live state, as reported to the renderer. */

@@ -175,6 +175,11 @@ async function main() {
   });
 
   const processRequests = [];
+  const sessionShutdownCalls = [];
+  let sessionShutdownBehavior = async (runtime) => {
+    sessionShutdownCalls.push(runtime);
+    return { closedSessionCount: 2 };
+  };
   let processBehavior = async () => successResult();
   let tokenIndex = 0;
   const baseEnv = {
@@ -211,6 +216,7 @@ async function main() {
       processRequests.push(request);
       return processBehavior(request);
     },
+    sessionShutdown: (runtime) => sessionShutdownBehavior(runtime),
     tokenFactory: () =>
       `opaque-login-token-${String(++tokenIndex).padStart(12, "0")}`,
   });
@@ -275,6 +281,8 @@ async function main() {
   });
   assert.equal(switched.profile.isDefault, true);
   assert.equal(switched.profile.id, workGrok.profile.id);
+  assert.equal(switched.closedSessionCount, 2);
+  assert.deepEqual(sessionShutdownCalls, ["grok"]);
   const afterSwitch = (await service.inspect("grok")).runtimes[0];
   const defaults = afterSwitch.profiles.filter((profile) => profile.isDefault);
   assert.equal(defaults.length, 1);
@@ -288,6 +296,30 @@ async function main() {
     (await service.inspect("grok")).runtimes[0].defaultProfileId,
     "personal",
   );
+
+  // A switch is fail-closed: every session shutdown must finish before the
+  // selected account changes, and a shutdown failure leaves the old default.
+  sessionShutdownBehavior = async (runtime) => {
+    sessionShutdownCalls.push(runtime);
+    throw new Error("synthetic close failure");
+  };
+  await expectCode(
+    () =>
+      service.setDefault({
+        runtime: "grok",
+        profileId: workGrok.profile.id,
+      }),
+    "NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED",
+  );
+  assert.equal(
+    (await service.inspect("grok")).runtimes[0].defaultProfileId,
+    "personal",
+    "failed shutdown must not change the selected account",
+  );
+  sessionShutdownBehavior = async (runtime) => {
+    sessionShutdownCalls.push(runtime);
+    return { closedSessionCount: 2 };
+  };
 
   const initialJson = JSON.stringify(initial);
   for (const forbidden of [
@@ -660,10 +692,25 @@ async function main() {
     runtime: "claude",
     profileId: claudeCreated.profile.id,
   });
+  let codexDefaultObservedDuringShutdown = null;
+  sessionShutdownBehavior = async (runtime) => {
+    sessionShutdownCalls.push(runtime);
+    if (runtime === "codex") {
+      codexDefaultObservedDuringShutdown = (
+        await codexStore.snapshot()
+      ).defaultProfileId;
+    }
+    return { closedSessionCount: 2 };
+  };
   await service.setDefault({
     runtime: "codex",
     profileId: codexCreated.profile.id,
   });
+  assert.equal(
+    codexDefaultObservedDuringShutdown,
+    "personal",
+    "runtime shutdown must settle before the Codex default/auth selection changes",
+  );
 
   const defaultDeleteCount = processRequests.length;
   await expectCode(
@@ -891,7 +938,11 @@ async function main() {
     },
   );
   assert.equal(codexLoginSpec.executable, "/opt/codara/bin/codex");
-  assert.deepEqual(codexLoginSpec.args, ["login"]);
+  assert.deepEqual(codexLoginSpec.args, [
+    "login",
+    "--config",
+    'cli_auth_credentials_store="file"',
+  ]);
   assert.equal(codexLoginSpec.shell, false);
   assertSanitizedEnv(codexLoginSpec.env, "codex", codexManagedHome);
 
@@ -1009,7 +1060,11 @@ async function main() {
   assert.equal(claudeLogout.maxBufferBytes, 4321);
   assertSanitizedEnv(claudeLogout.env, "claude", claudeManagedDir);
   assert.equal(codexLogout.executable, "/opt/codara/bin/codex");
-  assert.deepEqual(codexLogout.args, ["logout"]);
+  assert.deepEqual(codexLogout.args, [
+    "logout",
+    "--config",
+    'cli_auth_credentials_store="file"',
+  ]);
   assert.equal(codexLogout.shell, false);
   assertSanitizedEnv(codexLogout.env, "codex", codexManagedHome);
 
@@ -1061,8 +1116,10 @@ async function main() {
   }
   processBehavior = async () => successResult();
 
-  // Active leases fail before process invocation. Default rotation is allowed
-  // while leased because it affects only future launches.
+  // Active leases fail before logout/delete process invocation. In production
+  // the account-switch callback closes the runtime and releases its leases;
+  // this injected test callback reports that boundary without touching the
+  // synthetic lease registry.
   await service.setDefault({ runtime: "codex", profileId: "personal" });
   const releaseActive = codexLeases.acquire(
     codexCreated.profile.id,

@@ -188,6 +188,10 @@ export type ChatStreamEvent =
       inputTokens?: number;
       outputTokens?: number;
       cacheReadTokens?: number;
+      /** Turn-cumulative OpenRouter catalog-priced estimate in USD (Pi
+       *  message_end usage.cost totals). Present only once positive and only
+       *  for OpenRouter sessions; native subscription turns omit it. */
+      costUsd?: number;
       /** Tokens occupying the model's latest request context. Unlike
        * inputTokens (an incremental billing/audit counter), this is a gauge:
        * renderers replace the previous value instead of summing it. */

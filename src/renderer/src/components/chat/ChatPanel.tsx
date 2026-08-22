@@ -6,6 +6,7 @@ import type {
   RunState,
   Workspace,
 } from "@shared/types";
+import { isOpenRouterModelId } from "@shared/worker-model-roster";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { CloseIcon, HistoryIcon } from "../icons";
 import RunIdChip from "../RunIdChip";
@@ -883,19 +884,119 @@ function StatusMeta({ run }: { run: RunState }) {
   );
 }
 
-// Cost for this run: ONLY real, metered API spend (`totalCostUsd`, recomputed
-// after each priced SparkCall). Worker agents run on the user's Claude Code /
-// Codex CLI subscription, so a price-table estimate of their token usage is NOT
-// real money, surfacing it implied a CLI plan/council run "cost" something when
-// it didn't. The pill therefore appears only when a metered call was actually
-// billed, and stays hidden otherwise.
+// Cost for this run: catalog-priced usage on OPENROUTER MODELS ONLY. That is
+// the pill's whole point: subscription models (Claude, Codex, Grok families)
+// bill the plan the user already pays for, so catalog-pricing their tokens
+// into a "$" pill reads as money that will never be charged. pi-ai prices
+// every catalog model, so without this gate a gpt-5.6-sol chat lit the pill
+// up too. The rule mirrors the main process (piProviderForModel): a model is
+// OpenRouter when it carries a vendor slash and no first-party family prefix.
+// Manager turns contribute SparkCall.costUsd, sub-agent attempts contribute
+// attempt.costUsd filtered the same way. OpenRouter worker attempts fall back
+// to Codara's per-model rate table when the provider omits a cost block;
+// generic whole-run placeholder estimates (estimatedWorkerCostUsd) stay
+// excluded. While a turn streams the pill folds in live chat.usage cost events
+// so the number ticks up as the turn runs, then hands over to the
+// persisted record once the snapshot lands. Hidden until OpenRouter spend
+// exists. This is still an estimate based on the provider catalog; the final
+// OpenRouter invoice remains authoritative.
+
 function CostPill({ run }: { run: RunState }) {
-  const mgr = run.totalCostUsd;
-  const hasMgr = typeof mgr === "number" && Number.isFinite(mgr) && mgr > 0;
-  if (!hasMgr) return null;
+  // Turn-cumulative estimated cost per in-flight SparkCall, from live
+  // chat.usage events. Keyed by call so a finished call's persisted costUsd
+  // replaces (never doubles) its live value via the max() below.
+  const [liveCostByCall, setLiveCostByCall] = useState<Map<string, number>>(() => new Map());
+  const sparkCallsRef = useRef(run.sparkCalls);
+  sparkCallsRef.current = run.sparkCalls;
+
+  // Keep the event subscriber stable for the life of the chat. Snapshot
+  // updates arrive throughout a turn; rebuilding the subscriber and clearing
+  // its map on every SparkCall update made the live pill flicker back to zero.
+  useEffect(() => {
+    setLiveCostByCall((prev) => {
+      let next: Map<string, number> | null = null;
+      for (const call of run.sparkCalls ?? []) {
+        if (isOpenRouterModelId(call.model) || !prev.has(call.id)) continue;
+        next ??= new Map(prev);
+        next.delete(call.id);
+      }
+      return next ?? prev;
+    });
+  }, [run.sparkCalls]);
+
+  useEffect(() => {
+    const runId = run.id;
+    // Chat switch: the accumulator is per chat, so stale call ids from the
+    // previous conversation must not bleed into this one's total.
+    setLiveCostByCall(new Map());
+    const off = window.spark.orchestration.onEvent((event) => {
+      if (event.runId !== runId || event.type !== "chat.usage" || !event.sparkCallId) return;
+      // The main process emits cost only for OpenRouter sessions. If the
+      // SparkCall snapshot has already arrived, retain a second defensive
+      // model gate; otherwise accept the source-gated event immediately so
+      // the pill can tick before the next snapshot flush.
+      const call = sparkCallsRef.current?.find((entry) => entry.id === event.sparkCallId);
+      if (call && !isOpenRouterModelId(call.model)) return;
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const cost =
+        typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd) && payload.costUsd > 0
+          ? payload.costUsd
+          : 0;
+      if (cost <= 0) return;
+      const callId = event.sparkCallId;
+      setLiveCostByCall((prev) => {
+        if (prev.get(callId) === cost) return prev;
+        const next = new Map(prev);
+        next.set(callId, cost);
+        return next;
+      });
+    });
+    return off;
+  }, [run.id]);
+
+  const managerCost = useMemo(() => {
+    let total = 0;
+    const persistedIds = new Set<string>();
+    for (const call of run.sparkCalls ?? []) {
+      if (!isOpenRouterModelId(call.model)) continue;
+      persistedIds.add(call.id);
+      const persisted = typeof call.costUsd === "number" && Number.isFinite(call.costUsd)
+        ? call.costUsd
+        : 0;
+      // max(): while the call runs only the live value exists; after settle
+      // the persisted one is authoritative and equal or larger (recovery
+      // backfill may have folded in spend the live stream never reported).
+      total += Math.max(persisted, liveCostByCall.get(call.id) ?? 0);
+    }
+    // A call whose SparkCall record has not reached this snapshot yet (the
+    // event always names a started call, but snapshots lag the journal).
+    for (const [callId, cost] of liveCostByCall) {
+      if (!persistedIds.has(callId)) total += cost;
+    }
+    return total;
+  }, [run.sparkCalls, liveCostByCall]);
+
+  // Worker spend mirrors the main process's provider-priced rollup (any attempt
+  // with a finite costUsd counts) narrowed to OpenRouter models via the
+  // attempt's own resolved model.
+  const workerCost = (run.workerAttempts ?? []).reduce((total, attempt) => {
+    if (!isOpenRouterModelId(attempt.model)) return total;
+    const cost = typeof attempt.costUsd === "number" && Number.isFinite(attempt.costUsd)
+      ? attempt.costUsd
+      : 0;
+    return total + cost;
+  }, 0);
+  const total = managerCost + workerCost;
+  if (!(total > 0)) return null;
+
+  const parts = [
+    managerCost > 0 ? `Cora turns $${formatCostUsd(managerCost, { stripDollar: true })}` : null,
+    workerCost > 0 ? `sub-agents $${formatCostUsd(workerCost, { stripDollar: true })}` : null,
+  ].filter(Boolean);
+  const title = `Estimated OpenRouter usage for this chat: $${formatCostUsd(total, { stripDollar: true })} (${parts.join(" · ")}). Only OpenRouter models count; subscription models run on your plan. Calculated from per-request catalog rates; the final OpenRouter bill may differ.`;
   return (
     <span
-      title={`Exact metered API spend on this chat: ${formatCostUsd(mgr!)}.`}
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -915,7 +1016,7 @@ function CostPill({ run }: { run: RunState }) {
       }}
     >
       <span aria-hidden style={{ color: "var(--muted)" }}>$</span>
-      <span>{formatCostUsd(mgr!, { stripDollar: true })}</span>
+      <span>{formatCostUsd(total, { stripDollar: true })}</span>
     </span>
   );
 }
