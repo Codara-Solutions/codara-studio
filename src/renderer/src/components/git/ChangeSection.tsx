@@ -7,8 +7,18 @@ interface Props {
   count: number;
   collapsed: boolean;
   onToggle: () => void;
-  /** Section-level action revealed on header hover (stage all / unstage all). */
-  action?: { title: string; icon: React.ReactNode; onClick: () => void };
+  /**
+   * Section-level actions revealed on header hover (discard all / stage all /
+   * unstage all). Rendered left-to-right in the order given, just before the
+   * count.
+   */
+  actions?: Array<{
+    key: string;
+    title: string;
+    icon: React.ReactNode;
+    onClick: () => void;
+    danger?: boolean;
+  }>;
   disabled: boolean;
   children: React.ReactNode;
 }
@@ -20,7 +30,7 @@ export default function ChangeSection({
   count,
   collapsed,
   onToggle,
-  action,
+  actions,
   disabled,
   children,
 }: Props): React.ReactElement {
@@ -57,11 +67,22 @@ export default function ChangeSection({
           {title}
         </span>
         <span style={{ flex: 1 }} />
-        {action && hover && !disabled && (
-          <span onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex" }}>
-            <IconButton title={action.title} onClick={action.onClick} size={20}>
-              {action.icon}
-            </IconButton>
+        {actions && actions.length > 0 && hover && !disabled && (
+          <span
+            onClick={(e) => e.stopPropagation()}
+            style={{ display: "inline-flex", alignItems: "center", gap: 2 }}
+          >
+            {actions.map((item) => (
+              <IconButton
+                key={item.key}
+                title={item.title}
+                onClick={item.onClick}
+                danger={item.danger}
+                size={20}
+              >
+                {item.icon}
+              </IconButton>
+            ))}
           </span>
         )}
         <span

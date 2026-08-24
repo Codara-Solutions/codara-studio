@@ -395,7 +395,8 @@ export function unstageAll(cwd: string): Promise<GitOpResult> {
 
 // Discard working-tree changes. Tracked files are restored from the index;
 // untracked files (and untracked directories, via `-d`) are deleted outright.
-// Destructive — the renderer gates this behind an explicit confirm.
+// Destructive and not undoable — callers pass either one row's file or the
+// whole unstaged set (the panel's "Discard all changes" header action).
 export async function discardChanges(
   cwd: string,
   files: GitFileChange[],

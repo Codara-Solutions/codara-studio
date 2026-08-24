@@ -40,22 +40,16 @@ const ChangeRow = React.memo(function ChangeRow({
   onDiscard,
 }: Props) {
   const [hover, setHover] = useState(false);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const { dir, name } = splitPath(file.path);
   const color = statusColor(file.status);
   // Working-tree rows carry stage + discard; staged rows carry only unstage.
   const slotWidth = staged ? 24 : 46;
 
-  const resetHover = (): void => {
-    setHover(false);
-    setConfirmDiscard(false);
-  };
-
   return (
     <div
       onClick={() => onOpenDiff(file)}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={resetHover}
+      onMouseLeave={() => setHover(false)}
       title={`${statusLabel(file.status)} — ${file.path}`}
       style={{
         display: "flex",
@@ -130,18 +124,10 @@ const ChangeRow = React.memo(function ChangeRow({
           ) : (
             <>
               <IconButton
-                title={confirmDiscard ? "Click again to discard" : "Discard changes"}
+                title="Discard changes"
                 danger
-                active={confirmDiscard}
                 size={20}
-                onClick={() => {
-                  if (confirmDiscard) {
-                    onDiscard(file);
-                    setConfirmDiscard(false);
-                  } else {
-                    setConfirmDiscard(true);
-                  }
-                }}
+                onClick={() => onDiscard(file)}
               >
                 <UndoIcon />
               </IconButton>

@@ -31,6 +31,7 @@ import {
   PlusGlyph,
   RefreshIcon,
   Spinner,
+  UndoIcon,
 } from "./git-ui";
 
 // How long the scroll restore keeps re-applying itself while the list above
@@ -147,6 +148,17 @@ export default function GitPanel({
   );
   const stageAll = useCallback(() => {
     if (cwd) void runAction("stageAll", () => window.spark.git.stageAll(cwd));
+  }, [cwd, runAction]);
+  // Discard every working-tree change in one shot. The file list is read from
+  // the live status ref rather than the render-time snapshot so a poll landing
+  // between the hover and the click cannot make this act on stale paths.
+  const discardAll = useCallback(() => {
+    if (!cwd) return;
+    void runAction("discardAll", () => {
+      const files = statusRef.current?.unstaged ?? [];
+      if (files.length === 0) return Promise.resolve<GitOpResult>({ ok: true });
+      return window.spark.git.discard(cwd, files);
+    });
   }, [cwd, runAction]);
   const unstageAll = useCallback(() => {
     if (cwd) void runAction("unstageAll", () => window.spark.git.unstageAll(cwd));
@@ -502,11 +514,14 @@ export default function GitPanel({
                         collapsed={sections.staged}
                         onToggle={() => setSections((s) => ({ ...s, staged: !s.staged }))}
                         disabled={disabled}
-                        action={{
-                          title: "Unstage all changes",
-                          icon: <MinusGlyph />,
-                          onClick: unstageAll,
-                        }}
+                        actions={[
+                          {
+                            key: "unstage-all",
+                            title: "Unstage all changes",
+                            icon: <MinusGlyph />,
+                            onClick: unstageAll,
+                          },
+                        ]}
                       >
                         {staged.map((file) => (
                           <ChangeRow
@@ -531,11 +546,21 @@ export default function GitPanel({
                         collapsed={sections.changes}
                         onToggle={() => setSections((s) => ({ ...s, changes: !s.changes }))}
                         disabled={disabled}
-                        action={{
-                          title: "Stage all changes",
-                          icon: <PlusGlyph />,
-                          onClick: stageAll,
-                        }}
+                        actions={[
+                          {
+                            key: "discard-all",
+                            title: "Discard all changes",
+                            icon: <UndoIcon />,
+                            onClick: discardAll,
+                            danger: true,
+                          },
+                          {
+                            key: "stage-all",
+                            title: "Stage all changes",
+                            icon: <PlusGlyph />,
+                            onClick: stageAll,
+                          },
+                        ]}
                       >
                         {unstaged.map((file) => (
                           <ChangeRow
