@@ -260,6 +260,20 @@ export async function flushBufferedEvents(runId?: string): Promise<void> {
   );
 }
 
+/**
+ * Drop every process-local journal record for a run whose durable directory
+ * has been deleted. appendEvent is awaited by deleteRun before this is called,
+ * so its append queue is already settled; clearing the defensive buffer timer
+ * also prevents a stale streaming callback from recreating the removed run
+ * directory after deletion.
+ */
+export function forgetRunEventState(runId: string): void {
+  const buffer = pendingBuffers.get(runId);
+  if (buffer?.timer) clearTimeout(buffer.timer);
+  pendingBuffers.delete(runId);
+  runJournalStates.delete(runId);
+}
+
 // --- Fan-out event helpers --------------------------------------------------
 // Thin typed wrappers around appendEvent for the first-class parallel fan-out
 // path. They only format a human message + payload and delegate to appendEvent

@@ -137,6 +137,17 @@ const autoResumeAttempts = new Map<string, number[]>();
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
 
+// These registries are remount guards, not durable terminal state. App calls
+// this only after a pane disappears from every active/inactive workspace
+// layout. Exact lifecycle cleanup keeps them bounded without an arbitrary cap
+// that could evict a still-live terminal in an unusually large workspace.
+export function forgetTerminalSessionMemory(sessionId: string): void {
+  autorunFiredSessions.delete(sessionId);
+  nativeCliLoginTokenFiredSessions.delete(sessionId);
+  autoResumeAttempts.delete(sessionId);
+  resumeHintShown.delete(sessionId);
+}
+
 // Persistent diagnostic trail for restore decisions (<codaraHome>/logs/main.log
 // via main). "Some panes resume, some don't" is undebuggable from memory alone.
 function logRestore(line: string): void {
@@ -2886,7 +2897,9 @@ export function useTerminalSession({
         spawned = true;
         startupCommandHandled = Boolean(spawnResult.startupCommandHandled);
         attachedExistingSession = Boolean(spawnResult.attached);
-        if (startupCommandHandled) autorunFiredSessions.add(sessionId);
+        if (startupCommandHandled) {
+          autorunFiredSessions.add(sessionId);
+        }
         // Cold hydration deliberately strips the transient worker chip, but a
         // successfully delivered resume already gives us authoritative runtime
         // identity from the durable session pointer. Re-arm the renderer state
@@ -3581,20 +3594,29 @@ export function useTerminalSession({
         if (!readOnlyRef.current) void window.spark.pty.resume(sessionId);
       };
       // Prefer the next paint so xterm repairs before queued bytes drain. A
-      // fully occluded Electron window may pause requestAnimationFrame despite
-      // backgroundThrottling:false, however; never let that leave the PTY
-      // backlog paused indefinitely. The timer drains data into xterm's buffer
-      // and a later focus/visibility recovery repaints it if necessary.
+      // Chromium may throttle a fully occluded window; never let that leave the
+      // PTY backlog paused indefinitely. The timer drains data into xterm's
+      // buffer and a later focus/visibility recovery repaints it if necessary.
       recoveryFrame = window.requestAnimationFrame(finishRecovery);
       recoveryTimer = window.setTimeout(finishRecovery, 250);
     };
     const offHostResume = window.spark.pty.onHostResume(recoverAfterHostWake);
     const onFocus = () => recoverAfterHostWake();
     const onVisibility = () => {
-      if (document.visibilityState === "visible") recoverAfterHostWake();
+      if (document.visibilityState === "visible") {
+        recoverAfterHostWake();
+      } else if (!readOnlyRef.current) {
+        // Stop IPC/xterm churn while the whole window is minimized, hidden to
+        // tray, or frozen by the OS. Main keeps a bounded ordered backlog and
+        // recoverAfterHostWake resumes it only after xterm has repaired/refit.
+        void window.spark.pty.pause(sessionId);
+      }
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
+    // A pane can mount after the document is already hidden; no transition
+    // event will follow in that case, so apply the current state immediately.
+    onVisibility();
     return () => {
       recoveryGeneration += 1;
       offHostResume();

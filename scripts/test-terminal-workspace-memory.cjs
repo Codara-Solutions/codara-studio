@@ -40,6 +40,16 @@ const TERMINAL_STACK = path.join(
   "tabs",
   "TerminalStack.tsx",
 );
+const TERMINAL_PANE = path.join(
+  ROOT,
+  "src",
+  "renderer",
+  "src",
+  "components",
+  "Terminal",
+  "TerminalPane.tsx",
+);
+const USE_TABS = path.join(ROOT, "src", "renderer", "src", "tabs", "useTabs.ts");
 const APP = path.join(ROOT, "src", "renderer", "src", "App.tsx");
 
 let failures = 0;
@@ -159,6 +169,8 @@ async function main() {
   const source = fs.readFileSync(SESSION, "utf8");
   const stackSource = fs.readFileSync(TERMINAL_STACK, "utf8");
   const appSource = fs.readFileSync(APP, "utf8");
+  const paneSource = fs.readFileSync(TERMINAL_PANE, "utf8");
+  const tabsSource = fs.readFileSync(USE_TABS, "utf8");
   check(
     "the terminal plus menu omits the browser pane shortcut",
     !stackSource.includes('title: "Browser pane"') &&
@@ -172,8 +184,40 @@ async function main() {
       appSource.includes("liveTerminalWorkspaceIds"),
   );
   check(
+    "closed panes release renderer runtime and URL-dedupe records",
+    appSource.includes("for (const paneId of paneRuntimeRef.current.keys())") &&
+      appSource.includes("paneRuntimeRef.current.delete(paneId)") &&
+      appSource.includes("for (const paneId of lastOpenedUrlByTerminalRef.current.keys())") &&
+      appSource.includes("lastOpenedUrlByTerminalRef.current.delete(paneId)"),
+  );
+  check(
+    "capture-only exit timestamps are released after session discovery",
+    appSource.includes("capturingPanesRef.current.has(paneId)") &&
+      appSource.includes("confirmedAgentExitAtRef.current.delete(paneId)"),
+  );
+  check(
     "snapshot count is strictly bounded",
     source.includes("const MAX_XTERM_BUFFER_SNAPSHOTS = 16"),
+  );
+  check(
+    "closed panes release every terminal remount guard without evicting live panes",
+    source.includes("export function forgetTerminalSessionMemory") &&
+      source.includes("autorunFiredSessions.delete(sessionId)") &&
+      source.includes("nativeCliLoginTokenFiredSessions.delete(sessionId)") &&
+      source.includes("autoResumeAttempts.delete(sessionId)") &&
+      source.includes("resumeHintShown.delete(sessionId)") &&
+      appSource.includes("forgetTerminalSessionMemory(paneId)") &&
+      paneSource.includes("introShownSessions.delete(sessionId)") &&
+      appSource.includes("forgetTerminalPaneMemory(paneId)"),
+  );
+  check(
+    "deleted workspaces release restored-chat session metadata",
+    tabsSource.includes("restoredChatRunIdsByWorkspace.delete(workspaceId)"),
+  );
+  check(
+    "hidden documents pause PTY delivery before Chromium throttles the renderer",
+    source.includes('document.visibilityState === "visible"') &&
+      source.includes("window.spark.pty.pause(sessionId)"),
   );
   check(
     "snapshot cache also has a process-wide byte budget",

@@ -60,7 +60,6 @@ export default function GitHubSection({
   // Collapsed until asked for: the block is a secondary read of a remote, and
   // Source Control's own status is what the panel is opened for.
   const [collapsed, setCollapsed] = useState(true);
-  const [helpOpen, setHelpOpen] = useState(false);
   const [headerHover, setHeaderHover] = useState(false);
   const [refreshHover, setRefreshHover] = useState(false);
   // Background/initial reads are intentionally invisible in the header. Only
@@ -76,6 +75,10 @@ export default function GitHubSection({
   const [markReadyResult, setMarkReadyResult] = useState<GitHubMarkReadyResult | null>(null);
   const [markingReady, setMarkingReady] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
+  const [queueMerge, setQueueMerge] = useState<{
+    repository: string;
+    pullRequest: GitHubPullRequestSummary;
+  } | null>(null);
   const [mergeResult, setMergeResult] = useState<GitHubMergeResult | null>(null);
   const requestId = useRef(0);
   const markReadyRequestId = useRef(0);
@@ -93,7 +96,7 @@ export default function GitHubSection({
   // A new workspace context starts the block fresh — back to collapsed.
   useEffect(() => {
     setCollapsed(true);
-    setHelpOpen(false);
+    setQueueMerge(null);
     setQueueSummary({ loading: false, total: null });
   }, [cwd]);
 
@@ -470,9 +473,14 @@ export default function GitHubSection({
             {queue ? (
               <GitHubWorkQueue
                 key={queue.sourceWorkspaceId}
+                cwd={cwd}
                 sourceWorkspaceId={queue.sourceWorkspaceId}
                 refreshKey={queue.refreshKey}
                 onOpenItem={queue.onOpenItem}
+                onReviewMerge={(repository, pullRequest) => {
+                  setMergeResult(null);
+                  setQueueMerge({ repository, pullRequest });
+                }}
                 omitPullRequest={
                   status.pullRequest
                     ? {
@@ -484,16 +492,7 @@ export default function GitHubSection({
                 onSummary={handleQueueSummary}
               />
             ) : null}
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button
-                type="button"
-                aria-expanded={helpOpen}
-                onClick={() => setHelpOpen((value) => !value)}
-                style={linkButtonStyle}
-              >
-                How this works
-              </button>
-              <span style={{ flex: 1 }} />
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
               {issuesUrl ? (
                 <button
                   type="button"
@@ -505,13 +504,6 @@ export default function GitHubSection({
                 </button>
               ) : null}
             </div>
-            {helpOpen ? (
-              <MutedText>
-                Pick an issue to start it in its own worktree. Publish the
-                branch as a draft pull request, mark it ready for review, and
-                merge it here once checks and reviews pass.
-              </MutedText>
-            ) : null}
           </>
         )}
       </div>
@@ -540,6 +532,24 @@ export default function GitHubSection({
           onClose={() => setMergeOpen(false)}
           onMerged={() => {
             setMergeOpen(false);
+            setMergeResult(null);
+            onPublished();
+          }}
+        />
+      ) : null}
+      {queueMerge ? (
+        <MergePullRequestDialog
+          cwd={cwd}
+          repository={queueMerge.repository}
+          pullRequest={queueMerge.pullRequest}
+          previousResult={mergeResult}
+          onResult={setMergeResult}
+          onClose={() => {
+            setQueueMerge(null);
+            setMergeResult(null);
+          }}
+          onMerged={() => {
+            setQueueMerge(null);
             setMergeResult(null);
             onPublished();
           }}

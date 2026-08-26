@@ -544,6 +544,19 @@ async function main() {
       false,
       "an SSH terminal must reject a local Claude profile before dialing",
     );
+    await assert.rejects(
+      () =>
+        pty.spawn({
+          ...remoteOptions("ssh-grok-profile", "ssh-grok-profile-host", "grok"),
+          nativeGrokProfileId: controller.currentDefaultGrokProfileId,
+        }),
+      /only available in local terminals/,
+    );
+    assert.equal(
+      controller.connectionCalls.includes("ssh-grok-profile-host"),
+      false,
+      "an SSH terminal must reject a local Grok profile before dialing",
+    );
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
     delete process.env.CLAUDE_CODE_HOST_CREDS_FILE;
@@ -567,6 +580,21 @@ async function main() {
     assert.equal(grokClosed.closedSessionCount, 1);
     assert.equal(pty.exists(closeGrok.id), false);
     assert.equal(pty.exists(keepClaude.id), true);
+    assert.equal(
+      controller.activeProfileLeases.has("terminal:switch-grok"),
+      false,
+      "explicit Grok PTY close releases its account lease",
+    );
+    controller.failNextLocalSpawn = true;
+    await assert.rejects(
+      () => pty.spawn(localGrokOptions("grok-failed")),
+      /synthetic local spawn failure/,
+    );
+    assert.equal(
+      controller.activeProfileLeases.has("terminal:grok-failed"),
+      false,
+      "Grok process-construction failure releases its account lease",
+    );
     const claudeClosed = await pty.disposeNativeCliRuntimeGraceful("claude", 0);
     assert.equal(claudeClosed.closedSessionCount, 1);
     assert.equal(pty.exists(keepClaude.id), false);

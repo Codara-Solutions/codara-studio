@@ -115,7 +115,7 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     });
     await focusTerminal(panes.nth(1));
     await page.keyboard.press("Control+Alt+g");
-    const claudeSessions = page.getByRole("dialog", { name: "Claude Code sessions" });
+    const claudeSessions = page.getByRole("dialog", { name: "Claude sessions" });
     await expect.poll(
       async () => app!.evaluate(() => {
         const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };

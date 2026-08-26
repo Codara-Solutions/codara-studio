@@ -135,6 +135,7 @@ import type {
   GitHubMarkReadyResult,
   GitHubMergeInput,
   GitHubMergeResult,
+  GitHubPullRequestDetails,
   GitHubWorkspaceStatus,
   GitHubWorkQueueStatus,
   StartGitHubIssueInput,
@@ -1927,6 +1928,46 @@ export function registerIpc(): void {
         queue.invalidateGitHubWorkQueueCacheForScope(sourceWorkspaceId);
       }
       return queue.readGitHubWorkQueue(undefined, { sourceWorkspaceId });
+    },
+  );
+
+  handle(
+    "github:pullRequestDetails",
+    async (
+      _e,
+      request?: unknown,
+    ): Promise<GitHubPullRequestDetails> => {
+      const candidate =
+        request && typeof request === "object" && !Array.isArray(request)
+          ? (request as { cwd?: unknown; pullRequestNumber?: unknown })
+          : null;
+      const cwd = candidate?.cwd;
+      const pullRequestNumber = candidate?.pullRequestNumber;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("Pull request details require a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error(
+          "Pull request details are currently available for local workspaces only.",
+        );
+      }
+      if (
+        !Number.isSafeInteger(pullRequestNumber) ||
+        (pullRequestNumber as number) < 1
+      ) {
+        throw new Error("Pull request details require a valid pull request number.");
+      }
+      const github = await getGitHubCli();
+      const adapter = github.createGitHubCliAdapter();
+      if (!adapter.getPullRequestDetails) {
+        throw new Error("This Codara build cannot load pull request details.");
+      }
+      const repository = await adapter.resolveRepository(cwd);
+      return adapter.getPullRequestDetails(
+        cwd,
+        repository,
+        pullRequestNumber as number,
+      );
     },
   );
 

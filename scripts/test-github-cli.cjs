@@ -280,6 +280,87 @@ async function main() {
     }
 
     {
+      const repository = {
+        owner: "codara",
+        name: "studio",
+        nameWithOwner: "codara/studio",
+        url: "https://github.com/codara/studio",
+        hostname: "github.com",
+        defaultBranch: "main",
+      };
+      const payload = {
+        number: 42,
+        title: "Make reviews inspectable",
+        url: "https://github.com/codara/studio/pull/42",
+        state: "OPEN",
+        isDraft: false,
+        baseRefName: "main",
+        headRefName: "feature/reviews",
+        isCrossRepository: false,
+        updatedAt: "2026-08-26T15:00:00Z",
+        reviewDecision: "APPROVED",
+        mergeStateStatus: "CLEAN",
+        headRefOid: "a".repeat(40),
+        statusCheckRollup: [
+          { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
+        ],
+        author: { login: "review-agent" },
+        body: "What changed\n\nSafe details\u0000",
+        additions: 31,
+        deletions: 7,
+        changedFiles: 2,
+        labels: [{ name: "review" }],
+        files: [
+          { path: "src/review.ts", additions: 20, deletions: 2 },
+          { path: "tests/review.spec.ts", additions: 11, deletions: 5 },
+        ],
+      };
+      const { adapter, calls } = fakeAdapter(github, [
+        { stdout: JSON.stringify(payload), stderr: "" },
+      ]);
+      assert.deepEqual(await adapter.getPullRequestDetails("/repo", repository, 42), {
+        pullRequest: {
+          number: 42,
+          title: "Make reviews inspectable",
+          url: "https://github.com/codara/studio/pull/42",
+          state: "OPEN",
+          isDraft: false,
+          baseBranch: "main",
+          headBranch: "feature/reviews",
+          isCrossRepository: false,
+          updatedAt: "2026-08-26T15:00:00Z",
+          reviewDecision: "APPROVED",
+          mergeStateStatus: "CLEAN",
+          headCommitOid: "a".repeat(40),
+          checks: { total: 1, successful: 1, failed: 0, pending: 0 },
+        },
+        author: "review-agent",
+        body: "What changed\n\nSafe details",
+        bodyTruncated: false,
+        additions: 31,
+        deletions: 7,
+        changedFiles: 2,
+        labels: ["review"],
+        files: [
+          { path: "src/review.ts", additions: 20, deletions: 2 },
+          { path: "tests/review.spec.ts", additions: 11, deletions: 5 },
+        ],
+        filesTruncated: false,
+      });
+      assert.deepEqual(calls[0].args.slice(0, 6), [
+        "pr",
+        "view",
+        "42",
+        "--repo",
+        "codara/studio",
+        "--json",
+      ]);
+      for (const field of ["body", "author", "files", "changedFiles"]) {
+        assert.match(calls[0].args[6], new RegExp(`(^|,)${field}(,|$)`));
+      }
+    }
+
+    {
       const { adapter } = fakeAdapter(github, [
         commandFailure("HTTP 401: Bad credentials. Run gh auth login."),
       ]);

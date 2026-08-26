@@ -108,7 +108,11 @@ async function main() {
       /Issue → isolated worktree → draft PR/,
       "the jargon pipeline line must stay retired for the plain-language help disclosure",
     );
-    assert.match(surface, /How this works/);
+    assert.doesNotMatch(
+      surface,
+      /How this works/,
+      "the obsolete help disclosure must stay removed",
+    );
     const workQueue = readFileSync(
       path.join(
         ROOT,

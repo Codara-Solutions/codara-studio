@@ -257,6 +257,16 @@ check("the successor prompt actually hands the artifacts over", () => {
   assert.match(runStore, /collectPriorWorkerHandoffs/,
     "the prompt section is only real if prepareWorkerTask populates it");
   assert.match(runStore, /priorHandoffs,/);
+  assert.match(
+    runStore,
+    /legacyBoardAdoptionOps\.get\(workspaceId\) === settled[\s\S]*legacyBoardAdoptionOps\.delete\(workspaceId\)/,
+    "settled board-adoption queues must not retain every workspace for the process lifetime",
+  );
+  assert.match(
+    runStore,
+    /for \(const key of emittedFanOutDowngrades\)[\s\S]*key\.startsWith\(`\$\{run\.id\}:`\)[\s\S]*emittedFanOutDowngrades\.delete\(key\)/,
+    "deleting a run must release its in-memory fan-out dedupe keys",
+  );
 });
 
 Promise.all(results.filter((r) => r && typeof r.then === "function")).then(() => {

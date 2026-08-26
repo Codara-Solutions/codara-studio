@@ -269,6 +269,14 @@ export async function createPullRequestWorktree(
     await run(
       input.repoCwd,
       [
+        // Queue/status reads already authenticate through `gh`. Reuse that
+        // same host-scoped credential provider for this one HTTPS fetch so a
+        // private repository works without opening an interactive password
+        // prompt or placing a token in argv/environment.
+        "-c",
+        `credential.${new URL(remoteUrl).origin}.helper=!gh auth git-credential`,
+        "-c",
+        "credential.useHttpPath=false",
         "-c",
         "fetch.recurseSubmodules=false",
         "-c",
@@ -972,12 +980,20 @@ function isSafeRefName(value: unknown): value is string {
 }
 
 function safeGitError(value: unknown): string {
-  return errorText(value)
+  const safe = errorText(value)
     .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ")
     .replace(
       /(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})/gu,
       "[redacted]",
     )
     .trim()
-    .slice(0, 1_000) || "The pull request worktree could not be created.";
+    .slice(0, 1_000);
+  if (
+    /unable to get password|could not read (?:username|password)|authentication failed|terminal prompts? disabled|repository not found|http basic: access denied/iu.test(
+      safe,
+    )
+  ) {
+    return "GitHub could not authenticate the PR download. Run `gh auth login` (or refresh that login), make sure the account can read this repository, then try again.";
+  }
+  return safe || "The pull request worktree could not be created.";
 }

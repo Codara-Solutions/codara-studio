@@ -174,6 +174,9 @@ function releaseNativeProfileSessionLeases(session: Session): void {
   const releaseClaude = session.releaseNativeClaudeProfileLease;
   session.releaseNativeClaudeProfileLease = undefined;
   releaseClaude?.();
+  const releaseGrok = session.releaseNativeGrokProfileLease;
+  session.releaseNativeGrokProfileLease = undefined;
+  releaseGrok?.();
 }
 // Listeners for "session id became available" — orchestration uses this to
 // wait until the renderer-side TerminalView has called pty:spawn before we
@@ -750,7 +753,8 @@ async function spawnWithSessionLock(
   if (isRemotePath(opts.cwd)) {
     if (
       opts.nativeCodexProfileId !== undefined ||
-      opts.nativeClaudeProfileId !== undefined
+      opts.nativeClaudeProfileId !== undefined ||
+      opts.nativeGrokProfileId !== undefined
     ) {
       throw new Error("Native agent account profiles are only available in local terminals.");
     }
@@ -897,6 +901,7 @@ async function spawnWithSessionLock(
     releaseLock?.();
     spawnOpts.releaseNativeCodexProfileLease?.();
     spawnOpts.releaseNativeClaudeProfileLease?.();
+    spawnOpts.releaseNativeGrokProfileLease?.();
     throw err;
   }
 }

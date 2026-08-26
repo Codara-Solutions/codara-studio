@@ -8,6 +8,7 @@ import type {
   GitHubIssueSummary,
   GitHubMergeStrategy,
   GitHubPullRequestCheckoutMetadata,
+  GitHubPullRequestDetails,
   GitHubPullRequestSummary,
   GitHubRepositoryIdentity,
   GitHubWorkspaceStatus,
@@ -18,6 +19,7 @@ export type {
   GitHubCheckSummary,
   GitHubIssueSummary,
   GitHubPullRequestCheckoutMetadata,
+  GitHubPullRequestDetails,
   GitHubPullRequestState,
   GitHubPullRequestSummary,
   GitHubRepositoryIdentity,
@@ -55,6 +57,10 @@ const MAX_REPOSITORY_NAME = 240;
 const MAX_URL = 4_096;
 const MAX_BRANCH_NAME = 1_024;
 const MAX_PR_TITLE = 512;
+const MAX_PR_BODY_BYTES = 64 * 1024;
+const MAX_PR_DETAIL_FILES = 100;
+const MAX_PR_FILE_PATH = 4_096;
+const MAX_PR_DETAIL_LABELS = 12;
 const MAX_STATUS_NAME = 120;
 const MAX_ISSUE_LABEL = 120;
 const UNSAFE_GITHUB_TEXT =
@@ -84,6 +90,17 @@ const PULL_REQUEST_SUMMARY_JSON_FIELDS = [
   "mergeStateStatus",
   "headRefOid",
   "statusCheckRollup",
+].join(",");
+
+const PULL_REQUEST_DETAILS_JSON_FIELDS = [
+  PULL_REQUEST_SUMMARY_JSON_FIELDS,
+  "author",
+  "body",
+  "additions",
+  "deletions",
+  "changedFiles",
+  "labels",
+  "files",
 ].join(",");
 
 // Import pins the exact base and head commits plus the head repository
@@ -166,6 +183,11 @@ export interface GitHubCliAdapter {
     repository: string,
     pullRequestNumber: number,
   ): Promise<GitHubPullRequestSummary>;
+  getPullRequestDetails?(
+    cwd: string,
+    repository: GitHubRepositoryIdentity,
+    pullRequestNumber: number,
+  ): Promise<GitHubPullRequestDetails>;
   getPullRequestForCheckout?(
     cwd: string,
     repository: GitHubRepositoryIdentity,
@@ -513,6 +535,28 @@ export function createGitHubCliAdapter(
         throw invalidResponse("GitHub CLI returned a different pull request.");
       }
       return pullRequest;
+    },
+
+    async getPullRequestDetails(
+      cwd: string,
+      repository: GitHubRepositoryIdentity,
+      pullRequestNumber: number,
+    ): Promise<GitHubPullRequestDetails> {
+      assertPullRequestNumber(pullRequestNumber);
+      const stdout = await runRead(cwd, [
+        "pr",
+        "view",
+        String(pullRequestNumber),
+        "--repo",
+        repositorySelector(repository),
+        "--json",
+        PULL_REQUEST_DETAILS_JSON_FIELDS,
+      ]);
+      return parsePullRequestDetails(
+        stdout,
+        repository,
+        pullRequestNumber,
+      );
     },
 
     async getPullRequestForCheckout(
@@ -1227,6 +1271,65 @@ function parsePullRequestSummaryRecord(
   };
 }
 
+function parsePullRequestDetails(
+  stdout: string,
+  repository: GitHubRepositoryIdentity,
+  expectedNumber: number,
+): GitHubPullRequestDetails {
+  const value = parseJsonObject(stdout, "pull request details");
+  const pullRequest = parsePullRequestSummaryRecord(value, repository);
+  if (pullRequest.number !== expectedNumber) {
+    throw invalidResponse("GitHub CLI returned a different pull request.");
+  }
+
+  const body = boundedDetailText(value.body, "pull request body", MAX_PR_BODY_BYTES);
+  const authorRecord = optionalObject(value.author, "author");
+  const author = authorRecord
+    ? requiredString(authorRecord, "login", MAX_REPOSITORY_NAME)
+    : undefined;
+  const additions = requiredNonNegativeInteger(value, "additions");
+  const deletions = requiredNonNegativeInteger(value, "deletions");
+  const changedFiles = requiredNonNegativeInteger(value, "changedFiles");
+
+  if (!Array.isArray(value.labels)) {
+    throw invalidResponse("GitHub CLI returned invalid pull request labels.");
+  }
+  const labels = value.labels.slice(0, MAX_PR_DETAIL_LABELS).map((label) => {
+    if (!isRecord(label)) {
+      throw invalidResponse("GitHub CLI returned an invalid pull request label.");
+    }
+    return requiredString(label, "name", MAX_ISSUE_LABEL);
+  });
+
+  if (!Array.isArray(value.files)) {
+    throw invalidResponse("GitHub CLI returned invalid pull request files.");
+  }
+  const files = value.files.slice(0, MAX_PR_DETAIL_FILES).map((file) => {
+    if (!isRecord(file)) {
+      throw invalidResponse("GitHub CLI returned an invalid pull request file.");
+    }
+    return {
+      path: requiredString(file, "path", MAX_PR_FILE_PATH),
+      additions: requiredNonNegativeInteger(file, "additions"),
+      deletions: requiredNonNegativeInteger(file, "deletions"),
+    };
+  });
+
+  return {
+    pullRequest,
+    ...(author ? { author } : {}),
+    body: body.text,
+    bodyTruncated: body.truncated,
+    additions,
+    deletions,
+    changedFiles,
+    labels,
+    files,
+    filesTruncated:
+      value.files.length > MAX_PR_DETAIL_FILES || changedFiles > files.length,
+  };
+}
+
 function parsePullRequestCheckoutMetadata(
   stdout: string,
   repository: GitHubRepositoryIdentity,
@@ -1417,6 +1520,43 @@ function requiredPositiveInteger(record: Record<string, unknown>, field: string)
     throw invalidResponse(`GitHub CLI returned invalid ${field}.`);
   }
   return value as number;
+}
+
+function requiredNonNegativeInteger(
+  record: Record<string, unknown>,
+  field: string,
+): number {
+  const value = record[field];
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw invalidResponse(`GitHub CLI returned invalid ${field}.`);
+  }
+  return value as number;
+}
+
+function boundedDetailText(
+  value: unknown,
+  field: string,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
+  if (typeof value !== "string") {
+    throw invalidResponse(`GitHub CLI response is missing ${field}.`);
+  }
+  const safe = value
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]|\p{Bidi_Control}/gu, "")
+    .trim();
+  if (Buffer.byteLength(safe, "utf8") <= maxBytes) {
+    return { text: safe, truncated: false };
+  }
+  let text = "";
+  let used = 0;
+  for (const character of safe) {
+    const bytes = Buffer.byteLength(character, "utf8");
+    if (used + bytes > maxBytes) break;
+    text += character;
+    used += bytes;
+  }
+  return { text, truncated: true };
 }
 
 function requiredBoolean(record: Record<string, unknown>, field: string): boolean {

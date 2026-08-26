@@ -47,6 +47,13 @@ const introShownSessions = new Set<string>();
 const INTRO_HOLD_MS = 1_800;
 const INTRO_FADE_MS = 400;
 
+// App calls this only after the pane leaves every workspace layout. Unmount is
+// too early because workspace switches intentionally remount the same pane and
+// must not replay the intro.
+export function forgetTerminalPaneMemory(sessionId: string): void {
+  introShownSessions.delete(sessionId);
+}
+
 interface Props {
   sessionId: string;
   shell: ShellInfo;

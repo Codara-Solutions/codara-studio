@@ -38,6 +38,30 @@ export interface GitHubPullRequestSummary {
   checks: GitHubCheckSummary;
 }
 
+export interface GitHubPullRequestFileSummary {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * A bounded, read-only projection loaded only after somebody selects a PR.
+ * Keeping this out of the queue makes the overview fast while still giving
+ * the review surface enough context to make a merge decision.
+ */
+export interface GitHubPullRequestDetails {
+  pullRequest: GitHubPullRequestSummary;
+  author?: string;
+  body: string;
+  bodyTruncated: boolean;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  labels: string[];
+  files: GitHubPullRequestFileSummary[];
+  filesTruncated: boolean;
+}
+
 /**
  * Authoritative, checkout-safe projection for importing one exact PR revision.
  * This intentionally excludes bodies, comments, reviews, files, and raw GitHub

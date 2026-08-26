@@ -156,6 +156,7 @@ import {
   appendRegressionRevertEvent,
   appendWriteScopesDerivedEvent,
   eventsPath,
+  forgetRunEventState,
   listEvents,
   runDir,
   runsRoot,
@@ -11678,13 +11679,16 @@ const legacyBoardAdoptionOps = new Map<string, Promise<void>>();
 function withLegacyBoardAdoption(workspaceId: string, fn: () => Promise<void>): Promise<void> {
   const previous = legacyBoardAdoptionOps.get(workspaceId) ?? Promise.resolve();
   const next = previous.then(fn, fn);
-  legacyBoardAdoptionOps.set(
-    workspaceId,
-    next.then(
-      () => undefined,
-      () => undefined,
-    ),
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
   );
+  legacyBoardAdoptionOps.set(workspaceId, settled);
+  void settled.then(() => {
+    if (legacyBoardAdoptionOps.get(workspaceId) === settled) {
+      legacyBoardAdoptionOps.delete(workspaceId);
+    }
+  });
   return next;
 }
 
@@ -13351,6 +13355,10 @@ export async function deleteRun(runId: string): Promise<void> {
       );
     }
   }
+  for (const key of emittedFanOutDowngrades) {
+    if (key.startsWith(`${run.id}:`)) emittedFanOutDowngrades.delete(key);
+  }
+  forgetRunEventState(run.id);
 }
 
 // Reliable Cora-owned rewind. The epoch barrier lands before any asynchronous

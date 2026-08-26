@@ -144,6 +144,16 @@ async function main() {
     assert.deepEqual(readJournal(log, "bcast").map((e) => e.type), observed);
   });
 
+  await test("deleted-run cleanup cancels a buffered tail before it can recreate artifacts", async () => {
+    const log = await load();
+    log.appendBufferedEvent(input("deleted", "chat.assistant_block"));
+    log.forgetRunEventState("deleted");
+    await sleep(120);
+    assert.equal(fs.existsSync(log.eventsPath("deleted")), false);
+    const firstAfterReuse = await log.appendEvent(input("deleted", "run.created"));
+    assert.equal(firstAfterReuse.sequence, 1);
+  });
+
   fs.rmSync(TMP_HOME, { recursive: true, force: true });
   console.log(`\nAll ${passed} buffered-event checks passed.`);
 }

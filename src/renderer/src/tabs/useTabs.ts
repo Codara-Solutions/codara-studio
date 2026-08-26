@@ -1340,6 +1340,7 @@ export function useTabs(
         liveWorkspaceTabsRef.current.delete(workspaceId);
         closedChatRunIdsByWorkspaceRef.current.delete(workspaceId);
         deferredColdWorkspaceIdsRef.current.delete(workspaceId);
+        restoredChatRunIdsByWorkspace.delete(workspaceId);
       }
     }
     setInactiveWorkspaceLayouts((prev) => {

@@ -90,6 +90,44 @@ test("terminal output survives host suspend and resumes into the same xterm", as
       },
       { timeout: 10_000 },
     ).toContain(marker);
+
+    // Exercise the ordinary "left Codara running" path too. Schedule output
+    // before hiding so the shell keeps producing while Chromium throttles the
+    // hidden renderer; main's hide listener must park it, and reveal
+    // must repair xterm before replaying the bounded backlog.
+    const hiddenMarker = "WINDOW_HIDDEN_BACKLOG_MARKER_B91C";
+    await runTerminalCommand(
+      terminalInput,
+      `node -e "setTimeout(()=>{require('fs').writeFileSync('.hidden-output-ready','ready');console.log('${hiddenMarker}')},500)"`,
+    );
+    const hidden = await app.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      win.hide();
+      return !win.isVisible();
+    });
+    expect(hidden).toBe(true);
+    await expect.poll(
+      async () => readFile(join(workspaceDir, ".hidden-output-ready"), "utf8").catch(() => null),
+      { timeout: 15_000 },
+    ).toBe("ready");
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].showInactive();
+    });
+    await expect.poll(
+      async () => {
+        await terminalInput.press(process.platform === "darwin" ? "Meta+F" : "Control+F");
+        const findInput = page
+          .locator(".spark-terminal-pane:visible")
+          .first()
+          .getByPlaceholder("Find");
+        await findInput.fill(hiddenMarker);
+        await findInput.press("Enter");
+        await findInput.press("Escape");
+        await terminalInput.press("Control+Shift+C");
+        return page.evaluate(() => window.spark.clipboard.readText());
+      },
+      { timeout: 10_000 },
+    ).toContain(hiddenMarker);
   } finally {
     await app?.close();
   }

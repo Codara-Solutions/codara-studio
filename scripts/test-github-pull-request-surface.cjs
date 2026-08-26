@@ -60,7 +60,17 @@ function main() {
   );
   assert.match(queue, /<QueueMessage tone="error" alert>/);
   assert.match(queue, /aria-busy=\{busyKey === item\.key\}/);
-  assert.match(queue, /return "Import PR";/);
+  assert.match(queue, /return "Review";/);
+  assert.match(queue, /pullRequestDetails\(cwd, item\.pullRequest\.number\)/);
+  assert.match(queue, /Create review copy/);
+  assert.match(queue, /Review merge/);
+  assert.match(queue, /Description/);
+  assert.match(queue, /changed files/);
+  assert.doesNotMatch(
+    queue,
+    /return "Import PR";/,
+    "selecting a PR must inspect it before any worktree mutation",
+  );
   assert.ok(queue.includes('"Open pinned run"'));
   assert.ok(queue.includes('"Open pinned worktree"'));
 
@@ -116,6 +126,18 @@ function main() {
     "the unified GitHub block must keep one explicit refresh control",
   );
   assert.match(unified, /onClick=\{\(\) => \{[\s\S]{0,120}onRefresh\(\);/);
+  assert.doesNotMatch(unified, /How this works/);
+
+  assert.match(
+    ipc,
+    /"github:pullRequestDetails"[\s\S]{0,1600}adapter\.getPullRequestDetails/,
+    "main must resolve and load bounded PR details without creating a worktree",
+  );
+  assert.match(
+    preload,
+    /pullRequestDetails:[\s\S]{0,260}ipcRenderer\.invoke\("github:pullRequestDetails"/,
+    "preload must expose the read-only PR detail lookup",
+  );
 
   console.log(
     "PASS desktop pinned-PR IPC, queue action, navigation, error retention, and stale-revision labels",

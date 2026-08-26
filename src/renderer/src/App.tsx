@@ -59,6 +59,8 @@ import {
   setCreateAgentTerminalFn,
   setListShareableStudioTerminalsFn,
 } from "./components/Terminal/terminalRegistry";
+import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
+import { forgetTerminalPaneMemory } from "./components/Terminal/TerminalPane";
 import { mergeSessionStart } from "./components/Terminal/resume-policy";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
@@ -555,6 +557,10 @@ export default function App() {
       }
     >
   >(new Map());
+  // Per-pane URL auto-open dedupe. Pruned alongside paneRuntimeRef when its
+  // terminal leaves every active/inactive workspace layout.
+  const lastOpenedUrlByTerminalRef = useRef<Map<string, string>>(new Map());
+  const knownTerminalPaneIdsRef = useRef<Set<string>>(new Set());
   // Panes with an in-flight session-id capture (post agent-detection), so
   // repeated "agent running" events don't kick off duplicate discovery calls.
   const capturingPanesRef = useRef<Set<string>>(new Set());
@@ -680,6 +686,41 @@ export default function App() {
   useEffect(() => {
     tabs.pruneWorkspaceLayouts(validWorkspaceIds);
   }, [validWorkspaceIds, tabs.pruneWorkspaceLayouts]);
+
+  // Runtime-only pane records must follow the tab trees, not the lifetime of
+  // the renderer. A normal close removes the React listener before the PTY's
+  // delayed exit arrives, so relying on onTerminalPaneExit alone leaked one
+  // record per closed pane during a long Studio session.
+  useEffect(() => {
+    const livePaneIds = new Set<string>();
+    const collect = (items: Tab[]) => {
+      for (const tab of items) {
+        if (tab.kind !== "terminal") continue;
+        forEachTerminalLeaf(tab.root, (leaf) => livePaneIds.add(leaf.paneId));
+      }
+    };
+    collect(tabs.tabs);
+    for (const layout of tabs.inactiveWorkspaceLayouts) collect(layout.tabs);
+    for (const paneId of knownTerminalPaneIdsRef.current) {
+      if (!livePaneIds.has(paneId)) {
+        forgetTerminalSessionMemory(paneId);
+        forgetTerminalPaneMemory(paneId);
+      }
+    }
+    knownTerminalPaneIdsRef.current = livePaneIds;
+    for (const paneId of paneRuntimeRef.current.keys()) {
+      if (!livePaneIds.has(paneId)) paneRuntimeRef.current.delete(paneId);
+    }
+    for (const paneId of lastOpenedUrlByTerminalRef.current.keys()) {
+      if (!livePaneIds.has(paneId)) lastOpenedUrlByTerminalRef.current.delete(paneId);
+    }
+    for (const paneId of confirmedAgentExitAtRef.current.keys()) {
+      if (!livePaneIds.has(paneId) && !capturingPanesRef.current.has(paneId)) {
+        confirmedAgentExitAtRef.current.delete(paneId);
+      }
+    }
+  }, [tabs.tabs, tabs.inactiveWorkspaceLayouts]);
+
   const visibleWorkbenchTabs = useMemo(
     () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
     [tabs.tabs, activeRunId],
@@ -2333,6 +2374,7 @@ export default function App() {
     const workerMetaByAttempt = new Map<string, TerminalLeafWorker>();
     const reconcile = async () => {
       if (reconciling) return;
+      if (document.visibilityState !== "visible") return;
       reconciling = true;
       try {
         // Read runs through the ref: a `runs` dep would tear down and re-arm
@@ -3134,6 +3176,8 @@ export default function App() {
 
   const removeWorkspaceFromState = useCallback((id: string) => {
     delete activeRunIdsByWorkspaceRef.current[id];
+    pendingSpawnTerminalsRef.current.delete(id);
+    runRefreshPendingRef.current.delete(id);
     if (activeIdRef.current === id) {
       disposeTerminalPanesInTabs(tabsRef.current.tabs);
     } else {
@@ -3864,10 +3908,6 @@ export default function App() {
     () => new Set([3000, 3001, 4173, 4200, 4321, 5173, 5174, 6006, 8000, 8080, 8888]),
     [],
   );
-
-  // Per-terminal-tab "last URL we already opened" cache so a chatty dev
-  // server printing its URL on every change doesn't spam preview tabs.
-  const lastOpenedUrlByTerminalRef = useRef<Map<string, string>>(new Map());
 
   const handleDetectedUrl = useCallback(
     (tabId: string, paneId: string, url: string, meta?: { replayed?: boolean }) => {
@@ -5067,7 +5107,9 @@ export default function App() {
   const onTerminalPaneExit = useCallback(
     (tabId: string, paneId: string, info?: PtyExitInfo) => {
       paneRuntimeRef.current.delete(paneId);
-      if (!isAppTearingDown()) confirmedAgentExitAtRef.current.set(paneId, Date.now());
+      if (!isAppTearingDown() && capturingPanesRef.current.has(paneId)) {
+        confirmedAgentExitAtRef.current.set(paneId, Date.now());
+      }
       const t = tabsRef.current;
       const tab = t.tabs.find((item) => item.id === tabId);
       if (!tab || tab.kind !== "terminal") return;
@@ -5166,7 +5208,10 @@ export default function App() {
     ) => {
       if (state.running) {
         confirmedAgentExitAtRef.current.delete(paneId);
-      } else if (state.exitConfirmed === true) {
+      } else if (
+        state.exitConfirmed === true &&
+        capturingPanesRef.current.has(paneId)
+      ) {
         confirmedAgentExitAtRef.current.set(paneId, Date.now());
       }
       // Mirror alt-screen / TUI activity into the pane runtime tracker so
@@ -5294,7 +5339,10 @@ export default function App() {
               }
             })
             .catch(() => undefined)
-            .finally(() => capturingPanesRef.current.delete(paneId));
+            .finally(() => {
+              capturingPanesRef.current.delete(paneId);
+              confirmedAgentExitAtRef.current.delete(paneId);
+            });
         }
       }
       // Restore eligibility (`active`) tracks "is this pointer's agent running

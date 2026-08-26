@@ -8,6 +8,7 @@ import {
   nativeImage,
   ipcMain,
   powerMonitor,
+  type WebContents,
 } from "electron";
 import { logMain } from "./file-log";
 import { join } from "node:path";
@@ -210,7 +211,7 @@ function sendWindowState(win: BrowserWindow): void {
   });
 }
 
-type HostResumeReason = "resume" | "unlock-screen";
+type HostResumeReason = "resume" | "unlock-screen" | "window-visible";
 
 function notifyRenderersOfHostResume(reason: HostResumeReason): void {
   const payload = { reason, at: Date.now() };
@@ -218,6 +219,13 @@ function notifyRenderersOfHostResume(reason: HostResumeReason): void {
     if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
     win.webContents.send("terminal:host-resumed", payload);
   }
+}
+
+type TerminalPauseReason = "lock-screen" | "suspend" | "window-hidden";
+
+function pauseTerminalDelivery(reason: TerminalPauseReason): void {
+  const count = pty.pauseAllForHostSuspend();
+  if (count > 0) logMain("power", `${reason}: buffered ${count} terminal session(s)`);
 }
 
 // Bring the main window back from the tray (or recreate it if it was somehow
@@ -265,9 +273,14 @@ function pingRenderer(timeoutMs = 2000): Promise<boolean> {
   const nonce = ++healthPingSeq;
   return new Promise<boolean>((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | null = null;
     const finish = (ok: boolean) => {
       if (settled) return;
       settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
       pendingPongs.delete(nonce);
       resolve(ok);
     };
@@ -278,8 +291,12 @@ function pingRenderer(timeoutMs = 2000): Promise<boolean> {
       finish(false);
       return;
     }
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    timer.unref();
+    // A test double (or a future same-process transport) can answer during
+    // send(). Do not arm a timeout after that synchronous success.
+    if (!settled) {
+      timer = setTimeout(() => finish(false), timeoutMs);
+      timer.unref();
+    }
   });
 }
 
@@ -287,15 +304,29 @@ let recoveryTimestamps: number[] = [];
 let lastRecoveryAt = 0;
 // Pending unresponsive→force-recover timer (single window, so module-scoped).
 let unresponsiveTimer: NodeJS.Timeout | null = null;
+let unresponsiveTimerOwner: WebContents | null = null;
 const RECOVERY_DEDUPE_MS = 1500;
 const RECOVERY_BUDGET = 3;
 const RECOVERY_WINDOW_MS = 60_000;
+
+function clearUnresponsiveRecoveryTimer(owner?: WebContents): void {
+  if (owner && unresponsiveTimerOwner !== owner) return;
+  if (!unresponsiveTimer) return;
+  clearTimeout(unresponsiveTimer);
+  unresponsiveTimer = null;
+  unresponsiveTimerOwner = null;
+}
 
 // Recover a dead/wedged renderer by reloading it. Rapid duplicate calls (e.g.
 // forcefullyCrashRenderer → render-process-gone) are de-duped within a short
 // window. If reloads exceed the budget over RECOVERY_WINDOW_MS, the renderer is
 // crash-looping — destroy and recreate the whole window instead.
 function recoverRenderer(reason: string): void {
+  // Recovery can be triggered by a power-resume ping or process-gone before
+  // Electron emits `responsive`. Never let the old renderer's grace timer
+  // survive that recovery: its callback resolves `mainWindow` at fire time,
+  // so it could otherwise crash the freshly reloaded/recreated renderer.
+  clearUnresponsiveRecoveryTimer();
   const now = Date.now();
   if (now - lastRecoveryAt < RECOVERY_DEDUPE_MS) return; // recovery already in flight
   lastRecoveryAt = now;
@@ -626,12 +657,11 @@ function createWindow(): void {
       // sandboxed embedded browser with full Chromium controls (back/forward,
       // reload, devtools, capturePage). Without this flag <webview> is inert.
       webviewTag: true,
-      // Terminal PTYs remain live while the window is occluded, minimized, or
-      // behind the lock screen. Keep their renderer listeners and xterm buffer
-      // maintenance responsive instead of letting Chromium heavily throttle
-      // the page; this intentionally trades a little background CPU/RAM for
-      // terminal durability.
-      backgroundThrottling: false,
+      // Let Chromium freeze/throttle the renderer while the window is hidden.
+      // useTerminalSession pauses PTY delivery on document visibility loss and
+      // main retains the bounded output backlog, so terminal durability no
+      // longer requires every React timer/xterm observer to run in background.
+      backgroundThrottling: true,
     },
   });
 
@@ -649,6 +679,14 @@ function createWindow(): void {
 
   windowForEvents.on("maximize", () => sendWindowState(windowForEvents));
   windowForEvents.on("unmaximize", () => sendWindowState(windowForEvents));
+  // Chromium can throttle/freeze the renderer as soon as the whole window is
+  // minimized or hidden to the tray. Park terminal delivery from main as well
+  // as from the renderer's visibility listener, closing the small race before
+  // that listener runs (or when a wedged renderer cannot run it at all).
+  windowForEvents.on("minimize", () => pauseTerminalDelivery("window-hidden"));
+  windowForEvents.on("hide", () => pauseTerminalDelivery("window-hidden"));
+  windowForEvents.on("restore", () => notifyRenderersOfHostResume("window-visible"));
+  windowForEvents.on("show", () => notifyRenderersOfHostResume("window-visible"));
 
   // Notifications module reads focus state on demand via isFocused(); the
   // registration just hands it the window handle. focus/blur events are not
@@ -785,6 +823,7 @@ function createWindow(): void {
   });
 
   mainWindow.webContents.on("destroyed", () => {
+    clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
     // Renderer destruction can happen during workspace switches, reloads, or
     // crashes. Keep PTY processes alive so TerminalView can reattach when the
     // pane remounts; explicit pane close / app quit still kills them.
@@ -798,6 +837,7 @@ function createWindow(): void {
   // re-hydrates and reattaches/resumes each pane. 'clean-exit' is our own
   // reload/destroy, so don't fight it.
   windowForEvents.webContents.on("render-process-gone", (_e, details) => {
+    clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
     logMain("crash", `renderer process gone: ${details.reason} (exitCode ${details.exitCode})`);
     if (details.reason === "clean-exit") return;
     recoverRenderer(`render-process-gone:${details.reason}`);
@@ -808,15 +848,20 @@ function createWindow(): void {
   windowForEvents.webContents.on("unresponsive", () => {
     logMain("crash", "renderer unresponsive");
     if (unresponsiveTimer) return;
+    const owner = windowForEvents.webContents;
+    unresponsiveTimerOwner = owner;
     unresponsiveTimer = setTimeout(() => {
+      if (unresponsiveTimerOwner !== owner) return;
       unresponsiveTimer = null;
-      const wc = mainWindow?.webContents;
-      if (!wc || wc.isDestroyed()) return;
+      unresponsiveTimerOwner = null;
+      // Never let a delayed callback belonging to an old window crash the
+      // replacement renderer created by an earlier recovery.
+      if (mainWindow?.webContents !== owner || owner.isDestroyed()) return;
       logMain("crash", "renderer still unresponsive after grace; forcing recovery");
       try {
         // Fires render-process-gone(reason:'crashed'), which recovers. If it
         // throws (already gone), recover directly.
-        wc.forcefullyCrashRenderer();
+        owner.forcefullyCrashRenderer();
       } catch {
         recoverRenderer("unresponsive-timeout");
       }
@@ -824,10 +869,7 @@ function createWindow(): void {
     unresponsiveTimer.unref();
   });
   windowForEvents.webContents.on("responsive", () => {
-    if (unresponsiveTimer) {
-      clearTimeout(unresponsiveTimer);
-      unresponsiveTimer = null;
-    }
+    clearUnresponsiveRecoveryTimer(windowForEvents.webContents);
   });
   // Boot watchdog: arm on this window's own main-frame document navigations,
   // and only those. did-start-loading is frame-tree-wide, so a preview
@@ -1097,10 +1139,6 @@ app.whenReady().then(async () => {
   // bounded main-process backlog. Treat lock as the beginning of the vulnerable
   // window too: macOS can lock before the actual suspend event while remote
   // PTYs are still producing final bytes.
-  const pauseTerminalDelivery = (reason: "lock-screen" | "suspend") => {
-    const count = pty.pauseAllForHostSuspend();
-    if (count > 0) logMain("power", `${reason}: buffered ${count} terminal session(s)`);
-  };
   powerMonitor.on("lock-screen", () => pauseTerminalDelivery("lock-screen"));
   powerMonitor.on("suspend", () => {
     logMain("power", "system suspend");

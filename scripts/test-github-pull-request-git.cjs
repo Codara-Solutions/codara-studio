@@ -120,7 +120,10 @@ function dependencies(options = {}) {
           stderr: "",
         };
       }
-      if (command === "fetch") return { stdout: "", stderr: "" };
+      if (command === "fetch") {
+        if (options.fetchError) throw new Error(options.fetchError);
+        return { stdout: "", stderr: "" };
+      }
       if (command === "rev-parse" && cwd === "/repo") {
         return {
           stdout: `${options.fetchedOid ?? "b".repeat(40)}\n`,
@@ -558,6 +561,12 @@ async function main() {
         fetchCommand[10],
         /^\+refs\/pull\/42\/head:refs\/codara\/pr-import\//,
       );
+      assert.ok(
+        fetch.args.includes(
+          "credential.https://github.com.helper=!gh auth git-credential",
+        ),
+        "the PR fetch reuses the authenticated gh credential provider for private repositories",
+      );
       assert.equal(
         fetchCommand.join(" ").includes("feature"),
         false,
@@ -606,6 +615,17 @@ async function main() {
         ),
         "every Git process receives the scrubbed import environment",
       );
+    }
+
+    {
+      const mock = dependencies({
+        fetchError: "fatal: unable to get password from user",
+      });
+      const result = await module.createPullRequestWorktree(input(), mock.value);
+      assert.equal(result.ok, false);
+      assert.match(result.error, /gh auth login/);
+      assert.match(result.error, /account can read this repository/);
+      assert.doesNotMatch(result.error, /fatal:/);
     }
 
     {

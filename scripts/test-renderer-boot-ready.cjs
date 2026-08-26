@@ -48,6 +48,32 @@ assert.doesNotMatch(
   "arming after load can race a valid early ready signal and miss a hung load",
 );
 
+assert.match(
+  source,
+  /function clearUnresponsiveRecoveryTimer\(owner\?: WebContents\)[\s\S]*clearTimeout\(unresponsiveTimer\)[\s\S]*function recoverRenderer\(reason: string\): void \{[\s\S]*clearUnresponsiveRecoveryTimer\(\)/,
+  "renderer recovery must cancel the old renderer's delayed unresponsive crash",
+);
+assert.match(
+  source,
+  /webContents\.on\("destroyed", \(\) => \{[\s\S]*clearUnresponsiveRecoveryTimer\(windowForEvents\.webContents\)/,
+  "destroying a renderer must disarm its unresponsive timer",
+);
+assert.match(
+  source,
+  /unresponsiveTimerOwner !== owner[\s\S]*mainWindow\?\.webContents !== owner/,
+  "a stale unresponsive callback must never crash a replacement renderer",
+);
+assert.match(
+  source,
+  /backgroundThrottling: true/,
+  "the app renderer must be allowed to throttle after terminal delivery is parked",
+);
+assert.match(
+  source,
+  /\.on\("(?:minimize|hide)",[\s\S]*pauseTerminalDelivery\("window-hidden"\)[\s\S]*\.on\("(?:restore|show)",[\s\S]*notifyRenderersOfHostResume\("window-visible"\)/,
+  "main must park terminal delivery while the window is hidden and wake it after reveal",
+);
+
 console.log(
   "PASS renderer readiness is document-scoped, duplicate-safe, and watchdog-armed before a hung load",
 );

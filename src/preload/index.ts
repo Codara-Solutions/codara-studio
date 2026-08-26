@@ -19,6 +19,7 @@ import type {
   GitHubMarkReadyResult,
   GitHubMergeInput,
   GitHubMergeResult,
+  GitHubPullRequestDetails,
   GitHubWorkspaceStatus,
   GitHubWorkQueueStatus,
   StartGitHubIssueInput,
@@ -156,7 +157,7 @@ type PtyDataHandler = (data: Uint8Array | string) => void;
 type PtyReplayHandler = (info: { bytes: number }) => void;
 type PtyExitHandler = (info: PtyExitInfo) => void;
 type HostResumeHandler = (info: {
-  reason: "resume" | "unlock-screen";
+  reason: "resume" | "unlock-screen" | "window-visible";
   at: number;
 }) => void;
 type OrchestrationEventHandler = (event: SparkEvent) => void;
@@ -779,6 +780,14 @@ const api = {
       refresh = false,
     ): Promise<GitHubWorkQueueStatus> =>
       ipcRenderer.invoke("github:workQueue", { sourceWorkspaceId, refresh }),
+    pullRequestDetails: (
+      cwd: string,
+      pullRequestNumber: number,
+    ): Promise<GitHubPullRequestDetails> =>
+      ipcRenderer.invoke("github:pullRequestDetails", {
+        cwd,
+        pullRequestNumber,
+      }),
     status: (
       cwd: string,
       options: { refresh?: boolean } = {},
@@ -972,7 +981,10 @@ const api = {
     onHostResume: (handler: HostResumeHandler): (() => void) => {
       const listener = (
         _e: Electron.IpcRendererEvent,
-        info: { reason: "resume" | "unlock-screen"; at: number },
+        info: {
+          reason: "resume" | "unlock-screen" | "window-visible";
+          at: number;
+        },
       ) => handler(info);
       ipcRenderer.on("terminal:host-resumed", listener);
       return () => ipcRenderer.off("terminal:host-resumed", listener);
