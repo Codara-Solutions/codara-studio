@@ -172,8 +172,14 @@ export function parseClaudeSessionHead(text: string): {
     aiTitle: head.aiTitle === null ? null : clampTitle(head.aiTitle, TITLE_LIMIT),
     // Stricter than the shared parser's hasUser: a transcript whose user
     // records are all tooling noise (slash-command envelopes, caveat banners)
-    // is not resumable conversation, so require a surviving user text.
-    hasUser: head.firstUserText !== null && !head.sawSidechain,
+    // and nothing else is not a resumable conversation. But missing user
+    // prose in the head is a title problem, not a resumability problem: a
+    // session that opens with /model + /plan and a dozen file reads pushes
+    // the first typed sentence past the head window. An assistant reply or a
+    // generated ai-title proves a conversation happened, so accept those too.
+    hasUser:
+      !head.sawSidechain &&
+      (head.firstUserText !== null || head.sawAssistant || head.aiTitle !== null),
     isSidechain: head.sawSidechain,
   };
 }
@@ -286,7 +292,7 @@ async function listClaudeSessions(
         stateDir,
       );
       const parsed = parseClaudeSessionHead(head);
-      if (!parsed.hasUser) return null;
+      if (parsed.isSidechain) return null;
       // Prefer Claude Code's generated topic label; when the head missed the
       // record (giant pasted-context lines), fall back to a cached deeper
       // scan. The first user question then becomes the row's second line.
@@ -295,6 +301,9 @@ async function listClaudeSessions(
         (await findClaudeAiTitle(path, { mtimeMs, size }).then(
           (found) => (found === null ? null : clampTitle(found, TITLE_LIMIT)),
         ));
+      // The resumability decision runs after the deep scan on purpose: a
+      // buried ai-title is proof of a conversation the head could not see.
+      if (!parsed.hasUser && aiTitle === null) return null;
       return {
         runtime: "claude",
         sessionId: basename(path, ".jsonl"),

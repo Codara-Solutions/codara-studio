@@ -75,6 +75,10 @@ export interface ClaudeTranscriptHead {
   sawSidechain: boolean;
   // At least one non-sidechain, non-meta user record exists (resumable).
   hasUser: boolean;
+  // A main-lane assistant record appeared: the model actually answered, so
+  // the transcript is a conversation even when every user record in the head
+  // is tooling noise (slash-command envelopes) or tool results.
+  sawAssistant: boolean;
   cwd: string | null;
   startedAtMs: number | null;
 }
@@ -85,6 +89,7 @@ export function parseClaudeHead(headText: string): ClaudeTranscriptHead {
     firstUserText: null,
     sawSidechain: false,
     hasUser: false,
+    sawAssistant: false,
     cwd: null,
     startedAtMs: null,
   };
@@ -101,6 +106,10 @@ export function parseClaudeHead(headText: string): ClaudeTranscriptHead {
     if (rec.type === "ai-title" && typeof rec.aiTitle === "string") {
       const title = rec.aiTitle.replace(/\s+/g, " ").trim();
       if (title && out.aiTitle === null) out.aiTitle = title;
+      continue;
+    }
+    if (rec.type === "assistant") {
+      if (rec.isSidechain !== true) out.sawAssistant = true;
       continue;
     }
     if (rec.type !== "user") continue;

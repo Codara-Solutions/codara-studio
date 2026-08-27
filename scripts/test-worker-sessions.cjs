@@ -105,6 +105,77 @@ async function main() {
   check("Claude ignores sidechain-only transcripts", claudeSidechain.hasUser === false);
   check("Claude marks sidechain transcripts", claudeSidechain.isSidechain === true);
 
+  // A tool-heavy opening (/model, /plan, then a dozen file reads) pushes the
+  // first typed sentence past the head window: every user record the head
+  // sees is a command envelope or a tool_result. The assistant reply proves
+  // a conversation happened, so the session must stay resumable.
+  const claudeToolHeavy = parseClaudeSessionHead(jsonl(
+    {
+      type: "user",
+      isMeta: true,
+      message: { role: "user", content: "<local-command-caveat>Caveat</local-command-caveat>" },
+    },
+    {
+      type: "user",
+      cwd: "/workspace/project",
+      timestamp: "2026-08-21T10:00:00.000Z",
+      message: {
+        role: "user",
+        content: [
+          "<command-name>/model</command-name>",
+          "<command-message>model</command-message>",
+          "<command-args>fable</command-args>",
+        ].join("\n"),
+      },
+    },
+    {
+      type: "user",
+      message: { role: "user", content: "<local-command-stdout>Set model to Fable 5</local-command-stdout>" },
+    },
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "/a" } }],
+      },
+    },
+    {
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "file contents" }],
+      },
+    },
+  ));
+  check("Claude keeps tool-heavy transcripts resumable", claudeToolHeavy.hasUser === true);
+  check("Claude tool-heavy transcripts still have no head title", claudeToolHeavy.title === null);
+  check("Claude tool-heavy transcripts keep the recorded cwd", claudeToolHeavy.cwd === "/workspace/project");
+
+  const claudeSidechainAssistant = parseClaudeSessionHead(jsonl(
+    {
+      type: "user",
+      message: { role: "user", content: "<command-name>/usage</command-name>" },
+    },
+    {
+      type: "assistant",
+      isSidechain: true,
+      message: { role: "assistant", content: [{ type: "text", text: "subagent reply" }] },
+    },
+  ));
+  check(
+    "Claude sidechain assistant records do not make a transcript resumable",
+    claudeSidechainAssistant.hasUser === false,
+  );
+
+  const claudeTitledEnvelope = parseClaudeSessionHead(jsonl(
+    {
+      type: "user",
+      message: { role: "user", content: "<command-name>/grill-me</command-name>" },
+    },
+    { type: "ai-title", aiTitle: "Execute the plan" },
+  ));
+  check("Claude head ai-title makes a command-only head resumable", claudeTitledEnvelope.hasUser === true);
+
   const claudeCaveat = parseClaudeSessionHead(jsonl(
     {
       type: "user",
@@ -199,6 +270,40 @@ async function main() {
       message: { role: "user", content: "Automated Claude worker" },
     }),
   );
+  // Head-only sees a slash-command envelope plus a 300 KB meta record; the
+  // ai-title sits past the 256 KB head window and only the deep scan finds it.
+  const buriedTitleClaudeId = "66666666-6666-4666-8666-666666666666";
+  fs.writeFileSync(
+    path.join(claudeProject, `${buriedTitleClaudeId}.jsonl`),
+    jsonl(
+      {
+        type: "user",
+        cwd: workspace,
+        sessionId: buriedTitleClaudeId,
+        timestamp: "2026-07-17T10:02:00.000Z",
+        message: { role: "user", content: "<command-name>/plan</command-name>" },
+      },
+      {
+        type: "user",
+        isMeta: true,
+        cwd: workspace,
+        sessionId: buriedTitleClaudeId,
+        message: { role: "user", content: "x".repeat(300 * 1024) },
+      },
+      { type: "ai-title", aiTitle: "buried-topic", sessionId: buriedTitleClaudeId },
+    ),
+  );
+  const commandOnlyClaudeId = "77777777-7777-4777-8777-777777777777";
+  fs.writeFileSync(
+    path.join(claudeProject, `${commandOnlyClaudeId}.jsonl`),
+    jsonl({
+      type: "user",
+      cwd: workspace,
+      sessionId: commandOnlyClaudeId,
+      timestamp: "2026-07-17T10:03:00.000Z",
+      message: { role: "user", content: "<command-name>/usage</command-name>" },
+    }),
+  );
   fs.mkdirSync(path.join(process.env.CLAUDE_CONFIG_DIR, "file-history", claudeId), {
     recursive: true,
   });
@@ -206,7 +311,9 @@ async function main() {
   fs.writeFileSync(path.join(claudeProject, "memory", "MEMORY.md"), "fixture memory");
   fs.writeFileSync(
     path.join(process.env.CLAUDE_CONFIG_DIR, "history.jsonl"),
-    `${JSON.stringify({ sessionId: claudeId, project: workspace, display: "fixture" })}\n`,
+    [claudeId, buriedTitleClaudeId, commandOnlyClaudeId]
+      .map((sessionId) => JSON.stringify({ sessionId, project: workspace, display: "fixture" }))
+      .join("\n") + "\n",
   );
 
   const codexId = "22222222-2222-4222-8222-222222222222";
@@ -374,8 +481,23 @@ async function main() {
     listWorkerSessions("codex", workspace, { codexHome: process.env.CODEX_HOME }),
   ]);
   check(
-    "Directory picker lists only the interactive Claude session",
-    claudeSessions.length === 1 && claudeSessions[0].sessionId === claudeId,
+    "Directory picker lists only the interactive Claude sessions",
+    claudeSessions.length === 2 &&
+      claudeSessions.some((item) => item.sessionId === claudeId) &&
+      claudeSessions.every((item) => item.sessionId !== automatedClaudeId),
+  );
+  const buriedTitleRow = claudeSessions.find((item) => item.sessionId === buriedTitleClaudeId);
+  check(
+    "Directory picker rescues a session whose ai-title sits past the head window",
+    buriedTitleRow?.title === "buried-topic" && buriedTitleRow?.preview === null,
+  );
+  check(
+    "Directory picker still hides command-only transcripts",
+    claudeSessions.every((item) => item.sessionId !== commandOnlyClaudeId),
+  );
+  check(
+    "All-session scan still hides command-only transcripts",
+    allSessions.every((item) => item.sessionId !== commandOnlyClaudeId),
   );
   check(
     "Directory picker lists only the interactive Codex session",
@@ -738,7 +860,16 @@ async function main() {
   check("Claude deletion removes transcript", !fs.existsSync(claudeTranscript));
   check("Claude deletion removes companion state", !fs.existsSync(path.join(process.env.CLAUDE_CONFIG_DIR, "file-history", claudeId)));
   check("Claude deletion removes selected project memory", !fs.existsSync(path.join(claudeProject, "memory")));
-  check("Claude deletion filters prompt history", fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "history.jsonl"), "utf8") === "");
+  const claudeHistoryAfterDelete = fs.readFileSync(
+    path.join(process.env.CLAUDE_CONFIG_DIR, "history.jsonl"),
+    "utf8",
+  );
+  check(
+    "Claude deletion filters prompt history",
+    !claudeHistoryAfterDelete.includes(claudeId) &&
+      claudeHistoryAfterDelete.includes(buriedTitleClaudeId) &&
+      claudeHistoryAfterDelete.includes(commandOnlyClaudeId),
+  );
 
   await deleteWorkerSession(
     {
