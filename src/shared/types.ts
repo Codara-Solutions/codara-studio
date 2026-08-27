@@ -1163,6 +1163,36 @@ export interface AppPreferences {
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
   // "Remote access".
   remoteAccessEnabled?: boolean;
+  // Background auto-fetch (src/main/git-auto-fetch.ts): one `git fetch` per
+  // unique repository across every local workspace, on a timer. Default on.
+  gitAutoFetchEnabled?: boolean;
+  // Minutes between auto-fetch passes per repository (see
+  // GIT_AUTO_FETCH_INTERVAL_PRESETS). Stretched ×5 while the machine is idle.
+  gitAutoFetchIntervalMinutes?: number;
+  // When on, a fetch that brings in commits authored by someone other than
+  // the local git user (user.email) raises one grouped "teammate pushed"
+  // notification per repository. Default on; requires auto-fetch.
+  notifyTeammatePushes?: boolean;
+}
+
+export const DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES = 3;
+
+export const GIT_AUTO_FETCH_INTERVAL_PRESETS: ReadonlyArray<{
+  value: number;
+  label: string;
+  hint: string;
+}> = [
+  { value: 1, label: "1 min", hint: "Near-live; one fetch per repo every minute." },
+  { value: 3, label: "3 min", hint: "Default. Same cadence as VS Code / GitHub Desktop." },
+  { value: 5, label: "5 min", hint: "Lighter on the network." },
+  { value: 15, label: "15 min", hint: "Quiet; pushes surface within a quarter hour." },
+];
+
+// Pushed on "git:remote-updated" after a background fetch moved remote refs
+// for the listed workspace roots, so the Source Control poll refreshes now
+// instead of on its next 10s tick.
+export interface GitRemoteUpdatedPayload {
+  cwds: string[];
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -1298,6 +1328,9 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   nativeCliAccountLabels: {},
   restoreAgentSessions: false,
   remoteAccessEnabled: false,
+  gitAutoFetchEnabled: true,
+  gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
+  notifyTeammatePushes: true,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the
@@ -1428,14 +1461,20 @@ export type NotifyKind =
   | "automation.finished"
   | "automation.failed"
   | "automation.blocked"
-  | "app.update-ready";
+  | "app.update-ready"
+  // Background auto-fetch found commits by someone else on a remote branch
+  // (src/main/git-auto-fetch.ts). One grouped alert per repository per pass.
+  | "git.teammate-push";
 
 // Where clicking a notification (toast card, native notification, center
 // entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.
+// Workspace targets switch projects and, with panel "git", reveal the Source
+// Control section so the fetched commits are on screen.
 export type NavigationTarget =
   | { type: "run"; runId: string; workspaceId?: string }
   | { type: "terminal"; workspaceId: string; tabId: string; paneId: string }
-  | { type: "automation"; jobId: string; runId?: string; workspaceId?: string };
+  | { type: "automation"; jobId: string; runId?: string; workspaceId?: string }
+  | { type: "workspace"; workspaceId: string; panel?: "git" };
 
 // The one event shape every producer publishes and every surface consumes:
 // the in-app toast payload ("notification:in-app"), the native-notification

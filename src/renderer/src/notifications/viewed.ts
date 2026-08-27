@@ -38,6 +38,11 @@ export function isNotificationTargetViewed(
     );
   }
 
+  // A teammate-push alert has no "already looking at it" surface: the user
+  // may be in that workspace but not at the Source Control graph. Never
+  // auto-acknowledge; the click (or dismiss) is the read.
+  if (target.type === "workspace") return false;
+
   if (!workspaceMatches(target.workspaceId, view.workspaceId)) return false;
   if (target.runId && target.runId === view.visibleRunId) return true;
   return view.automationsActive;

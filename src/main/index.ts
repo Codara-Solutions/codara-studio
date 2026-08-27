@@ -7,13 +7,14 @@ import {
   globalShortcut,
   nativeImage,
   ipcMain,
+  net,
   powerMonitor,
   type WebContents,
 } from "electron";
 import { logMain } from "./file-log";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { registerIpc, setTrayHook } from "./ipc";
+import { broadcastGitRemoteUpdated, registerIpc, setTrayHook } from "./ipc";
 import { isTrustedOnSender, registerTrustedMainWindow } from "./main-window-trust";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
@@ -1163,8 +1164,21 @@ app.whenReady().then(async () => {
     resumeTimer = setTimeout(() => {
       resumeTimer = null;
       void onSystemResume();
+      // Waking the machine is exactly when remote state is stale: bring every
+      // repository's next background fetch forward (short jitter, not now).
+      void import("./git-auto-fetch")
+        .then((m) => m.nudgeGitAutoFetch("resume"))
+        .catch(() => undefined);
     }, 1500);
     resumeTimer.unref();
+  });
+  // Coming back to the app after a while (alt-tab from a long meeting) is the
+  // other "fresh data wanted now" moment. nudge() is a no-op unless the last
+  // pass is older than one interval, so ordinary focus churn costs nothing.
+  app.on("browser-window-focus", () => {
+    void import("./git-auto-fetch")
+      .then((m) => m.nudgeGitAutoFetch("focus"))
+      .catch(() => undefined);
   });
   powerMonitor.on("unlock-screen", () =>
     notifyRenderersOfHostResume("unlock-screen"),
@@ -1228,6 +1242,28 @@ app.whenReady().then(async () => {
   // BrowserWindow getter is already wired by registerMainWindow() inside
   // createWindow(); this kicks off the event subscription. Idempotent.
   startNotifications();
+
+  // Background auto-fetch + "teammate pushed" alerts. Lazy-imported to keep
+  // it out of the eager main bundle; the electron-only probes are injected so
+  // the module itself stays electron-free (and unit-testable). Its first pass
+  // is delayed ~30s after boot so launch isn't network-heavy.
+  void import("./git-auto-fetch")
+    .then((m) =>
+      m.startGitAutoFetch({
+        broadcastRemoteUpdated: broadcastGitRemoteUpdated,
+        isOnline: () => net.isOnline(),
+        idleSeconds: () => {
+          try {
+            return powerMonitor.getSystemIdleTime();
+          } catch {
+            return 0;
+          }
+        },
+      }),
+    )
+    .catch((err) => {
+      logMain("git-auto-fetch", `failed to start: ${String(err)}`);
+    });
 
   // Arm automations (cron / interval / folder-watch triggers) and resume any
   // queue items left mid-flight by a previous session. This stays fire-and-

@@ -141,6 +141,7 @@ export interface UsePanelLayoutApi extends PanelLayout {
   setLeftSplit: (ratio: number) => void;
   setRightSplit: (ratio: number) => void;
   toggleCollapse: (key: PanelSectionKey) => void;
+  revealSection: (key: PanelSectionKey) => void;
   moveSection: (key: PanelSectionKey, side: PanelSide, index: number) => void;
 }
 
@@ -182,6 +183,13 @@ export function usePanelLayout(): UsePanelLayoutApi {
   const toggleCollapse = useCallback((key: PanelSectionKey) => {
     setLayout((l) => ({ ...l, collapsed: { ...l.collapsed, [key]: !l.collapsed[key] } }));
   }, []);
+  // Idempotent expand — notification routing uses it to surface the Source
+  // Control section without flipping an already-open one closed.
+  const revealSection = useCallback((key: PanelSectionKey) => {
+    setLayout((l) =>
+      l.collapsed[key] ? { ...l, collapsed: { ...l.collapsed, [key]: false } } : l,
+    );
+  }, []);
   const moveSection = useCallback((key: PanelSectionKey, side: PanelSide, index: number) => {
     setLayout((layout) => {
       const sourceSide: PanelSide | null = layout.sections.left.includes(key)
@@ -219,6 +227,7 @@ export function usePanelLayout(): UsePanelLayoutApi {
       setLeftSplit,
       setRightSplit,
       toggleCollapse,
+      revealSection,
       moveSection,
     }),
     [
@@ -228,6 +237,7 @@ export function usePanelLayout(): UsePanelLayoutApi {
       setLeftSplit,
       setRightSplit,
       toggleCollapse,
+      revealSection,
       moveSection,
     ],
   );

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   APP_THEME_IDS,
   DEFAULT_AUTOSAVE_DELAY_MS,
+  DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   DEFAULT_NOTIFICATION_CHANNELS,
   DEFAULT_PREFERENCES,
@@ -114,6 +115,15 @@ function normalizeAutosaveDelay(value: unknown): number {
     return DEFAULT_AUTOSAVE_DELAY_MS;
   }
   return Math.max(250, Math.min(10_000, Math.round(value)));
+}
+
+// Auto-fetch cadence in minutes, clamped 1–60 (the presets are 1/3/5/15 but
+// a hand-edited file may hold any value in range).
+function normalizeAutoFetchInterval(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES;
+  }
+  return Math.max(1, Math.min(60, Math.round(value)));
 }
 
 function normalizeInlineDelay(value: unknown): number {
@@ -261,6 +271,18 @@ function normalize(
       typeof src.remoteAccessEnabled === "boolean"
         ? src.remoteAccessEnabled
         : DEFAULT_PREFERENCES.remoteAccessEnabled,
+    // Background auto-fetch + teammate-push alerts. Absent keys resolve to the
+    // defaults (on / 3 min / on) so existing preference files pick the
+    // feature up on upgrade.
+    gitAutoFetchEnabled:
+      typeof src.gitAutoFetchEnabled === "boolean"
+        ? src.gitAutoFetchEnabled
+        : DEFAULT_PREFERENCES.gitAutoFetchEnabled,
+    gitAutoFetchIntervalMinutes: normalizeAutoFetchInterval(src.gitAutoFetchIntervalMinutes),
+    notifyTeammatePushes:
+      typeof src.notifyTeammatePushes === "boolean"
+        ? src.notifyTeammatePushes
+        : DEFAULT_PREFERENCES.notifyTeammatePushes,
   };
 }
 

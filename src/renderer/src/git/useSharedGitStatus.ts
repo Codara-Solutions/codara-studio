@@ -183,6 +183,18 @@ export function useSharedGitStatus(cwd: string | null): SharedGitStatus {
     };
   }, [cwd, refresh]);
 
+  // Background auto-fetch moved remote refs for this root (ahead/behind, the
+  // remote branches in the graph). The fs watcher ignores .git, so without
+  // this push the change would only land on the next 10s poll tick.
+  useEffect(() => {
+    if (!cwd) return undefined;
+    const onRemoteUpdated = window.spark.git.onRemoteUpdated;
+    if (!onRemoteUpdated) return undefined;
+    return onRemoteUpdated((payload) => {
+      if (payload.cwds.includes(cwd)) void refresh(true);
+    });
+  }, [cwd, refresh]);
+
   const bumpVersion = useCallback(() => setGitVersion((v) => v + 1), []);
   const notifyChanged = useCallback(() => {
     void refresh(true);

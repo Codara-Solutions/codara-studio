@@ -24,13 +24,79 @@ export interface RunResult {
   stderr: string;
 }
 
+// ── User-initiated network op tracking ──────────────────────────────────────
+// The background auto-fetcher (git-auto-fetch.ts) must never race a push /
+// pull / fetch the user started from the panel or a GitHub action — two
+// processes updating the same refs produce "cannot lock ref" noise. Tracking
+// here, at the one choke point, covers every network call site (git-ops,
+// github-publish, github-pull-request-git) with a single edit. The
+// auto-fetcher passes `internal: true` so it never counts itself.
+
+const NETWORK_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "fetch",
+  "pull",
+  "push",
+  "clone",
+  "ls-remote",
+]);
+
+// First non-option token, skipping `-c key=val` pairs and `--flag` options.
+export function firstSubcommand(args: readonly string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (token === "-c" || token === "-C") {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    return token;
+  }
+  return null;
+}
+
+const networkOpsInFlight = new Map<string, number>();
+type NetworkOpListener = (cwd: string) => void;
+const networkOpSucceededListeners = new Set<NetworkOpListener>();
+
+export function isGitNetworkOpInFlight(cwd: string): boolean {
+  return (networkOpsInFlight.get(cwd) ?? 0) > 0;
+}
+
+// Fires after a user-initiated fetch/pull/push/clone finished successfully in
+// `cwd`. The auto-fetcher uses it to un-pause a repository whose background
+// fetch had hit an auth failure: the user just proved credentials work.
+export function onGitNetworkOpSucceeded(listener: NetworkOpListener): () => void {
+  networkOpSucceededListeners.add(listener);
+  return () => {
+    networkOpSucceededListeners.delete(listener);
+  };
+}
+
+function enterNetworkOp(cwd: string): void {
+  networkOpsInFlight.set(cwd, (networkOpsInFlight.get(cwd) ?? 0) + 1);
+}
+
+function leaveNetworkOp(cwd: string, succeeded: boolean): void {
+  const remaining = (networkOpsInFlight.get(cwd) ?? 1) - 1;
+  if (remaining <= 0) networkOpsInFlight.delete(cwd);
+  else networkOpsInFlight.set(cwd, remaining);
+  if (!succeeded) return;
+  for (const listener of networkOpSucceededListeners) {
+    try {
+      listener(cwd);
+    } catch {
+      /* listeners are best-effort */
+    }
+  }
+}
+
 // Single choke point for every git invocation. `credential.interactive=false`
 // + GIT_TERMINAL_PROMPT=0 make an auth-required network op fail fast instead
 // of blocking on a credential prompt that has nowhere to surface.
 export async function runGit(
   cwd: string,
   args: string[],
-  opts: { timeout?: number; env?: NodeJS.ProcessEnv } = {},
+  opts: { timeout?: number; env?: NodeJS.ProcessEnv; internal?: boolean } = {},
 ): Promise<RunResult> {
   // Remote workspace: run git on the host over the SSH exec channel. Same
   // flags + non-interactive credential env; parsers are unchanged since git's
@@ -38,20 +104,29 @@ export async function runGit(
   if (isRemotePath(cwd)) {
     return runRemoteGit(cwd, args, { timeout: opts.timeout });
   }
-  const { stdout, stderr } = await execFileAsync(
-    "git",
-    ["-C", cwd, "-c", "credential.interactive=false", ...args],
-    {
-      windowsHide: true,
-      maxBuffer: MAX_BUFFER,
-      timeout: opts.timeout ?? LOCAL_TIMEOUT_MS,
-      env: {
-        ...(opts.env ?? process.env),
-        GIT_TERMINAL_PROMPT: "0",
+  const subcommand = firstSubcommand(args);
+  const tracked = !opts.internal && subcommand !== null && NETWORK_SUBCOMMANDS.has(subcommand);
+  if (tracked) enterNetworkOp(cwd);
+  let succeeded = false;
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      "git",
+      ["-C", cwd, "-c", "credential.interactive=false", ...args],
+      {
+        windowsHide: true,
+        maxBuffer: MAX_BUFFER,
+        timeout: opts.timeout ?? LOCAL_TIMEOUT_MS,
+        env: {
+          ...(opts.env ?? process.env),
+          GIT_TERMINAL_PROMPT: "0",
+        },
       },
-    },
-  );
-  return { stdout: stdout.toString(), stderr: stderr.toString() };
+    );
+    succeeded = true;
+    return { stdout: stdout.toString(), stderr: stderr.toString() };
+  } finally {
+    if (tracked) leaveNetworkOp(cwd, succeeded);
+  }
 }
 
 // Pull the useful message out of a rejected execFile error: git writes the

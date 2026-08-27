@@ -928,7 +928,9 @@ function boundedQueueText(value: string, maxBytes: number): string {
   return result;
 }
 
-function createLimiter(
+// Minimal FIFO async semaphore. Exported: git-auto-fetch.ts bounds its
+// concurrent background fetches with the same primitive.
+export function createLimiter(
   limit: number,
 ): <T>(work: () => Promise<T>) => Promise<T> {
   let active = 0;

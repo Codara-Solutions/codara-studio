@@ -54,6 +54,11 @@ function watchingTarget(event: PublishInput): boolean {
   if (target.type === "terminal") {
     return isWatchingPane(target.workspaceId, target.tabId, target.paneId);
   }
+  // Teammate-push alerts (workspace targets) have no exact surface either —
+  // being in the workspace doesn't mean the Source Control graph is on
+  // screen — so they always alert (DND still mutes). The auto-fetcher does
+  // its own "did anything change" gating before publishing.
+  if (target.type === "workspace") return false;
   // No "watching an automation" surface exists; loop finishes always alert.
   return false;
 }

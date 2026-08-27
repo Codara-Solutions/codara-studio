@@ -84,6 +84,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitRemoteUpdatedPayload,
   GitStashList,
   GitStatus,
   LaunchWorkerAttemptInput,
@@ -681,6 +682,16 @@ const api = {
     push: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:push", cwd),
     pull: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:pull", cwd),
     fetch: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:fetch", cwd),
+    // Main→renderer push: the background auto-fetcher moved remote refs for
+    // the listed workspace roots (see git-auto-fetch.ts).
+    onRemoteUpdated: (
+      handler: (payload: GitRemoteUpdatedPayload) => void,
+    ): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, payload: GitRemoteUpdatedPayload) =>
+        handler(payload);
+      ipcRenderer.on("git:remote-updated", listener);
+      return () => ipcRenderer.off("git:remote-updated", listener);
+    },
     undoLastCommit: (cwd: string): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:undoLastCommit", cwd),
     checkout: (cwd: string, ref: string): Promise<GitOpResult> =>

@@ -31,6 +31,8 @@ import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_MAX,
   TERMINAL_SCROLLBACK_LINE_LIMIT_MIN,
   AUTOSAVE_DELAY_PRESETS,
+  DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
+  GIT_AUTO_FETCH_INTERVAL_PRESETS,
   INLINE_AI_DELAY_PRESETS,
 } from "@shared/types";
 import { runStatusColor } from "../lib/run-status";
@@ -1403,6 +1405,62 @@ function GeneralSettings({
               })
             }
           />
+        </div>
+      ) : null}
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
+      <SectionTitle
+        title="Git"
+        detail="Codara Studio can fetch every local workspace's remote in the background: one fetch per repository (worktrees share it), never pruning, at most two at a time, nothing while you're offline, and far less often while the machine is idle. When a fetch brings in commits by someone other than your git user.email you get one grouped alert per repository — “Etienne pushed 3 commits to feat/x” — and clicking it jumps to that workspace's Source Control graph. Your own pushes from another machine stay quiet."
+      />
+      {hydrated ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          <ToggleRow
+            title="Auto-fetch remotes in the background"
+            desc="Keeps ahead/behind and the remote branches in the graph current without pressing Fetch. Off = the manual Fetch button is the only network activity."
+            checked={preferences.gitAutoFetchEnabled !== false}
+            onChange={(v) => void setPreference("gitAutoFetchEnabled", v)}
+          />
+          {preferences.gitAutoFetchEnabled !== false ? (
+            <>
+              <div style={{ display: "grid", gap: 7 }}>
+                <span className="spark-eyebrow" style={{ fontSize: 11 }}>
+                  Fetch interval
+                </span>
+                <div
+                  role="group"
+                  aria-label="Auto-fetch interval"
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 6,
+                  }}
+                >
+                  {GIT_AUTO_FETCH_INTERVAL_PRESETS.map((preset) => (
+                    <TimingPresetButton
+                      key={preset.value}
+                      label={preset.label}
+                      hint={preset.hint}
+                      active={
+                        (preferences.gitAutoFetchIntervalMinutes ??
+                          DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES) === preset.value
+                      }
+                      onClick={() =>
+                        void setPreference("gitAutoFetchIntervalMinutes", preset.value)
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
+              <ToggleRow
+                title="Notify me when teammates push"
+                desc="One grouped alert per repository per fetch, only for commits whose author or committer isn't your git user.email. Uses the notification channels above; Do Not Disturb still mutes it."
+                checked={preferences.notifyTeammatePushes !== false}
+                onChange={(v) => void setPreference("notifyTeammatePushes", v)}
+              />
+            </>
+          ) : null}
         </div>
       ) : null}
 

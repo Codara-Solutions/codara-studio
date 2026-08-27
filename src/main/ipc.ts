@@ -383,6 +383,7 @@ import type {
   ProjectPolicyMode,
   PrefKey,
   PreferencesChange,
+  GitRemoteUpdatedPayload,
   PrepareWorkerTaskInput,
   NotificationCenterEntry,
   RenameRunInput,
@@ -807,6 +808,17 @@ export function broadcastPreferencesChanged<K extends PrefKey>(
   for (const wc of webContents.getAllWebContents()) {
     if (wc.isDestroyed()) continue;
     wc.send("preferences:changed", payload);
+  }
+}
+
+// Background auto-fetch moved remote refs for these workspace roots. The
+// renderer's shared git poll refreshes the active workspace at once instead
+// of waiting for its next 10s tick; other roots are picked up when activated.
+export function broadcastGitRemoteUpdated(cwds: string[]): void {
+  const payload: GitRemoteUpdatedPayload = { cwds };
+  for (const wc of webContents.getAllWebContents()) {
+    if (wc.isDestroyed()) continue;
+    wc.send("git:remote-updated", payload);
   }
 }
 

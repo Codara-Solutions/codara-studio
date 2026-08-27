@@ -2869,6 +2869,39 @@ export default function App() {
     }, 0);
   }, [booted, tabs.tabsWorkspaceId, applyTerminalFocus]);
 
+  const handleActivateWorkspace = useCallback((id: string) => {
+    pendingCrossWorkspaceRunSelectionRef.current = null;
+    runSelectionGenerationRef.current += 1;
+    const currentWorkspaceId = activeIdRef.current;
+    if (currentWorkspaceId) {
+      activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
+    }
+    activeIdRef.current = id;
+    setActiveId(id);
+  }, []);
+
+  // Teammate-push notification click: switch to the workspace and put its
+  // Source Control section on screen. The "graph" section may sit on either
+  // rail, be collapsed, or be hidden along with its whole rail (or, in the
+  // compact workbench, not be the one rail currently shown) — undo all three.
+  const compactWorkbenchRef = useRef(compactWorkbench);
+  compactWorkbenchRef.current = compactWorkbench;
+  const openWorkspacePanel = useCallback(
+    (workspaceId: string, panel?: "git") => {
+      if (!workspacesRef.current.some((workspace) => workspace.id === workspaceId)) return;
+      if (activeIdRef.current !== workspaceId) handleActivateWorkspace(workspaceId);
+      if (panel !== "git") return;
+      const side: PanelSide = panelsRef.current.sections.left.includes("graph")
+        ? "left"
+        : "right";
+      if (compactWorkbenchRef.current) setCompactPanel(side);
+      else if (side === "left") setShowLeft(true);
+      else setShowRight(true);
+      panelsRef.current.revealSection("graph");
+    },
+    [handleActivateWorkspace],
+  );
+
   // One navigation entry point for every notification surface (toast cards,
   // native-notification clicks via "notify:focus", the notification center).
   const navigateToNotifyTarget = useMemo(
@@ -2877,8 +2910,9 @@ export default function App() {
         selectRun: handleSelectRunAnywhere,
         focusTerminal: focusTerminalTarget,
         openAutomations: () => tabsRef.current.openAutomationsTab(),
+        openWorkspace: openWorkspacePanel,
       }),
-    [handleSelectRunAnywhere, focusTerminalTarget],
+    [handleSelectRunAnywhere, focusTerminalTarget, openWorkspacePanel],
   );
   useNotifyFocusRouting(navigateToNotifyTarget, booted);
 
@@ -2900,17 +2934,6 @@ export default function App() {
   // React setters, so these can carry empty dep arrays and stay referentially
   // stable for the lifetime of the component — which lets the React.memo on
   // WorkspaceRail actually skip renders.
-  const handleActivateWorkspace = useCallback((id: string) => {
-    pendingCrossWorkspaceRunSelectionRef.current = null;
-    runSelectionGenerationRef.current += 1;
-    const currentWorkspaceId = activeIdRef.current;
-    if (currentWorkspaceId) {
-      activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
-    }
-    activeIdRef.current = id;
-    setActiveId(id);
-  }, []);
-
   const handleEditWorkspace = useCallback((id: string) => {
     setEditingId((prev) => (prev === id ? null : id));
   }, []);

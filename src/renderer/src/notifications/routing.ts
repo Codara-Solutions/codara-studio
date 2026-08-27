@@ -9,6 +9,9 @@ export interface NavigationHandlers {
   selectRun: (runId: string, workspaceId?: string) => void;
   focusTerminal: (target: TerminalAgentTarget) => void;
   openAutomations: () => void;
+  // Switch to the workspace and, for panel "git", reveal its Source Control
+  // section (teammate-push alerts from the background auto-fetcher).
+  openWorkspace: (workspaceId: string, panel?: "git") => void;
 }
 
 export type NavigateTo = (target: NavigationTarget) => void;
@@ -35,6 +38,9 @@ export function createNavigateTo(handlers: NavigationHandlers): NavigateTo {
         // without it the click dead-ends in the wrong workspace's hub.
         if (target.runId) handlers.selectRun(target.runId, target.workspaceId);
         else handlers.openAutomations();
+        break;
+      case "workspace":
+        handlers.openWorkspace(target.workspaceId, target.panel);
         break;
     }
   };
