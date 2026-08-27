@@ -40,7 +40,7 @@ import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry } from "./agent-session-registry";
-import { activeTerminalAgentPaneIds } from "./terminal-agent-notify";
+import { activeTerminalAgentPaneIds, noteHostResume } from "./terminal-agent-notify";
 import {
   isAllowedMainWindowUrl,
   isSameResolvedPath,
@@ -1160,6 +1160,9 @@ app.whenReady().then(async () => {
     // drain queued PTY bytes. The delayed sweep below separately handles PTYs
     // the OS killed and a renderer/GPU process that returned wedged.
     notifyRenderersOfHostResume("resume");
+    // Restart the terminal-agent quiet windows before the 1s sweep can read
+    // the sleep gap as "the agent went silent → finished".
+    noteHostResume();
     if (resumeTimer) return; // coalesce duplicate resume events
     resumeTimer = setTimeout(() => {
       resumeTimer = null;

@@ -6,6 +6,7 @@ import type {
   SparkEvent,
   TerminalAgentStatePayload,
 } from "@shared/types";
+import { logMain } from "../file-log";
 import { subscribeToEvents } from "../orchestration/event-log";
 import { getPreferenceCached, loadPreferences } from "../preferences-store";
 import { isWatchingPane, isWatchingRun } from "./attention";
@@ -69,13 +70,20 @@ export function publish(input: PublishInput): void {
     id: makeId("notify"),
     createdAt: new Date().toISOString(),
   };
+  const watching = watchingTarget(input);
+  const dnd = getPreferenceCached("notificationsDnd") === true;
   const decision = decide(
     { kind: event.kind, sourceKey: event.sourceKey },
-    {
-      watching: watchingTarget(input),
-      dnd: getPreferenceCached("notificationsDnd") === true,
-    },
+    { watching, dnd },
     state,
+  );
+  // Persistent audit trail (<codaraHome>/logs/main.log): one line per
+  // publish, delivered or not. Center entries get auto-acknowledged and
+  // removed the moment the user views the target, so without this line a
+  // background chime leaves no evidence of what raised it.
+  logMain(
+    "notify",
+    `${decision.deliver ? "DELIVER" : "skip"} kind=${event.kind} source=${event.sourceKey} reason=${decision.reason} watching=${watching} dnd=${dnd} title="${event.title}" body="${event.body.replace(/\s+/g, " ").slice(0, 120)}"`,
   );
   if (decision.record) {
     void recordToCenter(event, {

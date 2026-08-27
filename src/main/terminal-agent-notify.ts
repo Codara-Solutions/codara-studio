@@ -186,10 +186,10 @@ let sweepTimer: NodeJS.Timeout | null = null;
 const LOG_PATH = path.join(os.tmpdir(), "spark-terminal-notify.log");
 let logChecked = false;
 function tanLog(msg: string): void {
-  // Off by default: the flight recorder only writes when explicitly opted in
-  // via SPARK_TERMINAL_NOTIFY_LOG. Call sites stay unconditional; this is a
-  // no-op unless the env var is set (truthy).
-  if (!process.env.SPARK_TERMINAL_NOTIFY_LOG) return;
+  // On by default (a few lines per agent turn, self-truncating at 2 MB) so a
+  // surprise "finished"/"needs you" chime can be traced to the exact state
+  // transition that raised it. SPARK_TERMINAL_NOTIFY_LOG=0 switches it off.
+  if (process.env.SPARK_TERMINAL_NOTIFY_LOG === "0") return;
   try {
     if (!logChecked) {
       logChecked = true;
@@ -592,6 +592,20 @@ export function noteTerminalUserInput(paneId: string): void {
   }
   w.userTurnArmed = true;
   rearm(paneSourceKey(paneId));
+}
+
+// The host slept: the wall-clock gap is not byte silence. Without this the
+// sweep's first tick after wake sees `now - lastWorkingAt` far past the quiet
+// window and fires "finished" for every pane that was mid-turn at suspend,
+// before the agent has had a chance to repaint. Restart the quiet window.
+export function noteHostResume(): void {
+  const now = Date.now();
+  for (const w of watchers.values()) {
+    if (w.state !== "working") continue;
+    w.lastWorkingAt = now;
+    w.lastOutputAt = now;
+    tanLog(`pane=${w.paneId} host resume — quiet window restarted`);
+  }
 }
 
 export function noteTerminalWillDispose(paneId: string): void {
@@ -1026,6 +1040,16 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   // noteTerminalUserInput.
   const isAgentIdleEcho =
     kind === "done" && w.runtime !== null && /waiting\s*for\s*your\s*input/i.test(message);
+  // The idle echo only means something if a turn actually ran since the last
+  // user input. Any keystroke (Esc, an arrow, a scroll report) arms the pane
+  // AND clears the policy's dedup via noteTerminalUserInput, so without this
+  // gate poking an idle prompt and walking away produced a "finished" chime
+  // a minute later with nothing to show for it. workedLongEnough() reads the
+  // working-phase stamps, which every non-working keystroke resets to 0.
+  if (isAgentIdleEcho && !workedLongEnough(w)) {
+    tanLog(`pane=${w.paneId} idle echo without a turn since last input — suppressed`);
+    return;
+  }
   if (!isAgentIdleEcho) rearm(paneSourceKey(w.paneId));
   deliver(w, kind, message.length > 0 ? message : null);
   w.userTurnArmed = false;

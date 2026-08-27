@@ -6,6 +6,7 @@ import type {
   TerminalAgentAttentionPayload,
 } from "@shared/types";
 import { revealWindow } from "../e2e-background";
+import { logMain } from "../file-log";
 
 // The four delivery transports for an alert the policy let through, gated by
 // the user's per-channel preferences. Each channel is best-effort: a thrown
@@ -92,6 +93,14 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
   const win = activeWindow();
 
   const appFocused = isAppFocused(win);
+
+  // Which transports actually fire — a sound with no toast and no OS
+  // notification (window unfocused + native off) is otherwise indistinguishable
+  // from a phantom chime after the fact.
+  logMain(
+    "notify",
+    `channels id=${event.id} focused=${appFocused} toast=${channels.inApp && !!win && appFocused} native=${channels.native && (!appFocused || !channels.inApp)} sound=${channels.sound && !!win} osCues=${channels.osCues}`,
+  );
 
   // In-app toast: only when the window is focused, so it can actually be seen.
   // When Codara Studio is minimized or backgrounded the toast would just stack
