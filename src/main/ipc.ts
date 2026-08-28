@@ -10,6 +10,13 @@ import { createFile, createFolder, deleteFile, deleteToStash, importEntries, lis
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
+import {
+  listKeys as listSshKeys,
+  generateKey as generateSshKey,
+  importKey as importSshKey,
+  deleteKey as deleteSshKey,
+} from "./remote/ssh-keys";
+import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import { browseRemoteDir } from "./remote/browse";
 import {
   answerAuthPrompt,
@@ -3477,6 +3484,20 @@ export function registerIpc(): void {
   handle("remote:disconnect", async (_e, hostId: string): Promise<void> => {
     disconnectHost(hostId);
   });
+  // SSH key management for the SSH manager dialog's Keys tab.
+  handle("sshKeys:list", async (): Promise<SshKeyInfo[]> => listSshKeys());
+  handle(
+    "sshKeys:generate",
+    async (
+      _e,
+      opts: { name: string; passphrase?: string; comment?: string },
+    ): Promise<SshKeyInfo> => generateSshKey(opts),
+  );
+  handle(
+    "sshKeys:import",
+    async (_e, sourcePath: string): Promise<SshKeyImportResult> => importSshKey(sourcePath),
+  );
+  handle("sshKeys:delete", async (_e, name: string): Promise<void> => deleteSshKey(name));
   handle(
     "remote:status",
     async (_e, hostId: string): Promise<RemoteConnectionStatus> => getConnectionStatus(hostId),
@@ -3491,6 +3512,13 @@ export function registerIpc(): void {
     // only the trusted renderer may answer, never a webview guest process.
     if (!isTrustedOnSender(e, "remote:authPromptAnswer")) return;
     answerAuthPrompt(answer);
+  });
+  // Remote access (phone app pairing). The renderer only ever sees status,
+  // device summaries, the pairing state, and the QR payload string; key
+  // material and pairing secret internals stay in main.
+  handle("remoteAccess:getStatus", async (_event): Promise<RemoteAccessStatus> => {
+    const service = await getRemoteAccess();
+    return service.getStatus();
   });
   handle(
     "remoteAccess:setEnabled",
