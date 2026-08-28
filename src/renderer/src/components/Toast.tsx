@@ -30,7 +30,7 @@ import {
 // visual timeout only hide the card, so missed entries remain in the center.
 
 // Fallback when the host passes no preference (matches DEFAULT_TOAST_DURATION_MS).
-const AUTO_DISMISS_MS = 3_000;
+const AUTO_DISMISS_MS = 6_000;
 // Cap simultaneous toasts so a misbehaving run that fires many alerts
 // in a row can't cover the whole screen. The oldest ones drop off the
 // stack while keeping the most recent visible.

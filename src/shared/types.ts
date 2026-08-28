@@ -1179,15 +1179,15 @@ export interface AppPreferences {
   toastDurationMs?: number;
 }
 
-export const DEFAULT_TOAST_DURATION_MS = 3_000;
+export const DEFAULT_TOAST_DURATION_MS = 6_000;
 
 export const TOAST_DURATION_PRESETS: ReadonlyArray<{
   value: number;
   label: string;
   hint: string;
 }> = [
-  { value: 3_000, label: "3 s", hint: "Default. A glance, then out of the way." },
-  { value: 6_000, label: "6 s", hint: "Time to read a longer body." },
+  { value: 3_000, label: "3 s", hint: "A glance, then out of the way." },
+  { value: 6_000, label: "6 s", hint: "Default. Time to read a longer body." },
   { value: 12_000, label: "12 s", hint: "Lingers while you finish a thought." },
   { value: 0, label: "Until closed", hint: "Stays until you click it or press ×." },
 ];
