@@ -4,6 +4,7 @@ import {
   APP_THEME_IDS,
   DEFAULT_AUTOSAVE_DELAY_MS,
   DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
+  DEFAULT_TOAST_DURATION_MS,
   DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   DEFAULT_NOTIFICATION_CHANNELS,
   DEFAULT_PREFERENCES,
@@ -283,7 +284,17 @@ function normalize(
       typeof src.notifyTeammatePushes === "boolean"
         ? src.notifyTeammatePushes
         : DEFAULT_PREFERENCES.notifyTeammatePushes,
+    toastDurationMs: normalizeToastDuration(src.toastDurationMs),
   };
+}
+
+// Toast on-screen time: 0 (sticky) or 1s–60s.
+function normalizeToastDuration(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_TOAST_DURATION_MS;
+  }
+  if (value <= 0) return 0;
+  return Math.max(1_000, Math.min(60_000, Math.round(value)));
 }
 
 async function readFromDisk(): Promise<AppPreferences> {

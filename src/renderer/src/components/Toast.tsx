@@ -29,6 +29,7 @@ import {
 // matching run, pane, or Automations hub does the same. The close button and
 // visual timeout only hide the card, so missed entries remain in the center.
 
+// Fallback when the host passes no preference (matches DEFAULT_TOAST_DURATION_MS).
 const AUTO_DISMISS_MS = 3_000;
 // Cap simultaneous toasts so a misbehaving run that fires many alerts
 // in a row can't cover the whole screen. The oldest ones drop off the
@@ -58,6 +59,10 @@ export interface ToastHostProps {
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   // The exact workbench surface currently visible to the user.
   activeView: ActiveNotificationView;
+  // On-screen time per toast (AppPreferences.toastDurationMs). 0 = sticky:
+  // the card stays until clicked or closed. Applies to toasts arriving after
+  // the change; cards already counting down keep their own clock.
+  dismissMs?: number;
 }
 
 async function markReadThenRemove(id: string): Promise<void> {
@@ -77,6 +82,7 @@ export default function ToastHost({
   navigateTo,
   resolveQuestion,
   activeView,
+  dismissMs = AUTO_DISMISS_MS,
 }: ToastHostProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastsRef = useRef(toasts);
@@ -205,9 +211,11 @@ export default function ToastHost({
         timers.delete(id);
       }
     }
-    // Start a fresh AUTO_DISMISS_MS window for any toast that doesn't already
-    // have one. Existing timers are left untouched, so a stream of arrivals
-    // can't keep older toasts alive forever — each expires on its own clock.
+    // Start a fresh dismiss window for any toast that doesn't already have
+    // one. Existing timers are left untouched, so a stream of arrivals can't
+    // keep older toasts alive forever — each expires on its own clock. A
+    // non-positive duration means sticky: no timer, the user closes the card.
+    if (dismissMs <= 0) return;
     for (const toast of toasts) {
       if (!timers.has(toast.id)) {
         timers.set(
@@ -215,11 +223,11 @@ export default function ToastHost({
           window.setTimeout(() => {
             timers.delete(toast.id);
             setToasts((current) => current.filter((t) => t.id !== toast.id));
-          }, AUTO_DISMISS_MS),
+          }, dismissMs),
         );
       }
     }
-  }, [toasts]);
+  }, [toasts, dismissMs]);
 
   // Clear every pending timer on unmount so a teardown can't fire setToasts.
   useEffect(() => {

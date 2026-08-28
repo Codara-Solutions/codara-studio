@@ -1173,7 +1173,24 @@ export interface AppPreferences {
   // the local git user (user.email) raises one grouped "teammate pushed"
   // notification per repository. Default on; requires auto-fetch.
   notifyTeammatePushes?: boolean;
+  // How long an in-app toast stays on screen before auto-dismissing, in ms.
+  // 0 = stay until clicked or closed. Missed toasts always remain in the
+  // notification center regardless.
+  toastDurationMs?: number;
 }
+
+export const DEFAULT_TOAST_DURATION_MS = 3_000;
+
+export const TOAST_DURATION_PRESETS: ReadonlyArray<{
+  value: number;
+  label: string;
+  hint: string;
+}> = [
+  { value: 3_000, label: "3 s", hint: "Default. A glance, then out of the way." },
+  { value: 6_000, label: "6 s", hint: "Time to read a longer body." },
+  { value: 12_000, label: "12 s", hint: "Lingers while you finish a thought." },
+  { value: 0, label: "Until closed", hint: "Stays until you click it or press ×." },
+];
 
 export const DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES = 3;
 
@@ -1331,6 +1348,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   notifyTeammatePushes: true,
+  toastDurationMs: DEFAULT_TOAST_DURATION_MS,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the

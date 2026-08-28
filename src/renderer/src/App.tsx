@@ -23,6 +23,7 @@ import type {
 } from "@shared/types";
 import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
+  DEFAULT_TOAST_DURATION_MS,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
 } from "@shared/types";
 import type {
@@ -6120,6 +6121,7 @@ export default function App() {
           navigateTo={navigateToNotifyTarget}
           resolveQuestion={resolveRunQuestion}
           activeView={activeNotificationView}
+          dismissMs={preferences.toastDurationMs ?? DEFAULT_TOAST_DURATION_MS}
         />
         {awayDigest && (
           <AwayDigestCard

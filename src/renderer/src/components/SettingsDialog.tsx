@@ -32,7 +32,9 @@ import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_MIN,
   AUTOSAVE_DELAY_PRESETS,
   DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
+  DEFAULT_TOAST_DURATION_MS,
   GIT_AUTO_FETCH_INTERVAL_PRESETS,
+  TOAST_DURATION_PRESETS,
   INLINE_AI_DELAY_PRESETS,
 } from "@shared/types";
 import { runStatusColor } from "../lib/run-status";
@@ -1405,6 +1407,38 @@ function GeneralSettings({
               })
             }
           />
+          {preferences.notificationChannels.inApp ? (
+            <div style={{ display: "grid", gap: 7, marginTop: 4 }}>
+              <span className="spark-eyebrow" style={{ fontSize: 11 }}>
+                Toast stays on screen
+              </span>
+              <div
+                role="group"
+                aria-label="Toast duration"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                  gap: 6,
+                }}
+              >
+                {TOAST_DURATION_PRESETS.map((preset) => (
+                  <TimingPresetButton
+                    key={preset.value}
+                    label={preset.label}
+                    hint={preset.hint}
+                    active={
+                      (preferences.toastDurationMs ?? DEFAULT_TOAST_DURATION_MS) === preset.value
+                    }
+                    onClick={() => void setPreference("toastDurationMs", preset.value)}
+                  />
+                ))}
+              </div>
+              <div style={{ color: "var(--muted)", fontSize: 11 }}>
+                A toast that times out is never lost — it stays unread in the bell until you
+                visit its chat or terminal.
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
