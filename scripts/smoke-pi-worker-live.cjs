@@ -91,7 +91,7 @@ async function main() {
   const mcpSdkDir = mcpConfigPath
     ? path.dirname(require.resolve("@modelcontextprotocol/sdk/client/index.js"))
     : null;
-  const configDir = process.env.CODARA_PI_SMOKE_CONFIG || path.join(os.homedir(), ".Codara", "pi-agent");
+  const configDir = process.env.CODARA_PI_SMOKE_CONFIG || path.join(os.homedir(), ".codarastudio", "pi-agent");
   const sessionDir = path.join(configDir, "sessions");
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pi-worker-"));
   const artifactPath = path.join(fixture, "worker-artifact.txt");
@@ -116,7 +116,7 @@ async function main() {
       model,
       thinking,
       sessionName: "Cora Pi worker smoke",
-      codaraHomeDir: path.join(os.homedir(), ".Codara"),
+      codaraHomeDir: path.join(os.homedir(), ".codarastudio"),
       ...(mcpConfigPath && mcpSdkDir ? { mcpConfigPath, mcpSdkDir } : {}),
     });
     assert.equal(Object.keys(plan.env).some((key) => key.toUpperCase().endsWith("_API_KEY")), false);

@@ -1,6 +1,6 @@
 "use strict";
 
-// Offline reads of the Codara home dir (~/.Codara). Listing and inspecting
+// Offline reads of the Codara home dir (~/.codarastudio). Listing and inspecting
 // runs works even when the app is closed; anything that must act on a live
 // run goes through lib/rpc.cjs instead.
 

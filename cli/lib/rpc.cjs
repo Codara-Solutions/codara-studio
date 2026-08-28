@@ -2,7 +2,7 @@
 
 // Talk to the running Codara Studio app over its authenticated loopback
 // socket. Discovery: read $CODARA_HOME_DIR/agent-socket.json (default
-// ~/.Codara) for the URL + bearer token, then POST JSON-RPC to /rpc.
+// ~/.codarastudio) for the URL + bearer token, then POST JSON-RPC to /rpc.
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -17,7 +17,7 @@ function homeDir(flags = {}) {
     process.env.CODARA_HOME_DIR ||
     process.env.SPARK_HOME_DIR ||
     process.env.SPARK_USER_DATA_DIR ||
-    path.join(os.homedir(), ".Codara")
+    path.join(os.homedir(), ".codarastudio")
   );
 }
 

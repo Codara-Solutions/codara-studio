@@ -16,7 +16,7 @@ import { appendAutoMemories } from "./cora-memory";
 // memory v2 (cora-memory.ts): recordRunLessons writes each derived sentence as
 // an [auto <date> run:<id>] bullet into the workspace's memory markdown, where
 // dedup, the 30-day auto TTL, and byte-cap eviction live. The old
-// ~/.Codara/lessons.json ledger is migrated and retired by cora-memory on its
+// ~/.codarastudio/lessons.json ledger is migrated and retired by cora-memory on its
 // first use. Every entry point stays best-effort: nothing here ever throws
 // into the run-completion path.
 //

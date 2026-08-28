@@ -19,7 +19,7 @@ test("the default Cora manager runs through Pi and can explain work on the persi
     mkdir(workspaceDir, { recursive: true }),
     mkdir(piConfigDir, { recursive: true, mode: 0o700 }),
   ]);
-  await copyFile(join(homedir(), ".Codara", "pi-agent", "auth.json"), join(piConfigDir, "auth.json"));
+  await copyFile(join(homedir(), ".codarastudio", "pi-agent", "auth.json"), join(piConfigDir, "auth.json"));
   await chmod(join(piConfigDir, "auth.json"), 0o600);
   await writeFile(
     join(workspaceDir, "README.md"),

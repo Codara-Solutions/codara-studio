@@ -495,18 +495,18 @@ async function main() {
     check(
       "the durable copy lives under the Codara home",
       (await plain.__test.resolveStableScriptPath()) ===
-        path.join(durableHome, ".Codara", "claude-hooks", "codara-hook.py"),
+        path.join(durableHome, ".codarastudio", "claude-hooks", "codara-hook.py"),
       String(await plain.__test.resolveStableScriptPath()),
     );
 
     // An isolated e2e / sandbox run overrides the home to a throwaway
     // directory. Copying there and writing THAT path into the user's real
-    // settings would recreate the incident, so we fall back to $HOME/.Codara.
+    // settings would recreate the incident, so we fall back to $HOME/.codarastudio.
     const overridden = loadInstaller({ home: durableHome, codaraHome: scratch("throwaway-home") });
     check(
       "a throwaway home override falls back to the default home",
       (await overridden.__test.resolveStableScriptPath()) ===
-        path.join(durableHome, ".Codara", "claude-hooks", "codara-hook.py"),
+        path.join(durableHome, ".codarastudio", "claude-hooks", "codara-hook.py"),
       String(await overridden.__test.resolveStableScriptPath()),
     );
 
@@ -776,7 +776,7 @@ async function main() {
       check(
         "a home managed as a git worktree still gets a durable copy",
         (await mod.__test.resolveStableScriptPath()) ===
-          path.join(home, ".Codara", "claude-hooks", "codara-hook.py"),
+          path.join(home, ".codarastudio", "claude-hooks", "codara-hook.py"),
         String(await mod.__test.resolveStableScriptPath()),
       );
     }
@@ -854,7 +854,7 @@ async function main() {
     // A settings.json authored on the other platform must not have its live
     // hooks deleted by the rescue path (WSL, synced dotfiles).
     {
-      const windowsish = String.raw`C:\Users\me\.Codara\claude-hooks\spark-hook.py`;
+      const windowsish = String.raw`C:\Users\me\.codarastudio\claude-hooks\spark-hook.py`;
       const { removed } = await fresh.__test.pruneDeadCodaraEntries({
         PreToolUse: [{ hooks: [{ type: "command", command: `"python" "${windowsish}" PreToolUse` }] }],
       });

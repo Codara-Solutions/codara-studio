@@ -137,7 +137,7 @@ const STABLE_HOOK_DIR_NAME = "claude-hooks";
 // home itself can be overridden to a throwaway directory (CODARA_HOME_DIR /
 // SPARK_HOME_DIR are how e2e runs and sandboxes isolate their state), and a
 // throwaway destination would recreate the very bug this guards against. In
-// that case fall back to the un-overridden $HOME/.Codara: the script resolves
+// that case fall back to the un-overridden $HOME/.codarastudio: the script resolves
 // its OUTPUT directory from the environment at fire time, so where the file
 // itself lives is independent of which home the events land in. Returns null
 // when even that is transient (nothing durable to write, so don't install).

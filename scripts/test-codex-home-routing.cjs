@@ -200,7 +200,7 @@ async function main() {
     // personal ~/.codex (native-cli-shared-state.ts), so resolution must
     // follow them instead of throwing. The strict rejections above prove
     // non-managed homes keep the old rule.
-    const codaraHome = path.join(personalOsHome, ".Codara");
+    const codaraHome = path.join(personalOsHome, ".codarastudio");
     const managedHome = path.join(
       codaraHome,
       "codex-cli",

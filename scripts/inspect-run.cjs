@@ -182,7 +182,7 @@ function candidateRunRoots(explicitRoots) {
   const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
   const names = ["Codara", "Cora", "Spark Agent", "spark-agent", "Electron"];
-  for (const home of [".Codara", ".Cora", ".SparkAgent"]) {
+  for (const home of [".codarastudio", ".Codara", ".Cora", ".SparkAgent"]) {
     roots.push(path.join(os.homedir(), home, "runs"));
   }
   for (const base of [appData, localAppData]) {

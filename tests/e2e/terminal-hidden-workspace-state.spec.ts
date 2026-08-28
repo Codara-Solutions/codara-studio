@@ -24,7 +24,7 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
         PATH: `${fixture.binDir}${delimiter}${process.env.PATH ?? ""}`,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
         CODARA_HOME_DIR: fixture.userDataDir,
         SPARK_HOME_DIR: fixture.userDataDir,

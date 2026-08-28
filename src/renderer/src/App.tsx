@@ -7541,7 +7541,7 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
             color: "var(--ink-dim)",
           }}
         >
-          ~/.Codara
+          ~/.codarastudio
         </span>
       </div>
     </div>

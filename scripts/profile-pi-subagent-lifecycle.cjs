@@ -34,7 +34,7 @@ function loadTypeScriptModule(sourcePath) {
 async function main() {
   const root = path.resolve(__dirname, "..");
   const runtime = loadTypeScriptModule(path.join(root, "src/main/orchestration/pi-runtime.ts"));
-  const configDir = process.env.CODARA_PI_SMOKE_CONFIG || path.join(os.homedir(), ".Codara", "pi-agent");
+  const configDir = process.env.CODARA_PI_SMOKE_CONFIG || path.join(os.homedir(), ".codarastudio", "pi-agent");
   const auth = await runtime.inspectPiSubscriptionAuth(path.join(configDir, "auth.json"), "openai-codex");
   assert.equal(auth.type, "oauth");
   const location = await runtime.resolvePinnedPiRuntime([path.join(root, "node_modules")]);

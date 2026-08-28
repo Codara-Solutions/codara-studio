@@ -14,10 +14,10 @@ import {
 
 // Cora memory v2: curated semantic guidance, two markdown tiers.
 //
-//   ~/.Codara/memory/MEMORY.md                    default profile global tier
-//   ~/.Codara/memory/workspaces/<id>.md           default profile workspace tier
-//   ~/.Codara/memory/profiles/<profile>/...       named isolated profiles
-//   ~/.Codara/memory/memory-state.json            the enable/disable toggles
+//   ~/.codarastudio/memory/MEMORY.md                    default profile global tier
+//   ~/.codarastudio/memory/workspaces/<id>.md           default profile workspace tier
+//   ~/.codarastudio/memory/profiles/<profile>/...       named isolated profiles
+//   ~/.codarastudio/memory/memory-state.json            the enable/disable toggles
 //
 // The markdown file IS the prompt payload. Injection pastes the raw file body
 // (byte-capped) into the manager turn's dynamic tail; parsing exists only for
@@ -240,7 +240,7 @@ function tierEnabled(
 // ── workspace metadata for the header (best-effort) ─────────────────────────
 
 // The header names the workspace and its cwd so a user browsing
-// ~/.Codara/memory/workspaces can tell the files apart. Resolved from
+// ~/.codarastudio/memory/workspaces can tell the files apart. Resolved from
 // spark-state.json (the persisted AppState) purely best-effort: a missing or
 // unreadable state file degrades to the raw workspaceId.
 function resolveWorkspaceMeta(workspaceId: string): { name: string; cwd: string } {
@@ -579,7 +579,7 @@ function tierPath(
     : workspaceMemoryPath(workspaceId, profileId);
 }
 
-// ── migration from ~/.Codara/lessons.json ───────────────────────────────────
+// ── migration from ~/.codarastudio/lessons.json ───────────────────────────────────
 
 let migration: Promise<void> | null = null;
 

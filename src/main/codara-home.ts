@@ -1,18 +1,37 @@
 import { app } from "electron";
-import { chmodSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  renameSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// Codara stores its own user data ($HOME/.Codara by default) instead of
+// Codara stores its own user data ($HOME/.codarastudio by default) instead of
 // piggybacking on Electron's userData dir. Keeps run.json, events.jsonl,
 // spark-state.json, and spark-settings.json out of the Chromium-cache-filled
 // userData folder. Internal file names keep the legacy spark- prefix — they
 // are an on-disk contract, renaming them buys nothing (see rebrand Phase C).
-const DEFAULT_DIR_NAME = ".Codara";
-// Pre-rename homes, newest first (the app was briefly "Cora", and "Spark
-// Agent" before that). Their contents are copied into ~/.Codara on first boot
-// after the rename; the old dirs are left untouched as a backstop.
-const LEGACY_DIR_NAMES = [".Cora", ".SparkAgent"];
+const DEFAULT_DIR_NAME = ".codarastudio";
+// The home immediately before this one. Unlike the older legacy homes below
+// it is MOVED (renamed) into place wholesale on first boot, so everything —
+// worktrees, CLI roots, auth — carries over without a copy. A symlink is left
+// at the old path so absolute paths persisted elsewhere (git worktree
+// registrations, `~/.codarastudio/cli/active/env.sh` lines in shell rc files,
+// SPARK_HOME_DIR baked into Claude/Codex MCP configs until they self-heal)
+// keep resolving.
+const RENAMED_DIR_NAME = ".Codara";
+// Pre-rename homes, newest first (the app was "Codara", briefly "Cora", and
+// "Spark Agent" before that). Their contents are copied into the current home
+// on first boot after the rename; the old dirs are left untouched as a
+// backstop. ".Codara" is listed here only for the case where the rename leg
+// could not run (both dirs already existed) — then it falls back to a copy.
+const LEGACY_DIR_NAMES = [RENAMED_DIR_NAME, ".Cora", ".SparkAgent"];
 const MIGRATION_MARKER = ".migrated";
 // The per-home files/dirs worth carrying across a rename. Deliberately NOT
 // copied: worktrees/ (git registers their absolute paths in the source repos —
@@ -34,7 +53,7 @@ const MIGRATED_ENTRIES = [
 
 let homeDirCached: string | null = null;
 
-// The home we use when no override is set: $HOME/.Codara. Exported because
+// The home we use when no override is set: $HOME/.codarastudio. Exported because
 // callers that must land on a DURABLE per-user path (the Claude hook script
 // copy, see hook-installer.ts) need somewhere to fall back to when the
 // override points at a throwaway directory.
@@ -56,6 +75,7 @@ export function codaraHome(): string {
 
 export function ensureCodaraHomeSync(): void {
   const dir = codaraHome();
+  if (process.env.SPARK_SKIP_LEGACY_MIGRATION !== "1") renameLegacyHomeSync(dir);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") {
     // The home contains the loopback bearer token and other per-user state.
@@ -78,7 +98,9 @@ export function ensureCodaraHomeSync(): void {
   // whatever already landed).
   let migrationFailed = false;
 
-  // Leg 1: prior home dirs (~/.Cora, then ~/.SparkAgent — the app renames).
+  // Leg 1: prior home dirs (~/.codarastudio, ~/.Cora, then ~/.SparkAgent — the app
+  // renames). ~/.codarastudio is normally a symlink to `dir` by now (see
+  // renameLegacyHomeSync) and is skipped as such.
   // Whole-content copy so runs/, prefs, and settings survive; the newest
   // legacy home wins per entry (migrateIfMissing skips anything already
   // present). Skipped when the app runs under an explicit home override that
@@ -86,7 +108,11 @@ export function ensureCodaraHomeSync(): void {
   for (const legacyName of LEGACY_DIR_NAMES) {
     try {
       const legacyHome = path.join(os.homedir(), legacyName);
-      if (existsSync(legacyHome) && path.resolve(legacyHome) !== path.resolve(dir)) {
+      if (
+        existsSync(legacyHome) &&
+        !isSymlink(legacyHome) &&
+        path.resolve(legacyHome) !== path.resolve(dir)
+      ) {
         for (const entry of MIGRATED_ENTRIES) {
           try {
             migrateIfMissing(path.join(legacyHome, entry), path.join(dir, entry));
@@ -118,6 +144,40 @@ export function ensureCodaraHomeSync(): void {
     writeFileSync(marker, new Date().toISOString(), "utf8");
   } catch (err) {
     console.error("[spark-home] failed to write migration marker:", err);
+  }
+}
+
+// ~/.codarastudio → ~/.codarastudio. Runs only for the un-overridden default home,
+// only when the new dir does not exist yet and the old one is a real
+// directory (not the symlink we leave behind). A rename is atomic on the same
+// filesystem, so a crash mid-way leaves either the old or the new layout
+// intact, never a half-copied mix. If the rename itself fails (permissions,
+// cross-device home), nothing is touched and the copy leg in
+// ensureCodaraHomeSync picks up the durable state instead.
+function renameLegacyHomeSync(dir: string): void {
+  if (path.resolve(dir) !== path.resolve(defaultCodaraHome())) return;
+  const oldHome = path.join(os.homedir(), RENAMED_DIR_NAME);
+  if (existsSync(dir) || !existsSync(oldHome) || isSymlink(oldHome)) return;
+  try {
+    renameSync(oldHome, dir);
+    console.log(`[spark-home] renamed ~/${RENAMED_DIR_NAME} to ~/${DEFAULT_DIR_NAME}`);
+  } catch (err) {
+    console.error(`[spark-home] could not rename ~/${RENAMED_DIR_NAME} to ~/${DEFAULT_DIR_NAME}:`, err);
+    return;
+  }
+  try {
+    // Junction on Windows so no elevated symlink privilege is needed.
+    symlinkSync(dir, oldHome, process.platform === "win32" ? "junction" : "dir");
+  } catch (err) {
+    console.warn(`[spark-home] could not leave a compatibility link at ~/${RENAMED_DIR_NAME}:`, err);
+  }
+}
+
+function isSymlink(target: string): boolean {
+  try {
+    return lstatSync(target).isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 

@@ -67,7 +67,7 @@ async function main() {
   const mcpSdkDir = mcpConfigPath
     ? path.dirname(require.resolve("@modelcontextprotocol/sdk/client/index.js"))
     : null;
-  const configDir = process.env.CODARA_PI_SMOKE_CONFIG || path.join(os.homedir(), ".Codara", "pi-agent");
+  const configDir = process.env.CODARA_PI_SMOKE_CONFIG || path.join(os.homedir(), ".codarastudio", "pi-agent");
   const sessionDir = path.join(configDir, "sessions");
   const auth = await runtime.inspectPiSubscriptionAuth(path.join(configDir, "auth.json"), provider);
   assert.equal(auth.type, "oauth");
@@ -87,7 +87,7 @@ async function main() {
     model,
     thinking,
     sessionName: "Codara Pi live smoke",
-    codaraHomeDir: path.join(os.homedir(), ".Codara"),
+    codaraHomeDir: path.join(os.homedir(), ".codarastudio"),
     ...(mcpConfigPath && mcpSdkDir ? { mcpConfigPath, mcpSdkDir } : {}),
   });
   for (const key of Object.keys(plan.env)) {

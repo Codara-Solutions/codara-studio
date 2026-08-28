@@ -227,7 +227,7 @@ async function main() {
   // real custom Codex home chosen by the user.
   {
     const userHome = makeHome("process-env");
-    const codaraHome = path.join(userHome, ".Codara");
+    const codaraHome = path.join(userHome, ".codarastudio");
     const personalCodexHome = path.join(userHome, ".codex");
     const managedHome = path.join(
       codaraHome,
@@ -420,7 +420,7 @@ async function main() {
     const contents = [
       "export PATH=/usr/local/bin:$PATH",
       NATIVE_CLI_SHELL_BLOCK_BEGIN,
-      '. "$HOME/.Codara/cli/active/env.sh"',
+      '. "$HOME/.codarastudio/cli/active/env.sh"',
       NATIVE_CLI_SHELL_BLOCK_END,
       "",
     ].join("\n");

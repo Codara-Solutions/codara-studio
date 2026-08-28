@@ -1,6 +1,6 @@
 "use strict";
 
-// Run inspection. Everything here reads ~/.Codara directly, so it works with
+// Run inspection. Everything here reads ~/.codarastudio directly, so it works with
 // the app closed.
 
 const { listRuns, findRun } = require("../lib/store.cjs");

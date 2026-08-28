@@ -6,7 +6,7 @@
 // the personal home via symlinks, keeping credentials and identity
 // per-account. Codex deliberately is not part of this layer: its managed slots
 // are auth-only vaults and every launch uses the ordinary ~/.codex home. Runs
-// entirely against temp dirs — never the real CLI homes or ~/.Codara.
+// entirely against temp dirs — never the real CLI homes or ~/.codarastudio.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

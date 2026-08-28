@@ -1280,7 +1280,7 @@ function doSpawn(
     env.SPARK_PANE_ID = hookEnv.SPARK_PANE_ID;
   }
   // Keep hook scripts and MCP children agreeing with the app about where the
-  // home dir lives (hooks fall back to ~/.Codara when unset; an app running
+  // home dir lives (hooks fall back to ~/.codarastudio when unset; an app running
   // under any override would otherwise write markers the app never sees).
   if (!env.SPARK_HOME_DIR) env.SPARK_HOME_DIR = codaraHome();
 

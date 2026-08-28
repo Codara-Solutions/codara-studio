@@ -163,7 +163,7 @@ function defaultCodaraHome(): string {
     process.env.CODARA_HOME_DIR ??
     process.env.SPARK_HOME_DIR ??
     process.env.SPARK_USER_DATA_DIR;
-  return override?.trim() || join(homedir(), ".Codara");
+  return override?.trim() || join(homedir(), ".codarastudio");
 }
 
 export function codaraPiAccountRootDir(): string {

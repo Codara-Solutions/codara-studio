@@ -38,7 +38,7 @@ async function main() {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-auth-test-"));
   try {
     const store = {
-      rootDir: path.join(fixture, ".Codara", "codex-cli"),
+      rootDir: path.join(fixture, ".codarastudio", "codex-cli"),
       personalHomeDir: path.join(fixture, ".codex"),
     };
     const live = path.join(store.personalHomeDir, "auth.json");

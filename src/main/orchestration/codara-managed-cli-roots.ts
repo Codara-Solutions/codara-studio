@@ -28,7 +28,7 @@ export function codaraHomeDir(): string {
     process.env.CODARA_HOME_DIR ??
     process.env.SPARK_HOME_DIR ??
     process.env.SPARK_USER_DATA_DIR;
-  return resolve(override?.trim() || join(homedir(), ".Codara"));
+  return resolve(override?.trim() || join(homedir(), ".codarastudio"));
 }
 
 export function codaraNativeCliActivePointerDir(

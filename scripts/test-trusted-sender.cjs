@@ -310,7 +310,7 @@ function runMode(dir, rendererEntry, pctEntry, mode) {
       PROBE_RENDERER_ENTRY: rendererEntry,
       PROBE_PCT_ENTRY: pctEntry,
       ELECTRON_ENABLE_LOGGING: "0",
-      // Keep the real gate's security log out of the user's ~/.Codara/logs.
+      // Keep the real gate's security log out of the user's ~/.codarastudio/logs.
       CODARA_HOME_DIR: dir,
     },
   });

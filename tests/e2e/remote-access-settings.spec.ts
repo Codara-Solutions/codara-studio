@@ -235,7 +235,7 @@ async function launch(fixture: Fixture): Promise<ElectronApplication> {
       ...process.env,
       // Pin every home override the app honors: a shell inside the dev app
       // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-      // point this instance at the user's real ~/.Codara. Remote access keys
+      // point this instance at the user's real ~/.codarastudio. Remote access keys
       // and paired devices live under that home, so an unpinned run would
       // write a test device into the user's real trust store.
       SPARK_USER_DATA_DIR: fixture.userDataDir,

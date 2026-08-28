@@ -4,7 +4,7 @@
 // cora — Codara Studio's orchestrator, from your terminal.
 //
 // Talks to the running app over its authenticated loopback socket
-// (lib/rpc.cjs); run inspection also works offline straight from ~/.Codara
+// (lib/rpc.cjs); run inspection also works offline straight from ~/.codarastudio
 // (lib/store.cjs). One file per command group under commands/.
 //
 //   node cli/cora.cjs help        (or `npm run cora -- help`)
@@ -61,7 +61,7 @@ ${c.bold("APP")}
   read <paneId> [--lines N]    read a terminal pane
   rpc <method> [params-json]   raw JSON-RPC escape hatch
 
-${c.bold("FLAGS")}  --json (raw output)   --home DIR (Codara home, default ~/.Codara)
+${c.bold("FLAGS")}  --json (raw output)   --home DIR (Codara home, default ~/.codarastudio)
 
   <run> accepts a full id or any unique prefix.
 `;

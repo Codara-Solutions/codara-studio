@@ -21,7 +21,7 @@ test("autopilot runs from a selected markdown plan", async () => {
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: userDataDir,
         CODARA_HOME_DIR: userDataDir,
         SPARK_HOME_DIR: userDataDir,
@@ -232,7 +232,7 @@ test("spark chat renders as a workbench tab", async () => {
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: userDataDir,
         CODARA_HOME_DIR: userDataDir,
         SPARK_HOME_DIR: userDataDir,
@@ -300,7 +300,7 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
         ...electronEnv,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: userDataDir,
         CODARA_HOME_DIR: userDataDir,
         SPARK_HOME_DIR: userDataDir,
@@ -493,7 +493,7 @@ test("runs can be deleted from the run list inline", async () => {
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: userDataDir,
         CODARA_HOME_DIR: userDataDir,
         SPARK_HOME_DIR: userDataDir,
@@ -543,7 +543,7 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: userDataDir,
         CODARA_HOME_DIR: userDataDir,
         SPARK_HOME_DIR: userDataDir,

@@ -22,7 +22,7 @@ test("a real Cora Codex worker executes through Pi and completes the normal atte
   // Copy, never print, the isolated subscription record into this disposable
   // Codara home. The Pi launch policy still strips every API-key environment
   // variable and validates that the selected provider record is OAuth.
-  await copyFile(join(homedir(), ".Codara", "pi-agent", "auth.json"), join(piConfigDir, "auth.json"));
+  await copyFile(join(homedir(), ".codarastudio", "pi-agent", "auth.json"), join(piConfigDir, "auth.json"));
   await chmod(join(piConfigDir, "auth.json"), 0o600);
   await writeFile(join(workspaceDir, "README.md"), "# Pi worker live fixture\n", "utf8");
   await writeFile(

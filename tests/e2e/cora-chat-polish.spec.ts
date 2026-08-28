@@ -14,7 +14,7 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
         CODARA_HOME_DIR: fixture.userDataDir,
         SPARK_HOME_DIR: fixture.userDataDir,
@@ -152,7 +152,7 @@ test("completed Cora turns retain provider-ordered text and tools without duplic
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
         CODARA_HOME_DIR: fixture.userDataDir,
         SPARK_HOME_DIR: fixture.userDataDir,
@@ -242,7 +242,7 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
-        // point this instance at the user's real ~/.Codara state.
+        // point this instance at the user's real ~/.codarastudio state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
         CODARA_HOME_DIR: fixture.userDataDir,
         SPARK_HOME_DIR: fixture.userDataDir,
@@ -392,7 +392,7 @@ async function prepareFixture(prefix: string): Promise<{
 /**
  * A native-Codex manager only launches once the selected account resolves as
  * connected (codex-cli-account-profiles.ts:964). For the personal profile —
- * the one every fixture here uses, since the fake ~/.Codara holds no managed
+ * the one every fixture here uses, since the fake ~/.codarastudio holds no managed
  * accounts — connectivity is pure filesystem state: defaultCodexCliAuthChecker
  * (codex-cli-account-profiles.ts:539) wants $CODEX_HOME to be a real directory
  * (not a symlink) holding a regular auth.json that is not readable by group or

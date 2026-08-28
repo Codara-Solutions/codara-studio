@@ -85,7 +85,7 @@ function isSandboxedHome(): boolean {
     process.env.CODARA_HOME_DIR ?? process.env.SPARK_HOME_DIR ?? process.env.SPARK_USER_DATA_DIR;
   if (!override || !override.trim()) return false;
   // Only temp-dir homes count as sandboxes. A persistent custom home (a user
-  // who deliberately relocated ~/.Codara) still gets managed MCP entries — the
+  // who deliberately relocated ~/.codarastudio) still gets managed MCP entries — the
   // baked SPARK_HOME_DIR in the entry env keeps external CLIs pointed right.
   const tmp = tmpdir();
   return override.startsWith(tmp) || override.startsWith("/tmp/") || override.startsWith("/private/tmp/");
@@ -255,7 +255,7 @@ function buildServerArgs(): string[] {
 
 function buildServerEnv(): Record<string, string> {
   // SPARK_HOME_DIR points the MCP server at the handshake file
-  // (<spark-home>/agent-socket.json). The server defaults to ~/.Codara
+  // (<spark-home>/agent-socket.json). The server defaults to ~/.codarastudio
   // when it's unset, so injecting it only matters for custom homes — but we
   // always write it so the entry is explicit and self-describing. No
   // SPARK_MCP_MODE here: the global entry exposes the studio (preview +

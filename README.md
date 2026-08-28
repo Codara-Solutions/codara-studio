@@ -19,7 +19,7 @@ The server is auto-installed into `~/.claude.json` and `~/.codex/config.toml`
 `claude` / `codex` binary is detectable on disk, Codara creates the config entry
 even if the CLI has never been launched. It proxies each tool call back to the
 running app over a loopback HTTP + bearer-token channel described by
-`~/.Codara/agent-socket.json`.
+`~/.codarastudio/agent-socket.json`.
 
 ### Using it
 
@@ -59,7 +59,7 @@ Execute and Automation rosters (`codara_spawn_workers`,
 
 `cli/cora.cjs` is a zero-dependency terminal remote for the running app — the
 fastest way to poke a new feature without a Playwright harness. It discovers
-the app exactly like the MCP servers do (reads `~/.Codara/agent-socket.json`,
+the app exactly like the MCP servers do (reads `~/.codarastudio/agent-socket.json`,
 speaks bearer-authed JSON-RPC to the loopback socket). See `cli/README.md`
 for the command surface, the live dashboard, and the harness benchmark.
 
@@ -114,7 +114,7 @@ directories, and the CLIs own everything inside them.
 sourced a generated env file from `~/.zshrc` / `~/.bashrc`. It was removed:
 Claude Code stores its chats and settings in the redirected config directory,
 so switching accounts made a plain `claude` lose them. Studio deletes the old
-pointer files under `~/.Codara/cli/active/` on start, and Settings → Accounts
+pointer files under `~/.codarastudio/cli/active/` on start, and Settings → Accounts
 shows how to remove the leftover shell block if you had turned it on.)
 
 `cora help` lists everything. The `app.*` RPC namespace (screenshots, in-page

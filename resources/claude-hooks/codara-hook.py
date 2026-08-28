@@ -21,7 +21,7 @@ Design constraints:
 - Atomic-ish writes: write to a tmp sibling then rename so the watcher never
   sees a half-written file.
 - Resolve CODARA_HOME_DIR / SPARK_HOME_DIR / SPARK_USER_DATA_DIR override
-  variables exactly like src/main/spark-home.ts does; otherwise fall back
+  variables exactly like src/main/codara-home.ts does; otherwise fall back
   through the legacy home directory names.
 """
 from __future__ import annotations
@@ -34,11 +34,11 @@ from datetime import datetime, timezone
 
 
 def _codara_home() -> str:
-    """Mirror the resolution logic in src/main/spark-home.ts."""
+    """Mirror the resolution logic in src/main/codara-home.ts."""
     override = os.environ.get("CODARA_HOME_DIR") or os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
     if override and override.strip():
         return override
-    for name in (".Codara", ".Cora"):
+    for name in (".codarastudio", ".Codara", ".Cora"):
         candidate = os.path.join(os.path.expanduser("~"), name)
         if os.path.isdir(candidate):
             return candidate

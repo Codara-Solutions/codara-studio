@@ -120,7 +120,7 @@ function codaraShapedConfig(script) {
     "",
     '[mcp_servers."codara-studio".env]',
     'ELECTRON_RUN_AS_NODE = "1"',
-    `SPARK_HOME_DIR = ${JSON.stringify(path.join(FAKE_HOME, ".Codara"))}`,
+    `SPARK_HOME_DIR = ${JSON.stringify(path.join(FAKE_HOME, ".codarastudio"))}`,
     "",
   ].join("\n");
 }

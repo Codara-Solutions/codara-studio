@@ -45,7 +45,7 @@ const path = require("node:path");
 const http = require("node:http");
 
 const HANDSHAKE_FILE = "agent-socket.json";
-const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Codara");
+const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".codarastudio");
 
 // Roster gating. Chosen once, at startup. Anything other than "execute" /
 // "automation" / "worker" (unset, "studio", empty) means the global studio

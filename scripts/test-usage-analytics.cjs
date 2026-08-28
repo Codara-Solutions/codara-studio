@@ -558,7 +558,7 @@ async function main() {
   /* ── Scanner: cache codec, pruning, and the filesystem walk ────────────── */
 
   // The scanner resolves its cache path through codaraHome(); point that at a
-  // throwaway directory so a test run can never touch the real ~/.Codara.
+  // throwaway directory so a test run can never touch the real ~/.codarastudio.
   const scannerHome = path.join(tmp, "home");
   fs.mkdirSync(scannerHome, { recursive: true });
   process.env.CODARA_HOME_DIR = scannerHome;

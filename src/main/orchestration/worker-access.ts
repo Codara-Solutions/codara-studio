@@ -86,7 +86,7 @@ export interface WaveDecorationInput {
   /** The OTHER worker nodes launching in the same wave. */
   peers: WavePeerInfo[];
   collab?: WorkerCollab;
-  /** Absolute run directory (~/.Codara/runs/<runId>); the board lives at
+  /** Absolute run directory (~/.codarastudio/runs/<runId>); the board lives at
    *  <runDir>/mail. Only read when the chat block renders. */
   runDir: string;
 }

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 // Copyable run-id chip. Click → writes the BARE id to the clipboard (no
 // prefix, no quotes: it gets pasted straight into an assistant that resolves
-// it to ~/.Codara/runs/<run-id>/) and flips the label to "Copied" for ~1.5s.
+// it to ~/.codarastudio/runs/<run-id>/) and flips the label to "Copied" for ~1.5s.
 // The chip doubles as a label so a surface showing several runs says which
 // one you are reading. Shared by the chat header, the chat status bar, and
 // the automations detail; `compact` is the icon-only target for dense rows.

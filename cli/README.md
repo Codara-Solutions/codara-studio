@@ -34,9 +34,9 @@ without spending CPU repainting idle screens.
 ## Layout
 
 - `cora.cjs` — entry point: arg parsing, help, dispatch.
-- `lib/rpc.cjs` — talks to the running app (reads `~/.Codara/agent-socket.json`
+- `lib/rpc.cjs` — talks to the running app (reads `~/.codarastudio/agent-socket.json`
   for the loopback URL + bearer token, POSTs JSON-RPC to `/rpc`).
-- `lib/store.cjs` — offline reads of `~/.Codara/runs`; run inspection works
+- `lib/store.cjs` — offline reads of `~/.codarastudio/runs`; run inspection works
   with the app closed.
 - `lib/ui.cjs` — colors, the logo, tables, time formatting.
 - `commands/` — one file per command group (`chat.cjs` owns the TUI; the rest

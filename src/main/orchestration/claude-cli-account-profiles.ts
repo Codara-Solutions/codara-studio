@@ -748,7 +748,7 @@ export async function defaultClaudeCliAuthChecker(
       repairMode: false,
       // Existing ~/.claude is commonly 0755. It is owned outside this
       // feature, so accept a real non-symlink directory without chmod. Every
-      // managed ~/.Codara/claude-cli/accounts/* directory remains 0700-only.
+      // managed ~/.codarastudio/claude-cli/accounts/* directory remains 0700-only.
       requirePrivate: input.managed,
     });
   } catch (error) {
