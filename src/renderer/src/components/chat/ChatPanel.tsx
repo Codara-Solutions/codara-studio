@@ -150,6 +150,7 @@ export default function ChatPanel({
           onOpenCardRun={onOpenBoardCardRun ?? noopOpenCardRun}
           onOpenWorkerTerminal={onOpenBoardWorkerTerminal ?? noopOpenWorkerTerminal}
           onCreateBoardRun={onCreateBoardRun ?? noopCreateBoardRun}
+          onOpenChat={() => setChatView("chat")}
         />
       </Suspense>
     ) : null;

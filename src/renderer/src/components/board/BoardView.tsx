@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BoardCard, BoardCardStatus, RunBoard, RunState } from "@shared/types";
+import type { BoardCard, BoardCardStatus, RunBoard, RunState, WorkerAttempt } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { boardBackend } from "./board-backend";
@@ -42,6 +42,9 @@ interface Props {
   // cards on its board. The caller owns tab promotion; this component gets
   // remounted keyed to the new run when it lands.
   onCreateBoardRun: (cards: BoardCard[]) => Promise<void>;
+  // Switches the chat surface back to the conversation so the user can answer
+  // the question a blocked card is waiting on. Absent: no Answer button.
+  onOpenChat?: () => void;
 }
 
 interface ColumnSpec {
@@ -87,12 +90,12 @@ const LANE_TINT: Record<string, string> = {
 // What lands in an empty lane — shown as a ghost caption inside the lane
 // itself, replacing the old board-wide instruction banner.
 const LANE_HINTS: Record<string, string> = {
-  idea: "Capture ideas. A title or a pasted screenshot is enough.",
-  queued: "Drop a card here and Cora picks it up.",
-  running: "Cards Cora's workers are building appear here.",
+  idea: "Capture ideas here. A title or a pasted screenshot is enough.",
+  queued: "Queue a card and Cora picks it up.",
+  running: "Cards Cora's workers are building.",
   blocked: "Cards waiting on an answer from you.",
   review: "Finished work to look over.",
-  done: "Shipped.",
+  done: "Nothing shipped yet.",
 };
 
 const NOTICE_MS = 3200;
@@ -112,6 +115,7 @@ export default function BoardView({
   onOpenCardRun,
   onOpenWorkerTerminal,
   onCreateBoardRun,
+  onOpenChat,
 }: Props) {
   const runId = run?.id ?? null;
   const [board, setBoard] = useState<RunBoard | null>(runId ? null : EMPTY_BOARD);
@@ -465,12 +469,20 @@ export default function BoardView({
 
   // Inline edit: replace a card's title/description in place.
   const patchCard = useCallback(
-    (cardId: string, patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>) => {
+    (cardId: string, patch: CardPatch) => {
       const current = boardRef.current;
       if (!current) return;
       const card = current.cards.find((item) => item.id === cardId);
       if (!card) return;
-      if (card.title === patch.title && (card.description ?? "") === (patch.description ?? "")) {
+      const nextImages = patch.imagePaths ?? [];
+      const sameImages =
+        nextImages.length === (card.imagePaths ?? []).length &&
+        nextImages.every((path, at) => (card.imagePaths ?? [])[at] === path);
+      if (
+        card.title === patch.title &&
+        (card.description ?? "") === (patch.description ?? "") &&
+        sameImages
+      ) {
         return;
       }
       const timestamp = new Date().toISOString();
@@ -484,6 +496,7 @@ export default function BoardView({
                 ...(patch.description
                   ? { description: patch.description }
                   : { description: undefined }),
+                ...(nextImages.length > 0 ? { imagePaths: nextImages } : { imagePaths: undefined }),
                 updatedAt: timestamp,
               }
             : item,
@@ -539,80 +552,272 @@ export default function BoardView({
     [run],
   );
 
+  // Side panel: composing a new card into a lane, or viewing / editing one
+  // card. One panel, three modes, so the board never opens two overlays.
+  const [panel, setPanel] = useState<PanelState | null>(null);
+  const [lightbox, setLightbox] = useState<{ paths: string[]; index: number } | null>(null);
+  const [filter, setFilter] = useState("");
+  const [doneExpanded, setDoneExpanded] = useState(false);
+  const filterRef = useRef<HTMLInputElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Elapsed-time ticker for running cards; only runs while something is live.
+  const anyRunning = (board?.cards ?? []).some((card) => card.status === "running");
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = window.setInterval(() => setTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [anyRunning]);
+
+  const panelCard = panel && panel.mode !== "compose"
+    ? board?.cards.find((card) => card.id === panel.cardId) ?? null
+    : null;
+  // A card deleted or moved away while its panel is open closes the panel.
+  useEffect(() => {
+    if (panel && panel.mode !== "compose" && !panelCard) setPanel(null);
+  }, [panel, panelCard]);
+
+  const closePanel = useCallback(() => setPanel(null), []);
+
+  const filterText = filter.trim().toLowerCase();
+  const matchesFilter = useCallback(
+    (card: BoardCard) =>
+      !filterText ||
+      card.title.toLowerCase().includes(filterText) ||
+      (card.description ?? "").toLowerCase().includes(filterText),
+    [filterText],
+  );
+
+  // Attempt context per card (worker model + start time) for the live chips.
+  const attemptByTask = useMemo(() => {
+    const map = new Map<string, WorkerAttempt>();
+    for (const attempt of run?.workerAttempts ?? []) {
+      // Latest attempt wins (attempts are appended chronologically).
+      map.set(attempt.workerTaskId, attempt);
+    }
+    return map;
+  }, [run]);
+
+  // The one question blocking this run, if any — shown on blocked cards so
+  // the board answers "what does Cora need?" without a trip to the chat.
+  const openQuestion = useMemo(() => {
+    const blocker = run?.blockedOn;
+    if (!blocker) return null;
+    const message = run?.humanMessages.find((item) => item.id === blocker.questionMessageId);
+    return message?.message ?? null;
+  }, [run]);
+
+  const moveToLane = useCallback(
+    (cardId: string, direction: 1 | -1) => {
+      const current = boardRef.current;
+      const card = current?.cards.find((item) => item.id === cardId);
+      if (!card) return;
+      const columnIndex = COLUMNS.findIndex((column) => column.statuses.includes(card.status));
+      const target = COLUMNS[columnIndex + direction];
+      if (!target) return;
+      advanceCard(cardId, target.dropStatus);
+    },
+    [advanceCard],
+  );
+
+  // Board-level keyboard layer. Card-level keys act on the focused card
+  // (cards are focusable); global keys need no focus.
+  const onBoardKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    const inField =
+      target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n" && !panel) {
+      event.preventDefault();
+      setPanel({ mode: "compose", status: "idea" });
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      filterRef.current?.focus();
+      filterRef.current?.select();
+      return;
+    }
+    if (inField) return;
+    const cardId = target.closest<HTMLElement>("[data-board-card]")?.dataset.boardCard;
+    if (!cardId) return;
+    const card = boardRef.current?.cards.find((item) => item.id === cardId);
+    if (!card) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const lane = target.closest<HTMLElement>("[data-board-lane]");
+      const cards = Array.from(lane?.querySelectorAll<HTMLElement>("[data-board-card]") ?? []);
+      const at = cards.findIndex((el) => el.dataset.boardCard === cardId);
+      const next = cards[at + (event.key === "ArrowDown" ? 1 : -1)];
+      next?.focus();
+      return;
+    }
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        moveToLane(cardId, event.key === "ArrowRight" ? 1 : -1);
+        return;
+      }
+      const lanes = Array.from(
+        rootRef.current?.querySelectorAll<HTMLElement>("[data-board-lane]") ?? [],
+      );
+      const laneEl = target.closest<HTMLElement>("[data-board-lane]");
+      const at = lanes.findIndex((el) => el === laneEl);
+      const nextLane = lanes[at + (event.key === "ArrowRight" ? 1 : -1)];
+      nextLane?.querySelector<HTMLElement>("[data-board-card]")?.focus();
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setPanel({ mode: "view", cardId });
+      return;
+    }
+    if (event.key.toLowerCase() === "e") {
+      event.preventDefault();
+      setPanel({ mode: "edit", cardId });
+      return;
+    }
+    if (event.key.toLowerCase() === "q") {
+      const quick = quickActionFor(card.status);
+      if (quick && quick.to === "queued") {
+        event.preventDefault();
+        advanceCard(cardId, "queued");
+      }
+    }
+  };
+
+  const openWorkerTerminal = (workerTaskId: string) => {
+    if (!onOpenWorkerTerminal(workerTaskId)) {
+      // Two ways to land here, and the notice must not pick the wrong one:
+      // the worker has not launched yet (no pane is created until it does),
+      // or its pane was closed.
+      showNotice("No terminal for that worker — it hasn't launched yet, or its pane was closed");
+    }
+  };
+
+  const ready = board !== null && !promoting;
+  const cards = board?.cards ?? [];
+  const countOf = (statuses: BoardCardStatus[]) =>
+    cards.filter((card) => statuses.includes(card.status)).length;
+  const runningCount = countOf(["running"]);
+  const blockedCount = countOf(["blocked"]);
+  const reviewCount = countOf(["review", "failed"]);
+  const doneCards = cardsByColumn.get("done") ?? [];
+  const showDoneRail = !doneExpanded && doneCards.length > 0;
+
   return (
     <div
-      style={{
-        flex: 1,
-        minWidth: 0,
-        minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        position: "relative",
-        background: "var(--bg)",
-        color: "var(--ink)",
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
-      }}
+      ref={rootRef}
+      className="spark-board"
+      onKeyDown={onBoardKeyDown}
     >
       {notice && (
-        <div
-          role="status"
-          className="spark-glass"
-          style={{
-            position: "absolute",
-            top: 12,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 30,
-            padding: "6px 12px",
-            borderRadius: "var(--radius-surface, 7px)",
-            border: "1px solid var(--rule)",
-            fontSize: 12,
-            color: "var(--ink)",
-            boxShadow: "var(--shadow-2)",
-            pointerEvents: "none",
-            whiteSpace: "nowrap",
-          }}
-        >
+        <div role="status" className="spark-glass spark-board__notice">
           {notice}
         </div>
       )}
 
-      <BoardHeader board={board} />
+      <div className="spark-board__toolbar">
+        <div className="spark-board__title">Board</div>
+        {runningCount > 0 && (
+          <SummaryChip tint="var(--info)" text={`${runningCount} in progress`} pulse />
+        )}
+        {blockedCount > 0 && (
+          <SummaryChip
+            tint="var(--warn)"
+            text={`${blockedCount} need${blockedCount === 1 ? "s" : ""} input`}
+          />
+        )}
+        {reviewCount > 0 && <SummaryChip tint="var(--accent)" text={`${reviewCount} to review`} />}
+        {cards.length === 0 && ready && (
+          <span className="spark-board__hint">
+            Add an idea, queue it, and this chat&apos;s Cora takes it from there.
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <label className="spark-board__filter">
+          <SearchIcon />
+          <input
+            ref={filterRef}
+            value={filter}
+            placeholder="Filter cards"
+            spellCheck={false}
+            onChange={(event) => setFilter(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setFilter("");
+                (event.target as HTMLInputElement).blur();
+              }
+            }}
+          />
+          {filter ? (
+            <button
+              type="button"
+              className="spark-icon-btn"
+              aria-label="Clear filter"
+              onClick={() => setFilter("")}
+              style={{ "--spark-icon-btn-size": "18px" } as React.CSSProperties}
+            >
+              <CloseIcon size={11} />
+            </button>
+          ) : (
+            <kbd className="spark-board__kbd">⌘F</kbd>
+          )}
+        </label>
+        <button
+          type="button"
+          className="spark-board__new"
+          disabled={!ready}
+          onClick={() => setPanel({ mode: "compose", status: "idea" })}
+        >
+          <PlusIcon />
+          New card
+          <kbd className="spark-board__kbd spark-board__kbd--on-accent">⌘N</kbd>
+        </button>
+      </div>
 
       {loadError ? (
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "var(--danger)",
-            fontSize: 12,
-          }}
-        >
-          {loadError}
-        </div>
+        <div className="spark-board__error">{loadError}</div>
       ) : (
-        <>
-          <div
-            style={{
-              flex: 1,
-              minHeight: 0,
-              display: "flex",
-              gap: 8,
-              padding: "0 14px 14px",
-              overflowX: "auto",
-              overflowY: "hidden",
-              alignItems: "stretch",
-            }}
-          >
-            {COLUMNS.map((column) => (
+        <div className="spark-board__lanes">
+          {COLUMNS.map((column) => {
+            const laneCards = cardsByColumn.get(column.key) ?? [];
+            // Lanes without a composer fold to a rail while they have nothing
+            // in them (a board with one running card should not spend four
+            // columns on empty space); Done also folds once it fills up.
+            const folded =
+              !column.composer &&
+              ((column.key === "done" && showDoneRail) || (laneCards.length === 0 && !filterText));
+            if (folded) {
+              return (
+                <LaneRail
+                  key={column.key}
+                  column={column}
+                  count={laneCards.length}
+                  dropActive={dropTarget?.column === column.key}
+                  onExpand={column.key === "done" && laneCards.length > 0 ? () => setDoneExpanded(true) : undefined}
+                  onDropIndexChange={(index) =>
+                    setDropTarget((prev) => {
+                      if (index === null) {
+                        return prev && prev.column === column.key ? null : prev;
+                      }
+                      if (prev && prev.column === column.key) return prev;
+                      return { column: column.key, index };
+                    })
+                  }
+                  onDrop={(event) => handleColumnDrop(column, event)}
+                />
+              );
+            }
+            return (
               <BoardColumn
                 key={column.key}
                 column={column}
-                cards={cardsByColumn.get(column.key) ?? []}
-                ready={board !== null && !promoting}
+                cards={laneCards}
+                visibleCards={laneCards.filter(matchesFilter)}
+                filtering={filterText.length > 0}
+                ready={ready}
                 dropIndex={dropTarget?.column === column.key ? dropTarget.index : null}
                 onDropIndexChange={(index) =>
                   // Dedup inside the updater — dragover fires continuously, and
@@ -626,278 +831,147 @@ export default function BoardView({
                   })
                 }
                 onDrop={(event) => handleColumnDrop(column, event)}
-                onAddCard={(draft) => addCard(column.dropStatus, draft)}
-                onDeleteCard={deleteCard}
-                onPatchCard={patchCard}
+                onCompose={() => setPanel({ mode: "compose", status: column.dropStatus })}
+                onCollapse={column.key === "done" ? () => setDoneExpanded(false) : undefined}
+                onOpenCard={(cardId) => setPanel({ mode: "view", cardId })}
                 onAdvanceCard={advanceCard}
-                knownWorkerTaskIds={knownWorkerTaskIds}
+                onOpenImages={(paths, index) => setLightbox({ paths, index })}
+                onOpenWorkerTerminal={openWorkerTerminal}
                 onOpenCardRun={onOpenCardRun}
-                onOpenWorkerTerminal={(workerTaskId) => {
-                  if (!onOpenWorkerTerminal(workerTaskId)) {
-                    // Two ways to land here, and the notice must not pick the
-                    // wrong one: the worker has not launched yet (no pane is
-                    // created until it does), or its pane was closed.
-                    showNotice(
-                      "No terminal for that worker — it hasn't launched yet, or its pane was closed",
-                    );
-                  }
-                }}
-                onNoticeError={showNotice}
+                onAnswer={onOpenChat}
+                attemptByTask={attemptByTask}
+                openQuestion={openQuestion}
+                knownWorkerTaskIds={knownWorkerTaskIds}
               />
-            ))}
-          </div>
-        </>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="spark-board__footer">
+        <span><kbd className="spark-board__kbd">↑</kbd><kbd className="spark-board__kbd">↓</kbd> select</span>
+        <span><kbd className="spark-board__kbd">Space</kbd> open</span>
+        <span><kbd className="spark-board__kbd">E</kbd> edit</span>
+        <span><kbd className="spark-board__kbd">Q</kbd> queue</span>
+        <span><kbd className="spark-board__kbd">⇧</kbd><kbd className="spark-board__kbd">→</kbd> move to next lane</span>
+        <span style={{ flex: 1 }} />
+        {doneCards.length > 0 && (
+          <button
+            type="button"
+            className="spark-board__footer-link"
+            onClick={() => setDoneExpanded((open) => !open)}
+          >
+            {doneExpanded ? "Collapse Done" : `Show ${doneCards.length} done`}
+          </button>
+        )}
+      </div>
+
+      {panel && (
+        <SidePanel
+          key={panel.mode === "compose" ? `compose:${panel.status}` : `${panel.mode}:${panel.cardId}`}
+          panel={panel}
+          card={panelCard}
+          run={run}
+          attempt={panelCard?.workerTaskId ? attemptByTask.get(panelCard.workerTaskId) ?? null : null}
+          openQuestion={openQuestion}
+          workerKnown={
+            panelCard?.workerTaskId ? knownWorkerTaskIds.has(panelCard.workerTaskId) : false
+          }
+          onClose={closePanel}
+          onSwitchMode={(mode) => {
+            if (panel.mode === "compose") return;
+            setPanel({ mode, cardId: panel.cardId });
+          }}
+          onAdd={(status, draft) => {
+            addCard(status, draft);
+            closePanel();
+          }}
+          onPatch={(cardId, patch) => {
+            patchCard(cardId, patch);
+            setPanel({ mode: "view", cardId });
+          }}
+          onDelete={(cardId) => {
+            closePanel();
+            deleteCard(cardId);
+          }}
+          onAdvance={advanceCard}
+          onOpenImages={(paths, index) => setLightbox({ paths, index })}
+          onOpenWorkerTerminal={openWorkerTerminal}
+          onOpenCardRun={onOpenCardRun}
+          onAnswer={onOpenChat}
+          onError={showNotice}
+        />
+      )}
+
+      {lightbox && (
+        <Lightbox
+          paths={lightbox.paths}
+          index={lightbox.index}
+          onIndexChange={(index) => setLightbox({ paths: lightbox.paths, index })}
+          onClose={() => setLightbox(null)}
+        />
       )}
     </div>
   );
 }
 
-// ── Header ──────────────────────────────────────────────────────────────────
+type PanelState =
+  | { mode: "compose"; status: BoardCardStatus }
+  | { mode: "view"; cardId: string }
+  | { mode: "edit"; cardId: string };
 
-// One compact line: title, a live "what's happening" summary (only the lanes
-// that mean something is happening), and — on an empty board — the single
-// sentence of instruction the old full-width banner used to spend 3 lines on.
-function BoardHeader({ board }: { board: RunBoard | null }) {
-  const cards = board?.cards ?? [];
-  const count = (statuses: BoardCardStatus[]) =>
-    cards.filter((card) => statuses.includes(card.status)).length;
-  const running = count(["running"]);
-  const blocked = count(["blocked"]);
-  const review = count(["review", "failed"]);
-  return (
-    <div
-      style={{
-        flex: "0 0 auto",
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        flexWrap: "wrap",
-        padding: "12px 14px 10px",
-      }}
-    >
-      <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: "0.01em" }}>Kanban</div>
-      {running > 0 && (
-        <SummaryChip tint="var(--info)" text={`${running} in progress`} pulse />
-      )}
-      {blocked > 0 && <SummaryChip tint="var(--warn)" text={`${blocked} need${blocked === 1 ? "s" : ""} input`} />}
-      {review > 0 && <SummaryChip tint="var(--accent)" text={`${review} to review`} />}
-      {cards.length === 0 && (
-        <span style={{ color: "var(--muted)", fontSize: 11, minWidth: 0 }}>
-          Add an idea, drag it to Queued, and this chat&apos;s Cora takes it from there.
-        </span>
-      )}
-    </div>
-  );
-}
+type CardPatch = Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description" | "imagePaths">>;
 
 function SummaryChip({ tint, text, pulse = false }: { tint: string; text: string; pulse?: boolean }) {
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        padding: "2px 8px",
-        borderRadius: 999,
-        fontSize: 10.5,
-        fontWeight: 600,
-        color: tint,
-        background: `color-mix(in oklch, ${tint} 12%, transparent)`,
-        border: `1px solid color-mix(in oklch, ${tint} 26%, transparent)`,
-        whiteSpace: "nowrap",
-      }}
-    >
-      <span
-        aria-hidden
-        className={pulse ? "spark-board-pulse" : undefined}
-        style={{ width: 5, height: 5, borderRadius: 999, background: tint }}
-      />
+    <span className="spark-board__chip" style={{ "--chip-tint": tint } as React.CSSProperties}>
+      <span aria-hidden className={pulse ? "spark-board__dot spark-board-pulse" : "spark-board__dot"} />
       {text}
     </span>
   );
 }
 
-// ── Column ──────────────────────────────────────────────────────────────────
-
-function BoardColumn({
-  column,
-  cards,
-  ready,
-  dropIndex,
-  onDropIndexChange,
-  onDrop,
-  onAddCard,
-  onDeleteCard,
-  onPatchCard,
-  onAdvanceCard,
-  knownWorkerTaskIds,
-  onOpenCardRun,
-  onOpenWorkerTerminal,
-  onNoticeError,
-}: {
-  column: ColumnSpec;
-  cards: BoardCard[];
-  ready: boolean;
-  dropIndex: number | null;
-  onDropIndexChange: (index: number | null) => void;
-  onDrop: (event: React.DragEvent) => void;
-  onAddCard: (draft: CardDraft) => void;
-  onDeleteCard: (cardId: string) => void;
-  onPatchCard: (
-    cardId: string,
-    patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>,
-  ) => void;
-  onAdvanceCard: (cardId: string, status: BoardCardStatus) => void;
-  knownWorkerTaskIds: ReadonlySet<string>;
-  onOpenCardRun: (runId: string) => void;
-  onOpenWorkerTerminal: (workerTaskId: string) => void;
-  onNoticeError: (text: string) => void;
-}) {
-  const acceptsCard = (event: React.DragEvent): boolean =>
-    Array.from(event.dataTransfer.types).includes(BOARD_CARD_DRAG_MIME);
-
-  const dropActive = dropIndex !== null;
-
-  return (
-    <div
-      className={dropActive ? "spark-board-lane spark-board-lane--drop" : "spark-board-lane"}
-      style={{ "--lane-tint": LANE_TINT[column.key] } as React.CSSProperties}
-      onDragOver={(event) => {
-        if (!acceptsCard(event)) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-        // Card rows set a precise index and stop propagation; reaching here
-        // means the pointer is over column chrome / empty space → append.
-        // (The parent's setter dedups, so firing per dragover tick is cheap.)
-        onDropIndexChange(cards.length);
-      }}
-      onDragLeave={(event) => {
-        if (
-          event.relatedTarget instanceof Node &&
-          event.currentTarget.contains(event.relatedTarget)
-        ) {
-          return;
-        }
-        onDropIndexChange(null);
-      }}
-      onDrop={onDrop}
-    >
-      <div
-        style={{
-          flex: "0 0 auto",
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          padding: "10px 12px 7px",
-        }}
-      >
-        <span
-          aria-hidden
-          style={{
-            width: 7,
-            height: 7,
-            flex: "0 0 auto",
-            borderRadius: 999,
-            background: LANE_TINT[column.key],
-            boxShadow: `0 0 7px color-mix(in oklch, ${LANE_TINT[column.key]} 45%, transparent)`,
-          }}
-        />
-        <span
-          style={{
-            fontSize: 10.5,
-            fontWeight: 650,
-            letterSpacing: "0.08em",
-            textTransform: "uppercase",
-            color: "var(--ink-dim)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {column.label}
-        </span>
-        {cards.length > 0 && (
-          <span
-            style={{
-              marginLeft: "auto",
-              minWidth: 17,
-              textAlign: "center",
-              padding: "0.5px 5px",
-              borderRadius: 999,
-              fontSize: 9.5,
-              fontFamily: "var(--font-mono)",
-              fontWeight: 600,
-              color: `color-mix(in oklch, ${LANE_TINT[column.key]} 78%, var(--ink))`,
-              background: `color-mix(in oklch, ${LANE_TINT[column.key]} 12%, transparent)`,
-              border: `1px solid color-mix(in oklch, ${LANE_TINT[column.key]} 20%, transparent)`,
-            }}
-          >
-            {cards.length}
-          </span>
-        )}
-      </div>
-
-      <div
-        style={{
-          flex: 1,
-          minHeight: 40,
-          overflowY: "auto",
-          overflowX: "hidden",
-          display: "flex",
-          flexDirection: "column",
-          gap: 6,
-          padding: "0 7px 7px",
-        }}
-      >
-        {cards.map((card, index) => (
-          <React.Fragment key={card.id}>
-            {dropIndex === index && <DropLine />}
-            <BoardCardView
-              card={card}
-              index={index}
-              onHoverIndexChange={onDropIndexChange}
-              workerKnown={card.workerTaskId ? knownWorkerTaskIds.has(card.workerTaskId) : false}
-              onOpenCardRun={onOpenCardRun}
-              onOpenWorkerTerminal={onOpenWorkerTerminal}
-              onDelete={() => onDeleteCard(card.id)}
-              onPatch={(patch) => onPatchCard(card.id, patch)}
-              onAdvance={(status) => onAdvanceCard(card.id, status)}
-            />
-          </React.Fragment>
-        ))}
-        {dropIndex === cards.length && <DropLine />}
-        {cards.length === 0 && !dropActive && (
-          <div
-            aria-hidden
-            style={{
-              flex: "0 0 auto",
-              padding: "14px 10px",
-              color: "var(--muted)",
-              fontSize: 10.5,
-              lineHeight: 1.55,
-              textAlign: "center",
-              opacity: 0.65,
-            }}
-          >
-            {LANE_HINTS[column.key]}
-          </div>
-        )}
-        {/* The composer lives at the BOTTOM of the lane — exactly where a new
-            card is appended — so adding never teleports the card away from
-            the form that created it. */}
-        {column.composer && ready && (
-          <AddCardComposer columnLabel={column.label} onAdd={onAddCard} onError={onNoticeError} />
-        )}
-      </div>
-    </div>
-  );
+// "just now" / "3m ago" for prose rows in the detail panel.
+function agoText(iso: string): string {
+  const short = relativeTime(iso);
+  return short === "now" ? "just now" : `${short} ago`;
 }
 
-function DropLine() {
-  return <div aria-hidden className="spark-board-dropline" />;
+// "3m" — glanceable card age without a timestamp's noise.
+function relativeTime(iso: string): string {
+  const delta = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(delta) || delta < 60_000) return "now";
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
 }
 
-// ── Card ────────────────────────────────────────────────────────────────────
+// "12:41" — elapsed since a worker attempt started, ticking while live.
+function elapsedSince(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const delta = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(delta) || delta < 0) return null;
+  const total = Math.floor(delta / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+// "claude-opus-5" → "opus 5", "gpt-5.6-sol" → "gpt 5.6": the worker chip is
+// a glance, not a spec sheet.
+function shortModel(model: string | undefined): string {
+  if (!model) return "worker";
+  const bare = model.split("/").pop() ?? model;
+  const parts = bare.split(/[-_]/).filter(Boolean);
+  const dropped = parts.filter((part) => !["claude", "sol", "latest", "preview"].includes(part));
+  return (dropped.length > 0 ? dropped : parts).slice(0, 2).join(" ");
+}
 
 // One-click lane hop offered on the card itself, so the common transitions
 // (send an idea to Cora, sign off a review, retry a failure) never require a
@@ -920,110 +994,297 @@ function quickActionFor(
   return null;
 }
 
-// "3m ago" — glanceable card age without a timestamp's noise.
-function relativeTime(iso: string): string {
-  const delta = Date.now() - Date.parse(iso);
-  if (!Number.isFinite(delta) || delta < 60_000) return "just now";
-  const minutes = Math.floor(delta / 60_000);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+function columnFor(status: BoardCardStatus): ColumnSpec {
+  return COLUMNS.find((column) => column.statuses.includes(status)) ?? COLUMNS[0];
 }
+
+// ── Column ──────────────────────────────────────────────────────────────────
+
+function BoardColumn({
+  column,
+  cards,
+  visibleCards,
+  filtering,
+  ready,
+  dropIndex,
+  onDropIndexChange,
+  onDrop,
+  onCompose,
+  onCollapse,
+  onOpenCard,
+  onAdvanceCard,
+  onOpenImages,
+  onOpenWorkerTerminal,
+  onOpenCardRun,
+  onAnswer,
+  attemptByTask,
+  openQuestion,
+  knownWorkerTaskIds,
+}: {
+  column: ColumnSpec;
+  cards: BoardCard[];
+  visibleCards: BoardCard[];
+  filtering: boolean;
+  ready: boolean;
+  dropIndex: number | null;
+  onDropIndexChange: (index: number | null) => void;
+  onDrop: (event: React.DragEvent) => void;
+  onCompose: () => void;
+  onCollapse?: () => void;
+  onOpenCard: (cardId: string) => void;
+  onAdvanceCard: (cardId: string, status: BoardCardStatus) => void;
+  onOpenImages: (paths: string[], index: number) => void;
+  onOpenWorkerTerminal: (workerTaskId: string) => void;
+  onOpenCardRun: (runId: string) => void;
+  onAnswer?: () => void;
+  attemptByTask: ReadonlyMap<string, WorkerAttempt>;
+  openQuestion: string | null;
+  knownWorkerTaskIds: ReadonlySet<string>;
+}) {
+  const acceptsCard = (event: React.DragEvent): boolean =>
+    Array.from(event.dataTransfer.types).includes(BOARD_CARD_DRAG_MIME);
+  const dropActive = dropIndex !== null;
+  // Drop indices are in the UNFILTERED lane's coordinates (moveCard reads the
+  // full lane); while a filter hides cards, drops append to the lane's end.
+  const indexOf = (card: BoardCard) => cards.findIndex((item) => item.id === card.id);
+
+  return (
+    <div
+      data-board-lane={column.key}
+      className={dropActive ? "spark-board-lane spark-board-lane--drop" : "spark-board-lane"}
+      style={{ "--lane-tint": LANE_TINT[column.key] } as React.CSSProperties}
+      onDragOver={(event) => {
+        if (!acceptsCard(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        // Card rows set a precise index and stop propagation; reaching here
+        // means the pointer is over column chrome / empty space → append.
+        onDropIndexChange(cards.length);
+      }}
+      onDragLeave={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        onDropIndexChange(null);
+      }}
+      onDrop={onDrop}
+    >
+      <div className="spark-board-lane__head">
+        <span aria-hidden className="spark-board__dot spark-board-lane__dot" />
+        <span className="spark-board-lane__name">{column.label}</span>
+        <span className="spark-board-lane__count">
+          {filtering && visibleCards.length !== cards.length
+            ? `${visibleCards.length} of ${cards.length}`
+            : cards.length}
+        </span>
+        <span style={{ flex: 1 }} />
+        {column.composer && (
+          <button
+            type="button"
+            className="spark-icon-btn"
+            aria-label={`New card in ${column.label}`}
+            title={`New card in ${column.label}`}
+            disabled={!ready}
+            onClick={onCompose}
+            style={{ "--spark-icon-btn-size": "22px" } as React.CSSProperties}
+          >
+            <PlusIcon />
+          </button>
+        )}
+        {onCollapse && (
+          <button
+            type="button"
+            className="spark-icon-btn"
+            aria-label="Collapse Done"
+            title="Collapse Done"
+            onClick={onCollapse}
+            style={{ "--spark-icon-btn-size": "22px" } as React.CSSProperties}
+          >
+            <ChevronIcon direction="left" />
+          </button>
+        )}
+      </div>
+
+      <div className="spark-board-lane__body">
+        {visibleCards.map((card, position) => {
+          const laneIndex = indexOf(card);
+          return (
+            <React.Fragment key={card.id}>
+              {!filtering && dropIndex === laneIndex && <DropLine />}
+              <BoardCardView
+                card={card}
+                index={laneIndex}
+                nextUp={column.key === "queued" && position === 0}
+                onHoverIndexChange={onDropIndexChange}
+                attempt={card.workerTaskId ? attemptByTask.get(card.workerTaskId) ?? null : null}
+                workerKnown={card.workerTaskId ? knownWorkerTaskIds.has(card.workerTaskId) : false}
+                question={card.status === "blocked" ? card.error || openQuestion : null}
+                onOpen={() => onOpenCard(card.id)}
+                onAdvance={(status) => onAdvanceCard(card.id, status)}
+                onOpenImages={onOpenImages}
+                onOpenWorkerTerminal={onOpenWorkerTerminal}
+                onOpenCardRun={onOpenCardRun}
+                onAnswer={onAnswer}
+              />
+            </React.Fragment>
+          );
+        })}
+        {!filtering && dropIndex === cards.length && <DropLine />}
+        {cards.length === 0 && !dropActive && (
+          <div aria-hidden className="spark-board-lane__empty">
+            {LANE_HINTS[column.key]}
+          </div>
+        )}
+        {cards.length > 0 && visibleCards.length === 0 && !dropActive && (
+          <div aria-hidden className="spark-board-lane__empty">No matches</div>
+        )}
+        {dropActive && (
+          <div className="spark-board-lane__drophint">
+            {column.key === "queued" ? "Drop to queue — Cora picks it up" : `Move to ${column.label}`}
+          </div>
+        )}
+        {column.composer && ready && (
+          <button type="button" className="spark-board-add" onClick={onCompose}>
+            <PlusIcon />
+            New card
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A lane folded to a 44px rail: an empty lane, or Done once it has cards.
+// A drop onto the rail still moves the card there.
+function LaneRail({
+  column,
+  count,
+  dropActive,
+  onExpand,
+  onDropIndexChange,
+  onDrop,
+}: {
+  column: ColumnSpec;
+  count: number;
+  dropActive: boolean;
+  onExpand?: () => void;
+  onDropIndexChange: (index: number | null) => void;
+  onDrop: (event: React.DragEvent) => void;
+}) {
+  return (
+    <div
+      data-board-lane={column.key}
+      className={dropActive ? "spark-board-rail spark-board-rail--drop" : "spark-board-rail"}
+      style={{ "--lane-tint": LANE_TINT[column.key] } as React.CSSProperties}
+      title={count === 0 ? `${column.label} — empty. Drop a card here to move it.` : undefined}
+      onDragOver={(event) => {
+        if (!Array.from(event.dataTransfer.types).includes(BOARD_CARD_DRAG_MIME)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        onDropIndexChange(count);
+      }}
+      onDragLeave={(event) => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) {
+          return;
+        }
+        onDropIndexChange(null);
+      }}
+      onDrop={onDrop}
+    >
+      {onExpand ? (
+        <button
+          type="button"
+          className="spark-icon-btn"
+          aria-label={`Expand ${column.label} (${count})`}
+          title={`Expand ${column.label}`}
+          onClick={onExpand}
+          style={{ "--spark-icon-btn-size": "22px" } as React.CSSProperties}
+        >
+          <ChevronIcon direction="right" />
+        </button>
+      ) : (
+        <span className="spark-board-rail__spacer" />
+      )}
+      <span aria-hidden className="spark-board__dot spark-board-lane__dot" />
+      <span className="spark-board-rail__label">{column.label}</span>
+      {count > 0 && <span className="spark-board-lane__count">{count}</span>}
+    </div>
+  );
+}
+
+function DropLine() {
+  return <div aria-hidden className="spark-board-dropline" />;
+}
+
+// ── Card ────────────────────────────────────────────────────────────────────
 
 function BoardCardView({
   card,
   index,
+  nextUp,
   onHoverIndexChange,
+  attempt,
   workerKnown,
-  onOpenCardRun,
-  onOpenWorkerTerminal,
-  onDelete,
-  onPatch,
+  question,
+  onOpen,
   onAdvance,
+  onOpenImages,
+  onOpenWorkerTerminal,
+  onOpenCardRun,
+  onAnswer,
 }: {
   card: BoardCard;
   index: number;
+  nextUp: boolean;
   onHoverIndexChange: (index: number) => void;
+  attempt: WorkerAttempt | null;
   workerKnown: boolean;
-  onOpenCardRun: (runId: string) => void;
-  onOpenWorkerTerminal: (workerTaskId: string) => void;
-  onDelete: () => void;
-  onPatch: (
-    patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>,
-  ) => void;
+  question: string | null;
+  onOpen: () => void;
   onAdvance: (status: BoardCardStatus) => void;
+  onOpenImages: (paths: string[], index: number) => void;
+  onOpenWorkerTerminal: (workerTaskId: string) => void;
+  onOpenCardRun: (runId: string) => void;
+  onAnswer?: () => void;
 }) {
   const [dragging, setDragging] = useState(false);
-  const [errorOpen, setErrorOpen] = useState(false);
-  const [editing, setEditing] = useState(false);
-  // The delete control is ALWAYS mounted (so it stays tab-reachable) and only
-  // revealed via opacity: on card hover, while it holds focus, or while armed.
-  const [hovered, setHovered] = useState(false);
-  const [deleteFocused, setDeleteFocused] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const confirmTimer = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (confirmTimer.current !== null) window.clearTimeout(confirmTimer.current);
-    },
-    [],
-  );
-  const disarmDelete = () => {
-    if (confirmTimer.current !== null) {
-      window.clearTimeout(confirmTimer.current);
-      confirmTimer.current = null;
-    }
-    setConfirmingDelete(false);
-  };
-  // Uniform two-step confirm for every card (cheap consistency beats
-  // special-casing linked cards): first activation arms, the second deletes.
-  // Escape and mouse-leave disarm; the timer is a leave-it-armed backstop.
-  const requestDelete = () => {
-    if (!confirmingDelete) {
-      setConfirmingDelete(true);
-      confirmTimer.current = window.setTimeout(() => {
-        confirmTimer.current = null;
-        setConfirmingDelete(false);
-      }, 4000);
-      return;
-    }
-    disarmDelete();
-    onDelete();
-  };
-
-  if (editing) {
-    return (
-      <CardEditor
-        card={card}
-        onSave={(patch) => {
-          setEditing(false);
-          onPatch(patch);
-        }}
-        onCancel={() => setEditing(false)}
-      />
-    );
-  }
-
   const quick = quickActionFor(card.status);
+  const images = card.imagePaths ?? [];
+  const live = card.status === "running";
+  const elapsed = live ? elapsedSince(attempt?.startedAt) : null;
+  const tone =
+    card.status === "running"
+      ? "spark-board-card--running"
+      : card.status === "blocked"
+        ? "spark-board-card--blocked"
+        : card.status === "failed"
+          ? "spark-board-card--failed"
+          : card.status === "done"
+            ? "spark-board-card--done"
+            : "";
+  const className = [
+    "spark-board-card",
+    tone,
+    dragging ? "spark-board-card--dragging" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div
       draggable
-      className={dragging ? "spark-board-card spark-board-card--dragging" : "spark-board-card"}
-      onDoubleClick={() => setEditing(true)}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => {
-        setHovered(false);
-        disarmDelete();
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && confirmingDelete) {
-          event.stopPropagation();
-          event.preventDefault();
-          disarmDelete();
-        }
+      tabIndex={0}
+      role="button"
+      data-board-card={card.id}
+      aria-label={card.title}
+      className={className}
+      onClick={(event) => {
+        // Inner buttons handle themselves; anywhere else on the card opens it.
+        if ((event.target as HTMLElement).closest("button, img")) return;
+        onOpen();
       }}
       onDragStart={(event) => {
         event.dataTransfer.setData(BOARD_CARD_DRAG_MIME, JSON.stringify({ cardId: card.id }));
@@ -1049,191 +1310,110 @@ function BoardCardView({
         onHoverIndexChange(self || before ? index : index + 1);
       }}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
-        {/* Status DOT (matches the mobile card dot and the session picker),
-            replacing the older colored edge stripe. */}
-        <span
-          aria-hidden
-          title={
-            card.status === "failed"
-              ? "Failed"
-              : COLUMNS.find((column) => column.statuses.includes(card.status))?.label ?? card.status
-          }
-          style={{
-            flex: "0 0 auto",
-            width: 7,
-            height: 7,
-            marginTop: 4.5,
-            borderRadius: 999,
-            background: STATUS_TINT[card.status],
-          }}
-        />
-        <span
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: 12,
-            fontWeight: 600,
-            lineHeight: 1.35,
-            overflowWrap: "anywhere",
-          }}
-        >
-          {card.title}
-        </span>
-        <button
-          type="button"
-          className="spark-icon-btn"
-          aria-label={`Edit card "${card.title}"`}
-          title="Edit this card (double-click also works)"
-          onClick={() => setEditing(true)}
-          style={
-            {
-              "--spark-icon-btn-size": "18px",
-              opacity: hovered ? 1 : 0,
-              transition: "opacity var(--motion-fast) var(--ease-out)",
-            } as React.CSSProperties
-          }
-        >
-          <PencilIcon />
-        </button>
-        {/* One always-mounted element for both states so arming never drops
-            focus: idle it is the opacity-revealed trash icon, armed it becomes
-            the confirm chip. Enter/Space activate it natively; Escape (card
-            handler above) disarms. */}
-        <button
-          type="button"
-          className={confirmingDelete ? undefined : "spark-icon-btn"}
-          aria-label={
-            confirmingDelete ? `Confirm deleting card "${card.title}"` : `Delete card "${card.title}"`
-          }
-          title={
-            confirmingDelete
-              ? "Click again (or press Enter) to delete this card. Escape cancels."
-              : "Delete this card"
-          }
-          onClick={requestDelete}
-          onFocus={() => setDeleteFocused(true)}
-          onBlur={() => setDeleteFocused(false)}
-          style={
-            confirmingDelete
-              ? {
-                  appearance: "none",
-                  flex: "0 0 auto",
-                  border: "1px solid color-mix(in oklch, var(--danger) 40%, transparent)",
-                  borderRadius: 999,
-                  background: "color-mix(in oklch, var(--danger) 14%, transparent)",
-                  color: "var(--danger)",
-                  fontFamily: "var(--font-sans)",
-                  fontSize: 10,
-                  fontWeight: 600,
-                  padding: "1px 7px",
-                  cursor: "default",
-                  whiteSpace: "nowrap",
-                }
-              : ({
-                  "--spark-icon-btn-size": "18px",
-                  // Revealed by card hover / its own focus; opacity (not
-                  // conditional mount) keeps it in the tab order, and the
-                  // global button:focus-visible ring stays fully visible.
-                  opacity: hovered || deleteFocused ? 1 : 0,
-                  transition: "opacity var(--motion-fast) var(--ease-out)",
-                } as React.CSSProperties)
-          }
-        >
-          {confirmingDelete ? "Delete?" : <TrashIcon />}
-        </button>
-        {card.status === "failed" && (
-          <button
-            type="button"
-            title={card.error || "The work failed."}
-            aria-expanded={errorOpen}
-            onClick={() => setErrorOpen((open) => !open)}
-            style={{
-              appearance: "none",
-              flex: "0 0 auto",
-              border: "1px solid color-mix(in oklch, var(--danger) 40%, transparent)",
-              borderRadius: 999,
-              background: "color-mix(in oklch, var(--danger) 14%, transparent)",
-              color: "var(--danger)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
-              fontWeight: 600,
-              padding: "1px 7px",
-              cursor: "default",
-            }}
-          >
-            failed
-          </button>
-        )}
+      <div className="spark-board-card__title">
+        {card.status === "done" && <CheckIcon size={14} tint="var(--ok)" />}
+        <span>{card.title}</span>
       </div>
 
-      {card.description && (
-        <div
-          style={{
-            fontSize: 11,
-            color: "var(--muted)",
-            lineHeight: 1.45,
-            display: "-webkit-box",
-            WebkitLineClamp: 4,
-            WebkitBoxOrient: "vertical",
-            overflow: "hidden",
-            overflowWrap: "anywhere",
-          }}
-        >
-          {card.description}
+      {question && (
+        <div className="spark-board-card__question">
+          <QuestionIcon />
+          <span>{question}</span>
         </div>
       )}
 
-      {errorOpen && card.error && (
-        <div
-          style={{
-            fontSize: 11,
-            color: "var(--danger)",
-            lineHeight: 1.45,
-            overflowWrap: "anywhere",
-          }}
-        >
-          {card.error}
+      {card.status === "failed" && card.error && (
+        <div className="spark-board-card__failure">
+          <WarnIcon />
+          <span>{card.error}</span>
         </div>
       )}
 
-      {card.imagePaths && card.imagePaths.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-          {card.imagePaths.map((path) => (
-            <img
+      {images.length > 0 && (
+        <div className="spark-board-card__images">
+          {images.slice(0, 3).map((path, at) => (
+            <button
               key={path}
-              src={pathToFileUrl(path)}
-              alt=""
+              type="button"
+              className="spark-board-thumb"
               title={path}
-              style={{
-                width: 38,
-                height: 38,
-                objectFit: "cover",
-                borderRadius: 4,
-                border: "1px solid var(--rule)",
+              aria-label={`Open image ${at + 1} of ${images.length}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenImages(images, at);
               }}
-            />
+            >
+              <CardImage path={path} />
+            </button>
           ))}
+          {images.length > 3 && (
+            <button
+              type="button"
+              className="spark-board-thumb spark-board-thumb--more"
+              aria-label={`Open all ${images.length} images`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenImages(images, 3);
+              }}
+            >
+              +{images.length - 3}
+            </button>
+          )}
         </div>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minHeight: 16 }}>
-        {quick && (
+      <div className="spark-board-card__meta">
+        {(card.status === "running" || card.status === "blocked") && (
+          <span
+            className="spark-board-worker"
+            style={{ "--worker-tint": STATUS_TINT[card.status] } as React.CSSProperties}
+          >
+            <span aria-hidden className={live ? "spark-board__dot spark-board-pulse" : "spark-board__dot"} />
+            {shortModel(attempt?.model)}
+          </span>
+        )}
+        {elapsed && <span className="spark-board-card__mono">{elapsed}</span>}
+        {card.status === "blocked" && !elapsed && (
+          <span className="spark-board-card__mono">waiting {relativeTime(card.updatedAt)}</span>
+        )}
+        {nextUp && <span className="spark-board-card__nextup">Next up</span>}
+        {images.length > 0 && card.status !== "running" && card.status !== "blocked" && (
+          <span className="spark-board-card__mono" title={`${images.length} image${images.length === 1 ? "" : "s"}`}>
+            <ImageIcon /> {images.length}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {card.status !== "blocked" && !elapsed && (
+          <span className="spark-board-card__mono" title={new Date(card.updatedAt).toLocaleString()}>
+            {relativeTime(card.updatedAt)}
+          </span>
+        )}
+        {card.status === "blocked" && onAnswer && (
           <button
             type="button"
-            className="spark-board-quick"
-            title={quick.title}
-            onClick={() => onAdvance(quick.to)}
-            style={{ "--quick-tint": STATUS_TINT[quick.to] } as React.CSSProperties}
+            className="spark-board-qa spark-board-qa--filled"
+            style={{ "--qa-tint": "var(--warn)" } as React.CSSProperties}
+            title="Answer Cora's question in the chat"
+            onClick={onAnswer}
           >
-            {quick.label}
-            <span aria-hidden>{quick.to === "done" ? "✓" : "→"}</span>
+            Answer
           </button>
         )}
-        {card.workerTaskId && (
+        {quick && card.status !== "blocked" && card.status !== "review" && card.status !== "failed" && (
           <button
             type="button"
-            className="spark-btn"
+            className="spark-board-qa"
+            title={quick.title}
+            onClick={() => onAdvance(quick.to)}
+            style={{ "--qa-tint": STATUS_TINT[quick.to] } as React.CSSProperties}
+          >
+            {quick.label}
+          </button>
+        )}
+        {card.workerTaskId && (card.status === "running" || card.status === "blocked") && (
+          <button
+            type="button"
+            className="spark-board-qa"
             disabled={!workerKnown}
             title={
               workerKnown
@@ -1241,159 +1421,214 @@ function BoardCardView({
                 : "This card's worker is no longer available"
             }
             onClick={() => onOpenWorkerTerminal(card.workerTaskId as string)}
-            style={{ fontSize: 10.5, padding: "1px 8px", opacity: workerKnown ? 1 : 0.5 }}
           >
+            <TerminalIcon />
             Terminal
           </button>
         )}
-        {!card.workerTaskId && card.runId && (
-          // LEGACY: the retired engine spawned a separate run for this card.
-          <button
-            type="button"
-            className="spark-btn"
-            onClick={() => onOpenCardRun(card.runId as string)}
-            style={{ fontSize: 10.5, padding: "1px 8px" }}
-          >
-            Open chat
-          </button>
-        )}
-        <span
-          title={new Date(card.updatedAt).toLocaleString()}
-          style={{
-            marginLeft: "auto",
-            fontSize: 9.5,
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            whiteSpace: "nowrap",
-            opacity: 0.85,
-          }}
-        >
-          {relativeTime(card.updatedAt)}
-        </span>
       </div>
+
+      {(card.status === "review" || card.status === "failed") && (
+        <div className="spark-board-card__actions">
+          {quick && (
+            <button
+              type="button"
+              className="spark-board-qa"
+              title={quick.title}
+              onClick={() => onAdvance(quick.to)}
+              style={{ "--qa-tint": STATUS_TINT[quick.to] } as React.CSSProperties}
+            >
+              {quick.to === "done" && <CheckIcon size={12} />}
+              {quick.label}
+            </button>
+          )}
+          {card.workerTaskId && (
+            <button
+              type="button"
+              className="spark-board-qa spark-board-qa--plain"
+              disabled={!workerKnown}
+              title={
+                workerKnown
+                  ? "Open the terminal of the worker on this card"
+                  : "This card's worker is no longer available"
+              }
+              onClick={() => onOpenWorkerTerminal(card.workerTaskId as string)}
+            >
+              <TerminalIcon />
+              Terminal
+            </button>
+          )}
+          {!card.workerTaskId && card.runId && (
+            // LEGACY: the retired engine spawned a separate run for this card.
+            <button
+              type="button"
+              className="spark-board-qa spark-board-qa--plain"
+              onClick={() => onOpenCardRun(card.runId as string)}
+            >
+              Open chat
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-// Inline editor swapped in for the card on pencil / double-click. Same fields
-// as the composer; Enter in the title saves, Escape cancels.
-function CardEditor({
+// An attached image on a card or in the panel. A path that no longer resolves
+// (moved home, deleted file) shows a labeled placeholder instead of the
+// browser's broken-image glyph.
+function CardImage({ path, cover = true }: { path: string; cover?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <span className="spark-board-thumb__missing" title={`Missing: ${path}`}>
+        <ImageIcon />
+      </span>
+    );
+  }
+  return (
+    <img
+      src={pathToFileUrl(path)}
+      alt=""
+      draggable={false}
+      onError={() => setFailed(true)}
+      style={{ objectFit: cover ? "cover" : "contain" }}
+    />
+  );
+}
+
+// ── Side panel: compose / view / edit ───────────────────────────────────────
+
+function SidePanel({
+  panel,
   card,
-  onSave,
-  onCancel,
+  run,
+  attempt,
+  openQuestion,
+  workerKnown,
+  onClose,
+  onSwitchMode,
+  onAdd,
+  onPatch,
+  onDelete,
+  onAdvance,
+  onOpenImages,
+  onOpenWorkerTerminal,
+  onOpenCardRun,
+  onAnswer,
+  onError,
 }: {
-  card: BoardCard;
-  onSave: (
-    patch: Pick<BoardCard, "title"> & Partial<Pick<BoardCard, "description">>,
-  ) => void;
-  onCancel: () => void;
+  panel: PanelState;
+  card: BoardCard | null;
+  run: RunState | null;
+  attempt: WorkerAttempt | null;
+  openQuestion: string | null;
+  workerKnown: boolean;
+  onClose: () => void;
+  onSwitchMode: (mode: "view" | "edit") => void;
+  onAdd: (status: BoardCardStatus, draft: CardDraft) => void;
+  onPatch: (cardId: string, patch: CardPatch) => void;
+  onDelete: (cardId: string) => void;
+  onAdvance: (cardId: string, status: BoardCardStatus) => void;
+  onOpenImages: (paths: string[], index: number) => void;
+  onOpenWorkerTerminal: (workerTaskId: string) => void;
+  onOpenCardRun: (runId: string) => void;
+  onAnswer?: () => void;
+  onError: (text: string) => void;
 }) {
-  const [title, setTitle] = useState(card.title);
-  const [description, setDescription] = useState(card.description ?? "");
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  // Focus lands inside the panel on open and returns to the board on close.
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const first = el.querySelector<HTMLElement>("textarea, input, button");
+    first?.focus({ preventScroll: true });
+  }, []);
 
-  const save = () => {
-    const trimmed = title.trim();
-    if (!trimmed) return;
-    const nextDescription = description.trim();
-    onSave(nextDescription ? { title: trimmed, description: nextDescription } : { title: trimmed });
-  };
+  const editing = panel.mode === "compose" || panel.mode === "edit";
+
+  // Escape and E work wherever focus happens to sit (a thumbnail, the scrim,
+  // nothing at all), not only inside the panel's subtree. The lightbox owns
+  // these keys while it is open and stops them before they reach here.
+  const modeRef = useRef(panel.mode);
+  modeRef.current = panel.mode;
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const inField =
+        !!target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT");
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (modeRef.current === "edit") onSwitchMode("view");
+        else onClose();
+        return;
+      }
+      if (modeRef.current === "view" && !inField && event.key.toLowerCase() === "e" && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        onSwitchMode("edit");
+      }
+    };
+    // Capture phase on document: React's own stopPropagation (used inside the
+    // panel to keep card shortcuts off the board) also stops the native event
+    // at the root container, so a bubble listener up here would never see
+    // keys pressed inside the panel. The lightbox listens on window, one
+    // level earlier, and claims its keys before this runs.
+    document.addEventListener("keydown", onKey, { capture: true });
+    return () => document.removeEventListener("keydown", onKey, { capture: true });
+  }, [onClose, onSwitchMode]);
 
   return (
-    <div
-      className="spark-board-composer"
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.stopPropagation();
-          onCancel();
-        }
-      }}
-    >
-      <input
-        className="spark-board-composer__title"
-        autoFocus
-        value={title}
-        onChange={(event) => setTitle(event.target.value)}
+    <div className="spark-board-scrim" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <div
+        ref={panelRef}
+        className="spark-board-panel"
+        role="dialog"
+        aria-modal="false"
+        aria-label={panel.mode === "compose" ? "New card" : card?.title ?? "Card"}
+        tabIndex={-1}
         onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            save();
-          }
+          // Keep card-level shortcuts (Q, arrows) from firing on the board
+          // behind the panel while typing or tabbing inside it.
+          if (event.key !== "Escape") event.stopPropagation();
         }}
-      />
-      <textarea
-        className="spark-board-composer__desc"
-        value={description}
-        placeholder="Details (optional)"
-        rows={3}
-        spellCheck={false}
-        onChange={(event) => setDescription(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            save();
-          }
-        }}
-      />
-      <div className="spark-board-composer__footer">
-        <button
-          type="button"
-          className="spark-board-composer__add"
-          disabled={!title.trim()}
-          onClick={save}
-        >
-          Save
-        </button>
-        <button type="button" className="spark-board-composer__cancel" onClick={onCancel}>
-          Cancel
-        </button>
-        <span className="spark-board-composer__hint">Enter to save</span>
+      >
+        {editing ? (
+          <CardForm
+            key={panel.mode === "compose" ? "compose" : `edit:${card?.id ?? ""}`}
+            mode={panel.mode === "compose" ? "compose" : "edit"}
+            initialStatus={panel.mode === "compose" ? panel.status : card?.status ?? "idea"}
+            card={panel.mode === "edit" ? card : null}
+            onClose={onClose}
+            onCancelEdit={() => onSwitchMode("view")}
+            onAdd={onAdd}
+            onPatch={onPatch}
+            onOpenImages={onOpenImages}
+            onError={onError}
+          />
+        ) : card ? (
+          <CardDetail
+            card={card}
+            run={run}
+            attempt={attempt}
+            question={card.status === "blocked" ? card.error || openQuestion : null}
+            workerKnown={workerKnown}
+            onClose={onClose}
+            onEdit={() => onSwitchMode("edit")}
+            onDelete={() => onDelete(card.id)}
+            onAdvance={(status) => onAdvance(card.id, status)}
+            onOpenImages={onOpenImages}
+            onOpenWorkerTerminal={onOpenWorkerTerminal}
+            onOpenCardRun={onOpenCardRun}
+            onAnswer={onAnswer}
+          />
+        ) : null}
       </div>
     </div>
   );
 }
-
-function PencilIcon() {
-  return (
-    <svg
-      width="11"
-      height="11"
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M2 12l1-3 7-7 2 2-7 7-3 1z" />
-      <path d="M9 3l2 2" />
-    </svg>
-  );
-}
-
-// Same trash glyph as WorkerSessionPicker's delete affordance, so "delete a
-// row/card" reads identically across the desktop surfaces.
-function TrashIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M3 4.2h8" />
-      <path d="M5.4 4.2V3.2a1 1 0 0 1 1-1h1.2a1 1 0 0 1 1 1v1" />
-      <path d="M4 4.2 4.5 11a1 1 0 0 0 1 .9h3a1 1 0 0 0 1-.9L10 4.2" />
-    </svg>
-  );
-}
-
-// ── Composer ────────────────────────────────────────────────────────────────
 
 const SUPPORTED_PASTED_IMAGE_TYPES = new Set([
   "image/png",
@@ -1403,7 +1638,7 @@ const SUPPORTED_PASTED_IMAGE_TYPES = new Set([
   "image/bmp",
 ]);
 
-function imageFilesFromClipboard(data: DataTransfer): File[] {
+function imageFilesFromTransfer(data: DataTransfer): File[] {
   const fromItems = Array.from(data.items)
     .filter((item) => item.kind === "file" && SUPPORTED_PASTED_IMAGE_TYPES.has(item.type))
     .map((item) => item.getAsFile())
@@ -1424,34 +1659,63 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
-function AddCardComposer({
-  columnLabel,
+// The writing surface for a card, new or existing: a real title, a brief
+// with room to think, and images pasted or dropped anywhere in the panel.
+function CardForm({
+  mode,
+  initialStatus,
+  card,
+  onClose,
+  onCancelEdit,
   onAdd,
+  onPatch,
+  onOpenImages,
   onError,
 }: {
-  columnLabel: string;
-  onAdd: (draft: CardDraft) => void;
+  mode: "compose" | "edit";
+  initialStatus: BoardCardStatus;
+  card: BoardCard | null;
+  onClose: () => void;
+  onCancelEdit: () => void;
+  onAdd: (status: BoardCardStatus, draft: CardDraft) => void;
+  onPatch: (cardId: string, patch: CardPatch) => void;
+  onOpenImages: (paths: string[], index: number) => void;
   onError: (text: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [imagePaths, setImagePaths] = useState<string[]>([]);
+  const [title, setTitle] = useState(card?.title ?? "");
+  const [description, setDescription] = useState(card?.description ?? "");
+  const [imagePaths, setImagePaths] = useState<string[]>(card?.imagePaths ?? []);
+  const [status, setStatus] = useState<BoardCardStatus>(initialStatus);
   const [pasting, setPasting] = useState(false);
-  const titleRef = useRef<HTMLInputElement | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const titleRef = useRef<HTMLTextAreaElement | null>(null);
+  const descRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const reset = () => {
-    setTitle("");
-    setDescription("");
-    setImagePaths([]);
-  };
+  // The title is a textarea that grows with its text, never a one-line input
+  // that scrolls a long title out of view.
+  useEffect(() => {
+    const el = titleRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [title]);
 
-  const submit = () => {
+  const canSave = title.trim().length > 0 && !pasting;
+
+  const submit = (nextStatus: BoardCardStatus = status) => {
     const trimmed = title.trim();
-    if (!trimmed) return;
-    onAdd({ title: trimmed, description: description.trim(), imagePaths });
-    reset();
-    titleRef.current?.focus({ preventScroll: true });
+    if (!trimmed || pasting) return;
+    if (mode === "compose") {
+      onAdd(nextStatus, { title: trimmed, description: description.trim(), imagePaths });
+      return;
+    }
+    if (!card) return;
+    const nextDescription = description.trim();
+    onPatch(card.id, {
+      title: trimmed,
+      ...(nextDescription ? { description: nextDescription } : { description: undefined }),
+      ...(imagePaths.length > 0 ? { imagePaths } : { imagePaths: undefined }),
+    });
   };
 
   const attachImages = async (files: File[]) => {
@@ -1477,154 +1741,576 @@ function AddCardComposer({
   };
 
   const onPaste = (event: React.ClipboardEvent) => {
-    const files = imageFilesFromClipboard(event.clipboardData);
+    const files = imageFilesFromTransfer(event.clipboardData);
     if (files.length === 0) return;
     event.preventDefault();
     void attachImages(files);
   };
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="spark-board-add"
-        onClick={() => setOpen(true)}
-        aria-label={`Add a card to ${columnLabel}`}
-      >
-        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>
-          <path
-            d="M6 2.2v7.6M2.2 6h7.6"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-          />
-        </svg>
-        New card
-      </button>
-    );
-  }
+  const hasImageFiles = (event: React.DragEvent) =>
+    Array.from(event.dataTransfer.types).includes("Files");
+
+  const laneLabel = columnFor(status).label;
 
   return (
     <div
-      className="spark-board-composer"
+      className={dragOver ? "spark-board-form spark-board-form--dragover" : "spark-board-form"}
+      onPaste={onPaste}
+      onDragOver={(event) => {
+        if (!hasImageFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDragOver(true);
+      }}
+      onDragLeave={(event) => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+        setDragOver(false);
+      }}
+      onDrop={(event) => {
+        if (!hasImageFiles(event)) return;
+        event.preventDefault();
+        setDragOver(false);
+        void attachImages(imageFilesFromTransfer(event.dataTransfer));
+      }}
       onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.stopPropagation();
-          reset();
-          setOpen(false);
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          submit();
         }
       }}
-      onBlur={(event) => {
-        // Clicking away from an untouched composer just closes it — no modal
-        // ceremony. Anything typed or pasted keeps the form open.
-        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-        if (!title.trim() && !description.trim() && imagePaths.length === 0) setOpen(false);
-      }}
     >
-      <input
-        ref={titleRef}
-        className="spark-board-composer__title"
-        autoFocus
-        value={title}
-        placeholder="What should Cora build?"
-        onChange={(event) => setTitle(event.target.value)}
-        onPaste={onPaste}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            submit();
-          }
-        }}
-      />
-      <textarea
-        className="spark-board-composer__desc"
-        value={description}
-        placeholder="Details — paste screenshots right here (optional)"
-        rows={2}
-        spellCheck={false}
-        onChange={(event) => setDescription(event.target.value)}
-        onPaste={onPaste}
-        onKeyDown={(event) => {
-          // Enter in the details field writes a newline; ⌘/Ctrl+Enter adds
-          // the card, mirroring every other multi-line composer in the app.
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            submit();
-          }
-        }}
-      />
-      {imagePaths.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "2px 11px 8px" }}>
-          {imagePaths.map((path) => (
-            <span key={path} style={{ position: "relative", display: "inline-flex" }}>
-              <img
-                src={pathToFileUrl(path)}
-                alt=""
-                title={path}
-                style={{
-                  width: 44,
-                  height: 44,
-                  objectFit: "cover",
-                  borderRadius: 6,
-                  border: "1px solid var(--rule-soft, var(--rule))",
-                  display: "block",
-                }}
-              />
-              <button
-                type="button"
-                aria-label="Remove image"
-                onClick={() =>
-                  setImagePaths((current) => current.filter((item) => item !== path))
-                }
-                style={{
-                  appearance: "none",
-                  position: "absolute",
-                  top: -5,
-                  right: -5,
-                  width: 15,
-                  height: 15,
-                  display: "grid",
-                  placeItems: "center",
-                  border: "1px solid var(--rule)",
-                  borderRadius: 999,
-                  background: "var(--panel-2, var(--bg))",
-                  color: "var(--muted)",
-                  fontSize: 9,
-                  lineHeight: 1,
-                  padding: 0,
-                  cursor: "default",
-                }}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="spark-board-composer__footer">
+      <div className="spark-board-panel__head">
+        <span className="spark-board-panel__eyebrow">{mode === "compose" ? "New card" : "Edit card"}</span>
+        {mode === "compose" ? (
+          <label className="spark-board-select" title="Lane">
+            <span aria-hidden className="spark-board__dot" style={{ background: LANE_TINT[columnFor(status).key] }} />
+            <select value={status} onChange={(event) => setStatus(event.target.value as BoardCardStatus)}>
+              {COLUMNS.filter((column) => column.composer).map((column) => (
+                <option key={column.key} value={column.dropStatus}>
+                  {column.label}
+                </option>
+              ))}
+            </select>
+            <ChevronIcon direction="down" />
+          </label>
+        ) : (
+          <span className="spark-board-card__mono" style={{ color: "var(--muted)" }}>{laneLabel}</span>
+        )}
+        <span style={{ flex: 1 }} />
+        <span className="spark-board-panel__esc">Esc to {mode === "compose" ? "close" : "cancel"}</span>
         <button
           type="button"
-          className="spark-board-composer__add"
-          disabled={!title.trim() || pasting}
-          onClick={submit}
+          className="spark-icon-btn"
+          aria-label="Close"
+          onClick={mode === "compose" ? onClose : onCancelEdit}
         >
-          Add card
+          <CloseIcon size={13} />
         </button>
+      </div>
+
+      <div className="spark-board-panel__body">
+        <textarea
+          ref={titleRef}
+          className="spark-board-form__title"
+          value={title}
+          rows={1}
+          placeholder="What should Cora build?"
+          spellCheck={false}
+          onChange={(event) => setTitle(event.target.value.replace(/\n/g, " "))}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              if (mode === "compose" && !description.trim()) {
+                // Enter on a title-only card adds it: the Trello reflex.
+                submit();
+              } else {
+                descRef.current?.focus();
+              }
+            }
+          }}
+        />
+
+        <div className="spark-board-form__field">
+          <div className="spark-board-form__label">What Cora should know</div>
+          <textarea
+            ref={descRef}
+            className="spark-board-form__desc"
+            value={description}
+            rows={8}
+            placeholder="Context, constraints, acceptance criteria. Paste screenshots anywhere in this panel."
+            spellCheck={false}
+            onChange={(event) => setDescription(event.target.value)}
+          />
+          <div className="spark-board-form__help">Plain text. Images can be pasted or dropped anywhere in this panel.</div>
+        </div>
+
+        <div className="spark-board-form__field">
+          <div className="spark-board-form__label">
+            Attachments{imagePaths.length > 0 ? ` · ${imagePaths.length}` : ""}
+          </div>
+          <div className="spark-board-form__images">
+            {imagePaths.map((path, at) => (
+              <span key={path} className="spark-board-form__image">
+                <button
+                  type="button"
+                  className="spark-board-thumb spark-board-thumb--lg"
+                  title={path}
+                  aria-label={`Open image ${at + 1}`}
+                  onClick={() => onOpenImages(imagePaths, at)}
+                >
+                  <CardImage path={path} />
+                </button>
+                <button
+                  type="button"
+                  className="spark-board-form__remove"
+                  aria-label="Remove image"
+                  title="Remove image"
+                  onClick={() => setImagePaths((current) => current.filter((item) => item !== path))}
+                >
+                  <CloseIcon size={9} />
+                </button>
+              </span>
+            ))}
+            <div className={pasting ? "spark-board-form__drop spark-board-form__drop--busy" : "spark-board-form__drop"}>
+              <UploadIcon />
+              {pasting ? "Saving image…" : "Drop or paste images"}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="spark-board-panel__foot">
         <button
           type="button"
-          className="spark-board-composer__cancel"
-          aria-label="Close the card composer"
-          onClick={() => {
-            reset();
-            setOpen(false);
-          }}
+          className="spark-board__new"
+          disabled={!canSave}
+          onClick={() => submit()}
+        >
+          {mode === "compose" ? "Add card" : "Save"}
+          <kbd className="spark-board__kbd spark-board__kbd--on-accent">⌘⏎</kbd>
+        </button>
+        {mode === "compose" && status === "idea" && (
+          <button
+            type="button"
+            className="spark-btn spark-board-form__queue"
+            disabled={!canSave}
+            title="Add the card straight to Queued so Cora picks it up"
+            onClick={() => submit("queued")}
+          >
+            Add and queue for Cora
+          </button>
+        )}
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          className="spark-btn spark-board-form__cancel"
+          onClick={mode === "compose" ? onClose : onCancelEdit}
         >
           Cancel
         </button>
-        <span className="spark-board-composer__hint">
-          {pasting ? "Adding image…" : "⏎ adds · esc closes"}
-        </span>
       </div>
     </div>
+  );
+}
+
+function CardDetail({
+  card,
+  run,
+  attempt,
+  question,
+  workerKnown,
+  onClose,
+  onEdit,
+  onDelete,
+  onAdvance,
+  onOpenImages,
+  onOpenWorkerTerminal,
+  onOpenCardRun,
+  onAnswer,
+}: {
+  card: BoardCard;
+  run: RunState | null;
+  attempt: WorkerAttempt | null;
+  question: string | null;
+  workerKnown: boolean;
+  onClose: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onAdvance: (status: BoardCardStatus) => void;
+  onOpenImages: (paths: string[], index: number) => void;
+  onOpenWorkerTerminal: (workerTaskId: string) => void;
+  onOpenCardRun: (runId: string) => void;
+  onAnswer?: () => void;
+}) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const column = columnFor(card.status);
+  const tint = STATUS_TINT[card.status];
+  const quick = quickActionFor(card.status);
+  const images = card.imagePaths ?? [];
+  const task = card.workerTaskId
+    ? run?.workerTasks.find((item) => item.id === card.workerTaskId) ?? null
+    : null;
+  const elapsed = card.status === "running" ? elapsedSince(attempt?.startedAt) : null;
+  const statusLabel = card.status === "failed" ? "Failed" : column.label;
+
+  return (
+    <div className="spark-board-detail">
+      <div className="spark-board-panel__head">
+        <span className="spark-board__chip" style={{ "--chip-tint": tint } as React.CSSProperties}>
+          <span aria-hidden className={card.status === "running" ? "spark-board__dot spark-board-pulse" : "spark-board__dot"} />
+          {statusLabel}
+        </span>
+        <span className="spark-board-card__mono" style={{ color: "var(--muted)" }}>{card.id}</span>
+        <span style={{ flex: 1 }} />
+        <button type="button" className="spark-icon-btn" aria-label="Edit card" title="Edit (E)" onClick={onEdit}>
+          <PencilIcon />
+        </button>
+        <button
+          type="button"
+          className={confirmingDelete ? "spark-board-qa spark-board-qa--filled" : "spark-icon-btn"}
+          style={confirmingDelete ? ({ "--qa-tint": "var(--danger)" } as React.CSSProperties) : undefined}
+          aria-label={confirmingDelete ? "Confirm delete" : "Delete card"}
+          title={confirmingDelete ? "Click again to delete. Escape cancels." : "Delete this card"}
+          onClick={() => {
+            if (!confirmingDelete) {
+              setConfirmingDelete(true);
+              window.setTimeout(() => setConfirmingDelete(false), 4000);
+              return;
+            }
+            onDelete();
+          }}
+        >
+          {confirmingDelete ? "Delete?" : <TrashIcon />}
+        </button>
+        <button type="button" className="spark-icon-btn" aria-label="Close" onClick={onClose}>
+          <CloseIcon size={13} />
+        </button>
+      </div>
+
+      <div className="spark-board-panel__body">
+        <div className="spark-board-detail__title">{card.title}</div>
+
+        {question && (
+          <div className="spark-board-card__question spark-board-detail__question">
+            <QuestionIcon />
+            <span>{question}</span>
+          </div>
+        )}
+        {card.status === "failed" && card.error && (
+          <div className="spark-board-card__failure">
+            <WarnIcon />
+            <span>{card.error}</span>
+          </div>
+        )}
+
+        <div className="spark-board-detail__rows">
+          {(attempt || task) && (
+            <div className="spark-board-detail__row">
+              <span>Worker</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="spark-board-worker" style={{ "--worker-tint": tint } as React.CSSProperties}>
+                  <span aria-hidden className={card.status === "running" ? "spark-board__dot spark-board-pulse" : "spark-board__dot"} />
+                  {shortModel(attempt?.model)}
+                </span>
+                {elapsed && <span className="spark-board-card__mono">running {elapsed}</span>}
+                {task && !elapsed && <span className="spark-board-card__mono">{task.status.replace(/_/g, " ")}</span>}
+              </span>
+            </div>
+          )}
+          {task && task.title !== card.title && (
+            <div className="spark-board-detail__row">
+              <span>Task</span>
+              <span>{task.title}</span>
+            </div>
+          )}
+          <div className="spark-board-detail__row">
+            <span>Created</span>
+            <span>
+              by {card.createdBy === "agent" ? "Cora" : "you"} ·{" "}
+              <span title={new Date(card.createdAt).toLocaleString()}>{agoText(card.createdAt)}</span>
+            </span>
+          </div>
+          <div className="spark-board-detail__row">
+            <span>Updated</span>
+            <span title={new Date(card.updatedAt).toLocaleString()}>{agoText(card.updatedAt)}</span>
+          </div>
+        </div>
+
+        <div className="spark-board-detail__actions">
+          {card.status === "blocked" && onAnswer && (
+            <button
+              type="button"
+              className="spark-board-qa spark-board-qa--filled"
+              style={{ "--qa-tint": "var(--warn)", height: 28 } as React.CSSProperties}
+              onClick={onAnswer}
+            >
+              Answer in chat
+            </button>
+          )}
+          {quick && (
+            <button
+              type="button"
+              className="spark-board-qa"
+              style={{ "--qa-tint": STATUS_TINT[quick.to], height: 28 } as React.CSSProperties}
+              title={quick.title}
+              onClick={() => onAdvance(quick.to)}
+            >
+              {quick.to === "done" && <CheckIcon size={12} />}
+              {quick.label}
+            </button>
+          )}
+          {card.workerTaskId && (
+            <button
+              type="button"
+              className="spark-board-qa spark-board-qa--plain"
+              style={{ height: 28 }}
+              disabled={!workerKnown}
+              title={workerKnown ? "Open the terminal of the worker on this card" : "This card's worker is no longer available"}
+              onClick={() => onOpenWorkerTerminal(card.workerTaskId as string)}
+            >
+              <TerminalIcon />
+              Open terminal
+            </button>
+          )}
+          {!card.workerTaskId && card.runId && (
+            <button
+              type="button"
+              className="spark-board-qa spark-board-qa--plain"
+              style={{ height: 28 }}
+              onClick={() => onOpenCardRun(card.runId as string)}
+            >
+              Open chat
+            </button>
+          )}
+        </div>
+
+        <div className="spark-board-form__field">
+          <div className="spark-board-form__label">Brief</div>
+          {card.description ? (
+            <div className="spark-board-detail__prose">{card.description}</div>
+          ) : (
+            <div className="spark-board-detail__prose" style={{ color: "var(--muted)" }}>
+              No brief. Press E to add one.
+            </div>
+          )}
+        </div>
+
+        {images.length > 0 && (
+          <div className="spark-board-form__field">
+            <div className="spark-board-form__label">Attachments · {images.length}</div>
+            <div className="spark-board-form__images">
+              {images.map((path, at) => (
+                <button
+                  key={path}
+                  type="button"
+                  className="spark-board-thumb spark-board-thumb--lg"
+                  title={path}
+                  aria-label={`Open image ${at + 1} of ${images.length}`}
+                  onClick={() => onOpenImages(images, at)}
+                >
+                  <CardImage path={path} />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="spark-board-panel__foot spark-board-panel__foot--hints">
+        <span><kbd className="spark-board__kbd">E</kbd> edit</span>
+        <span><kbd className="spark-board__kbd">Esc</kbd> back to board</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Lightbox ────────────────────────────────────────────────────────────────
+
+function Lightbox({
+  paths,
+  index,
+  onIndexChange,
+  onClose,
+}: {
+  paths: string[];
+  index: number;
+  onIndexChange: (index: number) => void;
+  onClose: () => void;
+}) {
+  const path = paths[index] ?? paths[0];
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // Take focus on open; hand it back to whatever opened us on close.
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    rootRef.current?.focus({ preventScroll: true });
+    return () => {
+      previous?.focus({ preventScroll: true });
+    };
+  }, []);
+  const prev = () => onIndexChange((index - 1 + paths.length) % paths.length);
+  const next = () => onIndexChange((index + 1) % paths.length);
+  // Own Escape and the arrows while open, ahead of the panel and the board
+  // (capture phase + stopImmediatePropagation), whatever has focus.
+  const handlers = useRef({ prev, next, onClose });
+  handlers.current = { prev, next, onClose };
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" && event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.key === "Escape") handlers.current.onClose();
+      else if (event.key === "ArrowLeft") handlers.current.prev();
+      else handlers.current.next();
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, []);
+  const name = path.split(/[\\/]/).pop() ?? path;
+
+  return (
+    <div
+      ref={rootRef}
+      className="spark-board-lightbox"
+      role="dialog"
+      aria-label={`Image ${index + 1} of ${paths.length}: ${name}`}
+      tabIndex={-1}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <div className="spark-board-lightbox__bar">
+        <span className="spark-board-card__mono" style={{ color: "var(--ink-dim)" }}>{name}</span>
+        {paths.length > 1 && (
+          <span className="spark-board-card__mono">{index + 1} / {paths.length}</span>
+        )}
+        <span style={{ flex: 1 }} />
+        <button type="button" className="spark-icon-btn" aria-label="Close" onClick={onClose}>
+          <CloseIcon size={13} />
+        </button>
+      </div>
+      <div className="spark-board-lightbox__stage">
+        {paths.length > 1 && (
+          <button type="button" className="spark-board-lightbox__nav" aria-label="Previous image" onClick={prev}>
+            <ChevronIcon direction="left" size={18} />
+          </button>
+        )}
+        <CardImage path={path} cover={false} />
+        {paths.length > 1 && (
+          <button type="button" className="spark-board-lightbox__nav" aria-label="Next image" onClick={next}>
+            <ChevronIcon direction="right" size={18} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Icons (stroke, 16-grid) ─────────────────────────────────────────────────
+
+function PlusIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+      <path d="M6 2.2v7.6M2.2 6h7.6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+      <circle cx="7" cy="7" r="4.2" />
+      <path d="M10.2 10.2 13.5 13.5" />
+    </svg>
+  );
+}
+
+function CloseIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
+      <path d="M4 4l8 8M12 4l-8 8" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ direction, size = 14 }: { direction: "left" | "right" | "down"; size?: number }) {
+  const d = direction === "left" ? "m10 4-4 4 4 4" : direction === "right" ? "m6 4 4 4-4 4" : "m4 6 4 4 4-4";
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={d} />
+    </svg>
+  );
+}
+
+function CheckIcon({ size = 12, tint }: { size?: number; tint?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={tint ?? "currentColor"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flex: "0 0 auto" }}>
+      <path d="m3 8.5 3 3 7-7" />
+    </svg>
+  );
+}
+
+function TerminalIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 4.5 7 8l-4 3.5M8.5 12h4.5" />
+    </svg>
+  );
+}
+
+function QuestionIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--warn)" strokeWidth="1.5" strokeLinecap="round" aria-hidden style={{ flex: "0 0 auto", marginTop: 2 }}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M6.2 6.3a1.9 1.9 0 1 1 2.6 1.8c-.6.3-.8.6-.8 1.2M8 11.4h.01" />
+    </svg>
+  );
+}
+
+function WarnIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden style={{ flex: "0 0 auto", marginTop: 2 }}>
+      <path d="M8 2.5 14 13H2z" />
+      <path d="M8 6.5v3M8 11.6h.01" />
+    </svg>
+  );
+}
+
+function ImageIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden>
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <path d="m2.5 11 3.5-3.5 2.5 2.5 2-2 3 3" />
+      <circle cx="10.5" cy="6" r="1" />
+    </svg>
+  );
+}
+
+function UploadIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M8 11V3M4.5 6.5 8 3l3.5 3.5M3 13h10" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M2 12l1-3 7-7 2 2-7 7-3 1z" />
+      <path d="M9 3l2 2" />
+    </svg>
+  );
+}
+
+// Same trash glyph as WorkerSessionPicker's delete affordance, so "delete a
+// row/card" reads identically across the desktop surfaces.
+function TrashIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 4.2h8" />
+      <path d="M5.4 4.2V3.2a1 1 0 0 1 1-1h1.2a1 1 0 0 1 1 1v1" />
+      <path d="M4 4.2 4.5 11a1 1 0 0 0 1 .9h3a1 1 0 0 0 1-.9L10 4.2" />
+    </svg>
   );
 }
