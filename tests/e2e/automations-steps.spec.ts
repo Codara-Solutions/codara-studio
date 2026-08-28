@@ -200,6 +200,41 @@ test("a failing step fails the pass unless it is soft-fail", async () => {
       .toBe(outFile);
     const { readFile } = await import("node:fs/promises");
     await expect.poll(() => readFile(outFile, "utf8")).toBe("partial\n[exit 7]\n");
+
+    // A Notify step must surface as a toast EVEN while the user is sitting on
+    // the automations page (the generic "already viewing the target" rule used
+    // to swallow it). Main only routes to the in-app toast when the window is
+    // focused — which a Playwright Electron window is not — so deliver the
+    // event straight to the renderer, exactly as deliver.ts does.
+    await app.evaluate(({ BrowserWindow }, hardId) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      win.webContents.send("notification:in-app", {
+        id: "notify-step-e2e",
+        kind: "automation.step",
+        sourceKey: "automation-step:e2e",
+        tone: "success",
+        title: "Ping from a step",
+        body: "hello from the notify step",
+        soundKind: "done",
+        target: { type: "automation", jobId: hardId, workspaceId: "ws-automations-e2e" },
+        createdAt: new Date().toISOString(),
+      });
+      // Control: the loop-level "finished" alert for a loom you are looking at
+      // is still auto-acknowledged (no toast).
+      win.webContents.send("notification:in-app", {
+        id: "notify-finished-e2e",
+        kind: "automation.finished",
+        sourceKey: "automation:e2e",
+        tone: "success",
+        title: "Automation — finished",
+        body: "control alert that should stay hidden",
+        soundKind: "done",
+        target: { type: "automation", jobId: hardId, workspaceId: "ws-automations-e2e" },
+        createdAt: new Date().toISOString(),
+      });
+    }, hardId);
+    await expect(page.getByRole("status").filter({ hasText: "hello from the notify step" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("control alert that should stay hidden")).toHaveCount(0);
   } finally {
     await app?.close();
   }

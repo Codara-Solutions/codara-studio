@@ -1,4 +1,4 @@
-import type { NavigationTarget } from "@shared/types";
+import type { NavigationTarget, NotifyKind } from "@shared/types";
 
 export interface ActiveNotificationView {
   workspaceId: string | null;
@@ -21,7 +21,15 @@ function workspaceMatches(
 export function isNotificationTargetViewed(
   target: NavigationTarget,
   view: ActiveNotificationView,
+  kind?: NotifyKind,
 ): boolean {
+  // A loom "Notify" step is the user's OWN message to themselves — being seen
+  // is its whole purpose. It targets its automation, and the automations page
+  // is exactly where the user sits after pressing Run now, so the generic
+  // "already looking at it" rule would swallow every one of them. Never
+  // auto-acknowledge; the click or dismiss is the read.
+  if (kind === "automation.step") return false;
+
   if (target.type === "run") {
     return (
       target.runId === view.visibleRunId &&

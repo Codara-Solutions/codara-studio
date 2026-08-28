@@ -98,7 +98,7 @@ export default function ToastHost({
 
   useEffect(() => {
     const off = window.spark.notifications.onInAppNotification((payload) => {
-      if (isNotificationTargetViewed(payload.target, activeViewRef.current)) {
+      if (isNotificationTargetViewed(payload.target, activeViewRef.current, payload.kind)) {
         acknowledge(payload.id);
         return;
       }
@@ -174,7 +174,7 @@ export default function ToastHost({
 
   useEffect(() => {
     const matchingVisible = toastsRef.current.filter(
-      (toast) => !isLocalToast(toast) && isNotificationTargetViewed(toast.target, activeView),
+      (toast) => !isLocalToast(toast) && isNotificationTargetViewed(toast.target, activeView, toast.kind),
     );
     if (matchingVisible.length > 0) {
       const matchingIds = new Set(matchingVisible.map((toast) => toast.id));
@@ -186,7 +186,7 @@ export default function ToastHost({
       .list()
       .then((entries) => {
         for (const entry of entries) {
-          if (isNotificationTargetViewed(entry.target, activeView)) {
+          if (isNotificationTargetViewed(entry.target, activeView, entry.kind)) {
             acknowledge(entry.id);
           }
         }
