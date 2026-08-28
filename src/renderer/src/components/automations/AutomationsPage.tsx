@@ -30,6 +30,7 @@ import {
 import { consumePendingAutomationFocus } from "./focus-request";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
 import { graphForJob } from "./flow/model";
+import { STEP_TONE, stepActionLine, stepTitle } from "./flow/step-meta";
 import { useAutomationWorkers } from "./useAutomationWorkers";
 import WorkersView from "./WorkersView";
 import RunPeek from "./RunPeek";
@@ -145,15 +146,28 @@ export default function AutomationsPage({
     }
   }, [workspaceId]);
 
+  // Looms v3: the loom's most recent SETTLED run, for when nothing is live —
+  // a steps-only pass is born terminal (never observed live), so the board
+  // and the pass card would otherwise have no run to paint outputs from.
+  const [settledRun, setSettledRun] = useState<RunState | null>(null);
   const refreshDetail = useCallback(async () => {
     const id = selectedIdRef.current;
     if (!id) {
       setLiveRun(null);
+      setSettledRun(null);
       return;
     }
     try {
       const detail = await window.spark.scheduler.getDetail?.(id);
       setLiveRun(detail?.liveRun ?? null);
+      const job = detail?.job;
+      const lastId = job?.lastRunId ?? job?.history[job.history.length - 1]?.runId;
+      if (!detail?.liveRun && lastId) {
+        const run = await window.spark.orchestration.getRun(lastId);
+        if (selectedIdRef.current === id) setSettledRun(run ?? null);
+      } else {
+        setSettledRun(null);
+      }
     } catch {
       /* best-effort */
     }
@@ -721,7 +735,7 @@ export default function AutomationsPage({
               <LiveBoard
                 key={selected.id}
                 job={selected}
-                liveRun={liveRun}
+                liveRun={liveRun ?? settledRun}
                 workers={boardWorkers}
                 initialFocusWorkerId={boardFocusWorkerId}
                 shown={active && boardShowing}
@@ -1849,17 +1863,27 @@ function predicateSummary(p: GuardPredicate): string {
 // model PER worker, so a single flat "Prompt" row would lie about what runs.
 function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
   const tone =
-    node.kind === "worker" ? WORKER_TONE : node.kind === "guard" ? "var(--ok)" : "var(--info)";
+    node.kind === "worker"
+      ? WORKER_TONE
+      : node.kind === "guard"
+        ? "var(--ok)"
+        : node.kind === "step"
+          ? STEP_TONE
+          : "var(--info)";
   const title =
-    node.label || (node.kind === "worker" ? "Worker" : node.kind === "guard" ? "Guard" : "Merge");
+    node.kind === "step"
+      ? stepTitle(node)
+      : node.label || (node.kind === "worker" ? "Worker" : node.kind === "guard" ? "Guard" : "Merge");
   const meta =
     node.kind === "worker"
       ? workerSummary(node.worker)
       : node.kind === "guard"
         ? predicateSummary(node.predicate)
-        : node.joinMode === "all"
-          ? "waits for all branches"
-          : "first branch wins";
+        : node.kind === "step"
+          ? stepActionLine(node.action)
+          : node.joinMode === "all"
+            ? "waits for all branches"
+            : "first branch wins";
   return (
     <div
       style={{
@@ -1887,7 +1911,7 @@ function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
           background: `color-mix(in oklch, ${tone} 9%, var(--panel-2))`,
         }}
       >
-        <LoomIcon kind={node.kind} tone={tone} size={12} />
+        <LoomIcon kind={node.kind} stepType={node.kind === "step" ? node.action.type : undefined} tone={tone} size={12} />
       </span>
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
@@ -1907,6 +1931,14 @@ function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
             style={{ fontSize: 11, color: "var(--ink-dim)", whiteSpace: "pre-wrap", maxHeight: 132, overflow: "auto" }}
           >
             {node.prompt || <span style={{ color: "var(--muted-2)" }}>none</span>}
+          </div>
+        )}
+        {node.kind === "step" && node.action.type === "script" && (
+          <div
+            className="spark-mono"
+            style={{ fontSize: 11, color: "var(--ink-dim)", whiteSpace: "pre-wrap", maxHeight: 132, overflow: "auto" }}
+          >
+            {node.action.code}
           </div>
         )}
       </div>

@@ -97,6 +97,64 @@ export const GRAPH_FANOUT_REVIEW: LoomGraph = {
   entryNodeIds: ["a", "b"],
 };
 
+/** "Script → AI summary": a Python step gathers data, a worker reads it. The
+ *  step's stdout reaches the worker as {{node:collect}}. */
+export const GRAPH_SCRIPT_THEN_AI: LoomGraph = {
+  version: 1,
+  nodes: [
+    {
+      id: "collect",
+      kind: "step",
+      label: "Collect",
+      ui: { x: 320, y: 60 },
+      action: {
+        type: "script",
+        language: "python",
+        code:
+          "import subprocess\n" +
+          "log = subprocess.run(['git', 'log', '--since=yesterday', '--stat'], capture_output=True, text=True)\n" +
+          "print(log.stdout or 'no commits since yesterday')\n",
+      },
+    },
+    {
+      id: "w0",
+      kind: "worker",
+      label: "Summarize",
+      ui: { x: 620, y: 60 },
+      worker: DEFAULT_WORKER,
+      prompt:
+        "Here is what changed in the repo since yesterday:\n\n{{node:collect}}\n\nWrite a short, plain-language digest to NOTES.md (append a dated section). Do not change any other file.",
+    },
+  ],
+  edges: [{ id: "e-collect-w0", from: "collect", to: "w0" }],
+  entryNodeIds: ["collect"],
+};
+
+/** "Script + notify" — no AI at all: run a command on a schedule, then tell me
+ *  what it printed. */
+export const GRAPH_SCRIPT_NOTIFY: LoomGraph = {
+  version: 1,
+  nodes: [
+    {
+      id: "run",
+      kind: "step",
+      label: "Run checks",
+      ui: { x: 320, y: 60 },
+      action: { type: "command", command: "npm test 2>&1 | tail -n 20" },
+      continueOnError: true,
+    },
+    {
+      id: "tell",
+      kind: "step",
+      label: "Tell me",
+      ui: { x: 620, y: 60 },
+      action: { type: "notify", title: "{{name}} · {{date}}", message: "{{node:run}}" },
+    },
+  ],
+  edges: [{ id: "e-run-tell", from: "run", to: "tell" }],
+  entryNodeIds: ["run"],
+};
+
 export const PRESETS: LoomPreset[] = [
   {
     id: "agent",
@@ -127,6 +185,26 @@ export const PRESETS: LoomPreset[] = [
     worker: DEFAULT_WORKER,
     promptHint: "Review the latest diff.",
     graph: GRAPH_FANOUT_REVIEW,
+  },
+  {
+    id: "script-ai",
+    title: "Script → AI summary",
+    blurb: "A Python step collects data, then a worker writes it up.",
+    trigger: { kind: "cron", expr: "0 9 * * 1-5" },
+    loop: { kind: "once", stop: {} },
+    worker: DEFAULT_WORKER,
+    promptHint: "Summarize {{node:collect}}.",
+    graph: GRAPH_SCRIPT_THEN_AI,
+  },
+  {
+    id: "script-notify",
+    title: "Run a script, notify me",
+    blurb: "No AI: run a command on a schedule and get its output as a notification.",
+    trigger: { kind: "cron", expr: "0 8 * * *" },
+    loop: { kind: "once", stop: {} },
+    worker: DEFAULT_WORKER,
+    promptHint: "",
+    graph: GRAPH_SCRIPT_NOTIFY,
   },
   {
     id: "nightly",

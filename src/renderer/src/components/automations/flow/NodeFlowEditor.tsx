@@ -18,6 +18,7 @@ import type {
   ScheduledJob,
   UpdateScheduledJobInput,
 } from "@shared/types";
+import { isStepsOnly, type PaletteChoice } from "./model";
 import { loopSummary, triggerSummary } from "../presentation";
 import NodeContextPanel from "./NodeContextPanel";
 import LoopInspector from "./LoopInspector";
@@ -43,7 +44,6 @@ import {
   type FlowNode,
   type FlowNodeData,
   type LoomDraft,
-  type LoomGraphNodeKind,
 } from "./model";
 
 export interface NodeFlowEditorProps {
@@ -128,6 +128,35 @@ function Editor({
   const rf = useReactFlow();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Looms v3: the most recent pass's per-node outputs (loomPass.nodeStates),
+  // so a step's config panel can show "what it printed last time" and feed
+  // {{node:<id>}} samples into a test run. Read once per open of an existing
+  // loom; a brand-new loom has no history.
+  const [lastOutputs, setLastOutputs] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!initial) return;
+    const runId =
+      initial.state.currentRunId ??
+      initial.lastRunId ??
+      initial.history[initial.history.length - 1]?.runId;
+    if (!runId) return;
+    let cancelled = false;
+    void window.spark.orchestration
+      .getRun(runId)
+      .then((run) => {
+        if (cancelled || !run?.loomPass) return;
+        const out: Record<string, string> = {};
+        for (const [id, ns] of Object.entries(run.loomPass.nodeStates)) {
+          if (ns.output !== undefined) out[id] = ns.output;
+        }
+        setLastOutputs(out);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [initial]);
 
   const markDirty = useCallback(() => setDirty(true), []);
 
@@ -220,7 +249,7 @@ function Editor({
   );
   const openPaletteToolbar = useCallback(() => {
     const base = containerRef.current?.getBoundingClientRect();
-    setPalette({ x: (base?.width ?? 400) / 2 - 110, y: 64, from: null });
+    setPalette({ x: Math.max(8, (base?.width ?? 400) / 2 - 150), y: 52, from: null });
   }, []);
 
   // Stamp onAddFrom onto every node's data so the '+' buttons can call back.
@@ -247,9 +276,10 @@ function Editor({
   );
 
   const pickNodeKind = useCallback(
-    (kind: LoomGraphNodeKind) => {
+    (choice: PaletteChoice) => {
+      const kind = choice.kind;
       const from = palette?.from ?? null;
-      const newId = freshId(kind[0]);
+      const newId = freshId(kind === "step" ? "s" : kind[0]);
       // Position: to the right of the originating node, else viewport center.
       let pos = { x: 0, y: 0 };
       const fromNode = from ? nodes.find((n) => n.id === from.nodeId) : null;
@@ -273,7 +303,8 @@ function Editor({
         id: newId,
         type: kind,
         position: pos,
-        data: defaultNodeData(kind) as FlowNodeData & Record<string, unknown>,
+        data: defaultNodeData(kind, choice.kind === "step" ? choice.stepType : undefined) as FlowNodeData &
+          Record<string, unknown>,
         selected: true,
       };
       // Append the new node selected; clear selection from everything else so
@@ -373,7 +404,9 @@ function Editor({
     const sink = sinkWorkerNode(nodes, edges);
     const sinkData = sink && sink.data.kind === "worker" ? sink.data : null;
     const worker = sinkData ? sinkData.worker : buildWorker(draft.worker);
-    const template = sinkData ? sinkData.prompt.trim() : draft.loop.template.trim();
+    // Steps-only looms carry no prompt at all (nothing reads it); the flat
+    // template mirrors the sink worker otherwise.
+    const template = sinkData ? sinkData.prompt.trim() : isStepsOnly(nodes) ? "" : draft.loop.template.trim();
 
     const input = {
       ...(initial?.input ?? {}),
@@ -737,7 +770,7 @@ function Editor({
             <span style={{ fontSize: 20, color: "var(--accent-text)" }}>+</span>
             <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-dim)" }}>Add first step</span>
             <span style={{ fontSize: 10.5, color: "var(--muted-2)", textAlign: "center" }}>
-              Wire a Worker, Guard, or Merge after the trigger.
+              An AI worker, a shell command, a script, an HTTP call…
             </span>
           </button>
         )}
@@ -782,6 +815,8 @@ function Editor({
                   }}
                   cwd={cwd}
                   chainableJobs={jobs.filter((j) => j.id !== initial?.id)}
+                  lastOutputs={lastOutputs}
+                  automationName={draft.name}
                 />
               )
             )}
@@ -824,6 +859,8 @@ export { graphForJob };
 
 function presetIcon(id: string): string {
   if (id === "until-tests") return "✓";
+  if (id === "script-ai") return "⌘";
+  if (id === "script-notify") return "▶";
   if (id === "fanout-review") return "⑂";
   if (id === "nightly") return "◷";
   if (id === "watch") return "◉";

@@ -10,6 +10,8 @@ import type {
   LoomGuardNode,
   LoomMergeNode,
   LoomNodeDef,
+  LoomStepAction,
+  LoomStepNode,
   LoomWorkerConfig,
   LoomWorkerNode,
   ScheduledJob,
@@ -17,6 +19,7 @@ import type {
 } from "@shared/types";
 import type { Edge, Node } from "@xyflow/react";
 import { DEFAULT_WORKER_EFFORT, DEFAULT_WORKER_MODEL } from "../worker-models";
+import { defaultStepAction, stepTitle, validateStepAction, type StepType } from "./step-meta";
 
 // The node-flow editor's data model. The TRIGGER + LOOP live OFF the graph
 // (job.trigger / job.loop); the graph holds the worker/guard/merge pipeline.
@@ -320,12 +323,25 @@ export type FlowNodeData =
       kind: "merge";
       label: string;
       joinMode: "all" | "any";
+    }
+  | {
+      kind: "step";
+      label: string;
+      action: LoomStepAction;
+      timeoutSec?: number;
+      continueOnError?: boolean;
     };
 
 export type FlowNode = Node<FlowNodeData & Record<string, unknown>>;
 export type FlowEdge = Edge<{ branch?: "pass" | "fail"; backEdge?: boolean; visitCap?: number } & Record<string, unknown>>;
 
-export type LoomGraphNodeKind = "worker" | "guard" | "merge";
+export type LoomGraphNodeKind = "worker" | "guard" | "merge" | "step";
+
+/** What the add-node palette hands back: a node kind, plus the action type
+ *  for a step (each step action is its own palette entry). */
+export type PaletteChoice =
+  | { kind: "worker" | "guard" | "merge" }
+  | { kind: "step"; stepType: StepType };
 
 let idSeq = 0;
 /** A short, stable-enough id for a freshly added node/edge. */
@@ -334,8 +350,10 @@ export function freshId(prefix: string): string {
   return `${prefix}${Date.now().toString(36).slice(-4)}${(idSeq % 1000).toString(36)}`;
 }
 
-export function defaultNodeData(kind: LoomGraphNodeKind): FlowNodeData {
+export function defaultNodeData(kind: LoomGraphNodeKind, stepType: StepType = "command"): FlowNodeData {
   switch (kind) {
+    case "step":
+      return { kind: "step", label: "", action: defaultStepAction(stepType) };
     case "worker":
       return {
         kind: "worker",
@@ -442,6 +460,14 @@ function nodeDataFromDef(n: LoomNodeDef): FlowNodeData & Record<string, unknown>
       return { kind: "guard", label: n.label ?? "Guard", predicate: n.predicate };
     case "merge":
       return { kind: "merge", label: n.label ?? "Merge", joinMode: n.joinMode };
+    case "step":
+      return {
+        kind: "step",
+        label: n.label ?? "",
+        action: n.action,
+        timeoutSec: n.timeoutSec,
+        continueOnError: n.continueOnError,
+      };
   }
 }
 
@@ -562,6 +588,12 @@ export function graphFromFlow(nodes: FlowNode[], edges: FlowEdge[]): LoomGraph {
       const def: LoomMergeNode = { id: n.id, kind: "merge", joinMode: d.joinMode, ui };
       if (d.label && d.label !== "Merge") def.label = d.label;
       graphNodes.push(def);
+    } else if (d.kind === "step") {
+      const def: LoomStepNode = { id: n.id, kind: "step", action: d.action, ui };
+      if (d.label && d.label.trim()) def.label = d.label.trim();
+      if (d.timeoutSec !== undefined && Number.isFinite(d.timeoutSec) && d.timeoutSec > 0) def.timeoutSec = d.timeoutSec;
+      if (d.continueOnError) def.continueOnError = true;
+      graphNodes.push(def);
     }
   }
 
@@ -651,14 +683,25 @@ export function validateGraph(
   edges: FlowEdge[],
 ): GraphProblem | null {
   const workerNodes = nodes.filter((n) => n.data.kind === "worker");
-  if (workerNodes.length === 0) {
-    return { message: "Add at least one Worker node." };
+  const stepNodes = nodes.filter((n) => n.data.kind === "step");
+  // A loom needs something that DOES work: an AI worker, or (Looms v3) a
+  // steps-only pipeline — "run this script nightly and tell me" is a real loom.
+  if (workerNodes.length === 0 && stepNodes.length === 0) {
+    return { message: "Add at least one node: a Worker, or a step like Shell command." };
   }
 
   // Every worker needs a non-empty prompt.
   for (const n of workerNodes) {
     if (n.data.kind === "worker" && !n.data.prompt.trim()) {
       return { message: `Worker "${n.data.label}" needs a prompt.`, focusNodeId: n.id };
+    }
+  }
+  // Every step needs a runnable action.
+  for (const n of stepNodes) {
+    if (n.data.kind !== "step") continue;
+    const problem = validateStepAction(n.data.action);
+    if (problem) {
+      return { message: `${stepTitle(n.data)} ${problem}`, focusNodeId: n.id };
     }
   }
 
@@ -727,6 +770,11 @@ export function validateGraph(
 function labelForNode(nodes: FlowNode[], id: string): string {
   const n = nodes.find((x) => x.id === id);
   return (n?.data.label as string) ?? id;
+}
+
+/** True when the graph runs no AI at all (steps/guards/merges only). */
+export function isStepsOnly(nodes: FlowNode[]): boolean {
+  return nodes.some((n) => n.data.kind === "step") && !nodes.some((n) => n.data.kind === "worker");
 }
 
 /** The terminal worker node (a worker with no outgoing forward edge to another

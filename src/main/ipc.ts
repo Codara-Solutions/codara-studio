@@ -330,6 +330,8 @@ import type {
   CreateEntryInput,
   AutomationDetail,
   AutomationWorkerInfo,
+  LoomStepResult,
+  TestStepInput,
   CreateScheduledJobInput,
   CreateStepInput,
   CreateRunInput,
@@ -2664,6 +2666,21 @@ export function registerIpc(): void {
   handle("scheduler:getDetail", async (_e, id: string): Promise<AutomationDetail | null> => {
     const { getDetail } = await getScheduler();
     return getDetail(id);
+  });
+
+  // Looms v3: run ONE step node standalone (the editor's "Run step" console).
+  // Same executor the pass engine uses, so the console shows exactly what a
+  // pass would record. Never rejects: failures come back as ok:false results.
+  handle("automations:testStep", async (_e, input: TestStepInput): Promise<LoomStepResult> => {
+    const { executeStep, sampleStepVars } = await import("./orchestration/loom-steps");
+    const nodeOutputs = input.nodeOutputs ?? {};
+    return executeStep(input.node, {
+      cwd: input.cwd,
+      vars: sampleStepVars(input.vars?.name ?? "automation", input.vars),
+      nodeOutputs,
+      incoming: Object.values(nodeOutputs),
+      env: { SPARK_NODE_ID: input.node.id, SPARK_STEP_TEST: "1" },
+    });
   });
 
   // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.

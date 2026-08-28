@@ -12,6 +12,7 @@ import type { Edge, EdgeProps, Node, NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type {
   AutomationWorkerInfo,
+  LoomStepAction,
   RunState,
   ScheduledJob,
 } from "@shared/types";
@@ -27,6 +28,7 @@ import {
   jobWorkerSummary,
 } from "./presentation";
 import { TRIGGER_ID, flowFromGraph, graphForJob } from "./flow/model";
+import { STEP_META, STEP_TONE, stepActionLine, stepTitle } from "./flow/step-meta";
 import { LoomIcon, Medallion, TopRule, WORKER_TONE } from "./flow/FlowNodes";
 import { workerModelLabel } from "./worker-models";
 import { describeWorkerLogFailure } from "./worker-log-tail";
@@ -65,7 +67,10 @@ type LiveNodeStatus =
   | "blocked";
 
 interface LiveNodeDatum extends Record<string, unknown> {
-  kind: "trigger" | "worker" | "guard" | "merge";
+  kind: "trigger" | "worker" | "guard" | "merge" | "step";
+  stepType?: LoomStepAction["type"];
+  // Step-only: the node's recorded output for this pass (what it printed).
+  output?: string;
   glyph: string;
   eyebrow: string;
   title: string;
@@ -257,6 +262,17 @@ export default function LiveBoard({
           sub: d.predicate.type,
           status: statuses.get(n.id) ?? "pending",
         };
+      } else if (d.kind === "step") {
+        datum = {
+          kind: "step",
+          stepType: d.action.type,
+          glyph: "▶",
+          eyebrow: STEP_META[d.action.type].eyebrow,
+          title: stepTitle(d),
+          sub: stepActionLine(d.action),
+          status: statuses.get(n.id) ?? "pending",
+          output: run?.loomPass?.nodeStates[n.id]?.output,
+        };
       } else {
         datum = {
           kind: "merge",
@@ -315,7 +331,14 @@ export default function LiveBoard({
   // Clicking a running node opens its worker's mirror terminal in the sheet.
   const workersRef = useRef(workers);
   workersRef.current = workers;
+  // Looms v3: clicking a settled step shows its full recorded output.
+  const [stepPeek, setStepPeek] = useState<{ id: string; title: string; output: string; status: LiveNodeStatus } | null>(null);
   const onNodeClick = useCallback((_e: React.MouseEvent, node: Node) => {
+    const datum = node.data as LiveNodeDatum;
+    if (datum.kind === "step") {
+      setStepPeek({ id: node.id, title: datum.title, output: datum.output ?? "", status: datum.status });
+      return;
+    }
     const ws = workersRef.current;
     const w =
       ws.find((x) => x.nodeId === node.id) ??
@@ -516,6 +539,47 @@ export default function LiveBoard({
             "auto"/"visible" that could punch through the hidden board overlay
             (values inherit); only the TerminalPane manages its own pair, and
             its `visible` prop is false whenever the sheet is off screen. */}
+        {stepPeek && (
+          <div
+            className="spark-fade-in"
+            data-testid="live-step-peek"
+            style={{
+              position: "absolute",
+              left: 12,
+              bottom: 12,
+              width: 420,
+              maxWidth: "calc(100% - 24px)",
+              maxHeight: "60%",
+              display: "flex",
+              flexDirection: "column",
+              zIndex: 6,
+              borderRadius: "var(--radius-popover)",
+              border: "1px solid var(--rule)",
+              background: "var(--panel)",
+              boxShadow: "var(--shadow-2)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 8px 12px", borderBottom: "1px solid var(--rule-soft)" }}>
+              <LoomIcon kind="step" tone={STEP_TONE} size={13} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {stepPeek.title}
+              </span>
+              <span className="spark-mono" style={{ fontSize: 10, color: stepPeek.status === "failed" ? "var(--danger)" : "var(--muted)" }}>
+                {stepPeek.status}
+              </span>
+              <button type="button" className="spark-btn" style={{ height: 24, width: 24, padding: 0 }} title="Close" onClick={() => setStepPeek(null)}>
+                ×
+              </button>
+            </div>
+            <pre
+              className="spark-mono"
+              style={{ margin: 0, padding: "10px 12px", overflow: "auto", fontSize: 11, lineHeight: 1.5, color: "var(--ink-dim)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+            >
+              {stepPeek.output.trim() ? stepPeek.output : stepPeek.status === "pending" ? "Not run yet." : "(no output)"}
+            </pre>
+          </div>
+        )}
         <div
           aria-hidden={!sheetOpen}
           style={{
@@ -1038,9 +1102,62 @@ function LiveNode({ data }: NodeProps): React.ReactElement {
       return <GuardCard d={d} />;
     case "merge":
       return <MergeCard d={d} />;
+    case "step":
+      return <StepCard d={d} />;
     default:
       return <WorkerCard d={d} />;
   }
+}
+
+// Step — a deterministic action; the pass records what it printed, and the
+// card previews the first lines so the board reads like a log at a glance.
+// Clicking it opens the full output (onNodeClick → stepPeek).
+function StepCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
+  const look = lookFor(d.status);
+  const tone = STEP_TONE;
+  const preview = (d.output ?? "").split(/\r?\n/).filter((l) => l.trim()).slice(0, 2).join("\n");
+  return (
+    <div style={{ ...cardBase(look), width: 232 }} data-testid="live-step-card">
+      <TopRule tone={tone} />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />
+      <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 12px 8px 13px" }}>
+        <Medallion icon={<LoomIcon kind="step" stepType={d.stepType} tone={tone} size={16} />} tone={tone} size={32} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span className="spark-eyebrow" style={{ fontSize: 8.5 }}>
+              {d.eyebrow}
+            </span>
+            <span style={{ flex: 1 }} />
+            {look.badge && <NodeBadge badge={look.badge} />}
+          </div>
+          <CardTitle text={d.title} />
+          <CardMeta text={d.sub} />
+        </div>
+      </div>
+      {preview && (
+        <pre
+          className="spark-mono"
+          title="Click to see the full output"
+          style={{
+            margin: "0 12px 10px 13px",
+            padding: "6px 8px",
+            borderRadius: 6,
+            background: "color-mix(in oklab, var(--bg) 70%, var(--panel))",
+            fontSize: 10,
+            lineHeight: 1.45,
+            color: "var(--ink-dim)",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxHeight: 44,
+            overflow: "hidden",
+          }}
+        >
+          {preview}
+        </pre>
+      )}
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} isConnectable={false} />
+    </div>
+  );
 }
 
 // ── node cards — the editor's silhouette language + live status jewelry ─────

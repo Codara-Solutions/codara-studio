@@ -122,7 +122,14 @@ export function workerSummary(worker: Partial<LoomWorkerConfig> | undefined): st
 // their actual worker nodes. Single-worker graphs keep the full
 // model · effort line; wider graphs count per model.
 export function jobWorkerSummary(job: ScheduledJob): string {
-  const workers = (job.graph?.nodes ?? []).filter((n): n is LoomWorkerNode => n.kind === "worker");
+  const nodes = job.graph?.nodes ?? [];
+  const workers = nodes.filter((n): n is LoomWorkerNode => n.kind === "worker");
+  // Looms v3: a steps-only loom runs no model at all — say so instead of
+  // echoing the (unused) flat worker default.
+  if (workers.length === 0 && nodes.some((n) => n.kind === "step")) {
+    const steps = nodes.filter((n) => n.kind === "step").length;
+    return `${steps} step${steps === 1 ? "" : "s"} · no AI`;
+  }
   if (workers.length === 0) return workerSummary(job.worker);
   if (workers.length === 1) return workerSummary(workers[0].worker);
   const counts = new Map<string, number>();

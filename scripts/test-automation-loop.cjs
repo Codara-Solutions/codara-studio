@@ -95,7 +95,9 @@ const harnessPlugin = {
             // Looms v2: the loop driver launches DIRECT worker runs. Each one
             // HOLDS until the test calls completeRun(). The launch record
             // captures the resolved engine/model/effort for assertions.
-            "export async function startDirectWorkerRun(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: 'running', executionMode: 'direct', humanMessages: [], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0 }; L.runs.set(id, run); L.launches.push({ kind: 'start', id, note: input.prompt, model: input.model, effort: input.effort, automationId: input.automationId, title: input.title, nodes: input.nodes, freshPass: input.freshPass }); L.pending.push(id); return run; }\n" +
+            "export async function startDirectWorkerRun(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: 'running', executionMode: 'direct', humanMessages: [], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0 }; L.runs.set(id, run); L.launches.push({ kind: 'start', id, note: input.prompt, model: input.model, effort: input.effort, automationId: input.automationId, title: input.title, nodes: input.nodes, freshPass: input.freshPass, preResolved: input.preResolved }); L.pending.push(id); return run; }\n" +
+            // Looms v3: a steps-only pass records a run born terminal (no worker).
+            "export async function recordStepOnlyPass(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: input.status, executionMode: 'direct', automationId: input.automationId, humanMessages: [{ id: 'n1', author: 'spark', kind: 'note', message: input.summary, createdAt: new Date().toISOString() }], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0, loomPass: { graphVersion: 1, nodeStates: {}, layerCursor: 0, pendingNodeIds: [] } }; L.runs.set(id, run); L.launches.push({ kind: 'step-only', id, status: input.status, summary: input.summary, preResolved: input.preResolved, title: input.title }); return run; }\n" +
             // Same-run chain: a fresh task on the existing run (back to non-terminal).
             // Append a fresh LIVE attempt for the chained node (reusing the node's
             // existing task when present so newestAttemptForNode picks it up) and flip
@@ -1306,6 +1308,91 @@ async function main() {
       resume.kind === "chain" && resume.note.includes("Which path?") && resume.freshPass === undefined,
     );
     await sched.stopJob(ans.id);
+  }
+
+  // ── 29) LOOMS v3: a STEP at the entry frontier settles BEFORE the worker ─────
+  //        wave; the worker launches with the step's output in its prompt and ─
+  //        the step arrives as a pre-resolved node for the loomPass seed. ──────
+  {
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const graph = {
+      version: 1,
+      nodes: [
+        { id: "S", kind: "step", label: "Collect", action: { type: "command", command: "echo FROM STEP {{iteration}}" } },
+        { id: "W", kind: "worker", label: "Use it", worker: { model: "claude-opus-5", effort: "medium" }, prompt: "Summarize: {{node:S}}" },
+      ],
+      edges: [{ id: "e-s-w", from: "S", to: "W" }],
+      entryNodeIds: ["S"],
+    };
+    const job = await sched.createJob({
+      name: "step-then-worker",
+      trigger: { kind: "manual" },
+      loop: { kind: "once", stop: {}, isolate: true },
+      input: baseInput,
+      prompt: { template: "fallback prompt" },
+      graph,
+    });
+    await sched.runJobNow(job.id);
+    const launch = L.launches[L.launches.length - 1];
+    ok("step→worker loom launches a direct run with ONLY the worker in the wave", launch.kind === "start" && Array.isArray(launch.nodes) && launch.nodes.length === 1 && launch.nodes[0].nodeId === "W");
+    ok("the worker prompt carries the step's rendered output", launch.nodes[0].template.includes("Summarize: FROM STEP 0"));
+    ok(
+      "the step arrives pre-resolved (succeeded, with its output + transcript note)",
+      Array.isArray(launch.preResolved) && launch.preResolved.length === 1 && launch.preResolved[0].nodeId === "S" &&
+        launch.preResolved[0].kind === "step" && launch.preResolved[0].status === "succeeded" &&
+        launch.preResolved[0].output === "FROM STEP 0" && launch.preResolved[0].note === "FROM STEP 0",
+    );
+    const rid = nextPending();
+    L.pending.length = 0;
+    await completeRun(rid, { summary: "done" });
+  }
+
+  // ── 30) LOOMS v3: a STEPS-ONLY loom runs a pass with NO worker: the run is ───
+  //        born terminal and the loop settles through onTerminal as usual. ─────
+  {
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const graph = {
+      version: 1,
+      nodes: [
+        { id: "a", kind: "step", action: { type: "command", command: "echo first" } },
+        { id: "b", kind: "step", action: { type: "command", command: "echo second after $NODE_OUTPUT_A" } },
+      ],
+      edges: [{ id: "e-a-b", from: "a", to: "b" }],
+      entryNodeIds: ["a"],
+    };
+    const job = await sched.createJob({
+      name: "steps-only",
+      trigger: { kind: "manual" },
+      loop: { kind: "count", stop: { maxIterations: 2 } },
+      input: baseInput,
+      prompt: { template: "" },
+      graph,
+    });
+    await sched.runJobNow(job.id);
+    await sleep(300);
+    const recs = L.launches.filter((l) => l.kind === "step-only");
+    ok("steps-only loom records a step-only pass per iteration (count 2 → 2 passes, no worker launch)", recs.length === 2 && !L.launches.some((l) => l.kind === "start" || l.kind === "chain"));
+    ok("each pass settles complete with the SINK step's output as summary", recs.every((r) => r.status === "complete" && r.summary === "second after first"));
+    const fin = (await sched.listJobs()).find((j) => j.id === job.id);
+    ok("the loop finalizes normally (max-iterations) with the history carrying the outputs", fin.state.status === "stopped" && fin.state.lastStopReason === "max-iterations" && fin.history.length === 2 && fin.history[1].summary === "second after first" && fin.history[1].status === "complete");
+
+    // A failing entry step fails the pass and stops the loop.
+    L.launches.length = 0;
+    const bad = await sched.createJob({
+      name: "steps-only-fail",
+      trigger: { kind: "manual" },
+      loop: { kind: "count", stop: { maxIterations: 3 } },
+      input: baseInput,
+      prompt: { template: "" },
+      graph: { version: 1, nodes: [{ id: "x", kind: "step", action: { type: "command", command: "echo nope; exit 2" } }], edges: [], entryNodeIds: ["x"] },
+    });
+    await sched.runJobNow(bad.id);
+    await sleep(300);
+    const badFin = (await sched.listJobs()).find((j) => j.id === bad.id);
+    const badRec = L.launches.find((l) => l.kind === "step-only");
+    ok("a failing entry step records a FAILED pass and stops the loop (iteration-failed)", badRec && badRec.status === "failed" && /Step "x" failed:[\s\S]*\[exit 2\]/.test(badRec.summary) && badFin.state.status === "stopped" && badFin.state.lastStopReason === "iteration-failed" && L.launches.length === 1);
   }
 
   sched.stopScheduler();

@@ -1,15 +1,20 @@
-import React, { useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentEffortLevel,
   AutomationTrigger,
   FolderTriggerEvent,
   GuardPredicate,
+  LoomScriptLanguage,
+  LoomStepAction,
+  LoomStepNode,
+  LoomStepResult,
   LoomWorkerConfig,
   ScheduledJob,
 } from "@shared/types";
 import { DEFAULT_ITERATION_TIMEOUT_MINUTES } from "@shared/types";
 import { Check, Field, Segmented } from "../FormKit";
 import { EFFORT_LABELS, WORKER_MODELS, workerEffortsFor } from "../worker-models";
+import { LoomIcon } from "./FlowNodes";
 import {
   upstreamNodeIds,
   TRIGGER_ID,
@@ -18,6 +23,7 @@ import {
   type FlowNodeData,
   type TriggerDraft,
 } from "./model";
+import { STEP_META, STEP_TONE, STEP_TYPES, defaultStepAction, stepTitle, validateStepAction } from "./step-meta";
 
 // The per-selected-node config panel — a fill-height column DOCKED beside the
 // canvas (mirrors LoopInspector). Dispatches on node kind: the trigger
@@ -89,12 +95,25 @@ export interface NodeContextPanelProps {
   onTriggerChange: (next: TriggerDraft) => void;
   cwd: string;
   chainableJobs: ScheduledJob[];
+  /** Looms v3: the most recent pass's per-node outputs (what each node
+   *  printed / returned last time). Feeds the step panel's "Last output" and
+   *  its test-run's {{node:<id>}} samples. Empty for a new loom. */
+  lastOutputs?: Record<string, string>;
+  /** The automation's name ({{name}} in a step test-run). */
+  automationName?: string;
 }
 
 // Kind → glyph + amber/accent/mixed/info tint for the header chip.
-function kindGlyph(node: FlowNode): { glyph: string; eyebrow: string; color: string; tint: string } {
+function kindGlyph(node: FlowNode): { glyph: React.ReactNode; eyebrow: string; color: string; tint: string } {
   const d = node.data;
   switch (d.kind) {
+    case "step":
+      return {
+        glyph: <LoomIcon kind="step" stepType={d.action.type} tone={STEP_TONE} size={14} />,
+        eyebrow: STEP_META[d.action.type].eyebrow,
+        color: STEP_TONE,
+        tint: "color-mix(in oklch, var(--automation) 14%, var(--panel-2))",
+      };
     case "trigger":
       return { glyph: "⚡", eyebrow: "Trigger", color: "var(--warn)", tint: "color-mix(in oklch, var(--warn) 16%, var(--panel-2))" };
     case "worker":
@@ -117,7 +136,11 @@ export default function NodeContextPanel(props: NodeContextPanelProps): React.Re
   const kind = node.data.kind;
   const meta = kindGlyph(node);
   const title =
-    kind === "trigger" ? "Trigger" : ((node.data.label as string) || meta.eyebrow);
+    kind === "trigger"
+      ? "Trigger"
+      : node.data.kind === "step"
+        ? stepTitle(node.data)
+        : ((node.data.label as string) || meta.eyebrow);
   const deletable = node.id !== TRIGGER_ID;
 
   return (
@@ -135,7 +158,7 @@ export default function NodeContextPanel(props: NodeContextPanelProps): React.Re
     >
       <Head glyph={meta.glyph} glyphColor={meta.color} tint={meta.tint} eyebrow={meta.eyebrow} title={title} onClose={onClose} />
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px 22px", display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 18px 22px", display: "flex", flexDirection: "column", gap: 18 }}>
         {kind === "trigger" ? (
           <TriggerForm
             trigger={props.trigger}
@@ -147,6 +170,8 @@ export default function NodeContextPanel(props: NodeContextPanelProps): React.Re
           <WorkerForm {...props} node={node} />
         ) : kind === "guard" ? (
           <GuardForm {...props} node={node} />
+        ) : kind === "step" ? (
+          <StepForm {...props} node={node} />
         ) : (
           <MergeForm {...props} node={node} />
         )}
@@ -185,7 +210,7 @@ function Head({
   title,
   onClose,
 }: {
-  glyph: string;
+  glyph: React.ReactNode;
   glyphColor: string;
   tint: string;
   eyebrow: string;
@@ -723,5 +748,570 @@ function MergeForm({
           : "Continues as soon as the first inbound branch finishes."}
       </Hint>
     </>
+  );
+}
+
+
+// ── step (Looms v3) ──────────────────────────────────────────────────────────
+// A deterministic action. The form is the action's fields plus the shared
+// knobs (timeout, soft-fail); below it, a "Run step" console executes the node
+// right now with the same executor a pass uses and shows stdout / stderr /
+// exit code / duration — so you never wire a command blind. "Last output"
+// shows what the node produced on the most recent pass.
+
+const STEP_KIND_OPTIONS = STEP_TYPES.map((t) => ({ value: t, label: STEP_META[t].eyebrow }));
+const SCRIPT_LANGS: { value: LoomScriptLanguage; label: string }[] = [
+  { value: "python", label: "Python" },
+  { value: "node", label: "Node" },
+  { value: "bash", label: "Bash" },
+];
+const HTTP_METHODS: { value: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; label: string }[] = [
+  { value: "GET", label: "GET" },
+  { value: "POST", label: "POST" },
+  { value: "PUT", label: "PUT" },
+  { value: "PATCH", label: "PATCH" },
+  { value: "DELETE", label: "DELETE" },
+];
+
+// What a blank "Run with" means per language, and the runners people reach
+// for most — one click each; anything else is typed in.
+const INTERPRETER_DEFAULT: Record<LoomScriptLanguage, string> = {
+  python: "python3 (or python)",
+  node: "bundled node runtime",
+  bash: "bash",
+};
+const INTERPRETER_PRESETS: Record<LoomScriptLanguage, string[]> = {
+  python: ["", "uv run python", "uv run --script", ".venv/bin/python", "python3.12", "conda run -n base python", "pipenv run python", "poetry run python"],
+  node: ["", "node", "bun", "deno run -A", "npx tsx"],
+  bash: ["", "zsh", "sh", "bash -e"],
+};
+
+const STEP_VARIABLES: { token: string; tip: string }[] = [
+  { token: "{{incoming}}", tip: "Output from the node(s) wired into this one." },
+  { token: "{{date}}", tip: "Today's local date, YYYY-MM-DD." },
+  { token: "{{iteration}}", tip: "The current loop pass number, starting at 0." },
+  { token: "{{lastOutput}}", tip: "The previous pass's final output." },
+  { token: "{{file}}", tip: "The path that fired a folder trigger." },
+  { token: "{{name}}", tip: "The name of this automation." },
+];
+
+function StepForm({
+  node,
+  edges,
+  onPatchNodeData,
+  cwd,
+  lastOutputs,
+  automationName,
+}: NodeContextPanelProps & { node: FlowNode }): React.ReactElement {
+  const d = node.data;
+  if (d.kind !== "step") return <></>;
+  const action = d.action;
+  const setAction = (next: LoomStepAction): void => onPatchNodeData(node.id, { action: next });
+  const patchAction = (patch: Partial<LoomStepAction>): void =>
+    setAction({ ...action, ...patch } as LoomStepAction);
+  const upstream = useMemo(() => upstreamNodeIds(node.id, edges), [node.id, edges]);
+
+  // Variable insertion targets the field that was last focused.
+  const focusedRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null);
+  const insertVariable = (v: string): void => {
+    const el = focusedRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const next = el.value.slice(0, start) + v + el.value.slice(end);
+    const field = el.dataset.field as keyof LoomStepAction | undefined;
+    if (!field) return;
+    patchAction({ [field]: next } as Partial<LoomStepAction>);
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + v.length;
+      el.setSelectionRange(pos, pos);
+    });
+  };
+  const track = (e: React.FocusEvent<HTMLTextAreaElement | HTMLInputElement>): void => {
+    focusedRef.current = e.currentTarget;
+  };
+
+  // ── Run step console ──
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<LoomStepResult | null>(null);
+  const runNow = useCallback(async () => {
+    if (running) return;
+    setRunning(true);
+    setResult(null);
+    try {
+      const testNode: LoomStepNode = {
+        id: node.id,
+        kind: "step",
+        label: d.label || undefined,
+        action: d.action,
+        timeoutSec: d.timeoutSec,
+        continueOnError: d.continueOnError,
+      };
+      const samples: Record<string, string> = {};
+      for (const id of upstream) if (lastOutputs?.[id] !== undefined) samples[id] = lastOutputs[id];
+      const r = await window.spark.scheduler.testStep({
+        cwd,
+        node: testNode,
+        nodeOutputs: samples,
+        vars: { name: automationName?.trim() || "automation" },
+      });
+      setResult(r);
+    } catch (e) {
+      setResult({ ok: false, output: "", durationMs: 0, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setRunning(false);
+    }
+  }, [running, node.id, d, upstream, lastOutputs, cwd, automationName]);
+  // A new node (or a changed action kind) starts with a clean console.
+  useEffect(() => {
+    setResult(null);
+  }, [node.id, action.type]);
+
+  const problem = validateStepAction(action);
+  const lastOutput = lastOutputs?.[node.id];
+  const mono: React.CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, width: "100%", maxWidth: "100%", boxSizing: "border-box" };
+
+  return (
+    <>
+      <Field label="Label">
+        <input
+          className="spark-input"
+          value={d.label}
+          onChange={(e) => onPatchNodeData(node.id, { label: e.target.value })}
+          placeholder={STEP_META[action.type].title}
+        />
+      </Field>
+
+      <Group label="What it does" hint={STEP_META[action.type].blurb}>
+        <Segmented
+          options={STEP_KIND_OPTIONS}
+          value={action.type}
+          onChange={(t) => setAction(defaultStepAction(t))}
+          wrap
+        />
+      </Group>
+
+      <Group label="Variables" hint="Click to insert into the field you were editing. Add |json to any token to get a quoted JSON string (safe inside an HTTP body), |line for its first line. Inside a command or script, upstream output is also available as $NODE_OUTPUT_<ID>, $INCOMING, $DATE.">
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {STEP_VARIABLES.map((v) => (
+            <PromptVariableChip key={v.token} token={v.token} tip={v.tip} onInsert={() => insertVariable(v.token)} />
+          ))}
+          {upstream.map((nid) => (
+            <PromptVariableChip
+              key={nid}
+              token={`{{node:${nid}}}`}
+              tip={`Output from upstream node ${nid} in the current pass.`}
+              onInsert={() => insertVariable(`{{node:${nid}}}`)}
+            />
+          ))}
+        </div>
+      </Group>
+
+      {action.type === "command" && (
+        <Group label="Command">
+          <textarea
+            className="spark-input"
+            data-field="command"
+            data-testid="step-command"
+            value={action.command}
+            onFocus={track}
+            onChange={(e) => patchAction({ command: e.target.value })}
+            placeholder={"npm test 2>&1 | tail -n 20"}
+            rows={4}
+            spellCheck={false}
+            style={{ ...mono, height: "auto", minHeight: 88, padding: "8px 10px", resize: "vertical" }}
+          />
+          <Field label="Working directory (optional)">
+            <input
+              className="spark-input spark-mono"
+              data-field="cwd"
+              value={action.cwd ?? ""}
+              onFocus={track}
+              onChange={(e) => patchAction({ cwd: e.target.value || undefined })}
+              placeholder={cwd}
+            />
+          </Field>
+          <EnvEditor value={action.env} onChange={(env) => patchAction({ env })} />
+        </Group>
+      )}
+
+      {action.type === "script" && (
+        <Group label="Script">
+          <Segmented options={SCRIPT_LANGS} value={action.language} onChange={(language) => patchAction({ language })} />
+          <textarea
+            className="spark-input"
+            data-field="code"
+            data-testid="step-code"
+            value={action.code}
+            onFocus={track}
+            onChange={(e) => patchAction({ code: e.target.value })}
+            placeholder={
+              action.language === "python"
+                ? "import os\nprint(os.environ.get('INCOMING', ''))"
+                : action.language === "node"
+                  ? "console.log(process.env.INCOMING ?? '')"
+                  : 'echo "$INCOMING"'
+            }
+            rows={10}
+            spellCheck={false}
+            style={{ ...mono, height: "auto", minHeight: 180, padding: "8px 10px", resize: "vertical", tabSize: 2 }}
+            onKeyDown={(e) => {
+              // Tab indents inside a script instead of leaving the field.
+              if (e.key === "Tab") {
+                e.preventDefault();
+                const el = e.currentTarget;
+                const start = el.selectionStart;
+                const end = el.selectionEnd;
+                const next = `${el.value.slice(0, start)}  ${el.value.slice(end)}`;
+                patchAction({ code: next });
+                requestAnimationFrame(() => el.setSelectionRange(start + 2, start + 2));
+              }
+            }}
+          />
+          <Field label="Run with">
+            <input
+              className="spark-input spark-mono"
+              data-field="interpreter"
+              data-testid="step-interpreter"
+              value={action.interpreter ?? ""}
+              onFocus={track}
+              onChange={(e) => patchAction({ interpreter: e.target.value || undefined })}
+              placeholder={INTERPRETER_DEFAULT[action.language]}
+            />
+          </Field>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: -4 }}>
+            {INTERPRETER_PRESETS[action.language].map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                className={`spark-badge${(action.interpreter ?? "") === preset ? " is-accent" : ""}`}
+                title={`Run the script with: ${preset || INTERPRETER_DEFAULT[action.language]}`}
+                onClick={() => patchAction({ interpreter: preset || undefined })}
+              >
+                {preset || "default"}
+              </button>
+            ))}
+          </div>
+          <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)", marginTop: -4 }}>
+            The script file is appended to this command. Tools on your login-shell PATH (uv, pyenv, nvm,
+            conda) and paths relative to the working directory both work.
+          </span>
+          <Field label="Working directory (optional)">
+            <input
+              className="spark-input spark-mono"
+              data-field="cwd"
+              value={action.cwd ?? ""}
+              onFocus={track}
+              onChange={(e) => patchAction({ cwd: e.target.value || undefined })}
+              placeholder={cwd}
+            />
+          </Field>
+          <EnvEditor value={action.env} onChange={(env) => patchAction({ env })} />
+        </Group>
+      )}
+
+      {action.type === "http" && (
+        <Group label="Request">
+          <Segmented options={HTTP_METHODS} value={action.method} onChange={(method) => patchAction({ method })} wrap />
+          <input
+            className="spark-input spark-mono"
+            data-field="url"
+            data-testid="step-url"
+            value={action.url}
+            onFocus={track}
+            onChange={(e) => patchAction({ url: e.target.value })}
+            placeholder="https://hooks.slack.com/services/…"
+          />
+          <EnvEditor
+            label="Headers"
+            keyPlaceholder="Content-Type"
+            valuePlaceholder="application/json"
+            value={action.headers}
+            onChange={(headers) => patchAction({ headers })}
+          />
+          {action.method !== "GET" && action.method !== "DELETE" && (
+            <Field label="Body">
+              <textarea
+                className="spark-input"
+                data-field="body"
+                value={action.body ?? ""}
+                onFocus={track}
+                onChange={(e) => patchAction({ body: e.target.value || undefined })}
+                placeholder={'{"text": "{{incoming}}"}'}
+                rows={5}
+                spellCheck={false}
+                style={{ ...mono, height: "auto", minHeight: 96, padding: "8px 10px", resize: "vertical" }}
+              />
+            </Field>
+          )}
+        </Group>
+      )}
+
+      {action.type === "writeFile" && (
+        <Group label="File">
+          <Segmented
+            options={[
+              { value: "append" as const, label: "Append" },
+              { value: "overwrite" as const, label: "Overwrite" },
+            ]}
+            value={action.mode}
+            onChange={(mode) => patchAction({ mode })}
+          />
+          <Field label="Path (absolute, or relative to the workspace)">
+            <input
+              className="spark-input spark-mono"
+              data-field="path"
+              data-testid="step-path"
+              value={action.path}
+              onFocus={track}
+              onChange={(e) => patchAction({ path: e.target.value })}
+              placeholder="notes/{{date}}.md"
+            />
+          </Field>
+          <Field label="Content">
+            <textarea
+              className="spark-input"
+              data-field="content"
+              value={action.content}
+              onFocus={track}
+              onChange={(e) => patchAction({ content: e.target.value })}
+              rows={6}
+              spellCheck={false}
+              style={{ ...mono, height: "auto", minHeight: 110, padding: "8px 10px", resize: "vertical" }}
+            />
+          </Field>
+        </Group>
+      )}
+
+      {action.type === "notify" && (
+        <Group label="Notification">
+          <Field label="Title (optional)">
+            <input
+              className="spark-input"
+              data-field="title"
+              value={action.title ?? ""}
+              onFocus={track}
+              onChange={(e) => patchAction({ title: e.target.value || undefined })}
+              placeholder="{{name}} · {{date}}"
+            />
+          </Field>
+          <Field label="Message">
+            <textarea
+              className="spark-input"
+              data-field="message"
+              data-testid="step-message"
+              value={action.message}
+              onFocus={track}
+              onChange={(e) => patchAction({ message: e.target.value })}
+              placeholder="{{incoming}}"
+              rows={4}
+              style={{ height: "auto", minHeight: 80, padding: "8px 10px", resize: "vertical", lineHeight: 1.5 }}
+            />
+          </Field>
+        </Group>
+      )}
+
+      <Group label="Limits">
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--muted)" }}>
+            timeout (s)
+            <input
+              className="spark-input spark-mono"
+              type="number"
+              min={1}
+              value={d.timeoutSec ?? ""}
+              placeholder="120"
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                onPatchNodeData(node.id, {
+                  timeoutSec: e.target.value.trim() && Number.isFinite(n) && n > 0 ? Math.round(n) : undefined,
+                });
+              }}
+              style={{ width: 80, height: 26 }}
+            />
+          </label>
+          <Check
+            label="Keep going if it fails"
+            checked={Boolean(d.continueOnError)}
+            onToggle={() => onPatchNodeData(node.id, { continueOnError: !d.continueOnError })}
+          />
+        </div>
+        <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)" }}>
+          {d.continueOnError
+            ? "A failure (non-zero exit, non-2xx) still settles this node; the error text becomes its output."
+            : "A failure (non-zero exit, non-2xx) fails the whole pass."}
+        </span>
+      </Group>
+
+      {/* Run step console */}
+      <Group label="Try it">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            type="button"
+            className="spark-btn is-primary"
+            data-testid="step-run"
+            disabled={running || Boolean(problem)}
+            onClick={() => void runNow()}
+            title={problem ? `Fix first: ${problem}` : "Run this node now, with the last pass's upstream outputs as samples"}
+            style={{ height: 28, fontSize: 12 }}
+          >
+            {running ? "Running…" : "▶ Run step"}
+          </button>
+          {result && (
+            <span
+              className="spark-mono"
+              data-testid="step-run-status"
+              style={{ fontSize: 10.5, color: result.ok ? "var(--ok)" : "var(--danger)" }}
+            >
+              {runStatusLine(result)}
+            </span>
+          )}
+        </div>
+        {problem && !result && (
+          <span style={{ fontSize: 10.5, color: "var(--muted)" }}>
+            {stepTitle(d)} {problem}
+          </span>
+        )}
+        {result && (
+          <StepConsole
+            output={result.stdout !== undefined ? result.stdout : result.output}
+            stderr={result.stderr}
+            emptyText={result.ok ? "(no output)" : (result.error ?? "failed")}
+          />
+        )}
+      </Group>
+
+      {lastOutput !== undefined && (
+        <Group label="Last pass output" hint="What this node produced the last time the automation ran.">
+          <StepConsole output={lastOutput} emptyText="(no output)" />
+        </Group>
+      )}
+    </>
+  );
+}
+
+/** "ok · exit 0 · 99ms" / "failed · exit 1 · 99ms" / "failed · timed out after 2s". */
+function runStatusLine(r: LoomStepResult): string {
+  const parts: string[] = [r.ok ? "ok" : "failed"];
+  if (r.exitCode !== undefined && r.exitCode !== null) parts.push(`exit ${r.exitCode}`);
+  else if (!r.ok && r.error) parts.push(r.error);
+  if (r.statusCode !== undefined) parts.push(`HTTP ${r.statusCode}`);
+  if (r.timedOut && r.error && !parts.includes(r.error)) parts.push(r.error);
+  parts.push(formatMs(r.durationMs));
+  return parts.join(" · ");
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+}
+
+/** The console block: stdout (and, when present, stderr under its own rule). */
+function StepConsole({
+  output,
+  stderr,
+  emptyText,
+}: {
+  output: string;
+  stderr?: string;
+  emptyText: string;
+}): React.ReactElement {
+  const hasOut = output.trim().length > 0;
+  const hasErr = Boolean(stderr && stderr.trim().length > 0);
+  return (
+    <div className="loom-console" data-testid="step-console">
+      <pre className="loom-console__out">{hasOut ? output : emptyText}</pre>
+      {hasErr && (
+        <>
+          <div className="loom-console__rule spark-eyebrow">stderr</div>
+          <pre className="loom-console__out is-err">{stderr}</pre>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Key/value rows for env vars or HTTP headers. */
+function EnvEditor({
+  value,
+  onChange,
+  label = "Environment (optional)",
+  keyPlaceholder = "API_TOKEN",
+  valuePlaceholder = "value or {{node:…}}",
+}: {
+  value: Record<string, string> | undefined;
+  onChange: (next: Record<string, string> | undefined) => void;
+  label?: string;
+  keyPlaceholder?: string;
+  valuePlaceholder?: string;
+}): React.ReactElement {
+  const rows = Object.entries(value ?? {});
+  const commit = (next: Array<[string, string]>): void => {
+    const obj: Record<string, string> = {};
+    for (const [k, v] of next) if (k.trim()) obj[k.trim()] = v;
+    onChange(Object.keys(obj).length > 0 ? obj : undefined);
+  };
+  // A draft row lets you type a key before it exists in the record.
+  const [draft, setDraft] = useState<[string, string]>(["", ""]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span className="spark-eyebrow">{label}</span>
+      {rows.map(([k, v], i) => (
+        <div key={`${i}-${k}`} style={{ display: "flex", gap: 6 }}>
+          <input
+            className="spark-input spark-mono"
+            value={k}
+            onChange={(e) => commit(rows.map((r, j) => (j === i ? [e.target.value, r[1]] : r)))}
+            style={{ flex: "0 0 40%", height: 26 }}
+          />
+          <input
+            className="spark-input spark-mono"
+            value={v}
+            onChange={(e) => commit(rows.map((r, j) => (j === i ? [r[0], e.target.value] : r)))}
+            style={{ flex: 1, height: 26 }}
+          />
+          <button
+            type="button"
+            className="spark-btn"
+            title="Remove"
+            onClick={() => commit(rows.filter((_r, j) => j !== i))}
+            style={{ height: 26, width: 26, padding: 0 }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          className="spark-input spark-mono"
+          value={draft[0]}
+          placeholder={keyPlaceholder}
+          onChange={(e) => setDraft([e.target.value, draft[1]])}
+          style={{ flex: "0 0 40%", height: 26 }}
+        />
+        <input
+          className="spark-input spark-mono"
+          value={draft[1]}
+          placeholder={valuePlaceholder}
+          onChange={(e) => setDraft([draft[0], e.target.value])}
+          onBlur={() => {
+            if (draft[0].trim()) {
+              commit([...rows, draft]);
+              setDraft(["", ""]);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && draft[0].trim()) {
+              e.preventDefault();
+              commit([...rows, draft]);
+              setDraft(["", ""]);
+            }
+          }}
+          style={{ flex: 1, height: 26 }}
+        />
+        <span style={{ width: 26 }} />
+      </div>
+    </div>
   );
 }

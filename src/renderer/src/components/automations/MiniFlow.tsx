@@ -1,9 +1,10 @@
 import React, { useMemo } from "react";
-import type { LoomNodeDef, ScheduledJob } from "@shared/types";
+import type { LoomNodeDef, LoomStepAction, ScheduledJob } from "@shared/types";
 import { triggerSummary } from "./presentation";
 import { graphForJob } from "./flow/model";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
 import { workerModelLabel } from "./worker-models";
+import { STEP_META, STEP_TONE, stepTitle } from "./flow/step-meta";
 
 // Read-only miniature of the loom's GRAPH for the detail view: the trigger
 // pinned at the left, then the worker/guard/merge nodes laid out left-to-right
@@ -22,7 +23,8 @@ interface Placed {
   id: string;
   col: number;
   row: number;
-  kind: "trigger" | "worker" | "guard" | "merge";
+  kind: "trigger" | "worker" | "guard" | "merge" | "step";
+  stepType?: LoomStepAction["type"];
   tone: string;
   eyebrow: string;
   text: string;
@@ -75,7 +77,16 @@ export default function MiniFlow({
       const col = depth(n.id);
       const row = rowCounter.get(col) ?? 0;
       rowCounter.set(col, row + 1);
-      placedNodes.push({ id: n.id, col, row, kind: n.kind, tone: toneFor(n), eyebrow: eyebrowFor(n), text: textFor(n) });
+      placedNodes.push({
+        id: n.id,
+        col,
+        row,
+        kind: n.kind,
+        stepType: n.kind === "step" ? n.action.type : undefined,
+        tone: toneFor(n),
+        eyebrow: eyebrowFor(n),
+        text: textFor(n),
+      });
     }
     const maxCol = Math.max(0, ...placedNodes.map((p) => p.col));
     const maxRow = Math.max(0, ...placedNodes.map((p) => p.row));
@@ -171,7 +182,7 @@ export default function MiniFlow({
             onMouseLeave={(e) => (e.currentTarget.style.borderColor = liveChip ? "var(--accent-edge)" : "var(--rule-soft)")}
           >
             <span aria-hidden style={{ display: "inline-flex", flex: "0 0 auto" }}>
-              <LoomIcon kind={p.kind} tone={p.tone} size={12} />
+              <LoomIcon kind={p.kind} stepType={p.stepType} tone={p.tone} size={12} />
             </span>
             <span style={{ display: "flex", flexDirection: "column", gap: 0, minWidth: 0 }}>
               <span className="spark-eyebrow" style={{ fontSize: 7.5 }}>{p.eyebrow}</span>
@@ -189,13 +200,16 @@ export default function MiniFlow({
 function toneFor(n: LoomNodeDef): string {
   if (n.kind === "worker") return WORKER_TONE;
   if (n.kind === "guard") return "var(--ok)";
+  if (n.kind === "step") return STEP_TONE;
   return "var(--info)";
 }
 function eyebrowFor(n: LoomNodeDef): string {
+  if (n.kind === "step") return STEP_META[n.action.type].eyebrow;
   return n.kind.charAt(0).toUpperCase() + n.kind.slice(1);
 }
 function textFor(n: LoomNodeDef): string {
   if (n.kind === "worker") return n.label ?? workerModelLabel(n.worker.model);
   if (n.kind === "guard") return n.label ?? n.predicate.type;
+  if (n.kind === "step") return stepTitle(n);
   return n.label ?? n.joinMode;
 }

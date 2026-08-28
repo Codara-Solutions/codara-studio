@@ -1,9 +1,10 @@
 import React from "react";
 import { BaseEdge, getBezierPath, Handle, Position } from "@xyflow/react";
 import type { EdgeProps, NodeProps } from "@xyflow/react";
-import type { GuardPredicate, LoomWorkerConfig } from "@shared/types";
+import type { GuardPredicate, LoomStepAction, LoomWorkerConfig } from "@shared/types";
 import { workerModelLabel } from "../worker-models";
 import type { FlowNodeData } from "./model";
+import { STEP_META, STEP_TONE, stepActionLine, stepTitle } from "./step-meta";
 
 // Custom ReactFlow node + edge renderers for the loom canvas, painted with
 // Codara's CSS variables. Design language: precision instrument — every role
@@ -71,17 +72,76 @@ const JOIN = (
   </>
 );
 
+// Step-action icons (Looms v3): a terminal prompt, a code bracket pair, a
+// globe/arrow, a page, a bell — each drawn on the same 16px grid.
+const SHELL = (
+  <>
+    <rect x="1.8" y="3" width="12.4" height="10" rx="1.6" />
+    <path d="m4.6 6.2 2.2 1.8-2.2 1.8M8.2 10h3" />
+  </>
+);
+const CODE = (
+  <>
+    <path d="m5.2 4.6-3.3 3.4 3.3 3.4M10.8 4.6l3.3 3.4-3.3 3.4M9.3 3 6.7 13" />
+  </>
+);
+const GLOBE = (
+  <>
+    <circle cx="8" cy="8" r="6.2" />
+    <path d="M1.8 8h12.4M8 1.8c2 2 2 10.4 0 12.4M8 1.8c-2 2-2 10.4 0 12.4" />
+  </>
+);
+const PAGE = (
+  <>
+    <path d="M4 1.8h5.2L13 5.6V14.2H4z" />
+    <path d="M9.2 1.8v3.8H13M6.2 8.6h3.6M6.2 11.2h3.6" />
+  </>
+);
+const BELL = (
+  <>
+    <path d="M4.2 11.2V7.6a3.8 3.8 0 0 1 7.6 0v3.6l1.2 1.4H3z" />
+    <path d="M6.6 13.4a1.4 1.4 0 0 0 2.8 0" />
+  </>
+);
+
+export function stepIconPath(type: LoomStepAction["type"]): React.ReactNode {
+  switch (type) {
+    case "command":
+      return SHELL;
+    case "script":
+      return CODE;
+    case "http":
+      return GLOBE;
+    case "writeFile":
+      return PAGE;
+    case "notify":
+      return BELL;
+  }
+}
+
 /** Role → line icon, for surfaces that dispatch on node kind (LiveBoard). */
 export function LoomIcon({
   kind,
   tone,
   size,
+  stepType,
 }: {
-  kind: "trigger" | "worker" | "guard" | "merge";
+  kind: "trigger" | "worker" | "guard" | "merge" | "step";
   tone: string;
   size?: number;
+  /** For kind "step": which action icon to draw (defaults to the shell). */
+  stepType?: LoomStepAction["type"];
 }): React.ReactElement {
-  const d = kind === "trigger" ? BOLT : kind === "guard" ? SPLIT : kind === "merge" ? JOIN : CPU;
+  const d =
+    kind === "trigger"
+      ? BOLT
+      : kind === "guard"
+        ? SPLIT
+        : kind === "merge"
+          ? JOIN
+          : kind === "step"
+            ? stepIconPath(stepType ?? "command")
+            : CPU;
   return <Icon d={d} tone={tone} size={size} />;
 }
 
@@ -515,6 +575,49 @@ export function MergeNode({ id, data, selected }: NodeProps): React.ReactElement
   );
 }
 
+// ── step node — a deterministic action (shell / script / http / file / notify) ─
+
+export function StepNode({ id, data, selected }: NodeProps): React.ReactElement {
+  const d = data as NodeData;
+  if (d.kind !== "step") return <div />;
+  const tone = STEP_TONE;
+  const meta = STEP_META[d.action.type];
+  return (
+    <div className="loom-node" style={cardStyle(selected, { width: 248, alignItems: "flex-start" })}>
+      <TopRule tone={tone} />
+      <Medallion icon={<Icon d={stepIconPath(d.action.type)} tone={tone} />} tone={tone} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Eyebrow text={meta.eyebrow} />
+          {d.continueOnError && (
+            <span
+              className="spark-mono"
+              title="A failure does not stop the pass"
+              style={{ marginLeft: "auto", fontSize: 8.5, color: "var(--muted)" }}
+            >
+              soft-fail
+            </span>
+          )}
+        </div>
+        <Title text={stepTitle(d)} />
+        <Meta text={stepActionLine(d.action)} />
+      </div>
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
+      {d.onAddFrom && (
+        <PlusButton
+          title="Add next step"
+          style={{ top: "50%", right: -31, transform: "translateY(-50%)" }}
+          onClick={(e) => {
+            e.stopPropagation();
+            d.onAddFrom?.(id, undefined, (e.currentTarget as HTMLElement).getBoundingClientRect());
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 // ── custom edge: bezier, branch-colored, back-edge dashed ────────────────────
 
 export function LoomEdge({
@@ -563,6 +666,7 @@ export const nodeTypes = {
   worker: WorkerNode,
   guard: GuardNode,
   merge: MergeNode,
+  step: StepNode,
 };
 
 export const edgeTypes = {

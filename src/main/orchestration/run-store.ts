@@ -230,20 +230,17 @@ import {
 } from "./manager-protocol";
 import {
   backEdgesToFire,
-  computeSkips,
   forwardDescendants,
   isPassComplete,
   MAX_BACK_EDGE_VISIT_CAP,
-  mergeOutput,
   nextReadyWave,
-  readyGuardNodes,
-  readyMergeNodes,
   renderNodePrompt,
   retryDisposition,
   upstreamOf,
 } from "./loom-graph";
 import { evaluateGuardPredicate } from "./loom-predicates";
-import type { LoomGraph, LoomNodeDef } from "@shared/types";
+import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
+import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
 import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
@@ -1682,6 +1679,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     return launchDirectNodeTasks(run.id, input.cwd, 1, input.nodes, {
       vars: input.vars,
       freshPass: input.freshPass,
+      preResolved: input.preResolved,
     });
   }
   // The prompt lands as a user note so history detail, {{lastOutput}}
@@ -1764,6 +1762,7 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
     return launchDirectNodeTasks(run.id, cwdMulti, passNumberMulti, input.nodes, {
       vars: input.vars,
       freshPass: input.freshPass,
+      preResolved: input.preResolved,
     });
   }
   const requestedQueuedIds = [...new Set(input.queuedMessageIds ?? [])];
@@ -1952,12 +1951,20 @@ async function launchDirectNodeTasks(
     // join and a bounded loop see the prior pass state). Single-node: the reset
     // re-seeds the one running node = today's behavior.
     freshPass?: boolean;
+    // Looms v3: nodes the loop driver settled inline BEFORE this entry wave
+    // (entry steps, or guards/merges wired off the trigger). Seeded into the
+    // loomPass as already-settled (so the walk never re-runs them and the live
+    // board paints them), fed to this wave's {{node:<id>}} / {{incoming}}, and
+    // each step leaves its transcript note. Empty/absent on every pre-v3 path.
+    preResolved?: PreResolvedNode[];
   },
 ): Promise<RunState> {
   if (nodes.length === 0) throw new Error("launchDirectNodeTasks requires at least one node.");
   const layer = _opts?.layer ?? 0;
   const vars = _opts?.vars ?? {};
-  const nodeOutputs = _opts?.nodeOutputs ?? {};
+  const preResolved = _opts?.preResolved ?? [];
+  const nodeOutputs: Record<string, string> = { ..._opts?.nodeOutputs };
+  for (const pr of preResolved) if (pr.output !== undefined && nodeOutputs[pr.nodeId] === undefined) nodeOutputs[pr.nodeId] = pr.output;
   const freshPass = _opts?.freshPass === true;
   let run = await requireRun(runId);
 
@@ -2144,6 +2151,35 @@ async function launchDirectNodeTasks(
       // freshPass starts from an EMPTY state (the previous pass is discarded);
       // otherwise we merge into the prior node states.
       const nodeStates = freshPass ? {} : { ...(prior?.nodeStates ?? {}) };
+      // Looms v3: pre-resolved entry nodes settle at layer 0 (they ran before
+      // this wave). A step's note is pushed here so the transcript reads in
+      // execution order: step output, then the worker prompt it fed.
+      for (const pr of preResolved) {
+        const existing = nodeStates[pr.nodeId];
+        nodeStates[pr.nodeId] = {
+          status: pr.status,
+          attemptIds: existing?.attemptIds ?? [],
+          output: pr.output,
+          layer: Math.max(0, layer - 1),
+          activations: existing?.activations,
+          branchResult: pr.branchResult,
+        };
+        if (pr.kind === "step" && pr.note) {
+          draft.humanMessages.push({
+            id: makeId("msg"),
+            runId: draft.id,
+            author: "spark",
+            kind: "note",
+            message: pr.note,
+            attachments: [],
+            intent: "answer",
+            deliveryState: "acknowledged",
+            conversationEpoch: conversationEpoch(draft),
+            createdAt: timestamp,
+            loomNodeId: pr.nodeId,
+          });
+        }
+      }
       for (const { nodeId, attemptId } of attempts) {
         const existing = freshPass ? undefined : nodeStates[nodeId];
         nodeStates[nodeId] = {
@@ -2192,6 +2228,122 @@ async function launchDirectNodeTasks(
 
   scheduleAutopilotCycles(run.id, attempts.map((a) => a.attemptId));
   return requireRun(run.id);
+}
+
+// Looms v3: a pass that settled ENTIRELY inline — every node a step/guard/merge
+// (or the surviving entry route led to none) — never launches a worker. It still
+// gets a run: the pass needs a transcript (each step's output is a spark note),
+// a loomPass so the live board and the Hub paint every node's outcome, and a
+// terminal status the loop driver reads through the same onTerminal path a
+// worker pass takes. The run is born terminal: created, seeded, finalized in
+// one breath — commitRunChange's complete/failed plumbing fires as usual.
+export async function recordStepOnlyPass(input: RecordStepOnlyPassInput): Promise<RunState> {
+  let run = await createRun({
+    workspaceId: input.workspaceId,
+    workspaceName: input.workspaceName ?? "workspace",
+    cwd: input.cwd,
+    origin: input.origin,
+    projectPolicyMode: input.projectPolicyMode,
+    title: input.title,
+    automationId: input.automationId,
+    executionMode: "direct",
+    chatBackend: "pi",
+    chatMode: "auto",
+  });
+  run = await commitRunChange(run, {
+    type: "direct_run.started",
+    message: "Loom step-only pass started",
+    payload: { automationId: input.automationId, model: null, stepOnly: true },
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "started",
+        startedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  const status: RunStatus = input.status;
+  return commitRunChange(run, {
+    type: "direct_run.finalized",
+    message: status === "complete" ? "Loom step-only pass finalized: complete" : "Loom step-only pass failed",
+    payload: {
+      attemptIds: [],
+      reportStatuses: [],
+      nextStatus: status,
+      settledNodeIds: [],
+      advancingTo: null,
+      retryingNodeIds: null,
+      resolvedMergeNodeIds: input.preResolved.filter((n) => n.kind === "merge").map((n) => n.nodeId),
+      resolvedGuardNodeIds: input.preResolved.filter((n) => n.kind === "guard").map((n) => n.nodeId),
+      resolvedStepNodeIds: input.preResolved.filter((n) => n.kind === "step").map((n) => n.nodeId),
+      skippedNodeIds: input.preResolved.filter((n) => n.status === "skipped").map((n) => n.nodeId),
+      stepOnly: true,
+    },
+    mutate: (draft, timestamp) => {
+      const nodeStates: NonNullable<RunState["loomPass"]>["nodeStates"] = {};
+      for (const pr of input.preResolved) {
+        nodeStates[pr.nodeId] = {
+          status: pr.status,
+          attemptIds: [],
+          output: pr.output,
+          layer: 0,
+          branchResult: pr.branchResult,
+        };
+        if (pr.kind === "step" && pr.note) {
+          draft.humanMessages.push({
+            id: makeId("msg"),
+            runId: draft.id,
+            author: "spark",
+            kind: "note",
+            message: pr.note,
+            attachments: [],
+            intent: "answer",
+            deliveryState: "acknowledged",
+            conversationEpoch: conversationEpoch(draft),
+            createdAt: timestamp,
+            loomNodeId: pr.nodeId,
+          });
+        }
+      }
+      // The pass summary is the LAST spark note (the loop contract). Only push
+      // it when it differs from the last step note so a sink step's output is
+      // never duplicated in the transcript.
+      const lastNote = [...draft.humanMessages].reverse().find((m) => m.author === "spark");
+      if (input.summary.trim() && lastNote?.message !== input.summary) {
+        draft.humanMessages.push({
+          id: makeId("msg"),
+          runId: draft.id,
+          author: "spark",
+          kind: "note",
+          message: input.summary,
+          attachments: [],
+          intent: "answer",
+          deliveryState: "acknowledged",
+          conversationEpoch: conversationEpoch(draft),
+          createdAt: timestamp,
+        });
+      }
+      draft.loomPass = {
+        graphVersion: 1,
+        nodeStates,
+        layerCursor: 0,
+        pendingNodeIds: [],
+        vars: input.vars && Object.keys(input.vars).length > 0 ? input.vars : undefined,
+      };
+      draft.status = status;
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: status === "complete" ? "idle" : "failed",
+        lastAction: "direct_run_finalized",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 // Force-fail a live (or stuck-preparing) attempt. Used by the automation-loop
@@ -2694,6 +2846,10 @@ async function finalizeDirectRun(runId: string): Promise<void> {
   // the nodes pruned dead by those routes (status skipped). Both are persisted in
   // the SAME advance commit; neither launches an attempt nor pushes a note.
   const resolvedGuards: Array<{ nodeId: string; branch: "pass" | "fail"; output: string }> = [];
+  // Looms v3: STEP nodes executed inline this advance (status + output + the raw
+  // result). Persisted like guards, plus a transcript note each so a sink step's
+  // output is the pass summary onTerminal reads.
+  const resolvedSteps: ResolvedStep[] = [];
   const skippedNodeIds = new Set<string>();
   // ── SLICE 6: bounded loop-back state for this advance ──────────────────────
   // The per-edge fire counters carried into this advance (defaults {} for an
@@ -2766,55 +2922,24 @@ async function finalizeDirectRun(runId: string): Promise<void> {
     const maxBackEdgeFires =
       graph.edges.filter((e) => e.backEdge === true).length * MAX_BACK_EDGE_VISIT_CAP + 1;
     for (let outer = maxBackEdgeFires; outer >= 0; outer -= 1) {
-      // Inline-resolution loop: resolve ready merges + guards, then prune. Each
-      // resolved merge/guard feeds the projection so a downstream merge/guard can
-      // become ready next turn; pruning a branch can in turn ready a merge whose
-      // skipped parents now let "any"/"all" settle. Bounded by the node count + 1
-      // (each merge/guard resolves at most once — it only leaves "pending" when
-      // picked up here, and skips are monotonic).
-      for (let bound = graph.nodes.length + 1; bound >= 0; bound -= 1) {
-        let progressed = false;
-        // Merges first (pure): a guard downstream of a merge reads the joined output.
-        for (const mergeId of readyMergeNodes(graph, projected)) {
-          const output = mergeOutput(graph, mergeId, projected);
-          projected[mergeId] = { status: "succeeded", output };
-          resolvedMerges.push({ nodeId: mergeId, output });
-          progressed = true;
-        }
-        // Guards (impure: await the predicate). The guard's source output is its
-        // single forward parent's output; incomingOutputs maps every forward parent.
-        for (const guardId of readyGuardNodes(graph, projected)) {
-          const parents = upstreamOf(graph, guardId);
-          const incomingOutputs: Record<string, string> = {};
-          for (const pid of parents) {
-            const out = projected[pid]?.output;
-            if (out !== undefined) incomingOutputs[pid] = out;
-          }
-          const sourceOutput = parents.length > 0 ? (projected[parents[0]]?.output ?? "") : "";
-          const node = nodeById.get(guardId);
-          const predicate = node && node.kind === "guard" ? node.predicate : undefined;
-          const passed = predicate
-            ? await evaluateGuardPredicate(predicate, {
-                cwd: predicateCwd,
-                sourceOutput,
-                incomingOutputs,
-              })
-            : false;
-          const branch: "pass" | "fail" = passed ? "pass" : "fail";
-          const output = `guard: ${branch}`;
-          projected[guardId] = { status: "succeeded", output, branchResult: branch };
-          resolvedGuards.push({ nodeId: guardId, branch, output });
-          progressed = true;
-        }
-        // Prune branches whose every path just went dead (transitive closure).
-        const skips = computeSkips(graph, projected);
-        for (const id of skips) {
-          projected[id] = { ...(projected[id] ?? { status: "pending" }), status: "skipped" };
-          skippedNodeIds.add(id);
-          progressed = true;
-        }
-        if (!progressed) break;
-      }
+      // Inline-resolution turn (loom-resolve.resolveInlineNodes): resolve every
+      // ready MERGE (pure join), GUARD (await its predicate; record branchResult)
+      // and STEP (execute its action; record its output), then prune the now-
+      // dead-only branches to "skipped" — repeating within the call until a turn
+      // makes no progress, so a chain of merges/guards/steps/skips collapses in
+      // ONE finalize. Shared with the loop driver's entry pre-resolution so both
+      // seams settle inline nodes byte-identically.
+      const turn = await resolveInlineNodes(graph, projected, {
+        cwd: predicateCwd,
+        vars: run.loomPass?.vars ?? {},
+        env: { SPARK_RUN_ID: run.id, ...(run.automationId ? { SPARK_AUTOMATION_ID: run.automationId } : {}) },
+        automationId: run.automationId,
+        workspaceId: run.workspaceId,
+      });
+      resolvedMerges.push(...turn.merges);
+      resolvedGuards.push(...turn.guards);
+      resolvedSteps.push(...turn.steps);
+      for (const id of turn.skipped) skippedNodeIds.add(id);
 
       // The stabilized projection is settled for this turn. Now fire any armed +
       // firable back-edges: an armed back-edge whose source ROUTED to it AND whose
@@ -2861,6 +2986,15 @@ async function finalizeDirectRun(runId: string): Promise<void> {
       }
     }
   }
+  // Looms v3: a step that failed (non-zero exit / non-2xx / thrown, without
+  // continueOnError) fails the pass exactly like a failed worker does — no
+  // further wave launches, the run terminalizes "failed" with the step's note as
+  // the pass summary.
+  const stepFailed = resolvedSteps.some((st) => st.status === "failed");
+  if (stepFailed) {
+    nextWaveNodeIds = [];
+    nextWaveNodes = [];
+  }
   const advancing = nextWaveNodeIds.length > 0;
 
   // SLICE 6: the per-pass activation backstop tripped — the loom kept re-opening
@@ -2879,7 +3013,7 @@ async function finalizeDirectRun(runId: string): Promise<void> {
   // exclusive: relaunching short-circuits the advance block (its !relaunching
   // guard leaves nextWaveNodeIds empty).
   const stayingLive = advancing || relaunching;
-  let committedStatus: RunStatus = activationCapHit
+  let committedStatus: RunStatus = activationCapHit || stepFailed
     ? "failed"
     : stayingLive
       ? "running"
@@ -2932,6 +3066,8 @@ async function finalizeDirectRun(runId: string): Promise<void> {
     type: "direct_run.finalized",
     message: activationCapHit
       ? `Loom pass failed: per-pass activation cap (${MAX_PASS_ACTIVATIONS}) exceeded`
+      : stepFailed
+        ? `Loom pass failed: step ${resolvedSteps.filter((st) => st.status === "failed").map((st) => st.nodeId).join(", ")} failed`
       : advancing
         ? backEdgeFired
           ? `Loom wave settled; looping back to ${nextWaveNodeIds.join(", ")}`
@@ -2948,6 +3084,7 @@ async function finalizeDirectRun(runId: string): Promise<void> {
       retryingNodeIds: relaunching ? relaunchNodeIds : null,
       resolvedMergeNodeIds: resolvedMerges.length > 0 ? resolvedMerges.map((m) => m.nodeId) : null,
       resolvedGuardNodeIds: resolvedGuards.length > 0 ? resolvedGuards.map((g) => g.nodeId) : null,
+      resolvedStepNodeIds: resolvedSteps.length > 0 ? resolvedSteps.map((st) => st.nodeId) : null,
       skippedNodeIds: skippedNodeIds.size > 0 ? [...skippedNodeIds] : null,
       // SLICE 6: which loop bodies a back-edge re-opened this advance, and the
       // updated per-edge fire budget (observability + boot-recovery audit trail).
@@ -3066,6 +3203,37 @@ async function finalizeDirectRun(runId: string): Promise<void> {
             activations: existing?.activations,
             branchResult: g.branch,
           };
+        }
+        // Looms v3: persist every inline-executed STEP — status (succeeded, or
+        // failed when its action failed without continueOnError) + its recorded
+        // output. Like a guard it launches NO worker and gets no task/step
+        // transition, but UNLIKE a guard it DOES leave a transcript note: the
+        // step's output is real pass content ({{lastOutput}} for a sink step,
+        // the thing the user asked to "see what was printed"). Created here if
+        // absent (steps aren't seeded by the launcher).
+        const stepLayer = (draft.loomPass.layerCursor ?? 0) + 1;
+        for (const st of resolvedSteps) {
+          const existing = draft.loomPass.nodeStates[st.nodeId];
+          draft.loomPass.nodeStates[st.nodeId] = {
+            status: st.status,
+            attemptIds: existing?.attemptIds ?? [],
+            output: st.output,
+            layer: existing?.layer ?? stepLayer,
+            activations: existing?.activations,
+          };
+          draft.humanMessages.push({
+            id: makeId("msg"),
+            runId: draft.id,
+            author: "spark",
+            kind: "note",
+            message: stepNoteMessage(st),
+            attachments: [],
+            intent: "answer",
+            deliveryState: "acknowledged",
+            conversationEpoch: conversationEpoch(draft),
+            createdAt: timestamp,
+            loomNodeId: st.nodeId,
+          });
         }
         // Persist every pruned node as "skipped" so the walk treats it as settled
         // (never launched, never waited on) and boot recovery re-derives the same

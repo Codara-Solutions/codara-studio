@@ -486,6 +486,20 @@ export function readyGuardNodes(
   return ready;
 }
 
+/** Pending STEP nodes ready to EXECUTE inline: the same readiness rule a worker
+ *  wave uses (nextReadyWave) — every live forward parent succeeded, or the step
+ *  is an entry node — filtered to kind "step". The executor runs each via
+ *  loom-steps.executeStep, records its output, then re-prunes; like a guard or
+ *  merge a step launches NO attempt. A subset of nextReadyWave by construction,
+ *  so isPassComplete's nextReadyWave clause already holds the pass for them. */
+export function readyStepNodes(
+  graph: LoomGraph,
+  nodeStates: Record<string, NodeStateLike>,
+): string[] {
+  const stepIds = new Set(graph.nodes.filter((n) => n.kind === "step").map((n) => n.id));
+  return nextReadyWave(graph, nodeStates).filter((id) => stepIds.has(id));
+}
+
 /** True when no pending node can still become ready — every node reachable from
  *  the part of the graph that ran is settled (succeeded/failed/blocked/skipped),
  *  OR the only nodes left pending are unreachable (a parent failed/blocked, or
@@ -647,10 +661,34 @@ export function truncateOutput(s: string, limit = 8192): string {
 export function renderNodePrompt(
   template: string,
   ctx: { vars: Record<string, string>; nodeOutputs: Record<string, string>; incoming: string[] },
+  opts?: {
+    /** Default true (worker prompts). Step-node templates pass false: a shell
+     *  command / URL / file path must never grow an upstream transcript. */
+    autoIncoming?: boolean;
+  },
 ): string {
+  const autoIncoming = opts?.autoIncoming !== false;
   const referencesUpstream = template.includes("{{incoming}}") || template.includes("{{node:");
   const hasIncoming = ctx.incoming.some((out) => out.trim().length > 0);
-  let result = !referencesUpstream && hasIncoming ? `${template}\n\n{{incoming}}` : template;
+  let result = autoIncoming && !referencesUpstream && hasIncoming ? `${template}\n\n{{incoming}}` : template;
+  const joinedIncoming = (): string =>
+    ctx.incoming.length > 0
+      ? ctx.incoming
+          .map((out, i) => `--- Output from upstream node ${i + 1} ---\n${truncateOutput(out)}`)
+          .join("\n\n")
+      : "";
+  // Filtered tokens FIRST ({{node:x|json}} before {{node:x}}), so the plain
+  // replaceAll below never eats the head of a filtered token.
+  result = result.replace(TOKEN_WITH_FILTER, (whole, name: string, filter: string) => {
+    let value: string | undefined;
+    if (name === "incoming") value = joinedIncoming();
+    else if (name.startsWith("node:")) {
+      const out = ctx.nodeOutputs[name.slice(5)];
+      value = out === undefined ? undefined : truncateOutput(out);
+    } else value = ctx.vars[name];
+    const filtered = applyTokenFilter(value ?? "", filter);
+    return value === undefined || filtered === null ? whole : filtered;
+  });
   for (const [key, value] of Object.entries(ctx.vars)) {
     result = result.replaceAll(`{{${key}}}`, value);
   }
@@ -658,13 +696,32 @@ export function renderNodePrompt(
     result = result.replaceAll(`{{node:${id}}}`, truncateOutput(output));
   }
   if (result.includes("{{incoming}}")) {
-    const joined =
-      ctx.incoming.length > 0
-        ? ctx.incoming
-            .map((out, i) => `--- Output from upstream node ${i + 1} ---\n${truncateOutput(out)}`)
-            .join("\n\n")
-        : "";
-    result = result.replaceAll("{{incoming}}", joined);
+    result = result.replaceAll("{{incoming}}", joinedIncoming());
   }
   return result;
+}
+
+// ── token filters (Looms v3) ─────────────────────────────────────────────────
+// `{{node:x|json}}` — the value as a JSON string literal (quotes included), so
+//   a webhook body like {"text": {{node:x|json}}} stays valid whatever the
+//   output contains. `|line` — the first non-empty line. `|trim` — trimmed.
+//   `|upper` / `|lower`. An unknown filter leaves the token untouched so the
+//   author sees it in the rendered prompt instead of silently losing data.
+const TOKEN_WITH_FILTER = /\{\{([A-Za-z][\w:-]*)\|([a-z]+)\}\}/g;
+
+export function applyTokenFilter(value: string, filter: string): string | null {
+  switch (filter) {
+    case "json":
+      return JSON.stringify(value);
+    case "line":
+      return value.split(/\r?\n/).find((l) => l.trim().length > 0)?.trim() ?? "";
+    case "trim":
+      return value.trim();
+    case "upper":
+      return value.toUpperCase();
+    case "lower":
+      return value.toLowerCase();
+    default:
+      return null;
+  }
 }

@@ -31,6 +31,9 @@ export const NOTIFY_KIND_META: Record<NotifyKind, NotifyKindMeta> = {
   "automation.finished": { label: "Automation finished", tone: "success", glyph: "loop" },
   "automation.failed": { label: "Automation failed", tone: "danger", glyph: "loop" },
   "automation.blocked": { label: "Automation needs you", tone: "warning", glyph: "loop" },
+  // A Notify step inside a loom pass — user-authored text, so the label is
+  // neutral and the body IS the message.
+  "automation.step": { label: "Automation", tone: "success", glyph: "loop" },
   "app.update-ready": { label: "Update ready", tone: "success", glyph: "bell" },
   "git.teammate-push": { label: "Teammate pushed", tone: "success", glyph: "bell" },
 };

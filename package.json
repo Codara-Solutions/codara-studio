@@ -31,6 +31,7 @@
     "test:orchestration-timeouts": "node scripts/test-orchestration-timeout-margin.cjs",
     "test:run-recovery-contracts": "node scripts/test-run-recovery-contracts.cjs",
     "test:parallel-wave": "node scripts/test-parallel-wave.cjs",
+    "test:loom-steps": "node scripts/test-loom-steps.cjs",
     "test:outcome-memory": "node scripts/test-outcome-memory.cjs",
     "test:manager-prompt-cache": "node scripts/test-manager-prompt-cache.cjs",
     "test:manager-call-settlement": "node scripts/test-manager-call-settlement.cjs",

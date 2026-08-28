@@ -1461,6 +1461,8 @@ export type NotifyKind =
   | "automation.finished"
   | "automation.failed"
   | "automation.blocked"
+  // A loom "Notify" step node fired (user-authored message from inside a pass).
+  | "automation.step"
   | "app.update-ready"
   // Background auto-fetch found commits by someone else on a remote branch
   // (src/main/git-auto-fetch.ts). One grouped alert per repository per pass.
@@ -4617,7 +4619,146 @@ export interface LoomMergeNode {
   joinMode: "all" | "any";
 }
 
-export type LoomNodeDef = LoomWorkerNode | LoomGuardNode | LoomMergeNode;
+// ── Looms v3: step nodes (non-AI actions) ───────────────────────────────────
+// A step node runs a deterministic action — a shell command, an inline script,
+// an HTTP request, a file write, or a notification — with NO model involved.
+// Steps settle INLINE in the pass engine (the same seam guards and merges use):
+// the action's captured stdout / response body / written path becomes the
+// node's `output`, so a downstream worker prompt can pull it via
+// {{node:<id>}} / {{incoming}} and a guard can branch on it. Every string field
+// of an action is a template rendered through loom-graph.renderNodePrompt, so
+// {{date}} {{iteration}} {{file}} {{name}} {{node:<id>}} {{incoming}} all
+// substitute. A failing action (non-zero exit, non-2xx, thrown error) fails
+// the pass unless `continueOnError` is set, in which case the node settles
+// "succeeded" with the error folded into its output for downstream nodes.
+
+export type LoomScriptLanguage = "bash" | "python" | "node";
+
+export type LoomStepAction =
+  | {
+      type: "command";
+      /** Shell command line, run via the user's login shell in `cwd`. */
+      command: string;
+      /** Working directory; defaults to the loom's workspace cwd. Templated. */
+      cwd?: string;
+      /** Extra environment variables (values templated). */
+      env?: Record<string, string>;
+    }
+  | {
+      type: "script";
+      language: LoomScriptLanguage;
+      /** Inline source; written to a temp file and run with the interpreter. */
+      code: string;
+      /** How to run the file: a command prefix the script path is appended
+       *  to, e.g. "uv run python", ".venv/bin/python", "python3.12",
+       *  "conda run -n ml python", "bun", "deno run". Blank = the default for
+       *  the language (python3 → python; the bundled node; bash). Resolved
+       *  through the login shell in the working directory, so relative venv
+       *  paths and PATH-managed tools (uv, pyenv, nvm) work. Templated. */
+      interpreter?: string;
+      cwd?: string;
+      env?: Record<string, string>;
+    }
+  | {
+      type: "http";
+      method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+      url: string;
+      headers?: Record<string, string>;
+      /** Request body (templated). Sent verbatim; set a Content-Type header. */
+      body?: string;
+    }
+  | {
+      type: "writeFile";
+      /** Absolute path, or relative to the loom's workspace cwd. Templated. */
+      path: string;
+      content: string;
+      mode: "overwrite" | "append";
+    }
+  | {
+      type: "notify";
+      title?: string;
+      message: string;
+    };
+
+export interface LoomStepNode {
+  id: string;
+  kind: "step";
+  label?: string;
+  ui?: { x: number; y: number };
+  action: LoomStepAction;
+  /** Wall-clock ceiling for command/script/http, in seconds (default 120,
+   *  hard-capped at 3600). */
+  timeoutSec?: number;
+  /** true = a failing action does NOT fail the pass; the node settles
+   *  "succeeded" with the error text as its output. */
+  continueOnError?: boolean;
+}
+
+/** The result of executing ONE step action — what the editor's "Run step"
+ *  console shows, and what the engine folds into the node's output. */
+export interface LoomStepResult {
+  ok: boolean;
+  /** The node output the engine records: stdout (command/script), the
+   *  response body (http), the written path (writeFile), or the message. */
+  output: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  /** http only */
+  statusCode?: number;
+  durationMs: number;
+  /** Set when the action failed (thrown, timed out, non-zero exit, non-2xx). */
+  error?: string;
+  timedOut?: boolean;
+}
+
+/** automations:testStep input — run one step node standalone from the editor. */
+export interface TestStepInput {
+  cwd: string;
+  node: LoomStepNode;
+  /** Optional sample values for {{node:<id>}} tokens (the editor passes the
+   *  last pass's recorded outputs when it has them). */
+  nodeOutputs?: Record<string, string>;
+  /** Optional overrides for the pass vars ({{date}} etc. default sensibly). */
+  vars?: Record<string, string>;
+}
+
+/** A node the loop driver settled BEFORE a pass's first worker wave existed
+ *  (an entry step, or a guard/merge wired straight off the trigger) — handed
+ *  to the launcher so the seeded loomPass carries it as already-settled and a
+ *  downstream worker's {{node:<id>}} / {{incoming}} read its output. */
+export interface PreResolvedNode {
+  nodeId: string;
+  /** "worker" only ever appears with status "skipped" (a pruned branch). */
+  kind: "step" | "guard" | "merge" | "worker";
+  status: "succeeded" | "failed" | "skipped";
+  output?: string;
+  branchResult?: "pass" | "fail";
+  /** Steps only: the transcript note to leave (the step's output / failure). */
+  note?: string;
+}
+
+/** run-store.recordStepOnlyPass input — a loom pass that settled entirely
+ *  inline (steps/guards/merges only, no worker to launch). The run exists so
+ *  the pass has a transcript, a loomPass for the live board, and a terminal
+ *  status for the loop driver — it just never ran a worker. */
+export interface RecordStepOnlyPassInput {
+  workspaceId: string;
+  workspaceName?: string;
+  cwd: string;
+  origin?: GitHubOrigin;
+  projectPolicyMode?: ProjectPolicyMode;
+  automationId: string;
+  title: string;
+  vars?: Record<string, string>;
+  preResolved: PreResolvedNode[];
+  status: "complete" | "failed";
+  /** The pass summary (the sink step's output, or the failure) — pushed as the
+   *  LAST spark note so the loop driver reads it as {{lastOutput}}. */
+  summary: string;
+}
+
+export type LoomNodeDef = LoomWorkerNode | LoomGuardNode | LoomMergeNode | LoomStepNode;
 
 /** A directed edge between two nodes. `branch` is only meaningful on edges
  *  whose source is a guard node (pass/fail routing). `backEdge`+`visitCap` are
@@ -4734,6 +4875,10 @@ export interface StartDirectWorkerRunInput {
    *  (mid-pass) so in-flight pass state is preserved. Single-node: the reset
    *  re-seeds the one running node = today's behavior. */
   freshPass?: boolean;
+  /** Looms v3: nodes the loop driver already settled inline before this entry
+   *  wave (entry steps / guards / merges). Seeded into loomPass as settled and
+   *  fed to the wave's {{node:<id>}} / {{incoming}} rendering. */
+  preResolved?: PreResolvedNode[];
 }
 
 /** One node to launch within a loom-pass wave (the multi-node entry seam +
@@ -4788,6 +4933,8 @@ export interface AddDirectIterationInput {
   /** Looms v2.5 (pass boundary): rebuild loomPass from scratch. See
    *  StartDirectWorkerRunInput.freshPass. */
   freshPass?: boolean;
+  /** Looms v3: see StartDirectWorkerRunInput.preResolved. */
+  preResolved?: PreResolvedNode[];
 }
 
 // Live lifecycle of an automation's loop.

@@ -1,4 +1,5 @@
 import type {
+  PreResolvedNode,
   AgentEffortLevel,
   AgentLoopSignal,
   AutomationContinuationSource,
@@ -24,7 +25,8 @@ import {
 import { appendHistory, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
 import { automationSourceKey, publish, rearm } from "../notify";
 import { appendEvent, subscribeToEvents } from "./event-log";
-import { planLoomLayers, renderNodePrompt, sinkNodeIds } from "./loom-graph";
+import { nextReadyWave, planLoomLayers, renderNodePrompt, sinkNodeIds, upstreamOf } from "./loom-graph";
+import { resolveInlineNodes, stepNoteMessage, type Projection } from "./loom-resolve";
 // Shell-check / git-clean probes live in loom-predicates so guard nodes (run-store)
 // and these StopConditions settle identically without a run-store↔automation-loop
 // static import cycle (automation-loop lazy-imports run-store).
@@ -318,11 +320,20 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
     // launch). A multi-entry frontier OR a single entry that feeds a successor
     // (a linear chain A→B→C) takes the multi-node path so the entry runs its OWN
     // prompt/worker, never the sink's mirror.
-    const degenerate = entryIds.length === 1 && sinks.includes(entryIds[0]);
+    // Looms v3: an entry frontier holding a NON-worker node (a step, or a
+    // guard/merge wired straight off the trigger) is settled inline BEFORE any
+    // worker launches — never the degenerate path, even for one node.
+    const hasInlineEntry = entryIds.some(
+      (nid) => graph.nodes.find((n) => n.id === nid)?.kind !== "worker",
+    );
+    const degenerate = !hasInlineEntry && entryIds.length === 1 && sinks.includes(entryIds[0]);
 
     const startedAt = nowIso();
     let run: RunState;
     const sameRun = !job.loop.isolate && job.state.currentRunId;
+    // Looms v3: set when the pass settled with NO worker to launch (steps-only,
+    // or an entry step failed). The run is already terminal; see below.
+    let stepOnly = false;
 
     if (degenerate) {
       // BYTE-IDENTICAL legacy path. pendingNextPrompt (answer-resume / agent
@@ -389,22 +400,91 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       // nodes (a guard/merge wired straight off the trigger) are skipped — the
       // executor only launches worker waves; if NONE remain we fall back to a
       // degenerate single-node launch so the pass never starts empty.
-      const workerEntries = entryIds
+      type WorkerDef = Extract<typeof graph.nodes[number], { kind: "worker" }>;
+      let workerEntries: WorkerDef[] = entryIds
         .map((nid) => graph.nodes.find((n) => n.id === nid))
-        .filter((n): n is Extract<typeof graph.nodes[number], { kind: "worker" }> => n?.kind === "worker");
+        .filter((n): n is WorkerDef => n?.kind === "worker");
+
+      // Looms v3: settle the inline entry nodes FIRST (steps run their actions,
+      // guards route, merges join, dead branches prune), then the worker wave is
+      // whatever those made ready — the same resolution finalizeDirectRun runs
+      // between waves, applied before the first one. Their outputs feed the
+      // launching workers' {{node:<id>}} / {{incoming}}; their settled states
+      // seed the run's loomPass via `preResolved`.
+      const projected: Projection = {};
+      const preResolved: PreResolvedNode[] = [];
+      const nodeOutputs: Record<string, string> = {};
+      let entryStepFailed = false;
+      let stepOnlySummary = "";
+      if (hasInlineEntry) {
+        const res = await resolveInlineNodes(graph, projected, {
+          cwd: job.input.cwd,
+          vars: passVars,
+          env: { SPARK_AUTOMATION_ID: id },
+          automationId: id,
+          workspaceId: job.input.workspaceId,
+        });
+        for (const m of res.merges) preResolved.push({ nodeId: m.nodeId, kind: "merge", status: "succeeded", output: m.output });
+        for (const g of res.guards) preResolved.push({ nodeId: g.nodeId, kind: "guard", status: "succeeded", output: g.output, branchResult: g.branch });
+        for (const st of res.steps) preResolved.push({ nodeId: st.nodeId, kind: "step", status: st.status, output: st.output, note: stepNoteMessage(st) });
+        for (const sk of res.skipped) {
+          const kind = graph.nodes.find((n) => n.id === sk)?.kind ?? "worker";
+          preResolved.push({ nodeId: sk, kind, status: "skipped" });
+        }
+        for (const [nid, ns] of Object.entries(projected)) if (ns.output !== undefined) nodeOutputs[nid] = ns.output;
+        const failedStep = res.steps.find((st) => st.status === "failed");
+        entryStepFailed = Boolean(failedStep);
+        const readyIds = entryStepFailed ? [] : nextReadyWave(graph, projected);
+        workerEntries = readyIds
+          .map((nid) => graph.nodes.find((n) => n.id === nid))
+          .filter((n): n is WorkerDef => n?.kind === "worker");
+        const lastStep = res.steps.length > 0 ? res.steps[res.steps.length - 1] : undefined;
+        stepOnlySummary = failedStep
+          ? stepNoteMessage(failedStep)
+          : lastStep
+            ? stepNoteMessage(lastStep)
+            : "Pass finished: no worker was reachable from the trigger.";
+      }
 
       if (workerEntries.length === 0) {
-        // No launchable entry worker (malformed graph) — stop cleanly.
-        await finalize(id, "iteration-failed");
-        return;
-      }
+        if (!hasInlineEntry) {
+          // No launchable entry worker (malformed graph) — stop cleanly.
+          await finalize(id, "iteration-failed");
+          return;
+        }
+        // Looms v3: a STEPS-ONLY pass (or an entry step that failed). Record a
+        // run that is born terminal so the pass has a transcript + loomPass and
+        // the loop driver decides continuation through onTerminal as usual.
+        const { recordStepOnlyPass } = await import("./run-store");
+        run = await recordStepOnlyPass({
+          workspaceId: job.input.workspaceId,
+          workspaceName: job.input.workspaceName,
+          cwd: job.input.cwd,
+          origin: job.input.origin,
+          projectPolicyMode: job.input.projectPolicyMode,
+          automationId: id,
+          title: `Loom: ${job.name} — pass ${passIter + 1}`,
+          vars: passVars,
+          preResolved,
+          status: entryStepFailed ? "failed" : "complete",
+          summary: stepOnlySummary,
+        });
+        stepOnly = true;
+      } else {
 
       // Resolve each entry node's own pinned worker (model + effort).
       const launches: import("@shared/types").DirectNodeLaunch[] = [];
       for (const node of workerEntries) {
         const resolved = resolveWorker(job, node.worker);
+        // Render against the pre-resolved outputs (empty for a worker-only
+        // frontier, so this stays byte-identical to the v2.5 launch string).
+        const parents = upstreamOf(graph, node.id);
         const rendered = decoratePrompt(
-          renderNodePrompt(node.prompt, { vars: passVars, nodeOutputs: {}, incoming: [] }),
+          renderNodePrompt(node.prompt, {
+            vars: passVars,
+            nodeOutputs,
+            incoming: parents.map((pid) => nodeOutputs[pid] ?? ""),
+          }),
           false,
         );
         launches.push({
@@ -431,6 +511,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           vars: passVars,
           nodes: launches,
           freshPass: true, // same-run PASS boundary: rebuild loomPass from scratch
+          preResolved: preResolved.length > 0 ? preResolved : undefined,
         });
       } else {
         const { startDirectWorkerRun } = await import("./run-store");
@@ -447,7 +528,9 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           effort: launches[0].worker.effort,
           vars: passVars,
           nodes: launches,
+          preResolved: preResolved.length > 0 ? preResolved : undefined,
         });
+      }
       }
     }
 
@@ -478,6 +561,19 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
     }));
 
     void emitIteration(id, passIter, run.id, "running");
+    if (stepOnly) {
+      // The run is already terminal: no watchdog, no terminal watcher. Hand it
+      // to onTerminal off this tick — the runner's single-flight latch must
+      // release first (the finally below), because onTerminal may start the
+      // next pass of a count/until/continuous loop.
+      const settledRun = run;
+      setTimeout(() => {
+        void onTerminal(id, settledRun).catch((err) => {
+          console.error(`[automation-loop] step-only pass settle ${id} failed:`, err);
+        });
+      }, 0);
+      return;
+    }
     armWatchdog(id, run.id, job.worker.timeoutMinutes);
     watchTerminal(id, run.id);
   } catch (err) {

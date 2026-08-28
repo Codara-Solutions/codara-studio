@@ -4003,14 +4003,49 @@ function validateGraph(graph: LoomGraph): string | null {
       access?: unknown;
       blockedTools?: unknown;
       collab?: unknown;
+      action?: { type?: unknown; command?: unknown; language?: unknown; code?: unknown; method?: unknown; url?: unknown; path?: unknown; content?: unknown; mode?: unknown; message?: unknown };
     };
     if (!node || typeof node.id !== "string" || node.id.trim().length === 0) {
       return "every graph node needs a non-empty string id";
     }
     if (ids.has(node.id)) return `duplicate node id: ${node.id}`;
     ids.add(node.id);
-    if (node.kind !== "worker" && node.kind !== "guard" && node.kind !== "merge") {
-      return `node ${node.id} has invalid kind '${String(node.kind)}' (expected worker|guard|merge)`;
+    if (node.kind !== "worker" && node.kind !== "guard" && node.kind !== "merge" && node.kind !== "step") {
+      return `node ${node.id} has invalid kind '${String(node.kind)}' (expected worker|guard|merge|step)`;
+    }
+    if (node.kind === "step") {
+      // Looms v3: a deterministic action. The engine dereferences these fields
+      // directly, so require each action's payload here.
+      const a = node.action;
+      if (!a || typeof a !== "object") return `step node ${node.id} requires an action`;
+      const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+      switch (a.type) {
+        case "command":
+          if (!nonEmpty(a.command)) return `step node ${node.id}: action 'command' requires a non-empty 'command'`;
+          break;
+        case "script":
+          if (a.language !== "bash" && a.language !== "python" && a.language !== "node") {
+            return `step node ${node.id}: action 'script' requires language bash|python|node`;
+          }
+          if (!nonEmpty(a.code)) return `step node ${node.id}: action 'script' requires non-empty 'code'`;
+          break;
+        case "http":
+          if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(String(a.method))) {
+            return `step node ${node.id}: action 'http' requires method GET|POST|PUT|PATCH|DELETE`;
+          }
+          if (!nonEmpty(a.url)) return `step node ${node.id}: action 'http' requires a non-empty 'url'`;
+          break;
+        case "writeFile":
+          if (!nonEmpty(a.path)) return `step node ${node.id}: action 'writeFile' requires a non-empty 'path'`;
+          if (typeof a.content !== "string") return `step node ${node.id}: action 'writeFile' requires 'content'`;
+          if (a.mode !== "overwrite" && a.mode !== "append") return `step node ${node.id}: action 'writeFile' requires mode overwrite|append`;
+          break;
+        case "notify":
+          if (!nonEmpty(a.message)) return `step node ${node.id}: action 'notify' requires a non-empty 'message'`;
+          break;
+        default:
+          return `step node ${node.id} has invalid action.type '${String(a.type)}' (expected command|script|http|writeFile|notify)`;
+      }
     }
     if (node.kind === "guard") {
       guardIds.add(node.id);
@@ -4332,12 +4367,17 @@ async function handleAutomationCreate(
   }
   const tlwErr = await validateTriggerLoopWorker({ trigger, loop, worker });
   if (tlwErr) return errorResponse(id, ERR_INVALID_PARAMS, tlwErr);
-  const promptTemplate = stringParam(params, "prompt_template");
-  if (!promptTemplate) return errorResponse(id, ERR_INVALID_PARAMS, "prompt_template is required");
   const graph = paramGraph(params);
   if (graph) {
     const graphErr = validateGraph(graph);
     if (graphErr) return errorResponse(id, ERR_INVALID_PARAMS, `invalid graph: ${graphErr}`);
+  }
+  // Looms v3: with a graph, every worker node carries its own prompt and a
+  // steps-only graph has nothing to prompt at all — prompt_template is only
+  // required for the single-worker (no graph) shape.
+  const promptTemplate = stringParam(params, "prompt_template") ?? "";
+  if (!promptTemplate && !graph) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "prompt_template is required when no graph is given");
   }
   // Resolve workspace binding server-side from the calling run. The architect
   // never supplies paths - the automation runs in the same workspace as the

@@ -53,6 +53,8 @@ import type {
   AppState,
   AutomationDetail,
   AutomationWorkerInfo,
+  LoomStepResult,
+  TestStepInput,
   RunBoard,
   RunBoardChangedPayload,
   RunBoardUpdateInput,
@@ -941,6 +943,8 @@ const api = {
     // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
     listActiveWorkers: (): Promise<AutomationWorkerInfo[]> =>
       ipcRenderer.invoke("automations:listActiveWorkers"),
+    testStep: (input: TestStepInput): Promise<LoomStepResult> =>
+      ipcRenderer.invoke("automations:testStep", input),
   },
   pty: {
     spawn: (args: {
