@@ -1381,6 +1381,17 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     ) {
       return run;
     }
+    // A queued user message IS the next thing to do. Interrupting a manager
+    // turn ("deliver now") requeues that turn's input and then hops back here
+    // through runInitialAutopilotPlanning; with every step already finished
+    // this branch would otherwise park the run on a synthetic "nothing
+    // runnable" question that the user never asked for, while their real
+    // message sits queued behind it (run-mtcrjcgl-gcdie9). Route the message
+    // to a fresh manager turn instead and let Cora decide what it means.
+    if (hasQueuedSteering(run)) {
+      scheduleQueuedSteeringFollowup(run);
+      return run;
+    }
     // Say WHY there is nothing to run. "I could not find a ready task" reads as
     // the model being confused, when the usual cause is concrete and visible in
     // the plan, most often every step already failed. Naming the real state
@@ -18554,7 +18565,7 @@ async function readWorkerReportWithWorkspaceShadowRecovery(
   if (expected) return { report: expected, relocatedFrom: null };
 
   // Claude occasionally abbreviates the absolute report target from the
-  // prompt to `.Codara/runs/...` and therefore writes it under the workspace
+  // prompt to `.codarastudio/runs/...` and therefore writes it under the workspace
   // instead of SPARK_HOME. Recover only the exact run-relative path; never
   // scan or move arbitrary workspace JSON. The parsed report proves the file
   // is complete before we copy it, and unlinking that exact shadow keeps the
@@ -19760,7 +19771,7 @@ async function runWorkerSession({
                 workerTaskId: task.id,
                 attemptId,
                 type: "worker_attempt.report_path_recovered",
-                message: "Recovered a final report written to a workspace-relative .Codara path",
+                message: "Recovered a final report written to a workspace-relative .codarastudio path",
                 payload: {
                   relocatedFrom: located.relocatedFrom,
                   finalReportPath: paths.finalReportJson,
@@ -19804,7 +19815,7 @@ async function runWorkerSession({
               workerTaskId: task.id,
               attemptId,
               type: "worker_attempt.report_path_recovered",
-              message: "Recovered a final report written to a workspace-relative .Codara path",
+              message: "Recovered a final report written to a workspace-relative .codarastudio path",
               payload: {
                 relocatedFrom,
                 finalReportPath: paths.finalReportJson,
