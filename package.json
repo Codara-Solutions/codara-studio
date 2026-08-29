@@ -65,6 +65,8 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:e2e",
     "package:win": "npm run build && electron-builder --win --x64",
     "package:mac": "npm run build && electron-builder --mac",
+    "release:mac": "node scripts/release.cjs mac",
+    "release:win": "node scripts/release.cjs win",
     "package:linux": "npm run build && electron-builder --linux",
     "postinstall": "node scripts/stamp-dev-electron-icon.cjs && electron-builder install-app-deps && node scripts/brand-pi-oauth-page.cjs",
     "test:usage-windows": "node scripts/test-usage-windows.cjs",
@@ -276,9 +278,15 @@
     "mac": {
       "icon": "build/icon.png",
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
     },
     "linux": {
       "icon": "build/icon.png",
@@ -288,9 +296,8 @@
       "category": "Development"
     },
     "publish": {
-      "provider": "github",
-      "owner": "Codara-Solutions",
-      "repo": "codara-studio"
+      "provider": "generic",
+      "url": "https://studio.codarasolutions.com/releases"
     }
   },
   "allowScripts": {
