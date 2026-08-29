@@ -952,6 +952,7 @@ const AutomationRow = React.memo(function AutomationRow({
           >
             {st.label}
           </span>
+          <RunIdChip runId={job.id} label="automation id" compact />
         </span>
         <span
           className="spark-mono"
@@ -1117,6 +1118,7 @@ function AutomationDetail({
             >
               {st.label}
             </span>
+            <RunIdChip runId={job.id} label="automation id" maxChars={24} />
           </div>
           <div className="spark-mono" style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
             {triggerSummary(job.trigger)} · {loopSummary(job.loop)} · {jobWorkerSummary(job)}

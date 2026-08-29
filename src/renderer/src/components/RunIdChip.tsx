@@ -23,12 +23,16 @@ export default function RunIdChip({
   runId,
   compact = false,
   maxChars = 12,
+  label = "run id",
 }: {
   runId: string;
   compact?: boolean;
   // Display budget for the id. Headers keep the default so the chip stays
   // narrow; roomier rows raise it to show the id whole.
   maxChars?: number;
+  // What the copied id IS, for tooltips/aria ("run id", "automation id").
+  // The visible chip prefix stays the uniform "id" in every case.
+  label?: string;
 }): React.ReactElement {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<number | null>(null);
@@ -61,7 +65,7 @@ export default function RunIdChip({
   const short = truncated ? `${runId.slice(0, maxChars)}…` : runId;
   // The tooltip carries the full id only when the chip cannot show it, so a
   // reader can still get at it without copying.
-  const title = copied ? "Copied" : truncated ? `Copy run id: ${runId}` : "Copy run id";
+  const title = copied ? "Copied" : truncated ? `Copy ${label}: ${runId}` : `Copy ${label}`;
 
   if (compact) {
     return (
@@ -69,8 +73,8 @@ export default function RunIdChip({
         type="button"
         className="spark-icon-btn"
         onClick={handleClick}
-        title={copied ? "Copied" : `Copy run id: ${runId}`}
-        aria-label="Copy run id"
+        title={copied ? "Copied" : `Copy ${label}: ${runId}`}
+        aria-label={`Copy ${label}`}
         style={
           {
             "--spark-icon-btn-size": "18px",
@@ -93,7 +97,7 @@ export default function RunIdChip({
       type="button"
       onClick={handleClick}
       title={title}
-      aria-label="Copy run id"
+      aria-label={`Copy ${label}`}
       style={{
         appearance: "none",
         display: "inline-flex",
