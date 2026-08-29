@@ -1503,7 +1503,7 @@ function GeneralSettings({
 
       <SectionTitle
         title="Git"
-        detail="Codara Studio can fetch every local workspace's remote in the background: one fetch per repository (worktrees share it), never pruning, at most two at a time, nothing while you're offline, and far less often while the machine is idle — so ahead/behind and the history graph stay current without pressing Fetch. Separately, it can watch your GitHub repositories for pushes by other people and tell you about them."
+        detail="Codara Studio can fetch every local workspace's remote in the background: one fetch per repository (worktrees share it), never pruning, at most two at a time, nothing while you're offline, and far less often while the machine is idle — so ahead/behind and the history graph stay current without pressing Fetch. Separately, it can watch your GitHub repositories for pushes by other people and tell you about them. With the Codara Studio GitHub App installed (see Instant git triggers below), pushes also arrive as webhooks and fetch immediately; the interval here is the fallback cadence for everything the app doesn't cover."
       />
       {hydrated ? (
         <div style={{ display: "grid", gap: 6 }}>
