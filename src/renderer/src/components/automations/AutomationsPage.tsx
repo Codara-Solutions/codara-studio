@@ -1768,6 +1768,15 @@ function HistoryTimeline({
                   {(rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0) ? "est. " : ""}
                   {fmtUsd(rec.costUsd)}
                 </span>
+                {rec.finishedAt && (
+                  <span
+                    className="spark-mono spark-num"
+                    style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}
+                    title="How long this pass ran"
+                  >
+                    {fmtElapsed(rec.startedAt, Date.parse(rec.finishedAt))}
+                  </span>
+                )}
                 <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
                   {fmtTime(rec.finishedAt ?? rec.startedAt)}
                 </span>

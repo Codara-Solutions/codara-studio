@@ -127,14 +127,21 @@ export default function LiveRunHero({
         <span className="loom-hero__meta spark-mono spark-num">
           {job.state.iteration}/{capLabel(job)} iters
         </span>
-        {feedLive && feedWorker?.startedAt && (
-          <span
-            className="loom-hero__meta spark-mono spark-num"
-            title={`started ${fmtClock(feedWorker.startedAt)}`}
-          >
-            {fmtElapsed(feedWorker.startedAt, now)}
-          </span>
-        )}
+        {(() => {
+          // Elapsed clock for the pass: the live worker's start when there is
+          // one, else the run's own start (steps-only passes have no worker).
+          const passStartedAt =
+            (feedLive ? feedWorker?.startedAt : undefined) ?? liveRun?.createdAt;
+          if (!passStartedAt) return null;
+          return (
+            <span
+              className="loom-hero__meta spark-mono spark-num"
+              title={`started ${fmtClock(passStartedAt)}`}
+            >
+              {fmtElapsed(passStartedAt, now)}
+            </span>
+          );
+        })()}
         <span className="loom-hero__meta spark-mono spark-num">
           est. {fmtUsd(job.state.spentUsd)}
           {typeof budget === "number" ? ` / ${fmtUsd(budget)}` : ""}
