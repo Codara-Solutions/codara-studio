@@ -684,12 +684,50 @@ function armGitTrigger(
 
   const disposers: Array<() => void> = [];
 
+  // Both event families keep their settled sha ON THE JOB (persisted), not in
+  // memory: a push that lands while the app is closed — or in the seconds
+  // between launch and the first auto-fetch pass — fires at arm time via the
+  // catch-up check instead of being silently absorbed into a fresh baseline.
+  // Only a job's very first arm seeds silently (there is nothing to compare).
+  const settle = async (
+    field: "lastGitRemoteSha" | "lastGitLocalSha",
+    sha: string,
+  ): Promise<void> => {
+    await patchJob(job.id, (j) => ({ ...j, [field]: sha }));
+  };
+
   if (wantsRemote) {
-    // Baseline the watched remote ref (branch-scoped) or rely on event
-    // delivery alone (unscoped: the auto-fetch pass itself proves movement).
-    let remoteBaseline: string | null | undefined;
-    const remoteRef = branchFilter ? `origin/${branchFilter}` : null;
-    if (remoteRef) void rev(remoteRef).then((sha) => (remoteBaseline = sha));
+    // Branch-scoped triggers watch origin/<branch>; unscoped ones watch the
+    // checked-out branch's upstream for catch-up and additionally fire on any
+    // auto-fetch movement event for this repo.
+    const remoteRef = branchFilter ? `origin/${branchFilter}` : "@{upstream}";
+
+    const checkRemote = async (viaEvent: boolean): Promise<void> => {
+      const sha = await rev(remoteRef);
+      if (disposed) return;
+      if (sha === null) {
+        // Ref unresolvable (no upstream / branch missing). Event-path
+        // unscoped triggers still fire: the auto-fetch pass itself proved
+        // the remote moved.
+        if (viaEvent && !branchFilter) fire();
+        return;
+      }
+      const prev = (await getJob(job.id))?.lastGitRemoteSha;
+      if (disposed) return;
+      if (prev === undefined) {
+        await settle("lastGitRemoteSha", sha); // first-ever arm: seed silently
+        return;
+      }
+      if (sha !== prev) {
+        await settle("lastGitRemoteSha", sha);
+        fire();
+      } else if (viaEvent && !branchFilter) {
+        // Some other ref moved (not our upstream) — unscoped means any push.
+        fire();
+      }
+    };
+
+    void checkRemote(false); // arm-time catch-up
 
     const matchesRepo = (cwds: string[]): boolean =>
       cwds.some((c) => c === cwd || cwd.startsWith(`${c}/`) || c.startsWith(`${cwd}/`));
@@ -698,28 +736,24 @@ function armGitTrigger(
       if (disposed) return;
       const off = m.onGitRemoteUpdated((cwds) => {
         if (disposed || !matchesRepo(cwds)) return;
-        if (!remoteRef) {
-          fire();
-          return;
-        }
-        void rev(remoteRef).then((sha) => {
-          if (disposed || sha === null) return;
-          if (remoteBaseline !== undefined && sha !== remoteBaseline) fire();
-          remoteBaseline = sha;
-        });
+        void checkRemote(true);
       });
       disposers.push(off);
     });
   }
 
   if (wantsLocal) {
-    let localBaseline: string | null | undefined;
-    const check = async (): Promise<void> => {
+    const checkLocal = async (): Promise<void> => {
       const sha = await rev("HEAD");
       if (disposed || sha === null) return;
-      const moved = localBaseline !== undefined && sha !== localBaseline;
-      localBaseline = sha;
-      if (!moved) return;
+      const prev = (await getJob(job.id))?.lastGitLocalSha;
+      if (disposed) return;
+      if (prev === undefined) {
+        await settle("lastGitLocalSha", sha); // first-ever arm: seed silently
+        return;
+      }
+      if (sha === prev) return;
+      await settle("lastGitLocalSha", sha);
       if (branchFilter) {
         try {
           const { runGit } = await import("../git-exec");
@@ -734,8 +768,8 @@ function armGitTrigger(
       }
       fire();
     };
-    void check(); // seed the baseline silently
-    const handle = setInterval(() => void check(), GIT_TRIGGER_POLL_MS);
+    void checkLocal(); // arm-time catch-up
+    const handle = setInterval(() => void checkLocal(), GIT_TRIGGER_POLL_MS);
     handle.unref?.();
     disposers.push(() => clearInterval(handle));
   }

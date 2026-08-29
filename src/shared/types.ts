@@ -5108,6 +5108,12 @@ export interface ScheduledJob {
   lastRunAt?: string; // ISO timestamp of the most recent firing
   lastRunId?: string; // runId produced by the most recent firing
   lastFiredPath?: string; // folder triggers: the path whose change last fired it
+  /** git triggers: the remote / local commit the trigger last settled on.
+   *  PERSISTED so a push that lands while the app is closed (or before the
+   *  background auto-fetch's first pass) still fires at the next arm instead
+   *  of being silently swallowed into an in-memory baseline. */
+  lastGitRemoteSha?: string;
+  lastGitLocalSha?: string;
   createdAt: string; // ISO timestamp
   /** The chat run that authored this loom: the Hub's assist ("Create with
    *  Cora") chat, or an ordinary auto/execute chat that created it with
