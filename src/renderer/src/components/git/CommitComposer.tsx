@@ -5,6 +5,7 @@ import {
   PushIcon,
   SparkleIcon,
   Spinner,
+  SplitCommitsIcon,
   SyncIcon,
 } from "./git-ui";
 
@@ -27,6 +28,13 @@ interface Props {
   onPush: () => void;
   onPull: () => void;
   onFetch: () => void;
+  /**
+   * "Split into commits" — AI groups the working tree into several coherent
+   * commits, user reviews the plan first. Optional so remote/limited hosts
+   * can omit it; the button hides when absent.
+   */
+  onSplit?: () => void;
+  canSplit?: boolean;
 }
 
 // Commit message box + the branch / sync row. The Commit button is the panel's
@@ -49,6 +57,8 @@ export default function CommitComposer({
   onPush,
   onPull,
   onFetch,
+  onSplit,
+  canSplit,
 }: Props): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [amend, setAmend] = useState(false);
@@ -298,6 +308,51 @@ export default function CommitComposer({
           </span>
         )}
       </button>
+
+      {/* "Split into commits" — quieter sibling under Commit: the AI proposes
+          grouping the changes into several commits and the user reviews the
+          plan before anything is committed. Hidden when the host has no
+          split support (remote workspaces). */}
+      {onSplit ? (
+        <button
+          type="button"
+          disabled={!canSplit || anyBusy}
+          onClick={onSplit}
+          title="Group related changes into separate commits — you review the plan before anything is saved"
+          style={{
+            appearance: "none",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 7,
+            height: 28,
+            width: "100%",
+            padding: "0 10px",
+            borderRadius: 7,
+            cursor: "default",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            fontWeight: 650,
+            border: "1px solid var(--rule)",
+            background: "transparent",
+            color: canSplit && !anyBusy ? "var(--ink-dim)" : "var(--muted-2)",
+            opacity: !canSplit && !anyBusy ? 0.65 : 1,
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          }}
+          onMouseEnter={(e) => {
+            if (canSplit && !anyBusy) {
+              e.currentTarget.style.background = "color-mix(in oklab, var(--ink) 6%, transparent)";
+            }
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+          }}
+        >
+          <SplitCommitsIcon />
+          <span>Split into commits</span>
+        </button>
+      ) : null}
     </div>
   );
 }

@@ -206,6 +206,18 @@ async function getGitHubPublish(): Promise<typeof import("./github-publish")> {
   return githubPublishMod;
 }
 
+let githubShareMod: typeof import("./github-share") | undefined;
+async function getGitHubShare(): Promise<typeof import("./github-share")> {
+  githubShareMod ??= await import("./github-share");
+  return githubShareMod;
+}
+
+let gitSplitMod: typeof import("./git-split-commits") | undefined;
+async function getGitSplit(): Promise<typeof import("./git-split-commits")> {
+  gitSplitMod ??= await import("./git-split-commits");
+  return gitSplitMod;
+}
+
 let githubMergeMod: typeof import("./github-merge") | undefined;
 async function getGitHubMerge(): Promise<typeof import("./github-merge")> {
   githubMergeMod ??= await import("./github-merge");
@@ -351,6 +363,7 @@ import type {
   GitConflictSide,
   GitCopyWorktreeResult,
   GitDiff,
+  GitDiffStats,
   GitFileChange,
   GitLog,
   GitOpResult,
@@ -1866,6 +1879,11 @@ export function registerIpc(): void {
     return getGitLog(cwd);
   });
 
+  handle("git:diffStats", async (_e, cwd: string): Promise<GitDiffStats> => {
+    const { getGitDiffStats } = await getGitOps();
+    return getGitDiffStats(cwd);
+  });
+
   handle("github:status", async (_e, request: unknown): Promise<GitHubWorkspaceStatus> => {
     const candidate =
       request && typeof request === "object" && !Array.isArray(request)
@@ -1983,6 +2001,68 @@ export function registerIpc(): void {
       }
       const { publishGitHubWorktree } = await getGitHubPublish();
       return publishGitHubWorktree(cwd, request?.input);
+    },
+  );
+  handle(
+    "github:shareDraft",
+    async (_e, request: { cwd?: unknown } | null) => {
+      const cwd = request?.cwd;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("Drafting a share requires a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error("Sharing for review is currently available for local workspaces only.");
+      }
+      const { draftGitHubShare } = await getGitHubShare();
+      return draftGitHubShare(cwd);
+    },
+  );
+  handle(
+    "github:share",
+    async (_e, request: { cwd?: unknown; input?: unknown } | null) => {
+      const cwd = request?.cwd;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("Sharing for review requires a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error("Sharing for review is currently available for local workspaces only.");
+      }
+      const { shareGitHubWorktree } = await getGitHubShare();
+      return shareGitHubWorktree(cwd, request?.input);
+    },
+  );
+  // "Split into commits": plan is read-only (model call over the diff);
+  // execute mutates the repo but only through file-level add+commit, gated by
+  // the shared plan validator. Local workspaces only, like share.
+  handle(
+    "git:splitPlan",
+    async (_e, request: { cwd?: unknown } | null) => {
+      const cwd = request?.cwd;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("Splitting commits requires a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error("Splitting commits is currently available for local workspaces only.");
+      }
+      const { planSplitCommits } = await getGitSplit();
+      return planSplitCommits(cwd);
+    },
+  );
+  handle(
+    "git:splitExecute",
+    async (_e, request: { cwd?: unknown; groups?: unknown } | null) => {
+      const cwd = request?.cwd;
+      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
+        throw new Error("Splitting commits requires a valid local workspace.");
+      }
+      if (isRemotePath(cwd)) {
+        throw new Error("Splitting commits is currently available for local workspaces only.");
+      }
+      if (!Array.isArray(request?.groups)) {
+        throw new Error("A reviewed split plan is required.");
+      }
+      const { executeSplitCommits } = await getGitSplit();
+      return executeSplitCommits(cwd, request.groups as never);
     },
   );
   handle(

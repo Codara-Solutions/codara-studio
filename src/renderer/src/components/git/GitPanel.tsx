@@ -7,6 +7,7 @@ import React, {
   useState,
 } from "react";
 import type {
+  GitDiffStats,
   GitFileChange,
   GitOpResult,
   GitStatus,
@@ -14,11 +15,12 @@ import type {
 } from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
-import ChangeRow from "./ChangeRow";
+import ChangeTree from "./ChangeTree";
 import ChangeSection from "./ChangeSection";
 import BranchMenu from "./BranchMenu";
 import CommitComposer from "./CommitComposer";
 import CommitDetail from "./CommitDetail";
+import SplitCommitsDialog from "./SplitCommitsDialog";
 import CommitHistory from "./CommitHistory";
 import GitHubSection from "./GitHubSection";
 import StashSection from "./StashSection";
@@ -50,7 +52,7 @@ interface Props {
   /** Shared status/log poll owned by App (one per active workspace). */
   git: SharedGitStatus;
   /** Opens a changed file's diff as a workbench tab (VS Code-style). */
-  onOpenDiffTab: (file: GitFileChange) => void;
+  onOpenDiffTab: (file: GitFileChange, options?: { pin?: boolean }) => void;
   /** Opens a file's diff within a commit as a workbench tab (history rows). */
   onOpenCommitDiffTab: (path: string, hash: string, options?: { pin?: boolean }) => void;
   /** The diff tab currently focused, if any — highlights its ChangeRow. */
@@ -84,6 +86,12 @@ export default function GitPanel({
   // A commit selected for inspection — when set, the body shows CommitDetail
   // (the history/inspection agent builds that view).
   const [detailHash, setDetailHash] = useState<string | null>(null);
+  // "Split into commits" review dialog.
+  const [splitOpen, setSplitOpen] = useState(false);
+  // Per-file +added/−removed counts (Hermes-style). Re-read whenever the
+  // shared status version bumps; a fetch failure just leaves rows without
+  // numbers, so errors are swallowed.
+  const [diffStats, setDiffStats] = useState<GitDiffStats | null>(null);
   // The commit the detail pane was showing when it closed. Its history row
   // flashes briefly so the eye re-anchors on return.
   const [returnHighlightHash, setReturnHighlightHash] = useState<string | null>(null);
@@ -105,8 +113,31 @@ export default function GitPanel({
     setReturnHighlightHash(null);
     savedScrollRef.current = null;
     setMessage("");
+    setDiffStats(null);
     setSections({ staged: false, changes: false, history: false });
   }, [cwd]);
+
+  // Per-file counts follow the shared status poll: every gitVersion bump
+  // re-reads the cached numstat (same 2s TTL as status, so this coalesces
+  // with the panel's normal polling instead of adding git traffic).
+  useEffect(() => {
+    if (!cwd || !status?.isRepo) {
+      setDiffStats(null);
+      return;
+    }
+    let cancelled = false;
+    void window.spark.git.diffStats(cwd).then(
+      (stats) => {
+        if (!cancelled) setDiffStats(stats);
+      },
+      () => {
+        /* decoration only — keep the previous stats on a failed read */
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, status?.isRepo, gitVersion]);
 
   // Run one git mutation: block re-entrancy, surface failures, refresh after.
   const runAction = useCallback(
@@ -266,11 +297,19 @@ export default function GitPanel({
     [cwd, message, notifyChanged],
   );
 
-  // Clicking a changed row opens (or focuses) its diff as a workbench tab.
+  // Clicking a changed row opens (or focuses) its diff as a preview tab;
+  // double-clicking pins it so the next row click opens a fresh tab.
   const openDiff = useCallback(
     (file: GitFileChange) => {
       setDetailHash(null);
       onOpenDiffTab(file);
+    },
+    [onOpenDiffTab],
+  );
+  const pinDiff = useCallback(
+    (file: GitFileChange) => {
+      setDetailHash(null);
+      onOpenDiffTab(file, { pin: true });
     },
     [onOpenDiffTab],
   );
@@ -487,28 +526,37 @@ export default function GitPanel({
                         setGitHubRefreshNonce((value) => value + 1);
                         notifyChanged();
                       }}
-                    />
-                    {displayError && (
-                      <ErrorStrip text={displayError} onDismiss={() => setOpError(null)} />
-                    )}
-                    <CommitComposer
-                      message={message}
-                      onMessageChange={setMessage}
-                      onCommit={(amend) => void handleCommit(amend)}
-                      onGenerateMessage={() => void handleGenerateMessage()}
-                      canCommit={canCommit}
-                      canGenerateMessage={canGenerateMessage}
-                      commitLabel={commitLabel}
-                      stagedCount={stagedCount}
-                      busy={busy}
-                      branch={status.branch}
-                      detached={status.detached}
-                      upstream={status.upstream}
-                      ahead={status.ahead}
-                      behind={status.behind}
-                      onPush={handlePush}
-                      onPull={handlePull}
-                      onFetch={handleFetch}
+                      composer={
+                        <>
+                          {displayError && (
+                            <ErrorStrip text={displayError} onDismiss={() => setOpError(null)} />
+                          )}
+                          <CommitComposer
+                            message={message}
+                            onMessageChange={setMessage}
+                            onCommit={(amend) => void handleCommit(amend)}
+                            onGenerateMessage={() => void handleGenerateMessage()}
+                            canCommit={canCommit}
+                            canGenerateMessage={canGenerateMessage}
+                            commitLabel={commitLabel}
+                            stagedCount={stagedCount}
+                            busy={busy}
+                            branch={status.branch}
+                            detached={status.detached}
+                            upstream={status.upstream}
+                            ahead={status.ahead}
+                            behind={status.behind}
+                            onPush={handlePush}
+                            onPull={handlePull}
+                            onFetch={handleFetch}
+                            onSplit={() => setSplitOpen(true)}
+                            canSplit={
+                              status.staged.length + status.unstaged.length >= 2 &&
+                              !status.hasConflicts
+                            }
+                          />
+                        </>
+                      }
                     />
 
                     {stagedCount > 0 && (
@@ -527,19 +575,20 @@ export default function GitPanel({
                           },
                         ]}
                       >
-                        {staged.map((file) => (
-                          <ChangeRow
-                            key={`s:${file.path}`}
-                            file={file}
-                            staged
-                            selected={activeDiffTarget?.staged === true && activeDiffTarget.path === file.path}
-                            disabled={disabled}
-                            onOpenDiff={openDiff}
-                            onStage={stageOne}
-                            onUnstage={unstageOne}
-                            onDiscard={discardOne}
-                          />
-                        ))}
+                        <ChangeTree
+                          files={staged}
+                          staged
+                          disabled={disabled}
+                          stats={diffStats?.staged}
+                          selectedPath={
+                            activeDiffTarget?.staged === true ? activeDiffTarget.path : null
+                          }
+                          onOpenDiff={openDiff}
+                          onPinDiff={pinDiff}
+                          onStage={stageOne}
+                          onUnstage={unstageOne}
+                          onDiscard={discardOne}
+                        />
                       </ChangeSection>
                     )}
 
@@ -566,19 +615,20 @@ export default function GitPanel({
                           },
                         ]}
                       >
-                        {unstaged.map((file) => (
-                          <ChangeRow
-                            key={`u:${file.path}`}
-                            file={file}
-                            staged={false}
-                            selected={activeDiffTarget?.staged === false && activeDiffTarget.path === file.path}
-                            disabled={disabled}
-                            onOpenDiff={openDiff}
-                            onStage={stageOne}
-                            onUnstage={unstageOne}
-                            onDiscard={discardOne}
-                          />
-                        ))}
+                        <ChangeTree
+                          files={unstaged}
+                          staged={false}
+                          disabled={disabled}
+                          stats={diffStats?.unstaged}
+                          selectedPath={
+                            activeDiffTarget?.staged === false ? activeDiffTarget.path : null
+                          }
+                          onOpenDiff={openDiff}
+                          onPinDiff={pinDiff}
+                          onStage={stageOne}
+                          onUnstage={unstageOne}
+                          onDiscard={discardOne}
+                        />
                       </ChangeSection>
                     )}
 
@@ -611,6 +661,17 @@ export default function GitPanel({
           )}
         </div>
       )}
+      {splitOpen && cwd ? (
+        <SplitCommitsDialog
+          cwd={cwd}
+          onClose={() => setSplitOpen(false)}
+          onDone={() => {
+            // New commits exist and the working tree shrank — refresh both
+            // the change lists and the history graph.
+            notifyChanged();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -271,6 +271,20 @@ export function SparkleIcon(): React.ReactElement {
   );
 }
 
+// "Split into commits": one change line branching into three commit rows.
+// Deliberately NOT the sparkle — ✦ is reserved for "AI writes text for you";
+// this action reorganizes work, so it gets its own glyph.
+export function SplitCommitsIcon(): React.ReactElement {
+  return svg(
+    <>
+      <path d="M2.5 7H5" />
+      <path d="M8.5 3.5h3M8.5 7h3M8.5 10.5h3" />
+      <path d="M5 7c2 0 1.5-3.5 3.5-3.5M5 7h3.5M5 7c2 0 1.5 3.5 3.5 3.5" />
+    </>,
+    1.2,
+  );
+}
+
 export function UndoIcon(): React.ReactElement {
   return svg(
     <>

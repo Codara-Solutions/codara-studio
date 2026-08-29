@@ -15,6 +15,9 @@ import type {
 import type {
   GitHubPublishInput,
   GitHubPublishResult,
+  GitHubShareDraft,
+  GitHubShareInput,
+  GitHubShareResult,
   GitHubMarkReadyInput,
   GitHubMarkReadyResult,
   GitHubMergeInput,
@@ -27,6 +30,11 @@ import type {
   StartGitHubPullRequestInput,
   StartGitHubPullRequestResult,
 } from "@shared/github";
+import type {
+  GitSplitExecuteResult,
+  GitSplitGroup,
+  GitSplitPlanResult,
+} from "@shared/git-split";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
@@ -83,6 +91,7 @@ import type {
   GitConflictSide,
   GitCopyWorktreeResult,
   GitDiff,
+  GitDiffStats,
   GitFileChange,
   GitLog,
   GitOpResult,
@@ -772,6 +781,16 @@ const api = {
     commitFileDiff: (cwd: string, hash: string, path: string): Promise<GitDiff> =>
       ipcRenderer.invoke("git:commitFileDiff", { cwd, hash, path }),
 
+    // "Split into commits": AI plan + user-reviewed execution.
+    splitPlan: (cwd: string): Promise<GitSplitPlanResult> =>
+      ipcRenderer.invoke("git:splitPlan", { cwd }),
+    splitExecute: (cwd: string, groups: GitSplitGroup[]): Promise<GitSplitExecuteResult> =>
+      ipcRenderer.invoke("git:splitExecute", { cwd, groups }),
+
+    // Per-file +added/−removed counts for the change lists (Hermes-style).
+    diffStats: (cwd: string): Promise<GitDiffStats> =>
+      ipcRenderer.invoke("git:diffStats", cwd),
+
     // Partial staging + conflict resolution
     applyPatch: (
       cwd: string,
@@ -814,6 +833,10 @@ const api = {
       input: GitHubPublishInput,
     ): Promise<GitHubPublishResult> =>
       ipcRenderer.invoke("github:publish", { cwd, input }),
+    shareDraft: (cwd: string): Promise<GitHubShareDraft> =>
+      ipcRenderer.invoke("github:shareDraft", { cwd }),
+    share: (cwd: string, input: GitHubShareInput): Promise<GitHubShareResult> =>
+      ipcRenderer.invoke("github:share", { cwd, input }),
     markReady: (
       cwd: string,
       input: GitHubMarkReadyInput,

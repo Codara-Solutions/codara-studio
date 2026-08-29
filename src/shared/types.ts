@@ -1935,6 +1935,25 @@ export interface GitStatus {
   error?: string;
 }
 
+/** Added/removed line counts for one changed file (git diff --numstat). */
+export interface GitFileDiffStat {
+  additions: number;
+  deletions: number;
+  /** Binary files have no line counts; the row shows a dot instead. */
+  binary: boolean;
+}
+
+/**
+ * Per-file diff stats for the working tree, keyed by repo-relative path —
+ * one map per side, matching GitStatus's staged/unstaged split. Read via a
+ * TTL cache next to git:status; rows missing from the maps simply render
+ * without counts (stats are decoration, never load-bearing).
+ */
+export interface GitDiffStats {
+  staged: Record<string, GitFileDiffStat>;
+  unstaged: Record<string, GitFileDiffStat>;
+}
+
 /**
  * One row of `git log --graph` output. Rows that carry a commit have the
  * hash / subject / etc. fields populated; pure connector rows have only
