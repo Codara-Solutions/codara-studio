@@ -148,3 +148,12 @@ Bump `version` in package.json, then `npm run release:mac` and
 bucket behind https://studio.codarasolutions.com. Running apps hear the SSE
 push within a minute and self-update. The "Release Codara Studio" automation
 in Codara Studio runs the whole sequence on every push to main.
+
+## License
+
+Codara Studio is source-available under the
+[PolyForm Shield License 1.0.0](./LICENSE). In plain language: you are free
+to use, modify, and build on the code, attribution is required (keep the
+Required Notice), and you may not sell Codara Studio or offer a product that
+competes with it built from this code. This is a source-available license,
+not an OSI-approved open source license.
