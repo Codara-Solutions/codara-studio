@@ -151,9 +151,7 @@ in Codara Studio runs the whole sequence on every push to main.
 
 ## License
 
-Codara Studio is source-available under the
-[PolyForm Shield License 1.0.0](./LICENSE). In plain language: you are free
-to use, modify, and build on the code, attribution is required (keep the
-Required Notice), and you may not sell Codara Studio or offer a product that
-competes with it built from this code. This is a source-available license,
-not an OSI-approved open source license.
+Codara Studio is open source under the [MIT License](./LICENSE),
+copyright Codara Solutions. Use it, modify it, redistribute it, build on it,
+commercially or otherwise; just keep the copyright and permission notice with
+copies of the software.

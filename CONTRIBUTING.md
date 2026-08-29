@@ -26,5 +26,4 @@ project healthy and your work easy to land.
 ## Licensing of contributions
 
 By opening a pull request you agree that your contribution is licensed under
-the repository's [LICENSE](./LICENSE) (PolyForm Shield 1.0.0) and may be
-distributed under it.
+the repository's [LICENSE](./LICENSE) (MIT) and may be distributed under it.
