@@ -1457,6 +1457,15 @@ const api = {
     // update-downloaded event. Main side calls autoUpdater.quitAndInstall()
     // which quits the app and runs the installer.
     quitAndInstall: (): Promise<void> => ipcRenderer.invoke("updater:quitAndInstall"),
+    // Manual check from Settings › About. Resolves with a summary object
+    // ({ status, updateAvailable?, version?, message? }) so the panel can
+    // show "up to date" — an outcome the passive banner never surfaces.
+    check: (): Promise<{
+      status: "dev" | "checked" | "error";
+      updateAvailable?: boolean;
+      version?: string;
+      message?: string;
+    }> => ipcRenderer.invoke("updater:check"),
   },
   inlineAi: {
     complete: (req: {

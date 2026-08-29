@@ -4432,6 +4432,8 @@ function formatRunCreated(value: string): string {
 
 function AboutSettings() {
   const [platform, setPlatform] = useState<string>("");
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     void window.spark.app.platform().then((p) => {
@@ -4442,6 +4444,29 @@ function AboutSettings() {
     };
   }, []);
   const version = (packageJson as { version: string }).version;
+
+  const handleCheck = async () => {
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const result = await window.spark.updater.check();
+      if (result.status === "dev") {
+        setCheckResult("Updates are disabled in dev builds.");
+      } else if (result.status === "error") {
+        setCheckResult(`Check failed: ${result.message ?? "unknown error"}`);
+      } else if (result.updateAvailable) {
+        // The banner takes over from here (download progress → restart).
+        setCheckResult(`Update v${result.version ?? "?"} found — downloading…`);
+      } else {
+        setCheckResult(`You're up to date (v${version}).`);
+      }
+    } catch {
+      setCheckResult("Check failed.");
+    } finally {
+      setChecking(false);
+    }
+  };
+
   return (
     <div style={{ display: "grid", gap: 14 }}>
       <SectionTitle
@@ -4463,6 +4488,35 @@ function AboutSettings() {
         <MetaRow label="Platform" value={platform || "—"} mono />
         <MetaRow label="App ID" value="com.codara.app" mono />
       </dl>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button
+          type="button"
+          onClick={() => void handleCheck()}
+          disabled={checking}
+          style={{
+            appearance: "none",
+            background: "var(--accent)",
+            color: "var(--accent-ink)",
+            border: "none",
+            boxShadow: "var(--lift-hi)",
+            padding: "5px 14px",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            fontWeight: 600,
+            letterSpacing: "0.02em",
+            borderRadius: 5,
+            cursor: "default",
+            opacity: checking ? 0.6 : 1,
+          }}
+        >
+          {checking ? "Checking…" : "Check for updates"}
+        </button>
+        {checkResult && (
+          <span style={{ fontFamily: "var(--font-sans)", fontSize: 12, color: "var(--muted)" }}>
+            {checkResult}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

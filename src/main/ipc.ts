@@ -3716,6 +3716,13 @@ export function registerIpc(): void {
     const { quitAndInstall } = await import("./auto-updater");
     quitAndInstall();
   });
+
+  // Manual "Check for updates" button in Settings › About. Returns a summary
+  // the panel renders inline; lifecycle events still stream to the banner.
+  handle("updater:check", async () => {
+    const { checkForUpdatesNow } = await import("./auto-updater");
+    return checkForUpdatesNow();
+  });
 }
 
 // cora-memory keys the workspace tier by workspaceId and sanitizes whatever it

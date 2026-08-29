@@ -28,6 +28,16 @@ export interface UpdaterEvent {
 // sees the lifecycle for the initial check.
 const INITIAL_CHECK_DELAY_MS = 4000;
 
+// Steady-state re-check cadence. The SSE push below normally beats this by a
+// wide margin; the interval is the fallback for machines whose stream is
+// blocked by a proxy or that were asleep when the push fired.
+const PERIODIC_CHECK_MS = 30 * 60 * 1000;
+
+// The website server broadcasts a `release` event on this stream the moment
+// a new version lands in the release bucket, so running apps learn about
+// updates within seconds instead of waiting for the next poll.
+const RELEASE_EVENTS_URL = "https://studio.codarasolutions.com/api/events";
+
 let registered = false;
 
 // True once a check has actually FOUND an update (update-available fired).
@@ -118,14 +128,110 @@ export function registerAutoUpdater(mainWindow: BrowserWindow): void {
   });
 
   setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((err: unknown) => {
+    void safeCheck();
+  }, INITIAL_CHECK_DELAY_MS);
+
+  // Fallback poll — see PERIODIC_CHECK_MS. unref-less on purpose: Electron's
+  // main loop runs for the life of the app anyway.
+  setInterval(() => {
+    void safeCheck();
+  }, PERIODIC_CHECK_MS);
+
+  subscribeToReleasePush();
+}
+
+function safeCheck(): Promise<void> {
+  return autoUpdater
+    .checkForUpdates()
+    .then(() => undefined)
+    .catch((err: unknown) => {
       // checkForUpdates rejects when no publish target is configured or the
       // feed is unreachable — a check-phase failure by definition. Log and
       // move on; don't crash main and don't alarm the user.
       const message = err instanceof Error ? err.message : String(err);
       console.warn("[auto-updater] checkForUpdates failed (ignored):", message);
     });
-  }, INITIAL_CHECK_DELAY_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Release push (SSE)
+// ---------------------------------------------------------------------------
+//
+// A single long-lived fetch to the website's /api/events stream. We only care
+// about one thing — "a release landed" — so the parser is deliberately tiny:
+// any `event: release` frame triggers a check. Reconnects forever with capped
+// backoff; the periodic poll covers any window where the stream is down.
+
+let sseBackoffMs = 5_000;
+
+function subscribeToReleasePush(): void {
+  const controller = new AbortController();
+  app.on("before-quit", () => controller.abort());
+
+  const connect = async (): Promise<void> => {
+    try {
+      const res = await fetch(RELEASE_EVENTS_URL, {
+        signal: controller.signal,
+        headers: { accept: "text/event-stream" },
+      });
+      if (!res.ok || !res.body) throw new Error(`stream responded ${res.status}`);
+      sseBackoffMs = 5_000;
+      console.log("[auto-updater] release push stream connected");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Frames are separated by a blank line; we only inspect event names.
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          if (/^event:\s*release$/m.test(frame)) {
+            console.log("[auto-updater] release push received — checking");
+            void safeCheck();
+          }
+        }
+      }
+      throw new Error("stream ended");
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[auto-updater] release stream dropped (${message}); retrying in ${sseBackoffMs}ms`);
+      setTimeout(() => void connect(), sseBackoffMs);
+      sseBackoffMs = Math.min(sseBackoffMs * 2, 5 * 60 * 1000);
+    }
+  };
+
+  void connect();
+}
+
+// Manual "Check for updates" from the Settings › About panel. Unlike the
+// background paths this reports its outcome to the caller so the button can
+// show "you're up to date" — a result the passive banner deliberately hides.
+export interface ManualCheckResult {
+  status: "dev" | "checked" | "error";
+  updateAvailable?: boolean;
+  version?: string;
+  message?: string;
+}
+
+export async function checkForUpdatesNow(): Promise<ManualCheckResult> {
+  if (!app.isPackaged) return { status: "dev" };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const info = result?.updateInfo;
+    const available =
+      info != null && result?.isUpdateAvailable !== undefined
+        ? Boolean(result.isUpdateAvailable)
+        : false;
+    return { status: "checked", updateAvailable: available, version: info?.version };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { status: "error", message };
+  }
 }
 
 // Invoked from the IPC handler when the renderer's "Restart and install"
